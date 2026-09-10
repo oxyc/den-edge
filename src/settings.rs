@@ -42,7 +42,7 @@ async fn read(state: &AppState, key: String) -> Response {
 async fn write(state: &AppState, req: Request) -> Response {
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let key = body.get("inboxKey").and_then(Value::as_str).unwrap_or("");
     if !valid_inbox_key(key) {

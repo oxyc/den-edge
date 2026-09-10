@@ -76,7 +76,7 @@ async fn claim(state: &AppState, req: Request) -> Response {
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let code = body.get("code").and_then(Value::as_str).unwrap_or("").to_uppercase();
     let now = state.now();

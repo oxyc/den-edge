@@ -44,7 +44,7 @@ async fn read(state: &AppState, id: &str) -> Response {
 async fn write(state: &AppState, id: &str, req: Request) -> Response {
     let body = match read_json(req, SYNC_MAX_BODY_BYTES).await {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let (Some(ciphertext), Some(nonce)) =
         (body.get("ciphertext").and_then(Value::as_str), body.get("nonce").and_then(Value::as_str))
