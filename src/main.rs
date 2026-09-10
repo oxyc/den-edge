@@ -9,6 +9,7 @@
 mod app;
 mod handler;
 mod inbox;
+mod library;
 mod link;
 mod metrics;
 mod plugins;
@@ -27,6 +28,9 @@ pub struct AppState {
     /// each happen as one step. Workers KV could not do this, which is how its inbox lost messages when two
     /// arrived at once. One household never contends on it.
     pub write_lock: tokio::sync::Mutex<()>,
+    /// The record logs loaded so far, by library id — one household's, a few MB at most. Held across a batch
+    /// or a read, so each library's compare-and-set is one step.
+    pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
     /// Link codes waiting to be claimed or polled. Ten minutes long at most, so memory is enough: a restart
     /// costs a pairing in progress, which the TV simply starts again.
     pub links: Mutex<HashMap<String, link::LinkState>>,
@@ -48,6 +52,7 @@ impl AppState {
         AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
+            libraries: tokio::sync::Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             claims: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),

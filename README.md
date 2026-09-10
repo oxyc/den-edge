@@ -25,6 +25,8 @@ change and one **Back up**.
 | `PUT /sync/{id}` `{ciphertext, nonce, baseVersion}` | `{version}`, or `409 {version}` when `baseVersion` is stale |
 | `GET`/`PUT /plugins` | the shared addon list: `{addons, version}` |
 | `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
+| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
+| `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
 | `GET /app/…` | the companion web page |
 
 The link's key goes in the `x-den-link` header, so it stays out of URLs (and so out of logs, proxies and
@@ -38,6 +40,11 @@ One file per key under `DATA_DIR`, in a directory per kind (`inbox/`, `plugins/`
 named by the key's SHA-256 so no key is a file name. Writes go to a temporary file, are synced, and are
 renamed into place, and every read-modify-write — an inbox append, a drain, a versioned write — happens under
 one lock. So two messages arriving together are both kept, which Workers KV couldn't promise.
+
+A library is one append-only log under `lib/`: its token's hash, then a line per write, synced before the
+answer goes out, replayed into memory on first use and rewritten without superseded lines once they
+outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
+ciphertext the clients seal and merge.
 
 A queue is kept for a week after its last message; everything else is kept until it is replaced. Pending
 link codes live in memory: a restart costs a pairing in progress, which the TV starts again.

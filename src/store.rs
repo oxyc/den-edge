@@ -16,7 +16,7 @@ pub struct Store {
 }
 
 /// The kinds of record, one directory each.
-pub const NAMESPACES: [&str; 4] = ["inbox", "plugins", "settings", "sync"];
+pub const NAMESPACES: [&str; 5] = ["inbox", "plugins", "settings", "sync", "lib"];
 
 impl Store {
     pub fn open(dir: &Path) -> io::Result<Store> {
@@ -26,24 +26,40 @@ impl Store {
         Ok(Store { dir: dir.to_owned() })
     }
 
-    fn path(&self, ns: &str, key: &str) -> PathBuf {
+    fn path(&self, ns: &str, key: &str, ext: &str) -> PathBuf {
         debug_assert!(NAMESPACES.contains(&ns));
-        self.dir.join(ns).join(format!("{}.json", crate::hex(&Sha256::digest(key.as_bytes()))))
+        self.dir.join(ns).join(format!("{}.{ext}", crate::hex(&Sha256::digest(key.as_bytes()))))
     }
 
     pub async fn get(&self, ns: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        match tokio::fs::read(self.path(ns, key)).await {
+        self.get_file(ns, key, "json").await
+    }
+
+    pub async fn put(&self, ns: &str, key: &str, value: &[u8]) -> io::Result<()> {
+        self.replace_file(ns, key, "json", value).await
+    }
+
+    pub async fn get_file(&self, ns: &str, key: &str, ext: &str) -> io::Result<Option<Vec<u8>>> {
+        match tokio::fs::read(self.path(ns, key, ext)).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    pub async fn put(&self, ns: &str, key: &str, value: &[u8]) -> io::Result<()> {
-        let path = self.path(ns, key);
+    /// Add to the end of a file, creating it, and sync before returning — an append-only log's write.
+    pub async fn append_file(&self, ns: &str, key: &str, ext: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut file =
+            tokio::fs::OpenOptions::new().create(true).append(true).open(self.path(ns, key, ext)).await?;
+        file.write_all(bytes).await?;
+        file.sync_data().await
+    }
+
+    pub async fn replace_file(&self, ns: &str, key: &str, ext: &str, value: &[u8]) -> io::Result<()> {
+        let path = self.path(ns, key, ext);
         // One temporary name per key is enough: writes are serialised, and a leftover from a crash is
         // simply overwritten by the next write.
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("{ext}.tmp"));
         let mut file = tokio::fs::File::create(&tmp).await?;
         file.write_all(value).await?;
         file.sync_all().await?;
@@ -52,7 +68,7 @@ impl Store {
     }
 
     pub async fn delete(&self, ns: &str, key: &str) -> io::Result<()> {
-        match tokio::fs::remove_file(self.path(ns, key)).await {
+        match tokio::fs::remove_file(self.path(ns, key, "json")).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }

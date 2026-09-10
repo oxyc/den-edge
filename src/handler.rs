@@ -62,6 +62,9 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     if path.starts_with("/sync/") {
         return crate::sync::handle(state, req).await;
     }
+    if path.starts_with("/lib/") {
+        return crate::library::handle(state, req).await;
+    }
     match path.as_str() {
         "/plugins" => crate::plugins::handle(state, req).await,
         "/settings" => crate::settings::handle(state, req).await,
@@ -97,6 +100,8 @@ pub fn route_label(path: &str) -> &'static str {
         "/inbox/drain" => "/inbox/drain",
         p if p == "/app" || p.starts_with("/app/") => "/app",
         p if p.starts_with("/sync/") => "/sync/:id",
+        p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
+        p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         _ => "other",
     }
 }
@@ -106,18 +111,19 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET_PUT: &[Method] = &[Method::GET, Method::PUT];
     const POST: &[Method] = &[Method::POST];
     match route {
-        "/health" | "/version" | "/config" | "/metrics" | "/app" | "/link/poll" | "/inbox/drain" => Some(GET),
+        "/health" | "/version" | "/config" | "/metrics" | "/app" | "/link/poll" | "/inbox/drain"
+        | "/lib/:id/changes" => Some(GET),
         "/plugins" | "/settings" | "/sync/:id" => Some(GET_PUT),
-        "/link/new" | "/link/claim" | "/inbox/append" => Some(POST),
+        "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" => Some(POST),
         _ => None,
     }
 }
 
 fn body_cap(route: &str) -> usize {
-    if route == "/sync/:id" {
-        SYNC_MAX_BODY_BYTES
-    } else {
-        MAX_BODY_BYTES
+    match route {
+        "/sync/:id" => SYNC_MAX_BODY_BYTES,
+        "/lib/:id/batch" => crate::library::BATCH_MAX_BODY_BYTES,
+        _ => MAX_BODY_BYTES,
     }
 }
 
@@ -136,7 +142,7 @@ fn metrics_authorized(state: &AppState, req: &Request) -> bool {
     constant_time_eq(given.trim().as_bytes(), want.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
