@@ -1,0 +1,7 @@
+# The build copies only Cargo.toml, Cargo.lock, src/ and app/; everything below is context it never reads.
+target
+data
+.git
+.github
+.env
+*.log

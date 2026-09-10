@@ -1,0 +1,25 @@
+[package]
+name = "den-edge"
+version = "0.2.0"
+edition = "2021"
+description = "Den's sync relay on the homelab: phone linking, the companion inbox, the library backup, the shared plugin list and settings, and the companion web page."
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "signal", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.3"
+url = "2"
+
+# Small static binary, like every den addon.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# Unwind (not abort): a stray panic in a request task drops that one connection instead of taking the
+# process down.

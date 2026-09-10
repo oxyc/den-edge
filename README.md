@@ -1,0 +1,62 @@
+# den-edge
+
+Den's sync relay, on the homelab. It links a phone to an Apple TV, carries the companion's messages to the
+TV, keeps the TV's encrypted library backup, and holds the plugin list and settings the phone and the TV
+share. It also serves the companion web page (`/app`).
+
+It never interprets what it stores: the backup is ciphertext sealed on the TV, and the rest is small JSON it
+validates and bounds. It replaced a Cloudflare Worker with the same HTTP API, so a TV moves over with a URL
+change and one **Back up**.
+
+## Routes
+
+| Route | What it does |
+|---|---|
+| `GET /health` | `{"status":"ok"}` |
+| `GET /version` | `{"version"}` |
+| `GET /config` | the TV's kill-switch and update gate |
+| `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
+| `POST /link/new` | the TV mints a pairing code: `{code, expiresAt}` (ten minutes) |
+| `POST /link/claim` `{code}` | the phone claims it: `{inboxKey}`; `410` unknown or expired, `409` claimed, `429` after 20 tries a minute from one address |
+| `GET /link/poll?code=` | the TV polls: `202` pending, then `{status:"claimed", inboxKey}` once |
+| `POST /inbox/append` `{inboxKey, message}` | the phone queues a message: addon, watchlist, play, TMDB key or metadata key |
+| `GET /inbox/drain?inboxKey=` | the TV takes the queue: `{messages}`, and it is emptied |
+| `GET /sync/{id}` | the library backup: `{ciphertext, nonce, version}` |
+| `PUT /sync/{id}` `{ciphertext, nonce, baseVersion}` | `{version}`, or `409 {version}` when `baseVersion` is stale |
+| `GET`/`PUT /plugins` | the shared addon list: `{addons, version}` |
+| `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
+| `GET /app/…` | the companion web page |
+
+Bodies are capped at 256 KiB, 4 MB on `/sync`. A method a route doesn't serve is `405`.
+
+## State
+
+One file per key under `DATA_DIR`, in a directory per kind (`inbox/`, `plugins/`, `settings/`, `sync/`),
+named by the key's SHA-256 so no key is a file name. Writes go to a temporary file, are synced, and are
+renamed into place, and every read-modify-write — an inbox append, a drain, a versioned write — happens under
+one lock. So two messages arriving together are both kept, which Workers KV couldn't promise.
+
+A queue is kept for a week after its last message; everything else is kept until it is replaced. Pending
+link codes live in memory: a restart costs a pairing in progress, which the TV starts again.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8080` | the port to listen on |
+| `DATA_DIR` | `data` (the image sets `/data`) | where the state lives |
+| `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
+| `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
+
+## Run
+
+```
+cargo run                       # http://localhost:8080, state in ./data
+cargo test
+```
+
+## Deploy
+
+A `v*` tag publishes `ghcr.io/oxyc/den-edge`. The homelab runs it as the `den-edge` Quadlet unit on host
+port 8094, with its state at `/var/lib/den/edge-data`, and `den-update` deploys new images (the den repo's
+`deploy/`).
