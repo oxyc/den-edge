@@ -56,6 +56,7 @@ link codes live in memory: a restart costs a pairing in progress, which the TV s
 | `PORT` | `8080` | the port to listen on |
 | `DATA_DIR` | `data` (the image sets `/data`) | where the state lives |
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
+| `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
 
 ## Run

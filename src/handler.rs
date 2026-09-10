@@ -24,9 +24,24 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let started = Instant::now();
     let method = req.method().clone();
     let route = route_label(req.uri().path());
-    let mut resp = dispatch(&state, req, route).await;
+    let origin = allowed_origin(&state, &req);
+    let mut resp = match &origin {
+        Some(_)
+            if method == Method::OPTIONS
+                && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
+        {
+            preflight()
+        }
+        _ => dispatch(&state, req, route).await,
+    };
     if method == Method::HEAD {
         *resp.body_mut() = Body::empty();
+    }
+    if let Some(origin) = origin {
+        resp.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    if !state.web_origins.is_empty() {
+        resp.headers_mut().append(header::VARY, HeaderValue::from_static("origin"));
     }
     if let Ok(id) = HeaderValue::from_str(&crate::hex(&crate::random_bytes::<8>())) {
         resp.headers_mut().insert("x-request-id", id);
@@ -36,6 +51,29 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     if state.log_requests {
         eprintln!("{method} {route} {status} {}ms", started.elapsed().as_millis());
     }
+    resp
+}
+
+/// The request's `Origin` when it is one of `WEB_ORIGINS` — the Den web app, which the browser serves from
+/// another origin than den-edge's. No credentials are involved: the keys travel in headers the app sets.
+fn allowed_origin(state: &AppState, req: &Request) -> Option<HeaderValue> {
+    let origin = req.headers().get(header::ORIGIN)?;
+    let value = origin.to_str().ok()?;
+    state.web_origins.iter().any(|o| o == value).then(|| origin.clone())
+}
+
+/// The answer to an allowed origin's CORS preflight: the methods the routes take and the headers that carry
+/// the keys, remembered for a day.
+fn preflight() -> Response {
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::NO_CONTENT;
+    let headers = resp.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type, x-den-link, x-den-library-token"),
+    );
+    headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
     resp
 }
 
@@ -326,6 +364,43 @@ pub mod tests {
         assert_eq!(config["minSupportedVersion"], "0.1.0");
         assert_eq!(config["features"]["aiReco"], false);
         assert_eq!(h.call("GET", "/nope", None).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_web_app_origin_gets_cors_and_no_other_origin_does() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().web_origins = vec!["https://pve.example".into()];
+        let preflight = h
+            .send(
+                "OPTIONS",
+                "/lib/0123456789abcdef/changes",
+                None,
+                &[("origin", "https://pve.example"), ("access-control-request-method", "GET")],
+            )
+            .await;
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+        assert_eq!(preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://pve.example");
+        let allowed = preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS].to_str().unwrap();
+        assert!(allowed.contains("x-den-library-token") && allowed.contains("x-den-link"), "{allowed}");
+
+        let get = h.send("GET", "/health", None, &[("origin", "https://pve.example")]).await;
+        assert_eq!(get.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://pve.example");
+        assert_eq!(get.headers()[header::VARY], "origin");
+        let other = h.send("GET", "/health", None, &[("origin", "https://elsewhere.example")]).await;
+        assert!(!other.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        let other_preflight = h
+            .send(
+                "OPTIONS",
+                "/plugins",
+                None,
+                &[("origin", "https://elsewhere.example"), ("access-control-request-method", "PUT")],
+            )
+            .await;
+        assert_ne!(
+            other_preflight.status(),
+            StatusCode::NO_CONTENT,
+            "no preflight for an origin not on the list"
+        );
     }
 
     #[tokio::test]
