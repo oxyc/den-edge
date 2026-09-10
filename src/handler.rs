@@ -192,6 +192,18 @@ pub fn query_param(req: &Request, name: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// The link's inbox key from the `x-den-link` header. A header keeps the key out of URLs, which end up in
+/// logs, proxies and history; the query and body forms older clients send still work (`link_key`, and each
+/// body's `inboxKey`).
+pub fn header_key(req: &Request) -> Option<String> {
+    req.headers().get("x-den-link").and_then(|v| v.to_str().ok()).map(str::to_owned)
+}
+
+/// The link's inbox key on a GET: the header, else the `inboxKey` query parameter.
+pub fn link_key(req: &Request) -> String {
+    header_key(req).or_else(|| query_param(req, "inboxKey")).unwrap_or_default()
+}
+
 /// The connecting address. The server is reached directly on the LAN or through `tailscale serve`, and
 /// neither is a proxy whose forwarded header could be trusted over the socket.
 pub fn client_ip(req: &Request) -> String {

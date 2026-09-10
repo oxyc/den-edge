@@ -3,11 +3,11 @@
 //! read from a LAN `http` manifest. Whole-list last-writer-wins with a version counter. Never written means
 //! 404, so a reader keeps its own list; `addons: []` is a real, empty list.
 //!
-//!   GET /plugins?inboxKey=…                         → { addons, version } | 404
-//!   PUT /plugins  { inboxKey, addons: [url | { url, name?, resources? }] } → { version }
+//!   GET /plugins   (x-den-link, or ?inboxKey=)                     → { addons, version } | 404
+//!   PUT /plugins   (x-den-link, or a body inboxKey) { addons: [url | { url, name?, resources? }] } → { version }
 
 use crate::handler::{
-    error, internal, js_len, json_reply, method_not_allowed, query_param, raw_json, read_json,
+    error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, raw_json, read_json,
     valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::inbox::acceptable_manifest_url;
@@ -26,7 +26,7 @@ const MAX_RESOURCES: usize = 20;
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match *req.method() {
-        Method::GET => read(state, query_param(&req, "inboxKey").unwrap_or_default()).await,
+        Method::GET => read(state, link_key(&req)).await,
         Method::PUT => write(state, req).await,
         _ => method_not_allowed(),
     }
@@ -44,11 +44,12 @@ async fn read(state: &AppState, key: String) -> Response {
 }
 
 async fn write(state: &AppState, req: Request) -> Response {
+    let from_header = header_key(&req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
-    let key = body.get("inboxKey").and_then(Value::as_str).unwrap_or("");
+    let key = from_header.as_deref().or_else(|| body.get("inboxKey").and_then(Value::as_str)).unwrap_or("");
     if !valid_inbox_key(key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
     }
@@ -153,6 +154,19 @@ mod tests {
             get(&h).await.1["addons"],
             json!([{ "url": "https://a.example/manifest.json" },
             { "url": "http://192.168.1.5:8080/manifest.json", "resources": ["catalog"] }])
+        );
+    }
+
+    #[tokio::test]
+    async fn the_key_can_travel_in_a_header() {
+        let h = Harness::new();
+        let body = json!({ "addons": ["https://a.example/manifest.json"] }).to_string();
+        let put = h.send("PUT", "/plugins", Some(body), &[("x-den-link", KEY)]).await;
+        assert_eq!(put.status(), StatusCode::OK);
+        let got = h.send("GET", "/plugins", None, &[("x-den-link", KEY)]).await;
+        assert_eq!(
+            crate::handler::tests::body_json(got).await["addons"][0]["url"],
+            "https://a.example/manifest.json"
         );
     }
 

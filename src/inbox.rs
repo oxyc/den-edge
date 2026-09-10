@@ -3,8 +3,8 @@
 //! watchlist, play, and the user's TMDB and other metadata keys.
 
 use crate::handler::{
-    error, internal, js_len, json_reply, method_not_allowed, query_param, read_json, valid_inbox_key,
-    MAX_BODY_BYTES,
+    error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, read_json,
+    valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::AppState;
 use axum::extract::Request;
@@ -24,17 +24,18 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
-        "/inbox/drain" => drain(state, query_param(&req, "inboxKey").unwrap_or_default()).await,
+        "/inbox/drain" => drain(state, link_key(&req)).await,
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
+    let from_header = header_key(&req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
-    let key = body.get("inboxKey").and_then(Value::as_str).unwrap_or("");
+    let key = from_header.as_deref().or_else(|| body.get("inboxKey").and_then(Value::as_str)).unwrap_or("");
     if !valid_inbox_key(key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
     }
@@ -233,6 +234,21 @@ mod tests {
         ] {
             assert_eq!(append(&h, bad.clone()).await, StatusCode::BAD_REQUEST, "{bad}");
         }
+    }
+
+    /// The key travels in `x-den-link`, out of the URL; a header wins over a body key.
+    #[tokio::test]
+    async fn the_key_can_travel_in_a_header() {
+        let h = Harness::new();
+        let body = json!({ "inboxKey": "not a key!", "message": { "type": "tmdbKey", "key": "k" } });
+        let appended = h.send("POST", "/inbox/append", Some(body.to_string()), &[("x-den-link", KEY)]).await;
+        assert_eq!(appended.status(), StatusCode::OK);
+        let drained = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
+        let messages = crate::handler::tests::body_json(drained).await["messages"].clone();
+        assert_eq!(messages, json!([{ "type": "tmdbKey", "key": "k" }]));
+        let junk =
+            h.send("GET", "/inbox/drain?inboxKey=abcdef0123456789", None, &[("x-den-link", "nope")]).await;
+        assert_eq!(junk.status(), StatusCode::BAD_REQUEST, "a header wins over the query");
     }
 
     #[tokio::test]

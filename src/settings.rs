@@ -2,11 +2,11 @@
 //! tagged config values (`{ bool | int | string | ints | strings }`), stored as given and bounded, never
 //! interpreted. Whole-blob last-writer-wins with a version counter; never written means 404.
 //!
-//!   GET /settings?inboxKey=…              → { settings, version } | 404
-//!   PUT /settings  { inboxKey, settings }  → { version }
+//!   GET /settings  (x-den-link, or ?inboxKey=)                  → { settings, version } | 404
+//!   PUT /settings  (x-den-link, or a body inboxKey) { settings }  → { version }
 
 use crate::handler::{
-    error, internal, js_len, json_reply, method_not_allowed, query_param, raw_json, read_json,
+    error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, raw_json, read_json,
     valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::AppState;
@@ -22,7 +22,7 @@ const MAX_JSON_LEN: usize = 20_000;
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match *req.method() {
-        Method::GET => read(state, query_param(&req, "inboxKey").unwrap_or_default()).await,
+        Method::GET => read(state, link_key(&req)).await,
         Method::PUT => write(state, req).await,
         _ => method_not_allowed(),
     }
@@ -40,11 +40,12 @@ async fn read(state: &AppState, key: String) -> Response {
 }
 
 async fn write(state: &AppState, req: Request) -> Response {
+    let from_header = header_key(&req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
     };
-    let key = body.get("inboxKey").and_then(Value::as_str).unwrap_or("");
+    let key = from_header.as_deref().or_else(|| body.get("inboxKey").and_then(Value::as_str)).unwrap_or("");
     if !valid_inbox_key(key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
     }
@@ -91,6 +92,18 @@ mod tests {
         let (_, got) = h.call("GET", &format!("/settings?inboxKey={KEY}"), None).await;
         assert_eq!(got, json!({ "settings": settings, "version": 1 }));
         assert_eq!(put(&h, json!({ "a": { "bool": false } })).await.1, json!({ "version": 2 }));
+    }
+
+    #[tokio::test]
+    async fn the_key_can_travel_in_a_header() {
+        let h = Harness::new();
+        let body = json!({ "settings": { "a": { "bool": true } } }).to_string();
+        assert_eq!(
+            h.send("PUT", "/settings", Some(body), &[("x-den-link", KEY)]).await.status(),
+            StatusCode::OK
+        );
+        let got = h.send("GET", "/settings", None, &[("x-den-link", KEY)]).await;
+        assert_eq!(crate::handler::tests::body_json(got).await["settings"], json!({ "a": { "bool": true } }));
     }
 
     #[tokio::test]

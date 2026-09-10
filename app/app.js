@@ -164,8 +164,8 @@
   function pushTo(key, message) {
     return fetch('/inbox/append', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inboxKey: key, message: message })
+      headers: linkHeaders(key, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ message: message })
     }).then(function (r) { return r.ok; });
   }
 
@@ -482,10 +482,16 @@
     updateEditState();
   }
 
+  // The link key travels in a header, never in a URL — URLs end up in logs, proxies and history.
+  function linkHeaders(key, extra) {
+    var h = { 'x-den-link': key };
+    for (var name in extra || {}) h[name] = extra[name];
+    return h;
+  }
   // --- Shared plugin list on den-edge: the phone and the TV converge here (per the linked inboxKey) ---
   function pluginsGet() {
     var k = inboxKey(); if (!k) return Promise.resolve(null);
-    return fetch('/plugins?inboxKey=' + encodeURIComponent(k))
+    return fetch('/plugins', { headers: linkHeaders(k) })
       .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
   }
   // Push the SAVED plugin list to the given TVs (each has its own /plugins list keyed by inboxKey).
@@ -498,8 +504,8 @@
       return e;
     });
     return Promise.all(keys.map(function (k) {
-      return fetch('/plugins', { method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inboxKey: k, addons: entries }) })
+      return fetch('/plugins', { method: 'PUT', headers: linkHeaders(k, { 'content-type': 'application/json' }),
+        body: JSON.stringify({ addons: entries }) })
         .then(function (r) { return r.ok; }).catch(function () { return false; });
     })).then(function (oks) { return oks.every(function (x) { return x; }); });
   }
@@ -507,14 +513,14 @@
   // languages, subtitle prefs, etc. A device publishes them on "Back up"; this phone relays them across
   // your devices (den-edge sees them in cleartext — same trust model as the plugin list + keys). ---
   function settingsGet(k) {
-    return fetch('/settings?inboxKey=' + encodeURIComponent(k))
+    return fetch('/settings', { headers: linkHeaders(k) })
       .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
   }
   function settingsPut(keys, settings) {
     if (!keys || !keys.length || !settings || !Object.keys(settings).length) return Promise.resolve(true);
     return Promise.all(keys.map(function (k) {
-      return fetch('/settings', { method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inboxKey: k, settings: settings }) })
+      return fetch('/settings', { method: 'PUT', headers: linkHeaders(k, { 'content-type': 'application/json' }),
+        body: JSON.stringify({ settings: settings }) })
         .then(function (r) { return r.ok; }).catch(function () { return false; });
     })).then(function (oks) { return oks.every(function (x) { return x; }); });
   }

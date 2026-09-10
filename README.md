@@ -27,6 +27,9 @@ change and one **Back up**.
 | `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
 | `GET /app/…` | the companion web page |
 
+The link's key goes in the `x-den-link` header, so it stays out of URLs (and so out of logs, proxies and
+history). The older `?inboxKey=` query and body `inboxKey` still work; a header wins over them.
+
 Bodies are capped at 256 KiB, 4 MB on `/sync`. A method a route doesn't serve is `405`.
 
 ## State
