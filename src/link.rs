@@ -75,14 +75,13 @@ mod tests {
         let key = "abcdef0123456789";
         let link = [("x-den-link", key)];
         h.send("POST", "/inbox/append", Some(json!({ "sealed": "AAECAw" }).to_string()), &link).await;
-        let addons = json!({ "addons": ["https://a.example/manifest.json"] }).to_string();
-        h.send("PUT", "/plugins", Some(addons), &link).await;
-        h.send("PUT", "/settings", Some(json!({ "settings": { "a": { "bool": true } } }).to_string()), &link)
-            .await;
+        // What an older link shared, before those routes were retired.
+        h.state.store.put("plugins", key, b"{}").await.unwrap();
+        h.state.store.put("settings", key, b"{}").await.unwrap();
 
         assert_eq!(h.send("DELETE", "/link", None, &link).await.status(), StatusCode::OK);
-        assert_eq!(h.send("GET", "/plugins", None, &link).await.status(), StatusCode::NOT_FOUND);
-        assert_eq!(h.send("GET", "/settings", None, &link).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(h.state.store.get("plugins", key).await.unwrap(), None);
+        assert_eq!(h.state.store.get("settings", key).await.unwrap(), None);
         let drained =
             crate::handler::tests::body_json(h.send("GET", "/inbox/drain", None, &link).await).await;
         assert_eq!(drained["messages"], json!([]));

@@ -11,11 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Body ceiling for every route that takes one except `/sync`: clears every real settings, plugins and
-/// inbox body with room to spare.
+/// Body ceiling for every route that takes one except a library batch: clears every real inbox and pairing body
+/// with room to spare.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
-/// `/sync` carries the library backup: ciphertext up to `sync::MAX_CIPHERTEXT` plus a small envelope.
-pub const SYNC_MAX_BODY_BYTES: usize = crate::sync::MAX_CIPHERTEXT + 4 * 1024;
 
 /// The TV's kill-switch and update gate, unchanged from the Worker.
 const CONFIG: &str = r#"{"minSupportedVersion":"0.1.0","recommendedVersion":"0.1.0","features":{"addonModule":true,"aiReco":false}}"#;
@@ -140,8 +138,6 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         return crate::library::handle(state, req).await;
     }
     match path.as_str() {
-        "/plugins" => crate::plugins::handle(state, req).await,
-        "/settings" => crate::settings::handle(state, req).await,
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
@@ -170,8 +166,6 @@ pub fn route_label(path: &str) -> &'static str {
         "/version" => "/version",
         "/config" => "/config",
         "/metrics" => "/metrics",
-        "/plugins" => "/plugins",
-        "/settings" => "/settings",
         "/link" => "/link",
         "/inbox/append" => "/inbox/append",
         "/inbox/drain" => "/inbox/drain",
@@ -190,22 +184,19 @@ pub fn route_label(path: &str) -> &'static str {
 fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET: &[Method] = &[Method::GET];
     const GET_PUT: &[Method] = &[Method::GET, Method::PUT];
-    const GET_PUT_DELETE: &[Method] = &[Method::GET, Method::PUT, Method::DELETE];
     const POST: &[Method] = &[Method::POST];
     const DELETE: &[Method] = &[Method::DELETE];
     match route {
         "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" => Some(GET),
-        "/plugins" | "/settings" | "/pair/:sid/:slot" => Some(GET_PUT),
-        "/sync/:id" => Some(GET_PUT_DELETE),
+        "/pair/:sid/:slot" => Some(GET_PUT),
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
-        "/link" | "/pair/:sid" | "/lib/:id" => Some(DELETE),
+        "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" => Some(DELETE),
         _ => None,
     }
 }
 
 fn body_cap(route: &str) -> usize {
     match route {
-        "/sync/:id" => SYNC_MAX_BODY_BYTES,
         "/lib/:id/batch" => crate::library::BATCH_MAX_BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
@@ -303,12 +294,6 @@ pub fn client_ip(req: &Request) -> String {
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map_or_else(|| "unknown".to_owned(), |c| c.0.ip().to_string())
-}
-
-/// A string's length as JavaScript counts it, in UTF-16 units — the unit every bound the Worker checked was
-/// written in.
-pub fn js_len(s: &str) -> usize {
-    s.encode_utf16().count()
 }
 
 /// A link credential: hex, at least 16 characters (a paired link's is 48).
@@ -432,9 +417,9 @@ pub mod tests {
         let other_preflight = h
             .send(
                 "OPTIONS",
-                "/plugins",
+                "/inbox/append",
                 None,
-                &[("origin", "https://elsewhere.example"), ("access-control-request-method", "PUT")],
+                &[("origin", "https://elsewhere.example"), ("access-control-request-method", "POST")],
             )
             .await;
         assert_ne!(
@@ -484,7 +469,8 @@ pub mod tests {
             (StatusCode::METHOD_NOT_ALLOWED, error("method_not_allowed"))
         );
         assert_eq!(h.call("GET", "/link", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(h.call("DELETE", "/settings", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(h.call("GET", "/sync/0123456789abcdef", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(h.call("GET", "/plugins", None).await.0, StatusCode::NOT_FOUND, "a retired route is gone");
         // An unknown route is the router's 404, whatever the method.
         assert_eq!(h.call("DELETE", "/nope", None).await.0, StatusCode::NOT_FOUND);
         // A preflight and a HEAD probe pass the allowlist; HEAD carries no body.
@@ -494,19 +480,17 @@ pub mod tests {
         assert_eq!(body_text(head).await, "");
 
         let declared = |n: usize| n.to_string();
-        let too_big = declared(SYNC_MAX_BODY_BYTES + 1);
-        let r = h.send("PUT", "/sync/deadbeefcafe1234", None, &[("content-length", &too_big)]).await;
+        let too_big = declared(crate::library::BATCH_MAX_BODY_BYTES + 1);
+        let r = h.send("POST", "/lib/0123456789abcdef/batch", None, &[("content-length", &too_big)]).await;
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        // /sync carries a library-sized body while every other route keeps the small cap.
+        // A batch carries a library's rows while every other route keeps the small cap.
         let over_small = declared(MAX_BODY_BYTES + 1);
-        let r = h.send("PUT", "/plugins", None, &[("content-length", &over_small)]).await;
+        let r = h.send("POST", "/inbox/append", None, &[("content-length", &over_small)]).await;
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         // ...and a body that declares no length is held to the same cap as it is read.
-        let big = format!(
-            r#"{{"inboxKey":"abcdef0123456789","addons":[],"pad":"{}"}}"#,
-            "x".repeat(MAX_BODY_BYTES)
-        );
-        assert_eq!(h.send("PUT", "/plugins", Some(big), &[]).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let big = format!(r#"{{"inboxKey":"abcdef0123456789","sealed":"{}"}}"#, "x".repeat(MAX_BODY_BYTES));
+        let r = h.send("POST", "/inbox/append", Some(big), &[]).await;
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -517,7 +501,7 @@ pub mod tests {
         let mut h = Harness::new();
         Arc::get_mut(&mut h.state).unwrap().metrics_token = Some("s3cret".into());
         h.call("GET", "/health", None).await;
-        h.call("GET", "/sync/0123456789abcdef", None).await;
+        h.call("DELETE", "/sync/0123456789abcdef", None).await;
         assert_eq!(
             h.send("GET", "/metrics", None, &[("authorization", "Bearer nope")]).await.status(),
             StatusCode::NOT_FOUND
@@ -527,7 +511,7 @@ pub mod tests {
         assert!(text.contains(r#"den_edge_requests_total{route="/health",status="200"} 1"#), "{text}");
         // A key in a path never becomes a label.
         assert!(
-            text.contains(r#"route="/sync/:id",status="404""#) && !text.contains("0123456789abcdef"),
+            text.contains(r#"route="/sync/:id",status="200""#) && !text.contains("0123456789abcdef"),
             "{text}"
         );
     }

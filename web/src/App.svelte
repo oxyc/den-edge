@@ -10,7 +10,7 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
-  // Settings is `#settings`, so Back returns to the library. Not a path: `/settings` is den-edge's API.
+  // Settings is `#settings`, so Back returns to the library.
   const onSettings = () => location.hash === '#settings';
   let settings = $state(onSettings());
   $effect(() => {

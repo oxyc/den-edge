@@ -22,10 +22,7 @@ the rest is small JSON it validates and bounds.
 | `DELETE /link` | unlinking: the link's inbox, plugins and settings are erased |
 | `POST /inbox/append` `{sealed}` | a paired device's sealed message for the TV ([den-spec inbox v1](https://github.com/oxyc/den-spec/blob/main/wire/inbox-v1.md)), kept as it came; a readable one is refused |
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied |
-| `GET`/`DELETE /sync/{id}` | the library backup: `{ciphertext, nonce, version}` |
-| `PUT /sync/{id}` `{ciphertext, nonce, baseVersion}` | `{version}`, or `409 {version}` when `baseVersion` is stale |
-| `GET`/`PUT /plugins` | the shared addon list: `{addons, version}` |
-| `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
+| `DELETE /sync/{id}` | erases a backup an older link or the retired settings backup left |
 | `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
 | `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
 
@@ -34,11 +31,12 @@ the rest is small JSON it validates and bounds.
 The link's key goes in the `x-den-link` header, so it stays out of URLs (and so out of logs, proxies and
 history). A key in the query string is not read; an append's body `inboxKey` still is, and the header wins.
 
-Bodies are capped at 256 KiB, 4 MB on `/sync`. A method a route doesn't serve is `405`.
+Bodies are capped at 256 KiB, 2 MiB on a library batch. A method a route doesn't serve is `405`.
 
 ## State
 
-One file per key under `DATA_DIR`, in a directory per kind (`inbox/`, `plugins/`, `settings/`, `sync/`),
+One file per key under `DATA_DIR`, in a directory per kind (`inbox/`; `plugins/`, `settings/` and `sync/` hold
+what retired routes left, erased as its links go),
 named by the key's SHA-256 so no key is a file name. Writes go to a temporary file, are synced, and are
 renamed into place, and every read-modify-write — an inbox append, a drain, a versioned write — happens under
 one lock. So two messages arriving together are both kept, which Workers KV couldn't promise.
@@ -71,8 +69,8 @@ can reach den-edge can't fill the host's disk. A library holds at most 50,000 ro
 `web/` is the Den web app (Svelte 5 on Vite), the Apple TV app's screens in a browser. The image builds it
 and den-edge serves it at `/` from `WEB_DIR`, beside its API — one origin, so the app needs no CORS. A path
 with no file behind it is one of the app's routes and gets the shell; hashed files under `/assets/` are
-cached for a year. App routes must not reuse an API path (`/settings`, `/plugins`, `/link`): the API answers
-first.
+cached for a year. App routes must not reuse an API path (`/lib`, `/pair`, `/inbox`, `/link`, `/sync`): the API
+answers first.
 
 ```
 cd web && npm install && npm run dev    # Vite on :5173, proxying the API to the homelab den-edge

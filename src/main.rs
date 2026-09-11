@@ -1,8 +1,6 @@
 //! den-edge — Den's sync relay, on the homelab. It relays pairings between a TV and another device, carries a
-//! paired device's sealed messages to the TV (the inbox), keeps the library's record log and the TV's
-//! encrypted backup, and holds the plugin list and settings older links shared. It also serves the Den web app.
-//! It never interprets what it stores: the log, the backup and the inbox are ciphertext, and the rest is small
-//! JSON it validates and bounds.
+//! paired device's sealed messages to the TV (the inbox), and keeps the library's record log. It also serves the
+//! Den web app. It never interprets what it stores: the log and the inbox are ciphertext the devices seal.
 //!
 //! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
@@ -12,8 +10,6 @@ mod library;
 mod link;
 mod metrics;
 mod pair;
-mod plugins;
-mod settings;
 mod store;
 mod sync;
 mod web;
