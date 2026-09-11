@@ -8,6 +8,7 @@
   import type { Title } from '../lib/library';
   import { playable, type Playable } from '../lib/playable';
   import {
+    describeRelease,
     endSession,
     listReleases,
     login,
@@ -354,9 +355,7 @@
   </div>
   {#if session}
     <footer>
-      <p class="release">
-        {session.release.label}{session.video?.transcoded ? ' · converted to H.264 for this browser' : ''}
-      </p>
+      <p class="release">{describeRelease(session)}</p>
       <div class="controls">
         {#if releases.length > 1}
           <label>

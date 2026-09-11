@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  describeRelease,
   endSession,
   findRemux,
   forgetSubtitles,
@@ -132,6 +133,22 @@ describe('endSession', () => {
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+  });
+});
+
+describe('describeRelease', () => {
+  it('names what plays: the release, and what a conversion brought it down to', () => {
+    expect(describeRelease(session)).toBe('1080p');
+    const converted = {
+      ...session,
+      release: { ...session.release, label: '4K • REMUX • Dolby Vision' },
+      video: { codec: 'h264', transcoded: true, width: 1920, height: 800, tonemapped: true },
+    };
+    expect(describeRelease(converted)).toBe('4K • REMUX • Dolby Vision · converted here to 800p H.264 SDR');
+    expect(describeRelease({ ...converted, video: { codec: 'h264', transcoded: true, height: 1080 } })).toBe(
+      '4K • REMUX • Dolby Vision · converted here to 1080p H.264',
+    );
+    expect(describeRelease({ ...session, video: { codec: 'hevc', transcoded: false } })).toBe('1080p');
   });
 });
 

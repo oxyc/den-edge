@@ -12,7 +12,8 @@ export interface Session {
   /** Seconds. */
   duration: number;
   release: { label: string; filename: string; size: number };
-  video?: { codec: string; transcoded: boolean };
+  /** What plays: the codec, the size it plays at, and whether den-remux converted and tone-mapped it. */
+  video?: { codec: string; transcoded: boolean; width?: number; height?: number; tonemapped?: boolean };
   /** The audio track playing, by index into `audioTracks`: one per session, re-encoded to AAC. */
   audioTrack: number;
   audioTracks: AudioTrack[];
@@ -132,6 +133,17 @@ export async function startSession(
     return { failure: failureOf(res.status, error) };
   }
   return { failure: 'unreachable' };
+}
+
+/**
+ * What is playing, as the player names it: the release, and — where den-remux couldn't send it as it is — what it
+ * came down to, so a converted 4K remux doesn't pass for the 4K it says on the tin.
+ */
+export function describeRelease(session: Session): string {
+  const video = session.video;
+  if (!video?.transcoded) return session.release.label;
+  const size = video.height ? `${video.height}p ` : '';
+  return `${session.release.label} · converted here to ${size}H.264${video.tonemapped ? ' SDR' : ''}`;
 }
 
 /** A release den-remux could play, as it lists them: never a URL. */
