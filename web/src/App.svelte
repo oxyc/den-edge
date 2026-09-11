@@ -1,8 +1,19 @@
 <script lang="ts">
   import Library from './Library.svelte';
+  import { announceDevice, deviceLabel } from './lib/edge';
   import { links } from './lib/links.svelte';
   import LinkTV from './LinkTV.svelte';
   import Linked from './Linked.svelte';
+
+  // Each linked TV names this device in its list; tell it again whenever the label changes (a new browser
+  // version doesn't change it, a different browser has its own links).
+  $effect(() => {
+    const device = deviceLabel();
+    for (const link of links.list) {
+      if (link.device === device) continue;
+      void announceDevice(link.inboxKey, device).then((ok) => ok && links.noteDevice(link.inboxKey, device));
+    }
+  });
 </script>
 
 <header class="bar glass">

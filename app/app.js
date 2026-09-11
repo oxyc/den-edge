@@ -120,18 +120,43 @@
     if (!hidden) addCodeInput.focus();
   });
 
-  // What this device is, for the TV's list of linked devices (the web app's deviceLabel). iPadOS asks for
-  // desktop sites with a Mac's user agent, so an iPad is told apart by its touch screen.
+  // What this device is, for the TV's list of linked devices (the web app's deviceLabel): "Mac · Chrome".
+  // iPadOS asks for desktop sites with a Mac's user agent, so an iPad is told apart by its touch screen.
   function deviceLabel() {
     var ua = navigator.userAgent;
-    if (/iPhone/.test(ua)) return 'iPhone';
-    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
-    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
-    if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
-    if (/CrOS/.test(ua)) return 'Chromebook';
-    if (/Windows/.test(ua)) return 'Windows PC';
-    if (/Linux/.test(ua)) return 'Linux PC';
-    return 'Browser';
+    var platform =
+      /iPhone/.test(ua) ? 'iPhone'
+      : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad'
+      : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android phone' : 'Android tablet')
+      : /Macintosh|Mac OS X/.test(ua) ? 'Mac'
+      : /CrOS/.test(ua) ? 'Chromebook'
+      : /Windows/.test(ua) ? 'Windows PC'
+      : /Linux/.test(ua) ? 'Linux PC'
+      : '';
+    var browser =
+      /Edg(A|iOS)?\//.test(ua) ? 'Edge'
+      : /Firefox\/|FxiOS/.test(ua) ? 'Firefox'
+      : /Chrome\/|CriOS/.test(ua) ? 'Chrome'
+      : /Safari\//.test(ua) ? 'Safari'
+      : '';
+    return [platform, browser].filter(Boolean).join(' · ') || 'Browser';
+  }
+
+  // Tell each linked TV what this device is whenever that changes, so its list of linked devices names it —
+  // links made before devices said, too. The label each TV was last told is kept on the link.
+  function noteDevice(key, label) {
+    var list = links();
+    list.forEach(function (l) { if (l.inboxKey === key) l.device = label; });
+    saveLinks(list);
+  }
+  function announceDevice() {
+    var label = deviceLabel();
+    links().forEach(function (tv) {
+      if (tv.device === label) return;
+      pushTo(tv.inboxKey, { type: 'device', name: label })
+        .then(function (ok) { if (ok) noteDevice(tv.inboxKey, label); })
+        .catch(function () {});
+    });
   }
 
   function claim(code, btn, input, err) {
@@ -144,6 +169,7 @@
       if (r.status === 200) {
         return r.json().then(function (d) {
           addLink(d.inboxKey);              // ADD, don't overwrite — so the phone can drive several TVs
+          noteDevice(d.inboxKey, deviceLabel());   // the claim already told this TV
           input.value = ''; btn.disabled = true;
           $('addTvForm').classList.add('hidden'); $('addTvBtn').textContent = '+ Link another TV';
           render();
@@ -686,6 +712,7 @@
   render();
   loadAddons();
   renderAddons();
+  announceDevice();
   if (inboxKey()) { pullPlugins(false); pullSettings(); }   // adopt the TV's shared plugins + settings on open
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/sw.js').catch(function () {});
 })();

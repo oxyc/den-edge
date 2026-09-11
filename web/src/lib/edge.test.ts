@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claimCode, deviceLabel } from './edge';
+import { announceDevice, claimCode, deviceLabel } from './edge';
 import { readLinks } from './links.svelte';
 
 function answering(status: number, body: unknown = {}): typeof fetch {
@@ -35,17 +35,43 @@ describe('claimCode', () => {
 describe('deviceLabel', () => {
   const as = (userAgent: string, maxTouchPoints = 0) => deviceLabel({ userAgent, maxTouchPoints });
 
-  it('names the device the way the TV will list it', () => {
-    expect(as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15')).toBe('Mac');
-    expect(as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15', 5)).toBe('iPad');
+  it('names the device and browser the way the TV will list them', () => {
+    const macSafari = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15';
+    expect(as(macSafari)).toBe('Mac · Safari');
+    expect(as(macSafari, 5)).toBe('iPad · Safari');
+    expect(as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36')).toBe(
+      'Mac · Chrome',
+    );
     expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148')).toBe('iPhone');
+    expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) CriOS/140.0 Mobile/15E148 Safari/604.1')).toBe(
+      'iPhone · Chrome',
+    );
     expect(as('Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36')).toBe(
-      'Android phone',
+      'Android phone · Chrome',
     );
-    expect(as('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36')).toBe(
-      'Windows PC',
+    expect(as('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36 Edg/140.0')).toBe(
+      'Windows PC · Edge',
     );
+    expect(as('Mozilla/5.0 (X11; Linux x86_64; rv:142.0) Gecko/20100101 Firefox/142.0')).toBe('Linux PC · Firefox');
     expect(as('curl/8.7.1')).toBe('Browser');
+  });
+});
+
+describe('announceDevice', () => {
+  it('sends the label to one TV through its inbox, the key in the header', async () => {
+    let sent: { url: string; headers: Record<string, string>; body: unknown } | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      sent = { url: String(url), headers: init?.headers as Record<string, string>, body: JSON.parse(String(init?.body)) };
+      return new Response('{}', { status: 200 });
+    };
+    expect(await announceDevice('deadbeefcafe1234', 'Mac · Chrome', fetchImpl)).toBe(true);
+    expect(sent?.url).toBe('/inbox/append');
+    expect(sent?.headers['x-den-link']).toBe('deadbeefcafe1234');
+    expect(sent?.body).toEqual({ message: { type: 'device', name: 'Mac · Chrome' } });
+    expect(await announceDevice('deadbeefcafe1234', 'Mac', answering(500))).toBe(false);
+    expect(await announceDevice('deadbeefcafe1234', 'Mac', async () => Promise.reject(new TypeError('offline')))).toBe(
+      false,
+    );
   });
 });
 

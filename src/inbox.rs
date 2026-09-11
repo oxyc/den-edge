@@ -126,6 +126,9 @@ fn validate(raw: Option<&Value>) -> Option<Value> {
             out.insert("service".into(), service.into());
             out.insert("key".into(), bounded_key(m)?.into());
         }
+        "device" => {
+            out.insert("name".into(), crate::link::device_label(m.get("name"))?.into());
+        }
         _ => return None,
     }
     Some(Value::Object(out))
@@ -216,9 +219,14 @@ mod tests {
                 .await,
             StatusCode::OK
         );
+        assert_eq!(
+            append(&h, json!({ "type": "device", "name": " Mac · Chrome\u{7}", "model": "x" })).await,
+            StatusCode::OK
+        );
         let messages = drain(&h).await;
         assert_eq!(messages[0], play);
         assert_eq!(messages[2], json!({ "type": "apiKey", "service": "omdb", "key": "OMDB1" }));
+        assert_eq!(messages[4], json!({ "type": "device", "name": "Mac · Chrome" }));
 
         for bad in [
             json!({ "type": "play", "tmdbId": 1, "mediaType": "person", "title": "x" }),
@@ -229,6 +237,8 @@ mod tests {
             json!({ "type": "apiKey", "service": "trakt", "key": "x" }),
             json!({ "type": "addon", "manifestUrl": "http://insecure.example/manifest.json" }),
             json!({ "type": "addon", "manifestUrl": "ftp://192.168.1.5/manifest.json" }),
+            json!({ "type": "device", "name": "  " }),
+            json!({ "type": "device", "name": 3 }),
             json!({ "type": "nope" }),
             json!("addon"),
         ] {

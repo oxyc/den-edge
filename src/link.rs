@@ -129,8 +129,9 @@ fn poll(state: &AppState, req: &Request) -> Response {
     }
 }
 
-/// A claiming device's label, as the TV will show it: trimmed, without control characters, and short.
-fn device_label(raw: Option<&Value>) -> Option<String> {
+/// A device's label, as the TV will show it: trimmed, without control characters, and short. Given when it
+/// claims a code, and again through its inbox (`device` messages) when it changes.
+pub(crate) fn device_label(raw: Option<&Value>) -> Option<String> {
     let label: String =
         raw?.as_str()?.trim().chars().filter(|c| !c.is_control()).take(MAX_DEVICE_LABEL).collect();
     (!label.is_empty()).then_some(label)
