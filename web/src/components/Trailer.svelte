@@ -39,7 +39,9 @@
     grid-template-rows: auto minmax(0, 1fr);
     height: 100vh;
     height: 100dvh;
-    padding: max(12px, env(safe-area-inset-top)) var(--gutter) max(12px, env(safe-area-inset-bottom));
+    /* Clear of a phone's camera cutout on every side, as the player is. */
+    padding: max(12px, env(safe-area-inset-top)) max(var(--gutter), env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
     background: #000;
     color: #fff;
   }

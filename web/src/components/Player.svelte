@@ -338,7 +338,8 @@
 
 <style>
   /* The visible viewport (dvh: a phone's toolbars excluded), and a middle row that may shrink below the video's own
-     height — so the video fits and its controls stay on screen. */
+     height — so the video fits and its controls stay on screen. Every side keeps clear of a phone's camera cutout,
+     which sits on the left or right edge in landscape. */
   .player {
     position: fixed;
     inset: 0 0 auto;
@@ -347,7 +348,8 @@
     grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100vh;
     height: 100dvh;
-    padding: max(12px, env(safe-area-inset-top)) var(--gutter) max(12px, env(safe-area-inset-bottom));
+    padding: max(12px, env(safe-area-inset-top)) max(var(--gutter), env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
     background: #000;
     color: #fff;
   }
