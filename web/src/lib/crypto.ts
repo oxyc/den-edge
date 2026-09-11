@@ -4,7 +4,7 @@
 
 const utf8 = new TextEncoder();
 
-async function hkdf(material: Uint8Array<ArrayBuffer>, salt: string, info: string, bytes: number) {
+export async function hkdf(material: Uint8Array<ArrayBuffer>, salt: string, info: string, bytes: number) {
   const key = await crypto.subtle.importKey('raw', material, 'HKDF', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
     { name: 'HKDF', hash: 'SHA-256', salt: utf8.encode(salt), info: utf8.encode(info) },

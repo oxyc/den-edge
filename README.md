@@ -76,6 +76,10 @@ npm run check && npm test && npm run build
 `DEN_EDGE=http://localhost:8080 npm run dev` proxies to a local den-edge instead. Installs run with
 `--ignore-scripts` in CI and the image.
 
+The library's wire format lives in [den-spec](https://github.com/oxyc/den-spec), checked out at `spec/`
+(`git submodule update --init`). `web/src/lib/wire.ts` implements it and its tests load den-spec's vectors,
+the same ones the Apple TV app checks itself against.
+
 ## Run
 
 ```
