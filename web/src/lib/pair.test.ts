@@ -136,6 +136,63 @@ function relay(secret: string, approve = true) {
   return { fetchImpl, wasDeleted: () => gone };
 }
 
+/** den-edge's relay, in memory: `new` mints a nameplate for the host's sid, `open` trades it back, slots are
+    write-once and answer 202 until written. */
+function fakeEdge(nameplate = 'ABCD') {
+  const slots = new Map<string, string>();
+  let sid = '';
+  const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const body = (init?.body ? JSON.parse(String(init.body)) : {}) as Record<string, string>;
+    if (url === '/pair/new') {
+      sid = body.sid ?? '';
+      return json(200, { nameplate });
+    }
+    if (url === '/pair/open') return body.nameplate === nameplate ? json(200, { sid }) : json(410, {});
+    const slot = url.startsWith(`/pair/${sid}/`) ? url.slice(`/pair/${sid}/`.length) : null;
+    if (!slot) return json(404, {});
+    if (init?.method === 'PUT') {
+      if (slots.has(slot)) return json(409, {});
+      slots.set(slot, body.m ?? '');
+      return json(200, { written: true });
+    }
+    const m = slots.get(slot);
+    return m === undefined ? json(202, { status: 'pending' }) : json(200, { m });
+  };
+  return fetchImpl;
+}
+
+describe('hosting a pairing', () => {
+  /** Both sides at once, as two browsers are: the host shows a code, the joiner types it. */
+  async function pairThem(allow: (joiner: string) => Promise<boolean>, fetchImpl = fakeEdge()) {
+    const libraryKey = new Uint8Array(32).fill(7);
+    // A poll that yields to the timers, not a no-op: the two sides take turns here as two browsers do, and a
+    // side that never yields spends its whole ten minutes of polls before the other writes a thing.
+    const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
+    let give: (code: string) => void = () => undefined;
+    const code = new Promise<string>((resolve) => (give = resolve));
+    const hosted = pair.host({ libraryKey, label: 'Safari on Mac', onCode: give, allow, fetchImpl, wait });
+    const joined = pair.join(await code, { label: 'Chrome on Android', fetchImpl, wait });
+    return { libraryKey, ...Object.fromEntries([['host', await hosted], ['join', await joined]]) };
+  }
+
+  it('hands this browser’s library to another, with no TV in it', async () => {
+    const { host: hosted, join: joined, libraryKey } = await pairThem(async () => true);
+    expect(hosted).toEqual({ joiner: 'Chrome on Android' });
+    expect(joined).toHaveProperty('handover.host', 'Safari on Mac');
+    const handover = (joined as { handover: pair.Handover }).handover;
+    expect([...handover.libraryKey]).toEqual([...libraryKey]);
+    expect(handover.linkKey).toHaveLength(32);
+  });
+
+  it('hands over nothing when the host refuses', async () => {
+    const { host: hosted, join: joined } = await pairThem(async () => false);
+    expect(hosted).toEqual({ error: 'failed' });
+    expect(joined).toEqual({ error: 'failed' });
+  });
+});
+
 describe('joining through den-edge', () => {
   const options = (fetchImpl: typeof fetch) => ({ label: p.joinerLabel, fetchImpl, wait: async () => {} });
 

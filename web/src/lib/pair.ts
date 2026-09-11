@@ -288,6 +288,33 @@ const OPEN_ERRORS: Record<number, JoinError> = { 409: 'claimed', 410: 'expired',
  * user to allow this device. A failed check, a declined prompt and an expired session all end as `failed`, and
  * the session is deleted, so the TV shows a new code.
  */
+/** The four slots at den-edge, as either side uses them: write yours, wait for theirs, give up together. */
+function relay(sid: string, fetchImpl: typeof fetch, wait: (ms: number) => Promise<void>) {
+  const session = `/pair/${sid}`;
+  const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
+  const send = (path: string, method: string, body: unknown) =>
+    call(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return {
+    call,
+    send,
+    put: async (slot: string, m: Uint8Array) => (await send(`${session}/${slot}`, 'PUT', { m: toBase64url(m) }))?.ok ?? false,
+    /** The slot's message once the other side writes it; null when the session ends or the ten minutes run out. */
+    read: async (slot: string): Promise<Bytes | null> => {
+      for (let waited = 0; waited < SESSION_MS; waited += POLL_MS) {
+        const res = await call(`${session}/${slot}`);
+        if (res?.status === 200) {
+          const m = ((await res.json().catch(() => null)) as { m?: unknown } | null)?.m;
+          return typeof m === 'string' ? fromBase64url(m) : null;
+        }
+        if (res && res.status !== 202) return null;
+        await wait(POLL_MS);
+      }
+      return null;
+    },
+    end: () => call(session, { method: 'DELETE' }),
+  };
+}
+
 export async function join(code: string, options: JoinOptions = {}): Promise<JoinResult> {
   const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
   const parsed = parseCode(code);
@@ -302,22 +329,9 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const sid = ((await opened.json().catch(() => null)) as { sid?: unknown } | null)?.sid;
   if (typeof sid !== 'string' || !/^[0-9a-f]{32}$/.test(sid)) return { error: 'unreachable' };
 
-  const session = `/pair/${sid}`;
-  const put = async (slot: string, m: Uint8Array) => (await send(`${session}/${slot}`, 'PUT', { m: toBase64url(m) }))?.ok ?? false;
-  const read = async (slot: string): Promise<Bytes | null> => {
-    for (let waited = 0; waited < SESSION_MS; waited += POLL_MS) {
-      const res = await call(`${session}/${slot}`);
-      if (res?.status === 200) {
-        const m = ((await res.json().catch(() => null)) as { m?: unknown } | null)?.m;
-        return typeof m === 'string' ? fromBase64url(m) : null;
-      }
-      if (res && res.status !== 202) return null;
-      await wait(POLL_MS);
-    }
-    return null;
-  };
+  const { put, read, end } = relay(sid, fetchImpl, wait);
   const fail = async (): Promise<JoinResult> => {
-    await call(session, { method: 'DELETE' });
+    await end();
     return { error: 'failed' };
   };
 
@@ -331,4 +345,73 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const handover = d && (await openHandover(finished.handoverKey, d));
   if (!handover) return fail();
   return { handover, inboxKey: (await linkKeys(handover.linkKey)).inbox };
+}
+
+// --- Hosting a pairing, as the TV does ---
+
+export type HostError = 'unreachable' | 'busy' | 'failed';
+export type HostResult = { joiner: string } | { error: HostError };
+
+export interface HostOptions {
+  /** The library to hand over: this browser's, raw. */
+  libraryKey: Bytes;
+  /** What the joined device will call this one; this browser by default. */
+  label?: string;
+  /** The code to show, as soon as den-edge has minted its half of it. */
+  onCode: (code: string) => void;
+  /** Allow the device this names? It is the label that device sent, and only a device that ran the code right
+      gets this far. A false ends the pairing. */
+  allow: (joiner: string) => Promise<boolean>;
+  fetchImpl?: typeof fetch;
+  wait?: (ms: number) => Promise<void>;
+  /** Fixed for tests. */
+  sid?: string;
+  secret?: string;
+  linkKey?: Bytes;
+  y?: Bytes;
+}
+
+const randomSecret = (): string =>
+  [...crypto.getRandomValues(new Uint8Array(8))].map((b) => ALPHABET[b & 31]).join('');
+
+const randomSid = (): string =>
+  [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+/**
+ * Host a pairing, so another browser joins this one's library without the TV: mint a session, show its code, run
+ * CPace through the relay, ask before handing anything over, and seal the handover to the key only the device
+ * that ran the same code can derive. The secret half of the code never reaches den-edge.
+ */
+export async function host(options: HostOptions): Promise<HostResult> {
+  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
+  const sid = options.sid ?? randomSid();
+  const secret = options.secret ?? randomSecret();
+  const { send, put, read, end } = relay(sid, fetchImpl, wait);
+
+  const made = await send('/pair/new', 'POST', { sid });
+  if (!made) return { error: 'unreachable' };
+  if (made.status !== 200) return { error: made.status === 429 || made.status === 503 ? 'busy' : 'unreachable' };
+  const nameplate = ((await made.json().catch(() => null)) as { nameplate?: unknown } | null)?.nameplate;
+  if (typeof nameplate !== 'string' || !parseCode(nameplate + secret)) return { error: 'unreachable' };
+  options.onCode(nameplate + secret);
+
+  const fail = async (): Promise<HostResult> => {
+    await end();
+    return { error: 'failed' };
+  };
+  const label = cleanLabel(options.label ?? deviceLabel()) || 'Browser';
+  const a = await read('a');
+  const responded = a && (await hostRespond(secret, fromHex(sid), label, a, options.y));
+  if (!responded || !(await put('b', responded.b))) return fail();
+  const c = await read('c');
+  if (!c || !(await hostConfirm(responded.state, c))) return fail();
+  if (!(await options.allow(responded.state.joiner))) return fail();
+  const handover = {
+    host: label,
+    linkKey: options.linkKey ?? crypto.getRandomValues(new Uint8Array(32)),
+    libraryKey: options.libraryKey,
+  };
+  const sealed = await sealHandover(responded.state.handoverKey, handover);
+  if (!(await put('d', sealed))) return fail();
+  return { joiner: responded.state.joiner };
 }

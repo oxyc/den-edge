@@ -5,6 +5,7 @@
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
+  import { formatCode, host, type HostError } from './lib/pair';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { denAddonOf } from './lib/scout';
   import { clearTmdbCache } from './lib/tmdbCache';
@@ -113,6 +114,42 @@
     } catch {
       return url;
     }
+  }
+
+  // Handing the library to another browser: this one hosts the pairing the TV would, so a laptop — or Den opened
+  // at another address — can join without the TV being to hand.
+  let code = $state<string | null>(null);
+  let asking = $state<string | null>(null);
+  let pairing = $state(false);
+  let pairNotice = $state<string | null>(null);
+  let answer = $state<((allowed: boolean) => void) | null>(null);
+  const pairFailures: Record<HostError, string> = {
+    unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
+    busy: 'Too many pairings started here just now. Wait a minute and try again.',
+    failed: 'That pairing didn’t finish. Show a new code and try again.',
+  };
+
+  async function linkBrowser() {
+    pairing = true;
+    pairNotice = null;
+    const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
+    const result = await host({
+      libraryKey,
+      onCode: (shown) => (code = shown),
+      allow: (joiner) =>
+        new Promise<boolean>((resolve) => {
+          code = null;
+          asking = joiner;
+          answer = (allowed) => {
+            asking = null;
+            answer = null;
+            resolve(allowed);
+          };
+        }),
+    });
+    code = null;
+    pairing = false;
+    pairNotice = 'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
   }
 
   // Unlinking asks twice: a second press within a few seconds confirms, so a stray tap does nothing.
@@ -239,6 +276,27 @@
     <span>Linked to {link.name ?? 'your Apple TV'}</span>
     <button class="quiet danger" onclick={unlink}>{confirming ? 'Press again to unlink' : 'Unlink'}</button>
   </div>
+
+  <h2>Another browser</h2>
+  <p class="sub">
+    Give this library to a browser on another device — a laptop, or Den opened at another address — without going to
+    the TV. Open Den there and type the code this shows.
+  </p>
+  <div class="tv">
+    {#if code}
+      <b class="code">{formatCode(code).text}</b>
+    {:else if asking}
+      <span>Allow <b>{asking}</b> to use your library?</span>
+    {:else}
+      <span>{pairNotice ?? 'Not pairing'}</span>
+    {/if}
+    {#if asking}
+      <button class="primary" onclick={() => answer?.(true)}>Allow</button>
+      <button class="quiet" onclick={() => answer?.(false)}>Refuse</button>
+    {:else}
+      <button class="quiet" disabled={pairing} onclick={linkBrowser}>{pairing ? 'Waiting…' : 'Show a code'}</button>
+    {/if}
+  </div>
 </section>
 
 <style>
@@ -349,6 +407,13 @@
   .tv span {
     margin-right: auto;
     color: var(--muted);
+  }
+
+  /* The code is read aloud to whoever is typing it: spaced, and in the app's one monospace. */
+  .code {
+    margin-right: auto;
+    font: 700 20px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.18em;
   }
 
   .error {
