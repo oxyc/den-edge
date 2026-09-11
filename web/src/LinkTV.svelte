@@ -42,6 +42,9 @@
 
 <section>
   <h1>Link your Apple TV</h1>
+  {#if links.moved}
+    <p class="sub" role="status">{links.moved} reset its library key, so this device needs to link again.</p>
+  {/if}
   <p class="sub">On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.</p>
   <form
     onsubmit={(event) => {

@@ -32,7 +32,7 @@
     type Shape,
     type Title,
   } from './lib/library';
-  import type { Link } from './lib/links.svelte';
+  import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { isHidden, readApiKey, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
@@ -62,6 +62,7 @@
 
   $effect(() => {
     void LibraryLog.open(link.libraryKey).then((opened) => {
+      if (opened?.moved) return links.forgetMoved(link);
       log = opened;
       if (!opened) return;
       clock.see(opened.newestStamp());
@@ -126,6 +127,7 @@
     failure = null;
     const saved = await log.write(row);
     busy = false;
+    if (log.moved) return links.forgetMoved(link);
     if (!saved) failure = SAVE_FAILED;
     version++;
   }

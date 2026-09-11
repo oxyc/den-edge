@@ -26,6 +26,7 @@
 
   $effect(() => {
     void LibraryLog.open(link.libraryKey).then((opened) => {
+      if (opened?.moved) return links.forgetMoved(link);
       if (opened) clock.see(opened.newestStamp());
       log = opened;
     });
@@ -49,6 +50,10 @@
     const row: SettingsRow = { ...base, values: { ...base.values, [name]: { value, at: clock.issue() } } };
     const saved = await log.write(row);
     saving = false;
+    if (log.moved) {
+      links.forgetMoved(link);
+      return false;
+    }
     if (!saved) {
       failure = 'Couldn’t save that. Check that this device is on your network.';
       return false;

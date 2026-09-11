@@ -43,13 +43,18 @@ const ROUNDS = 3;
 export class LibraryLog {
   /** Each row as last read or written, by the name its key is the HMAC of. */
   private readonly entries = new Map<string, Entry>();
+  /** The TV reset the library key: this log is deleted, its id retired, and this browser's key reaches nothing. */
+  moved = false;
 
   private constructor(
     private readonly keys: LibraryKeys,
     private readonly fetchImpl: typeof fetch,
   ) {}
 
-  /** Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. */
+  /**
+   * Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. A library
+   * that moved to a new key comes back empty and `moved`.
+   */
   static async open(libraryKey: string, fetchImpl: typeof fetch = fetch): Promise<LibraryLog | null> {
     const log = new LibraryLog(await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0))), fetchImpl);
     let since = 0;
@@ -61,6 +66,10 @@ export class LibraryLog {
         return null;
       }
       if (res.status === 404) return log; // nobody has written the library yet
+      if (res.status === 410) {
+        log.moved = true;
+        return log;
+      }
       if (!res.ok) return null;
       const page = (await res.json()) as Page;
       for (const entry of page.entries) {
@@ -108,7 +117,8 @@ export class LibraryLog {
 
   /**
    * Write a row, based on the sequence last seen for it. When another device wrote it first, their row comes back:
-   * ours is merged on top of it and written again. Resolves to the row as stored, or null when it couldn't be saved.
+   * ours is merged on top of it and written again. Resolves to the row as stored, or null when it couldn't be saved
+   * — `moved` says when that is because the library moved to a new key.
    */
   async write(local: Row): Promise<Row | null> {
     let target = local;
@@ -122,6 +132,7 @@ export class LibraryLog {
           headers: { ...this.headers(), 'content-type': 'application/json' },
           body: JSON.stringify({ writes: [{ k, base: this.entries.get(name)?.seq ?? 0, v }] }),
         });
+        if (res.status === 410) this.moved = true;
         if (!res.ok) return null;
         batch = (await res.json()) as Batch;
       } catch {

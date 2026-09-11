@@ -46,6 +46,8 @@ function writeLinks(list: Link[], storage: Storage | undefined = globalThis.loca
 
 class Links {
   list = $state<Link[]>(readLinks());
+  /** The TV a link was forgotten for because it reset its library key, until this browser links again. */
+  moved = $state<string | null>(null);
 
   get current(): Link | undefined {
     return this.list[0];
@@ -55,12 +57,19 @@ class Links {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
     const name = details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
     this.list = [...this.list, { inboxKey, name, linkedAt: now, libraryKey: details.libraryKey, linkKey: details.linkKey }];
+    this.moved = null;
     writeLinks(this.list);
   }
 
   remove(inboxKey: string): void {
     this.list = this.list.filter((l) => l.inboxKey !== inboxKey);
     writeLinks(this.list);
+  }
+
+  /** The TV reset its library key and dropped this browser: its keys reach nothing, so it pairs again. */
+  forgetMoved(link: Link): void {
+    this.remove(link.inboxKey);
+    this.moved = link.name ?? 'Your Apple TV';
   }
 }
 

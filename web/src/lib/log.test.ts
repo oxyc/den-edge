@@ -75,6 +75,20 @@ describe('LibraryLog', () => {
     expect(await LibraryLog.open(LIBRARY_KEY, async () => new Response('{}', { status: 500 }))).toBeNull();
   });
 
+  it('says when the TV moved the library to a new key', async () => {
+    const gone: typeof fetch = async () => new Response('{"error":"library_moved"}', { status: 410 });
+    const opened = await LibraryLog.open(LIBRARY_KEY, gone);
+    expect([opened?.moved, opened?.rows()]).toEqual([true, []]);
+
+    const { fetchImpl } = await edge();
+    const log = await LibraryLog.open(LIBRARY_KEY, async (input, init) =>
+      init?.method === 'POST' ? gone(input, init) : fetchImpl(input, init),
+    );
+    expect(log?.moved).toBe(false);
+    expect(await log!.write(addToWatchlist(blankTitle({ type: 'tv', id: 1 }, 0), at(1)))).toBeNull();
+    expect(log?.moved).toBe(true);
+  });
+
   it('knows the newest stamp it read', async () => {
     const { fetchImpl } = await edge([row(1), row(2, { reaction: { value: 'love', at: at(9000, 'web1') } })]);
     expect((await LibraryLog.open(LIBRARY_KEY, fetchImpl))?.newestStamp()).toEqual(at(9000, 'web1'));
