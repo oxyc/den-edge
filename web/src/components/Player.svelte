@@ -184,9 +184,8 @@
     {#if failure === 'login'}
       <form onsubmit={letIn}>
         <p>
-          This browser isn’t let in to Den’s player yet. Enter a browser key from the homelab (<code
-            >remux-browser-key.txt</code
-          >) — once; the browser keeps it for a month.
+          Your library’s scout install can only check what’s available, so playing it here needs a browser key from
+          the homelab (<code>remux-browser-key.txt</code>) — once; the browser keeps it for a month.
         </p>
         <input type="password" bind:value={key} autocomplete="current-password" aria-label="Browser key" />
         <button class="primary" disabled={!key.trim()}>Let this browser in</button>
