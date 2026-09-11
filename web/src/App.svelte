@@ -12,6 +12,12 @@
     const device = deviceLabel();
     for (const link of links.list) if (!link.linkKey) void announceDevice(link.inboxKey, device);
   });
+
+  // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
+  // installed or the storage is persistent — which would mean pairing again.
+  $effect(() => {
+    if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
+  });
 </script>
 
 <header class="bar glass">
