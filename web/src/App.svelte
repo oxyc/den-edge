@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Library from './Library.svelte';
   import { links } from './lib/links.svelte';
   import LinkTV from './LinkTV.svelte';
   import Linked from './Linked.svelte';
@@ -10,6 +11,9 @@
 
 <main>
   {#if links.current}
+    {#key links.current.inboxKey}
+      <Library link={links.current} />
+    {/key}
     <Linked link={links.current} />
   {:else}
     <LinkTV />
@@ -34,8 +38,8 @@
   }
 
   main {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
-    padding: 32px var(--gutter) calc(32px + env(safe-area-inset-bottom));
+    padding: 28px var(--gutter) calc(32px + env(safe-area-inset-bottom));
   }
 </style>

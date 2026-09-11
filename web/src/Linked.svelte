@@ -16,10 +16,7 @@
 </script>
 
 <section>
-  <h1>Linked to {link.name ?? 'your Apple TV'}</h1>
-  {#if link.linkedAt}
-    <p class="sub">Since {new Date(link.linkedAt).toLocaleDateString()}.</p>
-  {/if}
+  <span class="who">Linked to {link.name ?? 'your Apple TV'}</span>
   <!-- The companion page's tools (send to TV, plugins, keys) until they move here. It shares this link. -->
   <a class="tools glass" href="/app/">Companion tools</a>
   <button class="quiet" onclick={unlink}>{confirming ? 'Press again to unlink' : 'Unlink'}</button>
@@ -27,26 +24,22 @@
 
 <style>
   section {
-    display: grid;
-    justify-items: center;
-    gap: 16px;
-    max-width: 420px;
-    margin: 8vh auto 0;
-    text-align: center;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
   }
 
-  h1 {
-    margin: 0;
-    font-size: 28px;
-  }
-
-  .sub {
-    margin: 0;
+  .who {
+    margin-right: auto;
     color: var(--muted);
   }
 
   .tools {
-    padding: 12px 22px;
+    padding: 10px 18px;
     border-radius: 999px;
     color: var(--fg);
     font-weight: 600;
@@ -54,7 +47,7 @@
   }
 
   .quiet {
-    padding: 12px 20px;
+    padding: 10px 18px;
     border: 1px solid var(--line);
     border-radius: 999px;
     background: none;
