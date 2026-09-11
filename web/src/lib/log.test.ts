@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyLog, continueWatching, untitled, watchlist, withDisplay, type Library } from './library';
 import { readLog } from './log';
 import { fetchTitle, storedTmdbKey } from './tmdb';
-import { deriveKeys, seal, type Stamp, type TitleRow } from './wire';
+import { deriveKeys, seal, type EpisodeRow, type Stamp, type TitleRow } from './wire';
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 const at = (t: number): Stamp => [t, 0, 'tv01'];
@@ -94,6 +94,34 @@ describe('applyLog', () => {
       dismissed: { value: true, at: at(2500) },
     });
     expect(continueWatching(applyLog(backup, [dismissed]))).toEqual([]);
+  });
+
+  const episode = (season: number, number: number, value: number, t: number): EpisodeRow => ({
+    kind: 'ep',
+    schema: 2,
+    title: { type: 'tv', id: 95396 },
+    season,
+    episode: number,
+    progress: { value, at: at(t), viewing: value === 0 ? 1 : 0 },
+  });
+
+  it('puts a series in Continue Watching from its episode rows, once it has a name', () => {
+    const library = applyLog(backup, [episode(1, 2, 0.5, 4000)]);
+    expect(untitled(library)).toEqual([{ type: 'tv', id: 95396 }]);
+    const named = withDisplay(library, [{ type: 'tv', id: 95396, title: 'Severance', posterPath: '/s.jpg', rating: 8.4 }]);
+    expect(continueWatching(named)[0]).toEqual({
+      title: { type: 'tv', id: 95396, title: 'Severance', posterPath: '/s.jpg', rating: 8.4 },
+      fraction: 0.5,
+      episode: { season: 1, episode: 2 },
+    });
+  });
+
+  it('drops an un-watched episode, and every episode from before a series reset', () => {
+    const named = { ...backup, marks: [] };
+    expect(applyLog(named, [episode(1, 2, 0.5, 4000), episode(1, 2, 0, 5000)]).marks).toEqual([]);
+    const reset = row(95396, { title: { type: 'tv', id: 95396 }, episodesReset: at(4500) });
+    const after = applyLog(named, [episode(1, 1, 1, 4000), episode(1, 2, 0.3, 5000), reset]);
+    expect(after.marks.map((m) => m.episode)).toEqual([2]);
   });
 });
 

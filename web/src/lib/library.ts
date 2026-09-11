@@ -164,9 +164,30 @@ const titleKey = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 export function applyLog(library: Library, rows: Row[]): Library {
   const records = new Map(library.records.map((r) => [titleKey(r.title), r]));
   const dismissed = new Map(library.dismissed);
+  const marks = new Map(library.marks.map((m) => [markKey(m), m]));
+  const resets = new Map<string, number>();
   for (const row of rows) {
-    if (row.kind !== 'rec' || (row.title.type !== 'movie' && row.title.type !== 'tv')) continue;
+    if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
     const key = titleKey(row.title);
+    if (row.kind === 'ep') {
+      const episode = { type: row.title.type, id: row.title.id, season: row.season, episode: row.episode };
+      if (row.progress.value > 0) {
+        // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
+        const series = marks.get(markKey(episode)) ?? [...marks.values()].find((m) => titleKey(m) === key);
+        marks.set(markKey(episode), {
+          ...episode,
+          fraction: row.progress.value,
+          updatedAt: row.progress.at[0],
+          title: series?.title ?? '',
+          posterPath: series?.posterPath,
+          voteAverage: series?.voteAverage ?? 0,
+        });
+      } else {
+        marks.delete(markKey(episode)); // un-watched
+      }
+      continue;
+    }
+    if (row.episodesReset) resets.set(key, row.episodesReset[0]);
     records.set(key, {
       title: records.get(key)?.title ?? { type: row.title.type, id: row.title.id, title: '' },
       status: row.status.value,
@@ -177,19 +198,41 @@ export function applyLog(library: Library, rows: Row[]): Library {
     });
     if (row.dismissed.value) dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
   }
-  return { ...library, records: [...records.values()], dismissed };
+  // A whole series un-watched: every episode progress from before it goes.
+  for (const [key, mark] of marks) {
+    const reset = resets.get(titleKey(mark));
+    if (reset !== undefined && mark.updatedAt <= reset) marks.delete(key);
+  }
+  return { ...library, records: [...records.values()], marks: [...marks.values()], dismissed };
 }
 
-/** Titles the rows would show that have no display yet. */
+const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
+  `${m.type}:${m.id}:${m.season}:${m.episode}`;
+
+/** Titles the rows would show that have no display yet: library titles, and series only episode progress names. */
 export function untitled(library: Library): { type: MediaType; id: number }[] {
-  return library.records
-    .filter((r) => !r.deleted && r.title.title === '' && (r.status === 'watchlist' || r.status === 'inProgress'))
-    .map((r) => ({ type: r.title.type, id: r.title.id }));
+  const refs = new Map<string, { type: MediaType; id: number }>();
+  for (const r of library.records) {
+    if (!r.deleted && r.title.title === '' && (r.status === 'watchlist' || r.status === 'inProgress')) {
+      refs.set(titleKey(r.title), { type: r.title.type, id: r.title.id });
+    }
+  }
+  for (const m of library.marks) {
+    if (m.title === '' && (m.type === 'movie' || m.type === 'tv')) refs.set(titleKey(m), { type: m.type, id: m.id });
+  }
+  return [...refs.values()];
 }
 
 export function withDisplay(library: Library, titles: Title[]): Library {
   const byKey = new Map(titles.map((t) => [titleKey(t), t]));
-  return { ...library, records: library.records.map((r) => ({ ...r, title: byKey.get(titleKey(r.title)) ?? r.title })) };
+  return {
+    ...library,
+    records: library.records.map((r) => ({ ...r, title: byKey.get(titleKey(r.title)) ?? r.title })),
+    marks: library.marks.map((m) => {
+      const t = m.title === '' ? byKey.get(titleKey(m)) : undefined;
+      return t ? { ...m, title: t.title, posterPath: t.posterPath, voteAverage: t.rating ?? 0 } : m;
+    }),
+  };
 }
 
 /** Newest additions first, as the TV lists them. A title with no display yet waits, as on the TV. */
