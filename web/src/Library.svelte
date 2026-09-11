@@ -17,7 +17,7 @@
     removeFromLibrary,
     unwatch,
   } from './lib/actions';
-  import { browseRows, homeRows, tmdbPages } from './lib/catalog';
+  import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import {
@@ -175,13 +175,31 @@
   const browseShown = (title: Title) => shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
+  /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
+  const seeds = $derived.by(() => {
+    void version;
+    const titleRows = (log?.rows() ?? []).filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value);
+    const named = new Map((library?.records ?? []).filter((r) => r.title.title).map((r) => [titleKey(r.title), r.title]));
+    const recency = (r: TitleRow) => Math.max(r.watchedAt ?? 0, r.reaction.at[0], r.addedAt);
+    const latest = (keep: (r: TitleRow) => boolean) =>
+      titleRows
+        .filter(keep)
+        .sort((a, b) => recency(b) - recency(a))
+        .flatMap((r) => named.get(titleKey(r.title)) ?? [])
+        .slice(0, 2);
+    return {
+      watched: latest((r) => r.status.value === 'watched' || r.reaction.value === 'like' || r.reaction.value === 'love'),
+      watchlisted: latest((r) => r.status.value === 'watchlist'),
+      owned: new Set(titleRows.map((r) => titleKey(r.title))),
+    };
+  });
   const rows = $derived.by(() => {
     if (!pages) return [];
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
       return browseRows(route.page === 'movies' ? 'movie' : 'tv', pages, { minYear, hiddenGenres: prefs.excludedGenres });
     }
-    return homeRows(pages, { minYear });
+    return [...personalRows(pages, seeds), ...homeRows(pages, { minYear })];
   });
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);

@@ -286,6 +286,28 @@ export function homeRows(pages: Pages, { now = new Date(), minYear = undefined a
 }
 
 /**
+ * Home's personal rows, above the spine (HomeModel): "Because you watched X" for your latest watched or liked titles,
+ * then "Because you added X to your Watchlist" — TMDB's recommendations for each, less what your library holds.
+ */
+export function personalRows(
+  pages: Pages,
+  { watched, watchlisted, owned }: { watched: Title[]; watchlisted: Title[]; owned: Set<string> },
+): RowDef[] {
+  const row = (id: string, title: string, seed: Title): RowDef => ({
+    id: `${id}-${seed.type}-${seed.id}`,
+    title,
+    load: async (page) =>
+      (await pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, page)).filter(
+        (t) => !owned.has(`${t.type}:${t.id}`),
+      ),
+  });
+  return [
+    ...watched.map((seed) => row('byw', `Because you watched ${seed.title}`, seed)),
+    ...watchlisted.map((seed) => row('wl', `Because you added ${seed.title} to your Watchlist`, seed)),
+  ];
+}
+
+/**
  * The Movies or Series tab (BrowseModel): Popular, three genre rows from the TV's Explore order, then that type's
  * categories — none of them a genre already shown, or one the TV hides.
  */

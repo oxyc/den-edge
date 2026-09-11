@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { browseRows, categories, discoverParams, homeRows, interleave, RECIPES, tmdbPages, type Pages } from './catalog';
+import {
+  browseRows,
+  categories,
+  discoverParams,
+  homeRows,
+  interleave,
+  personalRows,
+  RECIPES,
+  tmdbPages,
+  type Pages,
+} from './catalog';
 
 describe('discover queries, as DenKit builds them', () => {
   it('joins genres AND or OR, keywords and countries OR, and dates by the type’s own field', () => {
@@ -96,6 +106,26 @@ describe('the screens', () => {
     const ids = rows.map((r) => r.id);
     for (const gone of ['genre-28-movie', 'genre-35-movie']) expect(ids).not.toContain(gone);
     expect(ids).toContain('genre-878-movie');
+  });
+
+  it("Home's personal rows: TMDB's recommendations for your latest titles, less what you already have", async () => {
+    const asked: string[] = [];
+    const recs: Pages = async (path) => {
+      asked.push(path);
+      return [
+        { type: 'movie', id: 1, title: 'Owned' },
+        { type: 'movie', id: 2, title: 'New to you' },
+      ];
+    };
+    const arrival = { type: 'movie' as const, id: 329865, title: 'Arrival' };
+    const dune = { type: 'movie' as const, id: 693134, title: 'Dune: Part Two' };
+    const rows = personalRows(recs, { watched: [arrival], watchlisted: [dune], owned: new Set(['movie:1']) });
+    expect(rows.map((r) => [r.id, r.title])).toEqual([
+      ['byw-movie-329865', 'Because you watched Arrival'],
+      ['wl-movie-693134', 'Because you added Dune: Part Two to your Watchlist'],
+    ]);
+    expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
+    expect(asked).toEqual(['/movie/329865/recommendations']);
   });
 
   it('loads a row a page at a time from TMDB, and asks for no page past 500', async () => {

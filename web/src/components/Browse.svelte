@@ -12,8 +12,10 @@
   let count = $state(STEP);
   let bottom: HTMLElement;
 
+  // A different screen starts from the top again; the same rows rebuilt (after a write, say) keep their place.
+  const signature = $derived(rows.map((r) => r.id).join('\n'));
   $effect(() => {
-    void rows;
+    void signature;
     count = STEP;
   });
 
