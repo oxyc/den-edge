@@ -1,7 +1,6 @@
 <!-- Settings, as on the TV: the user's own API keys and addons — kept in the library's settings (`set:keys`,
      `set:plugins`), sealed, so the TV and this browser share them and den-edge can't read them — and the linked TV. -->
 <script lang="ts">
-  import { loadLibrary } from './lib/backup';
   import { browserClock } from './lib/clock';
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
@@ -26,18 +25,11 @@
   const clock = browserClock();
 
   $effect(() => {
-    void open(link).then((opened) => (log = opened));
+    void LibraryLog.open(link.libraryKey).then((opened) => {
+      if (opened) clock.see(opened.newestStamp());
+      log = opened;
+    });
   });
-
-  /** A paired link holds the library key; an older one finds it in the TV's backup. */
-  async function open(link: Link): Promise<LibraryLog | null> {
-    const backup = link.libraryKey ? undefined : await loadLibrary(link.inboxKey);
-    const key = link.libraryKey ?? (backup?.state === 'ok' ? backup.libraryKey : undefined);
-    if (!key) return null;
-    const opened = await LibraryLog.open(key);
-    if (opened) clock.see(opened.newestStamp());
-    return opened;
-  }
 
   const keys = $derived.by(() => {
     void version;
@@ -172,8 +164,6 @@
   <h2>Apple TV</h2>
   <div class="tv">
     <span>Linked to {link.name ?? 'your Apple TV'}</span>
-    <!-- The companion page's tools (sending to the TV) until they move here. It shares this link. -->
-    <a class="tools glass" href="/app/">Companion tools</a>
     <button class="quiet danger" onclick={unlink}>{confirming ? 'Press again to unlink' : 'Unlink'}</button>
   </div>
 </section>
@@ -255,8 +245,7 @@
     border-color: var(--accent);
   }
 
-  button,
-  .tools {
+  button {
     padding: 10px 18px;
     border-radius: 999px;
     font-weight: 600;
@@ -287,11 +276,6 @@
   .tv span {
     margin-right: auto;
     color: var(--muted);
-  }
-
-  .tools {
-    color: var(--fg);
-    text-decoration: none;
   }
 
   .error {

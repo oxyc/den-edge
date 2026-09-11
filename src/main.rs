@@ -1,12 +1,11 @@
-//! den-edge — Den's sync relay, on the homelab. It links a phone to a TV, carries the companion's messages
-//! to the TV (the inbox), keeps the TV's encrypted library backup, and holds the plugin list and settings the
-//! phone and the TV share. It also serves the companion web page. It never interprets what it stores: the
-//! backup is ciphertext, and the rest is small JSON it validates and bounds.
+//! den-edge — Den's sync relay, on the homelab. It relays pairings between a TV and another device, carries a
+//! paired device's sealed messages to the TV (the inbox), keeps the library's record log and the TV's
+//! encrypted backup, and holds the plugin list and settings older links shared. It also serves the Den web app.
+//! It never interprets what it stores: the log, the backup and the inbox are ciphertext, and the rest is small
+//! JSON it validates and bounds.
 //!
-//! It answers the same HTTP API the Cloudflare Worker did, so moving a TV over is a URL change and one
-//! "Back up". State lives in files under `DATA_DIR`; pending link codes live in memory only.
+//! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
-mod app;
 mod handler;
 mod inbox;
 mod library;
@@ -33,25 +32,21 @@ pub struct AppState {
     /// The record logs loaded so far, by library id — one household's, a few MB at most. Held across a batch
     /// or a read, so each library's compare-and-set is one step.
     pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
-    /// Link codes waiting to be claimed or polled. Ten minutes long at most, so memory is enough: a restart
-    /// costs a pairing in progress, which the TV simply starts again.
-    pub links: Mutex<HashMap<String, link::LinkState>>,
-    /// Claim attempts per client address, to keep a six-character code from being guessed online.
+    /// Guesses per client address, to keep a pairing's nameplate from being guessed online.
     pub claims: Mutex<HashMap<String, link::Throttle>>,
-    /// Pairing sessions by `sid`, ten minutes long at most, like `links`.
+    /// Pairing sessions by `sid`. Ten minutes long at most, so memory is enough: a restart costs a pairing in
+    /// progress, which the TV simply starts again.
     pub pairs: Mutex<HashMap<String, pair::Session>>,
     /// Unix milliseconds. A field so a test can move time.
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
-    pub gen_code: Box<dyn Fn() -> String + Send + Sync>,
-    pub gen_inbox_key: Box<dyn Fn() -> String + Send + Sync>,
     pub gen_nameplate: Box<dyn Fn() -> String + Send + Sync>,
     pub metrics: metrics::Metrics,
     /// Bearer token for `/metrics` (env `METRICS_TOKEN`). `None` turns the route off.
     pub metrics_token: Option<String>,
     /// One stderr line per request (env `LOG_REQUESTS`), naming the route and never a key.
     pub log_requests: bool,
-    /// Origins a browser may call from (env `WEB_ORIGINS`, comma-separated): the Den web app. Empty sends
-    /// no CORS headers at all — the companion page is same-origin and needs none.
+    /// Origins a browser may call from (env `WEB_ORIGINS`, comma-separated): the Den web app when it is served
+    /// from elsewhere. Empty sends no CORS headers at all — the app served here is same-origin and needs none.
     pub web_origins: Vec<String>,
     /// The Den web app's built files (env `WEB_DIR`), served at `/`. `None` serves no app.
     pub web_dir: Option<std::path::PathBuf>,
@@ -63,12 +58,9 @@ impl AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
             libraries: tokio::sync::Mutex::new(HashMap::new()),
-            links: Mutex::new(HashMap::new()),
             claims: Mutex::new(HashMap::new()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
-            gen_code: Box::new(link::gen_code),
-            gen_inbox_key: Box::new(link::gen_inbox_key),
             gen_nameplate: Box::new(pair::gen_nameplate),
             metrics: metrics::Metrics::default(),
             metrics_token,

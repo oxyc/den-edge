@@ -6,38 +6,40 @@
   import { searchStream, type Hit } from './lib/search';
   import { searchSources } from './lib/searchSources';
   import { addToWatchlist, blankTitle, markWatched, react, removeFromLibrary, unwatch } from './lib/actions';
-  import { loadLibrary, type LibraryResult } from './lib/backup';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import {
     applyLog,
     continueWatching,
+    emptyLibrary,
+    titleKey,
     untitled,
     watchlist,
     withDisplay,
     type ContinueEntry,
+    type Shape,
     type Title,
   } from './lib/library';
   import type { Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { isHidden, readApiKey, readPrefs } from './lib/prefs';
-  import { fetchTitle, storedTmdbKey } from './lib/tmdb';
+  import { fetchDetails } from './lib/tmdb';
   import type { Stamp, TitleRow } from './lib/wire';
 
   let { link }: { link: Link } = $props();
 
-  interface Loaded {
-    result: LibraryResult;
-    /** The record log, when the TV has handed over its key — reading it and writing to it. */
-    log: LibraryLog | null;
-  }
+  /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
+  const LOOKUPS = 6;
 
-  /** The TMDB key the TV shares through the log (`set:keys`), else the companion page's own. */
-  let tmdbKey = $state(storedTmdbKey());
+  /** The TMDB key the library shares (`set:keys`). */
+  let tmdbKey = $state('');
   const clock = browserClock();
-  let loaded = $state<Loaded | null>(null);
+  /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
+  let log = $state<LibraryLog | null | undefined>(undefined);
   /** TMDB display for titles the log names without it, and for titles acted on here. */
   let displays = $state<Title[]>([]);
+  /** Season layouts of the series in the library, from TMDB. */
+  let shapes = $state(new Map<string, Shape>());
   /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
   let version = $state(0);
   let selected = $state<Title | null>(null);
@@ -46,49 +48,42 @@
   let notice = $state<string | null>(null);
 
   $effect(() => {
-    void load(link).then((l) => (loaded = l));
+    void LibraryLog.open(link.libraryKey).then((opened) => {
+      log = opened;
+      if (!opened) return;
+      clock.see(opened.newestStamp());
+      tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
+      if (tmdbKey) void name(opened, tmdbKey);
+    });
   });
 
-  /**
-   * The record log, over the TV's backup when there is one. A paired link holds the library key itself; an older
-   * link finds it in the backup.
-   */
-  async function load(link: Link): Promise<Loaded> {
-    const result = await loadLibrary(link.inboxKey);
-    const libraryKey = link.libraryKey ?? (result.state === 'ok' ? result.libraryKey : undefined);
-    if (!libraryKey) return { result, log: null };
-    const log = await LibraryLog.open(libraryKey);
-    if (!log) return { result, log: null };
-    const backup =
-      result.state === 'ok'
-        ? result
-        : { state: 'ok' as const, library: { records: [], marks: [], shapes: new Map(), dismissed: new Map() }, backedUpAt: 0 };
-    clock.see(log.newestStamp());
-    const key = readApiKey(log.settings('keys'), 'tmdb') ?? tmdbKey;
-    tmdbKey = key;
-    if (key) {
-      const library = applyLog(backup.library, log.rows());
-      const titles = await Promise.all(untitled(library).slice(0, 60).map((ref) => fetchTitle(ref, key)));
-      displays = titles.filter((t): t is Title => t !== null);
-    }
-    return { result: { ...backup, live: true }, log };
+  /** Every title the rows show, named from TMDB a few at a time, painted as each arrives. */
+  async function name(opened: LibraryLog, key: string) {
+    const queue = untitled(applyLog(emptyLibrary(), opened.rows()));
+    const lookup = async () => {
+      for (let ref = queue.shift(); ref; ref = queue.shift()) {
+        const found = await fetchDetails(ref, key);
+        if (!found) continue;
+        displays = [...displays, found.title];
+        if (found.shape) shapes = new Map(shapes).set(titleKey(ref), found.shape);
+      }
+    };
+    await Promise.all(Array.from({ length: LOOKUPS }, lookup));
   }
 
   const library = $derived.by(() => {
     void version;
-    if (loaded?.result.state !== 'ok') return null;
-    const base = loaded.log ? applyLog(loaded.result.library, loaded.log.rows()) : loaded.result.library;
-    return withDisplay(base, displays);
+    if (!log) return null;
+    return { ...withDisplay(applyLog(emptyLibrary(), log.rows()), displays), shapes };
   });
 
   const selectedRow = $derived.by(() => {
     void version;
-    return selected ? loaded?.log?.title(selected) : undefined;
+    return selected ? log?.title(selected) : undefined;
   });
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
-    const log = loaded?.log;
     if (!log) return;
     if (!displays.some((d) => d.type === title.type && d.id === title.id)) displays = [...displays, title];
     busy = true;
@@ -110,14 +105,14 @@
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
   }
 
-  const select = $derived(loaded?.log ? (title: Title) => (selected = title) : undefined);
+  const select = $derived(log ? (title: Title) => (selected = title) : undefined);
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
   // a newer query supersedes an older one mid-flight.
   const sources = $derived(tmdbKey ? searchSources(tmdbKey) : null);
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;
-    return readPrefs(loaded?.log?.settings('prefs'));
+    return readPrefs(log?.settings('prefs'));
   });
   let query = $state('');
   let hits = $state<Hit[] | null>(null);
@@ -163,9 +158,14 @@
   }
 </script>
 
-{#if !loaded}
+{#if log === undefined}
   <p class="note">Loading your library…</p>
-{:else if loaded.result.state === 'ok' && library}
+{:else if log === null || !library}
+  <p class="note">
+    Couldn’t open your library. Check that this device is on your network. If your TV reset its library key, unlink in
+    <a href="#settings">Settings</a> and pair again.
+  </p>
+{:else}
   {@const resume = continueWatching(library)}
   {@const saved = watchlist(library)}
   {#if sources}
@@ -213,20 +213,7 @@
   {#if !hits && !resume.length && !saved.length}
     <p class="note">Nothing in progress and nothing on your watchlist yet.</p>
   {/if}
-  {#if loaded.result.live}
-    <p class="note small">Up to date with your TV.</p>
-  {:else}
-    <p class="note small">
-      From the TV’s backup of {new Date(loaded.result.backedUpAt).toLocaleString()}. To see it live and change it, unlink
-      in <a href="#settings">Settings</a> and link again with the code the TV shows.
-    </p>
-  {/if}
-{:else if loaded.result.state === 'none'}
-  <p class="note">No backup from your TV yet. On the TV, open <b>Settings › Sync settings</b> and back up.</p>
-{:else if loaded.result.state === 'error' && loaded.result.reason === 'unreadable'}
-  <p class="note">The backup here was made with another link. Back up again on the TV.</p>
-{:else}
-  <p class="note">Couldn’t reach Den. Check that this device is on your network.</p>
+  <p class="note small">Up to date with your TV.</p>
 {/if}
 
 {#if selected}

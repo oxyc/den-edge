@@ -1,36 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { announceDevice, claimCode, deviceLabel } from './edge';
+import { deviceLabel } from './edge';
 import { readLinks } from './links.svelte';
-
-function answering(status: number, body: unknown = {}): typeof fetch {
-  return async () => new Response(JSON.stringify(body), { status });
-}
-
-describe('claimCode', () => {
-  it('sends the code upper-cased with the device, and returns the shared key', async () => {
-    let sent: unknown;
-    const fetchImpl: typeof fetch = async (_url, init) => {
-      sent = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ inboxKey: 'deadbeefcafe1234' }), { status: 200 });
-    };
-    expect(await claimCode(' ab3cde ', fetchImpl, 'Mac')).toEqual({ inboxKey: 'deadbeefcafe1234' });
-    expect(sent).toEqual({ code: 'AB3CDE', device: 'Mac' });
-  });
-
-  it('names what went wrong', async () => {
-    expect(await claimCode('X', answering(410))).toEqual({ error: 'expired' });
-    expect(await claimCode('X', answering(409))).toEqual({ error: 'claimed' });
-    expect(await claimCode('X', answering(429))).toEqual({ error: 'throttled' });
-    expect(await claimCode('X', answering(500))).toEqual({ error: 'unreachable' });
-    expect(await claimCode('X', async () => Promise.reject(new TypeError('offline')))).toEqual({
-      error: 'unreachable',
-    });
-  });
-
-  it('does not take a malformed key', async () => {
-    expect(await claimCode('X', answering(200, { inboxKey: 'not hex!' }))).toEqual({ error: 'unreachable' });
-  });
-});
 
 describe('deviceLabel', () => {
   const as = (userAgent: string, maxTouchPoints = 0) => deviceLabel({ userAgent, maxTouchPoints });
@@ -57,24 +27,6 @@ describe('deviceLabel', () => {
   });
 });
 
-describe('announceDevice', () => {
-  it('sends the label to one TV through its inbox, the key in the header', async () => {
-    let sent: { url: string; headers: Record<string, string>; body: unknown } | undefined;
-    const fetchImpl: typeof fetch = async (url, init) => {
-      sent = { url: String(url), headers: init?.headers as Record<string, string>, body: JSON.parse(String(init?.body)) };
-      return new Response('{}', { status: 200 });
-    };
-    expect(await announceDevice('deadbeefcafe1234', 'Mac · Chrome', fetchImpl)).toBe(true);
-    expect(sent?.url).toBe('/inbox/append');
-    expect(sent?.headers['x-den-link']).toBe('deadbeefcafe1234');
-    expect(sent?.body).toEqual({ message: { type: 'device', name: 'Mac · Chrome' } });
-    expect(await announceDevice('deadbeefcafe1234', 'Mac', answering(500))).toBe(false);
-    expect(await announceDevice('deadbeefcafe1234', 'Mac', async () => Promise.reject(new TypeError('offline')))).toBe(
-      false,
-    );
-  });
-});
-
 describe('readLinks', () => {
   function storage(values: Record<string, string>, throws = false): Storage {
     return {
@@ -85,16 +37,11 @@ describe('readLinks', () => {
     } as unknown as Storage;
   }
 
-  it('reads the list the companion page keeps, and keeps only well-formed links', () => {
-    const companion = { inboxKey: 'deadbeefcafe1234', name: 'Living room' };
-    const junk = [{ inboxKey: 3 }, { inboxKey: 'not a key' }];
-    expect(readLinks(storage({ 'den.links': JSON.stringify([companion, ...junk]) }))).toEqual([companion]);
-  });
-
-  it("picks up the companion page's older single link", () => {
-    expect(readLinks(storage({ 'den.inboxKey': 'abcdef0123456789' }))).toEqual([
-      { inboxKey: 'abcdef0123456789', name: 'Apple TV' },
-    ]);
+  it('keeps only paired links: a six-character one has no keys and pairs again', () => {
+    const paired = { inboxKey: 'deadbeefcafe1234', name: 'Living room', libraryKey: 'a2V5', linkKey: 'bGluaw==' };
+    const older = { inboxKey: 'abcdef0123456789', name: 'Apple TV' };
+    const junk = [{ inboxKey: 3 }, { inboxKey: 'not a key', libraryKey: 'a', linkKey: 'b' }];
+    expect(readLinks(storage({ 'den.links': JSON.stringify([paired, older, ...junk]) }))).toEqual([paired]);
   });
 
   it('survives storage that is malformed or throws', () => {

@@ -10,7 +10,6 @@ use crate::handler::{
     error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, raw_json, read_json,
     valid_inbox_key, MAX_BODY_BYTES,
 };
-use crate::inbox::acceptable_manifest_url;
 use crate::AppState;
 use axum::body::Body;
 use axum::extract::Request;
@@ -115,6 +114,30 @@ fn sanitize(raw: &Value) -> Option<Value> {
     Some(Value::Object(entry))
 }
 
+/// A host on the user's own network — the rule DenKit's `AddonClient.isLocalHost` and Den Web apply.
+fn is_local_host(host: &str) -> bool {
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".local") {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() != 4 || !octets.iter().all(|o| !o.is_empty() && o.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    let n = |o: &str| o.parse::<u64>().unwrap_or(u64::MAX);
+    let (a, b) = (n(octets[0]), n(octets[1]));
+    a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b))
+}
+
+/// https anywhere, or http only to a LAN or local host — the add-time rule the web and the TV enforce.
+fn acceptable_manifest_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw) else { return false };
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(is_local_host),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::Harness;
@@ -192,5 +215,17 @@ mod tests {
         );
         let junk = json!({ "inboxKey": "nope!", "addons": [] });
         assert_eq!(h.call("PUT", "/plugins", Some(junk)).await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn local_hosts_are_the_lan_and_nothing_else() {
+        for ok in
+            ["localhost", "127.0.0.1", "nas.local", "10.0.0.2", "192.168.86.193", "172.16.0.1", "172.31.9.9"]
+        {
+            assert!(super::is_local_host(ok), "{ok}");
+        }
+        for no in ["172.32.0.1", "192.169.1.1", "8.8.8.8", "example.com", "[::1]", "1.2.3"] {
+            assert!(!super::is_local_host(no), "{no}");
+        }
     }
 }

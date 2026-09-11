@@ -33,27 +33,20 @@ describe('sending to a TV', () => {
     return { sent, fetchImpl };
   }
 
-  it('seals for a paired link, and sends nothing readable', async () => {
+  const link = { inboxKey: 'abcdef0123456789', linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))) };
+
+  it('seals, and sends nothing readable', async () => {
     const { sent, fetchImpl } = capture();
-    const linkKey = btoa(String.fromCharCode(...fromHex(vectors.linkKey)));
-    expect(await sendToTV({ inboxKey: 'abcdef0123456789', linkKey }, play, fetchImpl)).toBe(true);
+    expect(await sendToTV(link, play, fetchImpl)).toBe(true);
     expect(sent[0]?.headers['x-den-link']).toBe('abcdef0123456789');
     expect(Object.keys(sent[0]?.body ?? {})).toEqual(['sealed']);
     expect(JSON.stringify(sent[0]?.body)).not.toContain('Fight Club');
-  });
-
-  it('sends as it is, with the time, for a six-character link', async () => {
-    const { sent, fetchImpl } = capture();
-    expect(await sendToTV({ inboxKey: 'abcdef0123456789' }, play, fetchImpl)).toBe(true);
-    const message = sent[0]?.body.message as Record<string, unknown>;
-    expect(message).toMatchObject(play);
-    expect(typeof message.sentAt).toBe('number');
   });
 
   it('says so when den-edge is out of reach', async () => {
     const down = (async () => {
       throw new TypeError('offline');
     }) as typeof fetch;
-    expect(await sendToTV({ inboxKey: 'abcdef0123456789' }, play, down)).toBe(false);
+    expect(await sendToTV(link, play, down)).toBe(false);
   });
 });

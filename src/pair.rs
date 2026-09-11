@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_is_limited_per_address_with_link_claims() {
+    async fn opening_is_limited_per_address() {
         let h = Harness::new();
         for _ in 0..crate::link::CLAIMS_PER_WINDOW {
             let open = h.call("POST", "/pair/open", Some(json!({ "nameplate": "GUES" }))).await;
@@ -278,8 +278,6 @@ mod tests {
         }
         let open = h.call("POST", "/pair/open", Some(json!({ "nameplate": "GUES" }))).await;
         assert_eq!(open.0, StatusCode::TOO_MANY_REQUESTS);
-        let claim = h.call("POST", "/link/claim", Some(json!({ "code": "GUESS1" }))).await;
-        assert_eq!(claim.0, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

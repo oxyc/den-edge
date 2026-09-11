@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { addToWatchlist, blankTitle, react } from './actions';
 import { applyLog, continueWatching, untitled, watchlist, withDisplay, type Library } from './library';
 import { LibraryLog } from './log';
-import { fetchTitle, storedTmdbKey } from './tmdb';
+import { fetchDetails } from './tmdb';
 import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
@@ -179,26 +179,36 @@ describe('applyLog', () => {
 });
 
 describe('tmdb', () => {
+  const answer = (body: unknown): typeof fetch => async () => new Response(JSON.stringify(body), { status: 200 });
+
   it('names a movie and a series from their details', async () => {
-    const answer = (body: unknown): typeof fetch => async () => new Response(JSON.stringify(body), { status: 200 });
     const movie = { title: 'Arrival', poster_path: '/a.jpg', release_date: '2016-11-11', vote_average: 7.6 };
-    expect(await fetchTitle({ type: 'movie', id: 329865 }, 'k', answer(movie))).toEqual({
-      type: 'movie',
-      id: 329865,
-      title: 'Arrival',
-      posterPath: '/a.jpg',
-      year: 2016,
-      rating: 7.6,
+    expect(await fetchDetails({ type: 'movie', id: 329865 }, 'k', answer(movie))).toEqual({
+      title: { type: 'movie', id: 329865, title: 'Arrival', posterPath: '/a.jpg', year: 2016, rating: 7.6 },
     });
-    const series = await fetchTitle({ type: 'tv', id: 95396 }, 'k', answer({ name: 'Severance', first_air_date: '2022-02-17' }));
-    expect(series).toMatchObject({ title: 'Severance', year: 2022 });
-    expect(await fetchTitle({ type: 'tv', id: 1 }, 'k', async () => new Response('{}', { status: 401 }))).toBeNull();
+    const series = await fetchDetails({ type: 'tv', id: 95396 }, 'k', answer({ name: 'Severance', first_air_date: '2022-02-17' }));
+    expect(series?.title).toMatchObject({ title: 'Severance', year: 2022 });
+    expect(await fetchDetails({ type: 'tv', id: 1 }, 'k', async () => new Response('{}', { status: 401 }))).toBeNull();
   });
 
-  it("reads the companion page's key", () => {
-    const storage = (value: string | null) => ({ getItem: () => value }) as unknown as Storage;
-    expect(storedTmdbKey(storage(JSON.stringify({ tmdbKey: 'abc' })))).toBe('abc');
-    expect(storedTmdbKey(storage('not json'))).toBe('');
-    expect(storedTmdbKey(storage(null))).toBe('');
+  it("reads a series' season layout, so Continue Watching can find the next episode", async () => {
+    const severance = {
+      name: 'Severance',
+      seasons: [
+        { season_number: 0, episode_count: 2 },
+        { season_number: 1, episode_count: 9 },
+        { season_number: 2, episode_count: 10 },
+      ],
+      last_episode_to_air: { season_number: 2, episode_number: 4 },
+    };
+    const found = await fetchDetails({ type: 'tv', id: 95396 }, 'k', answer(severance));
+    expect(found?.shape).toEqual({
+      counts: new Map([
+        [0, 2],
+        [1, 9],
+        [2, 10],
+      ]),
+      lastAired: { season: 2, episode: 4 },
+    });
   });
 });

@@ -1,17 +1,16 @@
 <script lang="ts">
-  import { claimCode, type ClaimError } from './lib/edge';
   import { links } from './lib/links.svelte';
   import { join, parseCode, type JoinError } from './lib/pair';
 
   // The TV's QR carries its code in the URL fragment, which never reaches a server; it is read once and dropped
-  // from the address bar, so it isn't left in history. An older TV's QR carries a six-character code in ?code=.
+  // from the address bar, so it isn't left in history.
   const scanned = new URLSearchParams(location.hash.slice(1)).get('pair');
   if (scanned) history.replaceState(null, '', location.pathname + location.search);
-  let code = $state((scanned ?? new URLSearchParams(location.search).get('code') ?? '').toUpperCase());
+  let code = $state((scanned ?? '').toUpperCase());
   let busy = $state(false);
-  let failure = $state<ClaimError | JoinError | null>(null);
+  let failure = $state<JoinError | null>(null);
 
-  const messages: Record<ClaimError | JoinError, string> = {
+  const messages: Record<JoinError, string> = {
     expired: 'That code has expired or doesn’t exist. Get a new one on the TV.',
     claimed: 'That code was already used. Get a new one on the TV.',
     throttled: 'Too many tries. Wait a minute and try again.',
@@ -20,32 +19,21 @@
     failed: 'The TV didn’t link this device: the code didn’t match, or it wasn’t allowed. Get a new code on the TV.',
   };
 
-  /** A TV that pairs shows twelve characters; an older one shows six. */
-  const pairing = $derived(parseCode(code) !== null);
-  const older = $derived(/^[A-Z0-9]{6}$/i.test(code.trim()));
+  /** The twelve characters the TV shows. */
+  const whole = $derived(parseCode(code) !== null);
 
   async function link() {
     busy = true;
     failure = null;
-    if (pairing) {
-      const result = await join(code);
-      busy = false;
-      if ('error' in result) {
-        failure = result.error;
-        return;
-      }
-      const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-      const { host, libraryKey, linkKey } = result.handover;
-      links.add(result.inboxKey, { name: host, libraryKey: base64(libraryKey), linkKey: base64(linkKey) });
-      return;
-    }
-    const result = await claimCode(code);
+    const result = await join(code);
     busy = false;
     if ('error' in result) {
       failure = result.error;
       return;
     }
-    links.add(result.inboxKey);
+    const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+    const { host, libraryKey, linkKey } = result.handover;
+    links.add(result.inboxKey, { name: host, libraryKey: base64(libraryKey), linkKey: base64(linkKey) });
   }
 
   // A scanned code starts at once: the next step is on the TV.
@@ -72,9 +60,7 @@
       aria-label="Link code"
       disabled={busy}
     />
-    <button class="primary" disabled={busy || !(pairing || older)}>
-      {busy ? (pairing ? 'Allow this device on your TV…' : 'Linking…') : 'Link'}
-    </button>
+    <button class="primary" disabled={busy || !whole}>{busy ? 'Allow this device on your TV…' : 'Link'}</button>
   </form>
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>

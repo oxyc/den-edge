@@ -1,6 +1,5 @@
 // The library's record log on den-edge (`/lib/<id>/…`, den-spec wire/library-v2.md): read whole, and written a
-// row at a time with compare-and-set. The TV writes it whenever the library changes, so it is fresher than the
-// backup it hands its key over in.
+// row at a time with compare-and-set. The TV writes it whenever the library changes.
 
 import {
   believe,

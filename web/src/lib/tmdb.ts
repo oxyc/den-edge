@@ -1,22 +1,19 @@
-// Title display from TMDB, for titles the record log knows but the TV's backup carries no display for: rows hold
-// ids and state only. Uses the TMDB key the companion page keeps on this origin (`den.config`).
+// Title display from TMDB, for the titles the record log names: rows hold ids and state only. Uses the TMDB key
+// the library shares (`set:keys`).
 
-import type { MediaType, Title } from './library';
+import type { MediaType, Shape, Title } from './library';
 
-export function storedTmdbKey(storage: Storage | undefined = globalThis.localStorage): string {
-  try {
-    const config = JSON.parse(storage?.getItem('den.config') ?? 'null') as { tmdbKey?: unknown } | null;
-    return typeof config?.tmdbKey === 'string' ? config.tmdbKey : '';
-  } catch {
-    return '';
-  }
+/** A title's display, and a series' season layout. */
+export interface Details {
+  title: Title;
+  shape?: Shape;
 }
 
-export async function fetchTitle(
+export async function fetchDetails(
   ref: { type: MediaType; id: number },
   key: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<Title | null> {
+): Promise<Details | null> {
   let details: Record<string, unknown>;
   try {
     const res = await fetchImpl(`https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}`);
@@ -25,7 +22,34 @@ export async function fetchTitle(
   } catch {
     return null;
   }
-  return toTitle(ref, details);
+  const title = toTitle(ref, details);
+  if (!title) return null;
+  return ref.type === 'tv' ? { title, shape: seriesShape(details) } : { title };
+}
+
+export async function fetchTitle(
+  ref: { type: MediaType; id: number },
+  key: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Title | null> {
+  return (await fetchDetails(ref, key, fetchImpl))?.title ?? null;
+}
+
+/** Episodes per season and the newest aired episode, from a series' TMDB details. */
+export function seriesShape(details: Record<string, unknown>): Shape | undefined {
+  if (!Array.isArray(details.seasons)) return undefined;
+  const counts = new Map<number, number>();
+  for (const season of details.seasons as { season_number?: unknown; episode_count?: unknown }[]) {
+    if (typeof season?.season_number === 'number' && typeof season.episode_count === 'number') {
+      counts.set(season.season_number, season.episode_count);
+    }
+  }
+  const last = details.last_episode_to_air as { season_number?: unknown; episode_number?: unknown } | null | undefined;
+  const lastAired =
+    typeof last?.season_number === 'number' && typeof last.episode_number === 'number'
+      ? { season: last.season_number, episode: last.episode_number }
+      : undefined;
+  return { counts, lastAired };
 }
 
 /** A TMDB movie or series object (detail, search result or credit) as a title; null without a name. */

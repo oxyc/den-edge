@@ -34,19 +34,14 @@ export async function sealMessage(enc: Bytes, message: object, sealing: Sealing 
   return toBase64url(out);
 }
 
-/**
- * Queue `message` for the TV behind `link`: sealed when the link was paired, as its TV takes nothing else; as it
- * is, with the time it was sent, for a link made with a six-character code. False when den-edge didn't take it.
- */
-export async function sendToTV(link: Link, message: object, fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  const body = link.linkKey
-    ? {
-        sealed: await sealMessage(
-          (await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)))).enc,
-          message,
-        ),
-      }
-    : { message: { ...message, sentAt: Date.now() } };
+/** Queue `message`, sealed, for the TV behind `link`. False when den-edge didn't take it. */
+export async function sendToTV(
+  link: Pick<Link, 'inboxKey' | 'linkKey'>,
+  message: object,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+  const body = { sealed: await sealMessage(enc, message) };
   try {
     const res = await fetchImpl('/inbox/append', {
       method: 'POST',

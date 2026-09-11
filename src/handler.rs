@@ -60,7 +60,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
 /// What every answer carries, for the day one is opened as a page or embedded elsewhere: no type sniffing, no
 /// referrer (a TMDB image request would otherwise carry this host's name), this origin only, and none of the
 /// powerful browser features. An API answer is data, so it also gets a policy under which, rendered, it can do
-/// nothing. A page's own policy (the web app's, the companion page's) is left as it is.
+/// nothing. A page's own policy (the web app's) is left as it is.
 fn harden(headers: &mut HeaderMap) {
     for (name, value) in [
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
@@ -142,7 +142,6 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     match path.as_str() {
         "/plugins" => crate::plugins::handle(state, req).await,
         "/settings" => crate::settings::handle(state, req).await,
-        p if p == "/app" || p.starts_with("/app/") => crate::app::handle(p),
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
@@ -174,16 +173,12 @@ pub fn route_label(path: &str) -> &'static str {
         "/plugins" => "/plugins",
         "/settings" => "/settings",
         "/link" => "/link",
-        "/link/new" => "/link/new",
-        "/link/claim" => "/link/claim",
-        "/link/poll" => "/link/poll",
         "/inbox/append" => "/inbox/append",
         "/inbox/drain" => "/inbox/drain",
         "/pair/new" => "/pair/new",
         "/pair/open" => "/pair/open",
         p if p.starts_with("/pair/") && p.matches('/').count() == 3 => "/pair/:sid/:slot",
         p if p.starts_with("/pair/") => "/pair/:sid",
-        p if p == "/app" || p.starts_with("/app/") => "/app",
         p if p.starts_with("/sync/") => "/sync/:id",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
@@ -199,13 +194,10 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const POST: &[Method] = &[Method::POST];
     const DELETE: &[Method] = &[Method::DELETE];
     match route {
-        "/health" | "/version" | "/config" | "/metrics" | "/app" | "/link/poll" | "/inbox/drain"
-        | "/lib/:id/changes" => Some(GET),
+        "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" => Some(GET),
         "/plugins" | "/settings" | "/pair/:sid/:slot" => Some(GET_PUT),
         "/sync/:id" => Some(GET_PUT_DELETE),
-        "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => {
-            Some(POST)
-        }
+        "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
         "/link" | "/pair/:sid" | "/lib/:id" => Some(DELETE),
         _ => None,
     }
@@ -242,7 +234,7 @@ pub fn error(msg: &str) -> Value {
     json!({ "error": msg })
 }
 
-/// A route handler's answer: JSON, never cached — link polls, drains and backups are real-time, and a
+/// A route handler's answer: JSON, never cached — pairing slots, drains and backups are real-time, and a
 /// cached one replays stale state.
 pub fn json_reply(status: StatusCode, body: &Value) -> Response {
     raw_json(status, Body::from(body.to_string()), true)
@@ -319,7 +311,7 @@ pub fn js_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// An inbox key as `/link` hands them out: hex, at least 16 characters.
+/// A link credential: hex, at least 16 characters (a paired link's is 48).
 pub fn valid_inbox_key(key: &str) -> bool {
     key.len() >= 16 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -358,15 +350,6 @@ pub mod tests {
             let c = Arc::clone(&clock);
             state.clock = Box::new(move || c.load(Ordering::Relaxed));
             Harness { state: Arc::new(state), clock, dir }
-        }
-
-        /// With the link generators replaced: codes and keys handed out in order, the last one repeating.
-        pub fn with_generators(codes: &[&str], keys: &[&str]) -> Self {
-            let mut h = Self::new();
-            let state = Arc::get_mut(&mut h.state).unwrap();
-            state.gen_code = sequence(codes);
-            state.gen_inbox_key = sequence(keys);
-            h
         }
 
         pub fn advance(&self, ms: u64) {
@@ -491,13 +474,6 @@ pub mod tests {
             api.headers()[header::CONTENT_SECURITY_POLICY],
             "default-src 'none'; frame-ancestors 'none'; sandbox"
         );
-        let page = h.send("GET", "/app", None, &[]).await;
-        let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-        assert!(
-            csp.contains("script-src 'self'") && !csp.contains("sandbox"),
-            "the page keeps its own: {csp}"
-        );
-        assert_eq!(page.headers()["referrer-policy"], "no-referrer");
     }
 
     #[tokio::test]
@@ -507,7 +483,7 @@ pub mod tests {
             h.call("DELETE", "/health", None).await,
             (StatusCode::METHOD_NOT_ALLOWED, error("method_not_allowed"))
         );
-        assert_eq!(h.call("GET", "/link/new", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(h.call("GET", "/link", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(h.call("DELETE", "/settings", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
         // An unknown route is the router's 404, whatever the method.
         assert_eq!(h.call("DELETE", "/nope", None).await.0, StatusCode::NOT_FOUND);
@@ -554,22 +530,5 @@ pub mod tests {
             text.contains(r#"route="/sync/:id",status="404""#) && !text.contains("0123456789abcdef"),
             "{text}"
         );
-    }
-
-    #[tokio::test]
-    async fn the_companion_page_is_served_whole() {
-        let h = Harness::new();
-        let page = h.send("GET", "/app", None, &[]).await;
-        assert!(page.headers()[header::CONTENT_TYPE].to_str().unwrap().contains("text/html"));
-        let html = body_text(page).await;
-        assert!(html.contains("Link your phone") && html.contains(r#"<script src="/app/app.js">"#));
-        let js = body_text(h.send("GET", "/app/app.js", None, &[]).await).await;
-        assert!(
-            js.contains("/link/claim") && js.contains("/inbox/append") && js.contains("api.themoviedb.org")
-        );
-        let manifest = h.send("GET", "/app/manifest.webmanifest", None, &[]).await;
-        assert_eq!(manifest.headers()[header::CONTENT_TYPE], "application/manifest+json");
-        assert_eq!(body_json(manifest).await["start_url"], "/app/");
-        assert_eq!(h.send("GET", "/app/nope.png", None, &[]).await.status(), StatusCode::NOT_FOUND);
     }
 }

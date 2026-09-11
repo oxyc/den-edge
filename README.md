@@ -1,12 +1,11 @@
 # den-edge
 
-Den's sync relay, on the homelab. It links a phone to an Apple TV, carries the companion's messages to the
-TV, keeps the TV's encrypted library backup, and holds the plugin list and settings the phone and the TV
-share. It also serves the companion web page (`/app`).
+Den's sync relay, on the homelab. It relays pairings between an Apple TV and another device, carries a paired
+device's sealed messages to the TV, keeps the library's record log and the TV's encrypted backup, and holds the
+plugin list and settings older links shared. It also serves the Den web app.
 
-It never interprets what it stores: the backup is ciphertext sealed on the TV, and the rest is small JSON it
-validates and bounds. It replaced a Cloudflare Worker with the same HTTP API, so a TV moves over with a URL
-change and one **Back up**.
+It never interprets what it stores: the log, the backup and the inbox are ciphertext sealed on the devices, and
+the rest is small JSON it validates and bounds.
 
 ## Routes
 
@@ -20,11 +19,8 @@ change and one **Back up**.
 | `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
 | `PUT`/`GET /pair/{sid}/{a–d}` `{m}` | the four CPace messages, each written once; `202` until written, `410` once the session is over |
 | `DELETE /pair/{sid}` | either side ends a pairing |
-| `POST /link/new` | the older pairing: the TV mints a code, `{code, expiresAt}` (ten minutes) |
-| `POST /link/claim` `{code}` | the phone claims it: `{inboxKey}`; `410` unknown or expired, `409` claimed, `429` after 20 tries a minute from one address |
-| `GET /link/poll?code=` | the TV polls: `202` pending, then `{status:"claimed", inboxKey}` once |
 | `DELETE /link` | unlinking: the link's inbox, plugins and settings are erased |
-| `POST /inbox/append` `{message}` or `{sealed}` | a message for the TV: addon, watchlist, play, TMDB key, metadata key or device name — or a paired device's sealed one ([den-spec inbox v1](https://github.com/oxyc/den-spec/blob/main/wire/inbox-v1.md)), kept as it came |
+| `POST /inbox/append` `{sealed}` | a paired device's sealed message for the TV ([den-spec inbox v1](https://github.com/oxyc/den-spec/blob/main/wire/inbox-v1.md)), kept as it came; a readable one is refused |
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied |
 | `GET`/`DELETE /sync/{id}` | the library backup: `{ciphertext, nonce, version}` |
 | `PUT /sync/{id}` `{ciphertext, nonce, baseVersion}` | `{version}`, or `409 {version}` when `baseVersion` is stale |
@@ -32,7 +28,8 @@ change and one **Back up**.
 | `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
 | `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
 | `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
-| `GET /app/…` | the companion web page |
+
+`POST /pair/open` allows 20 tries a minute from one address (`429` past that).
 
 The link's key goes in the `x-den-link` header, so it stays out of URLs (and so out of logs, proxies and
 history). A key in the query string is not read; an append's body `inboxKey` still is, and the header wins.
@@ -51,9 +48,8 @@ answer goes out, replayed into memory on first use and rewritten without superse
 outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
 ciphertext the clients seal and merge.
 
-A queue is kept for a week after its last message; everything else is kept until it is replaced. Pending
-link codes and pairing sessions live in memory: a restart costs a pairing in progress, which the TV starts
-again.
+A queue is kept for a week after its last message; everything else is kept until it is replaced. Pairing
+sessions live in memory: a restart costs a pairing in progress, which the TV starts again.
 
 The whole store holds at most `STORE_CAP_BYTES`: a write that would pass it is refused with `507`, so whoever
 can reach den-edge can't fill the host's disk. A library holds at most 50,000 rows (`413`).
@@ -75,8 +71,8 @@ can reach den-edge can't fill the host's disk. A library holds at most 50,000 ro
 `web/` is the Den web app (Svelte 5 on Vite), the Apple TV app's screens in a browser. The image builds it
 and den-edge serves it at `/` from `WEB_DIR`, beside its API — one origin, so the app needs no CORS. A path
 with no file behind it is one of the app's routes and gets the shell; hashed files under `/assets/` are
-cached for a year. App routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API
-answers first.
+cached for a year. App routes must not reuse an API path (`/settings`, `/plugins`, `/link`): the API answers
+first.
 
 ```
 cd web && npm install && npm run dev    # Vite on :5173, proxying the API to the homelab den-edge

@@ -1,26 +1,24 @@
-//! `/inbox` — the companion's messages to a TV. The phone appends under its `inboxKey`; the TV drains the
-//! queue on launch and foreground, which empties it. Six kinds of message: add an addon, add to the
-//! watchlist, play, the user's TMDB and other metadata keys, and the device's name. A device sends its name
-//! every time it opens, so a queue holds only the latest one. A paired device seals its messages instead
-//! (den-spec `wire/inbox-v1.md`), and they are kept as they came.
+//! `/inbox` — a paired device's messages to a TV (den-spec `wire/inbox-v1.md`). The device appends under its link
+//! credential, sealed under the link's key, so den-edge can't read, forge or replay them; the TV drains the queue
+//! on launch and while in front, which empties it. A readable message is refused: every device that sends one
+//! pairs now.
 
 use crate::handler::{
-    error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, read_json,
-    valid_inbox_key, MAX_BODY_BYTES,
+    error, header_key, internal, json_reply, link_key, method_not_allowed, read_json, valid_inbox_key,
+    MAX_BODY_BYTES,
 };
 use crate::AppState;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 const NS: &str = "inbox";
 /// A queue an unopened TV never drains goes after a week.
 const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The newest fifty are kept; older ones fall off the front.
 const MAX_MESSAGES: usize = 50;
-/// Metadata services whose keys the companion may send — never anything that plays or pays.
-const API_KEY_SERVICES: [&str; 2] = ["omdb", "doesthedogdie"];
+const MAX_SEALED_CHARS: usize = 4096;
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
@@ -41,11 +39,7 @@ async fn append(state: &AppState, req: Request) -> Response {
     if !valid_inbox_key(key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
     }
-    let message = match body.get("sealed") {
-        Some(sealed) => sealed_message(sealed),
-        None => validate(body.get("message")),
-    };
-    let Some(message) = message else {
+    let Some(message) = body.get("sealed").and_then(sealed_message) else {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_message"));
     };
     let _write = state.write_lock.lock().await;
@@ -54,9 +48,6 @@ async fn append(state: &AppState, req: Request) -> Response {
         Ok(queue) => queue.unwrap_or_default(),
         Err(e) => return internal("inbox read", e),
     };
-    if message["type"] == "device" {
-        queue.retain(|m| m["type"] != "device");
-    }
     queue.push(message);
     if queue.len() > MAX_MESSAGES {
         queue.drain(..queue.len() - MAX_MESSAGES);
@@ -98,52 +89,6 @@ async fn load(state: &AppState, key: &str, now: u64) -> std::io::Result<Option<V
     Ok(Some(stored.get("messages").and_then(Value::as_array).cloned().unwrap_or_default()))
 }
 
-/// A well-formed companion message, rebuilt from only the fields it may carry — or `None`.
-fn validate(raw: Option<&Value>) -> Option<Value> {
-    let m = raw?.as_object()?;
-    let mut out = Map::new();
-    let kind = m.get("type")?.as_str()?;
-    out.insert("type".into(), kind.into());
-    match kind {
-        "addon" => {
-            let url = m.get("manifestUrl")?.as_str().filter(|u| acceptable_manifest_url(u))?;
-            out.insert("manifestUrl".into(), url.into());
-        }
-        "watchlist" | "play" => {
-            let tmdb_id = m.get("tmdbId").filter(|v| v.is_number())?;
-            let media_type = m.get("mediaType")?.as_str().filter(|t| *t == "movie" || *t == "tv")?;
-            let title = m.get("title")?.as_str().filter(|t| !t.is_empty())?;
-            out.insert("tmdbId".into(), tmdb_id.clone());
-            out.insert("mediaType".into(), media_type.into());
-            out.insert("title".into(), title.into());
-            let optional: &[(&str, Check)] = if kind == "watchlist" {
-                &[("posterPath", Value::is_string), ("year", Value::is_number)]
-            } else {
-                // `sentAt` (Unix ms): the TV ignores a play that waited in the queue (issue #8, N4).
-                &[("season", Value::is_number), ("episode", Value::is_number), ("sentAt", Value::is_number)]
-            };
-            for (field, ok) in optional {
-                if let Some(v) = m.get(*field).filter(|v| ok(v)) {
-                    out.insert((*field).into(), v.clone());
-                }
-            }
-        }
-        "tmdbKey" => {
-            out.insert("key".into(), bounded_key(m)?.into());
-        }
-        "apiKey" => {
-            let service = m.get("service")?.as_str().filter(|s| API_KEY_SERVICES.contains(s))?;
-            out.insert("service".into(), service.into());
-            out.insert("key".into(), bounded_key(m)?.into());
-        }
-        "device" => {
-            out.insert("name".into(), crate::link::device_label(m.get("name"))?.into());
-        }
-        _ => return None,
-    }
-    Some(Value::Object(out))
-}
-
 /// A paired device's message: opaque base64url, which only its TV can open.
 fn sealed_message(raw: &Value) -> Option<Value> {
     let sealed = raw.as_str().filter(|s| {
@@ -154,40 +99,6 @@ fn sealed_message(raw: &Value) -> Option<Value> {
     Some(json!({ "sealed": sealed }))
 }
 
-const MAX_SEALED_CHARS: usize = 4096;
-
-/// What an optional field's value must be to be kept.
-type Check = fn(&Value) -> bool;
-
-fn bounded_key(m: &Map<String, Value>) -> Option<&str> {
-    m.get("key")?.as_str().filter(|k| !k.is_empty() && js_len(k) <= 200)
-}
-
-/// A host on the user's own network — the rule DenKit's `AddonClient.isLocalHost` and the companion page
-/// apply.
-fn is_local_host(host: &str) -> bool {
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".local") {
-        return true;
-    }
-    let octets: Vec<&str> = host.split('.').collect();
-    if octets.len() != 4 || !octets.iter().all(|o| !o.is_empty() && o.bytes().all(|b| b.is_ascii_digit())) {
-        return false;
-    }
-    let n = |o: &str| o.parse::<u64>().unwrap_or(u64::MAX);
-    let (a, b) = (n(octets[0]), n(octets[1]));
-    a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b))
-}
-
-/// https anywhere, or http only to a LAN or local host — the add-time rule the phone and the TV enforce.
-pub fn acceptable_manifest_url(raw: &str) -> bool {
-    let Ok(url) = url::Url::parse(raw) else { return false };
-    match url.scheme() {
-        "https" => true,
-        "http" => url.host_str().is_some_and(is_local_host),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::Harness;
@@ -196,8 +107,8 @@ mod tests {
 
     const KEY: &str = "deadbeefcafe1234deadbeef";
 
-    async fn append(h: &Harness, message: Value) -> StatusCode {
-        h.call("POST", "/inbox/append", Some(json!({ "inboxKey": KEY, "message": message }))).await.0
+    async fn append(h: &Harness, sealed: &str) -> StatusCode {
+        h.call("POST", "/inbox/append", Some(json!({ "inboxKey": KEY, "sealed": sealed }))).await.0
     }
 
     async fn drain(h: &Harness) -> Vec<Value> {
@@ -208,107 +119,34 @@ mod tests {
     #[tokio::test]
     async fn append_two_then_drain_returns_both_once() {
         let h = Harness::new();
-        let watchlist = json!({ "type": "watchlist", "tmdbId": 693134, "mediaType": "movie", "title": "Dune: Part Two",
-                                "year": 2024, "posterPath": "/x.jpg", "junk": 1 });
-        assert_eq!(append(&h, watchlist).await, StatusCode::OK);
-        assert_eq!(
-            append(&h, json!({ "type": "addon", "manifestUrl": "https://addon.example/manifest.json" }))
-                .await,
-            StatusCode::OK
-        );
-        let messages = drain(&h).await;
-        assert_eq!(messages.len(), 2);
-        assert_eq!(
-            messages[0],
-            json!({ "type": "watchlist", "tmdbId": 693134, "mediaType": "movie",
-                                        "title": "Dune: Part Two", "year": 2024, "posterPath": "/x.jpg" })
-        );
+        assert_eq!(append(&h, "AAECAw-_").await, StatusCode::OK);
+        assert_eq!(append(&h, "BAUG").await, StatusCode::OK);
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" }), json!({ "sealed": "BAUG" })]);
         assert!(drain(&h).await.is_empty(), "a drain empties the queue");
     }
 
     #[tokio::test]
-    async fn every_kind_of_message_is_checked() {
+    async fn only_a_well_formed_sealed_message_is_taken() {
         let h = Harness::new();
-        let play = json!({ "type": "play", "tmdbId": 1396, "mediaType": "tv", "title": "Breaking Bad", "season": 2,
-                           "episode": 4, "sentAt": 1_789_000_000_000_u64 });
-        assert_eq!(append(&h, play.clone()).await, StatusCode::OK);
-        assert_eq!(append(&h, json!({ "type": "tmdbKey", "key": "abc123" })).await, StatusCode::OK);
-        assert_eq!(
-            append(&h, json!({ "type": "apiKey", "service": "omdb", "key": "OMDB1" })).await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            append(&h, json!({ "type": "addon", "manifestUrl": "http://192.168.1.50:8093/manifest.json" }))
-                .await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            append(&h, json!({ "type": "device", "name": " Mac · Chrome\u{7}", "model": "x" })).await,
-            StatusCode::OK
-        );
-        let messages = drain(&h).await;
-        assert_eq!(messages[0], play);
-        assert_eq!(messages[2], json!({ "type": "apiKey", "service": "omdb", "key": "OMDB1" }));
-        assert_eq!(messages[4], json!({ "type": "device", "name": "Mac · Chrome" }));
-
-        for bad in [
-            json!({ "type": "play", "tmdbId": 1, "mediaType": "person", "title": "x" }),
-            json!({ "type": "watchlist", "tmdbId": "1", "mediaType": "movie", "title": "x" }),
-            json!({ "type": "watchlist", "tmdbId": 1, "mediaType": "movie", "title": "" }),
-            json!({ "type": "tmdbKey", "key": "" }),
-            json!({ "type": "tmdbKey", "key": "k".repeat(201) }),
-            json!({ "type": "apiKey", "service": "trakt", "key": "x" }),
-            json!({ "type": "addon", "manifestUrl": "http://insecure.example/manifest.json" }),
-            json!({ "type": "addon", "manifestUrl": "ftp://192.168.1.5/manifest.json" }),
-            json!({ "type": "device", "name": "  " }),
-            json!({ "type": "device", "name": 3 }),
-            json!({ "type": "nope" }),
-            json!("addon"),
-        ] {
-            assert_eq!(append(&h, bad.clone()).await, StatusCode::BAD_REQUEST, "{bad}");
-        }
-    }
-
-    /// A device names itself on every open, so a TV that stays off doesn't come back to a queue of names —
-    /// or lose real messages to the cap.
-    #[tokio::test]
-    async fn a_queue_keeps_only_the_latest_device_name() {
-        let h = Harness::new();
-        append(&h, json!({ "type": "device", "name": "Mac · Safari" })).await;
-        append(&h, json!({ "type": "tmdbKey", "key": "k" })).await;
-        append(&h, json!({ "type": "device", "name": "Mac · Chrome" })).await;
-        assert_eq!(
-            drain(&h).await,
-            vec![
-                json!({ "type": "tmdbKey", "key": "k" }),
-                json!({ "type": "device", "name": "Mac · Chrome" })
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_sealed_message_is_kept_as_it_came() {
-        let h = Harness::new();
-        let body = |sealed: Value| json!({ "inboxKey": KEY, "sealed": sealed });
-        assert_eq!(h.call("POST", "/inbox/append", Some(body(json!("AAECAw-_")))).await.0, StatusCode::OK);
         let too_long = "A".repeat(super::MAX_SEALED_CHARS + 1);
         for bad in [json!(""), json!("a+b/"), json!(too_long), json!(3)] {
-            let status = h.call("POST", "/inbox/append", Some(body(bad.clone()))).await.0;
+            let status =
+                h.call("POST", "/inbox/append", Some(json!({ "inboxKey": KEY, "sealed": bad }))).await.0;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
         }
-        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" })]);
+        let readable = json!({ "inboxKey": KEY, "message": { "type": "tmdbKey", "key": "k" } });
+        assert_eq!(h.call("POST", "/inbox/append", Some(readable)).await.0, StatusCode::BAD_REQUEST);
+        assert!(drain(&h).await.is_empty());
     }
 
     /// The key travels in `x-den-link`, out of the URL; a header wins over a body key.
     #[tokio::test]
     async fn the_key_can_travel_in_a_header() {
         let h = Harness::new();
-        let body = json!({ "inboxKey": "not a key!", "message": { "type": "tmdbKey", "key": "k" } });
+        let body = json!({ "inboxKey": "not a key!", "sealed": "AAEC" });
         let appended = h.send("POST", "/inbox/append", Some(body.to_string()), &[("x-den-link", KEY)]).await;
         assert_eq!(appended.status(), StatusCode::OK);
-        let drained = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
-        let messages = crate::handler::tests::body_json(drained).await["messages"].clone();
-        assert_eq!(messages, json!([{ "type": "tmdbKey", "key": "k" }]));
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })]);
         let query = h.send("GET", &format!("/inbox/drain?inboxKey={KEY}"), None, &[]).await;
         assert_eq!(query.status(), StatusCode::BAD_REQUEST, "a key in the URL is not read");
     }
@@ -316,7 +154,7 @@ mod tests {
     #[tokio::test]
     async fn junk_keys_are_refused_and_an_unknown_queue_is_empty() {
         let h = Harness::new();
-        let body = json!({ "inboxKey": "not a key!", "message": { "type": "tmdbKey", "key": "k" } });
+        let body = json!({ "inboxKey": "not a key!", "sealed": "AAEC" });
         assert_eq!(h.call("POST", "/inbox/append", Some(body)).await.0, StatusCode::BAD_REQUEST);
         let short = h.send("GET", "/inbox/drain", None, &[("x-den-link", "short")]).await;
         assert_eq!(short.status(), StatusCode::BAD_REQUEST);
@@ -329,12 +167,12 @@ mod tests {
     async fn the_newest_fifty_are_kept_and_a_week_old_queue_is_gone() {
         let h = Harness::new();
         for i in 0..55 {
-            append(&h, json!({ "type": "tmdbKey", "key": format!("k{i}") })).await;
+            append(&h, &format!("k{i}")).await;
         }
         let messages = drain(&h).await;
-        assert_eq!((messages.len(), messages[0]["key"].clone()), (50, json!("k5")));
+        assert_eq!((messages.len(), messages[0]["sealed"].clone()), (50, json!("k5")));
 
-        append(&h, json!({ "type": "tmdbKey", "key": "old" })).await;
+        append(&h, "old").await;
         h.advance(super::TTL_MS);
         assert!(drain(&h).await.is_empty(), "an expired queue is not delivered");
     }
@@ -347,26 +185,12 @@ mod tests {
         let appends: Vec<_> = (0..20)
             .map(|i| {
                 let h = std::sync::Arc::clone(&h);
-                tokio::spawn(
-                    async move { append(&h, json!({ "type": "tmdbKey", "key": format!("k{i}") })).await },
-                )
+                tokio::spawn(async move { append(&h, &format!("k{i}")).await })
             })
             .collect();
         for a in appends {
             assert_eq!(a.await.unwrap(), StatusCode::OK);
         }
         assert_eq!(drain(&h).await.len(), 20);
-    }
-
-    #[test]
-    fn local_hosts_are_the_lan_and_nothing_else() {
-        for ok in
-            ["localhost", "127.0.0.1", "nas.local", "10.0.0.2", "192.168.86.193", "172.16.0.1", "172.31.9.9"]
-        {
-            assert!(super::is_local_host(ok), "{ok}");
-        }
-        for no in ["172.32.0.1", "192.169.1.1", "8.8.8.8", "example.com", "[::1]", "1.2.3"] {
-            assert!(!super::is_local_host(no), "{no}");
-        }
     }
 }

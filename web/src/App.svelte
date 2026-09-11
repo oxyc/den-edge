@@ -1,17 +1,8 @@
 <script lang="ts">
   import Library from './Library.svelte';
-  import { announceDevice, deviceLabel } from './lib/edge';
   import { links } from './lib/links.svelte';
   import LinkTV from './LinkTV.svelte';
   import Settings from './Settings.svelte';
-
-  // Each linked TV names this device in its list. Told on every open rather than once: a TV build that doesn't
-  // know the message drops it, and den-edge keeps only the latest one queued. A paired TV has the name from the
-  // pairing, where den-edge couldn't change it, and takes only sealed messages.
-  $effect(() => {
-    const device = deviceLabel();
-    for (const link of links.list) if (!link.linkKey) void announceDevice(link.inboxKey, device);
-  });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
   // installed or the storage is persistent — which would mean pairing again.
