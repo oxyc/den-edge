@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { endSession, findRemux, forgetSubtitles, login, reportFailure, startSession, type Want } from './remux';
+import {
+  endSession,
+  findRemux,
+  forgetSubtitles,
+  listReleases,
+  login,
+  reportFailure,
+  startSession,
+  type Want,
+} from './remux';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -123,6 +132,25 @@ describe('endSession', () => {
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+  });
+});
+
+describe('listReleases', () => {
+  it('asks den-remux for the title’s releases and keeps the well-formed ones', async () => {
+    const calls: [string, RequestInit | undefined][] = [];
+    const releases = { releases: [{ label: '1080p • WEB-DL', filename: 'a.mkv', size: 1 }, { label: 'no name' }] };
+    const list = await listReleases(
+      { imdb: 'tt0903624', scout: want.scout },
+      async (input, init) => {
+        calls.push([String(input), init]);
+        return answer(200, releases);
+      },
+      'https://pve.example:8443/remux',
+    );
+    expect(list).toEqual([{ label: '1080p • WEB-DL', filename: 'a.mkv', size: 1 }]);
+    expect(calls[0]![0]).toBe('https://pve.example:8443/remux/releases');
+    expect(JSON.parse(String(calls[0]![1]!.body))).toEqual({ imdb: 'tt0903624', scout: want.scout });
+    expect(await listReleases({ imdb: 'tt1', scout: want.scout }, async () => answer(502, {}))).toBeNull();
   });
 });
 

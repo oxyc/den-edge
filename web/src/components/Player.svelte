@@ -9,11 +9,13 @@
   import { playable, type Playable } from '../lib/playable';
   import {
     endSession,
+    listReleases,
     login,
     reportFailure,
     startSession,
     type AudioTrack,
     type Failure,
+    type Release,
     type Session,
   } from '../lib/remux';
   import type { Addon } from '../lib/scout';
@@ -89,6 +91,8 @@
   let startAt: number | null = null;
   /** What this browser decodes, found once: den-remux converts only what won't play here. */
   let decodes: Playable | undefined;
+  /** The title's releases den-remux could play, to pick another from. */
+  let releases = $state<Release[]>([]);
 
   const heading = $derived(season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title);
   const names = (() => {
@@ -99,8 +103,8 @@
     }
   })();
 
-  /** Start a session: the release den-remux picks, or — with `pick` — the same release in another audio track. */
-  async function begin(pick?: { audioTrack: number; filename: string }) {
+  /** Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. */
+  async function begin(pick?: { audioTrack?: number; filename: string }) {
     clearTimeout(retry);
     failure = null;
     if (!imdb) {
@@ -135,6 +139,11 @@
       return;
     }
     session = result;
+    if (!releases.length) {
+      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then((list) => {
+        releases = list ?? [];
+      });
+    }
   }
 
   async function letIn(event: SubmitEvent) {
@@ -241,10 +250,21 @@
   /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
   function switchAudio(event: Event) {
     const n = Number((event.currentTarget as HTMLSelectElement).value);
-    if (!session || !video || n === session.audioTrack) return;
+    if (!session || n === session.audioTrack) return;
+    restart({ audioTrack: n, filename: session.release.filename });
+  }
+
+  /** Another release of the title, from the same second — also after this one wouldn't play. */
+  function switchRelease(event: Event) {
+    const filename = (event.currentTarget as HTMLSelectElement).value;
+    if (!session || filename === session.release.filename) return;
+    restart({ filename });
+  }
+
+  function restart(pick: { audioTrack?: number; filename: string }) {
+    if (!session) return;
     report();
-    startAt = video.currentTime;
-    const pick = { audioTrack: n, filename: session.release.filename };
+    startAt = video?.currentTime ?? startAt;
     hls?.destroy();
     hls = undefined;
     endSession(session);
@@ -338,6 +358,16 @@
         {session.release.label}{session.video?.transcoded ? ' · converted to H.264 for this browser' : ''}
       </p>
       <div class="controls">
+        {#if releases.length > 1}
+          <label>
+            Release
+            <select value={session.release.filename} onchange={switchRelease}>
+              {#each releases as release (release.filename)}
+                <option value={release.filename}>{release.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         {#if session.audioTracks.length > 1}
           <label>
             Audio
@@ -413,6 +443,12 @@
 
   select option {
     color: initial;
+  }
+
+  /* A release's label runs long ("4K • REMUX • Dolby Vision • Atmos • 75 GB"); on a phone it shortens instead. */
+  select {
+    max-width: min(70vw, 28rem);
+    text-overflow: ellipsis;
   }
 
   .primary {

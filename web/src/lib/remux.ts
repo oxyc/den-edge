@@ -134,6 +134,38 @@ export async function startSession(
   return { failure: 'unreachable' };
 }
 
+/** A release den-remux could play, as it lists them: never a URL. */
+export interface Release {
+  label: string;
+  filename: string;
+  size?: number | null;
+}
+
+/**
+ * The releases den-remux could play for a title, in the order it would try them, so the player can pick one by
+ * `filename`; null when it can't say.
+ */
+export async function listReleases(
+  title: Pick<Want, 'imdb' | 'season' | 'episode' | 'scout'>,
+  fetchImpl: typeof fetch = fetch,
+  base = '/remux',
+): Promise<Release[] | null> {
+  try {
+    const res = await fetchImpl(`${base}/releases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(title),
+    });
+    if (!res.ok) return null;
+    const releases = ((await res.json()) as { releases?: unknown }).releases;
+    return Array.isArray(releases)
+      ? releases.filter((r): r is Release => typeof r?.label === 'string' && typeof r?.filename === 'string')
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** End the session, so it stops counting against den-remux's cap — sent even as the page goes away. */
 export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
   void fetchImpl(session.playlist.replace(/\/master\.m3u8$/, ''), { method: 'DELETE', keepalive: true }).catch(
