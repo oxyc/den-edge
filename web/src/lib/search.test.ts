@@ -26,6 +26,7 @@ function sources(overrides: Partial<SearchSources> = {}): SearchSources {
       if (query.toLowerCase().includes('pitt')) return [pitt];
       return [matrix, reloaded].map((title) => ({ kind: 'title' as const, title }));
     },
+    titles: async () => [],
     byYear: async () => [],
     notableFilms: async (id) => (id === 287 ? [catalog['movie-550']!, catalog['movie-807']!] : []),
     semantic: async () => [],
@@ -59,6 +60,25 @@ describe('query hygiene', () => {
     ]);
     expect(foldedTitle('  The Matrix')).toBe('matrix');
     expect(foldedTitle('Amélie')).toBe('amelie');
+  });
+});
+
+describe('the title index', () => {
+  it('reads both of atlas’s catalogs, interleaved, a series as tv', async () => {
+    const fetchImpl = (async (input: string) => {
+      const url = String(input);
+      const metas = url.startsWith('/atlas/catalog/movie/den-titles/search=blade%20runer.json')
+        ? [{ moviedb_id: 78, type: 'movie' }, { moviedb_id: 335984, type: 'movie' }]
+        : url.startsWith('/atlas/catalog/series/den-titles/')
+          ? [{ moviedb_id: 84553, type: 'series' }]
+          : [];
+      return new Response(JSON.stringify({ metas }), { status: 200 });
+    }) as typeof fetch;
+    expect(await searchSources('key', fetchImpl).titles('blade runer')).toEqual([
+      { type: 'movie', id: 78 },
+      { type: 'tv', id: 84553 },
+      { type: 'movie', id: 335984 },
+    ]);
   });
 });
 
@@ -100,6 +120,26 @@ describe('searchStream, as the TV fuses it', () => {
     const s = sources({ ...down, semantic: async () => [{ type: 'movie', id: 157336 }] });
     expect(await final('space travel', s)).toEqual(['movie-157336']);
     await expect(final('space travel', sources(down))).rejects.toThrow('TMDB down');
+  });
+
+  it('leads the first paint with the title index, typos forgiven, the franchise grouped under its top hit', async () => {
+    const indexed: Record<string, Title> = {
+      'movie-78': { ...movie(78, 'Blade Runner'), collectionId: 422837 },
+      'movie-9999': movie(9999, 'Blade'),
+      'movie-335984': { ...movie(335984, 'Blade Runner 2049'), collectionId: 422837 },
+    };
+    const s = sources({
+      titles: async () => [78, 9999, 335984].map((id) => ({ type: 'movie' as const, id })),
+      title: async (ref) => indexed[`${ref.type}-${ref.id}`] ?? catalog[`${ref.type}-${ref.id}`] ?? null,
+    });
+    const batches: string[][] = [];
+    for await (const batch of searchStream('blade runer', s)) batches.push(batch.map(hitKey));
+    expect(batches[0]).toEqual(['movie-78', 'movie-335984', 'movie-9999', 'movie-603', 'movie-604']);
+  });
+
+  it('answers from the title index when TMDB is down', async () => {
+    const s = sources({ multi: () => Promise.reject(new Error('TMDB down')), titles: async () => [{ type: 'tv', id: 1 }] });
+    expect(await final('casa de papel', s)).toEqual(['tv-1']);
   });
 
   it('browses the facet lane for a country or decade, and a leftover naming a person leads with their work', async () => {

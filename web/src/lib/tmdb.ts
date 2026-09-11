@@ -40,10 +40,12 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
     : Array.isArray(details.genres)
       ? (details.genres as { id?: unknown }[]).map((g) => g.id).filter((g): g is number => typeof g === 'number')
       : undefined;
+  const collection = details.belongs_to_collection as { id?: unknown } | null | undefined;
   return {
     type: ref.type,
     id: ref.id,
     title: name,
+    collectionId: typeof collection?.id === 'number' ? collection.id : undefined,
     posterPath: text('poster_path'),
     year: Number.isFinite(year) ? year : undefined,
     rating: typeof details.vote_average === 'number' ? details.vote_average : undefined,

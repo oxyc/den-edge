@@ -2,8 +2,9 @@
 // does. A strong facet ("spanish series", "80s korean horror") browses the facet lane. Otherwise the first paint is
 // TMDB — a trailing "(1999)" routed to a year-scoped search, the singular/plural variant appended, a top person hit
 // expanded into their films — with the exact title promoted; then semantic hits fold in, and the exact title leads
-// the titles similar to it. The TV's on-device indexes are atlas here. Every source is best-effort except TMDB's
-// multi search, whose failure still leaves the semantic tail, as on the TV.
+// the titles similar to it. The TV's on-device indexes are atlas here: its fuzzy title index leads the first paint,
+// as the TV's does. Every source is best-effort except TMDB's multi search, whose failure still leaves the title
+// index and the semantic tail, as on the TV.
 
 import type { MediaType, Title } from './library';
 
@@ -28,6 +29,8 @@ export interface FacetAnswer {
 }
 
 export interface SearchSources {
+  /** atlas's fuzzy title index — the TV's on-device one: typo-tolerant, popularity-ranked, movies and series. */
+  titles(query: string): Promise<Ref[]>;
   /** TMDB /search/multi in TMDB's order; rejects when TMDB can't answer. */
   multi(query: string): Promise<Hit[]>;
   /** Exact matches from that release year, movies then series. */
@@ -40,7 +43,8 @@ export interface SearchSources {
   title(ref: Ref): Promise<Title | null>;
 }
 
-/** The TV's hydration caps: 12 for the semantic and similar tails, 50 for the facet lane. */
+/** The TV's hydration caps: 16 title-index hits, 12 for the semantic and similar tails, 50 for the facet lane. */
+const TITLE_LIMIT = 16;
 const TAIL_LIMIT = 12;
 const FACET_LIMIT = 50;
 
@@ -110,6 +114,19 @@ async function hydrate(refs: Ref[], limit: number, sources: SearchSources): Prom
   return titles.filter((t): t is Title => t !== null).map(titleHit);
 }
 
+/**
+ * The title index's hits with the franchise grouped under the top one: when it belongs to a TMDB collection, the
+ * other hits from that collection move up to follow it, so "matrix" gives the films before "Matrix Dreads".
+ */
+async function titleIndexHits(text: string, sources: SearchSources): Promise<Hit[]> {
+  const refs = await sources.titles(text).catch((): Ref[] => []);
+  const hits = await hydrate(refs, TITLE_LIMIT, sources);
+  const anchor = hits[0]?.kind === 'title' ? hits[0].title.collectionId : undefined;
+  if (anchor === undefined) return hits;
+  const inFranchise = (hit: Hit) => hit.kind === 'title' && hit.title.collectionId === anchor;
+  return [...hits.filter(inFranchise), ...hits.filter((h) => !inFranchise(h))];
+}
+
 /** Year-scoped matches lead, then TMDB's own ranking, then what only the plural variant found. */
 async function tmdbHits(text: string, year: number | undefined, sources: SearchSources): Promise<Hit[]> {
   const byYear = year === undefined ? Promise.resolve([]) : sources.byYear(text, year).catch(() => []);
@@ -165,6 +182,7 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
   if (text.length < 2) return;
   // Every source starts at once; the slow ones only stop blocking the first paint.
   const facets = sources.facets(query).catch((): FacetAnswer => ({ facet: null, titles: [] }));
+  const index = titleIndexHits(text, sources);
   const tmdb = tmdbHits(text, year, sources).then((hits) => expandTopPerson(hits, sources));
   tmdb.catch(() => {}); // awaited below; this only keeps an early failure from being reported unhandled
   const semantic = sources
@@ -182,12 +200,14 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
     }
   }
 
+  // The first paint: the title index leads — it forgives typos — then TMDB's answer.
+  const local = await index;
   let first: Hit[];
   try {
-    first = await tmdb;
+    first = dedupe([...local, ...(await tmdb)]);
   } catch (error) {
-    // Search matters most when TMDB is down: the semantic tail still answers if it can.
-    const tail = await semantic;
+    // Search matters most when TMDB is down: the title index and the semantic tail still answer if they can.
+    const tail = dedupe([...local, ...(await semantic)]);
     if (tail.length === 0) throw error;
     yield promoteExact(tail, text);
     return;

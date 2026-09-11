@@ -16,6 +16,8 @@ export interface Title {
   posterPath?: string;
   year?: number;
   rating?: number;
+  /** The TMDB collection a movie belongs to (from a detail fetch), so search can group a franchise. */
+  collectionId?: number;
   /** What the TV's hide rules look at (`prefs.ts`): TMDB genre ids, original language, the adult flag. */
   genreIds?: number[];
   originalLanguage?: string;

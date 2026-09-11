@@ -58,6 +58,23 @@ export function searchSources(tmdbKey: string, fetchImpl: typeof fetch = fetch, 
   }
 
   return {
+    // One catalog per type, each ranked; interleaved, so neither type buries the other. The exact title still
+    // leads later (`promoteExact`).
+    async titles(query) {
+      const search = (type: 'movie' | 'series') =>
+        fromAtlas(`/catalog/${type}/den-titles/search=${encodeURIComponent(query)}.json`)
+          .then((body) =>
+            records(body.metas).flatMap((m): Ref[] =>
+              typeof m.moviedb_id === 'number' ? [{ type: type === 'series' ? 'tv' : 'movie', id: m.moviedb_id }] : [],
+            ),
+          )
+          .catch((): Ref[] => []);
+      const [movies, series] = await Promise.all([search('movie'), search('series')]);
+      return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [movies[i], series[i]])
+        .flat()
+        .filter((ref): ref is Ref => ref !== undefined);
+    },
+
     async multi(query) {
       const body = await tmdb('/search/multi', { query, include_adult: 'false' });
       return records(body.results).flatMap((r): Hit[] => {
