@@ -31,6 +31,8 @@ use std::io;
 
 const NS: &str = "lib";
 const EXT: &str = "log";
+/// A deleted library's marker: its id is retired.
+const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
@@ -110,7 +112,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 }
 
 /// The library's owner ends it — a rekey moved the library to a new key (issue #8, audit #2). Its log and rows
-/// are gone, and the next write to the id starts a new library.
+/// are gone, and the id is retired: a device still holding the old key gets `410 library_moved` rather than
+/// quietly starting the library over (den #12, S5).
 async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     let mut libs = state.libraries.lock().await;
     if let Err(e) = load(state, &mut libs, id).await {
@@ -122,11 +125,23 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     if !constant_time_eq(&lib.token_hash, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    if let Err(e) = state.store.replace_file(NS, id, MOVED, b"").await {
+        return internal("library retire", e);
+    }
     if let Err(e) = state.store.delete_file(NS, id, EXT).await {
         return internal("library delete", e);
     }
     libs.remove(id);
     json_reply(StatusCode::OK, &json!({ "deleted": true }))
+}
+
+/// Whether `id` belonged to a library its owner deleted. Asked only when no library is loaded under it.
+async fn retired(state: &AppState, id: &str) -> io::Result<bool> {
+    Ok(state.store.get_file(NS, id, MOVED).await?.is_some())
+}
+
+fn moved() -> Response {
+    json_reply(StatusCode::GONE, &error("library_moved"))
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
@@ -145,6 +160,13 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     touch(&mut libs, id, now);
     let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: now };
     let existing = libs.get(id);
+    if existing.is_none() {
+        match retired(state, id).await {
+            Ok(true) => return moved(),
+            Ok(false) => {}
+            Err(e) => return internal("library read", e),
+        }
+    }
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
@@ -204,7 +226,11 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     }
     touch(&mut libs, id, state.now());
     let Some(lib) = libs.get(id) else {
-        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+        return match retired(state, id).await {
+            Ok(true) => moved(),
+            Ok(false) => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+            Err(e) => internal("library read", e),
+        };
     };
     if !constant_time_eq(&lib.token_hash, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
@@ -349,21 +375,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_owner_deletes_a_library_and_its_id_then_starts_over() {
+    async fn only_the_owner_deletes_a_library_and_its_id_is_then_retired() {
         let h = Harness::new();
         batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
         assert_eq!(delete(&h, "someone-else").await, StatusCode::FORBIDDEN);
         assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
-        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(changes(&h, TOKEN, "").await, (StatusCode::GONE, json!({ "error": "library_moved" })));
         assert_eq!(delete(&h, TOKEN).await, StatusCode::NOT_FOUND);
 
-        // Gone from disk too: a fresh start doesn't bring it back, and a new writer sets a new token.
+        // Across a restart too: a device still holding the old key can't start the library over.
         let reopened = Harness::in_dir(h.dir.clone());
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "n1" }] }).to_string();
         let resp = reopened
-            .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", "new-token")])
+            .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)])
             .await;
-        assert_eq!(body_json(resp).await["head"], 1);
+        assert_eq!(resp.status(), StatusCode::GONE);
     }
 
     #[tokio::test]
