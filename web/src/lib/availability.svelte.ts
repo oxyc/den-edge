@@ -10,6 +10,7 @@ import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
 import type { Scout } from './scout';
 import { fetchImdbId } from './tmdb';
+import { tmdbFetch } from './tmdbCache';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
 
@@ -33,7 +34,8 @@ export class Availability {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private scout: { config: string; tmdbKey: string } | null = null;
 
-  constructor(private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init)) {}
+  /** TMDB's answers come from this browser's cache; scout's pass straight through it. */
+  constructor(private readonly fetchImpl: typeof fetch = tmdbFetch) {}
 
   /** Ask this scout from now on — the library's (`findScout`), or nobody when it has none. */
   connect(scout: Scout | null, tmdbKey: string): void {

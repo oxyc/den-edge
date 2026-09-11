@@ -2,6 +2,7 @@
 // the library shares (`set:keys`).
 
 import type { MediaType, Shape, Title } from './library';
+import { tmdbFetch } from './tmdbCache';
 
 /** A title's display, and a series' season layout. */
 export interface Details {
@@ -12,7 +13,7 @@ export interface Details {
 export async function fetchDetails(
   ref: { type: MediaType; id: number },
   key: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<Details | null> {
   let details: Record<string, unknown>;
   try {
@@ -30,7 +31,7 @@ export async function fetchDetails(
 export async function fetchTitle(
   ref: { type: MediaType; id: number },
   key: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<Title | null> {
   return (await fetchDetails(ref, key, fetchImpl))?.title ?? null;
 }
@@ -39,7 +40,7 @@ export async function fetchTitle(
 export async function fetchImdbId(
   ref: { type: MediaType; id: number },
   key: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<string | null | undefined> {
   try {
     const res = await fetchImpl(

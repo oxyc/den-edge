@@ -4,6 +4,7 @@
 import type { MediaType, Title } from './library';
 import type { FacetAnswer, Hit, Ref, SearchSources } from './search';
 import { fetchTitle, toTitle } from './tmdb';
+import { tmdbFetch } from './tmdbCache';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -40,7 +41,7 @@ const notability = (credit: Json) =>
   Math.sqrt((typeof credit.popularity === 'number' ? credit.popularity : 0) *
     Math.max(1, typeof credit.vote_count === 'number' ? credit.vote_count : 0));
 
-export function searchSources(tmdbKey: string, fetchImpl: typeof fetch = fetch, atlas = '/atlas'): SearchSources {
+export function searchSources(tmdbKey: string, fetchImpl: typeof fetch = tmdbFetch, atlas = '/atlas'): SearchSources {
   const cache = new Map<string, Promise<Title | null>>();
 
   async function tmdb(path: string, params: Record<string, string> = {}): Promise<Json> {

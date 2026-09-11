@@ -5,6 +5,8 @@
 import type { MediaType, Title } from './library';
 import { toTitle } from './tmdb';
 
+import { tmdbFetch } from './tmdbCache';
+
 const TMDB = 'https://api.themoviedb.org/3';
 
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
@@ -231,7 +233,7 @@ export interface RowDef {
 /** One page of a TMDB list as titles. Rejects when TMDB doesn't answer; an empty page is the end. */
 export type Pages = (path: string, type: MediaType, params: Record<string, string>, page: number) => Promise<Title[]>;
 
-export function tmdbPages(key: string, fetchImpl: typeof fetch = fetch): Pages {
+export function tmdbPages(key: string, fetchImpl: typeof fetch = tmdbFetch): Pages {
   return async (path, type, params, page) => {
     if (page > 500) return []; // TMDB serves no deeper
     const url = new URL(TMDB + path);

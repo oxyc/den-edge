@@ -5,6 +5,8 @@
 import type { MediaType, Title } from './library';
 import { toTitle } from './tmdb';
 
+import { tmdbFetch } from './tmdbCache';
+
 const TMDB = 'https://api.themoviedb.org/3';
 
 type Json = Record<string, unknown>;
@@ -141,7 +143,7 @@ async function tmdb(path: string, key: string, params: Record<string, string>, f
 export async function fetchDetail(
   ref: { type: MediaType; id: number },
   key: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<TitleDetail | null> {
   const append = ref.type === 'tv' ? 'aggregate_credits,recommendations' : 'credits,recommendations';
   const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
@@ -153,13 +155,13 @@ export async function fetchSeason(
   seriesId: number,
   season: number,
   key: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<Episode[] | null> {
   const body = await tmdb(`/tv/${seriesId}/season/${season}`, key, {}, fetchImpl);
   return body && parseSeason(body);
 }
 
-export async function fetchPerson(id: number, key: string, fetchImpl: typeof fetch = fetch): Promise<PersonDetail | null> {
+export async function fetchPerson(id: number, key: string, fetchImpl: typeof fetch = tmdbFetch): Promise<PersonDetail | null> {
   const body = await tmdb(`/person/${id}`, key, {}, fetchImpl);
   return body && parsePerson(id, body);
 }

@@ -5,6 +5,7 @@
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
+  import { clearTmdbCache } from './lib/tmdbCache';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
   let { link }: { link: Link } = $props();
@@ -63,7 +64,10 @@
   }
 
   async function save(name: string, value: string | null) {
-    if (await write('keys', name, value ? { string: value } : null)) drafts[name] = '';
+    if (!(await write('keys', name, value ? { string: value } : null))) return;
+    drafts[name] = '';
+    // TMDB's terms: cached content goes when the key it was fetched with does.
+    if (name === 'tmdb' && !value) await clearTmdbCache();
   }
 
   let addonDraft = $state('');
