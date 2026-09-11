@@ -21,7 +21,7 @@
   import type { Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { isHidden, readApiKey, readPrefs } from './lib/prefs';
-  import { fetchTitle, storedTmdbKey } from './lib/tmdb';
+  import { fetchTitle, storedTmdbKey, storeTmdbKey } from './lib/tmdb';
   import type { Stamp, TitleRow } from './lib/wire';
 
   let { link }: { link: Link } = $props();
@@ -112,6 +112,18 @@
 
   const select = $derived(loaded?.log ? (title: Title) => (selected = title) : undefined);
 
+  // Search and titles' display come from TMDB with the user's own key. The TV shares it through the library log;
+  // until it does, it can be pasted here.
+  let keyDraft = $state('');
+  async function saveKey(event: SubmitEvent) {
+    event.preventDefault();
+    const key = keyDraft.trim();
+    if (!key) return;
+    storeTmdbKey(key);
+    tmdbKey = key;
+    loaded = await load(link);
+  }
+
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
   // a newer query supersedes an older one mid-flight.
   const sources = $derived(tmdbKey ? searchSources(tmdbKey) : null);
@@ -179,6 +191,14 @@
       bind:value={query}
       oninput={queryChanged}
     />
+  {:else}
+    <form class="keyform glass" onsubmit={saveKey}>
+      <label for="tmdb-key">Search needs your TMDB API key. Your TV shares it once it runs the latest Den; or paste it here.</label>
+      <div class="row">
+        <input id="tmdb-key" bind:value={keyDraft} autocomplete="off" spellcheck="false" placeholder="TMDB API key" />
+        <button disabled={!keyDraft.trim()}>Save</button>
+      </div>
+    </form>
   {/if}
   {#if hits}
     {#if hits.length}
@@ -257,6 +277,46 @@
 
   .search:focus-visible {
     border-color: var(--accent);
+  }
+
+  .keyform {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 28px;
+    padding: 16px 20px;
+    border-radius: var(--radius);
+    color: var(--muted);
+  }
+
+  .keyform .row {
+    display: flex;
+    gap: 10px;
+  }
+
+  .keyform input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 16px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: none;
+    color: var(--fg);
+    outline: none;
+  }
+
+  .keyform button {
+    padding: 10px 18px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .keyform button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .note {
