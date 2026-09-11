@@ -33,19 +33,29 @@ describe('claimCode', () => {
 });
 
 describe('readLinks', () => {
-  function storage(raw: string | null, throws = false): Storage {
+  function storage(values: Record<string, string>, throws = false): Storage {
     return {
-      getItem: () => {
+      getItem: (key: string) => {
         if (throws) throw new Error('blocked');
-        return raw;
+        return values[key] ?? null;
       },
     } as unknown as Storage;
   }
 
-  it('keeps only well-formed links and survives storage that throws', () => {
-    const good = { inboxKey: 'deadbeefcafe1234', linkedAt: 1 };
-    expect(readLinks(storage(JSON.stringify([good, { inboxKey: 3 }])))).toEqual([good]);
-    expect(readLinks(storage('not json'))).toEqual([]);
-    expect(readLinks(storage(null, true))).toEqual([]);
+  it('reads the list the companion page keeps, and keeps only well-formed links', () => {
+    const companion = { inboxKey: 'deadbeefcafe1234', name: 'Living room' };
+    const junk = [{ inboxKey: 3 }, { inboxKey: 'not a key' }];
+    expect(readLinks(storage({ 'den.links': JSON.stringify([companion, ...junk]) }))).toEqual([companion]);
+  });
+
+  it("picks up the companion page's older single link", () => {
+    expect(readLinks(storage({ 'den.inboxKey': 'abcdef0123456789' }))).toEqual([
+      { inboxKey: 'abcdef0123456789', name: 'Apple TV' },
+    ]);
+  });
+
+  it('survives storage that is malformed or throws', () => {
+    expect(readLinks(storage({ 'den.links': 'not json' }))).toEqual([]);
+    expect(readLinks(storage({}, true))).toEqual([]);
   });
 });
