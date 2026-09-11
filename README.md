@@ -66,6 +66,7 @@ can reach den-edge can't fill the host's disk. A library holds at most 50,000 ro
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
 | `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
+| `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address pairing limit reads `CF-Connecting-IP`, else the last `X-Forwarded-For` entry; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
 
 ## The Den web app

@@ -46,6 +46,9 @@ pub struct AppState {
     pub web_origins: Vec<String>,
     /// The Den web app's built files (env `WEB_DIR`), served at `/`. `None` serves no app.
     pub web_dir: Option<std::path::PathBuf>,
+    /// Proxies whose report of the visitor's address counts (env `TRUSTED_PROXIES`, comma-separated IPs):
+    /// `cloudflared` and `tailscale serve` connect from their own address (`handler::client_ip`).
+    pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 impl AppState {
@@ -63,6 +66,7 @@ impl AppState {
             log_requests,
             web_origins: Vec::new(),
             web_dir: None,
+            trusted_proxies: Vec::new(),
         }
     }
 
@@ -109,6 +113,7 @@ async fn main() {
         .map(|v| v.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect())
         .unwrap_or_default();
     state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
+    state.trusted_proxies = env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -134,6 +139,23 @@ async fn main() {
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+/// `TRUSTED_PROXIES`: comma-separated IP addresses. A malformed entry is said and skipped — trusting it would mean
+/// guessing what was meant.
+fn parse_proxies(value: &str) -> Vec<std::net::IpAddr> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let parsed = p.parse().ok();
+            if parsed.is_none() {
+                eprintln!("TRUSTED_PROXIES: {p:?} is not an IP address — skipping it");
+            }
+            parsed
+        })
+        .collect()
 }
 
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.

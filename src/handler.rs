@@ -288,12 +288,28 @@ pub fn link_key(req: &Request) -> String {
     header_key(req).unwrap_or_default()
 }
 
-/// The connecting address. The server is reached directly on the LAN or through `tailscale serve`, and
-/// neither is a proxy whose forwarded header could be trusted over the socket.
-pub fn client_ip(req: &Request) -> String {
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map_or_else(|| "unknown".to_owned(), |c| c.0.ip().to_string())
+/// The visitor's address, for the per-address limits. den-edge is reached directly on the LAN, or through
+/// `tailscale serve` and `cloudflared`, which connect from their own address — so behind a proxy listed in
+/// `TRUSTED_PROXIES` the address is the one that proxy reports: `CF-Connecting-IP` (Cloudflare), else the last
+/// `X-Forwarded-For` entry, the one the proxy added. From anyone else those headers are ignored: they could say
+/// anything.
+pub fn client_ip(state: &AppState, req: &Request) -> String {
+    let Some(peer) = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()) else {
+        return "unknown".to_owned();
+    };
+    if state.trusted_proxies.contains(&peer) {
+        let reported = header_value(req, "cf-connecting-ip")
+            .or_else(|| header_value(req, "x-forwarded-for").and_then(|v| v.rsplit(',').next()))
+            .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
+        if let Some(visitor) = reported {
+            return visitor.to_string();
+        }
+    }
+    peer.to_string()
+}
+
+fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers().get(name)?.to_str().ok()
 }
 
 /// A link credential: hex, at least 16 characters (a paired link's is 48).

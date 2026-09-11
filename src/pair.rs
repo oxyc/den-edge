@@ -46,7 +46,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 
 /// The host opens a session under a `sid` it generated, and gets the nameplate to show.
 async fn create(state: &AppState, req: Request) -> Response {
-    if throttled(state, &format!("mint:{}", client_ip(&req))) {
+    if throttled(state, &format!("mint:{}", client_ip(state, &req))) {
         return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
@@ -85,10 +85,9 @@ async fn create(state: &AppState, req: Request) -> Response {
 }
 
 /// The joiner trades the nameplate for the `sid`, once: a second opener is refused, so a stranger who
-/// guessed the nameplate ends the pairing visibly instead of joining it quietly. Limited per address, with
-/// `/link` claims.
+/// guessed the nameplate ends the pairing visibly instead of joining it quietly. Limited per address.
 async fn open(state: &AppState, req: Request) -> Response {
-    if throttled(state, &client_ip(&req)) {
+    if throttled(state, &client_ip(state, &req)) {
         return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
@@ -195,6 +194,32 @@ mod tests {
 
     async fn new_session(h: &Harness) {
         assert_eq!(h.call("POST", "/pair/new", Some(json!({ "sid": SID }))).await.0, StatusCode::OK);
+    }
+
+    /// An open for an unknown nameplate, from `visitor` as a proxy reports it.
+    async fn open_as(h: &Harness, visitor: &str) -> StatusCode {
+        let body = json!({ "nameplate": "GUES" }).to_string();
+        h.send("POST", "/pair/open", Some(body), &[("cf-connecting-ip", visitor)]).await.status()
+    }
+
+    /// Behind `cloudflared` or `tailscale serve` every request comes from the proxy's address, so a trusted proxy's
+    /// report of the visitor's address is what the limit counts — and nobody else's report is believed.
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_each_visitor_is_limited_on_their_own() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        for _ in 0..crate::link::CLAIMS_PER_WINDOW {
+            assert_eq!(open_as(&h, "203.0.113.5").await, StatusCode::GONE);
+        }
+        assert_eq!(open_as(&h, "203.0.113.5").await, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(open_as(&h, "203.0.113.6").await, StatusCode::GONE, "another visitor still gets through");
+
+        // Not from a trusted proxy: the header is anyone's to write, so the socket's address is what counts.
+        let direct = Harness::new();
+        for i in 0..crate::link::CLAIMS_PER_WINDOW {
+            assert_eq!(open_as(&direct, &format!("203.0.113.{i}")).await, StatusCode::GONE);
+        }
+        assert_eq!(open_as(&direct, "198.51.100.1").await, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
