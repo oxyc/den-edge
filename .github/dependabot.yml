@@ -11,6 +11,20 @@ updates:
         update-types: [minor, patch]
     labels: [dependencies]
 
+  # The web app den-edge serves. A release is proposed only once it is a week old, which leaves time for a
+  # compromised version to be found and pulled before it reaches the image.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      web:
+        update-types: [minor, patch]
+    labels: [dependencies]
+
   - package-ecosystem: docker
     directory: /
     schedule:
