@@ -57,13 +57,6 @@ pub struct AppState {
     /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
     /// device routes and never the web app — which would otherwise be handed out past Access.
     pub api_hosts: Vec<String>,
-    /// Public origin → LAN origin (env `LAN_MAP`: `https://d-scout.oxy.fi=http://192.168.86.193:8080,…`),
-    /// published in `GET /config` on every name but the public ones: a TV that reaches den-edge on the LAN
-    /// then reaches the addons there too.
-    pub lan_map: Vec<(String, String)>,
-    /// The addons' public origins behind Cloudflare Access (env `ACCESS_ORIGINS`, comma-separated): the only ones
-    /// the TVs send the library's service token to, published in `/config` and `/web-config`.
-    pub access_origins: Vec<String>,
     /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
@@ -94,8 +87,6 @@ impl AppState {
             trusted_proxies: Vec::new(),
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),
-            lan_map: Vec::new(),
-            access_origins: Vec::new(),
             relays: Vec::new(),
             relay_client: relay::client(),
             routes: Vec::new(),
@@ -150,9 +141,6 @@ async fn main() {
     state.trusted_proxies = env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
     state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
-    state.lan_map = env_opt("LAN_MAP").map(|v| parse_lan_map(&v)).unwrap_or_default();
-    state.access_origins =
-        env_opt("ACCESS_ORIGINS").map(|v| parse_origins("ACCESS_ORIGINS", &v)).unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.remux_origins = routes::remux_origins(&state.routes);
@@ -175,7 +163,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={} routes={} new_libraries={}",
+         web_hosts={} api_hosts={} relays={} routes={} new_libraries={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -183,8 +171,6 @@ async fn main() {
         if state.web_origins.is_empty() { "none".to_owned() } else { state.web_origins.join(",") },
         if state.web_hosts.is_empty() { "none".to_owned() } else { state.web_hosts.join(",") },
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
-        state.lan_map.len(),
-        state.access_origins.len(),
         state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
         state.routes.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
         state.new_libraries.as_str(),
@@ -232,23 +218,6 @@ fn parse_hosts(var: &str, value: &str) -> Vec<String> {
         .collect()
 }
 
-/// `LAN_MAP`: comma-separated `<public origin>=<LAN origin>` pairs, each side `http(s)://host[:port]` with no path.
-/// A malformed pair is said and skipped.
-fn parse_lan_map(value: &str) -> Vec<(String, String)> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .filter_map(|pair| {
-            let parsed = pair.split_once('=').and_then(|(public, lan)| Some((origin(public)?, origin(lan)?)));
-            if parsed.is_none() {
-                eprintln!("LAN_MAP: {pair:?} is not <public origin>=<LAN origin> — skipping it");
-            }
-            parsed
-        })
-        .collect()
-}
-
 /// `ADDON_RELAY`: comma-separated `/<prefix>=<origin>` pairs — one path segment, a plain http(s) origin. A malformed
 /// pair is said and skipped.
 fn parse_relays(value: &str) -> Vec<(String, String)> {
@@ -266,22 +235,6 @@ fn parse_relays(value: &str) -> Vec<(String, String)> {
             });
             if parsed.is_none() {
                 eprintln!("ADDON_RELAY: {pair:?} is not /<prefix>=<origin> — skipping it");
-            }
-            parsed
-        })
-        .collect()
-}
-
-/// `ACCESS_ORIGINS`: comma-separated origins, as `origin` reads them. A malformed one is said and skipped.
-fn parse_origins(var: &str, value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|o| !o.is_empty())
-        .filter_map(|o| {
-            let parsed = origin(o);
-            if parsed.is_none() {
-                eprintln!("{var}: {o:?} is not http(s)://host[:port] — skipping it");
             }
             parsed
         })

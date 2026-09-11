@@ -148,7 +148,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "/config" => config(state, face),
+        "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
         "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes)),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
@@ -209,34 +209,13 @@ impl Face {
     }
 }
 
-/// `GET /config`: the TV's kill-switch and update gate; `access`, the addon origins behind Cloudflare Access that
-/// get the library's service token — on every name, since it names nothing private; and, on every name but the
-/// public ones, `lan` — the addons' public origins mapped to their LAN addresses. A TV that reached den-edge on the
-/// LAN applies it and talks to the addons there; one that came in through the tunnel gets no map, and the internet
-/// gets no private addresses.
-fn config(state: &AppState, face: Face) -> Response {
-    let lan = face == Face::Both && !state.lan_map.is_empty();
-    if !lan && state.access_origins.is_empty() {
-        return raw_json(StatusCode::OK, Body::from(CONFIG), false);
-    }
-    let mut value: Value = serde_json::from_str(CONFIG).expect("CONFIG is JSON");
-    if !state.access_origins.is_empty() {
-        value["access"] = json!(state.access_origins);
-    }
-    if lan {
-        let map: serde_json::Map<String, Value> =
-            state.lan_map.iter().map(|(public, lan)| (public.clone(), Value::from(lan.as_str()))).collect();
-        value["lan"] = Value::Object(map);
-    }
-    bare_json(StatusCode::OK, &value)
-}
-
 /// A stable label per route, so a key in a path never becomes a metric label or a log field.
 pub fn route_label(path: &str) -> &'static str {
     match path {
         "/health" => "/health",
         "/version" => "/version",
         "/config" => "/config",
+        "/routes" => "/routes",
         "/metrics" => "/metrics",
         "/link" => "/link",
         "/inbox/append" => "/inbox/append",
@@ -496,13 +475,6 @@ pub mod tests {
         s.web_dir = Some(web);
         s.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
         s.api_hosts = crate::parse_hosts("API_HOSTS", " D-API.oxy.fi ,bad:8443");
-        s.lan_map = crate::parse_lan_map(
-            "https://d-scout.oxy.fi=http://192.168.86.193:8080, https://d-play.oxy.fi/=http://192.168.86.193:8080,nonsense",
-        );
-        s.access_origins = crate::parse_origins(
-            "ACCESS_ORIGINS",
-            "https://d-scout.oxy.fi, https://D-ATLAS.oxy.fi/,x; img-src *",
-        );
         s.routes = crate::routes::parse(
             "scout=http://192.168.86.193:8080 https://pve.example:8443/scout access:https://d-scout.oxy.fi;\
              remux=http://192.168.86.193:8095/remux https://pve.example:8443/remux",
@@ -639,27 +611,14 @@ pub mod tests {
         assert_eq!(status("bad:8443", "GET", "/").await, StatusCode::OK);
     }
 
+    /// Addresses come from `/routes` alone now (den #16): `/config` is the kill-switch and the update gate.
     #[tokio::test]
-    async fn the_lan_map_is_published_only_off_the_public_names() {
+    async fn config_carries_no_addresses() {
         let h = split_harness();
-        let config = |host: &'static str| {
-            let h = &h;
-            async move { body_json(h.send("GET", "/config", None, &[("host", host)]).await).await }
-        };
-        let lan = config("192.168.86.193:8094").await;
-        assert_eq!(lan["minSupportedVersion"], "0.1.0");
-        assert_eq!(
-            lan["lan"],
-            json!({"https://d-scout.oxy.fi": "http://192.168.86.193:8080", "https://d-play.oxy.fi": "http://192.168.86.193:8080"}),
-            "trailing slashes trimmed, the malformed pair skipped"
-        );
-        let public = config("d-api.oxy.fi").await;
-        assert_eq!(public["minSupportedVersion"], "0.1.0");
-        assert!(public.get("lan").is_none(), "no private addresses through the tunnel: {public}");
-        // The Access origins name nothing private: every name carries them.
-        let access = json!(["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"]);
-        assert_eq!(lan["access"], access);
-        assert_eq!(public["access"], access);
+        let config =
+            body_json(h.send("GET", "/config", None, &[("host", "192.168.86.193:8094")]).await).await;
+        assert_eq!(config["minSupportedVersion"], "0.1.0");
+        assert!(config.get("lan").is_none() && config.get("access").is_none(), "{config}");
     }
 
     #[tokio::test]
