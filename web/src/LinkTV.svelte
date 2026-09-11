@@ -34,8 +34,9 @@
         failure = result.error;
         return;
       }
-      const libraryKey = btoa(String.fromCharCode(...result.handover.libraryKey));
-      links.add(result.inboxKey, { name: result.handover.host, libraryKey });
+      const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+      const { host, libraryKey, linkKey } = result.handover;
+      links.add(result.inboxKey, { name: host, libraryKey: base64(libraryKey), linkKey: base64(linkKey) });
       return;
     }
     const result = await claimCode(code);

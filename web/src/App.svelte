@@ -6,10 +6,11 @@
   import Linked from './Linked.svelte';
 
   // Each linked TV names this device in its list. Told on every open rather than once: a TV build that doesn't
-  // know the message drops it, and den-edge keeps only the latest one queued.
+  // know the message drops it, and den-edge keeps only the latest one queued. A paired TV has the name from the
+  // pairing, where den-edge couldn't change it, and takes only sealed messages.
   $effect(() => {
     const device = deviceLabel();
-    for (const link of links.list) void announceDevice(link.inboxKey, device);
+    for (const link of links.list) if (!link.linkKey) void announceDevice(link.inboxKey, device);
   });
 </script>
 

@@ -11,6 +11,8 @@ export interface Link {
   /** The library's key, base64, when the TV handed it over in pairing (den-spec pairing v1). A link made with a
    * six-character code finds it in the TV's backup instead. */
   libraryKey?: string;
+  /** The link's own key, base64, from pairing: its inbox messages are sealed under a key it derives. */
+  linkKey?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -53,11 +55,12 @@ class Links {
     return this.list[0];
   }
 
-  add(inboxKey: string, details: { name?: string; libraryKey?: string } = {}, now = Date.now()): void {
+  add(inboxKey: string, details: { name?: string; libraryKey?: string; linkKey?: string } = {}, now = Date.now()): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
     const name = details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
     const link: Link = { inboxKey, name, linkedAt: now };
     if (details.libraryKey) link.libraryKey = details.libraryKey;
+    if (details.linkKey) link.linkKey = details.linkKey;
     this.list = [...this.list, link];
     writeLinks(this.list);
   }
