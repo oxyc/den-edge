@@ -12,16 +12,6 @@ export function storedTmdbKey(storage: Storage | undefined = globalThis.localSto
   }
 }
 
-/** Keep the user's TMDB key where the companion page keeps it, so both read the same one. */
-export function storeTmdbKey(key: string, storage: Storage | undefined = globalThis.localStorage): void {
-  try {
-    const config = JSON.parse(storage?.getItem('den.config') ?? 'null') as Record<string, unknown> | null;
-    storage?.setItem('den.config', JSON.stringify({ ...(config ?? {}), tmdbKey: key }));
-  } catch {
-    // Nothing persists in this browser; the key still works for this visit.
-  }
-}
-
 export async function fetchTitle(
   ref: { type: MediaType; id: number },
   key: string,

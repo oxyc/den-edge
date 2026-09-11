@@ -3,7 +3,7 @@
   import { announceDevice, deviceLabel } from './lib/edge';
   import { links } from './lib/links.svelte';
   import LinkTV from './LinkTV.svelte';
-  import Linked from './Linked.svelte';
+  import Settings from './Settings.svelte';
 
   // Each linked TV names this device in its list. Told on every open rather than once: a TV build that doesn't
   // know the message drops it, and den-edge keeps only the latest one queued. A paired TV has the name from the
@@ -18,18 +18,33 @@
   $effect(() => {
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
+
+  // Settings is `#settings`, so Back returns to the library. Not a path: `/settings` is den-edge's API.
+  const onSettings = () => location.hash === '#settings';
+  let settings = $state(onSettings());
+  $effect(() => {
+    const follow = () => (settings = onSettings());
+    addEventListener('hashchange', follow);
+    return () => removeEventListener('hashchange', follow);
+  });
 </script>
 
 <header class="bar glass">
-  <span class="brand">Den</span>
+  <a class="brand" href="#library">Den</a>
+  {#if links.current}
+    <a class="settings" href={settings ? '#library' : '#settings'} aria-current={settings ? 'page' : undefined}>Settings</a>
+  {/if}
 </header>
 
 <main>
   {#if links.current}
     {#key links.current.inboxKey}
-      <Library link={links.current} />
+      {#if settings}
+        <Settings link={links.current} />
+      {:else}
+        <Library link={links.current} />
+      {/if}
     {/key}
-    <Linked link={links.current} />
   {:else}
     <LinkTV />
   {/if}
@@ -42,14 +57,27 @@
     z-index: 10;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     margin: 12px var(--gutter) 0;
     padding: 12px 20px;
     border-radius: 999px;
   }
 
   .brand {
+    color: var(--fg);
     font-weight: 700;
     letter-spacing: 0.02em;
+    text-decoration: none;
+  }
+
+  .settings {
+    color: var(--muted);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .settings[aria-current='page'] {
+    color: var(--fg);
   }
 
   main {
