@@ -3,16 +3,20 @@
 // backup it hands its key over in.
 
 import {
+  believe,
   compareStamps,
   deriveKeys,
   mergeEpisode,
+  mergeSettings,
   mergeTitle,
+  newest,
   open,
   rowName,
   seal,
   ZERO_STAMP,
   type LibraryKeys,
   type Row,
+  type SettingsRow,
   type Stamp,
   type TitleRow,
 } from './wire';
@@ -61,7 +65,7 @@ export class LibraryLog {
       const page = (await res.json()) as Page;
       for (const entry of page.entries) {
         try {
-          const row = await open(log.keys, entry.k, entry.v);
+          const row = believe(await open(log.keys, entry.k, entry.v));
           log.entries.set(rowName(row), { seq: entry.seq, row });
         } catch {
           // Tampered with, or sealed under another library's key.
@@ -81,17 +85,20 @@ export class LibraryLog {
     return row?.kind === 'rec' ? row : undefined;
   }
 
+  /** A group of settings: the TV's `prefs`, the user's API `keys`. */
+  settings(name: string): SettingsRow | undefined {
+    const row = this.entries.get(`set:${name}`)?.row;
+    return row?.kind === 'set' ? row : undefined;
+  }
+
   /** The newest stamp read, so this browser's next edit is stamped after everything it has seen. */
   newestStamp(): Stamp {
-    let newest = ZERO_STAMP;
+    let latest = ZERO_STAMP;
     for (const { row } of this.entries.values()) {
-      const stamps =
-        row.kind === 'ep'
-          ? [row.progress.at]
-          : [row.status.at, row.resume.at, row.reaction.at, row.deleted.at, row.dismissed.at, row.episodesReset ?? ZERO_STAMP];
-      for (const stamp of stamps) if (compareStamps(stamp, newest) > 0) newest = stamp;
+      const stamp = newest(row);
+      if (compareStamps(stamp, latest) > 0) latest = stamp;
     }
-    return newest;
+    return latest;
   }
 
   /**
@@ -126,7 +133,7 @@ export class LibraryLog {
         this.entries.delete(name); // what this browser remembered belongs to a log that was reset
         continue;
       }
-      const theirs = await open(this.keys, k, conflict.v);
+      const theirs = believe(await open(this.keys, k, conflict.v));
       this.entries.set(name, { seq: conflict.seq, row: theirs });
       target = merge(theirs, target);
     }
@@ -141,5 +148,6 @@ export class LibraryLog {
 function merge(theirs: Row, ours: Row): Row {
   if (theirs.kind === 'rec' && ours.kind === 'rec') return mergeTitle(theirs, ours);
   if (theirs.kind === 'ep' && ours.kind === 'ep') return mergeEpisode(theirs, ours);
+  if (theirs.kind === 'set' && ours.kind === 'set') return mergeSettings(theirs, ours);
   return theirs;
 }

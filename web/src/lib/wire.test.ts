@@ -1,13 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  believe,
   Clock,
   deriveKeys,
   fromHex,
+  mergeSettings,
   mergeTitle,
   open,
   seal,
+  ZERO_STAMP,
   type Row,
+  type SettingsRow,
   type Stamp,
   type TitleRow,
 } from './wire';
@@ -23,6 +27,7 @@ const library = spec('library-v2.json') as {
 const merges = spec('merge-v2.json') as {
   base: TitleRow;
   merge: { case: string; a: Partial<TitleRow>; b: Partial<TitleRow>; merged: Partial<TitleRow> }[];
+  settings: { case: string; a: SettingsRow; b: SettingsRow; merged: SettingsRow }[];
   clock: { case: string; last: Stamp; now: number; issued: Stamp; seen?: Stamp }[];
 };
 
@@ -51,6 +56,23 @@ describe('library wire v2 matches den-spec', () => {
     const expected = { ...merges.base, ...merged };
     expect(mergeTitle(left, right)).toEqual(expected);
     expect(mergeTitle(right, left)).toEqual(expected);
+  });
+
+  it.each(merges.settings)('merges settings: $case', ({ a, b, merged }) => {
+    expect(mergeSettings(a, b)).toEqual(merged);
+    expect(mergeSettings(b, a)).toEqual(merged);
+  });
+
+  it('does not believe a stamp more than a day in the future', () => {
+    const now = 1_789_000_000_000;
+    const row: TitleRow = {
+      ...merges.base,
+      status: { value: 'watched', at: [now + 3 * 86_400_000, 0, 'evil'] },
+      reaction: { value: 'love', at: [now + 3_600_000, 0, 'tv01'] },
+    };
+    const believed = believe(row, now);
+    expect(believed.status.at).toEqual(ZERO_STAMP);
+    expect(believed.reaction.at).toEqual([now + 3_600_000, 0, 'tv01']);
   });
 
   it.each(merges.clock)('clock: $case', ({ last, now, issued, seen }) => {

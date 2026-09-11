@@ -19,6 +19,7 @@
   } from './lib/library';
   import type { Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
+  import { isHidden, readApiKey, readPrefs } from './lib/prefs';
   import { fetchTitle, storedTmdbKey } from './lib/tmdb';
   import type { Stamp, TitleRow } from './lib/wire';
 
@@ -30,7 +31,8 @@
     log: LibraryLog | null;
   }
 
-  const tmdbKey = storedTmdbKey();
+  /** The TMDB key the TV shares through the log (`set:keys`), else the companion page's own. */
+  let tmdbKey = $state(storedTmdbKey());
   const clock = browserClock();
   let loaded = $state<Loaded | null>(null);
   /** TMDB display for titles the log names without it, and for titles acted on here. */
@@ -52,9 +54,11 @@
     const log = await LibraryLog.open(result.libraryKey);
     if (!log) return { result, log: null };
     clock.see(log.newestStamp());
-    if (tmdbKey) {
+    const key = readApiKey(log.settings('keys'), 'tmdb') ?? tmdbKey;
+    tmdbKey = key;
+    if (key) {
       const library = applyLog(result.library, log.rows());
-      const titles = await Promise.all(untitled(library).slice(0, 60).map((ref) => fetchTitle(ref, tmdbKey)));
+      const titles = await Promise.all(untitled(library).slice(0, 60).map((ref) => fetchTitle(ref, key)));
       displays = titles.filter((t): t is Title => t !== null);
     }
     return { result: { ...result, live: true }, log };
@@ -89,7 +93,12 @@
 
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
   // a newer query supersedes an older one mid-flight.
-  const sources = tmdbKey ? searchSources(tmdbKey) : null;
+  const sources = $derived(tmdbKey ? searchSources(tmdbKey) : null);
+  /** The TV's hide rules, from the log's `set:prefs`. */
+  const prefs = $derived.by(() => {
+    void version;
+    return readPrefs(loaded?.log?.settings('prefs'));
+  });
   let query = $state('');
   let hits = $state<Hit[] | null>(null);
   let searchFailed = $state(false);
@@ -114,7 +123,9 @@
     try {
       for await (const batch of searchStream(text, sources)) {
         if (ticket !== generation) return;
-        hits = batch;
+        // The TV's search filter: its hide rules, but not the year floor or Hide Watched — a title typed by name
+        // must be findable.
+        hits = batch.filter((h) => h.kind === 'person' || !isHidden(h.title, prefs, { ignoringYearFloor: true }));
         painted = true;
       }
       if (!painted && ticket === generation) hits = [];

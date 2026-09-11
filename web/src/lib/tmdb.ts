@@ -34,6 +34,12 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
   const name = text('title') ?? text('name');
   if (!name) return null;
   const year = parseInt((text('release_date') ?? text('first_air_date') ?? '').slice(0, 4), 10);
+  // A list or search result names genres by id; a detail lists them as objects.
+  const genreIds = Array.isArray(details.genre_ids)
+    ? details.genre_ids.filter((g): g is number => typeof g === 'number')
+    : Array.isArray(details.genres)
+      ? (details.genres as { id?: unknown }[]).map((g) => g.id).filter((g): g is number => typeof g === 'number')
+      : undefined;
   return {
     type: ref.type,
     id: ref.id,
@@ -41,5 +47,8 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
     posterPath: text('poster_path'),
     year: Number.isFinite(year) ? year : undefined,
     rating: typeof details.vote_average === 'number' ? details.vote_average : undefined,
+    genreIds,
+    originalLanguage: text('original_language'),
+    adult: details.adult === true ? true : undefined,
   };
 }

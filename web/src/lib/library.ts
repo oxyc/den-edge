@@ -16,6 +16,10 @@ export interface Title {
   posterPath?: string;
   year?: number;
   rating?: number;
+  /** What the TV's hide rules look at (`prefs.ts`): TMDB genre ids, original language, the adult flag. */
+  genreIds?: number[];
+  originalLanguage?: string;
+  adult?: boolean;
 }
 
 type Status = 'none' | 'watchlist' | 'inProgress' | 'watched';
@@ -167,6 +171,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
   const marks = new Map(library.marks.map((m) => [markKey(m), m]));
   const resets = new Map<string, number>();
   for (const row of rows) {
+    if (row.kind === 'set') continue; // settings are read by prefs.ts
     if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {

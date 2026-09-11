@@ -104,12 +104,51 @@ export interface EpisodeRow {
   [unknown: string]: unknown;
 }
 
-export type Row = TitleRow | EpisodeRow;
+/** A setting's value, tagged as the TV's ConfigValue encodes it. */
+export type ConfigValue = { bool: boolean } | { int: number } | { string: string } | { ints: number[] } | { strings: string[] };
+
+/** A group of settings, `set:<name>`: each setting its own stamped value, null a cleared one. */
+export interface SettingsRow {
+  kind: 'set';
+  schema: number;
+  name: string;
+  values: Record<string, Stamped<ConfigValue | null>>;
+  [unknown: string]: unknown;
+}
+
+export type Row = TitleRow | EpisodeRow | SettingsRow;
 
 /** The name a row's key is the HMAC of. */
 export function rowName(row: Row): string {
+  if (row.kind === 'set') return `set:${row.name}`;
   const title = `${row.title.type}:${row.title.id}`;
   return row.kind === 'rec' ? `rec:${title}` : `ep:${title}:${row.season}:${row.episode}`;
+}
+
+/** How far ahead of this device's clock a stamp may be before it isn't believed (den-spec §4). */
+const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The row with every stamp more than a day ahead of `now` read as the zero stamp. A wrong clock, or a key holder
+ * writing year 2100, would otherwise win every merge for good; this way the value wins nothing, the clock never sees
+ * it, and the next write of the row replaces it.
+ */
+export function believe<T extends Row>(row: T, now = Date.now()): T {
+  const fix = (stamp: Stamp): Stamp => (stamp[0] > now + FUTURE_TOLERANCE_MS ? ZERO_STAMP : stamp);
+  const fixed = <V>(s: Stamped<V>): Stamped<V> => ({ ...s, at: fix(s.at) });
+  if (row.kind === 'ep') return { ...row, progress: { ...row.progress, at: fix(row.progress.at) } };
+  if (row.kind === 'set') {
+    return { ...row, values: Object.fromEntries(Object.entries(row.values).map(([key, value]) => [key, fixed(value)])) };
+  }
+  return {
+    ...row,
+    status: fixed(row.status),
+    resume: { ...row.resume, at: fix(row.resume.at) },
+    reaction: fixed(row.reaction),
+    deleted: fixed(row.deleted),
+    dismissed: fixed(row.dismissed),
+    episodesReset: row.episodesReset && fix(row.episodesReset),
+  };
 }
 
 async function rowMac(keys: LibraryKeys, name: string): Promise<Uint8Array<ArrayBuffer>> {
@@ -143,7 +182,9 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
     bytes.slice(12),
   );
   const parsed = JSON.parse(new TextDecoder().decode(plain)) as { kind?: unknown };
-  if (parsed.kind !== 'rec' && parsed.kind !== 'ep') throw new Error(`unknown row kind ${String(parsed.kind)}`);
+  if (parsed.kind !== 'rec' && parsed.kind !== 'ep' && parsed.kind !== 'set') {
+    throw new Error(`unknown row kind ${String(parsed.kind)}`);
+  }
   const row = parsed as Row;
   if (hex(await rowMac(keys, rowName(row))) !== k) throw new Error('the row names a different record than its key');
   return row;
@@ -163,12 +204,15 @@ function furthest(a: Progress, b: Progress): Progress {
   return order >= 0 ? a : b;
 }
 
-function newest(row: Row): Stamp {
+/** The newest stamp in a row. */
+export function newest(row: Row): Stamp {
   const stamps =
     row.kind === 'ep'
       ? [row.progress.at]
-      : [row.status.at, row.resume.at, row.reaction.at, row.deleted.at, row.dismissed.at, row.episodesReset ?? ZERO_STAMP];
-  return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a));
+      : row.kind === 'set'
+        ? Object.values(row.values).map((v) => v.at)
+        : [row.status.at, row.resume.at, row.reaction.at, row.deleted.at, row.dismissed.at, row.episodesReset ?? ZERO_STAMP];
+  return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP);
 }
 
 /** The version whose fields this client doesn't know survive: the newer one's, then the other's. */
@@ -200,6 +244,16 @@ export function mergeTitle(a: TitleRow, b: TitleRow): TitleRow {
 
 export function mergeEpisode(a: EpisodeRow, b: EpisodeRow): EpisodeRow {
   return { ...unknownFields(a, b), schema: Math.max(a.schema, b.schema), progress: furthest(a.progress, b.progress) };
+}
+
+/** Per setting, the later stamp; a setting only one version has is kept. */
+export function mergeSettings(a: SettingsRow, b: SettingsRow): SettingsRow {
+  const values = { ...a.values };
+  for (const [key, theirs] of Object.entries(b.values)) {
+    const mine = values[key];
+    if (!mine || compareStamps(theirs.at, mine.at) > 0) values[key] = theirs;
+  }
+  return { ...unknownFields(a, b), schema: Math.max(a.schema, b.schema), values };
 }
 
 export function fromHex(text: string): Uint8Array<ArrayBuffer> {
