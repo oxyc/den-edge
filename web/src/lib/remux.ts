@@ -3,6 +3,7 @@
 // play, and keeps scout's tickets and the debrid's links to itself. Its routes are on this origin under /remux
 // (tailscale serve), and a cookie from a one-time browser key lets this browser start sessions.
 
+import type { Playable } from './playable';
 import type { Entry } from './routes';
 
 export interface Session {
@@ -35,8 +36,10 @@ export interface Want {
   subtitleLanguages: string[];
   /** The player's languages, most wanted first. */
   audio: string[];
-  /** What this browser decodes: `h264`, and `hevc` when it can. */
+  /** What this browser decodes: `h264`, and `hevc` when it can — what a den-remux before `playable` reads. */
   videoCodecs: string[];
+  /** What this browser decodes, level by level (`playable`), so den-remux converts only what won't play here. */
+  playable?: Playable;
   /** Another track of an earlier session's release: its index there, and that release's filename. */
   audioTrack?: number;
   filename?: string;

@@ -6,6 +6,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
+  import { playable, type Playable } from '../lib/playable';
   import {
     endSession,
     login,
@@ -84,6 +85,8 @@
   let ended = false;
   /** Where the next session starts: a language switch picks up where the last one was. */
   let startAt: number | null = null;
+  /** What this browser decodes, found once: den-remux converts only what won't play here. */
+  let decodes: Playable | undefined;
 
   const heading = $derived(season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title);
   const names = (() => {
@@ -107,6 +110,7 @@
       imdb = found;
     }
     const languages = [...new Set(navigator.languages.map((l) => l.split('-')[0]!.toLowerCase()))];
+    const can = (decodes ??= await playable());
     const result = await startSession({
       imdb,
       season,
@@ -115,7 +119,8 @@
       subtitles,
       subtitleLanguages: languages.slice(0, 2),
       audio: [...navigator.languages],
-      videoCodecs: videoCodecs(),
+      videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
+      playable: can,
       ...pick,
     }, undefined, remux);
     if (ended) {
@@ -138,13 +143,6 @@
     if (!ok) return;
     key = '';
     void begin();
-  }
-
-  /** HEVC where the browser decodes it; den-remux converts an HEVC-only release to H.264 for the rest. */
-  function videoCodecs(): string[] {
-    const hevc = 'video/mp4; codecs="hvc1.1.6.L93.B0"';
-    const decodes = (globalThis.MediaSource?.isTypeSupported(hevc) ?? false) || document.createElement('video').canPlayType(hevc) !== '';
-    return decodes ? ['h264', 'hevc'] : ['h264'];
   }
 
   $effect(() => {
