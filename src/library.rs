@@ -11,6 +11,8 @@
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
 //! every later request must match it. A library nobody has written is a 404, which carries `generation` too.
+//! With `NEW_LIBRARIES=members`, that first write must also carry `x-den-library-member: <id>:<token>` of another
+//! library here (`NewLibraries`).
 //!
 //! `generation` is the store's (`Store::generation`): a different one tells a client that remembers how far it
 //! read that this store was restored or started over, so it reads from 0 and writes back what it holds.
@@ -37,6 +39,8 @@ const EXT: &str = "log";
 /// A deleted library's marker: its id is retired.
 const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
+/// `<id>:<token>` of a library the caller already holds, when it starts another (`NewLibraries::Members`).
+const MEMBER_HEADER: &str = "x-den-library-member";
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
 /// A sealed record is under a kilobyte; this is room for any, not a target.
@@ -51,6 +55,33 @@ const COMPACT_SLACK: usize = if cfg!(test) { 8 } else { 1000 };
 const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
 /// A library nobody has touched for this long leaves memory; its log reloads it on the next request.
 const IDLE_MS: u64 = 60 * 60 * 1000;
+
+/// Who may start a library (env `NEW_LIBRARIES`). `Members`: only a device that proves it holds another library here
+/// (`MEMBER_HEADER`), which is what a TV moving its library to a new key does, so a stranger reaching the public
+/// device API can't use the relay as storage (den #8). `Open`, the default, lets any first write start one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewLibraries {
+    #[default]
+    Open,
+    Members,
+}
+
+impl NewLibraries {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "open" => Some(Self::Open),
+            "members" => Some(Self::Members),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Members => "members",
+        }
+    }
+}
 
 pub struct Library {
     token_hash: [u8; 32],
@@ -148,6 +179,7 @@ fn moved() -> Response {
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
+    let member = req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let body = match read_json(req, BATCH_MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
@@ -161,15 +193,22 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     }
     let now = state.now();
     touch(&mut libs, id, now);
-    let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: now };
-    let existing = libs.get(id);
-    if existing.is_none() {
+    if !libs.contains_key(id) {
         match retired(state, id).await {
             Ok(true) => return moved(),
             Ok(false) => {}
             Err(e) => return internal("library read", e),
         }
+        if state.new_libraries == NewLibraries::Members {
+            match holds_another(state, &mut libs, id, member.as_deref()).await {
+                Ok(true) => {}
+                Ok(false) => return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed")),
+                Err(e) => return internal("library read", e),
+            }
+        }
     }
+    let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: now };
+    let existing = libs.get(id);
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
@@ -254,6 +293,25 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
         StatusCode::OK,
         &json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() }),
     )
+}
+
+/// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
+/// started proves nothing.
+async fn holds_another(
+    state: &AppState,
+    libs: &mut HashMap<String, Library>,
+    id: &str,
+    member: Option<&str>,
+) -> io::Result<bool> {
+    let Some((other, token)) = member.and_then(|m| m.split_once(':')) else {
+        return Ok(false);
+    };
+    if other == id || !valid_hex_id(other) || token.is_empty() || token.len() > 256 {
+        return Ok(false);
+    }
+    load(state, libs, other).await?;
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    Ok(libs.get(other).is_some_and(|lib| constant_time_eq(&lib.token_hash, &hash)))
 }
 
 /// Mark `id` used now, and let every library idle for an hour go from memory: a relay that kept every library it
@@ -558,6 +616,41 @@ mod tests {
             json!([{ "k": K2, "seq": 1, "v": "kept" }, { "k": K1, "seq": 41, "v": "v39" }])
         );
         assert_eq!(all["head"], 41);
+    }
+
+    async fn start(h: &Harness, id: &str, token: &str, member: Option<&str>) -> StatusCode {
+        let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "v" }] }).to_string();
+        let mut headers = vec![("x-den-library-token", token)];
+        if let Some(member) = member {
+            headers.push(("x-den-library-member", member));
+        }
+        h.send("POST", &format!("/lib/{id}/batch"), Some(body), &headers).await.status()
+    }
+
+    /// With `NEW_LIBRARIES=members` only a device holding another library here starts one — a TV moving its library
+    /// to a new key — and a library that exists takes writes as before.
+    #[tokio::test]
+    async fn with_members_only_a_holder_of_another_library_starts_one() {
+        let other = "fedcba9876543210fedcba9876543210";
+        let open = Harness::new();
+        assert_eq!(start(&open, LIB, TOKEN, None).await, StatusCode::OK, "open by default");
+
+        let h = Harness::in_dir_with(open.dir.clone(), |s| s.new_libraries = super::NewLibraries::Members);
+        assert_eq!(start(&h, other, "stranger", None).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            start(&h, other, "stranger", Some(&format!("{LIB}:not-its-token"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            start(&h, other, "new", Some(&format!("{other}:new"))).await,
+            StatusCode::FORBIDDEN,
+            "not itself"
+        );
+        assert_eq!(changes(&h, TOKEN, "").await.1["head"], 1, "the refusals left the member library alone");
+
+        assert_eq!(start(&h, other, "new", Some(&format!("{LIB}:{TOKEN}"))).await, StatusCode::OK);
+        assert_eq!(start(&h, other, "new", None).await, StatusCode::OK, "once it exists, no proof");
+        assert_eq!(start(&h, LIB, TOKEN, None).await, StatusCode::OK, "nor for a library that already was");
     }
 
     /// A library has a row cap; rewriting a row it already holds is always fine.

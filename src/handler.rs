@@ -417,11 +417,17 @@ pub mod tests {
         }
 
         pub fn in_dir(dir: std::path::PathBuf) -> Self {
+            Self::in_dir_with(dir, |_| {})
+        }
+
+        /// A harness whose state `configure` sets up first: a setting that comes from the environment.
+        pub fn in_dir_with(dir: std::path::PathBuf, configure: impl FnOnce(&mut AppState)) -> Self {
             let clock = Arc::new(AtomicU64::new(1_000_000));
             let store = crate::store::Store::open(&dir, crate::store::DEFAULT_CAP).unwrap();
             let mut state = AppState::new(store, None, false);
             let c = Arc::clone(&clock);
             state.clock = Box::new(move || c.load(Ordering::Relaxed));
+            configure(&mut state);
             Harness { state: Arc::new(state), clock, dir }
         }
 

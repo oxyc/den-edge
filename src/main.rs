@@ -72,6 +72,8 @@ pub struct AppState {
     pub routes: routes::Routes,
     /// den-remux's https origins from `routes`: what the web app's CSP lets its player fetch video from.
     pub remux_origins: Vec<String>,
+    /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
+    pub new_libraries: library::NewLibraries,
 }
 
 impl AppState {
@@ -98,6 +100,7 @@ impl AppState {
             relay_client: relay::client(),
             routes: Vec::new(),
             remux_origins: Vec::new(),
+            new_libraries: library::NewLibraries::Open,
         }
     }
 
@@ -153,6 +156,12 @@ async fn main() {
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.remux_origins = routes::remux_origins(&state.routes);
+    state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
+        library::NewLibraries::parse(&v).unwrap_or_else(|| {
+            eprintln!("NEW_LIBRARIES is {v:?}: expected open or members");
+            std::process::exit(1);
+        })
+    });
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -166,7 +175,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={} routes={}",
+         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={} routes={} new_libraries={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -178,6 +187,7 @@ async fn main() {
         state.access_origins.len(),
         state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
         state.routes.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
+        state.new_libraries.as_str(),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());
