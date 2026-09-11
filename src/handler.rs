@@ -122,6 +122,10 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         return bare_json(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large"));
     }
     let path = req.uri().path().to_owned();
+    let face = Face::of(state, &req);
+    if !face.serves(&path) {
+        return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -140,7 +144,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
+        "/config" => config(state, face),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(
@@ -157,6 +161,58 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
     }
+}
+
+/// Which half of den-edge a request's `Host` names (oxyc/den#15). The web app's public name sits behind
+/// Cloudflare Access and the device API's bypasses it, so each serves only its own half: without this the
+/// bypassed name would hand out the web app past Access, and the split would be decorative. Any other name —
+/// the LAN address, the tailnet's — serves both, as it always has.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Face {
+    Web,
+    Api,
+    Both,
+}
+
+impl Face {
+    fn of(state: &AppState, req: &Request) -> Face {
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).or_else(|| req.uri().host());
+        let named = |names: &[String]| host.is_some_and(|h| names.iter().any(|n| n.eq_ignore_ascii_case(h)));
+        if named(&state.web_hosts) {
+            Face::Web
+        } else if named(&state.api_hosts) {
+            Face::Api
+        } else {
+            Face::Both
+        }
+    }
+
+    /// `/health` and `/version` answer on every name; the device routes, `/config` and `/metrics` only where
+    /// devices call; the web app's files only where browsers load it.
+    fn serves(self, path: &str) -> bool {
+        let device = ["/link", "/inbox", "/pair/", "/sync/", "/lib/"].iter().any(|p| path.starts_with(p))
+            || matches!(path, "/config" | "/metrics");
+        match (self, path) {
+            (_, "/health" | "/version") | (Face::Both, _) => true,
+            (Face::Api, _) => device,
+            (Face::Web, _) => !device,
+        }
+    }
+}
+
+/// `GET /config`: the TV's kill-switch and update gate and, on every name but the public ones, `lan` — the
+/// addons' public origins mapped to their LAN addresses. A TV that reached den-edge on the LAN applies it and
+/// talks to the addons there; one that came in through the tunnel gets no map, and the internet gets no
+/// private addresses.
+fn config(state: &AppState, face: Face) -> Response {
+    if face != Face::Both || state.lan_map.is_empty() {
+        return raw_json(StatusCode::OK, Body::from(CONFIG), false);
+    }
+    let mut value: Value = serde_json::from_str(CONFIG).expect("CONFIG is JSON");
+    let lan: serde_json::Map<String, Value> =
+        state.lan_map.iter().map(|(public, lan)| (public.clone(), Value::from(lan.as_str()))).collect();
+    value["lan"] = Value::Object(lan);
+    bare_json(StatusCode::OK, &value)
 }
 
 /// A stable label per route, so a key in a path never becomes a metric label or a log field.
@@ -406,6 +462,68 @@ pub mod tests {
         assert_eq!(config["minSupportedVersion"], "0.1.0");
         assert_eq!(config["features"]["aiReco"], false);
         assert_eq!(h.call("GET", "/nope", None).await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// A harness serving a web app, with `d.oxy.fi` as its public name and `d-api.oxy.fi` as the device API's.
+    fn split_harness() -> Harness {
+        let mut h = Harness::new();
+        let web = temp_dir();
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html><title>Den</title>").unwrap();
+        let s = Arc::get_mut(&mut h.state).unwrap();
+        s.web_dir = Some(web);
+        s.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        s.api_hosts = crate::parse_hosts("API_HOSTS", " D-API.oxy.fi ,bad:8443");
+        s.lan_map = crate::parse_lan_map(
+            "https://d-scout.oxy.fi=http://192.168.86.193:8080, https://d-play.oxy.fi/=http://192.168.86.193:8080,nonsense",
+        );
+        h
+    }
+
+    #[tokio::test]
+    async fn each_public_name_serves_only_its_half() {
+        let h = split_harness();
+        let status = |host: &'static str, method: &'static str, path: &'static str| {
+            let h = &h;
+            async move { h.send(method, path, None, &[("host", host)]).await.status() }
+        };
+        // The web app's name: the app, and nothing of the device API.
+        assert_eq!(status("d.oxy.fi", "GET", "/").await, StatusCode::OK);
+        for path in ["/config", "/inbox/drain", "/lib/0123456789abcdef/changes", "/metrics"] {
+            assert_eq!(status("d.oxy.fi", "GET", path).await, StatusCode::NOT_FOUND, "{path} on d");
+        }
+        // The device API's name, however it is cased: the device routes, and never the app.
+        assert_eq!(status("D-Api.Oxy.Fi", "GET", "/").await, StatusCode::NOT_FOUND);
+        assert_eq!(status("d-api.oxy.fi", "GET", "/index.html").await, StatusCode::NOT_FOUND);
+        let lan_drain = status("192.168.86.193:8094", "GET", "/inbox/drain").await;
+        assert_ne!(lan_drain, StatusCode::NOT_FOUND, "the premise: the drain answers on the LAN");
+        assert_eq!(status("d-api.oxy.fi", "GET", "/inbox/drain").await, lan_drain);
+        // Both answer /health; any other name serves both halves, as before.
+        for host in ["d.oxy.fi", "d-api.oxy.fi", "192.168.86.193:8094"] {
+            assert_eq!(status(host, "GET", "/health").await, StatusCode::OK, "{host}");
+        }
+        assert_eq!(status("192.168.86.193:8094", "GET", "/").await, StatusCode::OK);
+        // A name with a port was refused when parsed, so it does not name the API half.
+        assert_eq!(status("bad:8443", "GET", "/").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_lan_map_is_published_only_off_the_public_names() {
+        let h = split_harness();
+        let config = |host: &'static str| {
+            let h = &h;
+            async move { body_json(h.send("GET", "/config", None, &[("host", host)]).await).await }
+        };
+        let lan = config("192.168.86.193:8094").await;
+        assert_eq!(lan["minSupportedVersion"], "0.1.0");
+        assert_eq!(
+            lan["lan"],
+            json!({"https://d-scout.oxy.fi": "http://192.168.86.193:8080", "https://d-play.oxy.fi": "http://192.168.86.193:8080"}),
+            "trailing slashes trimmed, the malformed pair skipped"
+        );
+        let public = config("d-api.oxy.fi").await;
+        assert_eq!(public["minSupportedVersion"], "0.1.0");
+        assert!(public.get("lan").is_none(), "no private addresses through the tunnel: {public}");
     }
 
     #[tokio::test]

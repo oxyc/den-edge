@@ -49,6 +49,16 @@ pub struct AppState {
     /// Proxies whose report of the visitor's address counts (env `TRUSTED_PROXIES`, comma-separated IPs):
     /// `cloudflared` and `tailscale serve` connect from their own address (`handler::client_ip`).
     pub trusted_proxies: Vec<std::net::IpAddr>,
+    /// The web app's public names (env `WEB_HOSTS`, comma-separated). They sit behind Cloudflare Access, and a
+    /// request for one gets the web app and none of the device API (`handler::Face`, oxyc/den#15).
+    pub web_hosts: Vec<String>,
+    /// The device API's public names (env `API_HOSTS`). They bypass Access, so a request for one gets the
+    /// device routes and never the web app — which would otherwise be handed out past Access.
+    pub api_hosts: Vec<String>,
+    /// Public origin → LAN origin (env `LAN_MAP`: `https://d-scout.oxy.fi=http://192.168.86.193:8080,…`),
+    /// published in `GET /config` on every name but the public ones: a TV that reaches den-edge on the LAN
+    /// then reaches the addons there too.
+    pub lan_map: Vec<(String, String)>,
 }
 
 impl AppState {
@@ -67,6 +77,9 @@ impl AppState {
             web_origins: Vec::new(),
             web_dir: None,
             trusted_proxies: Vec::new(),
+            web_hosts: Vec::new(),
+            api_hosts: Vec::new(),
+            lan_map: Vec::new(),
         }
     }
 
@@ -114,6 +127,9 @@ async fn main() {
         .unwrap_or_default();
     state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
     state.trusted_proxies = env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
+    state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
+    state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
+    state.lan_map = env_opt("LAN_MAP").map(|v| parse_lan_map(&v)).unwrap_or_default();
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -126,12 +142,16 @@ async fn main() {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
-        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={}",
+        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
+         web_hosts={} api_hosts={} lan_map={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
         on(state.log_requests),
         if state.web_origins.is_empty() { "none".to_owned() } else { state.web_origins.join(",") },
+        if state.web_hosts.is_empty() { "none".to_owned() } else { state.web_hosts.join(",") },
+        if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
+        state.lan_map.len(),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());
@@ -152,6 +172,50 @@ fn parse_proxies(value: &str) -> Vec<std::net::IpAddr> {
             let parsed = p.parse().ok();
             if parsed.is_none() {
                 eprintln!("TRUSTED_PROXIES: {p:?} is not an IP address — skipping it");
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// `WEB_HOSTS` / `API_HOSTS`: comma-separated host names, lower-cased, compared whole against a request's
+/// `Host`. An entry with a port, path or credentials is said and skipped: a name that matched differently from
+/// how it reads would make the split between the two halves a guess.
+fn parse_hosts(var: &str, value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .filter(|h| {
+            let ok = !h.contains(['/', ':', '@', '?', '#', ' ']);
+            if !ok {
+                eprintln!("{var}: {h:?} is not a bare host name — skipping it");
+            }
+            ok
+        })
+        .collect()
+}
+
+/// `LAN_MAP`: comma-separated `<public origin>=<LAN origin>` pairs, each side `http(s)://host[:port]` with no path.
+/// A malformed pair is said and skipped.
+fn parse_lan_map(value: &str) -> Vec<(String, String)> {
+    let origin = |o: &str| {
+        let o = o.trim().trim_end_matches('/').to_ascii_lowercase();
+        let ok = o.split_once("://").is_some_and(|(scheme, host)| {
+            matches!(scheme, "http" | "https")
+                && !host.is_empty()
+                && !host.contains(['/', '?', '#', '@', ' '])
+        });
+        ok.then_some(o)
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter_map(|pair| {
+            let parsed = pair.split_once('=').and_then(|(public, lan)| Some((origin(public)?, origin(lan)?)));
+            if parsed.is_none() {
+                eprintln!("LAN_MAP: {pair:?} is not <public origin>=<LAN origin> — skipping it");
             }
             parsed
         })
