@@ -248,8 +248,12 @@
 
   $effect(() => {
     untrack(() => void begin());
+    // The page behind stays put: it would otherwise scroll under a player that covers it.
+    const scrolls = [document.documentElement, document.body].map((el) => [el, el.style.overflow] as const);
+    for (const [el] of scrolls) el.style.overflow = 'hidden';
     addEventListener('pagehide', finish);
     return () => {
+      for (const [el, overflow] of scrolls) el.style.overflow = overflow;
       removeEventListener('pagehide', finish);
       finish();
     };

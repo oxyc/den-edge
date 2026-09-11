@@ -57,9 +57,23 @@ export async function login(key: string, fetchImpl: typeof fetch = fetch): Promi
   }
 }
 
+/**
+ * What den-remux said of each install offered as den-subtitles' — taken, or refused — so a later session offers the
+ * one it took first and never one it refused: each refusal is a request, and new sessions are rate-limited.
+ */
+const subtitleVerdicts = new Map<string, boolean>();
+
+/** Forget those verdicts (tests). */
+export function forgetSubtitles(): void {
+  subtitleVerdicts.clear();
+}
+
 export async function startSession(want: Want, fetchImpl: typeof fetch = fetch): Promise<Session | { failure: Failure }> {
   const { subtitles, subtitleLanguages, ...fields } = want;
-  const candidates: (string | undefined)[] = subtitleLanguages.length ? [...subtitles, undefined] : [undefined];
+  const offered = subtitles
+    .filter((install) => subtitleVerdicts.get(install) !== false)
+    .sort((a, b) => Number(subtitleVerdicts.get(b) === true) - Number(subtitleVerdicts.get(a) === true));
+  const candidates: (string | undefined)[] = subtitleLanguages.length ? [...offered, undefined] : [undefined];
   for (const candidate of candidates) {
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
@@ -72,9 +86,15 @@ export async function startSession(want: Want, fetchImpl: typeof fetch = fetch):
     } catch {
       return { failure: 'unreachable' };
     }
-    if (res.status === 201) return (await res.json()) as Session;
+    if (res.status === 201) {
+      if (candidate) subtitleVerdicts.set(candidate, true);
+      return (await res.json()) as Session;
+    }
     const error = await errorCode(res);
-    if (error === 'bad_subtitles') continue; // not den-subtitles: the next, or none
+    if (error === 'bad_subtitles' && candidate) {
+      subtitleVerdicts.set(candidate, false); // not den-subtitles: the next, or none
+      continue;
+    }
     return { failure: failureOf(res.status, error) };
   }
   return { failure: 'unreachable' };

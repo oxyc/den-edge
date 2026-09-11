@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { endSession, login, startSession, type Want } from './remux';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { endSession, forgetSubtitles, login, startSession, type Want } from './remux';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -19,6 +19,21 @@ const session = {
 const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 describe('startSession', () => {
+  beforeEach(forgetSubtitles);
+
+  it('remembers which addon is den-subtitles, so the next session offers only that one', async () => {
+    const offered: unknown[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      offered.push(body.subtitles);
+      return body.subtitles === want.subtitles[1] ? answer(201, session) : answer(400, { error: 'bad_subtitles' });
+    };
+    await startSession(want, fetchImpl);
+    offered.length = 0;
+    await startSession(want, fetchImpl);
+    expect(offered).toEqual([want.subtitles[1]]);
+  });
+
   it('tries each LAN addon as den-subtitles until one is, and sends what the page wants', async () => {
     const sent: Record<string, unknown>[] = [];
     const result = await startSession(want, async (_input, init) => {
