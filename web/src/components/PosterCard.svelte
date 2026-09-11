@@ -1,6 +1,8 @@
 <!-- A poster with its title — the one card every row uses (the TV's PosterCard). Posters come straight from
-     TMDB's image CDN, which needs no key. With `onselect` the whole card is a button. -->
+     TMDB's image CDN, which needs no key. With `onselect` the whole card is a button. A movie scout found nothing
+     to play for is faded, as on the TV. -->
 <script lang="ts">
+  import { availability } from '../lib/availability.svelte';
   import type { Title } from '../lib/library';
 
   let {
@@ -10,6 +12,8 @@
     onselect,
   }: { title: Title; caption?: string; progress?: number; onselect?: () => void } = $props();
   const poster = $derived(title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined);
+  const faded = $derived(availability.unavailable(title));
+  $effect(() => availability.want(title));
 </script>
 
 {#snippet body()}
@@ -33,15 +37,25 @@
 {/snippet}
 
 {#if onselect}
-  <button type="button" class="card pick" onclick={onselect}>{@render body()}</button>
+  <button type="button" class="card pick" class:faded onclick={onselect}>{@render body()}</button>
 {:else}
-  <figure class="card">{@render body()}</figure>
+  <figure class="card" class:faded>{@render body()}</figure>
 {/if}
 
 <style>
   .card {
     margin: 0;
     width: var(--card-w);
+  }
+
+  /* The TV's fade: dim, and less so under the pointer or focus so the card stays legible. */
+  .faded {
+    opacity: 0.5;
+  }
+
+  .faded:hover,
+  .faded:focus-visible {
+    opacity: 0.8;
   }
 
   .pick {

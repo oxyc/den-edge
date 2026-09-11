@@ -66,8 +66,22 @@ export function acceptsAddonURL(url: string): boolean {
     return false;
   }
   if (parsed.protocol === 'https:') return true;
-  if (parsed.protocol !== 'http:') return false;
-  const host = parsed.hostname;
+  return parsed.protocol === 'http:' && lanHost(parsed.hostname);
+}
+
+/** An http or https URL to a LAN host: an addon on the homelab, not a public one. */
+export function isLanURL(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && lanHost(parsed.hostname);
+}
+
+/** localhost, `*.local`, or an RFC 1918 address. */
+function lanHost(host: string): boolean {
   if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.local')) return true;
   const labels = host.split('.');
   if (labels.length !== 4 || !labels.every((label) => /^\d{1,3}$/.test(label) && Number(label) <= 255)) return false;

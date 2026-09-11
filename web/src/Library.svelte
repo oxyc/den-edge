@@ -34,7 +34,8 @@
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
-  import { isHidden, readApiKey, readPrefs } from './lib/prefs';
+  import { availability } from './lib/availability.svelte';
+  import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
@@ -68,6 +69,7 @@
       clock.see(opened.newestStamp());
       tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
       if (tmdbKey) void name(opened, tmdbKey);
+      void availability.connect(readPlugins(opened.settings('plugins')), tmdbKey);
     });
   });
 
