@@ -67,6 +67,10 @@ pub struct AppState {
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
     pub relay_client: relay::RelayClient,
+    /// Where the web app's player reaches den-remux when this origin has none (env `REMUX_ORIGIN`, the tailnet's
+    /// `https://pve.…:8443`): published in `/web-config` and allowed in the app's CSP. Video never goes through
+    /// den-edge or the tunnel (oxyc/den#15).
+    pub remux_origin: Option<String>,
 }
 
 impl AppState {
@@ -91,6 +95,7 @@ impl AppState {
             access_origins: Vec::new(),
             relays: Vec::new(),
             relay_client: relay::client(),
+            remux_origin: None,
         }
     }
 
@@ -144,6 +149,13 @@ async fn main() {
     state.access_origins =
         env_opt("ACCESS_ORIGINS").map(|v| parse_origins("ACCESS_ORIGINS", &v)).unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
+    state.remux_origin = env_opt("REMUX_ORIGIN").and_then(|v| {
+        let parsed = origin(&v);
+        if parsed.is_none() {
+            eprintln!("REMUX_ORIGIN: {v:?} is not http(s)://host[:port] — ignoring it");
+        }
+        parsed
+    });
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -157,7 +169,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={}",
+         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={} remux_origin={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -168,6 +180,7 @@ async fn main() {
         state.lan_map.len(),
         state.access_origins.len(),
         state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
+        state.remux_origin.as_deref().unwrap_or("none"),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());

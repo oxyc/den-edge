@@ -149,8 +149,10 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => config(state, face),
-        // The web app's counterpart to /config: which addon origins get the library's Access token.
-        "/web-config" => bare_json(StatusCode::OK, &json!({ "access": state.access_origins })),
+        // The web app's counterpart to /config: which addon origins are Den's, and where its player reaches den-remux.
+        "/web-config" => {
+            bare_json(StatusCode::OK, &json!({ "access": state.access_origins, "remux": state.remux_origin }))
+        }
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(
@@ -162,7 +164,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         p => match &state.web_dir {
             Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
-                crate::web::serve(dir, p).await
+                crate::web::serve(dir, p, state.remux_origin.as_deref()).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
@@ -498,6 +500,7 @@ pub mod tests {
             "ACCESS_ORIGINS",
             "https://d-scout.oxy.fi, https://D-ATLAS.oxy.fi/,x; img-src *",
         );
+        s.remux_origin = crate::origin("https://PVE.example:8443/");
         h
     }
 
@@ -507,10 +510,18 @@ pub mod tests {
         let config = h.send("GET", "/web-config", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(
             body_json(config).await,
-            json!({ "access": ["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"] })
+            json!({ "access": ["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"], "remux": "https://pve.example:8443" })
         );
         let on_api = h.send("GET", "/web-config", None, &[("host", "d-api.oxy.fi")]).await;
         assert_eq!(on_api.status(), StatusCode::NOT_FOUND);
+        // The player may reach den-remux there: its playlists and segments, and the video itself.
+        let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
+        let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
+        assert!(csp.contains("media-src 'self' blob: https://pve.example:8443;"), "{csp}");
+        assert!(
+            csp.contains("connect-src 'self' https://api.themoviedb.org https://pve.example:8443;"),
+            "{csp}"
+        );
     }
 
     /// A fake addon on a local port, answering with what it was sent — so a test sees what the relay passed on.

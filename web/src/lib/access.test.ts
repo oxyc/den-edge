@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { accessOrigins } from './access';
+import { webConfig } from './access';
 
-describe('accessOrigins', () => {
-  it('reads den-edge’s list, and is empty when it has none', async () => {
+describe('webConfig', () => {
+  it('reads den-edge’s addon origins and den-remux’s, and is empty when it has neither', async () => {
     const answer = (body: string, status = 200): typeof fetch => async () => new Response(body, { status });
-    expect(await accessOrigins(answer('{"access":["https://d-scout.oxy.fi",3]}'))).toEqual(new Set(['https://d-scout.oxy.fi']));
-    expect(await accessOrigins(answer('<!doctype html>'))).toEqual(new Set());
-    expect(await accessOrigins(answer('{}', 404))).toEqual(new Set());
+    expect(await webConfig(answer('{"access":["https://d-scout.oxy.fi",3],"remux":"https://pve.example:8443"}'))).toEqual({
+      access: new Set(['https://d-scout.oxy.fi']),
+      remux: 'https://pve.example:8443',
+    });
+    expect(await webConfig(answer('{"access":[],"remux":null}'))).toEqual({ access: new Set(), remux: null });
+    expect(await webConfig(answer('<!doctype html>'))).toEqual({ access: new Set(), remux: null });
+    expect(await webConfig(answer('{}', 404))).toEqual({ access: new Set(), remux: null });
   });
 });

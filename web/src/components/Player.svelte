@@ -16,6 +16,7 @@
     episode,
     tmdbKey,
     scout,
+    remux,
     subtitles,
     resume,
     next,
@@ -28,6 +29,8 @@
     episode?: number;
     tmdbKey: string;
     scout: Addon;
+    /** Where den-remux answers (`findRemux`): '' for this origin, else the tailnet's address. */
+    remux: string;
     /** The library's other LAN addons: den-subtitles is among them. */
     subtitles: string[];
     /** Where the library says this was left. */
@@ -105,7 +108,7 @@
       audio: [...navigator.languages],
       videoCodecs: videoCodecs(),
       ...pick,
-    });
+    }, undefined, remux);
     if (ended) {
       if (!('failure' in result)) endSession(result);
       return;
@@ -120,7 +123,7 @@
 
   async function letIn(event: SubmitEvent) {
     event.preventDefault();
-    const ok = await login(key.trim());
+    const ok = await login(key.trim(), undefined, remux);
     badKey = ok === false;
     if (ok === null) failure = 'unreachable';
     if (!ok) return;

@@ -42,19 +42,26 @@ export interface Want {
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
 
-/** Whether den-remux answers under this origin — the tailnet's `/remux`; the public web name has none (#15). */
-export async function remuxAnswers(fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  try {
-    return (await fetchImpl('/remux/login')).status === 405; // its POST-only route; the app shell would be a 200
-  } catch {
-    return false;
+/**
+ * Where den-remux answers for this page: the first of `bases` — '' for this origin, then the tailnet's address den-edge
+ * names (#15) — or null. The public web name has none of its own, and a browser off the tailnet reaches neither.
+ */
+export async function findRemux(bases: string[], fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  for (const base of bases) {
+    try {
+      // Its POST-only route answers a GET with 405; the app shell would be a 200.
+      if ((await fetchImpl(`${base}/remux/login`)).status === 405) return base;
+    } catch {
+      // Out of reach from here: off the tailnet, or no den-remux at all.
+    }
   }
+  return null;
 }
 
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */
-export async function login(key: string, fetchImpl: typeof fetch = fetch): Promise<boolean | null> {
+export async function login(key: string, fetchImpl: typeof fetch = fetch, base = ''): Promise<boolean | null> {
   try {
-    const res = await fetchImpl('/remux/login', {
+    const res = await fetchImpl(`${base}/remux/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ key }),
@@ -77,7 +84,12 @@ export function forgetSubtitles(): void {
   subtitleVerdicts.clear();
 }
 
-export async function startSession(want: Want, fetchImpl: typeof fetch = fetch): Promise<Session | { failure: Failure }> {
+/** A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. */
+export async function startSession(
+  want: Want,
+  fetchImpl: typeof fetch = fetch,
+  base = '',
+): Promise<Session | { failure: Failure }> {
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
     .filter((install) => subtitleVerdicts.get(install) !== false)
@@ -87,7 +99,7 @@ export async function startSession(want: Want, fetchImpl: typeof fetch = fetch):
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
     try {
-      res = await fetchImpl('/remux/session', {
+      res = await fetchImpl(`${base}/remux/session`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -97,7 +109,8 @@ export async function startSession(want: Want, fetchImpl: typeof fetch = fetch):
     }
     if (res.status === 201) {
       if (candidate) subtitleVerdicts.set(candidate, true);
-      return (await res.json()) as Session;
+      const session = (await res.json()) as Session;
+      return { ...session, playlist: base + session.playlist };
     }
     const error = await errorCode(res);
     if (error === 'bad_subtitles' && candidate) {

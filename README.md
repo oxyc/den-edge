@@ -14,7 +14,7 @@ the rest is small JSON it validates and bounds.
 | `GET /health` | `{"status":"ok"}` |
 | `GET /version` | `{"version"}` |
 | `GET /config` | the TV's kill-switch and update gate; `access` — the addon origins behind Cloudflare Access that get the library's service token (`ACCESS_ORIGINS`) — on every name; and `lan` — the addons' public origins mapped to their LAN addresses (`LAN_MAP`) — on every name but the public ones |
-| `GET /web-config` | the web app's counterpart to `/config`, served wherever the app is: `access`, the same list |
+| `GET /web-config` | the web app's counterpart to `/config`, served wherever the app is: `access`, the same list, and `remux`, where its player reaches den-remux (`REMUX_ORIGIN`) |
 | `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
 | `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes) |
 | `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
@@ -72,6 +72,7 @@ can reach den-edge can't fill the host's disk. A library holds at most 50,000 ro
 | `LAN_MAP` | unset | `<public origin>=<LAN origin>` pairs, comma-separated (`https://d-scout.oxy.fi=http://192.168.86.193:8080`), published as `GET /config`'s `lan` on every name but the public ones: a TV that reached den-edge on the LAN talks to the addons there too, and the internet is handed no private address |
 | `ACCESS_ORIGINS` | unset | the addons' public origins behind Cloudflare Access, comma-separated (`https://d-scout.oxy.fi,…`). TVs send the library's service token to these and nowhere else; published as `access` in `/config` and `/web-config` (the web app recognises install URLs on them as Den's own, and asks them through `ADDON_RELAY`) |
 | `ADDON_RELAY` | unset | `/<prefix>=<LAN origin>` pairs, comma-separated (`/scout=http://192.168.86.193:8080,/atlas=http://192.168.86.193:8081`). The web app asks its addons at `/<prefix>/…` on its own origin and den-edge fetches them at the LAN address: JSON only (GET, HEAD, POST), without the browser's cookies or headers, not on the `API_HOSTS` names. So the browser never holds the Access token, and needs no CORS past Access |
+| `REMUX_ORIGIN` | unset | where the web app's player reaches den-remux when this origin serves none (`https://pve.tailce93d3.ts.net:8443`, the tailnet): published as `remux` in `/web-config` and allowed in the app's `connect-src` and `media-src`. Video never goes through den-edge or the tunnel, so a browser off the tailnet gets no player |
 | `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address pairing limit reads `CF-Connecting-IP`, else the last `X-Forwarded-For` entry; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
 

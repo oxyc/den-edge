@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { endSession, forgetSubtitles, login, startSession, type Want } from './remux';
+import { endSession, findRemux, forgetSubtitles, login, startSession, type Want } from './remux';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -76,6 +76,33 @@ describe('startSession', () => {
     expect(await failing(503, 'transcode_unavailable')).toEqual({ failure: 'transcode' });
     expect(await failing(502, 'scout_unavailable')).toEqual({ failure: 'unreachable' });
     expect(await startSession(plain, async () => Promise.reject(new TypeError('offline')))).toEqual({ failure: 'unreachable' });
+  });
+});
+
+describe('findRemux', () => {
+  it('takes this origin first, then the tailnet’s address, and none when neither answers', async () => {
+    const answering = (bases: string[]): typeof fetch => async (input) => {
+      const url = String(input);
+      if (!bases.some((b) => url === `${b}/remux/login`)) throw new TypeError('unreachable');
+      return new Response('{}', { status: 405 });
+    };
+    const tailnet = 'https://pve.example:8443';
+    expect(await findRemux(['', tailnet], answering(['', tailnet]))).toBe('');
+    expect(await findRemux(['', tailnet], answering([tailnet]))).toBe(tailnet);
+    expect(await findRemux(['', tailnet], answering([]))).toBeNull();
+    const shell: typeof fetch = async () => new Response('<!doctype html>', { status: 200 });
+    expect(await findRemux([''], shell), 'the app shell is not den-remux').toBeNull();
+  });
+
+  it('starts a session there and hands back a playlist this page can play', async () => {
+    const tailnet = 'https://pve.example:8443';
+    let asked = '';
+    const result = await startSession({ ...want, subtitleLanguages: [] }, async (input) => {
+      asked = String(input);
+      return answer(201, session);
+    }, tailnet);
+    expect(asked).toBe(`${tailnet}/remux/session`);
+    expect(result).toMatchObject({ playlist: `${tailnet}/remux/s/sid/sig/master.m3u8` });
   });
 });
 
