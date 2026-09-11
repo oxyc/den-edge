@@ -8,11 +8,20 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct Metrics {
     requests: Mutex<BTreeMap<(&'static str, u16), u64>>,
+    /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
+    /// over rows (or one keeps writing from an old base).
+    library_writes: Mutex<(u64, u64)>,
 }
 
 impl Metrics {
     pub fn record(&self, route: &'static str, status: u16) {
         *lock(&self.requests).entry((route, status)).or_default() += 1;
+    }
+
+    pub fn record_library_writes(&self, applied: usize, conflicts: usize) {
+        let mut counts = lock(&self.library_writes);
+        counts.0 += applied as u64;
+        counts.1 += conflicts as u64;
     }
 
     pub fn render(&self) -> String {
@@ -26,6 +35,13 @@ impl Metrics {
         for ((route, status), n) in lock(&self.requests).iter() {
             out.push_str(&format!("den_edge_requests_total{{route=\"{route}\",status=\"{status}\"}} {n}\n"));
         }
+        let (applied, conflicts) = *lock(&self.library_writes);
+        out.push_str(&format!(
+            "# HELP den_edge_library_writes_total Record-log writes, applied or refused as stale.\n\
+             # TYPE den_edge_library_writes_total counter\n\
+             den_edge_library_writes_total{{outcome=\"applied\"}} {applied}\n\
+             den_edge_library_writes_total{{outcome=\"conflict\"}} {conflicts}\n"
+        ));
         out
     }
 }

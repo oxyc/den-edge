@@ -170,6 +170,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             eprintln!("library compaction: {e}");
         }
     }
+    state.metrics.record_library_writes(applied.len(), conflicts.len());
     json_reply(StatusCode::OK, &json!({ "head": head, "applied": applied, "conflicts": conflicts }))
 }
 
@@ -360,6 +361,16 @@ mod tests {
             json!([{ "k": K1, "seq": 2, "v": "merged" }]),
             "only what changed after 1"
         );
+    }
+
+    #[tokio::test]
+    async fn applied_and_stale_writes_are_counted_for_metrics() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "a" }, { "k": K2, "base": 0, "v": "b" }])).await;
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "stale" }])).await;
+        let text = h.state.metrics.render();
+        assert!(text.contains(r#"den_edge_library_writes_total{outcome="applied"} 2"#), "{text}");
+        assert!(text.contains(r#"den_edge_library_writes_total{outcome="conflict"} 1"#), "{text}");
     }
 
     #[tokio::test]
