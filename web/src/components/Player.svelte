@@ -1,11 +1,12 @@
 <!-- Playback in this browser through den-remux: the title's release as HLS, played natively where the browser can
-     (Safari, and so AirPlay) and through hls.js elsewhere. Starts where the library says, and reports where it got
-     to every minute, on pause and on close. A browser den-remux doesn't know yet is asked for its key once. -->
+     (Safari, and so AirPlay) and through hls.js elsewhere. The browser's own controls do the transport; the bars
+     around the video carry what Den adds — the audio language, the next episode, and waiting for a free slot. Starts
+     where the library says, and reports where it got to every minute, on pause and on close. -->
 <script lang="ts">
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
-  import { endSession, login, startSession, type Failure, type Session } from '../lib/remux';
+  import { endSession, login, startSession, type AudioTrack, type Failure, type Session } from '../lib/remux';
   import type { Scout } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
 
@@ -17,7 +18,9 @@
     scout,
     subtitles,
     resume,
+    next,
     onprogress,
+    onnext,
     onclose,
   }: {
     title: Title;
@@ -29,18 +32,28 @@
     subtitles: string[];
     /** Where the library says this was left. */
     resume: { fraction: number; seconds?: number };
+    /** The episode after this one, as `S2 · E4`, when there is one. */
+    next?: string;
     onprogress: (fraction: number, seconds: number) => void;
+    onnext?: () => void;
     onclose: () => void;
   } = $props();
 
   const REPORT_MS = 60_000;
-  const messages: Record<Exclude<Failure, 'login'> | 'imdb' | 'unsupported', string> = {
+  /** How long before asking again while every slot, or the GPU, is taken. */
+  const RETRY_MS = 20_000;
+  /** Seconds the next episode waits once this one has ended. */
+  const UP_NEXT_SECS = 10;
+  const messages: Record<'none' | 'unreachable' | 'imdb' | 'unsupported', string> = {
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
-    busy: 'Two things are already playing through Den. Stop one and try again.',
-    transcode: 'This one needs converting for this browser, and the homelab is busy converting another. Try again in a few minutes.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
+  };
+  /** Waiting on den-remux, which is asked again every RETRY_MS. */
+  const waits: Record<'busy' | 'transcode', string> = {
+    busy: 'Den is already playing two things. Waiting for one to stop…',
+    transcode: 'This needs converting for this browser, and the homelab is converting another. Waiting for it to finish…',
   };
 
   let video = $state<HTMLVideoElement>();
@@ -48,19 +61,38 @@
   let failure = $state<Failure | 'imdb' | 'unsupported' | null>(null);
   let key = $state('');
   let badKey = $state(false);
+  /** Seconds until the next episode starts, once this one has ended. */
+  let upNext = $state<number | null>(null);
+  let imdb: string | undefined;
   let hls: Hls | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let countdown: ReturnType<typeof setInterval> | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
   let reported = -1;
   let ended = false;
+  /** Where the next session starts: a language switch picks up where the last one was. */
+  let startAt: number | null = null;
 
   const heading = $derived(season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title);
+  const names = (() => {
+    try {
+      return new Intl.DisplayNames([navigator.language], { type: 'language' });
+    } catch {
+      return null;
+    }
+  })();
 
-  async function begin() {
+  /** Start a session: the release den-remux picks, or — with `pick` — the same release in another audio track. */
+  async function begin(pick?: { audioTrack: number; filename: string }) {
+    clearTimeout(retry);
     failure = null;
-    const imdb = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
     if (!imdb) {
-      failure = imdb === null ? 'imdb' : 'unreachable';
-      return;
+      const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
+      if (!found) {
+        failure = found === null ? 'imdb' : 'unreachable';
+        return;
+      }
+      imdb = found;
     }
     const languages = [...new Set(navigator.languages.map((l) => l.split('-')[0]!.toLowerCase()))];
     const result = await startSession({
@@ -72,12 +104,17 @@
       subtitleLanguages: languages.slice(0, 2),
       audio: [...navigator.languages],
       videoCodecs: videoCodecs(),
+      ...pick,
     });
-    if ('failure' in result) {
-      failure = result.failure;
+    if (ended) {
+      if (!('failure' in result)) endSession(result);
       return;
     }
-    if (ended) return endSession(result);
+    if ('failure' in result) {
+      failure = result.failure;
+      if (result.failure === 'busy' || result.failure === 'transcode') retry = setTimeout(() => void begin(pick), RETRY_MS);
+      return;
+    }
     session = result;
   }
 
@@ -106,7 +143,7 @@
       return;
     }
     void import('hls.js').then(({ default: Hls }) => {
-      if (ended) return;
+      if (ended || session !== current) return;
       if (!Hls.isSupported()) {
         failure = 'unsupported';
         return;
@@ -122,11 +159,12 @@
     return session?.duration ?? 0;
   }
 
-  /** Pick up where it was left, unless that was the very start or the credits. */
-  function seekToResume() {
+  /** Pick up where it was left — or where the last session was — unless that was the very start or the credits. */
+  function seekToStart() {
     const total = length();
     if (!video || !total) return;
-    const at = resume.seconds ?? resume.fraction * total;
+    const at = startAt ?? resume.seconds ?? resume.fraction * total;
+    startAt = null;
     if (at > 5 && at / total < 0.95) video.currentTime = at;
   }
 
@@ -149,10 +187,55 @@
     report();
   }
 
+  /** The end: count down to the next episode, when there is one. */
+  function finished() {
+    report();
+    if (!onnext) return;
+    upNext = UP_NEXT_SECS;
+    countdown = setInterval(() => {
+      upNext = (upNext ?? 1) - 1;
+      if (upNext > 0) return;
+      stay();
+      onnext?.();
+    }, 1000);
+  }
+
+  function stay() {
+    clearInterval(countdown);
+    upNext = null;
+  }
+
+  /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
+  function switchAudio(event: Event) {
+    const n = Number((event.currentTarget as HTMLSelectElement).value);
+    if (!session || !video || n === session.audioTrack) return;
+    report();
+    startAt = video.currentTime;
+    const pick = { audioTrack: n, filename: session.release.filename };
+    hls?.destroy();
+    hls = undefined;
+    endSession(session);
+    session = null;
+    void begin(pick);
+  }
+
+  function trackLabel(track: AudioTrack, n: number): string {
+    let language: string | undefined;
+    try {
+      language = track.language ? (names?.of(track.language) ?? track.language) : undefined;
+    } catch {
+      language = track.language ?? undefined;
+    }
+    const channels = track.channels === 6 ? ' 5.1' : track.channels === 8 ? ' 7.1' : '';
+    return `${language ?? track.name ?? `Track ${n + 1}`}${channels}${track.commentary ? ' · commentary' : ''}`;
+  }
+
   function finish() {
     if (ended) return;
     ended = true;
     clearInterval(timer);
+    clearInterval(countdown);
+    clearTimeout(retry);
     report();
     hls?.destroy();
     if (session) endSession(session);
@@ -191,6 +274,8 @@
         <button class="primary" disabled={!key.trim()}>Let this browser in</button>
         {#if badKey}<p class="error" role="alert">That isn’t one of the homelab’s browser keys.</p>{/if}
       </form>
+    {:else if failure === 'busy' || failure === 'transcode'}
+      <p class="note" role="status">{waits[failure]}</p>
     {:else if failure}
       <p class="error" role="alert">{messages[failure]}</p>
     {:else if !session}
@@ -202,17 +287,45 @@
         controls
         autoplay
         playsinline
-        onloadedmetadata={seekToResume}
+        onloadedmetadata={seekToStart}
         onplay={playing}
         onpause={paused}
-        onended={report}
+        onended={finished}
       ></video>
     {/if}
   </div>
   {#if session}
-    <p class="release">
-      {session.release.label}{session.video?.transcoded ? ' · converted to H.264 for this browser' : ''}
-    </p>
+    <footer>
+      <p class="release">
+        {session.release.label}{session.video?.transcoded ? ' · converted to H.264 for this browser' : ''}
+      </p>
+      <div class="controls">
+        {#if session.audioTracks.length > 1}
+          <label>
+            Audio
+            <select value={session.audioTrack} onchange={switchAudio}>
+              {#each session.audioTracks as track, n (n)}
+                <option value={n}>{trackLabel(track, n)}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        {#if onnext && next}
+          {#if upNext !== null}
+            <button
+              class="primary"
+              onclick={() => {
+                stay();
+                onnext();
+              }}>Next: {next} ({upNext})</button
+            >
+            <button onclick={stay}>Stay</button>
+          {:else}
+            <button onclick={onnext}>Next: {next}</button>
+          {/if}
+        {/if}
+      </div>
+    </footer>
   {/if}
 </div>
 
@@ -246,15 +359,20 @@
     white-space: nowrap;
   }
 
-  header button,
-  .primary {
+  button,
+  select {
     flex: 0 0 auto;
     padding: 8px 16px;
     border: 1px solid rgb(255 255 255 / 0.4);
     border-radius: 999px;
     background: none;
     color: #fff;
+    font: inherit;
     cursor: pointer;
+  }
+
+  select option {
+    color: initial;
   }
 
   .primary {
@@ -297,14 +415,41 @@
     color: #fff;
   }
 
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 12px;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  label {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    color: rgb(255 255 255 / 0.6);
+    font-size: 14px;
+  }
+
   .note,
   .release {
+    max-width: 50ch;
     color: rgb(255 255 255 / 0.6);
+    text-align: center;
   }
 
   .release {
-    margin: 12px 0 0;
+    margin: 0;
     font-size: 14px;
+    text-align: left;
   }
 
   .error {

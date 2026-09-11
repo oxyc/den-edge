@@ -10,6 +10,16 @@ export interface Session {
   duration: number;
   release: { label: string; filename: string; size: number };
   video?: { codec: string; transcoded: boolean };
+  /** The audio track playing, by index into `audioTracks`: one per session, re-encoded to AAC. */
+  audioTrack: number;
+  audioTracks: AudioTrack[];
+}
+
+export interface AudioTrack {
+  language?: string | null;
+  name?: string | null;
+  channels: number;
+  commentary: boolean;
 }
 
 export interface Want {
@@ -25,6 +35,9 @@ export interface Want {
   audio: string[];
   /** What this browser decodes: `h264`, and `hevc` when it can. */
   videoCodecs: string[];
+  /** Another track of an earlier session's release: its index there, and that release's filename. */
+  audioTrack?: number;
+  filename?: string;
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';

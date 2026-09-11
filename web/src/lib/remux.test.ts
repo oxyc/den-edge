@@ -9,7 +9,13 @@ const want: Want = {
   audio: ['en-US'],
   videoCodecs: ['h264'],
 };
-const session = { playlist: '/remux/s/sid/sig/master.m3u8', duration: 7200, release: { label: '1080p', filename: 'f.mkv', size: 1 } };
+const session = {
+  playlist: '/remux/s/sid/sig/master.m3u8',
+  duration: 7200,
+  release: { label: '1080p', filename: 'f.mkv', size: 1 },
+  audioTrack: 0,
+  audioTracks: [{ language: 'eng', name: null, channels: 6, commentary: false }],
+};
 const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 describe('startSession', () => {
@@ -35,6 +41,15 @@ describe('startSession', () => {
     expect(result).toEqual(session);
     expect(sent.at(-1)).not.toHaveProperty('subtitles');
     expect(sent.at(-1)).not.toHaveProperty('subtitleLanguages');
+  });
+
+  it('asks for another track of the same release', async () => {
+    let sent: Record<string, unknown> = {};
+    await startSession({ ...want, subtitleLanguages: [], audioTrack: 1, filename: 'f.mkv' }, async (_input, init) => {
+      sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return answer(201, session);
+    });
+    expect(sent).toMatchObject({ audioTrack: 1, filename: 'f.mkv' });
   });
 
   it('says why a session could not start', async () => {

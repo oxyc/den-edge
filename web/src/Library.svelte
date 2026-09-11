@@ -28,6 +28,8 @@
     applyLog,
     continueWatching,
     emptyLibrary,
+    episodeAfter,
+    isAired,
     titleKey,
     untitled,
     watchlist,
@@ -176,10 +178,36 @@
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
   }
 
-  /** Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. */
+  /**
+   * Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. A series with
+   * no episode named picks up where Continue Watching would, or starts at the beginning.
+   */
   const playHere = $derived(
-    scout && tmdbKey ? (title: Title, season?: number, episode?: number) => (playing = { title, season, episode }) : undefined,
+    scout && tmdbKey
+      ? (title: Title, season?: number, episode?: number) => {
+          if (title.type === 'tv' && (season === undefined || episode === undefined)) {
+            const up = library && continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode;
+            playing = { title, ...(up ?? { season: 1, episode: 1 }) };
+          } else {
+            playing = { title, season, episode };
+          }
+        }
+      : undefined,
   );
+
+  /** The aired episode after the one playing, from the series' season layout; none after a movie or the last. */
+  let following = $state<Target | null>(null);
+  $effect(() => {
+    const target = playing;
+    following = null;
+    if (!target || target.season === undefined || target.episode === undefined) return;
+    const at = { season: target.season, episode: target.episode };
+    void (async () => {
+      const shape = shapes.get(titleKey(target.title)) ?? (await fetchDetails(target.title, tmdbKey))?.shape;
+      const next = shape && episodeAfter(at, shape);
+      if (playing === target && next && isAired(next, shape.lastAired)) following = { title: target.title, ...next };
+    })();
+  });
 
   function progressOf(target: Target) {
     const { title, season, episode } = target;
@@ -378,17 +406,22 @@
 
 {#if playing && scout}
   {@const target = playing}
-  <Player
-    title={target.title}
-    season={target.season}
-    episode={target.episode}
-    {tmdbKey}
-    {scout}
-    subtitles={lanInstalls(plugins, scout)}
-    resume={resumePoint(target)}
-    onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
-    onclose={() => (playing = null)}
-  />
+  {@const after = following}
+  {#key `${titleKey(target.title)}:${target.season}:${target.episode}`}
+    <Player
+      title={target.title}
+      season={target.season}
+      episode={target.episode}
+      {tmdbKey}
+      {scout}
+      subtitles={lanInstalls(plugins, scout)}
+      resume={resumePoint(target)}
+      next={after ? `S${after.season} · E${after.episode}` : undefined}
+      onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
+      onnext={after ? () => (playing = after) : undefined}
+      onclose={() => (playing = null)}
+    />
+  {/key}
 {/if}
 
 <style>

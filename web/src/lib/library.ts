@@ -164,7 +164,7 @@ export function watchlist(library: Library): Title[] {
 }
 
 /** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
-function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
+export function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
   const seasons = [...shape.counts.entries()].sort(([a], [b]) => (a === 0 ? Infinity : a) - (b === 0 ? Infinity : b));
   const index = seasons.findIndex(([season]) => season === at.season);
   if (index < 0) return undefined;
@@ -173,7 +173,7 @@ function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
   return next ? { season: next[0], episode: 1 } : undefined;
 }
 
-function isAired(at: { season: number; episode: number }, lastAired: Shape['lastAired']): boolean {
+export function isAired(at: { season: number; episode: number }, lastAired: Shape['lastAired']): boolean {
   if (!lastAired || lastAired.season <= 0) return true;
   return at.season < lastAired.season || (at.season === lastAired.season && at.episode <= lastAired.episode);
 }

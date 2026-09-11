@@ -41,7 +41,7 @@
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
     onplay: (title: Title) => void;
-    /** Play in this browser: a movie, or one episode of a series. None when this browser can't. */
+    /** Play in this browser: a movie, a series where it picks up, or one episode. None when this browser can't. */
     onplayhere?: (title: Title, season?: number, episode?: number) => void;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     onselect: (title: Title) => void;
@@ -123,7 +123,7 @@
     onseen={(on) => onseen(d.title, on)}
     onreact={(reaction) => onreact(d.title, reaction)}
     onplay={() => onplay(d.title)}
-    onplayhere={onplayhere && d.title.type === 'movie' ? () => onplayhere(d.title) : undefined}
+    onplayhere={onplayhere ? () => onplayhere(d.title) : undefined}
   />
   {#if d.overview}<p class="overview">{d.overview}</p>{/if}
 
