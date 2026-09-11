@@ -498,12 +498,20 @@
     cursor: pointer;
   }
 
-  /* The title takes the width; closing is one glyph, as it is on the pickers. */
+  /* The title takes the width; closing is one glyph, as it is on the pickers. No ring around it: it sits beside
+     the title rather than among the controls, and a bordered circle reads heavier than what it does. */
   .close {
     display: grid;
     place-items: center;
     width: 44px;
     padding: 0;
+    border-color: transparent;
+  }
+
+  .close .icon {
+    width: 22px;
+    height: 22px;
+    opacity: 0.85;
   }
 
   /* Where the browser draws the open menu itself, on its own ground. */
@@ -610,6 +618,14 @@
     max-width: 18rem;
     min-height: 44px;
     padding: 0 14px;
+  }
+
+  /* One picker on a phone gets the row to itself, filling it: at 18rem it sat just short of the width, pushed
+     against the right edge. Wider, the row is shared with the release line and 18rem is the right size again. */
+  @media (max-width: 40rem) {
+    .controls > .pick:only-child {
+      max-width: none;
+    }
   }
 
   .pick .value {
