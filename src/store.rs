@@ -103,7 +103,11 @@ impl Store {
     }
 
     pub async fn delete(&self, ns: &str, key: &str) -> io::Result<()> {
-        let path = self.path(ns, key, "json");
+        self.delete_file(ns, key, "json").await
+    }
+
+    pub async fn delete_file(&self, ns: &str, key: &str, ext: &str) -> io::Result<()> {
+        let path = self.path(ns, key, ext);
         let old = file_len(&path).await;
         match tokio::fs::remove_file(path).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),

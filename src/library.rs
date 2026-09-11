@@ -7,8 +7,9 @@
 //!
 //!   POST /lib/{id}/batch  { writes: [{ k, base, v }] } → { head, applied: [{ k, seq }], conflicts: [{ k, seq, v }] }
 //!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more }
+//!   DELETE /lib/{id}                                   → { deleted: true }
 //!
-//! Both carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
+//! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
 //! every later request must match it. A library nobody has written is a 404.
 //!
 //! On disk a library is one append-only log, `lib/<sha256(id)>.log`: a line with the token's hash, then a
@@ -76,9 +77,10 @@ struct Write {
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let path = req.uri().path().to_owned();
-    let Some((id, action)) = path.strip_prefix("/lib/").and_then(|rest| rest.split_once('/')) else {
+    let Some(rest) = path.strip_prefix("/lib/") else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
+    let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
     if !valid_hex_id(id) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_library_id"));
     }
@@ -101,9 +103,30 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .clamp(1, MAX_LIMIT);
             changes(state, id, token_hash, since, limit).await
         }
-        ("batch" | "changes", _) => method_not_allowed(),
+        ("", Method::DELETE) => forget(state, id, token_hash).await,
+        ("batch" | "changes" | "", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
+}
+
+/// The library's owner ends it — a rekey moved the library to a new key (issue #8, audit #2). Its log and rows
+/// are gone, and the next write to the id starts a new library.
+async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
+    let mut libs = state.libraries.lock().await;
+    if let Err(e) = load(state, &mut libs, id).await {
+        return internal("library read", e);
+    }
+    let Some(lib) = libs.get(id) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    if !constant_time_eq(&lib.token_hash, &token_hash) {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    if let Err(e) = state.store.delete_file(NS, id, EXT).await {
+        return internal("library delete", e);
+    }
+    libs.remove(id);
+    json_reply(StatusCode::OK, &json!({ "deleted": true }))
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
@@ -313,12 +336,34 @@ mod tests {
         (status, body_json(resp).await)
     }
 
+    async fn delete(h: &Harness, token: &str) -> StatusCode {
+        h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", token)]).await.status()
+    }
+
     async fn changes(h: &Harness, token: &str, query: &str) -> (StatusCode, Value) {
         let resp = h
             .send("GET", &format!("/lib/{LIB}/changes{query}"), None, &[("x-den-library-token", token)])
             .await;
         let status = resp.status();
         (status, body_json(resp).await)
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_deletes_a_library_and_its_id_then_starts_over() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        assert_eq!(delete(&h, "someone-else").await, StatusCode::FORBIDDEN);
+        assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(delete(&h, TOKEN).await, StatusCode::NOT_FOUND);
+
+        // Gone from disk too: a fresh start doesn't bring it back, and a new writer sets a new token.
+        let reopened = Harness::in_dir(h.dir.clone());
+        let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "n1" }] }).to_string();
+        let resp = reopened
+            .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", "new-token")])
+            .await;
+        assert_eq!(body_json(resp).await["head"], 1);
     }
 
     #[tokio::test]

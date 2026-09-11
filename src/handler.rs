@@ -187,6 +187,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/sync/") => "/sync/:id",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
+        p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         _ => "other",
     }
 }
@@ -205,7 +206,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => {
             Some(POST)
         }
-        "/link" | "/pair/:sid" => Some(DELETE),
+        "/link" | "/pair/:sid" | "/lib/:id" => Some(DELETE),
         _ => None,
     }
 }
