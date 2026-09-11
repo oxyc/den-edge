@@ -3,7 +3,7 @@
 //! read from a LAN `http` manifest. Whole-list last-writer-wins with a version counter. Never written means
 //! 404, so a reader keeps its own list; `addons: []` is a real, empty list.
 //!
-//!   GET /plugins   (x-den-link, or ?inboxKey=)                     → { addons, version } | 404
+//!   GET /plugins   (x-den-link)                                    → { addons, version } | 404
 //!   PUT /plugins   (x-den-link, or a body inboxKey) { addons: [url | { url, name?, resources? }] } → { version }
 
 use crate::handler::{
@@ -128,7 +128,8 @@ mod tests {
     }
 
     async fn get(h: &Harness) -> (StatusCode, Value) {
-        h.call("GET", &format!("/plugins?inboxKey={KEY}"), None).await
+        let resp = h.send("GET", "/plugins", None, &[("x-den-link", KEY)]).await;
+        (resp.status(), crate::handler::tests::body_json(resp).await)
     }
 
     #[tokio::test]
@@ -180,7 +181,15 @@ mod tests {
         let many: Vec<String> = (0..101).map(|i| format!("https://a{i}.example/manifest.json")).collect();
         assert_eq!(put(&h, json!(many)).await.0, StatusCode::BAD_REQUEST);
         assert_eq!(put(&h, json!("not a list")).await.0, StatusCode::BAD_REQUEST);
-        assert_eq!(h.call("GET", "/plugins?inboxKey=nope!", None).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            h.send("GET", "/plugins", None, &[("x-den-link", "nope!")]).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            h.call("GET", &format!("/plugins?inboxKey={KEY}"), None).await.0,
+            StatusCode::BAD_REQUEST,
+            "a key in the URL is not read"
+        );
         let junk = json!({ "inboxKey": "nope!", "addons": [] });
         assert_eq!(h.call("PUT", "/plugins", Some(junk)).await.0, StatusCode::BAD_REQUEST);
     }

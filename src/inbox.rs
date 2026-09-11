@@ -183,8 +183,8 @@ mod tests {
     }
 
     async fn drain(h: &Harness) -> Vec<Value> {
-        let (_, body) = h.call("GET", &format!("/inbox/drain?inboxKey={KEY}"), None).await;
-        body["messages"].as_array().unwrap().clone()
+        let resp = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
+        crate::handler::tests::body_json(resp).await["messages"].as_array().unwrap().clone()
     }
 
     #[tokio::test]
@@ -277,9 +277,8 @@ mod tests {
         let drained = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
         let messages = crate::handler::tests::body_json(drained).await["messages"].clone();
         assert_eq!(messages, json!([{ "type": "tmdbKey", "key": "k" }]));
-        let junk =
-            h.send("GET", "/inbox/drain?inboxKey=abcdef0123456789", None, &[("x-den-link", "nope")]).await;
-        assert_eq!(junk.status(), StatusCode::BAD_REQUEST, "a header wins over the query");
+        let query = h.send("GET", &format!("/inbox/drain?inboxKey={KEY}"), None, &[]).await;
+        assert_eq!(query.status(), StatusCode::BAD_REQUEST, "a key in the URL is not read");
     }
 
     #[tokio::test]
@@ -287,11 +286,10 @@ mod tests {
         let h = Harness::new();
         let body = json!({ "inboxKey": "not a key!", "message": { "type": "tmdbKey", "key": "k" } });
         assert_eq!(h.call("POST", "/inbox/append", Some(body)).await.0, StatusCode::BAD_REQUEST);
-        assert_eq!(h.call("GET", "/inbox/drain?inboxKey=short", None).await.0, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            h.call("GET", "/inbox/drain?inboxKey=abcdef0123456789", None).await,
-            (StatusCode::OK, json!({ "messages": [] }))
-        );
+        let short = h.send("GET", "/inbox/drain", None, &[("x-den-link", "short")]).await;
+        assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+        let empty = h.send("GET", "/inbox/drain", None, &[("x-den-link", "abcdef0123456789")]).await;
+        assert_eq!(crate::handler::tests::body_json(empty).await, json!({ "messages": [] }));
         assert_eq!(h.call("GET", "/inbox/append", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
     }
 

@@ -4,7 +4,7 @@
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -22,6 +22,8 @@ const CONFIG: &str = r#"{"minSupportedVersion":"0.1.0","recommendedVersion":"0.1
 
 pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let started = Instant::now();
+    // In the answer and in the log line, so a device's report can be matched to this request.
+    let rid = crate::hex(&crate::random_bytes::<8>());
     let method = req.method().clone();
     let route = route_label(req.uri().path());
     let origin = allowed_origin(&state, &req);
@@ -43,15 +45,46 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     if !state.web_origins.is_empty() {
         resp.headers_mut().append(header::VARY, HeaderValue::from_static("origin"));
     }
-    if let Ok(id) = HeaderValue::from_str(&crate::hex(&crate::random_bytes::<8>())) {
+    harden(resp.headers_mut());
+    if let Ok(id) = HeaderValue::from_str(&rid) {
         resp.headers_mut().insert("x-request-id", id);
     }
     let status = resp.status().as_u16();
     state.metrics.record(route, status);
     if state.log_requests {
-        eprintln!("{method} {route} {status} {}ms", started.elapsed().as_millis());
+        eprintln!("{method} {route} {status} {}ms rid={rid}", started.elapsed().as_millis());
     }
     resp
+}
+
+/// What every answer carries, for the day one is opened as a page or embedded elsewhere: no type sniffing, no
+/// referrer (a TMDB image request would otherwise carry this host's name), this origin only, and none of the
+/// powerful browser features. An API answer is data, so it also gets a policy under which, rendered, it can do
+/// nothing. A page's own policy (the web app's, the companion page's) is left as it is.
+fn harden(headers: &mut HeaderMap) {
+    for (name, value) in [
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"),
+        (HeaderName::from_static("cross-origin-opener-policy"), "same-origin"),
+        (HeaderName::from_static("cross-origin-resource-policy"), "same-origin"),
+        (
+            HeaderName::from_static("permissions-policy"),
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        ),
+    ] {
+        if !headers.contains_key(&name) {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    }
+    let is_json =
+        headers.get(header::CONTENT_TYPE).is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    if is_json && !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+        );
+    }
 }
 
 /// The request's `Origin` when it is one of `WEB_ORIGINS` — the Den web app, which the browser serves from
@@ -68,7 +101,7 @@ fn preflight() -> Response {
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = StatusCode::NO_CONTENT;
     let headers = resp.headers_mut();
-    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST, DELETE"));
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static("content-type, x-den-link, x-den-library-token"),
@@ -137,6 +170,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/metrics" => "/metrics",
         "/plugins" => "/plugins",
         "/settings" => "/settings",
+        "/link" => "/link",
         "/link/new" => "/link/new",
         "/link/claim" => "/link/claim",
         "/link/poll" => "/link/poll",
@@ -153,12 +187,16 @@ pub fn route_label(path: &str) -> &'static str {
 fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET: &[Method] = &[Method::GET];
     const GET_PUT: &[Method] = &[Method::GET, Method::PUT];
+    const GET_PUT_DELETE: &[Method] = &[Method::GET, Method::PUT, Method::DELETE];
     const POST: &[Method] = &[Method::POST];
+    const DELETE: &[Method] = &[Method::DELETE];
     match route {
         "/health" | "/version" | "/config" | "/metrics" | "/app" | "/link/poll" | "/inbox/drain"
         | "/lib/:id/changes" => Some(GET),
-        "/plugins" | "/settings" | "/sync/:id" => Some(GET_PUT),
+        "/plugins" | "/settings" => Some(GET_PUT),
+        "/sync/:id" => Some(GET_PUT_DELETE),
         "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" => Some(POST),
+        "/link" => Some(DELETE),
         _ => None,
     }
 }
@@ -243,15 +281,15 @@ pub fn query_param(req: &Request, name: &str) -> Option<String> {
 }
 
 /// The link's inbox key from the `x-den-link` header. A header keeps the key out of URLs, which end up in
-/// logs, proxies and history; the query and body forms older clients send still work (`link_key`, and each
-/// body's `inboxKey`).
+/// logs, proxies and history — a CDN's included — so the `?inboxKey=` form older clients sent is no longer
+/// read. A body's `inboxKey` still is: bodies aren't logged.
 pub fn header_key(req: &Request) -> Option<String> {
     req.headers().get("x-den-link").and_then(|v| v.to_str().ok()).map(str::to_owned)
 }
 
-/// The link's inbox key on a GET: the header, else the `inboxKey` query parameter.
+/// The link's inbox key on a request without a body: the header, or nothing.
 pub fn link_key(req: &Request) -> String {
-    header_key(req).or_else(|| query_param(req, "inboxKey")).unwrap_or_default()
+    header_key(req).unwrap_or_default()
 }
 
 /// The connecting address. The server is reached directly on the LAN or through `tailscale serve`, and
@@ -413,6 +451,31 @@ pub mod tests {
     async fn every_response_carries_a_request_id() {
         let resp = Harness::new().send("GET", "/health", None, &[]).await;
         assert_eq!(resp.headers()["x-request-id"].len(), 16);
+    }
+
+    #[tokio::test]
+    async fn every_answer_is_hardened_and_an_api_answer_can_do_nothing_as_a_page() {
+        let h = Harness::new();
+        let api = h.send("GET", "/health", None, &[]).await;
+        for (name, value) in [
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "no-referrer"),
+            ("cross-origin-opener-policy", "same-origin"),
+            ("cross-origin-resource-policy", "same-origin"),
+        ] {
+            assert_eq!(api.headers()[name], value, "{name}");
+        }
+        assert_eq!(
+            api.headers()[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; frame-ancestors 'none'; sandbox"
+        );
+        let page = h.send("GET", "/app", None, &[]).await;
+        let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(
+            csp.contains("script-src 'self'") && !csp.contains("sandbox"),
+            "the page keeps its own: {csp}"
+        );
+        assert_eq!(page.headers()["referrer-policy"], "no-referrer");
     }
 
     #[tokio::test]

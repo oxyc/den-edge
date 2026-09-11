@@ -40,6 +40,11 @@ const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1000;
 /// Superseded lines tolerated beyond the live ones before the log is rewritten.
 const COMPACT_SLACK: usize = if cfg!(test) { 8 } else { 1000 };
+/// Rows a library may hold: a long-time viewer's titles and episodes fit many times over; a stranger using the
+/// relay as free storage hits it (issue #8, #5).
+const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
+/// A library nobody has touched for this long leaves memory; its log reloads it on the next request.
+const IDLE_MS: u64 = 60 * 60 * 1000;
 
 pub struct Library {
     token_hash: [u8; 32],
@@ -47,6 +52,8 @@ pub struct Library {
     rows: HashMap<String, Row>,
     /// Write lines in the log file, superseded ones included.
     lines: usize,
+    /// When a request last used it, for dropping idle libraries from memory.
+    last_used: u64,
 }
 
 struct Row {
@@ -111,12 +118,18 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     if let Err(e) = load(state, &mut libs, id).await {
         return internal("library read", e);
     }
-    let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0 };
+    let now = state.now();
+    touch(&mut libs, id, now);
+    let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: now };
     let existing = libs.get(id);
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
     let lib = existing.unwrap_or(&fresh);
+    let new_rows = writes.iter().filter(|w| !lib.rows.contains_key(&w.k)).count();
+    if lib.rows.len() + new_rows > MAX_ROWS {
+        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+    }
 
     // Decide every write against the state before this batch (keys are unique within it), write the
     // applied ones to disk, and only then change what is in memory — a failed write changes nothing.
@@ -165,6 +178,7 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     if let Err(e) = load(state, &mut libs, id).await {
         return internal("library read", e);
     }
+    touch(&mut libs, id, state.now());
     let Some(lib) = libs.get(id) else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
@@ -177,6 +191,15 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     let entries: Vec<Value> =
         rows.iter().take(limit).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
     json_reply(StatusCode::OK, &json!({ "entries": entries, "head": lib.head, "more": more }))
+}
+
+/// Mark `id` used now, and let every library idle for an hour go from memory: a relay that kept every library it
+/// ever loaded would grow without bound. Their logs stay on disk, and `load` brings one back when it's asked for.
+fn touch(libs: &mut HashMap<String, Library>, id: &str, now: u64) {
+    libs.retain(|key, lib| key == id || now.saturating_sub(lib.last_used) < IDLE_MS);
+    if let Some(lib) = libs.get_mut(id) {
+        lib.last_used = now;
+    }
 }
 
 /// Bring a library into memory from its log, if it has one and isn't already there.
@@ -201,7 +224,7 @@ fn replay(bytes: &[u8]) -> Option<Library> {
     let mut lines = bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty());
     let header: Value = serde_json::from_slice(lines.next()?).ok()?;
     let token_hash = from_hex32(header.get("token")?.as_str()?)?;
-    let mut lib = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0 };
+    let mut lib = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: 0 };
     for line in lines {
         // Only the last line can be cut short, and everything before it was synced.
         let Ok(line) = serde_json::from_slice::<Line>(line) else { break };
@@ -414,6 +437,35 @@ mod tests {
             json!([{ "k": K2, "seq": 1, "v": "kept" }, { "k": K1, "seq": 41, "v": "v39" }])
         );
         assert_eq!(all["head"], 41);
+    }
+
+    /// A library has a row cap; rewriting a row it already holds is always fine.
+    #[tokio::test]
+    async fn a_full_library_takes_no_new_rows() {
+        let h = Harness::new();
+        let writes: Vec<Value> =
+            (0..super::MAX_ROWS).map(|i| json!({ "k": format!("{i:016x}"), "base": 0, "v": "v" })).collect();
+        assert_eq!(batch(&h, TOKEN, json!(writes)).await.0, StatusCode::OK);
+        let (status, body) =
+            batch(&h, TOKEN, json!([{ "k": "ffffffffffffffff", "base": 0, "v": "v" }])).await;
+        assert_eq!((status, body), (StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": "library_full" })));
+        assert_eq!(
+            batch(&h, TOKEN, json!([{ "k": format!("{:016x}", 0), "base": 1, "v": "w" }])).await.0,
+            StatusCode::OK
+        );
+    }
+
+    /// A library idle for an hour leaves memory, and comes back from its log when asked for.
+    #[tokio::test]
+    async fn an_idle_library_leaves_memory_and_comes_back() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "kept" }])).await;
+        h.advance(super::IDLE_MS + 1);
+        let other = "fedcba9876543210fedcba9876543210";
+        let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "x" }] }).to_string();
+        h.send("POST", &format!("/lib/{other}/batch"), Some(body), &[("x-den-library-token", "other")]).await;
+        assert_eq!(h.state.libraries.lock().await.len(), 1, "the idle library was dropped");
+        assert_eq!(changes(&h, TOKEN, "").await.1["entries"][0]["v"], "kept");
     }
 
     /// A crash mid-append leaves the last line cut short. It is dropped, and the next write is not fused

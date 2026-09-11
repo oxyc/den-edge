@@ -5,6 +5,8 @@
 //!
 //!   GET /sync/{id}                                → { ciphertext, nonce, version } | 404
 //!   PUT /sync/{id}  { ciphertext, nonce, baseVersion } → { version } | 409 { error, version }
+//!   DELETE /sync/{id}                             → { deleted: true } — on unlinking, the backup filed under
+//!                                                   that link goes too
 
 use crate::handler::{
     error, internal, js_len, json_reply, method_not_allowed, raw_json, read_json, SYNC_MAX_BODY_BYTES,
@@ -28,7 +30,17 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match *req.method() {
         Method::GET => read(state, &id).await,
         Method::PUT => write(state, &id, req).await,
+        Method::DELETE => forget(state, &id).await,
         _ => method_not_allowed(),
+    }
+}
+
+/// Remove a backup. Idempotent, and asks nothing but the id — which is all a write asks, too.
+async fn forget(state: &AppState, id: &str) -> Response {
+    let _write = state.write_lock.lock().await;
+    match state.store.delete(NS, id).await {
+        Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": true })),
+        Err(e) => internal("sync delete", e),
     }
 }
 
@@ -132,6 +144,18 @@ mod tests {
         let missing =
             h.call("PUT", &format!("/sync/{ID}"), Some(json!({ "nonce": "n", "baseVersion": 0 }))).await;
         assert_eq!(missing.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_backup_can_be_deleted_and_deleting_twice_is_fine() {
+        let h = Harness::new();
+        put(&h, "gone", 0).await;
+        assert_eq!(
+            h.call("DELETE", &format!("/sync/{ID}"), None).await,
+            (StatusCode::OK, json!({ "deleted": true }))
+        );
+        assert_eq!(h.call("GET", &format!("/sync/{ID}"), None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(h.call("DELETE", &format!("/sync/{ID}"), None).await.0, StatusCode::OK);
     }
 
     /// The backup outlives the process — the one thing a relay that loses it on restart gets wrong.

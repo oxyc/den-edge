@@ -2,7 +2,7 @@
 //! tagged config values (`{ bool | int | string | ints | strings }`), stored as given and bounded, never
 //! interpreted. Whole-blob last-writer-wins with a version counter; never written means 404.
 //!
-//!   GET /settings  (x-den-link, or ?inboxKey=)                  → { settings, version } | 404
+//!   GET /settings  (x-den-link)                                 → { settings, version } | 404
 //!   PUT /settings  (x-den-link, or a body inboxKey) { settings }  → { version }
 
 use crate::handler::{
@@ -85,11 +85,12 @@ mod tests {
     #[tokio::test]
     async fn absent_until_written_then_round_trips_and_bumps_the_version() {
         let h = Harness::new();
-        assert_eq!(h.call("GET", &format!("/settings?inboxKey={KEY}"), None).await.0, StatusCode::NOT_FOUND);
+        let get = || h.send("GET", "/settings", None, &[("x-den-link", KEY)]);
+        assert_eq!(get().await.status(), StatusCode::NOT_FOUND);
         let settings = json!({ "den.shownWarningCategories": { "strings": ["A death", "A dog dies"] },
                                "den.hideWatched": { "bool": true } });
         assert_eq!(put(&h, settings.clone()).await, (StatusCode::OK, json!({ "version": 1 })));
-        let (_, got) = h.call("GET", &format!("/settings?inboxKey={KEY}"), None).await;
+        let got = crate::handler::tests::body_json(get().await).await;
         assert_eq!(got, json!({ "settings": settings, "version": 1 }));
         assert_eq!(put(&h, json!({ "a": { "bool": false } })).await.1, json!({ "version": 2 }));
     }
@@ -109,7 +110,10 @@ mod tests {
     #[tokio::test]
     async fn bad_keys_non_objects_and_oversized_settings_are_refused() {
         let h = Harness::new();
-        assert_eq!(h.call("GET", "/settings?inboxKey=nope!", None).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            h.send("GET", "/settings", None, &[("x-den-link", "nope!")]).await.status(),
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(put(&h, json!([1, 2])).await.1, json!({ "error": "invalid_settings" }));
         assert_eq!(put(&h, json!("x")).await.1, json!({ "error": "invalid_settings" }));
         let many: Map<String, Value> = (0..61).map(|i| (format!("k{i}"), json!({ "bool": true }))).collect();

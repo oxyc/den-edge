@@ -3,7 +3,8 @@
 //! the key and nothing here remembers the pair.
 
 use crate::handler::{
-    client_ip, error, json_reply, method_not_allowed, query_param, read_json, MAX_BODY_BYTES,
+    client_ip, error, internal, json_reply, link_key, method_not_allowed, query_param, read_json,
+    valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::{lock, AppState};
 use axum::extract::Request;
@@ -46,16 +47,36 @@ pub fn gen_inbox_key() -> String {
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
-        "/link/new" if req.method() == Method::POST => mint(state),
+        "/link" if req.method() == Method::DELETE => forget(state, link_key(&req)).await,
+        "/link/new" if req.method() == Method::POST => mint(state, &client_ip(&req)),
         "/link/claim" if req.method() == Method::POST => claim(state, req).await,
-        "/link/new" | "/link/claim" => method_not_allowed(),
+        "/link" | "/link/new" | "/link/claim" => method_not_allowed(),
         "/link/poll" => poll(state, &req),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
 }
 
-/// The TV mints a code to display.
-fn mint(state: &AppState) -> Response {
+/// Unlinking a device erases what its link left here — its inbox, and the plugins and settings it shared — so a
+/// device the TV no longer trusts can't read or add to them (issue #8, N3). Idempotent.
+async fn forget(state: &AppState, key: String) -> Response {
+    if !valid_inbox_key(&key) {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
+    }
+    let _write = state.write_lock.lock().await;
+    for ns in ["inbox", "plugins", "settings"] {
+        if let Err(e) = state.store.delete(ns, &key).await {
+            return internal("link forget", e);
+        }
+    }
+    json_reply(StatusCode::OK, &json!({ "forgotten": true }))
+}
+
+/// The TV mints a code to display. Codes cost nothing to ask for and each is held ten minutes, so minting
+/// shares the claims' per-address limit rather than letting a loop fill the table.
+fn mint(state: &AppState, ip: &str) -> Response {
+    if throttled(state, &format!("mint:{ip}")) {
+        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    }
     let now = state.now();
     let mut links = lock(&state.links);
     links.retain(|_, link| link.expires_at > now);
@@ -194,6 +215,39 @@ mod tests {
             super::device_label(Some(&json!("x".repeat(99)))).map(|l| l.len()),
             Some(super::MAX_DEVICE_LABEL)
         );
+    }
+
+    #[tokio::test]
+    async fn unlinking_erases_what_the_link_left_behind() {
+        let h = Harness::new();
+        let key = "abcdef0123456789";
+        let link = [("x-den-link", key)];
+        let message = json!({ "message": { "type": "tmdbKey", "key": "k" } }).to_string();
+        h.send("POST", "/inbox/append", Some(message), &link).await;
+        let addons = json!({ "addons": ["https://a.example/manifest.json"] }).to_string();
+        h.send("PUT", "/plugins", Some(addons), &link).await;
+        h.send("PUT", "/settings", Some(json!({ "settings": { "a": { "bool": true } } }).to_string()), &link)
+            .await;
+
+        assert_eq!(h.send("DELETE", "/link", None, &link).await.status(), StatusCode::OK);
+        assert_eq!(h.send("GET", "/plugins", None, &link).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(h.send("GET", "/settings", None, &link).await.status(), StatusCode::NOT_FOUND);
+        let drained =
+            crate::handler::tests::body_json(h.send("GET", "/inbox/drain", None, &link).await).await;
+        assert_eq!(drained["messages"], json!([]));
+        assert_eq!(h.send("DELETE", "/link", None, &link).await.status(), StatusCode::OK, "again is fine");
+        assert_eq!(h.send("DELETE", "/link", None, &[]).await.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn minting_codes_is_throttled_per_address() {
+        let h = Harness::new();
+        for _ in 0..super::CLAIMS_PER_WINDOW {
+            assert_eq!(h.call("POST", "/link/new", None).await.0, StatusCode::OK);
+        }
+        assert_eq!(h.call("POST", "/link/new", None).await.0, StatusCode::TOO_MANY_REQUESTS);
+        h.advance(super::CLAIM_WINDOW_MS);
+        assert_eq!(h.call("POST", "/link/new", None).await.0, StatusCode::OK);
     }
 
     #[tokio::test]
