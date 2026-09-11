@@ -20,6 +20,27 @@ pub struct Store {
     /// Bytes on disk across every namespace.
     used: AtomicU64,
     cap: u64,
+    generation: String,
+}
+
+/// The file holding the store's generation, beside the namespaces.
+const GENERATION: &str = "generation";
+
+/// The store's generation: a random id, made the first time the store opens and kept after that. The backup leaves
+/// its file out, so a store restored from a backup — or one that lost its data and started over — opens with a new
+/// one, and a client that remembers how far it read knows those numbers belong to another store (den-spec
+/// library-v2 §2).
+fn load_generation(dir: &Path) -> io::Result<String> {
+    let path = dir.join(GENERATION);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let id = text.trim();
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(id.to_owned());
+        }
+    }
+    let id = crate::hex(&crate::random_bytes::<16>());
+    std::fs::write(&path, format!("{id}\n"))?;
+    Ok(id)
 }
 
 /// The kinds of record, one directory each.
@@ -37,7 +58,12 @@ impl Store {
                 used += entry?.metadata()?.len();
             }
         }
-        Ok(Store { dir: dir.to_owned(), used: AtomicU64::new(used), cap })
+        let generation = load_generation(dir)?;
+        Ok(Store { dir: dir.to_owned(), used: AtomicU64::new(used), cap, generation })
+    }
+
+    pub fn generation(&self) -> &str {
+        &self.generation
     }
 
     /// Refuses a file growing from `old` to `new` bytes when that takes the store past its cap.

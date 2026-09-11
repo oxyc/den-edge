@@ -46,6 +46,10 @@ answer goes out, replayed into memory on first use and rewritten without superse
 outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
 ciphertext the clients seal and merge.
 
+`DATA_DIR/generation` is a random id minted the first time the store opens. Every `/lib` answer carries it.
+Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
+the change, reads the log from the start and writes back what the snapshot lacks (den-spec library-v2 §2).
+
 A queue is kept for a week after its last message; everything else is kept until it is replaced. Pairing
 sessions live in memory: a restart costs a pairing in progress, which the TV starts again.
 

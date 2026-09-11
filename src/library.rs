@@ -5,12 +5,15 @@
 //! row, which the client merges and writes again — compare-and-set per record. Tombstones are ordinary
 //! writes, and nothing expires.
 //!
-//!   POST /lib/{id}/batch  { writes: [{ k, base, v }] } → { head, applied: [{ k, seq }], conflicts: [{ k, seq, v }] }
-//!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more }
+//!   POST /lib/{id}/batch  { writes: [{ k, base, v }] } → { head, applied: [{ k, seq }], conflicts: [{ k, seq, v }], generation }
+//!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation }
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
-//! every later request must match it. A library nobody has written is a 404.
+//! every later request must match it. A library nobody has written is a 404, which carries `generation` too.
+//!
+//! `generation` is the store's (`Store::generation`): a different one tells a client that remembers how far it
+//! read that this store was restored or started over, so it reads from 0 and writes back what it holds.
 //!
 //! On disk a library is one append-only log, `lib/<sha256(id)>.log`: a line with the token's hash, then a
 //! line per applied write, synced before the answer goes out. It is replayed into memory on first use and
@@ -216,7 +219,10 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         }
     }
     state.metrics.record_library_writes(applied.len(), conflicts.len());
-    json_reply(StatusCode::OK, &json!({ "head": head, "applied": applied, "conflicts": conflicts }))
+    json_reply(
+        StatusCode::OK,
+        &json!({ "head": head, "applied": applied, "conflicts": conflicts, "generation": state.store.generation() }),
+    )
 }
 
 async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, limit: usize) -> Response {
@@ -228,7 +234,11 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     let Some(lib) = libs.get(id) else {
         return match retired(state, id).await {
             Ok(true) => moved(),
-            Ok(false) => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+            // A store that lost its data answers here, so the generation goes with it.
+            Ok(false) => json_reply(
+                StatusCode::NOT_FOUND,
+                &json!({ "error": "not_found", "generation": state.store.generation() }),
+            ),
             Err(e) => internal("library read", e),
         };
     };
@@ -240,7 +250,10 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     let more = rows.len() > limit;
     let entries: Vec<Value> =
         rows.iter().take(limit).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
-    json_reply(StatusCode::OK, &json!({ "entries": entries, "head": lib.head, "more": more }))
+    json_reply(
+        StatusCode::OK,
+        &json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() }),
+    )
 }
 
 /// Mark `id` used now, and let every library idle for an hour go from memory: a relay that kept every library it
@@ -399,16 +412,42 @@ mod tests {
             batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }, { "k": K2, "base": 0, "v": "c2" }]))
                 .await;
         assert_eq!(status, StatusCode::OK);
+        let generation = h.state.store.generation();
         assert_eq!(
             got,
-            json!({ "head": 2, "applied": [{ "k": K1, "seq": 1 }, { "k": K2, "seq": 2 }], "conflicts": [] })
+            json!({ "head": 2, "applied": [{ "k": K1, "seq": 1 }, { "k": K2, "seq": 2 }], "conflicts": [],
+                    "generation": generation })
         );
         let (_, all) = changes(&h, TOKEN, "").await;
         assert_eq!(
             all,
             json!({ "entries": [{ "k": K1, "seq": 1, "v": "c1" }, { "k": K2, "seq": 2, "v": "c2" }],
-                                "head": 2, "more": false })
+                    "head": 2, "more": false, "generation": generation })
         );
+    }
+
+    /// The store's generation survives a restart; a store that comes back without it — restored from a backup,
+    /// which leaves the file out, or started over — answers with a new one, a 404 included.
+    #[tokio::test]
+    async fn a_restored_store_answers_with_a_new_generation() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let first = changes(&h, TOKEN, "").await.1["generation"].clone();
+        assert_eq!(first.as_str().map(str::len), Some(32));
+
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(changes(&restarted, TOKEN, "").await.1["generation"], first, "a restart keeps it");
+
+        std::fs::remove_file(h.dir.join("generation")).unwrap();
+        let restored = Harness::in_dir(h.dir.clone());
+        let (_, got) = changes(&restored, TOKEN, "").await;
+        assert_ne!(got["generation"], first);
+        assert_eq!(got["entries"][0]["v"], "c1", "the data itself is untouched");
+
+        let empty = Harness::new();
+        let (status, body) = changes(&empty, TOKEN, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["generation"].as_str(), Some(empty.state.store.generation()));
     }
 
     /// A write based on a stale sequence gets the current row back; one based on the current one lands.
