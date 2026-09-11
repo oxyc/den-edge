@@ -4,7 +4,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another.
 const edge = process.env.DEN_EDGE ?? 'http://192.168.86.193:8094';
-const api = ['/pair', '/inbox', '/lib', '/config', '/health'];
+const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout'];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 
