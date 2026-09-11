@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Library from './Library.svelte';
   import { links } from './lib/links.svelte';
   import { parseRoute } from './lib/route';
@@ -14,10 +15,23 @@
   // Each page is a fragment (`#settings`, `#title/tv/1399`, `#person/287`), so Back returns to the one before.
   let route = $state(parseRoute(location.hash));
   $effect(() => {
-    const follow = () => (route = parseRoute(location.hash));
+    const follow = () => {
+      const next = () => (route = parseRoute(location.hash));
+      // The browser cross-fades one page into the next where it can (Safari 18, Chrome 111); where it can't, or
+      // where the viewer asked for less movement, the page simply changes.
+      const start = (document as Document & { startViewTransition?: StartViewTransition }).startViewTransition;
+      if (!start || matchMedia('(prefers-reduced-motion: reduce)').matches) return next();
+      start.call(document, async () => {
+        next();
+        await tick();
+      });
+    };
     addEventListener('hashchange', follow);
     return () => removeEventListener('hashchange', follow);
   });
+  /** What a browser with view transitions offers; older ones have none, and are given the plain change instead. */
+  type StartViewTransition = (update: () => Promise<void>) => unknown;
+
   const settings = $derived(route.page === 'settings');
   const tabs = [
     { page: 'library', label: 'Home' },
