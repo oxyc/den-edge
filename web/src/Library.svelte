@@ -8,6 +8,7 @@
   import { addToWatchlist, blankTitle, markWatched, react, removeFromLibrary, unwatch } from './lib/actions';
   import { loadLibrary, type LibraryResult } from './lib/backup';
   import { browserClock } from './lib/clock';
+  import { sendToTV } from './lib/inbox';
   import {
     applyLog,
     continueWatching,
@@ -42,6 +43,7 @@
   let selected = $state<Title | null>(null);
   let busy = $state(false);
   let failure = $state<string | null>(null);
+  let notice = $state<string | null>(null);
 
   $effect(() => {
     void load(link).then((l) => (loaded = l));
@@ -95,6 +97,17 @@
     busy = false;
     if (!saved) failure = 'Couldn’t save that. Check that this device is on your network.';
     version++;
+  }
+
+  /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
+  async function play(title: Title) {
+    busy = true;
+    failure = null;
+    notice = null;
+    const sent = await sendToTV(link, { type: 'play', tmdbId: title.id, mediaType: title.type, title: title.title });
+    busy = false;
+    if (sent) notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
+    else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
   }
 
   const select = $derived(loaded?.log ? (title: Title) => (selected = title) : undefined);
@@ -219,10 +232,13 @@
     row={selectedRow}
     {busy}
     {failure}
+    {notice}
     onclose={() => {
       selected = null;
       failure = null;
+      notice = null;
     }}
+    onplay={() => play(title)}
     onwatchlist={(on) => act(title, on ? addToWatchlist : removeFromLibrary)}
     onseen={(on) => act(title, on ? markWatched : unwatch)}
     onreact={(reaction) => act(title, (row, at) => react(row, reaction, at))}

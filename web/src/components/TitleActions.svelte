@@ -12,6 +12,8 @@
     onwatchlist,
     onseen,
     onreact,
+    onplay,
+    notice = null,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -20,6 +22,10 @@
     onwatchlist: (on: boolean) => void;
     onseen: (on: boolean) => void;
     onreact: (reaction: Reaction | null) => void;
+    /** Play it on the linked TV; no button without it. */
+    onplay?: () => void;
+    /** What the last action did, when that's worth saying. */
+    notice?: string | null;
   } = $props();
 
   const active = $derived(row !== undefined && !row.deleted.value);
@@ -34,6 +40,7 @@
 </script>
 
 <div class="actions">
+  {#if onplay}<button class="play" disabled={busy} onclick={onplay}>Play on TV</button>{/if}
   <button class:on={listed} aria-pressed={listed} disabled={busy} onclick={() => onwatchlist(!listed)}>
     {listed ? 'On your watchlist' : 'Add to watchlist'}
   </button>
@@ -51,7 +58,7 @@
     >
   {/each}
 </div>
-{#if failure}<p class="failure" role="alert">{failure}</p>{/if}
+{#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p class="notice" role="status">{notice}</p>{/if}
 
 <style>
   .actions {
@@ -82,7 +89,18 @@
     cursor: progress;
   }
 
+  button.play {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+
   .failure {
     color: var(--danger);
+  }
+
+  .notice {
+    color: var(--muted);
   }
 </style>

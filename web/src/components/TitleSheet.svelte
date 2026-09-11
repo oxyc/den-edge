@@ -14,6 +14,8 @@
     onwatchlist,
     onseen,
     onreact,
+    onplay,
+    notice = null,
   }: {
     title: Title;
     row: TitleRow | undefined;
@@ -23,6 +25,8 @@
     onwatchlist: (on: boolean) => void;
     onseen: (on: boolean) => void;
     onreact: (reaction: TitleRow['reaction']['value']) => void;
+    onplay?: () => void;
+    notice?: string | null;
   } = $props();
 
   let dialog: HTMLDialogElement;
@@ -39,7 +43,7 @@
       <p class="kind">{[title.type === 'tv' ? 'Series' : 'Movie', title.year].filter(Boolean).join(' · ')}</p>
     </div>
   </div>
-  <TitleActions {row} {busy} {failure} {onwatchlist} {onseen} {onreact} />
+  <TitleActions {row} {busy} {failure} {onwatchlist} {onseen} {onreact} {onplay} {notice} />
   <button class="done" onclick={() => dialog.close()}>Done</button>
 </dialog>
 

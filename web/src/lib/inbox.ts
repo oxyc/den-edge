@@ -3,6 +3,8 @@
 // opens too.
 
 import { hex } from './crypto';
+import type { Link } from './links.svelte';
+import { linkKeys } from './pair';
 import { toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -30,4 +32,29 @@ export async function sealMessage(enc: Bytes, message: object, sealing: Sealing 
   out.set(nonce);
   out.set(sealed, nonce.length);
   return toBase64url(out);
+}
+
+/**
+ * Queue `message` for the TV behind `link`: sealed when the link was paired, as its TV takes nothing else; as it
+ * is, with the time it was sent, for a link made with a six-character code. False when den-edge didn't take it.
+ */
+export async function sendToTV(link: Link, message: object, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const body = link.linkKey
+    ? {
+        sealed: await sealMessage(
+          (await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)))).enc,
+          message,
+        ),
+      }
+    : { message: { ...message, sentAt: Date.now() } };
+  try {
+    const res = await fetchImpl('/inbox/append', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-den-link': link.inboxKey },
+      body: JSON.stringify(body),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
