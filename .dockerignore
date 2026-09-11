@@ -1,6 +1,8 @@
-# The build copies only Cargo.toml, Cargo.lock, src/ and app/; everything below is context it never reads.
+# The build copies Cargo.toml, Cargo.lock, src/, app/ and web/; everything below is context it never reads.
 target
 data
+web/node_modules
+web/dist
 .git
 .github
 .env

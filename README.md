@@ -56,8 +56,25 @@ link codes live in memory: a restart costs a pairing in progress, which the TV s
 | `PORT` | `8080` | the port to listen on |
 | `DATA_DIR` | `data` (the image sets `/data`) | where the state lives |
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
+| `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
+
+## The Den web app
+
+`web/` is the Den web app (Svelte 5 on Vite), the Apple TV app's screens in a browser. The image builds it
+and den-edge serves it at `/` from `WEB_DIR`, beside its API — one origin, so the app needs no CORS. A path
+with no file behind it is one of the app's routes and gets the shell; hashed files under `/assets/` are
+cached for a year. App routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API
+answers first.
+
+```
+cd web && npm install && npm run dev    # Vite on :5173, proxying the API to the homelab den-edge
+npm run check && npm test && npm run build
+```
+
+`DEN_EDGE=http://localhost:8080 npm run dev` proxies to a local den-edge instead. Installs run with
+`--ignore-scripts` in CI and the image.
 
 ## Run
 

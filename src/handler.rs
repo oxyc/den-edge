@@ -118,7 +118,13 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
             );
             resp
         }
-        _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
+        "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
+        p => match &state.web_dir {
+            Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
+                crate::web::serve(dir, p).await
+            }
+            _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
+        },
     }
 }
 

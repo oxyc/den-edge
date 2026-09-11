@@ -1,0 +1,41 @@
+<script lang="ts">
+  import { links } from './lib/links.svelte';
+  import LinkTV from './LinkTV.svelte';
+  import Linked from './Linked.svelte';
+</script>
+
+<header class="bar glass">
+  <span class="brand">Den</span>
+</header>
+
+<main>
+  {#if links.current}
+    <Linked link={links.current} />
+  {:else}
+    <LinkTV />
+  {/if}
+</main>
+
+<style>
+  .bar {
+    position: sticky;
+    top: max(12px, env(safe-area-inset-top));
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    margin: 12px var(--gutter) 0;
+    padding: 12px 20px;
+    border-radius: 999px;
+  }
+
+  .brand {
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px var(--gutter) calc(32px + env(safe-area-inset-bottom));
+  }
+</style>

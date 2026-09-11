@@ -39,6 +39,24 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
+  # The Den web app den-edge serves: type-checked, tested and built, as the image's web stage builds it.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
   # The image is what ships, and it builds differently from `cargo build` (musl, scratch). Caught on the PR
   # rather than at tag time, for amd64 — the only arch the box runs.
   build-pr:

@@ -16,6 +16,7 @@ mod plugins;
 mod settings;
 mod store;
 mod sync;
+mod web;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,6 +49,8 @@ pub struct AppState {
     /// Origins a browser may call from (env `WEB_ORIGINS`, comma-separated): the Den web app. Empty sends
     /// no CORS headers at all — the companion page is same-origin and needs none.
     pub web_origins: Vec<String>,
+    /// The Den web app's built files (env `WEB_DIR`), served at `/`. `None` serves no app.
+    pub web_dir: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -65,6 +68,7 @@ impl AppState {
             metrics_token,
             log_requests,
             web_origins: Vec::new(),
+            web_dir: None,
         }
     }
 
@@ -109,6 +113,7 @@ async fn main() {
     state.web_origins = env_opt("WEB_ORIGINS")
         .map(|v| v.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect())
         .unwrap_or_default();
+    state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -121,8 +126,9 @@ async fn main() {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
-        "den-edge {} listening on :{port} — data={dir} metrics={} log_requests={} web_origins={}",
+        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={}",
         env!("CARGO_PKG_VERSION"),
+        state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
         on(state.log_requests),
         if state.web_origins.is_empty() { "none".to_owned() } else { state.web_origins.join(",") },

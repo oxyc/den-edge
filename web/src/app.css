@@ -1,0 +1,58 @@
+/* Den's own look, not a generic iOS one: the TV's page colours, and Liquid Glass on chrome only — bars,
+   sheets, controls over media — never per poster or inside scrolling rows, where backdrop-filter costs
+   frames on a phone. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0b0f;
+  --fg: #e7e7ea;
+  --muted: #9a9aa6;
+  --card: #16161c;
+  --line: #26262f;
+  --accent: #5b8cff;
+  --danger: #ff6b6b;
+  --radius: 14px;
+  --gutter: clamp(16px, 4vw, 48px);
+  --glass-bg: rgb(28 28 34 / 0.55);
+  --glass-edge: rgb(255 255 255 / 0.12);
+  --glass-blur: blur(24px) saturate(160%);
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.glass {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 8px 32px rgb(0 0 0 / 0.35);
+}
+
+/* Solid where the blur isn't available, or isn't wanted. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background: rgb(28 28 34 / 0.96);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    background: rgb(28 28 34);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
