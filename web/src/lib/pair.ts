@@ -25,6 +25,17 @@ export function parseCode(input: string): { nameplate: string; secret: string } 
   return { nameplate: code.slice(0, 4), secret: code.slice(4) };
 }
 
+/**
+ * A code as it is typed: alphabet characters only, at most twelve, in the TV's groups of four. `caret` is where the
+ * cursor was in `input`; the result's caret stays after the same characters.
+ */
+export function formatCode(input: string, caret = input.length): { text: string; caret: number } {
+  const keep = (s: string) => [...s.toUpperCase()].filter((c) => ALPHABET.includes(c)).join('');
+  const chars = keep(input).slice(0, 12);
+  const n = Math.min(keep(input.slice(0, caret)).length, chars.length);
+  return { text: chars.match(/.{1,4}/g)?.join('-') ?? '', caret: n + Math.floor(Math.max(n - 1, 0) / 4) };
+}
+
 /** What a device calls itself, as the other's list of linked devices shows it. The same rule as den-edge's. */
 export function cleanLabel(raw: string): string {
   return [...raw.trim()]

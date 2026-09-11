@@ -45,6 +45,16 @@ describe('pairing v1 matches den-spec', () => {
     expect(pair.parseCode(input)).toEqual(parsed);
   });
 
+  it('groups a code as it is typed and keeps the cursor after the same characters', () => {
+    expect(pair.formatCode('abcd')).toEqual({ text: 'ABCD', caret: 4 });
+    expect(pair.formatCode('ABCDE')).toEqual({ text: 'ABCD-E', caret: 6 });
+    expect(pair.formatCode('ab cd-ef gh jkLM NP')).toEqual({ text: 'ABCD-EFGH-JKLM', caret: 14 });
+    expect(pair.formatCode('AB0O1ICD')).toEqual({ text: 'ABCD', caret: 4 });
+    expect(pair.formatCode('ABCDXEFGH', 5)).toEqual({ text: 'ABCD-XEFG-H', caret: 6 });
+    expect(pair.formatCode('ABCD-EFGH', 4)).toEqual({ text: 'ABCD-EFGH', caret: 4 });
+    expect(pair.formatCode('')).toEqual({ text: '', caret: 0 });
+  });
+
   it('plays both sides of the pinned pairing', async () => {
     const sid = fromHex(p.sid);
     const joiner = await pair.joinerStart(p.secret, sid, p.joinerLabel, fromHex(p.ya));

@@ -1,12 +1,35 @@
 <script lang="ts">
   import { links } from './lib/links.svelte';
-  import { join, parseCode, type JoinError } from './lib/pair';
+  import { formatCode, join, parseCode, type JoinError } from './lib/pair';
 
   // The TV's QR carries its code in the URL fragment, which never reaches a server; it is read once and dropped
   // from the address bar, so it isn't left in history.
   const scanned = new URLSearchParams(location.hash.slice(1)).get('pair');
   if (scanned) history.replaceState(null, '', location.pathname + location.search);
-  let code = $state((scanned ?? '').toUpperCase());
+  let code = $state(formatCode(scanned ?? '').text);
+
+  /** The empty slots behind the field: what's typed covers them one by one, the dashes stay put. */
+  const MASK = '____-____-____';
+
+  /** Regroups what was typed; deleting a dash deletes the character beside it instead, or the dash would come back. */
+  function typed(event: Event & { currentTarget: HTMLInputElement }) {
+    const input = event.currentTarget;
+    let value = input.value;
+    let caret = input.selectionStart ?? value.length;
+    const kind = event instanceof InputEvent ? event.inputType : '';
+    if (value.replace(/-/g, '').length === code.replace(/-/g, '').length) {
+      if (kind === 'deleteContentBackward' && caret > 0) {
+        value = value.slice(0, caret - 1) + value.slice(caret);
+        caret -= 1;
+      } else if (kind === 'deleteContentForward') {
+        value = value.slice(0, caret) + value.slice(caret + 1);
+      }
+    }
+    const next = formatCode(value, caret);
+    code = next.text;
+    input.value = next.text;
+    input.setSelectionRange(next.caret, next.caret);
+  }
   let busy = $state(false);
   let failure = $state<JoinError | null>(null);
 
@@ -52,17 +75,18 @@
       void link();
     }}
   >
-    <input
-      class="code"
-      bind:value={code}
-      maxlength="16"
-      autocomplete="off"
-      autocapitalize="characters"
-      spellcheck="false"
-      placeholder="ABCD-EFGH-JKLM"
-      aria-label="Link code"
-      disabled={busy}
-    />
+    <div class="code">
+      <span class="mask" aria-hidden="true"><span class="typed">{code}</span>{MASK.slice(code.length)}</span>
+      <input
+        value={code}
+        oninput={typed}
+        autocomplete="off"
+        autocapitalize="characters"
+        spellcheck="false"
+        aria-label="Link code, twelve characters"
+        disabled={busy}
+      />
+    </div>
     <button class="primary" disabled={busy || !whole}>{busy ? 'Allow this device on your TV…' : 'Link'}</button>
   </form>
   {#if failure}
@@ -92,23 +116,46 @@
     gap: 12px;
   }
 
+  /* The mask sizes the box and sits under the input: both share one monospace font, so each typed character
+     lands on its slot. */
   .code {
-    width: 100%;
-    padding: 16px;
+    position: relative;
+    justify-self: center;
+    max-width: 100%;
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--card);
-    color: var(--fg);
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-align: center;
-    text-transform: uppercase;
-    outline: none;
   }
 
-  .code:focus-visible {
+  .code:focus-within {
     border-color: var(--accent);
+  }
+
+  .mask,
+  .code input {
+    padding: 16px 20px;
+    font: 700 24px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.18em;
+  }
+
+  .mask {
+    display: block;
+    color: var(--muted);
+    white-space: pre;
+  }
+
+  .typed {
+    visibility: hidden;
+  }
+
+  .code input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    outline: none;
   }
 
   .primary {
