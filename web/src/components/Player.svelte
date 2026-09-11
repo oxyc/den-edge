@@ -6,7 +6,15 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
-  import { endSession, login, startSession, type AudioTrack, type Failure, type Session } from '../lib/remux';
+  import {
+    endSession,
+    login,
+    reportFailure,
+    startSession,
+    type AudioTrack,
+    type Failure,
+    type Session,
+  } from '../lib/remux';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
 
@@ -47,11 +55,12 @@
   const RETRY_MS = 20_000;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
-  const messages: Record<'none' | 'unreachable' | 'imdb' | 'unsupported', string> = {
+  const messages: Record<'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback', string> = {
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
+    playback: 'This browser couldn’t play this release. Try it on your TV.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
@@ -61,7 +70,7 @@
 
   let video = $state<HTMLVideoElement>();
   let session = $state<Session | null>(null);
-  let failure = $state<Failure | 'imdb' | 'unsupported' | null>(null);
+  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | null>(null);
   let key = $state('');
   let badKey = $state(false);
   /** Seconds until the next episode starts, once this one has ended. */
@@ -152,10 +161,20 @@
         return;
       }
       hls = new Hls({ enableWorker: false });
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) broke(0, `hls.js ${data.type} ${data.details}`);
+      });
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
     });
   });
+
+  /** The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. */
+  function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
+    if (!session || failure) return;
+    reportFailure(session, code, message);
+    failure = 'playback';
+  }
 
   function length(): number {
     if (video && Number.isFinite(video.duration) && video.duration > 0) return video.duration;
@@ -298,6 +317,7 @@
         onplay={playing}
         onpause={paused}
         onended={finished}
+        onerror={() => broke()}
       ></video>
     {/if}
   </div>

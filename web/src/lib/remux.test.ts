@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { endSession, findRemux, forgetSubtitles, login, startSession, type Want } from './remux';
+import { endSession, findRemux, forgetSubtitles, login, reportFailure, startSession, type Want } from './remux';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -123,5 +123,18 @@ describe('endSession', () => {
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+  });
+});
+
+describe('reportFailure', () => {
+  it('posts the browser’s error to the session’s report path, cut short', async () => {
+    const calls: [string, RequestInit | undefined][] = [];
+    reportFailure(session, 4, `MEDIA_ERR_SRC_NOT_SUPPORTED ${'x'.repeat(300)}`, async (input, init) => {
+      calls.push([String(input), init]);
+      return new Response(null, { status: 204 });
+    });
+    expect(calls.map(([url, init]) => [url, init?.method])).toEqual([['/remux/s/sid/sig/report', 'POST']]);
+    const body = JSON.parse(String(calls[0]![1]!.body)) as { code: number; message: string };
+    expect([body.code, body.message.length, body.message.startsWith('MEDIA_ERR_SRC')]).toEqual([4, 200, true]);
   });
 });

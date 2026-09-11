@@ -138,6 +138,17 @@ export function endSession(session: Session, fetchImpl: typeof fetch = fetch): v
   );
 }
 
+/**
+ * Tell den-remux this browser couldn't play the session — its MediaError code (0 for hls.js) and message — for its
+ * log: the browser's verdict is otherwise seen by nobody. A beacon, so it goes even as the page closes.
+ */
+export function reportFailure(session: Session, code: number, message: string, fetchImpl: typeof fetch = fetch): void {
+  const url = session.playlist.replace(/\/master\.m3u8$/, '/report');
+  const body = JSON.stringify({ code, message: message.slice(0, 200) });
+  if (globalThis.navigator?.sendBeacon?.(url, body)) return;
+  void fetchImpl(url, { method: 'POST', body, keepalive: true }).catch(() => undefined);
+}
+
 async function errorCode(res: Response): Promise<string | undefined> {
   try {
     const error = ((await res.json()) as { error?: unknown }).error;
