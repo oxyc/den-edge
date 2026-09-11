@@ -413,6 +413,12 @@
       max(12px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
     background: #000;
     color: #fff;
+    /* A tap near the video's own controls acts on them: no text selected under the finger, no grey flash, and no
+       double-tap zoom, which a phone otherwise waits for before passing the tap on. */
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
 
   header {
