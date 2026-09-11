@@ -260,10 +260,10 @@ export function fromHex(text: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(text.match(/../g) ?? [], (byte) => parseInt(byte, 16));
 }
 
-function toBase64url(bytes: Uint8Array): string {
+export function toBase64url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
-function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
+export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0));
 }
