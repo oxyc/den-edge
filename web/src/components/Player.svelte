@@ -217,12 +217,16 @@
 </div>
 
 <style>
+  /* The visible viewport (dvh: a phone's toolbars excluded), and a middle row that may shrink below the video's own
+     height — so the video fits and its controls stay on screen. */
   .player {
     position: fixed;
-    inset: 0;
+    inset: 0 0 auto;
     z-index: 50;
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: 100vh;
+    height: 100dvh;
     padding: max(12px, env(safe-area-inset-top)) var(--gutter) max(12px, env(safe-area-inset-bottom));
     background: #000;
     color: #fff;
@@ -265,15 +269,17 @@
   }
 
   .stage {
+    position: relative;
     display: grid;
     min-height: 0;
     place-items: center;
   }
 
   video {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
-    max-height: 100%;
     object-fit: contain;
   }
 
