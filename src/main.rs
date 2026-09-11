@@ -12,6 +12,7 @@ mod inbox;
 mod library;
 mod link;
 mod metrics;
+mod pair;
 mod plugins;
 mod settings;
 mod store;
@@ -37,10 +38,13 @@ pub struct AppState {
     pub links: Mutex<HashMap<String, link::LinkState>>,
     /// Claim attempts per client address, to keep a six-character code from being guessed online.
     pub claims: Mutex<HashMap<String, link::Throttle>>,
+    /// Pairing sessions by `sid`, ten minutes long at most, like `links`.
+    pub pairs: Mutex<HashMap<String, pair::Session>>,
     /// Unix milliseconds. A field so a test can move time.
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
     pub gen_code: Box<dyn Fn() -> String + Send + Sync>,
     pub gen_inbox_key: Box<dyn Fn() -> String + Send + Sync>,
+    pub gen_nameplate: Box<dyn Fn() -> String + Send + Sync>,
     pub metrics: metrics::Metrics,
     /// Bearer token for `/metrics` (env `METRICS_TOKEN`). `None` turns the route off.
     pub metrics_token: Option<String>,
@@ -61,9 +65,11 @@ impl AppState {
             libraries: tokio::sync::Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             claims: Mutex::new(HashMap::new()),
+            pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_code: Box::new(link::gen_code),
             gen_inbox_key: Box::new(link::gen_inbox_key),
+            gen_nameplate: Box::new(pair::gen_nameplate),
             metrics: metrics::Metrics::default(),
             metrics_token,
             log_requests,

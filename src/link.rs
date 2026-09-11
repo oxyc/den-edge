@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 
 const TTL_MS: u64 = 10 * 60 * 1000;
 /// No 0/O or 1/I. Thirty-two symbols, so `byte & 31` picks one without bias.
-const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub(crate) const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Claims per client address per minute: the only secret in a pairing is a six-character code.
-const CLAIMS_PER_WINDOW: u32 = 20;
+pub(crate) const CLAIMS_PER_WINDOW: u32 = 20;
 const CLAIM_WINDOW_MS: u64 = 60 * 1000;
 
 pub struct LinkState {
@@ -160,7 +160,7 @@ pub(crate) fn device_label(raw: Option<&Value>) -> Option<String> {
 
 /// Counts a claim from `ip`; true once it is over the limit. A blocked attempt doesn't extend the window, an
 /// allowed one does — so a steady stream of guesses stays blocked and the window clears once they stop.
-fn throttled(state: &AppState, ip: &str) -> bool {
+pub(crate) fn throttled(state: &AppState, ip: &str) -> bool {
     let now = state.now();
     let mut claims = lock(&state.claims);
     if claims.len() > 1024 {

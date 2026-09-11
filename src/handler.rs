@@ -130,6 +130,9 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     if path.starts_with("/inbox") {
         return crate::inbox::handle(state, req).await;
     }
+    if path.starts_with("/pair/") {
+        return crate::pair::handle(state, req).await;
+    }
     if path.starts_with("/sync/") {
         return crate::sync::handle(state, req).await;
     }
@@ -176,6 +179,10 @@ pub fn route_label(path: &str) -> &'static str {
         "/link/poll" => "/link/poll",
         "/inbox/append" => "/inbox/append",
         "/inbox/drain" => "/inbox/drain",
+        "/pair/new" => "/pair/new",
+        "/pair/open" => "/pair/open",
+        p if p.starts_with("/pair/") && p.matches('/').count() == 3 => "/pair/:sid/:slot",
+        p if p.starts_with("/pair/") => "/pair/:sid",
         p if p == "/app" || p.starts_with("/app/") => "/app",
         p if p.starts_with("/sync/") => "/sync/:id",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
@@ -193,10 +200,12 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     match route {
         "/health" | "/version" | "/config" | "/metrics" | "/app" | "/link/poll" | "/inbox/drain"
         | "/lib/:id/changes" => Some(GET),
-        "/plugins" | "/settings" => Some(GET_PUT),
+        "/plugins" | "/settings" | "/pair/:sid/:slot" => Some(GET_PUT),
         "/sync/:id" => Some(GET_PUT_DELETE),
-        "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" => Some(POST),
-        "/link" => Some(DELETE),
+        "/link/new" | "/link/claim" | "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => {
+            Some(POST)
+        }
+        "/link" | "/pair/:sid" => Some(DELETE),
         _ => None,
     }
 }
@@ -382,7 +391,7 @@ pub mod tests {
         }
     }
 
-    fn sequence(values: &[&str]) -> Box<dyn Fn() -> String + Send + Sync> {
+    pub fn sequence(values: &[&str]) -> Box<dyn Fn() -> String + Send + Sync> {
         let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
         let next = AtomicUsize::new(0);
         Box::new(move || values[next.fetch_add(1, Ordering::Relaxed).min(values.len() - 1)].clone())
