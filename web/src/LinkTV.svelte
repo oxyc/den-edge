@@ -8,8 +8,8 @@
   if (scanned) history.replaceState(null, '', location.pathname + location.search);
   let code = $state(formatCode(scanned ?? '').text);
 
-  /** The empty slots behind the field: what's typed covers them one by one, the dashes stay put. */
-  const MASK = '____-____-____';
+  /** The dashes behind the field, with a blank for each character still to type. */
+  const MASK = '    -    -    ';
 
   /** Regroups what was typed; deleting a dash deletes the character beside it instead, or the dash would come back. */
   function typed(event: Event & { currentTarget: HTMLInputElement }) {
