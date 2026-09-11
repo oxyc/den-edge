@@ -1,7 +1,10 @@
 <script lang="ts">
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
+  import SearchResults from './components/SearchResults.svelte';
   import TitleSheet from './components/TitleSheet.svelte';
+  import { searchStream, type Hit } from './lib/search';
+  import { searchSources } from './lib/searchSources';
   import { addToWatchlist, blankTitle, markWatched, react, removeFromLibrary, unwatch } from './lib/actions';
   import { loadLibrary, type LibraryResult } from './lib/backup';
   import { browserClock } from './lib/clock';
@@ -84,6 +87,45 @@
 
   const select = $derived(loaded?.log ? (title: Title) => (selected = title) : undefined);
 
+  // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
+  // a newer query supersedes an older one mid-flight.
+  const sources = tmdbKey ? searchSources(tmdbKey) : null;
+  let query = $state('');
+  let hits = $state<Hit[] | null>(null);
+  let searchFailed = $state(false);
+  let generation = 0;
+  let pause: ReturnType<typeof setTimeout> | undefined;
+
+  function queryChanged() {
+    clearTimeout(pause);
+    generation++;
+    const text = query.trim();
+    if (text.length < 2 || !sources) {
+      hits = null;
+      return;
+    }
+    pause = setTimeout(() => void runSearch(text, generation), 300);
+  }
+
+  async function runSearch(text: string, ticket: number) {
+    if (!sources) return;
+    searchFailed = false;
+    let painted = false;
+    try {
+      for await (const batch of searchStream(text, sources)) {
+        if (ticket !== generation) return;
+        hits = batch;
+        painted = true;
+      }
+      if (!painted && ticket === generation) hits = [];
+    } catch {
+      if (ticket === generation) {
+        searchFailed = true;
+        hits = [];
+      }
+    }
+  }
+
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
     return entry.title.year ? String(entry.title.year) : undefined;
@@ -95,7 +137,24 @@
 {:else if loaded.result.state === 'ok' && library}
   {@const resume = continueWatching(library)}
   {@const saved = watchlist(library)}
-  {#if resume.length}
+  {#if sources}
+    <input
+      class="search glass"
+      type="search"
+      placeholder="Search movies, series and people"
+      aria-label="Search movies, series and people"
+      autocomplete="off"
+      bind:value={query}
+      oninput={queryChanged}
+    />
+  {/if}
+  {#if hits}
+    {#if hits.length}
+      <SearchResults {hits} onselect={select} />
+    {:else}
+      <p class="note">{searchFailed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}</p>
+    {/if}
+  {:else if resume.length}
     <PosterRow heading="Continue Watching">
       {#each resume as entry (`${entry.title.type}:${entry.title.id}`)}
         <PosterCard
@@ -107,7 +166,7 @@
       {/each}
     </PosterRow>
   {/if}
-  {#if saved.length}
+  {#if !hits && saved.length}
     <PosterRow heading="Watchlist">
       {#each saved as title (`${title.type}:${title.id}`)}
         <PosterCard
@@ -118,7 +177,7 @@
       {/each}
     </PosterRow>
   {/if}
-  {#if !resume.length && !saved.length}
+  {#if !hits && !resume.length && !saved.length}
     <p class="note">Nothing in progress and nothing on your watchlist yet.</p>
   {/if}
   {#if loaded.result.live}
@@ -152,6 +211,19 @@
 {/if}
 
 <style>
+  .search {
+    width: 100%;
+    margin-bottom: 28px;
+    padding: 12px 20px;
+    border-radius: 999px;
+    color: var(--fg);
+    outline: none;
+  }
+
+  .search:focus-visible {
+    border-color: var(--accent);
+  }
+
   .note {
     color: var(--muted);
   }

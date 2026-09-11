@@ -28,7 +28,8 @@ export async function fetchTitle(
   return toTitle(ref, details);
 }
 
-function toTitle(ref: { type: MediaType; id: number }, details: Record<string, unknown>): Title | null {
+/** A TMDB movie or series object (detail, search result or credit) as a title; null without a name. */
+export function toTitle(ref: { type: MediaType; id: number }, details: Record<string, unknown>): Title | null {
   const text = (field: string) => (typeof details[field] === 'string' ? (details[field] as string) : undefined);
   const name = text('title') ?? text('name');
   if (!name) return null;
