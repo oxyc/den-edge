@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import Detail from './components/Detail.svelte';
   import Person from './components/Person.svelte';
@@ -335,6 +336,16 @@
     }
   }
 
+  /** What Home's billboard carries when the library has nothing of its own to put there. */
+  let trending = $state<Title | null>(null);
+  $effect(() => {
+    const load = pages;
+    if (!load || trending) return;
+    void load('/trending/movie/week', 'movie', {}, 1)
+      .then((list) => (trending = list[0] ?? null))
+      .catch(() => undefined);
+  });
+
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
     return entry.title.year ? String(entry.title.year) : undefined;
@@ -385,6 +396,18 @@
     />
   {:else if !sources}
     <p class="note">Search needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
+  {/if}
+  {#if !hits && !facet && tmdbKey}
+    {@const up = resume[0]}
+    {@const featured = up?.title ?? saved[0] ?? trending}
+    {#if featured}
+      <Billboard
+        title={featured}
+        {tmdbKey}
+        caption={up ? caption(up) : undefined}
+        onplay={playHere && (() => playHere(featured, up?.episode?.season, up?.episode?.episode))}
+      />
+    {/if}
   {/if}
   {#if hits}
     {#if hits.length}
