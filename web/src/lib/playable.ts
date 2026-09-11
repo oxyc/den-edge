@@ -9,12 +9,16 @@ export interface Playable {
   hevcMain: number;
   /** 10-bit HEVC's, which every HDR release is. */
   hevcMain10: number;
+  /** HEVC's High tier, which a UHD Blu-ray remux often is and Apple's decoders never take. */
+  hevcHighTier: number;
   hdr: boolean;
 }
 
 /** Levels 3.1, 4.0, 4.1, 5.0 and 5.1: 720p up to 4K. */
 const H264_LEVELS = [0x1f, 0x28, 0x29, 0x32, 0x33];
 const HEVC_LEVELS = [93, 120, 123, 150, 153];
+/** The High tier starts at level 4. */
+const HEVC_HIGH_LEVELS = [120, 123, 150, 153];
 
 export interface Probe {
   /** Whether a `video/mp4; codecs=…` type plays here. */
@@ -39,28 +43,35 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
   const highest = (levels: number[], codec: (level: number) => string) =>
     levels.filter((level) => probe.supports(`video/mp4; codecs="${codec(level)}"`)).at(-1) ?? 0;
   const hevcMain10 = highest(HEVC_LEVELS, (level) => `hvc1.2.4.L${level}.B0`);
+  // A type check says yes to a High tier string more readily than the decoder does, so Media Capabilities has the
+  // last word where there is one.
+  const highTier = highest(HEVC_HIGH_LEVELS, (level) => `hvc1.2.4.H${level}.B0`);
+  const uhd = { width: 3840, height: 2160, bitrate: 40_000_000, framerate: 24 };
   return {
     h264: highest(H264_LEVELS, (level) => `avc1.6400${level.toString(16)}`),
     hevcMain: highest(HEVC_LEVELS, (level) => `hvc1.1.6.L${level}.B0`),
     hevcMain10,
-    hdr: hevcMain10 > 0 && (await decodesHdr(probe)),
+    hevcHighTier:
+      highTier > 0 && (await decodes(probe, { contentType: `video/mp4; codecs="hvc1.2.4.H${highTier}.B0"`, ...uhd }))
+        ? highTier
+        : 0,
+    hdr:
+      hevcMain10 > 0 &&
+      (await decodes(probe, {
+        contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0"',
+        ...uhd,
+        transferFunction: 'pq',
+        colorGamut: 'rec2020',
+        hdrMetadataType: 'smpteSt2086',
+      })),
   };
 }
 
-/** 4K HDR10 at a remux's bitrate. A browser that can't be asked is taken at its 10-bit HEVC's word. */
-async function decodesHdr(probe: Probe): Promise<boolean> {
+/** Media Capabilities' answer. A browser that can't be asked is taken at its type check's word. */
+async function decodes(probe: Probe, video: VideoConfiguration): Promise<boolean> {
   if (!probe.decodes) return true;
   try {
-    return await probe.decodes({
-      contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0"',
-      width: 3840,
-      height: 2160,
-      bitrate: 40_000_000,
-      framerate: 24,
-      transferFunction: 'pq',
-      colorGamut: 'rec2020',
-      hdrMetadataType: 'smpteSt2086',
-    });
+    return await probe.decodes(video);
   } catch {
     return false;
   }

@@ -52,6 +52,8 @@
   } = $props();
 
   const REPORT_MS = 60_000;
+  /** How long a video may go without a picture before it counts as one the browser can't play. */
+  const STUCK_MS = 30_000;
   /** How long before asking again while every slot, or the GPU, is taken. */
   const RETRY_MS = 20_000;
   /** Seconds the next episode waits once this one has ended. */
@@ -148,9 +150,19 @@
   $effect(() => {
     const [current, element] = [session, video];
     if (!current || !element) return;
+    // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
+    // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that.
+    const stuck = setTimeout(() => {
+      const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
+      if (noSource || (!element.paused && element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)) {
+        broke(element.error?.code ?? 0, `no picture after ${STUCK_MS / 1000} s (readyState ${element.readyState}, networkState ${element.networkState})`);
+      }
+    }, STUCK_MS);
+    const cleanup = () => clearTimeout(stuck);
+    element.addEventListener('loadeddata', cleanup, { once: true });
     if (element.canPlayType('application/vnd.apple.mpegurl')) {
       element.src = current.playlist;
-      return;
+      return cleanup;
     }
     void import('hls.js').then(({ default: Hls }) => {
       if (ended || session !== current) return;
@@ -165,6 +177,7 @@
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
     });
+    return cleanup;
   });
 
   /** The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. */

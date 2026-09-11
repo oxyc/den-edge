@@ -8,19 +8,28 @@ const browser = (yes: (codec: string) => boolean, decodes?: Probe['decodes']): P
 });
 
 describe('playable', () => {
-  it('finds the highest level of each codec, and asks about HDR', async () => {
+  it('finds the highest level of each codec, and asks about the High tier and HDR', async () => {
     const asked: VideoConfiguration[] = [];
-    const phone = browser(() => true, async (video) => {
+    const tv = browser(() => true, async (video) => {
       asked.push(video);
       return true;
     });
-    expect(await playable(phone)).toEqual({ h264: 0x33, hevcMain: 153, hevcMain10: 153, hdr: true });
-    expect(asked[0]).toMatchObject({ transferFunction: 'pq', width: 3840 });
+    expect(await playable(tv)).toEqual({ h264: 0x33, hevcMain: 153, hevcMain10: 153, hevcHighTier: 153, hdr: true });
+    expect(asked.map((v) => v.contentType)).toEqual([
+      'video/mp4; codecs="hvc1.2.4.H153.B0"',
+      'video/mp4; codecs="hvc1.2.4.L153.B0"',
+    ]);
+    expect(asked[1]).toMatchObject({ transferFunction: 'pq', width: 3840 });
+  });
+
+  it('believes Media Capabilities over a type check that takes the High tier', async () => {
+    const iphone = browser(() => true, async (video) => !video.contentType.includes('.H'));
+    expect(await playable(iphone)).toMatchObject({ hevcMain10: 153, hevcHighTier: 0, hdr: true });
   });
 
   it('gives no HEVC, and no HDR, to a browser without it', async () => {
     const firefox = browser((codec) => codec.startsWith('avc1'), async () => true);
-    expect(await playable(firefox)).toEqual({ h264: 0x33, hevcMain: 0, hevcMain10: 0, hdr: false });
+    expect(await playable(firefox)).toEqual({ h264: 0x33, hevcMain: 0, hevcMain10: 0, hevcHighTier: 0, hdr: false });
   });
 
   it('stops at the level the decoder tops out at', async () => {
