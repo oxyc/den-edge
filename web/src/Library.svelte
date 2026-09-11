@@ -43,9 +43,9 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
-  import { webConfig } from './lib/access';
   import { findRemux } from './lib/remux';
-  import { denInstalls, findAddon, findAtlas, SCOUT, type Addon } from './lib/scout';
+  import { fetchRoutes, type Routes } from './lib/routes';
+  import { findAddon, findAtlas, installsOf, SCOUT, type Addon } from './lib/scout';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -74,12 +74,9 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
-  /** Den's addon origins behind Cloudflare Access (den-edge's `/web-config`): install URLs on them are Den's. */
-  let access = $state(new Set<string>());
-  /**
-   * Where den-remux answers for this page — this origin (the tailnet's `/remux`), else the tailnet's address from the
-   * public name — so a title can play here; null off the tailnet, where video has no way in (#15).
-   */
+  /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
+  let routes = $state<Routes>({});
+  /** Where den-remux answers for this page (`findRemux`), so a title can play here; null where no route reaches it. */
   let remux = $state<string | null>(null);
 
   type Target = { title: Title; season?: number; episode?: number };
@@ -97,12 +94,11 @@
       plugins = readPlugins(opened.settings('plugins'));
       const [key, installed] = [tmdbKey, plugins];
       void (async () => {
-        const config = await webConfig();
-        access = config.access;
+        routes = await fetchRoutes();
         const [foundScout, foundAtlas, foundRemux] = await Promise.all([
-          findAddon(installed, access, SCOUT),
-          findAtlas(installed, access),
-          findRemux(['', ...(config.remux ? [config.remux] : [])]),
+          findAddon(installed, routes, SCOUT),
+          findAtlas(installed, routes),
+          findRemux(routes.remux ?? []),
         ]);
         scout = foundScout;
         atlas = foundAtlas?.base ?? null;
@@ -435,7 +431,7 @@
       {tmdbKey}
       {scout}
       {remux}
-      subtitles={denInstalls(plugins, access, scout)}
+      subtitles={installsOf(plugins, routes, 'subs')}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}

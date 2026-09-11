@@ -3,6 +3,8 @@
 // play, and keeps scout's tickets and the debrid's links to itself. Its routes are on this origin under /remux
 // (tailscale serve), and a cookie from a one-time browser key lets this browser start sessions.
 
+import type { Entry } from './routes';
+
 export interface Session {
   /** `/remux/s/<sid>/<sig>/master.m3u8`: a signed URL, so AirPlay can play it too. */
   playlist: string;
@@ -43,25 +45,31 @@ export interface Want {
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
 
 /**
- * Where den-remux answers for this page: the first of `bases` — '' for this origin, then the tailnet's address den-edge
- * names (#15) — or null. The public web name has none of its own, and a browser off the tailnet reaches neither.
+ * Where den-remux answers for this page: the first of its routes-table entries (den-spec routes-v1) this page can use
+ * whose `/health` answers — none behind Access (a browser holds no token), and no plain http from an https page — or
+ * null, off the tailnet where no address reaches it.
  */
-export async function findRemux(bases: string[], fetchImpl: typeof fetch = fetch): Promise<string | null> {
-  for (const base of bases) {
+export async function findRemux(
+  entries: Entry[],
+  fetchImpl: typeof fetch = fetch,
+  secure = globalThis.location?.protocol !== 'http:',
+): Promise<string | null> {
+  for (const entry of entries) {
+    if (entry.access || (secure && entry.url.startsWith('http:'))) continue;
     try {
-      // Its POST-only route answers a GET with 405; the app shell would be a 200.
-      if ((await fetchImpl(`${base}/remux/login`)).status === 405) return base;
+      const res = await fetchImpl(`${entry.url}/health`);
+      if (res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string') return entry.url;
     } catch {
-      // Out of reach from here: off the tailnet, or no den-remux at all.
+      // Out of reach from here, or not den-remux: the next.
     }
   }
   return null;
 }
 
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */
-export async function login(key: string, fetchImpl: typeof fetch = fetch, base = ''): Promise<boolean | null> {
+export async function login(key: string, fetchImpl: typeof fetch = fetch, base = '/remux'): Promise<boolean | null> {
   try {
-    const res = await fetchImpl(`${base}/remux/login`, {
+    const res = await fetchImpl(`${base}/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ key }),
@@ -88,7 +96,7 @@ export function forgetSubtitles(): void {
 export async function startSession(
   want: Want,
   fetchImpl: typeof fetch = fetch,
-  base = '',
+  base = '/remux',
 ): Promise<Session | { failure: Failure }> {
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
@@ -99,7 +107,7 @@ export async function startSession(
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
     try {
-      res = await fetchImpl(`${base}/remux/session`, {
+      res = await fetchImpl(`${base}/session`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -109,8 +117,9 @@ export async function startSession(
     }
     if (res.status === 201) {
       if (candidate) subtitleVerdicts.set(candidate, true);
+      // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const session = (await res.json()) as Session;
-      return { ...session, playlist: base + session.playlist };
+      return /^https?:/.test(base) ? { ...session, playlist: new URL(session.playlist, base).href } : session;
     }
     const error = await errorCode(res);
     if (error === 'bad_subtitles' && candidate) {

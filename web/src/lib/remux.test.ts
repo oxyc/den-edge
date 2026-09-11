@@ -80,29 +80,30 @@ describe('startSession', () => {
 });
 
 describe('findRemux', () => {
-  it('takes this origin first, then the tailnet’s address, and none when neither answers', async () => {
-    const answering = (bases: string[]): typeof fetch => async (input) => {
-      const url = String(input);
-      if (!bases.some((b) => url === `${b}/remux/login`)) throw new TypeError('unreachable');
-      return new Response('{}', { status: 405 });
-    };
-    const tailnet = 'https://pve.example:8443';
-    expect(await findRemux(['', tailnet], answering(['', tailnet]))).toBe('');
-    expect(await findRemux(['', tailnet], answering([tailnet]))).toBe(tailnet);
-    expect(await findRemux(['', tailnet], answering([]))).toBeNull();
+  const lan = 'http://192.168.86.193:8095/remux';
+  const tailnet = 'https://pve.example:8443/remux';
+  const entries = [{ url: lan }, { url: tailnet }, { url: 'https://d-remux.example/remux', access: true }];
+  const answering = (urls: string[]): typeof fetch => async (input) => {
+    if (!urls.includes(String(input))) throw new TypeError('unreachable');
+    return new Response('{"status":"ok"}', { status: 200 });
+  };
+
+  it('takes the first entry this page can use whose health answers', async () => {
+    expect(await findRemux(entries, answering([`${lan}/health`, `${tailnet}/health`]), true), 'no http from https').toBe(tailnet);
+    expect(await findRemux(entries, answering([`${lan}/health`]), false), 'an http page may use the LAN').toBe(lan);
+    expect(await findRemux(entries, answering(['https://d-remux.example/remux/health']), true), 'no Access token').toBeNull();
     const shell: typeof fetch = async () => new Response('<!doctype html>', { status: 200 });
-    expect(await findRemux([''], shell), 'the app shell is not den-remux').toBeNull();
+    expect(await findRemux(entries, shell, true), 'the app shell is not den-remux').toBeNull();
   });
 
   it('starts a session there and hands back a playlist this page can play', async () => {
-    const tailnet = 'https://pve.example:8443';
     let asked = '';
     const result = await startSession({ ...want, subtitleLanguages: [] }, async (input) => {
       asked = String(input);
       return answer(201, session);
     }, tailnet);
-    expect(asked).toBe(`${tailnet}/remux/session`);
-    expect(result).toMatchObject({ playlist: `${tailnet}/remux/s/sid/sig/master.m3u8` });
+    expect(asked).toBe(`${tailnet}/session`);
+    expect(result).toMatchObject({ playlist: 'https://pve.example:8443/remux/s/sid/sig/master.m3u8' });
   });
 });
 

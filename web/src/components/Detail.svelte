@@ -8,6 +8,7 @@
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
   import TitleActions from './TitleActions.svelte';
+  import Trailer from './Trailer.svelte';
 
   type Reaction = TitleRow['reaction']['value'];
 
@@ -53,11 +54,14 @@
   let detail = $state<TitleDetail | null | undefined>(undefined);
   let season = $state<number | null>(null);
   let seasonEpisodes = $state<Episode[] | null | undefined>(undefined);
+  /** Its trailer is showing. */
+  let trailer = $state(false);
 
   $effect(() => {
     const [current, key] = [ref, tmdbKey];
     detail = undefined;
     season = null;
+    trailer = false;
     void fetchDetail(current, key).then((loaded) => {
       if (current !== ref) return;
       detail = loaded;
@@ -124,7 +128,11 @@
     onreact={(reaction) => onreact(d.title, reaction)}
     onplay={() => onplay(d.title)}
     onplayhere={onplayhere ? () => onplayhere(d.title) : undefined}
+    ontrailer={d.trailer ? () => (trailer = true) : undefined}
   />
+  {#if trailer && d.trailer}
+    <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailer = false)} />
+  {/if}
   {#if d.overview}<p class="overview">{d.overview}</p>{/if}
 
   {#if d.seasons.length}

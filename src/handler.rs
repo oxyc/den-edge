@@ -149,10 +149,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => config(state, face),
-        // The web app's counterpart to /config: which addon origins are Den's, and where its player reaches den-remux.
-        "/web-config" => {
-            bare_json(StatusCode::OK, &json!({ "access": state.access_origins, "remux": state.remux_origin }))
-        }
+        "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes, face != Face::Both)),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(
@@ -164,7 +161,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         p => match &state.web_dir {
             Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
-                crate::web::serve(dir, p, state.remux_origin.as_deref()).await
+                crate::web::serve(dir, p, &state.remux_origins).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
@@ -205,7 +202,7 @@ impl Face {
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
         match (self, path) {
-            (_, "/health" | "/version") | (Face::Both, _) => true,
+            (_, "/health" | "/version" | "/routes") | (Face::Both, _) => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,
         }
@@ -500,21 +497,31 @@ pub mod tests {
             "ACCESS_ORIGINS",
             "https://d-scout.oxy.fi, https://D-ATLAS.oxy.fi/,x; img-src *",
         );
-        s.remux_origin = crate::origin("https://PVE.example:8443/");
+        s.routes = crate::routes::parse(
+            "scout=http://192.168.86.193:8080 https://pve.example:8443/scout access:https://d-scout.oxy.fi;\
+             remux=http://192.168.86.193:8095/remux https://pve.example:8443/remux",
+        );
+        s.remux_origins = crate::routes::remux_origins(&s.routes);
         h
     }
 
     #[tokio::test]
-    async fn the_web_app_learns_which_addons_get_the_access_token() {
+    async fn every_name_serves_the_routes_and_the_public_ones_no_lan_address() {
         let h = split_harness();
-        let config = h.send("GET", "/web-config", None, &[("host", "d.oxy.fi")]).await;
-        assert_eq!(
-            body_json(config).await,
-            json!({ "access": ["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"], "remux": "https://pve.example:8443" })
-        );
-        let on_api = h.send("GET", "/web-config", None, &[("host", "d-api.oxy.fi")]).await;
-        assert_eq!(on_api.status(), StatusCode::NOT_FOUND);
-        // The player may reach den-remux there: its playlists and segments, and the video itself.
+        let routes = |host: &'static str| {
+            let h = &h;
+            async move { body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await }
+        };
+        let lan = routes("192.168.86.193:8094").await;
+        assert_eq!(lan["addons"]["scout"][0]["url"], "http://192.168.86.193:8080");
+        for host in ["d.oxy.fi", "d-api.oxy.fi"] {
+            assert_eq!(
+                routes(host).await["addons"]["scout"],
+                json!([{ "url": "https://pve.example:8443/scout" }, { "url": "https://d-scout.oxy.fi", "access": true }]),
+                "{host}"
+            );
+        }
+        // The player may reach den-remux there, and a trailer plays in YouTube's embed.
         let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
         let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
         assert!(csp.contains("media-src 'self' blob: https://pve.example:8443;"), "{csp}");
@@ -522,6 +529,7 @@ pub mod tests {
             csp.contains("connect-src 'self' https://api.themoviedb.org https://pve.example:8443;"),
             "{csp}"
         );
+        assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");
     }
 
     /// A fake addon on a local port, answering with what it was sent — so a test sees what the relay passed on.

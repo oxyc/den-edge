@@ -42,6 +42,8 @@ export interface TitleDetail {
   cast: Credit[];
   /** TMDB's recommendations for it. */
   more: Title[];
+  /** Its trailer's YouTube id, from TMDB's videos: what the web plays, embedded. */
+  trailer?: string;
 }
 
 export interface Episode {
@@ -99,7 +101,15 @@ export function parseDetail(ref: { type: MediaType; id: number }, body: Json): T
     seasons,
     cast: cast.slice(0, CAST_LIMIT),
     more,
+    trailer: trailerOf(body),
   };
+}
+
+/** A YouTube trailer from TMDB's videos: a trailer before a teaser, an official one before the rest. */
+function trailerOf(body: Json): string | undefined {
+  const kind = (v: Json) => (v.type === 'Trailer' ? 0 : v.type === 'Teaser' ? 2 : 4) + (v.official === true ? 0 : 1);
+  const videos = list(obj(body.videos).results).filter((v) => v.site === 'YouTube' && text(v.key) && kind(v) < 4);
+  return text(videos.sort((a, b) => kind(a) - kind(b))[0]?.key);
 }
 
 export function parseSeason(body: Json): Episode[] {
@@ -145,7 +155,7 @@ export async function fetchDetail(
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<TitleDetail | null> {
-  const append = ref.type === 'tv' ? 'aggregate_credits,recommendations' : 'credits,recommendations';
+  const append = ref.type === 'tv' ? 'aggregate_credits,recommendations,videos' : 'credits,recommendations,videos';
   const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
   return body && parseDetail(ref, body);
 }

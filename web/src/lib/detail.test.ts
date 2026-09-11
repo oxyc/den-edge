@@ -63,7 +63,16 @@ describe('title pages', () => {
     expect(parseDetail({ type: 'movie', id: 1 }, {})).toBeNull();
   });
 
-  it('asks TMDB for the credits and recommendations in the same fetch', async () => {
+  it('takes a YouTube trailer before a teaser, an official one before the rest, and nothing else', () => {
+    const videos = (...results: object[]) => parseDetail({ type: 'movie', id: 1 }, { ...movie, videos: { results } })!.trailer;
+    const yt = (key: string, type: string, official = false) => ({ site: 'YouTube', key, type, official });
+    expect(videos(yt('teaser', 'Teaser', true), yt('fan', 'Trailer'), yt('real', 'Trailer', true))).toBe('real');
+    expect(videos(yt('teaser', 'Teaser'), { site: 'Vimeo', key: 'v', type: 'Trailer' })).toBe('teaser');
+    expect(videos(yt('clip', 'Clip', true))).toBeUndefined();
+    expect(parseDetail({ type: 'movie', id: 1 }, movie)!.trailer).toBeUndefined();
+  });
+
+  it('asks TMDB for the credits, recommendations and videos in the same fetch', async () => {
     const asked: string[] = [];
     const fetchImpl = (async (url: string) => {
       asked.push(url);
@@ -73,7 +82,7 @@ describe('title pages', () => {
     const url = new URL(asked[0]!);
     expect([url.pathname, url.searchParams.get('append_to_response')]).toEqual([
       '/3/tv/95396',
-      'aggregate_credits,recommendations',
+      'aggregate_credits,recommendations,videos',
     ]);
     const down = (async () => new Response('{}', { status: 401 })) as typeof fetch;
     expect(await fetchDetail({ type: 'movie', id: 1 }, 'k', down)).toBeNull();
