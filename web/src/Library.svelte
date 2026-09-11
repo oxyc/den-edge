@@ -216,7 +216,10 @@
   {#if loaded.result.live}
     <p class="note small">Up to date with your TV.</p>
   {:else}
-    <p class="note small">From the TV’s backup of {new Date(loaded.result.backedUpAt).toLocaleString()}.</p>
+    <p class="note small">
+      From the TV’s backup of {new Date(loaded.result.backedUpAt).toLocaleString()}. To see it live and change it, unlink
+      in <a href="#settings">Settings</a> and link again with the code the TV shows.
+    </p>
   {/if}
 {:else if loaded.result.state === 'none'}
   <p class="note">No backup from your TV yet. On the TV, open <b>Settings › Sync settings</b> and back up.</p>
