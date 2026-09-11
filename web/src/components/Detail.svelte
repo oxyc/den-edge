@@ -276,6 +276,11 @@
     cursor: pointer;
   }
 
+  /* A finger's worth, as every control in the player and the actions row is. */
+  .mark {
+    min-height: 44px;
+  }
+
   .tabs button.on,
   .mark.on {
     border-color: var(--fg);

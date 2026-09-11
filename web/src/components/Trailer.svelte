@@ -18,7 +18,19 @@
 <div class="trailer" role="dialog" aria-modal="true" aria-label={`${title}: trailer`}>
   <header>
     <b>{title}</b>
-    <button onclick={onclose}>Close</button>
+    <!-- The way out of an embed that won't play: a trailer whose owner disabled embedding shows only "Watch on
+         YouTube" here, and nothing in the page can be told that happened. On a phone the link opens the app. -->
+    <a
+      class="out"
+      href={`https://www.youtube.com/watch?v=${encodeURIComponent(key)}`}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {@render out()}<span class="label">YouTube, in a new tab</span>
+    </a>
+    <button class="close" onclick={onclose}>
+      {@render cross()}<span class="label">Close</span>
+    </button>
   </header>
   <!-- The page sends no referrer, and YouTube's embed refuses to play without one: this frame sends its origin. -->
   <iframe
@@ -29,6 +41,18 @@
     referrerpolicy="strict-origin-when-cross-origin"
   ></iframe>
 </div>
+
+{#snippet out()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M14 4.5h5.5V10" />
+    <path d="M19.5 4.5 12 12" />
+    <path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5" />
+  </svg>
+{/snippet}
+
+{#snippet cross()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18" /></svg>
+{/snippet}
 
 <style>
   .trailer {
@@ -55,20 +79,73 @@
   }
 
   header b {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  button {
+  .out,
+  .close {
+    display: flex;
     flex: 0 0 auto;
-    padding: 8px 16px;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0 14px;
     border: 1px solid rgb(255 255 255 / 0.4);
     border-radius: 999px;
     background: none;
     color: #fff;
     font: inherit;
+    text-decoration: none;
     cursor: pointer;
+  }
+
+  /* Closing is one glyph, as it is in the player, and it stands beside the title rather than among controls. */
+  .close {
+    width: 44px;
+    padding: 0;
+    border-color: transparent;
+  }
+
+  /* Read out at every width, drawn only where the title can spare it. */
+  .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  @media (min-width: 560px) {
+    .out .label {
+      position: static;
+      width: auto;
+      height: auto;
+      clip-path: none;
+    }
+  }
+
+  .icon {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .out:focus-visible,
+  .close:focus-visible {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   iframe {
