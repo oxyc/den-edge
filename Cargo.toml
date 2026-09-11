@@ -1,6 +1,6 @@
 [package]
 name = "den-edge"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 description = "Den's sync relay on the homelab: phone linking, the companion inbox, the library backup, the shared plugin list and settings, and the companion web page."
 license = "MIT"
