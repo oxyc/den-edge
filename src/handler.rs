@@ -190,14 +190,18 @@ impl Face {
     }
 
     /// `/health` and `/version` answer on every name; the device routes, `/config` and `/metrics` only where
-    /// devices call; the web app's files only where browsers load it.
+    /// devices call; the web app's files only where browsers load it. The web app is a device too: the routes it
+    /// calls on its own origin — pairing, the library log, sending to the TV — answer on its name as well, where
+    /// they sit behind Access. What only a TV does (draining its inbox, unlinking, `/config`) stays off it.
     fn serves(self, path: &str) -> bool {
         let device = ["/link", "/inbox", "/pair/", "/sync/", "/lib/"].iter().any(|p| path.starts_with(p))
             || matches!(path, "/config" | "/metrics");
+        let web_app_calls =
+            path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
         match (self, path) {
             (_, "/health" | "/version") | (Face::Both, _) => true,
             (Face::Api, _) => device,
-            (Face::Web, _) => !device,
+            (Face::Web, _) => !device || web_app_calls,
         }
     }
 }
@@ -520,11 +524,21 @@ pub mod tests {
             let h = &h;
             async move { h.send(method, path, None, &[("host", host)]).await.status() }
         };
-        // The web app's name: the app, and nothing of the device API.
+        // The web app's name: the app and the routes it calls, and nothing only a TV does.
         assert_eq!(status("d.oxy.fi", "GET", "/").await, StatusCode::OK);
-        for path in ["/config", "/inbox/drain", "/lib/0123456789abcdef/changes", "/metrics"] {
+        for path in ["/config", "/inbox/drain", "/metrics"] {
             assert_eq!(status("d.oxy.fi", "GET", path).await, StatusCode::NOT_FOUND, "{path} on d");
         }
+        assert_eq!(status("d.oxy.fi", "DELETE", "/link").await, StatusCode::NOT_FOUND);
+        assert_ne!(
+            status("d.oxy.fi", "POST", "/pair/open").await,
+            StatusCode::NOT_FOUND,
+            "pairing a browser"
+        );
+        // A batch, not changes: an unwritten library's changes are a 404 of their own.
+        let batch = status("d.oxy.fi", "POST", "/lib/0123456789abcdef/batch").await;
+        assert_ne!(batch, StatusCode::NOT_FOUND, "the library log");
+        assert_ne!(status("d.oxy.fi", "POST", "/inbox/append").await, StatusCode::NOT_FOUND, "Play on TV");
         // The device API's name, however it is cased: the device routes, and never the app.
         assert_eq!(status("D-Api.Oxy.Fi", "GET", "/").await, StatusCode::NOT_FOUND);
         assert_eq!(status("d-api.oxy.fi", "GET", "/index.html").await, StatusCode::NOT_FOUND);
