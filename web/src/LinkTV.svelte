@@ -1,23 +1,43 @@
 <script lang="ts">
   import { claimCode, type ClaimError } from './lib/edge';
   import { links } from './lib/links.svelte';
+  import { join, parseCode, type JoinError } from './lib/pair';
 
-  // The TV's link QR carries the code, so a scan arrives ready to link.
-  let code = $state(new URLSearchParams(location.search).get('code')?.toUpperCase() ?? '');
+  // The TV's QR carries its code in the URL fragment, which never reaches a server; it is read once and dropped
+  // from the address bar, so it isn't left in history. An older TV's QR carries a six-character code in ?code=.
+  const scanned = new URLSearchParams(location.hash.slice(1)).get('pair');
+  if (scanned) history.replaceState(null, '', location.pathname + location.search);
+  let code = $state((scanned ?? new URLSearchParams(location.search).get('code') ?? '').toUpperCase());
   let busy = $state(false);
-  let failure = $state<ClaimError | null>(null);
+  let failure = $state<ClaimError | JoinError | null>(null);
 
-  const messages: Record<ClaimError, string> = {
+  const messages: Record<ClaimError | JoinError, string> = {
     expired: 'That code has expired or doesn’t exist. Get a new one on the TV.',
     claimed: 'That code was already used. Get a new one on the TV.',
     throttled: 'Too many tries. Wait a minute and try again.',
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
+    mistyped: 'That isn’t a whole code. Check it against the TV.',
+    failed: 'The TV didn’t link this device: the code didn’t match, or it wasn’t allowed. Get a new code on the TV.',
   };
 
-  async function link(event: SubmitEvent) {
-    event.preventDefault();
+  /** A TV that pairs shows twelve characters; an older one shows six. */
+  const pairing = $derived(parseCode(code) !== null);
+  const older = $derived(/^[A-Z0-9]{6}$/i.test(code.trim()));
+
+  async function link() {
     busy = true;
     failure = null;
+    if (pairing) {
+      const result = await join(code);
+      busy = false;
+      if ('error' in result) {
+        failure = result.error;
+        return;
+      }
+      const libraryKey = btoa(String.fromCharCode(...result.handover.libraryKey));
+      links.add(result.inboxKey, { name: result.handover.host, libraryKey });
+      return;
+    }
     const result = await claimCode(code);
     busy = false;
     if ('error' in result) {
@@ -26,23 +46,34 @@
     }
     links.add(result.inboxKey);
   }
+
+  // A scanned code starts at once: the next step is on the TV.
+  if (scanned && parseCode(scanned)) void link();
 </script>
 
 <section>
   <h1>Link your Apple TV</h1>
-  <p class="sub">On the TV, open <b>Settings › Linked devices</b> and enter the code it shows.</p>
-  <form onsubmit={link}>
+  <p class="sub">On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.</p>
+  <form
+    onsubmit={(event) => {
+      event.preventDefault();
+      void link();
+    }}
+  >
     <input
       class="code"
       bind:value={code}
-      maxlength="6"
+      maxlength="16"
       autocomplete="off"
       autocapitalize="characters"
       spellcheck="false"
-      placeholder="XXXXXX"
+      placeholder="ABCD-EFGH-JKLM"
       aria-label="Link code"
+      disabled={busy}
     />
-    <button class="primary" disabled={busy || code.trim().length !== 6}>{busy ? 'Linking…' : 'Link'}</button>
+    <button class="primary" disabled={busy || !(pairing || older)}>
+      {busy ? (pairing ? 'Allow this device on your TV…' : 'Linking…') : 'Link'}
+    </button>
   </form>
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>
@@ -78,9 +109,9 @@
     border-radius: var(--radius);
     background: var(--card);
     color: var(--fg);
-    font-size: 24px;
+    font-size: 22px;
     font-weight: 700;
-    letter-spacing: 0.4em;
+    letter-spacing: 0.12em;
     text-align: center;
     text-transform: uppercase;
     outline: none;

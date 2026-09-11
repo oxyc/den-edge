@@ -4,10 +4,13 @@
 
 export interface Link {
   inboxKey: string;
-  /** The companion page names each TV; a link made here is "Apple TV" until renamed there. */
+  /** A paired TV names itself; the companion page names each TV; a six-character link made here is "Apple TV". */
   name?: string;
   /** Set by links made here; the companion page's own links don't record it. */
   linkedAt?: number;
+  /** The library's key, base64, when the TV handed it over in pairing (den-spec pairing v1). A link made with a
+   * six-character code finds it in the TV's backup instead. */
+  libraryKey?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -50,10 +53,12 @@ class Links {
     return this.list[0];
   }
 
-  add(inboxKey: string, now = Date.now()): void {
+  add(inboxKey: string, details: { name?: string; libraryKey?: string } = {}, now = Date.now()): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
-    const name = this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV';
-    this.list = [...this.list, { inboxKey, name, linkedAt: now }];
+    const name = details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
+    const link: Link = { inboxKey, name, linkedAt: now };
+    if (details.libraryKey) link.libraryKey = details.libraryKey;
+    this.list = [...this.list, link];
     writeLinks(this.list);
   }
 

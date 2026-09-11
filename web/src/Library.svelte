@@ -44,24 +44,32 @@
   let failure = $state<string | null>(null);
 
   $effect(() => {
-    void load(link.inboxKey).then((l) => (loaded = l));
+    void load(link).then((l) => (loaded = l));
   });
 
-  /** The backup, brought up to date from the record log when the TV has handed over its key. */
-  async function load(inboxKey: string): Promise<Loaded> {
-    const result = await loadLibrary(inboxKey);
-    if (result.state !== 'ok' || !result.libraryKey) return { result, log: null };
-    const log = await LibraryLog.open(result.libraryKey);
+  /**
+   * The record log, over the TV's backup when there is one. A paired link holds the library key itself; an older
+   * link finds it in the backup.
+   */
+  async function load(link: Link): Promise<Loaded> {
+    const result = await loadLibrary(link.inboxKey);
+    const libraryKey = link.libraryKey ?? (result.state === 'ok' ? result.libraryKey : undefined);
+    if (!libraryKey) return { result, log: null };
+    const log = await LibraryLog.open(libraryKey);
     if (!log) return { result, log: null };
+    const backup =
+      result.state === 'ok'
+        ? result
+        : { state: 'ok' as const, library: { records: [], marks: [], shapes: new Map(), dismissed: new Map() }, backedUpAt: 0 };
     clock.see(log.newestStamp());
     const key = readApiKey(log.settings('keys'), 'tmdb') ?? tmdbKey;
     tmdbKey = key;
     if (key) {
-      const library = applyLog(result.library, log.rows());
+      const library = applyLog(backup.library, log.rows());
       const titles = await Promise.all(untitled(library).slice(0, 60).map((ref) => fetchTitle(ref, key)));
       displays = titles.filter((t): t is Title => t !== null);
     }
-    return { result: { ...result, live: true }, log };
+    return { result: { ...backup, live: true }, log };
   }
 
   const library = $derived.by(() => {
