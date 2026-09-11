@@ -149,7 +149,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => config(state, face),
-        "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes, face != Face::Both)),
+        "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes)),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(
@@ -506,20 +506,12 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn every_name_serves_the_routes_and_the_public_ones_no_lan_address() {
+    async fn every_name_serves_the_whole_routes_table() {
         let h = split_harness();
-        let routes = |host: &'static str| {
-            let h = &h;
-            async move { body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await }
-        };
-        let lan = routes("192.168.86.193:8094").await;
-        assert_eq!(lan["addons"]["scout"][0]["url"], "http://192.168.86.193:8080");
-        for host in ["d.oxy.fi", "d-api.oxy.fi"] {
-            assert_eq!(
-                routes(host).await["addons"]["scout"],
-                json!([{ "url": "https://pve.example:8443/scout" }, { "url": "https://d-scout.oxy.fi", "access": true }]),
-                "{host}"
-            );
+        // Away from home, a client still matches its LAN install URLs against the LAN entries.
+        for host in ["192.168.86.193:8094", "d.oxy.fi", "d-api.oxy.fi"] {
+            let routes = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
+            assert_eq!(routes["addons"]["scout"][0]["url"], "http://192.168.86.193:8080", "{host}");
         }
         // The player may reach den-remux there, and a trailer plays in YouTube's embed.
         let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;

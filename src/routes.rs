@@ -1,6 +1,7 @@
 //! The routes table (den-spec `wire/routes-v1.md`, oxyc/den#16): for each service, every address a client may try,
-//! in order — LAN, tailnet, public — as the deployment builds it (env `ROUTES`). `GET /routes` serves it on every
-//! name; on den-edge's public names the LAN addresses are left out, so the internet is handed no private address.
+//! in order — LAN, tailnet, public — as the deployment builds it (env `ROUTES`). `GET /routes` serves all of it on
+//! every name: a client away from home still holds install URLs issued on the LAN, and needs the LAN entries to tell
+//! which service each one is.
 
 use serde_json::{json, Map, Value};
 use std::net::IpAddr;
@@ -87,23 +88,21 @@ fn private(url: &str) -> bool {
     }
 }
 
-/// The table as den-spec's JSON, without the LAN addresses when `public` (a request on den-edge's public names).
-pub fn to_json(routes: &Routes, public: bool) -> Value {
+/// The table as den-spec's JSON.
+pub fn to_json(routes: &Routes) -> Value {
     let services: Map<String, Value> = routes
         .iter()
         .map(|(name, entries)| {
-            let list =
-                entries
-                    .iter()
-                    .filter(|e| !(public && private(&e.url)))
-                    .map(|e| {
-                        if e.access {
-                            json!({ "url": e.url, "access": true })
-                        } else {
-                            json!({ "url": e.url })
-                        }
-                    })
-                    .collect();
+            let list = entries
+                .iter()
+                .map(|e| {
+                    if e.access {
+                        json!({ "url": e.url, "access": true })
+                    } else {
+                        json!({ "url": e.url })
+                    }
+                })
+                .collect();
             (name.clone(), Value::Array(list))
         })
         .collect();
@@ -147,16 +146,21 @@ mod tests {
     }
 
     #[test]
-    fn the_public_names_are_handed_no_private_address() {
-        let routes = parse(TABLE);
-        let lan = to_json(&routes, false);
-        assert_eq!(lan["v"], 1);
-        assert_eq!(lan["addons"]["scout"].as_array().unwrap().len(), 3);
-        let public = to_json(&routes, true);
+    fn the_table_carries_every_entry() {
+        let table = to_json(&parse(TABLE));
+        assert_eq!(table["v"], 1);
         assert_eq!(
-            public["addons"]["scout"],
-            json!([{ "url": "https://pve.example:8443/scout" }, { "url": "https://d-scout.oxy.fi", "access": true }])
+            table["addons"]["scout"],
+            json!([
+                { "url": "http://192.168.86.193:8080" },
+                { "url": "https://pve.example:8443/scout" },
+                { "url": "https://d-scout.oxy.fi", "access": true }
+            ])
         );
+    }
+
+    #[test]
+    fn lan_addresses_are_told_apart() {
         for url in [
             "http://10.1.2.3",
             "http://172.20.0.1:80",
