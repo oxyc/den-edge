@@ -23,6 +23,7 @@
     onseen,
     onreact,
     onplay,
+    onplayhere,
     onepisode,
     onselect,
     shown = () => true,
@@ -40,6 +41,8 @@
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
     onplay: (title: Title) => void;
+    /** Play in this browser: a movie, or one episode of a series. None when this browser can't. */
+    onplayhere?: (title: Title, season?: number, episode?: number) => void;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     onselect: (title: Title) => void;
     /** The TV's hide rules, for the recommendations. */
@@ -120,6 +123,7 @@
     onseen={(on) => onseen(d.title, on)}
     onreact={(reaction) => onreact(d.title, reaction)}
     onplay={() => onplay(d.title)}
+    onplayhere={onplayhere && d.title.type === 'movie' ? () => onplayhere(d.title) : undefined}
   />
   {#if d.overview}<p class="overview">{d.overview}</p>{/if}
 
@@ -150,14 +154,23 @@
                 <b>{e.number}. {e.name}</b>
                 {#if e.overview}<p>{e.overview}</p>{/if}
               </div>
-              <button
-                class="mark"
-                class:on={seen}
-                aria-pressed={seen}
-                aria-label={`Episode ${e.number}: ${seen ? 'seen' : 'mark as seen'}`}
-                disabled={busy}
-                onclick={() => season !== null && onepisode(d.title, season, e.number, !seen)}>{seen ? 'Seen' : 'Mark seen'}</button
-              >
+              <div class="buttons">
+                {#if onplayhere}
+                  <button
+                    class="mark"
+                    aria-label={`Play episode ${e.number}`}
+                    onclick={() => season !== null && onplayhere(d.title, season, e.number)}>Play</button
+                  >
+                {/if}
+                <button
+                  class="mark"
+                  class:on={seen}
+                  aria-pressed={seen}
+                  aria-label={`Episode ${e.number}: ${seen ? 'seen' : 'mark as seen'}`}
+                  disabled={busy}
+                  onclick={() => season !== null && onepisode(d.title, season, e.number, !seen)}>{seen ? 'Seen' : 'Mark seen'}</button
+                >
+              </div>
             </li>
           {/each}
         </ol>
@@ -281,6 +294,13 @@
     grid-template-columns: clamp(120px, 24vw, 220px) 1fr auto;
     gap: 14px;
     align-items: start;
+  }
+
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: end;
   }
 
   .still {

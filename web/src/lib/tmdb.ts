@@ -35,6 +35,24 @@ export async function fetchTitle(
   return (await fetchDetails(ref, key, fetchImpl))?.title ?? null;
 }
 
+/** A title's IMDb id, which scout keys streams by: null when TMDB has none, undefined when TMDB couldn't be asked. */
+export async function fetchImdbId(
+  ref: { type: MediaType; id: number },
+  key: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null | undefined> {
+  try {
+    const res = await fetchImpl(
+      `https://api.themoviedb.org/3/${ref.type}/${ref.id}/external_ids?api_key=${encodeURIComponent(key)}`,
+    );
+    if (!res.ok) return undefined;
+    const found = ((await res.json()) as { imdb_id?: unknown }).imdb_id;
+    return typeof found === 'string' && /^tt\d+$/.test(found) ? found : null;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Episodes per season and the newest aired episode, from a series' TMDB details. */
 export function seriesShape(details: Record<string, unknown>): Shape | undefined {
   if (!Array.isArray(details.seasons)) return undefined;

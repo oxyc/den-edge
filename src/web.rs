@@ -10,9 +10,10 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
 use std::path::{Component, Path, PathBuf};
 
-/// What the app may load and call: itself, TMDB's images and API (BYOK, straight from the browser).
+/// What the app may load and call: itself, TMDB's images and API (BYOK, straight from the browser), and video from
+/// den-remux on this origin — `blob:` for hls.js, which hands the video element a MediaSource.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-    img-src 'self' data: https://image.tmdb.org; connect-src 'self' https://api.themoviedb.org; \
+    img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:; connect-src 'self' https://api.themoviedb.org; \
     frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 pub async fn serve(dir: &Path, path: &str) -> Response {

@@ -4,6 +4,7 @@
   import Person from './components/Person.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
+  import Player from './components/Player.svelte';
   import SearchResults from './components/SearchResults.svelte';
   import { searchStream, type Hit } from './lib/search';
   import { searchSources } from './lib/searchSources';
@@ -16,6 +17,9 @@
     react,
     removeFromLibrary,
     unwatch,
+    updateEpisodeProgress,
+    updateProgress,
+    WATCHED,
   } from './lib/actions';
   import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
@@ -37,6 +41,7 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
+  import { findScout, lanInstalls, type Scout } from './lib/scout';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -60,6 +65,13 @@
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */
+  let plugins = $state<string[]>([]);
+  let scout = $state<Scout | null>(null);
+
+  type Target = { title: Title; season?: number; episode?: number };
+  /** What's playing in this browser. */
+  let playing = $state<Target | null>(null);
 
   $effect(() => {
     void LibraryLog.open(link.libraryKey).then((opened) => {
@@ -69,7 +81,12 @@
       clock.see(opened.newestStamp());
       tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
       if (tmdbKey) void name(opened, tmdbKey);
-      void availability.connect(readPlugins(opened.settings('plugins')), tmdbKey);
+      plugins = readPlugins(opened.settings('plugins'));
+      const key = tmdbKey;
+      void findScout(plugins).then((found) => {
+        scout = found;
+        availability.connect(found, key);
+      });
     });
   });
 
@@ -157,6 +174,35 @@
     busy = false;
     if (sent) notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
+  }
+
+  /** Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. */
+  const playHere = $derived(
+    scout && tmdbKey ? (title: Title, season?: number, episode?: number) => (playing = { title, season, episode }) : undefined,
+  );
+
+  function progressOf(target: Target) {
+    const { title, season, episode } = target;
+    return season !== undefined && episode !== undefined ? log?.episode(title, season, episode)?.progress : log?.title(title)?.resume;
+  }
+
+  /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
+  function resumePoint(target: Target): { fraction: number; seconds?: number } {
+    const progress = progressOf(target);
+    return progress && progress.value < WATCHED ? { fraction: progress.value, seconds: progress.seconds } : { fraction: 0 };
+  }
+
+  /** Where playback got to, written as the TV's player writes it. */
+  async function progressed(target: Target, fraction: number, seconds: number) {
+    if (!log) return;
+    const { title, season, episode } = target;
+    remember(title);
+    if (season !== undefined && episode !== undefined) {
+      const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+      await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
+    } else {
+      await save(updateProgress(log.title(title) ?? blankTitle(title, Date.now()), fraction, seconds, clock.issue()));
+    }
   }
 
   const open = (title: Title) => {
@@ -273,6 +319,7 @@
     onseen={(title, on) => act(title, on ? markWatched : unwatch)}
     onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
     onplay={play}
+    onplayhere={playHere}
     onepisode={markEpisodeSeen}
     onselect={open}
     {shown}
@@ -327,6 +374,21 @@
   {#if !hits}
     <Browse {rows} shown={browseShown} onselect={open} />
   {/if}
+{/if}
+
+{#if playing && scout}
+  {@const target = playing}
+  <Player
+    title={target.title}
+    season={target.season}
+    episode={target.episode}
+    {tmdbKey}
+    {scout}
+    subtitles={lanInstalls(plugins, scout)}
+    resume={resumePoint(target)}
+    onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
+    onclose={() => (playing = null)}
+  />
 {/if}
 
 <style>

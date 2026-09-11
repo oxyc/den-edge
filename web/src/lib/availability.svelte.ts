@@ -8,7 +8,8 @@
 
 import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
-import { isLanURL } from './prefs';
+import type { Scout } from './scout';
+import { fetchImdbId } from './tmdb';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
 
@@ -21,7 +22,6 @@ const LOOKUPS = 6;
 /** How long before asking again about a movie scout was still checking, and how many times. */
 export const RETRY_MS = 10_000;
 const RETRIES = 3;
-const SCOUT = 'com.den.scout';
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
@@ -35,32 +35,15 @@ export class Availability {
 
   constructor(private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init)) {}
 
-  /**
-   * Find scout among the library's plugins. Its install URL names the TV's LAN address, which this page can't reach,
-   * so each LAN plugin's config is tried against scout on this page's own origin (`/scout/`): the one whose manifest
-   * is scout's. A public addon's URL is never sent.
-   */
-  async connect(plugins: string[], tmdbKey: string): Promise<void> {
+  /** Ask this scout from now on — the library's (`findScout`), or nobody when it has none. */
+  connect(scout: Scout | null, tmdbKey: string): void {
     const previous = this.scout?.config;
-    this.scout = null;
-    if (!tmdbKey) return;
-    for (const url of plugins) {
-      const config = lanConfig(url);
-      if (!config) continue;
-      try {
-        const res = await this.fetchImpl(`/scout/${config}/manifest.json`);
-        if (!res.ok || ((await res.json()) as { id?: unknown }).id !== SCOUT) continue;
-      } catch {
-        continue;
-      }
-      if (config !== previous) {
-        this.verdicts.clear();
-        this.tries.clear();
-      }
-      this.scout = { config, tmdbKey };
-      this.gather();
-      return;
+    this.scout = scout && tmdbKey ? { config: scout.config, tmdbKey } : null;
+    if (this.scout && this.scout.config !== previous) {
+      this.verdicts.clear();
+      this.tries.clear();
     }
+    this.gather();
   }
 
   /** A poster is showing: its movie is asked about along with the others showing now. */
@@ -135,29 +118,12 @@ export class Availability {
     }, RETRY_MS);
   }
 
-  /** The movie's IMDb id from TMDB; null when it has none, undefined when TMDB couldn't be asked. */
   private async imdbId(id: number, key: string): Promise<string | null | undefined> {
     if (this.imdbIds.has(id)) return this.imdbIds.get(id);
-    try {
-      const res = await this.fetchImpl(
-        `https://api.themoviedb.org/3/movie/${id}/external_ids?api_key=${encodeURIComponent(key)}`,
-      );
-      if (!res.ok) return undefined;
-      const found = ((await res.json()) as { imdb_id?: unknown }).imdb_id;
-      const imdb = typeof found === 'string' && /^tt\d+$/.test(found) ? found : null;
-      this.imdbIds.set(id, imdb);
-      return imdb;
-    } catch {
-      return undefined;
-    }
+    const imdb = await fetchImdbId({ type: 'movie', id }, key, this.fetchImpl);
+    if (imdb !== undefined) this.imdbIds.set(id, imdb);
+    return imdb;
   }
-}
-
-/** The config segment of a LAN addon's `…/<config>/manifest.json` URL. */
-function lanConfig(url: string): string | null {
-  if (!isLanURL(url)) return null;
-  const [config, file, ...rest] = new URL(url).pathname.split('/').filter(Boolean);
-  return config && file === 'manifest.json' && rest.length === 0 && /^[\w.~%-]+$/.test(config) ? config : null;
 }
 
 async function each<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {

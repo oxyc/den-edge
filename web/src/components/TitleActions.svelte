@@ -13,6 +13,7 @@
     onseen,
     onreact,
     onplay,
+    onplayhere,
     notice = null,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
@@ -24,6 +25,8 @@
     onreact: (reaction: Reaction | null) => void;
     /** Play it on the linked TV; no button without it. */
     onplay?: () => void;
+    /** Play it in this browser; no button without it. */
+    onplayhere?: () => void;
     /** What the last action did, when that's worth saying. */
     notice?: string | null;
   } = $props();
@@ -40,7 +43,8 @@
 </script>
 
 <div class="actions">
-  {#if onplay}<button class="play" disabled={busy} onclick={onplay}>Play on TV</button>{/if}
+  {#if onplayhere}<button class="play" disabled={busy} onclick={onplayhere}>Play</button>{/if}
+  {#if onplay}<button class:play={!onplayhere} disabled={busy} onclick={onplay}>Play on TV</button>{/if}
   <button class:on={listed} aria-pressed={listed} disabled={busy} onclick={() => onwatchlist(!listed)}>
     {listed ? 'On your watchlist' : 'Add to watchlist'}
   </button>
