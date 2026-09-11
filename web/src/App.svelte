@@ -1,6 +1,7 @@
 <script lang="ts">
   import Library from './Library.svelte';
   import { links } from './lib/links.svelte';
+  import { parseRoute } from './lib/route';
   import LinkTV from './LinkTV.svelte';
   import Settings from './Settings.svelte';
 
@@ -10,14 +11,14 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
-  // Settings is `#settings`, so Back returns to the library.
-  const onSettings = () => location.hash === '#settings';
-  let settings = $state(onSettings());
+  // Each page is a fragment (`#settings`, `#title/tv/1399`, `#person/287`), so Back returns to the one before.
+  let route = $state(parseRoute(location.hash));
   $effect(() => {
-    const follow = () => (settings = onSettings());
+    const follow = () => (route = parseRoute(location.hash));
     addEventListener('hashchange', follow);
     return () => removeEventListener('hashchange', follow);
   });
+  const settings = $derived(route.page === 'settings');
 </script>
 
 <header class="bar glass">
@@ -33,7 +34,7 @@
       {#if settings}
         <Settings link={links.current} />
       {:else}
-        <Library link={links.current} />
+        <Library link={links.current} {route} />
       {/if}
     {/key}
   {:else}

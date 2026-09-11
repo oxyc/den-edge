@@ -1,7 +1,7 @@
 // What the web can do to a title, as the TV's LibraryStateMachine does it: each action is a "set" (never a toggle,
 // den-spec §6) stamped once, applied to the row as last read — or to a blank one for a title new to the library.
 
-import { ZERO_STAMP, type Stamp, type TitleRow } from './wire';
+import { ZERO_STAMP, type EpisodeRow, type Stamp, type TitleRow } from './wire';
 
 type Reaction = NonNullable<TitleRow['reaction']['value']>;
 
@@ -55,4 +55,27 @@ export function unwatch(row: TitleRow, at: Stamp): TitleRow {
 
 export function react(row: TitleRow, reaction: Reaction | null, at: Stamp): TitleRow {
   return { ...row, reaction: { value: reaction, at } };
+}
+
+/** An episode the library has never held: no progress, at the zero stamp. */
+export function blankEpisode(ref: { type: 'movie' | 'tv'; id: number }, season: number, episode: number): EpisodeRow {
+  return {
+    kind: 'ep',
+    schema: 2,
+    title: { type: ref.type, id: ref.id },
+    season,
+    episode,
+    progress: { value: 0, at: ZERO_STAMP, viewing: 0 },
+  };
+}
+
+/**
+ * An episode seen, or not (den-spec §3): seen is the whole of it in this viewing; un-seen is nothing in a new one, so
+ * the old 100% can't outvote it.
+ */
+export function markEpisode(row: EpisodeRow, seen: boolean, at: Stamp): EpisodeRow {
+  const progress = seen
+    ? { value: 1, at, viewing: row.progress.viewing }
+    : { value: 0, at, viewing: row.progress.viewing + 1 };
+  return { ...row, progress };
 }

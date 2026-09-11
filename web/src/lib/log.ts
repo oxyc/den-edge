@@ -13,6 +13,7 @@ import {
   rowName,
   seal,
   ZERO_STAMP,
+  type EpisodeRow,
   type LibraryKeys,
   type Row,
   type SettingsRow,
@@ -82,6 +83,11 @@ export class LibraryLog {
   title(ref: { type: string; id: number }): TitleRow | undefined {
     const row = this.entries.get(`rec:${ref.type}:${ref.id}`)?.row;
     return row?.kind === 'rec' ? row : undefined;
+  }
+
+  episode(ref: { type: string; id: number }, season: number, episode: number): EpisodeRow | undefined {
+    const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
+    return row?.kind === 'ep' ? row : undefined;
   }
 
   /** A group of settings: the TV's `prefs`, the user's API `keys`. */

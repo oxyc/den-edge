@@ -1,11 +1,21 @@
 <script lang="ts">
+  import Detail from './components/Detail.svelte';
+  import Person from './components/Person.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
   import SearchResults from './components/SearchResults.svelte';
-  import TitleSheet from './components/TitleSheet.svelte';
   import { searchStream, type Hit } from './lib/search';
   import { searchSources } from './lib/searchSources';
-  import { addToWatchlist, blankTitle, markWatched, react, removeFromLibrary, unwatch } from './lib/actions';
+  import {
+    addToWatchlist,
+    blankEpisode,
+    blankTitle,
+    markEpisode,
+    markWatched,
+    react,
+    removeFromLibrary,
+    unwatch,
+  } from './lib/actions';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import {
@@ -23,13 +33,15 @@
   import type { Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { isHidden, readApiKey, readPrefs } from './lib/prefs';
+  import { titleHref, type Route } from './lib/route';
   import { fetchDetails } from './lib/tmdb';
-  import type { Stamp, TitleRow } from './lib/wire';
+  import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
-  let { link }: { link: Link } = $props();
+  let { link, route }: { link: Link; route: Route } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
+  const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   /** The TMDB key the library shares (`set:keys`). */
   let tmdbKey = $state('');
@@ -42,7 +54,6 @@
   let shapes = $state(new Map<string, Shape>());
   /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
   let version = $state(0);
-  let selected = $state<Title | null>(null);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -77,21 +88,58 @@
     return { ...withDisplay(applyLog(emptyLibrary(), log.rows()), displays), shapes };
   });
 
-  const selectedRow = $derived.by(() => {
+  /** The title whose page is open, if one is. */
+  const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
+  const pageRow = $derived.by(() => {
     void version;
-    return selected ? log?.title(selected) : undefined;
+    return page ? log?.title(page) : undefined;
   });
+  const pageEpisodes = $derived.by(() => {
+    void version;
+    const rows = new Map<string, EpisodeRow>();
+    if (!page || !log) return rows;
+    for (const row of log.rows()) {
+      if (row.kind === 'ep' && row.title.type === page.type && row.title.id === page.id) {
+        rows.set(`${row.season}:${row.episode}`, row);
+      }
+    }
+    return rows;
+  });
+
+  // A new page starts clean, and at its top.
+  $effect(() => {
+    failure = null;
+    notice = null;
+    if (route.page !== 'library') scrollTo(0, 0);
+  });
+
+  function remember(title: Title) {
+    if (!displays.some((d) => d.type === title.type && d.id === title.id)) displays = [...displays, title];
+  }
+
+  /** Write one row and re-derive what shows it. */
+  async function save(row: Row) {
+    if (!log) return;
+    busy = true;
+    failure = null;
+    const saved = await log.write(row);
+    busy = false;
+    if (!saved) failure = SAVE_FAILED;
+    version++;
+  }
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
     if (!log) return;
-    if (!displays.some((d) => d.type === title.type && d.id === title.id)) displays = [...displays, title];
-    busy = true;
-    failure = null;
-    const saved = await log.write(change(log.title(title) ?? blankTitle(title, Date.now()), clock.issue()));
-    busy = false;
-    if (!saved) failure = 'Couldn’t save that. Check that this device is on your network.';
-    version++;
+    remember(title);
+    await save(change(log.title(title) ?? blankTitle(title, Date.now()), clock.issue()));
+  }
+
+  async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
+    if (!log) return;
+    remember(title);
+    const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+    await save(markEpisode(row, seen, clock.issue()));
   }
 
   /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
@@ -105,7 +153,10 @@
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
   }
 
-  const select = $derived(log ? (title: Title) => (selected = title) : undefined);
+  const open = (title: Title) => {
+    location.hash = titleHref(title);
+  };
+  const select = $derived(log ? open : undefined);
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
   // a newer query supersedes an older one mid-flight.
   const sources = $derived(tmdbKey ? searchSources(tmdbKey) : null);
@@ -114,6 +165,7 @@
     void version;
     return readPrefs(log?.settings('prefs'));
   });
+  const shown = (title: Title) => !isHidden(title, prefs);
   let query = $state('');
   let hits = $state<Hit[] | null>(null);
   let searchFailed = $state(false);
@@ -165,6 +217,27 @@
     Couldn’t open your library. Check that this device is on your network. If your TV reset its library key, unlink in
     <a href="#settings">Settings</a> and pair again.
   </p>
+{:else if route.page !== 'library' && !tmdbKey}
+  <p class="note">This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
+{:else if page}
+  <Detail
+    ref={page}
+    {tmdbKey}
+    row={pageRow}
+    episodes={pageEpisodes}
+    {busy}
+    {failure}
+    {notice}
+    onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
+    onseen={(title, on) => act(title, on ? markWatched : unwatch)}
+    onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
+    onplay={play}
+    onepisode={markEpisodeSeen}
+    onselect={open}
+    {shown}
+  />
+{:else if route.page === 'person'}
+  <Person id={route.id} {tmdbKey} onselect={open} {shown} />
 {:else}
   {@const resume = continueWatching(library)}
   {@const saved = watchlist(library)}
@@ -214,26 +287,6 @@
     <p class="note">Nothing in progress and nothing on your watchlist yet.</p>
   {/if}
   <p class="note small">Up to date with your TV.</p>
-{/if}
-
-{#if selected}
-  {@const title = selected}
-  <TitleSheet
-    {title}
-    row={selectedRow}
-    {busy}
-    {failure}
-    {notice}
-    onclose={() => {
-      selected = null;
-      failure = null;
-      notice = null;
-    }}
-    onplay={() => play(title)}
-    onwatchlist={(on) => act(title, on ? addToWatchlist : removeFromLibrary)}
-    onseen={(on) => act(title, on ? markWatched : unwatch)}
-    onreact={(reaction) => act(title, (row, at) => react(row, reaction, at))}
-  />
 {/if}
 
 <style>
