@@ -319,7 +319,11 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
-    <button onclick={close}>Close</button>
+    <button class="close" aria-label="Close" onclick={close}>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="m6 6 12 12M18 6 6 18" />
+      </svg>
+    </button>
   </header>
   <div class="stage">
     {#if failure === 'login'}
@@ -492,6 +496,14 @@
     min-height: 44px;
     padding: 8px 18px;
     cursor: pointer;
+  }
+
+  /* The title takes the width; closing is one glyph, as it is on the pickers. */
+  .close {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    padding: 0;
   }
 
   /* Where the browser draws the open menu itself, on its own ground. */
