@@ -267,9 +267,12 @@ pub fn method_not_allowed() -> Response {
     json_reply(StatusCode::METHOD_NOT_ALLOWED, &error("method_not_allowed"))
 }
 
-/// A storage failure: logged with what failed, answered as a plain 500.
+/// A storage failure: logged with what failed, answered as a plain 500 — or a 507 when the store is at its cap.
 pub fn internal(what: &str, e: std::io::Error) -> Response {
     eprintln!("{what}: {e}");
+    if e.kind() == std::io::ErrorKind::StorageFull {
+        return bare_json(StatusCode::INSUFFICIENT_STORAGE, &error("storage_full"));
+    }
     bare_json(StatusCode::INTERNAL_SERVER_ERROR, &error("internal_error"))
 }
 
@@ -349,7 +352,8 @@ pub mod tests {
 
         pub fn in_dir(dir: std::path::PathBuf) -> Self {
             let clock = Arc::new(AtomicU64::new(1_000_000));
-            let mut state = AppState::new(crate::store::Store::open(&dir).unwrap(), None, false);
+            let store = crate::store::Store::open(&dir, crate::store::DEFAULT_CAP).unwrap();
+            let mut state = AppState::new(store, None, false);
             let c = Arc::clone(&clock);
             state.clock = Box::new(move || c.load(Ordering::Relaxed));
             Harness { state: Arc::new(state), clock, dir }
@@ -454,6 +458,14 @@ pub mod tests {
             StatusCode::NO_CONTENT,
             "no preflight for an origin not on the list"
         );
+    }
+
+    #[test]
+    fn a_full_store_answers_507_and_other_failures_500() {
+        let full = std::io::Error::new(std::io::ErrorKind::StorageFull, "cap");
+        assert_eq!(internal("write", full).status(), StatusCode::INSUFFICIENT_STORAGE);
+        let other = std::io::Error::other("disk");
+        assert_eq!(internal("write", other).status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

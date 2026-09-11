@@ -16,12 +16,17 @@ change and one **Back up**.
 | `GET /version` | `{"version"}` |
 | `GET /config` | the TV's kill-switch and update gate |
 | `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
-| `POST /link/new` | the TV mints a pairing code: `{code, expiresAt}` (ten minutes) |
+| `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes) |
+| `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
+| `PUT`/`GET /pair/{sid}/{a–d}` `{m}` | the four CPace messages, each written once; `202` until written, `410` once the session is over |
+| `DELETE /pair/{sid}` | either side ends a pairing |
+| `POST /link/new` | the older pairing: the TV mints a code, `{code, expiresAt}` (ten minutes) |
 | `POST /link/claim` `{code}` | the phone claims it: `{inboxKey}`; `410` unknown or expired, `409` claimed, `429` after 20 tries a minute from one address |
 | `GET /link/poll?code=` | the TV polls: `202` pending, then `{status:"claimed", inboxKey}` once |
-| `POST /inbox/append` `{inboxKey, message}` | the phone queues a message: addon, watchlist, play, TMDB key or metadata key |
-| `GET /inbox/drain?inboxKey=` | the TV takes the queue: `{messages}`, and it is emptied |
-| `GET /sync/{id}` | the library backup: `{ciphertext, nonce, version}` |
+| `DELETE /link` | unlinking: the link's inbox, plugins and settings are erased |
+| `POST /inbox/append` `{message}` or `{sealed}` | a message for the TV: addon, watchlist, play, TMDB key, metadata key or device name — or a paired device's sealed one ([den-spec inbox v1](https://github.com/oxyc/den-spec/blob/main/wire/inbox-v1.md)), kept as it came |
+| `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied |
+| `GET`/`DELETE /sync/{id}` | the library backup: `{ciphertext, nonce, version}` |
 | `PUT /sync/{id}` `{ciphertext, nonce, baseVersion}` | `{version}`, or `409 {version}` when `baseVersion` is stale |
 | `GET`/`PUT /plugins` | the shared addon list: `{addons, version}` |
 | `GET`/`PUT /settings` | the shared settings: `{settings, version}` |
@@ -30,7 +35,7 @@ change and one **Back up**.
 | `GET /app/…` | the companion web page |
 
 The link's key goes in the `x-den-link` header, so it stays out of URLs (and so out of logs, proxies and
-history). The older `?inboxKey=` query and body `inboxKey` still work; a header wins over them.
+history). A key in the query string is not read; an append's body `inboxKey` still is, and the header wins.
 
 Bodies are capped at 256 KiB, 4 MB on `/sync`. A method a route doesn't serve is `405`.
 
@@ -47,7 +52,11 @@ outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first 
 ciphertext the clients seal and merge.
 
 A queue is kept for a week after its last message; everything else is kept until it is replaced. Pending
-link codes live in memory: a restart costs a pairing in progress, which the TV starts again.
+link codes and pairing sessions live in memory: a restart costs a pairing in progress, which the TV starts
+again.
+
+The whole store holds at most `STORE_CAP_BYTES`: a write that would pass it is refused with `507`, so whoever
+can reach den-edge can't fill the host's disk. A library holds at most 50,000 rows (`413`).
 
 ## Configuration
 
@@ -55,6 +64,7 @@ link codes live in memory: a restart costs a pairing in progress, which the TV s
 |---|---|---|
 | `PORT` | `8080` | the port to listen on |
 | `DATA_DIR` | `data` (the image sets `/data`) | where the state lives |
+| `STORE_CAP_BYTES` | `1073741824` (1 GiB) | the most the state may take on disk |
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
 | `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |

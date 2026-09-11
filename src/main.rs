@@ -107,7 +107,8 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tokio::main]
 async fn main() {
     let dir = env_opt("DATA_DIR").unwrap_or_else(|| "data".to_owned());
-    let store = store::Store::open(std::path::Path::new(&dir)).unwrap_or_else(|e| {
+    let cap = env_opt("STORE_CAP_BYTES").and_then(|v| v.parse().ok()).unwrap_or(store::DEFAULT_CAP);
+    let store = store::Store::open(std::path::Path::new(&dir), cap).unwrap_or_else(|e| {
         eprintln!("data dir {dir} is unusable: {e}");
         std::process::exit(1);
     });
@@ -257,8 +258,11 @@ mod tests {
     async fn a_client_holding_a_partial_request_cannot_hold_shutdown_open() {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        let state =
-            Arc::new(AppState::new(store::Store::open(&handler::tests::temp_dir()).unwrap(), None, false));
+        let state = Arc::new(AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        ));
         let app = axum::Router::new().fallback(handler::handle).with_state(state);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let grace = Duration::from_millis(300);

@@ -5,25 +5,53 @@
 //!
 //! File names are the SHA-256 of the key, not the key: an inbox key is a credential, and a name made from
 //! it would put it in every directory listing and bound nothing about its length.
+//!
+//! The store holds at most `cap` bytes: a write that would grow it past that fails as `StorageFull`, so
+//! whoever can reach den-edge can't fill the host's disk (issue #8, audit #5).
 
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 
 pub struct Store {
     dir: PathBuf,
+    /// Bytes on disk across every namespace.
+    used: AtomicU64,
+    cap: u64,
 }
 
 /// The kinds of record, one directory each.
 pub const NAMESPACES: [&str; 5] = ["inbox", "plugins", "settings", "sync", "lib"];
 
+/// The cap unless `STORE_CAP_BYTES` sets one: far past one household's few MB.
+pub const DEFAULT_CAP: u64 = 1 << 30;
+
 impl Store {
-    pub fn open(dir: &Path) -> io::Result<Store> {
+    pub fn open(dir: &Path, cap: u64) -> io::Result<Store> {
+        let mut used = 0;
         for ns in NAMESPACES {
             std::fs::create_dir_all(dir.join(ns))?;
+            for entry in std::fs::read_dir(dir.join(ns))? {
+                used += entry?.metadata()?.len();
+            }
         }
-        Ok(Store { dir: dir.to_owned() })
+        Ok(Store { dir: dir.to_owned(), used: AtomicU64::new(used), cap })
+    }
+
+    /// Refuses a file growing from `old` to `new` bytes when that takes the store past its cap.
+    fn check(&self, old: u64, new: u64) -> io::Result<()> {
+        if new > old && self.used.load(Ordering::Relaxed) + (new - old) > self.cap {
+            return Err(io::Error::new(io::ErrorKind::StorageFull, "den-edge's storage cap is reached"));
+        }
+        Ok(())
+    }
+
+    /// Counts a file that went from `old` to `new` bytes.
+    fn account(&self, old: u64, new: u64) {
+        self.used.fetch_add(new, Ordering::Relaxed);
+        self.used.fetch_sub(old, Ordering::Relaxed);
     }
 
     fn path(&self, ns: &str, key: &str, ext: &str) -> PathBuf {
@@ -49,14 +77,19 @@ impl Store {
 
     /// Add to the end of a file, creating it, and sync before returning — an append-only log's write.
     pub async fn append_file(&self, ns: &str, key: &str, ext: &str, bytes: &[u8]) -> io::Result<()> {
+        self.check(0, bytes.len() as u64)?;
         let mut file =
             tokio::fs::OpenOptions::new().create(true).append(true).open(self.path(ns, key, ext)).await?;
         file.write_all(bytes).await?;
-        file.sync_data().await
+        file.sync_data().await?;
+        self.account(0, bytes.len() as u64);
+        Ok(())
     }
 
     pub async fn replace_file(&self, ns: &str, key: &str, ext: &str, value: &[u8]) -> io::Result<()> {
         let path = self.path(ns, key, ext);
+        let old = file_len(&path).await;
+        self.check(old, value.len() as u64)?;
         // One temporary name per key is enough: writes are serialised, and a leftover from a crash is
         // simply overwritten by the next write.
         let tmp = path.with_extension(format!("{ext}.tmp"));
@@ -64,13 +97,49 @@ impl Store {
         file.write_all(value).await?;
         file.sync_all().await?;
         drop(file);
-        tokio::fs::rename(&tmp, &path).await
+        tokio::fs::rename(&tmp, &path).await?;
+        self.account(old, value.len() as u64);
+        Ok(())
     }
 
     pub async fn delete(&self, ns: &str, key: &str) -> io::Result<()> {
-        match tokio::fs::remove_file(self.path(ns, key, "json")).await {
+        let path = self.path(ns, key, "json");
+        let old = file_len(&path).await;
+        match tokio::fs::remove_file(path).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+            _ => {
+                self.account(old, 0);
+                Ok(())
+            }
         }
+    }
+}
+
+/// A file's size, or 0 when there is none.
+async fn file_len(path: &Path) -> u64 {
+    tokio::fs::metadata(path).await.map_or(0, |m| m.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+    use std::io::ErrorKind::StorageFull;
+
+    #[tokio::test]
+    async fn a_write_past_the_cap_is_refused_and_freed_room_is_counted() {
+        let dir = crate::handler::tests::temp_dir();
+        let store = Store::open(&dir, 10).unwrap();
+        store.put("inbox", "a", b"12345678").await.unwrap();
+        assert_eq!(store.put("inbox", "b", b"123").await.unwrap_err().kind(), StorageFull);
+        store.put("inbox", "a", b"1").await.unwrap();
+        store.put("inbox", "b", b"123").await.unwrap();
+        store.delete("inbox", "a").await.unwrap();
+        store.append_file("lib", "c", "log", b"123456").await.unwrap();
+        assert_eq!(store.append_file("lib", "c", "log", b"12").await.unwrap_err().kind(), StorageFull);
+
+        // Reopened, it counts what is on disk: 3 + 6 bytes.
+        let reopened = Store::open(&dir, 10).unwrap();
+        assert_eq!(reopened.put("inbox", "d", b"12").await.unwrap_err().kind(), StorageFull);
+        reopened.put("inbox", "d", b"1").await.unwrap();
     }
 }
