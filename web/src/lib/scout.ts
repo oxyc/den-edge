@@ -57,6 +57,20 @@ export async function findAtlas(plugins: string[], routes: Routes, fetchImpl: ty
   return here ? { install: ATLAS.path, base: ATLAS.path } : null;
 }
 
+/** Den's own addons, as Settings names them. */
+const DEN_ADDONS = [
+  { name: 'scout', label: 'Den Scout', role: 'Streams' },
+  { name: 'subs', label: 'Den Subtitles', role: 'Subtitles' },
+  { name: 'atlas', label: 'Den Atlas', role: 'Discovery' },
+  { name: 'reel', label: 'Den Reel', role: 'Trailers' },
+];
+
+/** Which of Den's addons the plugin at `url` is, by the routes table's entries; null for anyone else's. */
+export function denAddonOf(url: string, routes: Routes): { label: string; role: string } | null {
+  const install = url.endsWith(MANIFEST) ? url.slice(0, -MANIFEST.length) : url;
+  return DEN_ADDONS.find((addon) => within(install, routes[addon.name]) !== null) ?? null;
+}
+
 /** The library's installs of the service `name` (den-subtitles, for den-remux), without their manifest file. */
 export function installsOf(plugins: string[], routes: Routes, name: string): string[] {
   return plugins.flatMap((url) => {

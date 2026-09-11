@@ -5,6 +5,8 @@
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
+  import { fetchRoutes, type Routes } from './lib/routes';
+  import { denAddonOf } from './lib/scout';
   import { clearTmdbCache } from './lib/tmdbCache';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
@@ -24,6 +26,9 @@
   let saving = $state(false);
   let failure = $state<string | null>(null);
   const clock = browserClock();
+  /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
+  let routes = $state<Routes>({});
+  void fetchRoutes().then((fetched) => (routes = fetched));
 
   $effect(() => {
     void LibraryLog.open(link.libraryKey).then((opened) => {
@@ -201,8 +206,9 @@
     <h2>Plugins</h2>
     <p class="sub">Your addons, shared with your Apple TV through your library. One you add here waits on the TV until you install it there.</p>
     {#each plugins as url (url)}
+      {@const den = denAddonOf(url, routes)}
       <div class="plugin">
-        <span title={url}>{hostOf(url)}</span>
+        <div class="label"><b>{den?.label ?? hostOf(url)}</b><span>{den?.role ?? 'Plugin'}</span></div>
         <button class="quiet" disabled={saving} onclick={() => write('plugins', { [url]: null })}>Remove</button>
       </div>
     {:else}
@@ -283,10 +289,10 @@
     border-top: 1px solid var(--line);
   }
 
-  .plugin span {
+  .plugin .label {
+    min-width: 0;
     margin-right: auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
   }
 
   .row,

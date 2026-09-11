@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import { findAddon, findAtlas, installsOf, SCOUT } from './scout';
+import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT } from './scout';
 
 const ROUTES: Routes = {
   scout: [{ url: 'http://192.168.86.193:8080' }, { url: 'https://pve.example:8443/scout' }, { url: 'https://d-scout.oxy.fi', access: true }],
@@ -51,6 +51,15 @@ describe('findAtlas', () => {
     });
     expect((await findAtlas([], ROUTES, plugin.fetchImpl))?.base).toBe('/atlas');
     expect(await findAtlas([], ROUTES, addons({}).fetchImpl), 'nothing under /atlas here').toBeNull();
+  });
+});
+
+describe('denAddonOf', () => {
+  it('names Den’s own plugins on any of their addresses, and nobody else’s', () => {
+    expect(denAddonOf(SUBS_LAN, ROUTES)).toEqual({ name: 'subs', label: 'Den Subtitles', role: 'Subtitles' });
+    expect(denAddonOf(SCOUT_PUBLIC, ROUTES)?.label).toBe('Den Scout');
+    expect(denAddonOf(THEIRS, ROUTES)).toBeNull();
+    expect(denAddonOf(SUBS_LAN, {}), 'before the table arrives').toBeNull();
   });
 });
 
