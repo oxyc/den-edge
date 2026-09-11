@@ -21,8 +21,13 @@ const CLAIM_WINDOW_MS: u64 = 60 * 1000;
 pub struct LinkState {
     /// Set once the phone has claimed the code.
     inbox_key: Option<String>,
+    /// What the claiming device called itself ("Mac", "iPhone"), for the TV's list of linked devices.
+    device: Option<String>,
     expires_at: u64,
 }
+
+/// The longest device label passed on to the TV.
+const MAX_DEVICE_LABEL: usize = 40;
 
 pub struct Throttle {
     count: u32,
@@ -65,7 +70,7 @@ fn mint(state: &AppState) -> Response {
         return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("code_unavailable"));
     }
     let expires_at = now + TTL_MS;
-    links.insert(code.clone(), LinkState { inbox_key: None, expires_at });
+    links.insert(code.clone(), LinkState { inbox_key: None, device: None, expires_at });
     json_reply(StatusCode::OK, &json!({ "code": code, "expiresAt": expires_at }))
 }
 
@@ -79,6 +84,7 @@ async fn claim(state: &AppState, req: Request) -> Response {
         Err(resp) => return *resp,
     };
     let code = body.get("code").and_then(Value::as_str).unwrap_or("").to_uppercase();
+    let device = device_label(body.get("device"));
     let now = state.now();
     let mut links = lock(&state.links);
     match links.get_mut(&code) {
@@ -91,6 +97,7 @@ async fn claim(state: &AppState, req: Request) -> Response {
         Some(link) => {
             let key = (state.gen_inbox_key)();
             link.inbox_key = Some(key.clone());
+            link.device = device;
             json_reply(StatusCode::OK, &json!({ "inboxKey": key }))
         }
     }
@@ -108,13 +115,25 @@ fn poll(state: &AppState, req: &Request) -> Response {
         links.remove(&code);
         return json_reply(StatusCode::GONE, &error("expired_or_unknown"));
     }
+    let device = link.device.clone();
     match link.inbox_key.clone() {
         None => json_reply(StatusCode::ACCEPTED, &json!({ "status": "pending" })),
         Some(key) => {
             links.remove(&code);
-            json_reply(StatusCode::OK, &json!({ "status": "claimed", "inboxKey": key }))
+            let mut answer = json!({ "status": "claimed", "inboxKey": key });
+            if let Some(device) = device {
+                answer["device"] = device.into();
+            }
+            json_reply(StatusCode::OK, &answer)
         }
     }
+}
+
+/// A claiming device's label, as the TV will show it: trimmed, without control characters, and short.
+fn device_label(raw: Option<&Value>) -> Option<String> {
+    let label: String =
+        raw?.as_str()?.trim().chars().filter(|c| !c.is_control()).take(MAX_DEVICE_LABEL).collect();
+    (!label.is_empty()).then_some(label)
 }
 
 /// Counts a claim from `ip`; true once it is over the limit. A blocked attempt doesn't extend the window, an
@@ -154,6 +173,26 @@ mod tests {
         let (_, got) = h.call("GET", "/link/poll?code=LNK234", None).await;
         assert_eq!(got, json!({ "status": "claimed", "inboxKey": "deadbeefcafe1234" }));
         assert_eq!(h.call("GET", "/link/poll?code=LNK234", None).await.0, StatusCode::GONE);
+    }
+
+    /// The TV learns what linked to it, so its list says "Mac" or "iPhone" rather than "Phone".
+    #[tokio::test]
+    async fn the_claiming_device_names_itself_to_the_tv() {
+        let h = Harness::with_generators(&["DEV234", "BAR234"], &["deadbeefcafe1234", "cafecafecafe1234"]);
+        h.call("POST", "/link/new", None).await;
+        h.call("POST", "/link/claim", Some(json!({ "code": "DEV234", "device": "  Mac\u{7} " }))).await;
+        let (_, got) = h.call("GET", "/link/poll?code=DEV234", None).await;
+        assert_eq!(got, json!({ "status": "claimed", "inboxKey": "deadbeefcafe1234", "device": "Mac" }));
+
+        // A claim without one, or with an empty one, says nothing about the device.
+        h.call("POST", "/link/new", None).await;
+        h.call("POST", "/link/claim", Some(json!({ "code": "BAR234", "device": "   " }))).await;
+        let (_, got) = h.call("GET", "/link/poll?code=BAR234", None).await;
+        assert!(got.get("device").is_none(), "{got}");
+        assert_eq!(
+            super::device_label(Some(&json!("x".repeat(99)))).map(|l| l.len()),
+            Some(super::MAX_DEVICE_LABEL)
+        );
     }
 
     #[tokio::test]

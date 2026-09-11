@@ -3,14 +3,34 @@
 export type ClaimError = 'expired' | 'claimed' | 'throttled' | 'unreachable';
 export type ClaimResult = { inboxKey: string } | { error: ClaimError };
 
+/**
+ * What this device is, as the TV's list of linked devices shows it. iPadOS asks for desktop sites with a Mac's
+ * user agent, so an iPad is told apart by its touch screen.
+ */
+export function deviceLabel(nav: { userAgent: string; maxTouchPoints?: number } = navigator): string {
+  const ua = nav.userAgent;
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && (nav.maxTouchPoints ?? 0) > 1)) return 'iPad';
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+  if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+  if (/CrOS/.test(ua)) return 'Chromebook';
+  if (/Windows/.test(ua)) return 'Windows PC';
+  if (/Linux/.test(ua)) return 'Linux PC';
+  return 'Browser';
+}
+
 /** Claim the code the TV shows under Settings › Linked devices, for the key the TV and this browser share. */
-export async function claimCode(code: string, fetchImpl: typeof fetch = fetch): Promise<ClaimResult> {
+export async function claimCode(
+  code: string,
+  fetchImpl: typeof fetch = fetch,
+  device: string = deviceLabel(),
+): Promise<ClaimResult> {
   let res: Response;
   try {
     res = await fetchImpl('/link/claim', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: code.trim().toUpperCase() }),
+      body: JSON.stringify({ code: code.trim().toUpperCase(), device }),
     });
   } catch {
     return { error: 'unreachable' };

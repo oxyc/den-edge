@@ -120,12 +120,26 @@
     if (!hidden) addCodeInput.focus();
   });
 
+  // What this device is, for the TV's list of linked devices (the web app's deviceLabel). iPadOS asks for
+  // desktop sites with a Mac's user agent, so an iPad is told apart by its touch screen.
+  function deviceLabel() {
+    var ua = navigator.userAgent;
+    if (/iPhone/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+    if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+    if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+    if (/CrOS/.test(ua)) return 'Chromebook';
+    if (/Windows/.test(ua)) return 'Windows PC';
+    if (/Linux/.test(ua)) return 'Linux PC';
+    return 'Browser';
+  }
+
   function claim(code, btn, input, err) {
     btn.disabled = true; err.textContent = '';
     fetch('/link/claim', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: code })
+      body: JSON.stringify({ code: code, device: deviceLabel() })
     }).then(function (r) {
       if (r.status === 200) {
         return r.json().then(function (d) {

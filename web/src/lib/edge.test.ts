@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claimCode } from './edge';
+import { claimCode, deviceLabel } from './edge';
 import { readLinks } from './links.svelte';
 
 function answering(status: number, body: unknown = {}): typeof fetch {
@@ -7,14 +7,14 @@ function answering(status: number, body: unknown = {}): typeof fetch {
 }
 
 describe('claimCode', () => {
-  it('sends the code upper-cased and returns the shared key', async () => {
+  it('sends the code upper-cased with the device, and returns the shared key', async () => {
     let sent: unknown;
     const fetchImpl: typeof fetch = async (_url, init) => {
       sent = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ inboxKey: 'deadbeefcafe1234' }), { status: 200 });
     };
-    expect(await claimCode(' ab3cde ', fetchImpl)).toEqual({ inboxKey: 'deadbeefcafe1234' });
-    expect(sent).toEqual({ code: 'AB3CDE' });
+    expect(await claimCode(' ab3cde ', fetchImpl, 'Mac')).toEqual({ inboxKey: 'deadbeefcafe1234' });
+    expect(sent).toEqual({ code: 'AB3CDE', device: 'Mac' });
   });
 
   it('names what went wrong', async () => {
@@ -29,6 +29,23 @@ describe('claimCode', () => {
 
   it('does not take a malformed key', async () => {
     expect(await claimCode('X', answering(200, { inboxKey: 'not hex!' }))).toEqual({ error: 'unreachable' });
+  });
+});
+
+describe('deviceLabel', () => {
+  const as = (userAgent: string, maxTouchPoints = 0) => deviceLabel({ userAgent, maxTouchPoints });
+
+  it('names the device the way the TV will list it', () => {
+    expect(as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15')).toBe('Mac');
+    expect(as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15', 5)).toBe('iPad');
+    expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148')).toBe('iPhone');
+    expect(as('Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36')).toBe(
+      'Android phone',
+    );
+    expect(as('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36')).toBe(
+      'Windows PC',
+    );
+    expect(as('curl/8.7.1')).toBe('Browser');
   });
 });
 
