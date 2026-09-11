@@ -19,12 +19,22 @@
     return () => removeEventListener('hashchange', follow);
   });
   const settings = $derived(route.page === 'settings');
+  const tabs = [
+    { page: 'library', label: 'Home' },
+    { page: 'movies', label: 'Movies' },
+    { page: 'series', label: 'Series' },
+    { page: 'settings', label: 'Settings' },
+  ] as const;
 </script>
 
 <header class="bar glass">
   <a class="brand" href="#library">Den</a>
   {#if links.current}
-    <a class="settings" href={settings ? '#library' : '#settings'} aria-current={settings ? 'page' : undefined}>Settings</a>
+    <nav>
+      {#each tabs as tab (tab.page)}
+        <a href="#{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}>{tab.label}</a>
+      {/each}
+    </nav>
   {/if}
 </header>
 
@@ -62,13 +72,18 @@
     text-decoration: none;
   }
 
-  .settings {
+  nav {
+    display: flex;
+    gap: clamp(12px, 3vw, 24px);
+  }
+
+  nav a {
     color: var(--muted);
     font-weight: 600;
     text-decoration: none;
   }
 
-  .settings[aria-current='page'] {
+  nav a[aria-current='page'] {
     color: var(--fg);
   }
 

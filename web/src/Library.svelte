@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Browse from './components/Browse.svelte';
   import Detail from './components/Detail.svelte';
   import Person from './components/Person.svelte';
   import PosterCard from './components/PosterCard.svelte';
@@ -16,6 +17,7 @@
     removeFromLibrary,
     unwatch,
   } from './lib/actions';
+  import { browseRows, homeRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import {
@@ -166,6 +168,23 @@
     return readPrefs(log?.settings('prefs'));
   });
   const shown = (title: Title) => !isHidden(title, prefs);
+  /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
+  const watched = $derived(
+    new Set(library?.records.filter((r) => !r.deleted && r.status === 'watched').map((r) => titleKey(r.title)) ?? []),
+  );
+  const browseShown = (title: Title) => shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
+  /** The browse screens' rows, headers now and posters as each nears the screen. */
+  const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
+  const rows = $derived.by(() => {
+    if (!pages) return [];
+    const minYear = prefs.minReleaseYear;
+    if (route.page === 'movies' || route.page === 'series') {
+      return browseRows(route.page === 'movies' ? 'movie' : 'tv', pages, { minYear, hiddenGenres: prefs.excludedGenres });
+    }
+    return homeRows(pages, { minYear });
+  });
+  /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
+  const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   let query = $state('');
   let hits = $state<Hit[] | null>(null);
   let searchFailed = $state(false);
@@ -239,9 +258,9 @@
 {:else if route.page === 'person'}
   <Person id={route.id} {tmdbKey} onselect={open} {shown} />
 {:else}
-  {@const resume = continueWatching(library)}
-  {@const saved = watchlist(library)}
-  {#if sources}
+  {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
+  {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
+  {#if sources && !facet}
     <input
       class="search glass"
       type="search"
@@ -251,7 +270,7 @@
       bind:value={query}
       oninput={queryChanged}
     />
-  {:else}
+  {:else if !sources}
     <p class="note">Search needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
   {/if}
   {#if hits}
@@ -283,10 +302,9 @@
       {/each}
     </PosterRow>
   {/if}
-  {#if !hits && !resume.length && !saved.length}
-    <p class="note">Nothing in progress and nothing on your watchlist yet.</p>
+  {#if !hits}
+    <Browse {rows} shown={browseShown} onselect={open} />
   {/if}
-  <p class="note small">Up to date with your TV.</p>
 {/if}
 
 <style>
@@ -304,9 +322,5 @@
   }
   .note {
     color: var(--muted);
-  }
-
-  .small {
-    font-size: 13px;
   }
 </style>
