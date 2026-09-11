@@ -142,20 +142,13 @@
     return [platform, browser].filter(Boolean).join(' · ') || 'Browser';
   }
 
-  // Tell each linked TV what this device is whenever that changes, so its list of linked devices names it —
-  // links made before devices said, too. The label each TV was last told is kept on the link.
-  function noteDevice(key, label) {
-    var list = links();
-    list.forEach(function (l) { if (l.inboxKey === key) l.device = label; });
-    saveLinks(list);
-  }
+  // Tell each linked TV what this device is, on every open, so its list of linked devices names it — links
+  // made before devices said, too. Every open rather than once: a TV build that doesn't know the message
+  // drops it, and den-edge keeps only the latest one queued.
   function announceDevice() {
     var label = deviceLabel();
     links().forEach(function (tv) {
-      if (tv.device === label) return;
-      pushTo(tv.inboxKey, { type: 'device', name: label })
-        .then(function (ok) { if (ok) noteDevice(tv.inboxKey, label); })
-        .catch(function () {});
+      pushTo(tv.inboxKey, { type: 'device', name: label }).catch(function () {});
     });
   }
 
@@ -169,7 +162,6 @@
       if (r.status === 200) {
         return r.json().then(function (d) {
           addLink(d.inboxKey);              // ADD, don't overwrite — so the phone can drive several TVs
-          noteDevice(d.inboxKey, deviceLabel());   // the claim already told this TV
           input.value = ''; btn.disabled = true;
           $('addTvForm').classList.add('hidden'); $('addTvBtn').textContent = '+ Link another TV';
           render();

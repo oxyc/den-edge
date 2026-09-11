@@ -8,8 +8,6 @@ export interface Link {
   name?: string;
   /** Set by links made here; the companion page's own links don't record it. */
   linkedAt?: number;
-  /** The device label this TV was last told, so it's sent again only when it changes. */
-  device?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -52,15 +50,10 @@ class Links {
     return this.list[0];
   }
 
-  add(inboxKey: string, device?: string, now = Date.now()): void {
+  add(inboxKey: string, now = Date.now()): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
     const name = this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV';
-    this.list = [...this.list, { inboxKey, name, linkedAt: now, device }];
-    writeLinks(this.list);
-  }
-
-  noteDevice(inboxKey: string, device: string): void {
-    this.list = this.list.map((l) => (l.inboxKey === inboxKey ? { ...l, device } : l));
+    this.list = [...this.list, { inboxKey, name, linkedAt: now }];
     writeLinks(this.list);
   }
 

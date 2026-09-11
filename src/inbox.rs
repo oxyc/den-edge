@@ -1,6 +1,7 @@
 //! `/inbox` — the companion's messages to a TV. The phone appends under its `inboxKey`; the TV drains the
-//! queue on launch and foreground, which empties it. Five kinds of message: add an addon, add to the
-//! watchlist, play, and the user's TMDB and other metadata keys.
+//! queue on launch and foreground, which empties it. Six kinds of message: add an addon, add to the
+//! watchlist, play, the user's TMDB and other metadata keys, and the device's name. A device sends its name
+//! every time it opens, so a queue holds only the latest one.
 
 use crate::handler::{
     error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, read_json,
@@ -48,6 +49,9 @@ async fn append(state: &AppState, req: Request) -> Response {
         Ok(queue) => queue.unwrap_or_default(),
         Err(e) => return internal("inbox read", e),
     };
+    if message["type"] == "device" {
+        queue.retain(|m| m["type"] != "device");
+    }
     queue.push(message);
     if queue.len() > MAX_MESSAGES {
         queue.drain(..queue.len() - MAX_MESSAGES);
@@ -244,6 +248,23 @@ mod tests {
         ] {
             assert_eq!(append(&h, bad.clone()).await, StatusCode::BAD_REQUEST, "{bad}");
         }
+    }
+
+    /// A device names itself on every open, so a TV that stays off doesn't come back to a queue of names —
+    /// or lose real messages to the cap.
+    #[tokio::test]
+    async fn a_queue_keeps_only_the_latest_device_name() {
+        let h = Harness::new();
+        append(&h, json!({ "type": "device", "name": "Mac · Safari" })).await;
+        append(&h, json!({ "type": "tmdbKey", "key": "k" })).await;
+        append(&h, json!({ "type": "device", "name": "Mac · Chrome" })).await;
+        assert_eq!(
+            drain(&h).await,
+            vec![
+                json!({ "type": "tmdbKey", "key": "k" }),
+                json!({ "type": "device", "name": "Mac · Chrome" })
+            ]
+        );
     }
 
     /// The key travels in `x-den-link`, out of the URL; a header wins over a body key.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { claimCode, deviceLabel, type ClaimError } from './lib/edge';
+  import { claimCode, type ClaimError } from './lib/edge';
   import { links } from './lib/links.svelte';
 
   // The TV's link QR carries the code, so a scan arrives ready to link.
@@ -18,14 +18,13 @@
     event.preventDefault();
     busy = true;
     failure = null;
-    const device = deviceLabel();
-    const result = await claimCode(code, fetch, device);
+    const result = await claimCode(code);
     busy = false;
     if ('error' in result) {
       failure = result.error;
       return;
     }
-    links.add(result.inboxKey, device); // the claim already told the TV
+    links.add(result.inboxKey);
   }
 </script>
 

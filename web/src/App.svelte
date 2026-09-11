@@ -5,14 +5,11 @@
   import LinkTV from './LinkTV.svelte';
   import Linked from './Linked.svelte';
 
-  // Each linked TV names this device in its list; tell it again whenever the label changes (a new browser
-  // version doesn't change it, a different browser has its own links).
+  // Each linked TV names this device in its list. Told on every open rather than once: a TV build that doesn't
+  // know the message drops it, and den-edge keeps only the latest one queued.
   $effect(() => {
     const device = deviceLabel();
-    for (const link of links.list) {
-      if (link.device === device) continue;
-      void announceDevice(link.inboxKey, device).then((ok) => ok && links.noteDevice(link.inboxKey, device));
-    }
+    for (const link of links.list) void announceDevice(link.inboxKey, device);
   });
 </script>
 
