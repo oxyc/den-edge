@@ -2,6 +2,7 @@
      `set:plugins`), sealed, so the TV and this browser share them and den-edge can't read them — and the linked TV. -->
 <script lang="ts">
   import { browserClock } from './lib/clock';
+  import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
   import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
@@ -127,6 +128,7 @@
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
     busy: 'Too many pairings started here just now. Wait a minute and try again.',
     failed: 'That pairing didn’t finish. Show a new code and try again.',
+    insecure: 'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
 
   async function linkBrowser() {
@@ -135,6 +137,7 @@
     const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
     const result = await host({
       libraryKey,
+      label: thisDevice.name,
       onCode: (shown) => (code = shown),
       allow: (joiner) =>
         new Promise<boolean>((resolve) => {
@@ -149,19 +152,25 @@
     });
     code = null;
     pairing = false;
+    if ('joiner' in result) links.share(result.joiner);
     pairNotice = 'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
   }
 
-  // Unlinking asks twice: a second press within a few seconds confirms, so a stray tap does nothing.
-  let confirming = $state(false);
-  function unlink() {
-    if (!confirming) {
-      confirming = true;
-      setTimeout(() => (confirming = false), 4000);
+  const when = (at: number) => new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+  // Unlinking asks twice: a second press within a few seconds confirms, so a stray tap does nothing. The link
+  // awaiting its second press is held by key, so one row's confirmation never arms another's.
+  let confirming = $state<string | null>(null);
+  function unlink(target: Link) {
+    if (confirming !== target.inboxKey) {
+      confirming = target.inboxKey;
+      setTimeout(() => (confirming = null), 4000);
       return;
     }
-    links.remove(link.inboxKey);
-    location.hash = '';
+    confirming = null;
+    links.remove(target.inboxKey);
+    // The library this screen was reading is gone; the app sends you back to linking.
+    if (target.inboxKey === link.inboxKey) location.hash = '';
   }
 </script>
 
@@ -271,11 +280,35 @@
   {/if}
   {#if failure}<p class="error" role="alert">{failure}</p>{/if}
 
-  <h2>Apple TV</h2>
-  <div class="tv">
-    <span>Linked to {link.name ?? 'your Apple TV'}</span>
-    <button class="quiet danger" onclick={unlink}>{confirming ? 'Press again to unlink' : 'Unlink'}</button>
+  <h2>This device</h2>
+  <p class="sub">
+    What the other device asks to allow, and lists this one under. Two phones of the same make guess the same name,
+    so give this one its own.
+  </p>
+  <div class="row">
+    <input
+      value={thisDevice.chosen}
+      placeholder={thisDevice.guess}
+      oninput={(event) => thisDevice.rename(event.currentTarget.value)}
+      autocomplete="off"
+      maxlength="40"
+      aria-label="This device’s name"
+    />
   </div>
+
+  <h2>Linked devices</h2>
+  <p class="sub">The libraries this browser can open. Unlinking is this browser’s own business; the device keeps running.</p>
+  {#each links.list as linked (linked.inboxKey)}
+    <div class="device">
+      <div class="label">
+        {linked.name ?? 'Apple TV'}
+        {#if linked.linkedAt}<span>Linked {when(linked.linkedAt)}</span>{/if}
+      </div>
+      <button class="quiet danger" onclick={() => unlink(linked)}>
+        {confirming === linked.inboxKey ? 'Press again to unlink' : 'Unlink'}
+      </button>
+    </div>
+  {/each}
 
   <h2>Another browser</h2>
   <p class="sub">
@@ -297,6 +330,18 @@
       <button class="quiet" disabled={pairing} onclick={linkBrowser}>{pairing ? 'Waiting…' : 'Show a code'}</button>
     {/if}
   </div>
+  {#each links.shared as device (device.name + device.at)}
+    <div class="device">
+      <div class="label">
+        {device.name}
+        <span>Given your library {when(device.at)}</span>
+      </div>
+      <button class="quiet" onclick={() => links.forgetShared(device)}>Forget</button>
+    </div>
+  {/each}
+  {#if links.shared.length}
+    <p class="sub note">Forgetting one only stops listing it here — it keeps the copy of your library it was given.</p>
+  {/if}
 </section>
 
 <style>
@@ -339,7 +384,8 @@
     font-size: 14px;
   }
 
-  .plugin {
+  .plugin,
+  .device {
     display: flex;
     gap: 10px;
     align-items: center;
@@ -347,10 +393,16 @@
     border-top: 1px solid var(--line);
   }
 
-  .plugin .label {
+  .plugin .label,
+  .device .label {
     min-width: 0;
     margin-right: auto;
     overflow-wrap: anywhere;
+  }
+
+  .note {
+    margin-top: 12px;
+    font-size: 14px;
   }
 
   .row,

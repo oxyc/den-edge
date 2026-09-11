@@ -11,6 +11,10 @@ const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 export default defineConfig({
   plugins: [svelte({ compilerOptions: { experimental: { async: true } } })],
   server: {
+    // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
+    // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`
+    // puts this server behind the tailnet's own certificate, and the dev server has to answer to that name.
+    allowedHosts: ['.ts.net', 'localhost'],
     proxy: {
       ...Object.fromEntries(api.map((path) => [path, { target: edge, changeOrigin: true }])),
       '/atlas': { target: atlas, changeOrigin: true, rewrite: (path) => path.replace(/^\/atlas/, '') },

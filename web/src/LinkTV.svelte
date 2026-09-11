@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { thisDevice } from './lib/device.svelte';
   import { links } from './lib/links.svelte';
   import { formatCode, join, parseCode, type JoinError } from './lib/pair';
 
@@ -40,6 +41,7 @@
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
     mistyped: 'That isn’t a whole code. Check it against the TV.',
     failed: 'The TV didn’t link this device: the code didn’t match, or it wasn’t allowed. Get a new code on the TV.',
+    insecure: 'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
 
   /** The twelve characters the TV shows. */
@@ -48,7 +50,7 @@
   async function link() {
     busy = true;
     failure = null;
-    const result = await join(code);
+    const result = await join(code, { label: thisDevice.name });
     busy = false;
     if ('error' in result) {
       failure = result.error;
@@ -87,6 +89,18 @@
         disabled={busy}
       />
     </div>
+    <label class="name">
+      <span>The TV will ask to allow this device as</span>
+      <input
+        value={thisDevice.chosen}
+        placeholder={thisDevice.guess}
+        oninput={(event) => thisDevice.rename(event.currentTarget.value)}
+        autocomplete="off"
+        maxlength="40"
+        aria-label="This device’s name"
+        disabled={busy}
+      />
+    </label>
     <button class="primary" disabled={busy || !whole}>{busy ? 'Allow this device on your TV…' : 'Link'}</button>
   </form>
   {#if failure}
@@ -171,6 +185,32 @@
   .primary:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+
+  /* Two phones of the same make guess the same name, and the TV's list would show two of it. */
+  .name {
+    display: grid;
+    gap: 6px;
+  }
+
+  .name span {
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .name input {
+    padding: 12px 16px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    text-align: center;
+    outline: none;
+  }
+
+  .name input:focus-visible {
+    border-color: var(--accent);
   }
 
   .error {

@@ -266,7 +266,7 @@ export async function linkKeys(linkKey: Bytes): Promise<{ inbox: string; enc: By
 
 // --- Joining through den-edge ---
 
-export type JoinError = 'mistyped' | 'expired' | 'claimed' | 'throttled' | 'failed' | 'unreachable';
+export type JoinError = 'mistyped' | 'expired' | 'claimed' | 'throttled' | 'failed' | 'unreachable' | 'insecure';
 export type JoinResult = { handover: Handover; inboxKey: string } | { error: JoinError };
 
 interface JoinOptions {
@@ -276,6 +276,14 @@ interface JoinOptions {
   /** A fixed scalar, for tests. */
   y?: Bytes;
 }
+
+/**
+ * WebCrypto, which every step of CPace leans on, exists only in a secure context — https, or localhost. Served
+ * over plain http on a LAN address there is no `crypto.subtle` at all, and the maths throws halfway through a
+ * pairing: a code on one screen and a spinner on the other, with nothing said. Both sides check before they
+ * start, so the page can say what is wrong instead.
+ */
+const secureContext = (): boolean => typeof crypto !== 'undefined' && crypto.subtle !== undefined;
 
 const POLL_MS = 1000;
 /** A session's whole life on den-edge: past it, a slot never fills. */
@@ -319,6 +327,7 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
   const parsed = parseCode(code);
   if (!parsed) return { error: 'mistyped' };
+  if (!secureContext()) return { error: 'insecure' };
   const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
   const send = (path: string, method: string, body: unknown) =>
     call(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -349,7 +358,7 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
 
 // --- Hosting a pairing, as the TV does ---
 
-export type HostError = 'unreachable' | 'busy' | 'failed';
+export type HostError = 'unreachable' | 'busy' | 'failed' | 'insecure';
 export type HostResult = { joiner: string } | { error: HostError };
 
 export interface HostOptions {
@@ -384,6 +393,7 @@ const randomSid = (): string =>
  */
 export async function host(options: HostOptions): Promise<HostResult> {
   const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
+  if (!secureContext()) return { error: 'insecure' };
   const sid = options.sid ?? randomSid();
   const secret = options.secret ?? randomSecret();
   const { send, put, read, end } = relay(sid, fetchImpl, wait);

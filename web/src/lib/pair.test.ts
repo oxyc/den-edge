@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { hex } from './crypto';
 import * as pair from './pair';
 import { fromBase64url, fromHex, toBase64url } from './wire';
@@ -220,5 +220,21 @@ describe('joining through den-edge', () => {
     expect(await pair.join('ABCD-EFGH-JKLM', options(answering(410)))).toEqual({ error: 'expired' });
     expect(await pair.join('ABCD-EFGH-JKLM', options(answering(429)))).toEqual({ error: 'throttled' });
     expect(await pair.join('ABCD-EFGH-JKLM', options(never))).toEqual({ error: 'unreachable' });
+  });
+
+  it('says so, instead of hanging, on a page served without WebCrypto', async () => {
+    const never = (async () => {
+      throw new Error('no request expected');
+    }) as typeof fetch;
+    // A plain-http address has no `crypto.subtle`: the maths would throw between two written slots, leaving a code
+    // on one screen and a spinner on the other.
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes });
+    try {
+      expect(await pair.join('ABCD-EFGH-JKLM', options(never))).toEqual({ error: 'insecure' });
+      const hosting = { libraryKey: new Uint8Array(32), onCode: () => undefined, allow: async () => true };
+      expect(await pair.host({ ...hosting, fetchImpl: never })).toEqual({ error: 'insecure' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
