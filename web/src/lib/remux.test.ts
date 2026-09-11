@@ -6,6 +6,7 @@ import {
   forgetSubtitles,
   listReleases,
   login,
+  releaseParts,
   reportFailure,
   startSession,
   type Want,
@@ -149,6 +150,12 @@ describe('describeRelease', () => {
       '4K • REMUX • Dolby Vision · converted here to 1080p H.264',
     );
     expect(describeRelease({ ...session, video: { codec: 'hevc', transcoded: false } })).toBe('1080p');
+  });
+
+  it('gives the parts apart, so the player can lead with what plays', () => {
+    expect(releaseParts(session)).toEqual({ release: '1080p' });
+    const converted = { ...session, video: { codec: 'h264', transcoded: true, height: 1080, tonemapped: true } };
+    expect(releaseParts(converted)).toEqual({ converted: '1080p H.264 SDR', release: '1080p' });
   });
 });
 

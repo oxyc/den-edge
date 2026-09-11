@@ -8,10 +8,10 @@
   import type { Title } from '../lib/library';
   import { playable, type Playable } from '../lib/playable';
   import {
-    describeRelease,
     endSession,
     listReleases,
     login,
+    releaseParts,
     reportFailure,
     startSession,
     type AudioTrack,
@@ -354,37 +354,57 @@
     {/if}
   </div>
   {#if session}
+    {@const parts = releaseParts(session)}
+    {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     <footer>
-      <p class="release">{describeRelease(session)}</p>
+      <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
+           than breaking mid-label when there is no room beside it. -->
+      <p class="release" aria-live="polite">
+        {#if parts.converted}
+          <span class="playing">Converted here to {parts.converted}</span>
+          <span class="source">from {parts.release}</span>
+        {:else}
+          <span class="playing">{parts.release}</span>
+        {/if}
+      </p>
       <div class="controls">
         {#if releases.length > 1}
-          <label>
-            Release
-            <select value={session.release.filename} onchange={switchRelease}>
+          <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet
+               on a phone — and a screen reader reads a pop-up button, while the pill draws the icon and the short
+               form of what is chosen. -->
+          <div class="pick">
+            {@render plates()}
+            <span class="value" aria-hidden="true">{session.release.label.split('•')[0]?.trim()}</span>
+            {@render chevron()}
+            <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
               {#each releases as release (release.filename)}
                 <option value={release.filename}>{release.label}</option>
               {/each}
             </select>
-          </label>
+          </div>
         {/if}
-        {#if session.audioTracks.length > 1}
-          <label>
-            Audio
-            <select value={session.audioTrack} onchange={switchAudio}>
+        {#if session.audioTracks.length > 1 && playingTrack}
+          <div class="pick">
+            {@render globe()}
+            <span class="value" aria-hidden="true">{trackLabel(playingTrack, session.audioTrack)}</span>
+            {@render chevron()}
+            <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
               {#each session.audioTracks as track, n (n)}
                 <option value={n}>{trackLabel(track, n)}</option>
               {/each}
             </select>
-          </label>
+          </div>
         {/if}
         {#if onnext && next}
           {#if upNext !== null}
+            <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
             <button
               class="primary"
+              aria-label="Next: {next}"
               onclick={() => {
                 stay();
                 onnext();
-              }}>Next: {next} ({upNext})</button
+              }}>Next: {next} <span aria-hidden="true">({upNext})</span></button
             >
             <button onclick={stay}>Stay</button>
           {:else}
@@ -395,6 +415,29 @@
     </footer>
   {/if}
 </div>
+
+<!-- The Apple TV's own menus mark these with rectangle.stack and globe; the same two, drawn as lines. -->
+{#snippet plates()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M8 4.5h8" />
+    <path d="M6 7.5h12" />
+    <rect x="4" y="10.5" width="16" height="9.5" rx="2.5" />
+  </svg>
+{/snippet}
+
+{#snippet globe()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12h17" />
+    <path d="M12 3.5c2.4 2.4 3.7 5.3 3.7 8.5s-1.3 6.1-3.7 8.5c-2.4-2.4-3.7-5.3-3.7-8.5s1.3-6.1 3.7-8.5Z" />
+  </svg>
+{/snippet}
+
+{#snippet chevron()}
+  <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="m6 9.5 6 6 6-6" />
+  </svg>
+{/snippet}
 
 <style>
   /* The visible viewport (dvh: a phone's toolbars excluded), and a middle row that may shrink below the video's own
@@ -435,25 +478,25 @@
   }
 
   button,
-  select {
+  .pick {
     flex: 0 0 auto;
-    padding: 8px 16px;
     border: 1px solid rgb(255 255 255 / 0.4);
     border-radius: 999px;
     background: none;
     color: #fff;
     font: inherit;
+  }
+
+  /* A finger's worth, as every control here is. */
+  button {
+    min-height: 44px;
+    padding: 8px 18px;
     cursor: pointer;
   }
 
+  /* Where the browser draws the open menu itself, on its own ground. */
   select option {
     color: initial;
-  }
-
-  /* A release's label runs long ("4K • REMUX • Dolby Vision • Atmos • 75 GB"); on a phone it shortens instead. */
-  select {
-    max-width: min(70vw, 28rem);
-    text-overflow: ellipsis;
   }
 
   .primary {
@@ -499,7 +542,7 @@
   footer {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 16px;
+    gap: 10px 16px;
     align-items: center;
     justify-content: space-between;
     padding-top: 12px;
@@ -507,30 +550,105 @@
 
   .controls {
     display: flex;
+    flex: 1 1 auto;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
+    justify-content: flex-end;
   }
 
-  label {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    color: rgb(255 255 255 / 0.6);
-    font-size: 14px;
-  }
-
-  .note,
-  .release {
+  .note {
     max-width: 50ch;
     color: rgb(255 255 255 / 0.6);
     text-align: center;
   }
 
+  /* The line takes a phone's width to itself and shares a laptop's with the pickers. Its two parts are flex items,
+     so the source drops whole to the next line before either of them breaks in the middle. */
   .release {
+    display: flex;
+    flex: 1 1 16rem;
+    flex-wrap: wrap;
+    gap: 2px 0.5ch;
+    align-items: baseline;
+    min-width: 0;
+    max-width: 70ch;
     margin: 0;
-    font-size: 14px;
-    text-align: left;
+  }
+
+  .playing {
+    color: rgb(255 255 255 / 0.85);
+    font-size: 15px;
+  }
+
+  /* Where it came from, not what is playing. */
+  .source {
+    min-width: 0;
+    color: rgb(255 255 255 / 0.5);
+    font-size: 13px;
+  }
+
+  .pick {
+    position: relative;
+    display: flex;
+    flex: 1 1 9rem;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+    max-width: 18rem;
+    min-height: 44px;
+    padding: 0 14px;
+  }
+
+  .pick .value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 15px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .icon {
+    width: 20px;
+    height: 20px;
+    opacity: 0.75;
+  }
+
+  .chevron {
+    width: 14px;
+    height: 14px;
+    opacity: 0.5;
+  }
+
+  .icon,
+  .chevron {
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* The control itself fills the pill — never hidden, which would stop a phone opening it. */
+  .pick select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    appearance: none;
+    cursor: pointer;
+  }
+
+  /* The focused element is the select inside, so the pill lights up with it. */
+  .pick:focus-within,
+  button:focus-visible {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .error {

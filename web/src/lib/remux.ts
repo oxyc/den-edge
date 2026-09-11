@@ -140,10 +140,20 @@ export async function startSession(
  * came down to, so a converted 4K remux doesn't pass for the 4K it says on the tin.
  */
 export function describeRelease(session: Session): string {
+  const { converted, release } = releaseParts(session);
+  return converted ? `${release} · converted here to ${converted}` : release;
+}
+
+/**
+ * The same, in its two parts: what den-remux brought the release down to — absent when it sent the release as it
+ * is — and the release itself, so the player can lead with what plays and leave the rest quieter.
+ */
+export function releaseParts(session: Session): { converted?: string; release: string } {
   const video = session.video;
-  if (!video?.transcoded) return session.release.label;
+  const release = session.release.label;
+  if (!video?.transcoded) return { release };
   const size = video.height ? `${video.height}p ` : '';
-  return `${session.release.label} · converted here to ${size}H.264${video.tonemapped ? ' SDR' : ''}`;
+  return { converted: `${size}H.264${video.tonemapped ? ' SDR' : ''}`, release };
 }
 
 /** A release den-remux could play, as it lists them: never a URL. */
