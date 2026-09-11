@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
-import { isHidden, readApiKey, readPrefs } from './prefs';
+import { acceptsAddonURL, isHidden, readApiKey, readPlugins, readPrefs } from './prefs';
 import { toTitle } from './tmdb';
 import type { SettingsRow, Stamp } from './wire';
 
@@ -62,6 +62,33 @@ describe('prefs', () => {
     const keys: SettingsRow = { kind: 'set', schema: 2, name: 'keys', values: { tmdb: { value: { string: 'K1' }, at } } };
     expect(readApiKey(keys, 'tmdb')).toBe('K1');
     expect(readApiKey(keys, 'omdb')).toBeUndefined();
+  });
+
+  it('lists the addons still wanted, not the removed ones', () => {
+    const plugins: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'plugins',
+      values: {
+        'https://b.example/manifest.json': { value: { bool: true }, at },
+        'https://gone.example/manifest.json': { value: null, at },
+        'http://192.168.1.5:8080/manifest.json': { value: { bool: true }, at },
+      },
+    };
+    expect(readPlugins(plugins)).toEqual(['http://192.168.1.5:8080/manifest.json', 'https://b.example/manifest.json']);
+    expect(readPlugins(undefined)).toEqual([]);
+  });
+
+  it('takes the addon URLs the TV takes: https, or http on the LAN', () => {
+    expect(acceptsAddonURL('https://addon.example/manifest.json')).toBe(true);
+    expect(acceptsAddonURL('http://192.168.86.193:8080/manifest.json')).toBe(true);
+    expect(acceptsAddonURL('http://den.local/manifest.json')).toBe(true);
+    expect(acceptsAddonURL('http://172.20.0.1/manifest.json')).toBe(true);
+    expect(acceptsAddonURL('http://addon.example/manifest.json')).toBe(false);
+    expect(acceptsAddonURL('http://10.0.0.1.attacker.example/manifest.json'), 'a public name ending like an address').toBe(false);
+    expect(acceptsAddonURL('http://172.32.0.1/manifest.json')).toBe(false);
+    expect(acceptsAddonURL('ftp://addon.example/manifest.json')).toBe(false);
+    expect(acceptsAddonURL('not a url')).toBe(false);
   });
 
   it('takes genres, language and the adult flag from any TMDB shape', () => {

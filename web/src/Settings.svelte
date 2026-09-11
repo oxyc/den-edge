@@ -1,12 +1,12 @@
-<!-- Settings, as on the TV: the user's own API keys — kept in the library's settings (`set:keys`), sealed, so the TV
-     and this browser share them and den-edge can't read them — and the linked TV. -->
+<!-- Settings, as on the TV: the user's own API keys and addons — kept in the library's settings (`set:keys`,
+     `set:plugins`), sealed, so the TV and this browser share them and den-edge can't read them — and the linked TV. -->
 <script lang="ts">
   import { loadLibrary } from './lib/backup';
   import { browserClock } from './lib/clock';
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
-  import { readApiKey } from './lib/prefs';
-  import type { SettingsRow } from './lib/wire';
+  import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
+  import type { ConfigValue, SettingsRow } from './lib/wire';
 
   let { link }: { link: Link } = $props();
 
@@ -43,25 +43,50 @@
     void version;
     return log?.settings('keys');
   });
+  const plugins = $derived.by(() => {
+    void version;
+    return readPlugins(log?.settings('plugins'));
+  });
 
-  /** Set one key, or clear it with null — stamped now, merged over what the TV last wrote. */
-  async function save(name: string, value: string | null) {
-    if (!log) return;
+  /** Set one setting, or clear it with null — stamped now, merged over what the TV last wrote. */
+  async function write(group: string, name: string, value: ConfigValue | null): Promise<boolean> {
+    if (!log) return false;
     saving = true;
     failure = null;
-    const base: SettingsRow = keys ?? { kind: 'set', schema: 2, name: 'keys', values: {} };
-    const row: SettingsRow = {
-      ...base,
-      values: { ...base.values, [name]: { value: value ? { string: value } : null, at: clock.issue() } },
-    };
+    const base: SettingsRow = log.settings(group) ?? { kind: 'set', schema: 2, name: group, values: {} };
+    const row: SettingsRow = { ...base, values: { ...base.values, [name]: { value, at: clock.issue() } } };
     const saved = await log.write(row);
     saving = false;
     if (!saved) {
       failure = 'Couldn’t save that. Check that this device is on your network.';
+      return false;
+    }
+    version++;
+    return true;
+  }
+
+  async function save(name: string, value: string | null) {
+    if (await write('keys', name, value ? { string: value } : null)) drafts[name] = '';
+  }
+
+  let addonDraft = $state('');
+  /** Trailing slashes dropped, so the same addon typed twice is one entry. */
+  const addonURL = $derived(addonDraft.trim().replace(/\/+$/, ''));
+
+  async function addPlugin() {
+    if (!acceptsAddonURL(addonURL)) {
+      failure = 'Use https://, or http:// for an address on your network (localhost, *.local, 10.x, 172.16–31.x, 192.168.x).';
       return;
     }
-    drafts[name] = '';
-    version++;
+    if (await write('plugins', addonURL, { bool: true })) addonDraft = '';
+  }
+
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
   }
 
   // Unlinking asks twice: a second press within a few seconds confirms, so a stray tap does nothing.
@@ -113,13 +138,41 @@
         </div>
       </form>
     {/each}
+
+    <h2>Plugins</h2>
+    <p class="sub">Your addons, shared with your Apple TV through your library. One you add here waits on the TV until you install it there.</p>
+    {#each plugins as url (url)}
+      <div class="plugin">
+        <span title={url}>{hostOf(url)}</span>
+        <button class="quiet" disabled={saving} onclick={() => write('plugins', url, null)}>Remove</button>
+      </div>
+    {:else}
+      <p class="sub">No plugins yet.</p>
+    {/each}
+    <form
+      class="row"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void addPlugin();
+      }}
+    >
+      <input
+        type="url"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="https://…/manifest.json"
+        aria-label="Plugin manifest URL"
+        bind:value={addonDraft}
+      />
+      <button class="primary" disabled={saving || !addonURL}>Add</button>
+    </form>
   {/if}
   {#if failure}<p class="error" role="alert">{failure}</p>{/if}
 
   <h2>Apple TV</h2>
   <div class="tv">
     <span>Linked to {link.name ?? 'your Apple TV'}</span>
-    <!-- The companion page's tools (plugins, sending to the TV) until they move here. It shares this link. -->
+    <!-- The companion page's tools (sending to the TV) until they move here. It shares this link. -->
     <a class="tools glass" href="/app/">Companion tools</a>
     <button class="quiet danger" onclick={unlink}>{confirming ? 'Press again to unlink' : 'Unlink'}</button>
   </div>
@@ -163,6 +216,20 @@
   .label span {
     color: var(--muted);
     font-size: 14px;
+  }
+
+  .plugin {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .plugin span {
+    margin-right: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .row,

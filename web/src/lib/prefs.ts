@@ -46,6 +46,35 @@ export function readApiKey(row: SettingsRow | undefined, name: string): string |
   return value && 'string' in value && value.string ? value.string : undefined;
 }
 
+/** The user's addons (`set:plugins`): each manifest URL still wanted, sorted. */
+export function readPlugins(row: SettingsRow | undefined): string[] {
+  return Object.entries(row?.values ?? {})
+    .filter(([, stamped]) => stamped.value !== null && 'bool' in stamped.value && stamped.value.bool)
+    .map(([url]) => url)
+    .sort();
+}
+
+/**
+ * Whether the TV takes this addon URL (DenKit `AddonClient.acceptsAddonURL`): https anywhere, or http only to a
+ * LAN host — localhost, `*.local`, or an RFC 1918 address — so a public addon is never reached in plaintext.
+ */
+export function acceptsAddonURL(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol !== 'http:') return false;
+  const host = parsed.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.local')) return true;
+  const labels = host.split('.');
+  if (labels.length !== 4 || !labels.every((label) => /^\d{1,3}$/.test(label) && Number(label) <= 255)) return false;
+  const [a = -1, b = -1] = labels.map(Number);
+  return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
 /**
  * Whether the TV would hide this title. Adult titles and titles with no poster never show; the year floor applies
  * unless `ignoringYearFloor` — explicit search sets it, since a title typed by name must be findable — and then the
