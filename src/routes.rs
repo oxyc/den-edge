@@ -93,16 +93,17 @@ pub fn to_json(routes: &Routes) -> Value {
     let services: Map<String, Value> = routes
         .iter()
         .map(|(name, entries)| {
-            let list = entries
-                .iter()
-                .map(|e| {
-                    if e.access {
-                        json!({ "url": e.url, "access": true })
-                    } else {
-                        json!({ "url": e.url })
-                    }
-                })
-                .collect();
+            let list =
+                entries
+                    .iter()
+                    .map(|e| {
+                        if e.access {
+                            json!({ "url": e.url, "access": true })
+                        } else {
+                            json!({ "url": e.url })
+                        }
+                    })
+                    .collect();
             (name.clone(), Value::Array(list))
         })
         .collect();
