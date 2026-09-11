@@ -41,7 +41,12 @@ const notability = (credit: Json) =>
   Math.sqrt((typeof credit.popularity === 'number' ? credit.popularity : 0) *
     Math.max(1, typeof credit.vote_count === 'number' ? credit.vote_count : 0));
 
-export function searchSources(tmdbKey: string, fetchImpl: typeof fetch = tmdbFetch, atlas = '/atlas'): SearchSources {
+/** `atlas` is where this page reaches atlas (`findAtlas`); null leaves search to TMDB alone. */
+export function searchSources(
+  tmdbKey: string,
+  fetchImpl: typeof fetch = tmdbFetch,
+  atlas: string | null = '/atlas',
+): SearchSources {
   const cache = new Map<string, Promise<Title | null>>();
 
   async function tmdb(path: string, params: Record<string, string> = {}): Promise<Json> {
@@ -53,6 +58,7 @@ export function searchSources(tmdbKey: string, fetchImpl: typeof fetch = tmdbFet
   }
 
   async function fromAtlas(path: string): Promise<Json> {
+    if (atlas === null) throw new Error('no atlas from here');
     const res = await fetchImpl(atlas + path);
     if (!res.ok) throw new Error(`atlas answered ${res.status}`);
     return (await res.json()) as Json;

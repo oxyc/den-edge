@@ -145,6 +145,8 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => config(state, face),
+        // The web app's counterpart to /config: which addon origins get the library's Access token.
+        "/web-config" => bare_json(StatusCode::OK, &json!({ "access": state.access_origins })),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(
@@ -156,7 +158,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         p => match &state.web_dir {
             Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
-                crate::web::serve(dir, p).await
+                crate::web::serve(dir, p, &state.access_origins).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
@@ -200,18 +202,25 @@ impl Face {
     }
 }
 
-/// `GET /config`: the TV's kill-switch and update gate and, on every name but the public ones, `lan` — the
-/// addons' public origins mapped to their LAN addresses. A TV that reached den-edge on the LAN applies it and
-/// talks to the addons there; one that came in through the tunnel gets no map, and the internet gets no
-/// private addresses.
+/// `GET /config`: the TV's kill-switch and update gate; `access`, the addon origins behind Cloudflare Access that
+/// get the library's service token — on every name, since it names nothing private; and, on every name but the
+/// public ones, `lan` — the addons' public origins mapped to their LAN addresses. A TV that reached den-edge on the
+/// LAN applies it and talks to the addons there; one that came in through the tunnel gets no map, and the internet
+/// gets no private addresses.
 fn config(state: &AppState, face: Face) -> Response {
-    if face != Face::Both || state.lan_map.is_empty() {
+    let lan = face == Face::Both && !state.lan_map.is_empty();
+    if !lan && state.access_origins.is_empty() {
         return raw_json(StatusCode::OK, Body::from(CONFIG), false);
     }
     let mut value: Value = serde_json::from_str(CONFIG).expect("CONFIG is JSON");
-    let lan: serde_json::Map<String, Value> =
-        state.lan_map.iter().map(|(public, lan)| (public.clone(), Value::from(lan.as_str()))).collect();
-    value["lan"] = Value::Object(lan);
+    if !state.access_origins.is_empty() {
+        value["access"] = json!(state.access_origins);
+    }
+    if lan {
+        let map: serde_json::Map<String, Value> =
+            state.lan_map.iter().map(|(public, lan)| (public.clone(), Value::from(lan.as_str()))).collect();
+        value["lan"] = Value::Object(map);
+    }
     bare_json(StatusCode::OK, &value)
 }
 
@@ -477,7 +486,31 @@ pub mod tests {
         s.lan_map = crate::parse_lan_map(
             "https://d-scout.oxy.fi=http://192.168.86.193:8080, https://d-play.oxy.fi/=http://192.168.86.193:8080,nonsense",
         );
+        s.access_origins = crate::parse_origins(
+            "ACCESS_ORIGINS",
+            "https://d-scout.oxy.fi, https://D-ATLAS.oxy.fi/,x; img-src *",
+        );
         h
+    }
+
+    #[tokio::test]
+    async fn the_web_app_learns_which_addons_get_the_access_token() {
+        let h = split_harness();
+        let config = h.send("GET", "/web-config", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(
+            body_json(config).await,
+            json!({ "access": ["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"] })
+        );
+        let on_api = h.send("GET", "/web-config", None, &[("host", "d-api.oxy.fi")]).await;
+        assert_eq!(on_api.status(), StatusCode::NOT_FOUND);
+        // The app may call them, and nothing that would widen its policy got in.
+        let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
+        let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
+        assert!(
+            csp.contains("connect-src 'self' https://api.themoviedb.org https://d-scout.oxy.fi https://d-atlas.oxy.fi;"),
+            "{csp}"
+        );
+        assert!(!csp.contains("img-src *"), "{csp}");
     }
 
     #[tokio::test]
@@ -524,6 +557,10 @@ pub mod tests {
         let public = config("d-api.oxy.fi").await;
         assert_eq!(public["minSupportedVersion"], "0.1.0");
         assert!(public.get("lan").is_none(), "no private addresses through the tunnel: {public}");
+        // The Access origins name nothing private: every name carries them.
+        let access = json!(["https://d-scout.oxy.fi", "https://d-atlas.oxy.fi"]);
+        assert_eq!(lan["access"], access);
+        assert_eq!(public["access"], access);
     }
 
     #[tokio::test]

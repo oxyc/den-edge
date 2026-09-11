@@ -42,6 +42,15 @@ export interface Want {
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
 
+/** Whether den-remux answers under this origin — the tailnet's `/remux`; the public web name has none (#15). */
+export async function remuxAnswers(fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  try {
+    return (await fetchImpl('/remux/login')).status === 405; // its POST-only route; the app shell would be a 200
+  } catch {
+    return false;
+  }
+}
+
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */
 export async function login(key: string, fetchImpl: typeof fetch = fetch): Promise<boolean | null> {
   try {

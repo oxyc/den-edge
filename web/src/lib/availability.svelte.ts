@@ -8,7 +8,7 @@
 
 import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
-import type { Scout } from './scout';
+import type { Addon } from './scout';
 import { fetchImdbId } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 
@@ -32,16 +32,19 @@ export class Availability {
   private readonly wanted = new Set<number>();
   private readonly tries = new Map<number, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
-  private scout: { config: string; tmdbKey: string } | null = null;
+  private scout: { base: string; tmdbKey: string; fetch: typeof fetch } | null = null;
 
   /** TMDB's answers come from this browser's cache; scout's pass straight through it. */
   constructor(private readonly fetchImpl: typeof fetch = tmdbFetch) {}
 
-  /** Ask this scout from now on — the library's (`findScout`), or nobody when it has none. */
-  connect(scout: Scout | null, tmdbKey: string): void {
-    const previous = this.scout?.config;
-    this.scout = scout && tmdbKey ? { config: scout.config, tmdbKey } : null;
-    if (this.scout && this.scout.config !== previous) {
+  /**
+   * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none — through `fetchImpl`, which
+   * carries the Access token where scout's public name needs it.
+   */
+  connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = this.fetchImpl): void {
+    const previous = this.scout?.base;
+    this.scout = scout && tmdbKey ? { base: scout.base, tmdbKey, fetch: fetchImpl } : null;
+    if (this.scout && this.scout.base !== previous) {
       this.verdicts.clear();
       this.tries.clear();
     }
@@ -86,7 +89,7 @@ export class Availability {
     let answer: Record<string, Verdict> = {};
     if (byImdb.size > 0) {
       try {
-        const res = await this.fetchImpl(`/scout/${scout.config}/availability`, {
+        const res = await scout.fetch(`${scout.base}/availability`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ids: [...byImdb.keys()] }),

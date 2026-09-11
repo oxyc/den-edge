@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Availability, RETRY_MS } from './availability.svelte';
 
-const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', config: 'sealed-cfg' };
+const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
 
 /** Scout on this origin, and TMDB naming movie n `tt000000n` — except 404, which has no IMDb id. */
 function fake(verdicts: () => Record<string, string>) {

@@ -7,7 +7,7 @@
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
   import { endSession, login, startSession, type AudioTrack, type Failure, type Session } from '../lib/remux';
-  import type { Scout } from '../lib/scout';
+  import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
 
   let {
@@ -27,7 +27,7 @@
     season?: number;
     episode?: number;
     tmdbKey: string;
-    scout: Scout;
+    scout: Addon;
     /** The library's other LAN addons: den-subtitles is among them. */
     subtitles: string[];
     /** Where the library says this was left. */

@@ -13,7 +13,8 @@ the rest is small JSON it validates and bounds.
 |---|---|
 | `GET /health` | `{"status":"ok"}` |
 | `GET /version` | `{"version"}` |
-| `GET /config` | the TV's kill-switch and update gate, plus `lan` — the addons' public origins mapped to their LAN addresses (`LAN_MAP`) — on every name but the public ones |
+| `GET /config` | the TV's kill-switch and update gate; `access` — the addon origins behind Cloudflare Access that get the library's service token (`ACCESS_ORIGINS`) — on every name; and `lan` — the addons' public origins mapped to their LAN addresses (`LAN_MAP`) — on every name but the public ones |
+| `GET /web-config` | the web app's counterpart to `/config`, served wherever the app is: `access`, the same list |
 | `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
 | `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes) |
 | `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
@@ -69,6 +70,7 @@ can reach den-edge can't fill the host's disk. A library holds at most 50,000 ro
 | `WEB_HOSTS` | unset | the web app's public names (comma-separated, e.g. `d.oxy.fi`, behind Cloudflare Access). A request for one gets the web app and `/health`/`/version` — never a device route, `/config` or `/metrics` |
 | `API_HOSTS` | unset | the device API's public names (e.g. `d-api.oxy.fi`, Access bypassed). A request for one gets the device routes and never the web app, which would otherwise be served past Access. A name in neither list (the LAN address, the tailnet's) serves both halves |
 | `LAN_MAP` | unset | `<public origin>=<LAN origin>` pairs, comma-separated (`https://d-scout.oxy.fi=http://192.168.86.193:8080`), published as `GET /config`'s `lan` on every name but the public ones: a TV that reached den-edge on the LAN talks to the addons there too, and the internet is handed no private address |
+| `ACCESS_ORIGINS` | unset | the addons' public origins behind Cloudflare Access, comma-separated (`https://d-scout.oxy.fi,…`). Apps send the library's service token to these and nowhere else; published as `access` in `/config` and `/web-config`, and allowed in the web app's `connect-src` |
 | `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address pairing limit reads `CF-Connecting-IP`, else the last `X-Forwarded-For` entry; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
 

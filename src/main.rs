@@ -59,6 +59,10 @@ pub struct AppState {
     /// published in `GET /config` on every name but the public ones: a TV that reaches den-edge on the LAN
     /// then reaches the addons there too.
     pub lan_map: Vec<(String, String)>,
+    /// The addons' public origins behind Cloudflare Access (env `ACCESS_ORIGINS`, comma-separated): the web app
+    /// sends the library's service token to these and nowhere else (`GET /web-config`), and may call them (its
+    /// CSP's `connect-src`).
+    pub access_origins: Vec<String>,
 }
 
 impl AppState {
@@ -80,6 +84,7 @@ impl AppState {
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),
             lan_map: Vec::new(),
+            access_origins: Vec::new(),
         }
     }
 
@@ -130,6 +135,8 @@ async fn main() {
     state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
     state.lan_map = env_opt("LAN_MAP").map(|v| parse_lan_map(&v)).unwrap_or_default();
+    state.access_origins =
+        env_opt("ACCESS_ORIGINS").map(|v| parse_origins("ACCESS_ORIGINS", &v)).unwrap_or_default();
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -143,7 +150,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} lan_map={}",
+         web_hosts={} api_hosts={} lan_map={} access_origins={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -152,6 +159,7 @@ async fn main() {
         if state.web_hosts.is_empty() { "none".to_owned() } else { state.web_hosts.join(",") },
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
         state.lan_map.len(),
+        state.access_origins.len(),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());
@@ -199,15 +207,6 @@ fn parse_hosts(var: &str, value: &str) -> Vec<String> {
 /// `LAN_MAP`: comma-separated `<public origin>=<LAN origin>` pairs, each side `http(s)://host[:port]` with no path.
 /// A malformed pair is said and skipped.
 fn parse_lan_map(value: &str) -> Vec<(String, String)> {
-    let origin = |o: &str| {
-        let o = o.trim().trim_end_matches('/').to_ascii_lowercase();
-        let ok = o.split_once("://").is_some_and(|(scheme, host)| {
-            matches!(scheme, "http" | "https")
-                && !host.is_empty()
-                && !host.contains(['/', '?', '#', '@', ' '])
-        });
-        ok.then_some(o)
-    };
     value
         .split(',')
         .map(str::trim)
@@ -220,6 +219,34 @@ fn parse_lan_map(value: &str) -> Vec<(String, String)> {
             parsed
         })
         .collect()
+}
+
+/// `ACCESS_ORIGINS`: comma-separated origins, as `origin` reads them. A malformed one is said and skipped.
+fn parse_origins(var: &str, value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| {
+            let parsed = origin(o);
+            if parsed.is_none() {
+                eprintln!("{var}: {o:?} is not http(s)://host[:port] — skipping it");
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// `http(s)://host[:port]`, lower-cased, without a trailing slash — or `None` for anything with a path, query,
+/// credentials or a space, which would read differently from how it matches.
+fn origin(o: &str) -> Option<String> {
+    let o = o.trim().trim_end_matches('/').to_ascii_lowercase();
+    let ok = o.split_once("://").is_some_and(|(scheme, host)| {
+        matches!(scheme, "http" | "https")
+            && !host.is_empty()
+            && !host.contains(['/', '?', '#', '@', ' ', ';', ','])
+    });
+    ok.then_some(o)
 }
 
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.

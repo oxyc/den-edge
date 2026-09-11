@@ -42,13 +42,16 @@
     return readPlugins(log?.settings('plugins'));
   });
 
-  /** Set one setting, or clear it with null — stamped now, merged over what the TV last wrote. */
-  async function write(group: string, name: string, value: ConfigValue | null): Promise<boolean> {
+  /** Set settings in one group, or clear one with null — stamped now, together, merged over what the TV last wrote. */
+  async function write(group: string, changes: Record<string, ConfigValue | null>): Promise<boolean> {
     if (!log) return false;
     saving = true;
     failure = null;
     const base: SettingsRow = log.settings(group) ?? { kind: 'set', schema: 2, name: group, values: {} };
-    const row: SettingsRow = { ...base, values: { ...base.values, [name]: { value, at: clock.issue() } } };
+    const at = clock.issue();
+    const values = { ...base.values };
+    for (const [name, value] of Object.entries(changes)) values[name] = { value, at };
+    const row: SettingsRow = { ...base, values };
     const saved = await log.write(row);
     saving = false;
     if (log.moved) {
@@ -64,7 +67,7 @@
   }
 
   async function save(name: string, value: string | null) {
-    if (!(await write('keys', name, value ? { string: value } : null))) return;
+    if (!(await write('keys', { [name]: value ? { string: value } : null }))) return;
     drafts[name] = '';
     // TMDB's terms: cached content goes when the key it was fetched with does.
     if (name === 'tmdb' && !value) await clearTmdbCache();
@@ -79,7 +82,24 @@
       failure = 'Use https://, or http:// for an address on your network (localhost, *.local, 10.x, 172.16–31.x, 192.168.x).';
       return;
     }
-    if (await write('plugins', addonURL, { bool: true })) addonDraft = '';
+    if (await write('plugins', { [addonURL]: { bool: true } })) addonDraft = '';
+  }
+
+  // The Cloudflare Access service token (oxyc/den#15): typing its 64-character secret on a TV is painful, so it can
+  // be entered here and reaches every TV through the library.
+  let accessId = $state('');
+  let accessSecret = $state('');
+  const hasAccess = $derived(!!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'));
+
+  /** Both halves together, or both cleared: one without the other opens nothing. */
+  async function saveAccess(clear = false) {
+    const [id, secret] = clear ? [null, null] : [accessId.trim(), accessSecret.trim()];
+    if (!clear && (!id || !secret)) return;
+    const value = (v: string | null) => (v ? { string: v } : null);
+    if (await write('keys', { cfAccessId: value(id), cfAccessSecret: value(secret) })) {
+      accessId = '';
+      accessSecret = '';
+    }
   }
 
   function hostOf(url: string): string {
@@ -140,12 +160,50 @@
       </form>
     {/each}
 
+    <h2>Away from home</h2>
+    <p class="sub">
+      The Cloudflare Access service token that lets your Apple TVs in other homes — and this page on its public name —
+      reach your plugins. Enter it once: it reaches every TV through your library. Reload to use it here.
+    </p>
+    <form
+      class="key"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void saveAccess();
+      }}
+    >
+      <div class="row">
+        <input
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={hasAccess ? 'Client ID saved — type to replace' : 'Client ID'}
+          aria-label="Access client ID"
+          bind:value={accessId}
+        />
+      </div>
+      <div class="row">
+        <input
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={hasAccess ? 'Client secret saved — type to replace' : 'Client secret'}
+          aria-label="Access client secret"
+          bind:value={accessSecret}
+        />
+        <button class="primary" disabled={saving || !accessId.trim() || !accessSecret.trim()}>Save</button>
+        {#if hasAccess}
+          <button type="button" class="quiet" disabled={saving} onclick={() => saveAccess(true)}>Remove</button>
+        {/if}
+      </div>
+    </form>
+
     <h2>Plugins</h2>
     <p class="sub">Your addons, shared with your Apple TV through your library. One you add here waits on the TV until you install it there.</p>
     {#each plugins as url (url)}
       <div class="plugin">
         <span title={url}>{hostOf(url)}</span>
-        <button class="quiet" disabled={saving} onclick={() => write('plugins', url, null)}>Remove</button>
+        <button class="quiet" disabled={saving} onclick={() => write('plugins', { [url]: null })}>Remove</button>
       </div>
     {:else}
       <p class="sub">No plugins yet.</p>
