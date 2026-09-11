@@ -20,11 +20,14 @@
     return list;
   }
   function saveLinks(list) { localStorage.setItem(LINKS_KEY, JSON.stringify(list)); }
-  function inboxKeys() { return links().map(function (l) { return l.inboxKey; }); }
+  // A TV paired from Den Web (a link with its own linkKey) takes only sealed messages, which this page can't
+  // make, and shares nothing in cleartext — so pushes and reads go to the other links only.
+  function cleartextLinks() { return links().filter(function (l) { return !l.linkKey; }); }
+  function inboxKeys() { return cleartextLinks().map(function (l) { return l.inboxKey; }); }
   function isLinked() { return links().length > 0; }
   // Primary (first) TV — used for single-target reads (library download, plugin metadata) that all TVs
   // converge on anyway (iCloud TV↔TV / identical pushes). Broadcasts use inboxKeys().
-  function inboxKey() { var list = links(); return list.length ? list[0].inboxKey : null; }
+  function inboxKey() { var list = cleartextLinks(); return list.length ? list[0].inboxKey : null; }
   function addLink(inboxKey, name) {
     var list = links();
     if (list.some(function (l) { return l.inboxKey === inboxKey; })) return;
