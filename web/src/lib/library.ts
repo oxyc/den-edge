@@ -5,6 +5,8 @@
 // Swift's encoder writes a Date as seconds since 2001-01-01, Data as base64, and an Int-keyed dictionary as a
 // flat [key, value, key, value] array.
 
+import type { Row } from './wire';
+
 export type MediaType = 'movie' | 'tv';
 
 export interface Title {
@@ -154,10 +156,46 @@ export function parseSnapshot(snapshot: unknown): Library {
 
 const titleKey = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 
-/** Newest additions first, as the TV lists them. */
+/**
+ * The record log's title rows over a backup's records. The log is the fresher of the two — the TV writes it on
+ * every change and the backup only when asked — so its state wins. A title only the log knows arrives without
+ * display (rows carry none); `untitled` and `withDisplay` fill it in from TMDB.
+ */
+export function applyLog(library: Library, rows: Row[]): Library {
+  const records = new Map(library.records.map((r) => [titleKey(r.title), r]));
+  const dismissed = new Map(library.dismissed);
+  for (const row of rows) {
+    if (row.kind !== 'rec' || (row.title.type !== 'movie' && row.title.type !== 'tv')) continue;
+    const key = titleKey(row.title);
+    records.set(key, {
+      title: records.get(key)?.title ?? { type: row.title.type, id: row.title.id, title: '' },
+      status: row.status.value,
+      progress: row.resume.value,
+      progressAt: row.resume.at[0],
+      addedAt: row.addedAt,
+      deleted: row.deleted.value,
+    });
+    if (row.dismissed.value) dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
+  }
+  return { ...library, records: [...records.values()], dismissed };
+}
+
+/** Titles the rows would show that have no display yet. */
+export function untitled(library: Library): { type: MediaType; id: number }[] {
+  return library.records
+    .filter((r) => !r.deleted && r.title.title === '' && (r.status === 'watchlist' || r.status === 'inProgress'))
+    .map((r) => ({ type: r.title.type, id: r.title.id }));
+}
+
+export function withDisplay(library: Library, titles: Title[]): Library {
+  const byKey = new Map(titles.map((t) => [titleKey(t), t]));
+  return { ...library, records: library.records.map((r) => ({ ...r, title: byKey.get(titleKey(r.title)) ?? r.title })) };
+}
+
+/** Newest additions first, as the TV lists them. A title with no display yet waits, as on the TV. */
 export function watchlist(library: Library): Title[] {
   return library.records
-    .filter((r) => !r.deleted && r.status === 'watchlist')
+    .filter((r) => !r.deleted && r.status === 'watchlist' && r.title.title !== '')
     .sort((a, b) => b.addedAt - a.addedAt)
     .map((r) => r.title);
 }
@@ -218,7 +256,7 @@ export function continueWatching(library: Library): ContinueEntry[] {
   }
 
   const movies = library.records
-    .filter((r) => !r.deleted && r.status === 'inProgress' && r.title.type === 'movie')
+    .filter((r) => !r.deleted && r.status === 'inProgress' && r.title.type === 'movie' && r.title.title !== '')
     .sort((a, b) => b.progressAt - a.progressAt);
   for (const record of movies) {
     const key = titleKey(record.title);
