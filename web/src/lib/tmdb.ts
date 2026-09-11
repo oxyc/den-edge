@@ -25,6 +25,10 @@ export async function fetchTitle(
   } catch {
     return null;
   }
+  return toTitle(ref, details);
+}
+
+function toTitle(ref: { type: MediaType; id: number }, details: Record<string, unknown>): Title | null {
   const text = (field: string) => (typeof details[field] === 'string' ? (details[field] as string) : undefined);
   const name = text('title') ?? text('name');
   if (!name) return null;

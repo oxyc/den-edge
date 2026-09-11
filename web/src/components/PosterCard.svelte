@@ -1,14 +1,19 @@
 <!-- A poster with its title — the one card every row uses (the TV's PosterCard). Posters come straight from
-     TMDB's image CDN, which needs no key. -->
+     TMDB's image CDN, which needs no key. With `onselect` the whole card is a button. -->
 <script lang="ts">
   import type { Title } from '../lib/library';
 
-  let { title, caption, progress }: { title: Title; caption?: string; progress?: number } = $props();
+  let {
+    title,
+    caption,
+    progress,
+    onselect,
+  }: { title: Title; caption?: string; progress?: number; onselect?: () => void } = $props();
   const poster = $derived(title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined);
 </script>
 
-<figure class="card">
-  <div class="art">
+{#snippet body()}
+  <span class="art">
     {#if poster}
       <img src={poster} alt="" loading="lazy" decoding="async" />
     {:else}
@@ -20,12 +25,18 @@
     {#if progress !== undefined && progress > 0}
       <span class="progress" style:--p={progress}></span>
     {/if}
-  </div>
-  <figcaption>
+  </span>
+  <span class="meta">
     <span class="name">{title.title}</span>
     {#if caption}<span class="caption">{caption}</span>{/if}
-  </figcaption>
-</figure>
+  </span>
+{/snippet}
+
+{#if onselect}
+  <button type="button" class="card pick" onclick={onselect}>{@render body()}</button>
+{:else}
+  <figure class="card">{@render body()}</figure>
+{/if}
 
 <style>
   .card {
@@ -33,8 +44,23 @@
     width: var(--card-w);
   }
 
+  .pick {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .pick:focus-visible .art {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+  }
+
   .art {
     position: relative;
+    display: block;
     aspect-ratio: 2 / 3;
     max-width: 100%;
     overflow: hidden;
@@ -80,7 +106,7 @@
     background: linear-gradient(to right, var(--fg) calc(var(--p) * 100%), rgb(255 255 255 / 0.3) 0);
   }
 
-  figcaption {
+  .meta {
     display: grid;
     margin-top: 8px;
     font-size: 14px;

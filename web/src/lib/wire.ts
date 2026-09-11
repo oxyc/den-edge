@@ -31,6 +31,11 @@ export class Clock {
   see(stamp: Stamp) {
     if (compareStamps(stamp, this.last) > 0) this.last = stamp;
   }
+
+  /** The last stamp issued or seen — what a device keeps between visits. */
+  get current(): Stamp {
+    return this.last;
+  }
 }
 
 export interface LibraryKeys {

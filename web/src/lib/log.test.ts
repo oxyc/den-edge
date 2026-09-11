@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { addToWatchlist, blankTitle, react } from './actions';
 import { applyLog, continueWatching, untitled, watchlist, withDisplay, type Library } from './library';
-import { readLog } from './log';
+import { LibraryLog } from './log';
 import { fetchTitle, storedTmdbKey } from './tmdb';
-import { deriveKeys, seal, type EpisodeRow, type Stamp, type TitleRow } from './wire';
+import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
-const at = (t: number): Stamp => [t, 0, 'tv01'];
+const at = (t: number, device = 'tv01'): Stamp => [t, 0, device];
 
 function row(id: number, overrides: Partial<TitleRow> = {}): TitleRow {
   return {
@@ -24,33 +25,85 @@ function row(id: number, overrides: Partial<TitleRow> = {}): TitleRow {
   };
 }
 
-/** den-edge's `changes`, paged by `limit`, over rows sealed like the TV seals them. */
-async function edge(rows: TitleRow[], extra: { k: string; v: string }[] = []): Promise<typeof fetch> {
+/**
+ * den-edge's `/lib` in memory, with library.rs's rules: `changes` paged in sequence order (two a page, so paging
+ * is exercised), and `batch` with compare-and-set on each row's sequence.
+ */
+async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
   const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
-  const sealed = [...(await Promise.all(rows.map((r) => seal(keys, r)))), ...extra].map((e, i) => ({ ...e, seq: i + 1 }));
-  return async (input, init) => {
-    const url = new URL(String(input), 'https://den.example');
+  let head = 0;
+  const stored = new Map<string, { k: string; seq: number; v: string }>();
+  for (const entry of [...(await Promise.all(rows.map((r) => seal(keys, r)))), ...extra]) {
+    stored.set(entry.k, { ...entry, seq: ++head });
+  }
+  const fetchImpl: typeof fetch = async (input, init) => {
     if ((init?.headers as Record<string, string>)['x-den-library-token'] !== keys.token) {
       return new Response('{"error":"forbidden"}', { status: 403 });
     }
-    const since = Number(url.searchParams.get('since'));
-    const newer = sealed.filter((e) => e.seq > since);
-    const page = newer.slice(0, 2); // a small page, so paging is exercised
-    return new Response(JSON.stringify({ entries: page, head: sealed.length, more: newer.length > 2 }), { status: 200 });
+    if (init?.method === 'POST') {
+      const { writes } = JSON.parse(String(init.body)) as { writes: { k: string; base: number; v: string }[] };
+      const applied: { k: string; seq: number }[] = [];
+      const conflicts: { k: string; seq: number; v: string | null }[] = [];
+      for (const write of writes) {
+        const current = stored.get(write.k);
+        if ((current?.seq ?? 0) !== write.base) {
+          conflicts.push({ k: write.k, seq: current?.seq ?? 0, v: current?.v ?? null });
+          continue;
+        }
+        stored.set(write.k, { k: write.k, seq: ++head, v: write.v });
+        applied.push({ k: write.k, seq: head });
+      }
+      return new Response(JSON.stringify({ head, applied, conflicts }), { status: 200 });
+    }
+    const since = Number(new URL(String(input), 'https://den.example').searchParams.get('since'));
+    const newer = [...stored.values()].filter((e) => e.seq > since).sort((a, b) => a.seq - b.seq);
+    return new Response(JSON.stringify({ entries: newer.slice(0, 2), head, more: newer.length > 2 }), { status: 200 });
   };
+  return { fetchImpl, stored };
 }
 
-describe('readLog', () => {
+describe('LibraryLog', () => {
   it('reads every page and opens each row, skipping one that does not open', async () => {
     const rows = [row(1), row(2), row(3)];
-    const rows2 = await readLog(LIBRARY_KEY, await edge(rows, [{ k: 'ab'.repeat(32), v: 'AAAA' }]));
-    expect(rows2).toEqual(rows);
+    const { fetchImpl } = await edge(rows, [{ k: 'ab'.repeat(32), v: 'AAAA' }]);
+    expect((await LibraryLog.open(LIBRARY_KEY, fetchImpl))?.rows()).toEqual(rows);
   });
 
   it('is empty for a library nobody wrote, and null when den-edge is out of reach', async () => {
-    expect(await readLog(LIBRARY_KEY, async () => new Response('{}', { status: 404 }))).toEqual([]);
-    expect(await readLog(LIBRARY_KEY, async () => Promise.reject(new TypeError('offline')))).toBeNull();
-    expect(await readLog(LIBRARY_KEY, async () => new Response('{}', { status: 500 }))).toBeNull();
+    expect((await LibraryLog.open(LIBRARY_KEY, async () => new Response('{}', { status: 404 })))?.rows()).toEqual([]);
+    expect(await LibraryLog.open(LIBRARY_KEY, async () => Promise.reject(new TypeError('offline')))).toBeNull();
+    expect(await LibraryLog.open(LIBRARY_KEY, async () => new Response('{}', { status: 500 }))).toBeNull();
+  });
+
+  it('knows the newest stamp it read', async () => {
+    const { fetchImpl } = await edge([row(1), row(2, { reaction: { value: 'love', at: at(9000, 'web1') } })]);
+    expect((await LibraryLog.open(LIBRARY_KEY, fetchImpl))?.newestStamp()).toEqual(at(9000, 'web1'));
+  });
+
+  it('writes a title new to the library, and a stale write merges on top of the row that beat it', async () => {
+    const { fetchImpl } = await edge();
+    const [phone, laptop] = [await LibraryLog.open(LIBRARY_KEY, fetchImpl), await LibraryLog.open(LIBRARY_KEY, fetchImpl)];
+    const ref = { type: 'movie' as const, id: 438631 };
+
+    // The phone adds it; the laptop, which read the log before that, reacts to it.
+    expect(await phone!.write(addToWatchlist(blankTitle(ref, 5000), at(5000, 'ph01')))).not.toBeNull();
+    const stored = await laptop!.write(react(blankTitle(ref, 6000), 'love', at(6000, 'lt01')));
+    expect(stored?.kind === 'rec' && [stored.status.value, stored.reaction.value]).toEqual(['watchlist', 'love']);
+
+    const reread = await LibraryLog.open(LIBRARY_KEY, fetchImpl);
+    expect(reread?.title(ref)?.status.value).toBe('watchlist');
+    expect(reread?.title(ref)?.reaction.value).toBe('love');
+    expect(reread?.title(ref)?.addedAt).toBe(5000);
+  });
+
+  it('says so when a write cannot be saved', async () => {
+    const { fetchImpl } = await edge();
+    const log = await LibraryLog.open(LIBRARY_KEY, fetchImpl);
+    const offline = await LibraryLog.open(LIBRARY_KEY, async (input, init) =>
+      init?.method === 'POST' ? Promise.reject(new TypeError('offline')) : fetchImpl(input, init),
+    );
+    expect(log).not.toBeNull();
+    expect(await offline!.write(addToWatchlist(blankTitle({ type: 'tv', id: 1 }, 0), at(1)))).toBeNull();
   });
 });
 
