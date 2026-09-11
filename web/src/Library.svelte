@@ -336,13 +336,20 @@
     }
   }
 
-  /** What Home's billboard carries when the library has nothing of its own to put there. */
-  let trending = $state<Title | null>(null);
+  /**
+   * What Home's billboard cycles: the leading row's titles, as the TV's featured hero takes them — the first
+   * personal row when the library has one, else what is trending.
+   */
+  let featured = $state<Title[]>([]);
   $effect(() => {
-    const load = pages;
-    if (!load || trending) return;
-    void load('/trending/movie/week', 'movie', {}, 1)
-      .then((list) => (trending = list[0] ?? null))
+    const lead = route.page === 'library' ? rows[0] : undefined;
+    featured = [];
+    if (!lead) return;
+    void lead
+      .load(1)
+      .then((list) => {
+        if (rows[0] === lead) featured = list;
+      })
       .catch(() => undefined);
   });
 
@@ -397,17 +404,8 @@
   {:else if !sources}
     <p class="note">Search needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
   {/if}
-  {#if !hits && !facet && tmdbKey}
-    {@const up = resume[0]}
-    {@const featured = up?.title ?? saved[0] ?? trending}
-    {#if featured}
-      <Billboard
-        title={featured}
-        {tmdbKey}
-        caption={up ? caption(up) : undefined}
-        onplay={playHere && (() => playHere(featured, up?.episode?.season, up?.episode?.episode))}
-      />
-    {/if}
+  {#if !hits && !facet && tmdbKey && featured.length}
+    <Billboard titles={featured.filter(browseShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
   {/if}
   {#if hits}
     {#if hits.length}
