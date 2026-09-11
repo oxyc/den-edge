@@ -1,7 +1,8 @@
 //! `/inbox` — the companion's messages to a TV. The phone appends under its `inboxKey`; the TV drains the
 //! queue on launch and foreground, which empties it. Six kinds of message: add an addon, add to the
 //! watchlist, play, the user's TMDB and other metadata keys, and the device's name. A device sends its name
-//! every time it opens, so a queue holds only the latest one.
+//! every time it opens, so a queue holds only the latest one. A paired device seals its messages instead
+//! (den-spec `wire/inbox-v1.md`), and they are kept as they came.
 
 use crate::handler::{
     error, header_key, internal, js_len, json_reply, link_key, method_not_allowed, read_json,
@@ -40,7 +41,11 @@ async fn append(state: &AppState, req: Request) -> Response {
     if !valid_inbox_key(key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
     }
-    let Some(message) = validate(body.get("message")) else {
+    let message = match body.get("sealed") {
+        Some(sealed) => sealed_message(sealed),
+        None => validate(body.get("message")),
+    };
+    let Some(message) = message else {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_message"));
     };
     let _write = state.write_lock.lock().await;
@@ -138,6 +143,18 @@ fn validate(raw: Option<&Value>) -> Option<Value> {
     }
     Some(Value::Object(out))
 }
+
+/// A paired device's message: opaque base64url, which only its TV can open.
+fn sealed_message(raw: &Value) -> Option<Value> {
+    let sealed = raw.as_str().filter(|s| {
+        !s.is_empty()
+            && s.len() <= MAX_SEALED_CHARS
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    })?;
+    Some(json!({ "sealed": sealed }))
+}
+
+const MAX_SEALED_CHARS: usize = 4096;
 
 /// What an optional field's value must be to be kept.
 type Check = fn(&Value) -> bool;
@@ -267,6 +284,19 @@ mod tests {
                 json!({ "type": "device", "name": "Mac · Chrome" })
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_message_is_kept_as_it_came() {
+        let h = Harness::new();
+        let body = |sealed: Value| json!({ "inboxKey": KEY, "sealed": sealed });
+        assert_eq!(h.call("POST", "/inbox/append", Some(body(json!("AAECAw-_")))).await.0, StatusCode::OK);
+        let too_long = "A".repeat(super::MAX_SEALED_CHARS + 1);
+        for bad in [json!(""), json!("a+b/"), json!(too_long), json!(3)] {
+            let status = h.call("POST", "/inbox/append", Some(body(bad.clone()))).await.0;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" })]);
     }
 
     /// The key travels in `x-den-link`, out of the URL; a header wins over a body key.
