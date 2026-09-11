@@ -162,8 +162,8 @@
 
     <h2>Away from home</h2>
     <p class="sub">
-      The Cloudflare Access service token that lets your Apple TVs in other homes — and this page on its public name —
-      reach your plugins. Enter it once: it reaches every TV through your library. Reload to use it here.
+      The Cloudflare Access service token that lets your Apple TVs in other homes reach your plugins. Enter it once:
+      it reaches every TV through your library.
     </p>
     <form
       class="key"

@@ -32,22 +32,23 @@ describe('findAddon', () => {
     expect(asked).toEqual(['/scout/subs-cfg/manifest.json', '/scout/sealed-cfg/manifest.json']);
   });
 
-  it('asks a public install behind Access where it is', async () => {
-    const { asked, fetchImpl } = addons({ [SCOUT_PUBLIC]: 'com.den.scout' });
+  it('asks a public install behind Access through this origin too, keeping its URL for den-remux', async () => {
+    const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
     expect(await findAddon([PUBLIC, SCOUT_PUBLIC], ACCESS, SCOUT, fetchImpl)).toEqual({
       install: 'https://d-scout.oxy.fi/sealed-cfg',
-      base: 'https://d-scout.oxy.fi/sealed-cfg',
+      base: '/scout/sealed-cfg',
     });
-    expect(asked).toEqual([SCOUT_PUBLIC]);
+    expect(asked).toEqual(['/scout/sealed-cfg/manifest.json']);
   });
 });
 
 describe('findAtlas', () => {
   it('is a plugin, else this origin’s own, else none', async () => {
-    const plugin = addons({ 'https://d-atlas.oxy.fi/manifest.json': 'com.den.atlas' });
-    expect((await findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ACCESS, plugin.fetchImpl))?.base).toBe(
-      'https://d-atlas.oxy.fi',
-    );
+    const plugin = addons({ '/atlas/manifest.json': 'com.den.atlas' });
+    expect(await findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ACCESS, plugin.fetchImpl)).toEqual({
+      install: 'https://d-atlas.oxy.fi',
+      base: '/atlas',
+    });
     const tailnet = addons({ '/atlas/manifest.json': 'com.den.atlas' });
     expect((await findAtlas([], ACCESS, tailnet.fetchImpl))?.base).toBe('/atlas');
     expect(await findAtlas([], ACCESS, addons({}).fetchImpl), 'the public web name serves no /atlas').toBeNull();

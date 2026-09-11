@@ -10,6 +10,7 @@ mod library;
 mod link;
 mod metrics;
 mod pair;
+mod relay;
 mod store;
 mod sync;
 mod web;
@@ -59,10 +60,13 @@ pub struct AppState {
     /// published in `GET /config` on every name but the public ones: a TV that reaches den-edge on the LAN
     /// then reaches the addons there too.
     pub lan_map: Vec<(String, String)>,
-    /// The addons' public origins behind Cloudflare Access (env `ACCESS_ORIGINS`, comma-separated): the web app
-    /// sends the library's service token to these and nowhere else (`GET /web-config`), and may call them (its
-    /// CSP's `connect-src`).
+    /// The addons' public origins behind Cloudflare Access (env `ACCESS_ORIGINS`, comma-separated): the only ones
+    /// the TVs send the library's service token to, published in `/config` and `/web-config`.
     pub access_origins: Vec<String>,
+    /// Path prefix → addon LAN origin (env `ADDON_RELAY`: `/scout=http://192.168.86.193:8080,…`): what the web app
+    /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
+    pub relays: Vec<(String, String)>,
+    pub relay_client: relay::RelayClient,
 }
 
 impl AppState {
@@ -85,6 +89,8 @@ impl AppState {
             api_hosts: Vec::new(),
             lan_map: Vec::new(),
             access_origins: Vec::new(),
+            relays: Vec::new(),
+            relay_client: relay::client(),
         }
     }
 
@@ -137,6 +143,7 @@ async fn main() {
     state.lan_map = env_opt("LAN_MAP").map(|v| parse_lan_map(&v)).unwrap_or_default();
     state.access_origins =
         env_opt("ACCESS_ORIGINS").map(|v| parse_origins("ACCESS_ORIGINS", &v)).unwrap_or_default();
+    state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     let state = Arc::new(state);
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
@@ -150,7 +157,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} lan_map={} access_origins={}",
+         web_hosts={} api_hosts={} lan_map={} access_origins={} relays={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -160,6 +167,7 @@ async fn main() {
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
         state.lan_map.len(),
         state.access_origins.len(),
+        state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());
@@ -215,6 +223,29 @@ fn parse_lan_map(value: &str) -> Vec<(String, String)> {
             let parsed = pair.split_once('=').and_then(|(public, lan)| Some((origin(public)?, origin(lan)?)));
             if parsed.is_none() {
                 eprintln!("LAN_MAP: {pair:?} is not <public origin>=<LAN origin> — skipping it");
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// `ADDON_RELAY`: comma-separated `/<prefix>=<origin>` pairs — one path segment, a plain http(s) origin. A malformed
+/// pair is said and skipped.
+fn parse_relays(value: &str) -> Vec<(String, String)> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter_map(|pair| {
+            let parsed = pair.split_once('=').and_then(|(prefix, lan)| {
+                let prefix = prefix.trim();
+                let segment = prefix.strip_prefix('/')?;
+                let ok =
+                    !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+                ok.then(|| Some((prefix.to_owned(), origin(lan)?))).flatten()
+            });
+            if parsed.is_none() {
+                eprintln!("ADDON_RELAY: {pair:?} is not /<prefix>=<origin> — skipping it");
             }
             parsed
         })

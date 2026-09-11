@@ -43,10 +43,9 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
-  import { accessOrigins, accessToken, withAccess } from './lib/access';
+  import { accessOrigins } from './lib/access';
   import { remuxAnswers } from './lib/remux';
   import { denInstalls, findAddon, findAtlas, SCOUT, type Addon } from './lib/scout';
-  import { tmdbFetch } from './lib/tmdbCache';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -75,10 +74,8 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
-  /** Den's addon origins behind Cloudflare Access (den-edge's `/web-config`), which get the library's token. */
+  /** Den's addon origins behind Cloudflare Access (den-edge's `/web-config`): install URLs on them are Den's. */
   let access = $state(new Set<string>());
-  /** `fetch` for Den's addons and TMDB: TMDB from this browser's cache, the token to the names behind Access. */
-  let addonFetch = $state<typeof fetch>(tmdbFetch);
   /** den-remux answers under this origin (the tailnet's `/remux`), so a title can play here. */
   let remux = $state(false);
 
@@ -95,17 +92,16 @@
       tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
       if (tmdbKey) void name(opened, tmdbKey);
       plugins = readPlugins(opened.settings('plugins'));
-      const [key, token, installed] = [tmdbKey, accessToken(opened.settings('keys')), plugins];
+      const [key, installed] = [tmdbKey, plugins];
       void (async () => {
         access = await accessOrigins();
-        addonFetch = withAccess(access, token, tmdbFetch);
         const [foundScout, foundAtlas] = await Promise.all([
-          findAddon(installed, access, SCOUT, addonFetch),
-          findAtlas(installed, access, addonFetch),
+          findAddon(installed, access, SCOUT),
+          findAtlas(installed, access),
         ]);
         scout = foundScout;
         atlas = foundAtlas?.base ?? null;
-        availability.connect(foundScout, key, addonFetch);
+        availability.connect(foundScout, key);
       })();
       void remuxAnswers().then((answers) => (remux = answers));
     });
@@ -258,7 +254,7 @@
   const select = $derived(log ? open : undefined);
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
   // a newer query supersedes an older one mid-flight.
-  const sources = $derived(tmdbKey ? searchSources(tmdbKey, addonFetch, atlas) : null);
+  const sources = $derived(tmdbKey ? searchSources(tmdbKey, undefined, atlas) : null);
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;

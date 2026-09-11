@@ -1,8 +1,7 @@
-// Den's own addons among the library's plugins (`set:plugins`), and where this page asks them. An install URL
-// names either a public name behind Cloudflare Access (oxyc/den#15), asked where it is with the library's service
-// token (`withAccess`), or — from before those names — the TV's LAN address, which an https page can't reach, asked
-// instead under this origin's tailscale serve path (`/scout`, `/atlas`). An addon that is not Den's is never sent
-// anything.
+// Den's own addons among the library's plugins (`set:plugins`), and where this page asks them. An install URL names
+// either a public name behind Cloudflare Access (oxyc/den#15) or the TV's LAN address; this page can reach neither
+// itself, so it asks both under its own origin — `/scout`, `/atlas` — which den-edge relays on the public name
+// (`ADDON_RELAY`) and tailscale serve on the tailnet. An addon that is not Den's is never sent anything.
 
 import { isLanURL } from './prefs';
 
@@ -27,9 +26,9 @@ function place(url: string, access: Set<string>, lanPath: string): Addon | null 
   const suffix = '/manifest.json';
   if (!parsed.pathname.endsWith(suffix) || parsed.search || parsed.hash) return null;
   const install = url.slice(0, -suffix.length);
-  if (access.has(parsed.origin)) return { install, base: install };
   const path = parsed.pathname.slice(0, -suffix.length);
-  return isLanURL(url) && /^(\/[\w.~%-]+)?$/.test(path) ? { install, base: lanPath + path } : null;
+  const dens = access.has(parsed.origin) || isLanURL(url);
+  return dens && /^(\/[\w.~%-]+)?$/.test(path) ? { install, base: lanPath + path } : null;
 }
 
 async function manifestIs(manifest: string, id: string, fetchImpl: typeof fetch): Promise<boolean> {

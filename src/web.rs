@@ -10,28 +10,23 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
 use std::path::{Component, Path, PathBuf};
 
-/// What the app may load and call: itself, TMDB's images and API (BYOK, straight from the browser), video from
-/// den-remux on this origin — `blob:` for hls.js, which hands the video element a MediaSource — and `addons`, the
-/// addons' public names behind Access (`ACCESS_ORIGINS`, each already checked to be a bare origin).
-fn csp(addons: &[String]) -> String {
-    let addons: String = addons.iter().map(|o| format!(" {o}")).collect();
-    format!(
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:; \
-         connect-src 'self' https://api.themoviedb.org{addons}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-    )
-}
+/// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
+/// `tailscale serve` on the tailnet) — TMDB's images and API (BYOK, straight from the browser), and video from
+/// den-remux on this origin: `blob:` for hls.js, which hands the video element a MediaSource.
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:; connect-src 'self' https://api.themoviedb.org; \
+    frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-pub async fn serve(dir: &Path, path: &str, addons: &[String]) -> Response {
+pub async fn serve(dir: &Path, path: &str) -> Response {
     let Some(relative) = relative(path) else { return not_found() };
     let file = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
     match tokio::fs::read(&file).await {
-        Ok(bytes) => respond(bytes, &file, path.starts_with("/assets/"), addons),
+        Ok(bytes) => respond(bytes, &file, path.starts_with("/assets/")),
         // A route in the app, not a file: the app's shell renders it.
         Err(_) if !path.rsplit('/').next().unwrap_or("").contains('.') => {
             let index = dir.join("index.html");
             match tokio::fs::read(&index).await {
-                Ok(bytes) => respond(bytes, &index, false, addons),
+                Ok(bytes) => respond(bytes, &index, false),
                 Err(_) => not_found(),
             }
         }
@@ -46,7 +41,7 @@ fn relative(path: &str) -> Option<PathBuf> {
     relative.components().all(|c| matches!(c, Component::Normal(_))).then_some(relative)
 }
 
-fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, addons: &[String]) -> Response {
+fn respond(bytes: Vec<u8>, file: &Path, immutable: bool) -> Response {
     let content_type = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -69,10 +64,7 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, addons: &[String]) -> R
     );
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
-        let policy = HeaderValue::from_str(&csp(addons))
-            .or_else(|_| HeaderValue::from_str(&csp(&[])))
-            .expect("the policy is ASCII");
-        headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+        headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP));
     }
     resp
 }

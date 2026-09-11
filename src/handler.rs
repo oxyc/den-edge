@@ -126,6 +126,10 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     if !face.serves(&path) {
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
+    let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
+    if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
+        return crate::relay::relay(state, req, target).await;
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -158,7 +162,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         p => match &state.web_dir {
             Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
-                crate::web::serve(dir, p, &state.access_origins).await
+                crate::web::serve(dir, p).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
@@ -507,14 +511,78 @@ pub mod tests {
         );
         let on_api = h.send("GET", "/web-config", None, &[("host", "d-api.oxy.fi")]).await;
         assert_eq!(on_api.status(), StatusCode::NOT_FOUND);
-        // The app may call them, and nothing that would widen its policy got in.
-        let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
-        let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
-        assert!(
-            csp.contains("connect-src 'self' https://api.themoviedb.org https://d-scout.oxy.fi https://d-atlas.oxy.fi;"),
-            "{csp}"
+    }
+
+    /// A fake addon on a local port, answering with what it was sent — so a test sees what the relay passed on.
+    async fn addon() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|req: Request| async move {
+            let (parts, body) = req.into_parts();
+            let body = axum::body::to_bytes(body, 1024).await.unwrap();
+            let seen = json!({
+                "method": parts.method.as_str(),
+                "uri": parts.uri.to_string(),
+                "cookie": parts.headers.contains_key(header::COOKIE),
+                "access": parts.headers.contains_key("cf-access-client-id"),
+                "body": String::from_utf8_lossy(&body),
+            });
+            let mut resp = Response::new(Body::from(seen.to_string()));
+            resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            resp.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("tracking=1"));
+            resp
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_web_app_asks_the_addons_through_its_own_name() {
+        let mut h = split_harness();
+        let scout = addon().await;
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/scout={scout}"));
+        let resp = h
+            .send(
+                "POST",
+                "/scout/sealed-cfg/availability?x=1",
+                Some(r#"{"ids":["tt1"]}"#.into()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("cookie", "CF_Authorization=session"),
+                    ("cf-access-client-id", "token"),
+                ],
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key(header::SET_COOKIE), "the addon's cookie stays behind");
+        assert_eq!(
+            body_json(resp).await,
+            json!({
+                "method": "POST",
+                "uri": "/sealed-cfg/availability?x=1",
+                "cookie": false,
+                "access": false,
+                "body": r#"{"ids":["tt1"]}"#,
+            }),
+            "the path and body go along; the browser's session and Cloudflare's headers don't"
         );
-        assert!(!csp.contains("img-src *"), "{csp}");
+        // Never on the device API's name, which bypasses Access; and only what an addon's JSON takes.
+        let on_api = h.send("GET", "/scout/cfg/manifest.json", None, &[("host", "d-api.oxy.fi")]).await;
+        assert_eq!(on_api.status(), StatusCode::NOT_FOUND);
+        let put = h.send("PUT", "/scout/cfg/manifest.json", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(put.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // A prefix must be a whole path segment.
+        let beside = h.send("GET", "/scoutx/library", None, &[("host", "d.oxy.fi")]).await;
+        assert!(body_text(beside).await.contains("<title>Den</title>"), "not relayed: the app's shell");
+    }
+
+    #[test]
+    fn relays_are_a_path_segment_and_a_plain_origin() {
+        let relays = crate::parse_relays(
+            "/scout=http://192.168.86.193:8080/, /bad path=http://x, /atlas=ftp://x, atlas=http://y",
+        );
+        assert_eq!(relays, [("/scout".to_owned(), "http://192.168.86.193:8080".to_owned())]);
     }
 
     #[tokio::test]
