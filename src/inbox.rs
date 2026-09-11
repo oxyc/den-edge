@@ -114,7 +114,8 @@ fn validate(raw: Option<&Value>) -> Option<Value> {
             let optional: &[(&str, Check)] = if kind == "watchlist" {
                 &[("posterPath", Value::is_string), ("year", Value::is_number)]
             } else {
-                &[("season", Value::is_number), ("episode", Value::is_number)]
+                // `sentAt` (Unix ms): the TV ignores a play that waited in the queue (issue #8, N4).
+                &[("season", Value::is_number), ("episode", Value::is_number), ("sentAt", Value::is_number)]
             };
             for (field, ok) in optional {
                 if let Some(v) = m.get(*field).filter(|v| ok(v)) {
@@ -211,7 +212,8 @@ mod tests {
     #[tokio::test]
     async fn every_kind_of_message_is_checked() {
         let h = Harness::new();
-        let play = json!({ "type": "play", "tmdbId": 1396, "mediaType": "tv", "title": "Breaking Bad", "season": 2, "episode": 4 });
+        let play = json!({ "type": "play", "tmdbId": 1396, "mediaType": "tv", "title": "Breaking Bad", "season": 2,
+                           "episode": 4, "sentAt": 1_789_000_000_000_u64 });
         assert_eq!(append(&h, play.clone()).await, StatusCode::OK);
         assert_eq!(append(&h, json!({ "type": "tmdbKey", "key": "abc123" })).await, StatusCode::OK);
         assert_eq!(

@@ -314,7 +314,9 @@
       target = list[idx];
     }
     btn.disabled = true;
-    pushTo(target.inboxKey, { type: 'play', tmdbId: item.tmdbId, mediaType: item.mediaType, title: item.title })
+    // sentAt: the TV ignores a play that waited in its queue, so a TV that was off doesn't start it later.
+    pushTo(target.inboxKey, { type: 'play', tmdbId: item.tmdbId, mediaType: item.mediaType, title: item.title,
+                              sentAt: Date.now() })
       .then(function (ok) {
         toast(ok ? 'Playing “' + item.title + '” on ' + target.name + ' — make sure Den is open'
                  : 'Could not send — try again.');
