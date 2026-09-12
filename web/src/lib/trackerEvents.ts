@@ -1,4 +1,5 @@
 import { compareStamps, rowName, type Row, type SettingsRow, type Stamp } from './wire';
+import { syncPolicy } from './syncCore';
 
 /** Explicit user actions each occupy an independent encrypted row, so permanent history cannot overflow a title.
  * Tracker imports never call this function. An event records intent, not proof of tracker delivery.
@@ -14,17 +15,8 @@ export interface TrackerEvent {
 
 export function recordTrackerEvent(before: Row, after: Row, at: Stamp, id: string = crypto.randomUUID()): SettingsRow | null {
   if (rowName(before) !== rowName(after) || after.kind === 'set') return null;
-  const fields = after.kind === 'rec' ? ['status', 'reaction', 'deleted'] : ['progress'];
-  const changes: Record<string, { before: unknown; after: unknown }> = {};
-  for (const field of fields) {
-    const prior = before[field];
-    const next = after[field] as { at?: Stamp } | undefined;
-    if (next?.at && compareStamps(next.at, at) === 0 && JSON.stringify(prior) !== JSON.stringify(next)) {
-      changes[field] = { before: prior, after: next };
-    }
-  }
-  if (Object.keys(changes).length === 0) return null;
-  const event: TrackerEvent = { schema: 1, id, at, before, after, changes };
+  const event = syncPolicy<TrackerEvent | null>({ op: 'capture', before, after, at, id });
+  if (!event) return null;
   return { kind: 'set', schema: 2, name: `tracker-event:${id}`, values: { event: { value: { string: JSON.stringify(event) }, at } } };
 }
 

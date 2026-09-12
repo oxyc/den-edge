@@ -3,6 +3,7 @@
 // checks it against den-spec's vectors, which the TV checks itself against too.
 
 import { hex, hkdf } from './crypto';
+import { syncPolicy } from './syncCore';
 
 const utf8 = new TextEncoder();
 
@@ -23,8 +24,7 @@ export class Clock {
   ) {}
 
   issue(now = Date.now()): Stamp {
-    const t = Math.max(now, this.last[0]);
-    this.last = [t, t === this.last[0] ? this.last[1] + 1 : 0, this.device];
+    this.last = syncPolicy<Stamp>({ op: 'issue', last: this.last, now, device: this.device });
     return this.last;
   }
 
@@ -190,20 +190,6 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
   return row;
 }
 
-function later<T extends { at: Stamp }>(a: T, b: T): T {
-  return compareStamps(b.at, a.at) > 0 ? b : a;
-}
-
-/** A later viewing outright, then the furthest progress, the later stamp, the later position. */
-function furthest(a: Progress, b: Progress): Progress {
-  const order =
-    a.viewing - b.viewing ||
-    a.value - b.value ||
-    compareStamps(a.at, b.at) ||
-    (a.seconds ?? -1) - (b.seconds ?? -1);
-  return order >= 0 ? a : b;
-}
-
 /** The newest stamp in a row. */
 export function newest(row: Row): Stamp {
   const stamps =
@@ -215,45 +201,17 @@ export function newest(row: Row): Stamp {
   return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP);
 }
 
-/** The version whose fields this client doesn't know survive: the newer one's, then the other's. */
-function unknownFields<T extends Row>(a: T, b: T): T {
-  return compareStamps(newest(b), newest(a)) > 0 ? { ...a, ...b } : { ...b, ...a };
-}
-
 export function mergeTitle(a: TitleRow, b: TitleRow): TitleRow {
-  const reset =
-    a.episodesReset && b.episodesReset
-      ? compareStamps(b.episodesReset, a.episodesReset) > 0
-        ? b.episodesReset
-        : a.episodesReset
-      : (a.episodesReset ?? b.episodesReset);
-  const watched = [a.watchedAt, b.watchedAt].filter((t): t is number => t !== null);
-  return {
-    ...unknownFields(a, b),
-    schema: Math.max(a.schema, b.schema),
-    status: later(a.status, b.status),
-    resume: furthest(a.resume, b.resume),
-    reaction: later(a.reaction, b.reaction),
-    deleted: later(a.deleted, b.deleted),
-    dismissed: later(a.dismissed, b.dismissed),
-    episodesReset: reset,
-    addedAt: Math.min(a.addedAt, b.addedAt),
-    watchedAt: watched.length ? Math.min(...watched) : null,
-  };
+  return syncPolicy<TitleRow>({ op: 'merge', a, b });
 }
 
 export function mergeEpisode(a: EpisodeRow, b: EpisodeRow): EpisodeRow {
-  return { ...unknownFields(a, b), schema: Math.max(a.schema, b.schema), progress: furthest(a.progress, b.progress) };
+  return syncPolicy<EpisodeRow>({ op: 'merge', a, b });
 }
 
 /** Per setting, the later stamp; a setting only one version has is kept. */
 export function mergeSettings(a: SettingsRow, b: SettingsRow): SettingsRow {
-  const values = { ...a.values };
-  for (const [key, theirs] of Object.entries(b.values)) {
-    const mine = values[key];
-    if (!mine || compareStamps(theirs.at, mine.at) > 0) values[key] = theirs;
-  }
-  return { ...unknownFields(a, b), schema: Math.max(a.schema, b.schema), values };
+  return syncPolicy<SettingsRow>({ op: 'merge', a, b });
 }
 
 export function fromHex(text: string): Uint8Array<ArrayBuffer> {

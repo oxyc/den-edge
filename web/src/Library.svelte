@@ -208,57 +208,72 @@
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
     if (!log) return;
-    remember(title);
-    const before = log.title(title) ?? blankTitle(title, Date.now());
-    clock.see(log.newestStamp());
-    const at = clock.issue();
-    const event = recordTrackerEvent(before, change(before, at), at);
-    return event ? await save(event, true) : true;
+    try {
+      remember(title);
+      const before = log.title(title) ?? blankTitle(title, Date.now());
+      clock.see(log.newestStamp());
+      const at = clock.issue();
+      const event = recordTrackerEvent(before, change(before, at), at);
+      return event ? await save(event, true) : true;
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
+    }
   }
 
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
     if (!log) return;
-    remember(title);
-    const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-    clock.see(log.newestStamp());
-    const at = clock.issue();
-    const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
-    return event ? await save(event, true) : true;
+    try {
+      remember(title);
+      const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+      clock.see(log.newestStamp());
+      const at = clock.issue();
+      const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
+      return event ? await save(event, true) : true;
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
+    }
   }
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
     if (!log) return;
-    if (title.type === 'tv') {
-      const shape = shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
-      if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
-      const journals: SettingsRow[] = [];
-      clock.see(log.newestStamp());
-      for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
-        if (season <= 0) continue;
-        for (let episode = 1; episode <= count; episode++) {
-          if (!isAired({ season, episode }, shape.lastAired)) continue;
-          const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-          const at = clock.issue();
-          const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
-          if (event) journals.push(event);
+    try {
+      if (title.type === 'tv') {
+        const shape = shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
+        if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
+        const journals: SettingsRow[] = [];
+        clock.see(log.newestStamp());
+        for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
+          if (season <= 0) continue;
+          for (let episode = 1; episode <= count; episode++) {
+            if (!isAired({ season, episode }, shape.lastAired)) continue;
+            const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+            const at = clock.issue();
+            const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
+            if (event) journals.push(event);
+          }
         }
+        const before = log.title(title) ?? blankTitle(title, Date.now());
+        const at = clock.issue();
+        const event = recordTrackerEvent(before, (seen ? markWatched : unwatch)(before, at), at);
+        if (event) journals.push(event);
+        busy = true;
+        failure = null;
+        try {
+          if (!await log.writeActions(journals)) failure = SAVE_FAILED;
+          else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+          version++;
+        } catch { failure = SAVE_FAILED; }
+        finally { busy = false; }
+        return;
       }
-      const before = log.title(title) ?? blankTitle(title, Date.now());
-      const at = clock.issue();
-      const event = recordTrackerEvent(before, (seen ? markWatched : unwatch)(before, at), at);
-      if (event) journals.push(event);
-      busy = true;
-      failure = null;
-      try {
-        if (!await log.writeActions(journals)) failure = SAVE_FAILED;
-        else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-        version++;
-      } catch { failure = SAVE_FAILED; }
-      finally { busy = false; }
-      return;
+      await act(title, seen ? markWatched : unwatch);
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
     }
-    await act(title, seen ? markWatched : unwatch);
   }
 
   /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
@@ -317,13 +332,18 @@
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
     if (!log) return;
-    const { title, season, episode } = target;
-    remember(title);
-    if (season !== undefined && episode !== undefined) {
-      const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-      await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
-    } else {
-      await save(updateProgress(log.title(title) ?? blankTitle(title, Date.now()), fraction, seconds, clock.issue()));
+    try {
+      const { title, season, episode } = target;
+      remember(title);
+      if (season !== undefined && episode !== undefined) {
+        const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+        await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
+      } else {
+        await save(updateProgress(log.title(title) ?? blankTitle(title, Date.now()), fraction, seconds, clock.issue()));
+      }
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
     }
   }
 

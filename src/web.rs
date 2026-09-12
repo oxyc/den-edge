@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 fn csp(remux: &[String]) -> String {
     let remux: String = remux.iter().map(|o| format!(" {o}")).collect();
     format!(
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:{remux}; \
          connect-src 'self' https://api.themoviedb.org{remux}; frame-src https://www.youtube-nocookie.com; \
          frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -55,6 +55,7 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
         "webmanifest" => "application/manifest+json",
+        "wasm" => "application/wasm",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "ico" => "image/x-icon",
@@ -91,6 +92,13 @@ mod tests {
     use crate::handler::tests::{body_text, Harness};
     use axum::http::{header, StatusCode};
     use std::sync::Arc;
+
+    #[test]
+    fn policy_allows_local_wasm_without_allowing_javascript_eval() {
+        let policy = super::csp(&[]);
+        assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
+        assert!(!policy.contains("'unsafe-eval'"));
+    }
 
     fn with_app() -> Harness {
         let mut h = Harness::new();
