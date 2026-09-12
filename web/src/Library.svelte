@@ -268,6 +268,9 @@
     new Set(library?.records.filter((r) => !r.deleted && r.status === 'watched').map((r) => titleKey(r.title)) ?? []),
   );
   const browseShown = (title: Title) => shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
+  /** The billboard's own rule: everything the rows hide, except the missing poster it doesn't draw. */
+  const featuredShown = (title: Title) =>
+    !isHidden(title, prefs, { requirePoster: false }) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -342,17 +345,19 @@
    */
   let featured = $state<Title[]>([]);
   $effect(() => {
-    const lead = route.page === 'library' ? rows[0] : undefined;
+    const lead = rows[0];
     // Read once: this re-runs when atlas resolves, and the billboard is rebuilt from whichever source answered.
     const here = atlas;
+    const type = facet;
     featured = [];
     if (!lead) return;
-    // atlas's "Trending Everywhere" leads it, as it leads the TV's Movies and Series billboards — the plugins
-    // are what Den knows about what is being watched. Where atlas is out of reach, the leading row stands in
-    // (two TMDB pages: the billboard carries forty slides and a page is twenty), as it does on the TV's Home.
+    // Each tab's billboard takes what the TV's takes. Home: its own leading row — the "Because you watched" row
+    // when there is one, else Trending — which is exactly what `HomeView.heroRow` picks. Movies and Series:
+    // atlas's "Trending Everywhere", the catalog their billboards lead with there, falling back to the tab's
+    // leading row when atlas is out of reach. Two pages, since a page is twenty and the billboard carries forty.
     const rowPages = () =>
       Promise.all([lead.load(1), lead.load(2).catch(() => [])]).then(([first, second]) => [...first, ...second]);
-    void (here ? trendingEverywhere(here) : Promise.resolve([]))
+    void (type && here ? trendingEverywhere(here, fetch, type) : Promise.resolve([] as Title[]))
       .then((list) => (list.length ? list : rowPages()))
       .then((list) => {
         if (rows[0] === lead) featured = list;
@@ -400,8 +405,10 @@
   {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
   <!-- The billboard leads the page, as it does on the TV: it reaches the top of the window and runs up behind
        the bar, so search follows it rather than pushing it down the screen. -->
-  {#if !hits && !facet && tmdbKey && featured.length}
-    <Billboard titles={featured.filter(browseShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
+  <!-- Kept in the page while the library is still opening, so its space is held from the first paint and the
+       rows below don't jump down when the titles arrive. -->
+  {#if !hits && (tmdbKey || log === undefined)}
+    <Billboard titles={featured.filter(featuredShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
   {/if}
   {#if sources && !facet}
     <input

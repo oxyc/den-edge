@@ -50,6 +50,14 @@ describe('prefs', () => {
     expect(isHidden(film({}), prefs)).toBe(false);
     expect(isHidden(film({ adult: true }), prefs)).toBe(true);
     expect(isHidden(film({ posterPath: undefined }), prefs)).toBe(true);
+    expect(
+      isHidden(film({ posterPath: undefined }), prefs, { requirePoster: false }),
+      'a surface drawing a backdrop keeps a title that has no poster',
+    ).toBe(false);
+    expect(
+      isHidden(film({ posterPath: undefined, genreIds: [27] }), prefs, { requirePoster: false }),
+      'every other rule still applies to it',
+    ).toBe(true);
     expect(isHidden(film({ genreIds: [27, 53] }), prefs)).toBe(true);
     expect(isHidden(film({ originalLanguage: 'hi' }), prefs)).toBe(true);
     expect(isHidden(film({ genreIds: [16], originalLanguage: 'ja' }), prefs)).toBe(true);

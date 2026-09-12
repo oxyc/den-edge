@@ -92,11 +92,14 @@ function lanHost(host: string): boolean {
 /**
  * Whether the TV would hide this title. Adult titles and titles with no poster never show; the year floor applies
  * unless `ignoringYearFloor` — explicit search sets it, since a title typed by name must be findable — and then the
- * hidden genres and languages, and anime when that's hidden.
+ * hidden genres and languages, and anime when that's hidden. A surface that draws something other than a poster
+ * passes `requirePoster: false`.
  */
-export function isHidden(title: Title, prefs: Prefs, { ignoringYearFloor = false } = {}): boolean {
+export function isHidden(title: Title, prefs: Prefs, { ignoringYearFloor = false, requirePoster = true } = {}): boolean {
   if (title.adult) return true;
-  if (!title.posterPath) return true;
+  // A card with no poster is a blank card. The billboard draws a backdrop instead, and an addon catalog names
+  // titles by id with the artwork left to TMDB — asking for a poster there hides every one of them.
+  if (requirePoster && !title.posterPath) return true;
   if (!ignoringYearFloor && prefs.minReleaseYear !== undefined && title.year !== undefined && title.year < prefs.minReleaseYear) {
     return true;
   }

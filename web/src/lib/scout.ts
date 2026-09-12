@@ -88,8 +88,13 @@ function catalogTitles(body: unknown, type: MediaType): Title[] {
  * Both types, interleaved so neither buries the other. Empty when atlas is out of reach, which leaves the caller
  * to fall back rather than showing nothing.
  */
-export async function trendingEverywhere(base: string, fetchImpl: typeof fetch = fetch): Promise<Title[]> {
+export async function trendingEverywhere(
+  base: string,
+  fetchImpl: typeof fetch = fetch,
+  only?: MediaType,
+): Promise<Title[]> {
   const load = async (type: 'movie' | 'series'): Promise<Title[]> => {
+    if (only && only !== (type === 'series' ? 'tv' : 'movie')) return [];
     try {
       const res = await fetchImpl(`${base}/catalog/${type}/jw-trending.json`);
       return res.ok ? catalogTitles(await res.json(), type === 'series' ? 'tv' : 'movie') : [];

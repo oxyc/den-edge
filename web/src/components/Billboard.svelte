@@ -3,6 +3,8 @@
      arrow keys, or by its dots — and any of those stops the rotation, from then on it is yours to drive. A still
      picture, not a trailer: motion here would cost a phone its data and its battery for decoration. -->
 <script lang="ts">
+  import { cubicInOut } from 'svelte/easing';
+  import { fade, fly } from 'svelte/transition';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
@@ -80,15 +82,23 @@
     [current?.year ? String(current.year) : undefined, ...(detail?.genres ?? []).slice(0, 2)].filter(Boolean).join(' · '),
   );
 
+  /** Which way a slide comes in from: the way you paged, as the TV pushes its text from the paging edge. */
+  let direction = $state(1);
+  const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  /** A slide's travel, in ms: nothing moves for a viewer who asked for less movement. */
+  const slideMs = () => (still() ? 0 : 420);
+
   /** Page by `delta`, wrapping at either end: the set is a loop, as the TV's is. */
   function page(delta: number) {
     if (shown.length < 2) return;
     paging = true;
+    direction = delta > 0 ? 1 : -1;
     index = (index + delta + shown.length) % shown.length;
   }
 
   function show(n: number) {
     paging = true;
+    direction = n >= index ? 1 : -1;
     index = n;
   }
 
@@ -139,62 +149,84 @@
   });
 </script>
 
-{#if current}
-  <section
-    class="billboard"
-    aria-roledescription="carousel"
-    aria-label="Featured"
-    onpointerenter={() => (held = true)}
-    onpointerleave={() => (held = false)}
-    onfocusin={() => (held = true)}
-    onfocusout={() => (held = false)}
-  >
-    <!-- The surface a swipe is read from; its listeners are bound in the script, beside the gesture itself. -->
-    <div class="stage" bind:this={stage}>
-      {#if detail?.backdropPath}
-        <img class="backdrop" src={backdropURL(detail.backdropPath)} alt="" draggable="false" />
-      {/if}
-      <div class="scrim"></div>
-      <div class="fade"></div>
-      <div class="told">
-        <div class="text">
-          <h2><a href={titleHref(current)}>{current.title}</a></h2>
-          {#if facts}<p class="facts">{facts}</p>{/if}
-          {#if detail?.overview}<p class="overview">{detail.overview}</p>{/if}
-          <div class="actions">
-            {#if onplay}
-              {@const title = current}
-              <button class="primary" onclick={() => onplay(title)}>
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
-                </svg>
-                Play
-              </button>
-            {/if}
-            <a class="more" href={titleHref(current)}>More</a>
-          </div>
-          {#if shown.length > 1}
-            <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
-              {#each window9.at as n (n)}
-                {@const edge =
-                  (n === window9.start && window9.start > 0) || (n === window9.end - 1 && window9.end < window9.count)}
-                <button
-                  class="dot"
-                  class:on={n === index}
-                  class:edge
-                  aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
-                  aria-current={n === index ? 'true' : undefined}
-                  onclick={() => show(n)}
-                  onkeydown={keyed}
-                ></button>
-              {/each}
+<!-- Drawn before there is anything to draw: the billboard's height is the same whether or not its titles have
+     arrived, so the page doesn't jump when they do. -->
+<section
+  class="billboard"
+  aria-roledescription="carousel"
+  aria-label="Featured"
+  onpointerenter={() => (held = true)}
+  onpointerleave={() => (held = false)}
+  onfocusin={() => (held = true)}
+  onfocusout={() => (held = false)}
+>
+  <!-- The surface a swipe is read from; its listeners are bound in the script, beside the gesture itself. -->
+  <div class="stage" bind:this={stage}>
+    <!-- Both pictures are in the same box, so one dissolves into the next instead of leaving a black frame. -->
+    {#if detail?.backdropPath}
+      {#key detail.backdropPath}
+        <img
+          class="backdrop"
+          src={backdropURL(detail.backdropPath)}
+          alt=""
+          draggable="false"
+          in:fade={{ duration: slideMs() }}
+          out:fade={{ duration: slideMs() }}
+        />
+      {/key}
+    {/if}
+    <div class="scrim"></div>
+    <div class="fade"></div>
+    <div class="told">
+      <!-- The words are pushed in from the edge you paged towards, as the TV's hero pushes them; the dots below
+           stay where they are, since they are the indicator and not part of the slide. -->
+      <div class="stack">
+        {#if current}
+          {#key `${current.type}:${current.id}`}
+            {@const title = current}
+            <div
+              class="text"
+              in:fly={{ x: 48 * direction, duration: slideMs(), easing: cubicInOut }}
+              out:fly={{ x: -48 * direction, duration: slideMs(), easing: cubicInOut }}
+            >
+              <h2><a href={titleHref(title)}>{title.title}</a></h2>
+              {#if facts}<p class="facts">{facts}</p>{/if}
+              {#if detail?.overview}<p class="overview">{detail.overview}</p>{/if}
+              <div class="actions">
+                {#if onplay}
+                  <button class="primary" onclick={() => onplay(title)}>
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
+                    </svg>
+                    Play
+                  </button>
+                {/if}
+                <a class="more" href={titleHref(title)}>More</a>
+              </div>
             </div>
-          {/if}
-        </div>
+          {/key}
+        {/if}
       </div>
+      {#if shown.length > 1}
+        <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
+          {#each window9.at as n (n)}
+            {@const edge =
+              (n === window9.start && window9.start > 0) || (n === window9.end - 1 && window9.end < window9.count)}
+            <button
+              class="dot"
+              class:on={n === index}
+              class:edge
+              aria-label={shown[n]?.title ?? `Slide ${n + 1}`}
+              aria-current={n === index ? 'true' : undefined}
+              onclick={() => show(n)}
+              onkeydown={keyed}
+            ></button>
+          {/each}
+        </div>
+      {/if}
     </div>
-  </section>
-{/if}
+  </div>
+</section>
 
 <style>
   /* Full-bleed out of the page's column, and up behind the floating bar, as the TV's hero runs up behind the
@@ -272,10 +304,20 @@
     padding: var(--bar-space) var(--gutter) 32px;
   }
 
+  /* One cell, so the slide leaving and the slide arriving sit on top of each other rather than stacking up and
+     pushing the dots down as they pass. */
+  .stack {
+    display: grid;
+    min-height: 190px;
+    align-items: end;
+  }
+
   .text {
     display: grid;
+    grid-area: 1 / 1;
     gap: 8px;
     max-width: 720px;
+    align-content: end;
   }
 
   h2 {
@@ -369,22 +411,24 @@
 
   .dot::before {
     display: block;
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 999px;
     background: rgb(255 255 255 / 0.35);
     content: '';
+    transition: width 0.2s ease, height 0.2s ease, background-color 0.2s ease;
   }
 
-  /* Shrunk to say the set carries on past the window. */
+  /* The bullet at either end of the window is drawn smaller where the set carries on past it — the pager says
+     "there is more this way" without growing a fortieth bullet. */
   .dot.edge::before {
-    width: 5px;
-    height: 5px;
+    width: 4px;
+    height: 4px;
   }
 
   .dot.on::before {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     background: var(--fg);
   }
 
