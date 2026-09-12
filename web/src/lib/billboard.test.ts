@@ -75,7 +75,7 @@ describe('taste', () => {
     { title: film(4, { genreIds: [HORROR], originalLanguage: 'en' }), weight: 0.6 },
   ]);
 
-  it('scores a title by its best genre and its language, not by an average', () => {
+  it('marks a title up for the genres this library watches and down for the ones it does not', () => {
     const nordicCrime = affinity(film(9, { genreIds: [CRIME, 9648], originalLanguage: 'sv' }), watched);
     const englishHorror = affinity(film(10, { genreIds: [HORROR], originalLanguage: 'en' }), watched);
     expect(nordicCrime).toBeGreaterThan(englishHorror);
@@ -127,6 +127,86 @@ describe('taste', () => {
     const loudHorror = film(21, { releaseDate: '2026-09-05', genreIds: [HORROR], originalLanguage: 'en', popularity: 400 });
     const picked = pickBillboard([{ title: loudHorror }, { title: onTaste }], { now: NOW, taste: watched });
     expect(picked.map((t) => t.id)).toEqual([20, 21]);
+  });
+});
+
+describe('taste beyond genre', () => {
+  const DRAMA = 18;
+  const MYSTERY = 9648;
+  const CRIME = 80;
+  const ACTION = 28;
+  const HORROR = 27;
+
+  it('tells a real match from a title that merely carries the library’s commonest genre', () => {
+    // The failure this replaces: affinity read a title's best genre against the profile's strongest, so in a
+    // library where half of everything is tagged Drama every drama on earth scored a perfect match and taste
+    // decided nothing. Measured against what this library's own titles score, they separate.
+    const spread = tasteOf([
+      { title: film(1, { genreIds: [DRAMA, MYSTERY] }) },
+      { title: film(2, { genreIds: [DRAMA, CRIME] }) },
+      { title: film(3, { genreIds: [DRAMA, MYSTERY, CRIME] }) },
+      { title: film(4, { genreIds: [DRAMA] }) },
+    ]);
+    const close = affinity(film(10, { genreIds: [DRAMA, MYSTERY, CRIME] }), spread);
+    const dramaAlone = affinity(film(11, { genreIds: [DRAMA] }), spread);
+    expect(close).toBeGreaterThan(dramaAlone);
+    expect(dramaAlone).toBeLessThan(0.8);
+  });
+
+  it('follows the people behind what has been watched, across genres', () => {
+    const DIRECTOR = 5000;
+    const auteur = tasteOf([
+      { title: film(1, { genreIds: [DRAMA], people: [DIRECTOR, 1, 2] }) },
+      { title: film(2, { genreIds: [DRAMA], people: [DIRECTOR, 3, 4] }) },
+    ]);
+    const theirs = affinity(film(10, { genreIds: [ACTION], people: [DIRECTOR, 9] }), auteur);
+    const stranger = affinity(film(11, { genreIds: [ACTION], people: [8, 9] }), auteur);
+    expect(theirs).toBeGreaterThan(stranger);
+    // Enough on its own to survive the stranger cut: a film by someone they follow is not a stranger.
+    expect(theirs).toBeGreaterThan(0.15);
+  });
+
+  it('reads where a title was made, so a co-production in English still reads as one of theirs', () => {
+    const nordic = tasteOf([
+      { title: film(1, { genreIds: [CRIME], countries: ['SE'], originalLanguage: 'sv' }) },
+      { title: film(2, { genreIds: [CRIME], countries: ['DK'], originalLanguage: 'da' }) },
+    ]);
+    const coproduction = affinity(film(10, { genreIds: [CRIME], countries: ['SE', 'GB'], originalLanguage: 'en' }), nordic);
+    const american = affinity(film(11, { genreIds: [CRIME], countries: ['US'], originalLanguage: 'en' }), nordic);
+    expect(coproduction).toBeGreaterThan(american);
+  });
+
+  it('prefers the decade this library actually watches', () => {
+    const modern = tasteOf([
+      { title: film(1, { genreIds: [DRAMA], releaseDate: '2024-01-01' }) },
+      { title: film(2, { genreIds: [DRAMA], releaseDate: '2022-06-01' }) },
+    ]);
+    const now = affinity(film(10, { genreIds: [DRAMA], releaseDate: '2026-03-01' }), modern);
+    const old = affinity(film(11, { genreIds: [DRAMA], releaseDate: '1981-03-01' }), modern);
+    expect(now).toBeGreaterThan(old);
+  });
+
+  it('carries the next of a franchise already started, whatever genre it turned into', () => {
+    const started = tasteOf([{ title: film(1, { genreIds: [ACTION], collectionId: 77 }) }]);
+    const sequel = affinity(film(10, { genreIds: [DRAMA], collectionId: 77 }), started);
+    const unrelated = affinity(film(11, { genreIds: [DRAMA] }), started);
+    expect(unrelated).toBe(0);
+    expect(sequel).toBeCloseTo(0.5, 6);
+  });
+
+  it('marks down what was disliked, while a genre they otherwise watch survives one bad film', () => {
+    const turnedDown = tasteOf([
+      { title: film(1, { genreIds: [DRAMA, HORROR] }) },
+      { title: film(2, { genreIds: [DRAMA] }) },
+      { title: film(3, { genreIds: [DRAMA] }) },
+      { title: film(4, { genreIds: [DRAMA, ACTION] }), weight: -1.5 },
+    ]);
+    const drama = affinity(film(10, { genreIds: [DRAMA] }), turnedDown);
+    const alsoAction = affinity(film(12, { genreIds: [DRAMA, ACTION] }), turnedDown);
+    const onlyAction = affinity(film(11, { genreIds: [ACTION] }), turnedDown);
+    expect(drama).toBeGreaterThan(0.5);
+    expect(alsoAction).toBeLessThan(drama);
+    expect(onlyAction).toBe(0);
   });
 });
 

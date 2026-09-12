@@ -23,7 +23,7 @@
     updateProgress,
     WATCHED,
   } from './lib/actions';
-  import { pickBillboard, tasteOf, type Candidate } from './lib/billboard';
+  import { pickBillboard, tasteOf, worth, type Candidate } from './lib/billboard';
   import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
@@ -279,15 +279,29 @@
     !isHidden(title, prefs, { requirePoster: false }) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
    * What this library says it likes, for the billboard's taste term. Watched and part-watched titles are a
-   * verdict and count full; a watchlisted one is an intention and counts for less. Titles TMDB hasn't named yet
+   * verdict and count full; a watchlisted one is an intention and counts for less; a reaction is the one thing
+   * said outright, so it counts for more than either, and a dislike counts against. Titles TMDB hasn't named yet
    * carry no genres, so they simply don't vote.
    */
   const taste = $derived.by(() => {
-    const weightOf = (status: string) => (status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0);
+    void version;
+    // Reactions live on the log's rows; the records carry only status. A title is read by both.
+    const reactions = new Map(
+      (log?.rows() ?? [])
+        .filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value)
+        .map((r) => [titleKey(r.title), r.reaction.value]),
+    );
+    const weightOf = (status: string, reaction: string | null | undefined) => {
+      // Turning something down is the whole verdict; that they sat through it doesn't soften it.
+      if (reaction === 'dislike') return -1.5;
+      const seen = status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
+      return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
+    };
     return tasteOf(
       (library?.records ?? []).flatMap((r) => {
-        const weight = r.deleted || r.title.title === '' ? 0 : weightOf(r.status);
-        return weight > 0 ? [{ title: r.title, weight }] : [];
+        if (r.deleted || r.title.title === '') return [];
+        const weight = weightOf(r.status, reactions.get(titleKey(r.title)));
+        return weight === 0 ? [] : [{ title: r.title, weight }];
       }),
     );
   });
@@ -418,8 +432,15 @@
           ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
         ];
         const named = await nameCandidates(pool);
+        // Only titles we actually know something about. atlas hands over hundreds named by id alone, and an
+        // unjudged title cannot be matched against this library's taste or dropped for missing it — so it
+        // competes on attention and freshness only, and wins slides against titles that were judged. Since the
+        // ones asked of TMDB are the best of the pool to begin with, dropping the rest costs nothing. The guard
+        // is for the day TMDB can't be reached at all: better an unjudged billboard than an empty one.
+        const judged = named.filter((c) => c.title.genreIds?.length);
+        const pickable = judged.length >= 20 ? judged : named;
         // Never a title this library already holds: the billboard is for what hasn't been found yet.
-        const picked = pickBillboard(named, {
+        const picked = pickBillboard(pickable, {
           taste,
           keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
         });
@@ -437,12 +458,17 @@
    * it. The strongest few by their place in those lists are named properly first. Bounded, and `tmdbFetch`
    * caches, so a hundred arrivals don't become a hundred requests.
    */
-  async function nameCandidates(pool: Candidate[], most = 24): Promise<Candidate[]> {
+  async function nameCandidates(pool: Candidate[], most = 60): Promise<Candidate[]> {
     const key = tmdbKey;
-    const standing = (c: Candidate) => (c.arrival && c.arrival.of > 0 ? 1 - c.arrival.rank / c.arrival.of : 0);
+    // By what a title is worth before taste — not by which arrivals list it came from. Nine candidates in ten
+    // reach here knowing only their own id, and an unnamed one has no genres, so taste cannot weigh it at all:
+    // it rides on attention and lands high whatever the household likes. These are the ones that could
+    // plausibly make the billboard, so these are the ones worth a request.
+    const busiest = pool.reduce((most_, { title }) => Math.max(most_, title.popularity ?? 0), 0);
+    const now = new Date();
     const bare = pool
-      .filter((c) => c.arrival && !c.title.genreIds)
-      .sort((a, b) => standing(b) - standing(a))
+      .filter((c) => !c.title.genreIds)
+      .sort((a, b) => worth(b, now, busiest) - worth(a, now, busiest))
       .slice(0, most);
     if (!key || bare.length === 0) return pool;
     const queue = [...bare];

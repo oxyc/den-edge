@@ -51,44 +51,172 @@ const TASTE_FLOOR = 0.35;
 /** How much a second kind of attention adds once the first is counted. See `attention`. */
 const CORROBORATION = 0.3;
 
-/** What a library says its viewer likes: how much of it sits in each genre, and in each original language. */
+/**
+ * How the facets of a taste trade off. The genre decides; the rest separate titles the genre can't tell apart.
+ * Language is deliberately the smallest: in a library three-quarters in English it would otherwise hand a third
+ * of the decision to every Hollywood release for the least interesting fact about it. Only the facets a title
+ * can actually be judged on are counted (see `affinity`), which is why language is smaller still than it looks —
+ * on a title that arrived with no credits and no countries it would otherwise inflate to a sixth of the answer.
+ */
+const FACETS = { genres: 0.56, people: 0.22, countries: 0.1, languages: 0.06, decades: 0.06 };
+/** Weight of matching people at which the household counts as following them: one lead is a coincidence. */
+const PEOPLE_ENOUGH = 2;
+/** How far towards a full match a title carries for being the next of something already followed. */
+const FRANCHISE_LIFT = 0.5;
+/** Weight of dislike that halves a title's affinity. Below it a single bad film marks a title down, not out. */
+const DISLIKE_PATIENCE = 2;
+
+/**
+ * What a library says its viewer likes, facet by facet.
+ *
+ * Weights are signed: watching something adds, disliking it subtracts, so a genre the household otherwise
+ * watches survives one bad film in it while a genre only ever turned down goes negative.
+ */
 export interface Taste {
   genres: Map<number, number>;
   languages: Map<string, number>;
+  /** Where what they watch was made. It reads "Nordic" better than the language does: the region co-produces
+      constantly, in two or three languages and often in English. */
+  countries: Map<string, number>;
+  /** By TMDB person id — the director and the head of the billing. The one taste that crosses genres. */
+  people: Map<number, number>;
+  /** By decade. Whether this is a household that watches what just came out, or one that watches the eighties. */
+  decades: Map<number, number>;
+  /** By TMDB collection id: the franchises already being followed. */
+  franchises: Map<number, number>;
+  /**
+   * What a title from this library scores on each facet, averaged over the library itself.
+   *
+   * Facets are read as a share of the whole profile, and a share alone says nothing: in a library half of whose
+   * titles are tagged Drama, "Drama" is a third of the genre weight and "Drama, Mystery, Crime" barely more, so
+   * every drama on earth looked like a perfect match and taste stopped deciding anything at all. Measured
+   * against what this household's own titles score, the same numbers separate properly — and they calibrate
+   * themselves to a library of any size or spread.
+   */
+  typical: { genres: number; languages: number; countries: number; decades: number };
+}
+
+const genresOf = (title: Title) => title.genreIds ?? [];
+const languagesOf = (title: Title) => (title.originalLanguage ? [title.originalLanguage] : []);
+const countriesOf = (title: Title) => title.countries ?? [];
+const peopleOf = (title: Title) => title.people ?? [];
+const franchisesOf = (title: Title) => (title.collectionId === undefined ? [] : [title.collectionId]);
+
+/** The decade it belongs to, from the fullest date it has. */
+function decadesOf(title: Title): number[] {
+  const year = title.releaseDate ? Number.parseInt(title.releaseDate.slice(0, 4), 10) : title.year;
+  return year === undefined || !Number.isFinite(year) ? [] : [Math.floor(year / 10) * 10];
+}
+
+/**
+ * How much of a facet's liked weight these keys account for. Only the liked part: a key in the red counts as
+ * nothing here, and is answered for by `distaste`.
+ */
+function shareOf<K>(map: Map<K, number>, keys: K[]): number {
+  let liked = 0;
+  for (const weight of map.values()) if (weight > 0) liked += weight;
+  if (liked <= 0) return 0;
+  let mine = 0;
+  for (const key of new Set(keys)) mine += Math.max(0, map.get(key) ?? 0);
+  return Math.min(1, mine / liked);
 }
 
 /**
  * The shape of a library. Weights let a watched title count for more than a watchlisted one — the first is a
- * verdict, the second only an intention.
+ * verdict, the second only an intention — and a negative weight is a title turned down.
  */
 export function tasteOf(entries: { title: Title; weight?: number }[]): Taste {
-  const genres = new Map<number, number>();
-  const languages = new Map<string, number>();
+  const taste: Taste = {
+    genres: new Map(),
+    languages: new Map(),
+    countries: new Map(),
+    people: new Map(),
+    decades: new Map(),
+    franchises: new Map(),
+    typical: { genres: 0, languages: 0, countries: 0, decades: 0 },
+  };
+  const add = <K>(map: Map<K, number>, keys: K[], weight: number) => {
+    for (const key of new Set(keys)) map.set(key, (map.get(key) ?? 0) + weight);
+  };
   for (const { title, weight = 1 } of entries) {
-    for (const id of title.genreIds ?? []) genres.set(id, (genres.get(id) ?? 0) + weight);
-    const language = title.originalLanguage;
-    if (language) languages.set(language, (languages.get(language) ?? 0) + weight);
+    if (weight === 0) continue;
+    add(taste.genres, genresOf(title), weight);
+    add(taste.languages, languagesOf(title), weight);
+    add(taste.countries, countriesOf(title), weight);
+    add(taste.people, peopleOf(title), weight);
+    add(taste.decades, decadesOf(title), weight);
+    add(taste.franchises, franchisesOf(title), weight);
   }
-  return { genres, languages };
+  // What the library scores against itself, now that there is a profile to score against.
+  const liked = entries.filter((entry) => (entry.weight ?? 1) > 0);
+  const mean = <K>(map: Map<K, number>, keysOf: (title: Title) => K[]) => {
+    let sum = 0;
+    let total = 0;
+    for (const { title, weight = 1 } of liked) {
+      sum += weight * shareOf(map, keysOf(title));
+      total += weight;
+    }
+    return total > 0 ? sum / total : 0;
+  };
+  taste.typical = {
+    genres: mean(taste.genres, genresOf),
+    languages: mean(taste.languages, languagesOf),
+    countries: mean(taste.countries, countriesOf),
+    decades: mean(taste.decades, decadesOf),
+  };
+  return taste;
+}
+
+/** Whether the household follows the people behind this title, saturating: one shared lead is a coincidence. */
+function following(map: Map<number, number>, people: number[]): number | undefined {
+  if (people.length === 0 || map.size === 0) return undefined;
+  let met = 0;
+  for (const id of new Set(people)) met += Math.max(0, map.get(id) ?? 0);
+  return 1 - Math.exp(-met / PEOPLE_ENOUGH);
 }
 
 /**
- * How much a title looks like the library. Its best-matching genre rather than its average one — a Nordic crime
- * drama shouldn't be marked down for also being tagged Mystery — read against the strongest genre in the
- * profile, since a large library spreads its shares thin. Language carries the rest: "Nordic" is a language
- * before it is a genre.
+ * How much this library has turned down what the title is made of. A dislike is the one thing a viewer says
+ * outright, so it is answered outright rather than left to cancel out inside a share: a genre, a person or a
+ * franchise carrying negative weight marks the title down in proportion to how firmly it was rejected.
+ */
+function distaste(title: Title, taste: Taste): number {
+  const owed = <K>(map: Map<K, number>, keys: K[]) => {
+    let against = 0;
+    for (const key of new Set(keys)) against -= Math.min(0, map.get(key) ?? 0);
+    return against;
+  };
+  const against =
+    owed(taste.genres, genresOf(title)) + owed(taste.people, peopleOf(title)) + owed(taste.franchises, franchisesOf(title));
+  return against <= 0 ? 0 : against / (against + DISLIKE_PATIENCE);
+}
+
+/**
+ * How much a title looks like the library, across every facet either of them knows about.
+ *
+ * Facets a title can't be judged on are left out rather than scored zero, and the rest are re-weighted between
+ * them: an atlas catalog names a title by id, so most candidates arrive with no credits and no countries, and
+ * counting those as "no match" would mark down every title for what TMDB simply wasn't asked.
  */
 export function affinity(title: Title, taste?: Taste): number {
   if (!taste) return 0;
-  const topGenre = Math.max(0, ...taste.genres.values());
-  const topLanguage = Math.max(0, ...taste.languages.values());
-  const genre = topGenre > 0 ? Math.max(0, ...(title.genreIds ?? []).map((id) => taste.genres.get(id) ?? 0)) / topGenre : 0;
-  const language = topLanguage > 0 ? (taste.languages.get(title.originalLanguage ?? '') ?? 0) / topLanguage : 0;
-  // Language nudges; the genre decides. It used to be worth a third, which in a library three-quarters in
-  // English handed that third to every Hollywood release for the least interesting fact about it. Weighting it
-  // by how rare the match is was worse: in a mostly-Swedish library a single English film would then make every
-  // English title look like a match. A tenth, and no cleverness.
-  return 0.9 * genre + 0.1 * language;
+  const facet = <K>(map: Map<K, number>, keys: K[], typical: number) =>
+    keys.length === 0 || typical <= 0 ? undefined : Math.min(1, shareOf(map, keys) / typical);
+  const parts: [number, number | undefined][] = [
+    [FACETS.genres, facet(taste.genres, genresOf(title), taste.typical.genres)],
+    [FACETS.languages, facet(taste.languages, languagesOf(title), taste.typical.languages)],
+    [FACETS.countries, facet(taste.countries, countriesOf(title), taste.typical.countries)],
+    [FACETS.decades, facet(taste.decades, decadesOf(title), taste.typical.decades)],
+    [FACETS.people, following(taste.people, peopleOf(title))],
+  ];
+  const known = parts.filter((part): part is [number, number] => part[1] !== undefined);
+  const total = known.reduce((sum, [weight]) => sum + weight, 0);
+  if (total <= 0) return 0;
+  const match = known.reduce((sum, [weight, value]) => sum + weight * value, 0) / total;
+  // The next of something already followed is wanted whatever else it is: a sequel shares a franchise, rarely a
+  // genre profile, and nobody who watched the first three needs to be sold the fourth.
+  const followed = title.collectionId !== undefined && (taste.franchises.get(title.collectionId) ?? 0) > 0;
+  return (followed ? match + (1 - match) * FRANCHISE_LIFT : match) * (1 - distaste(title, taste));
 }
 
 /** When it came out, as a date. A title known only by its year is placed mid-year — coarse, but honest. */
@@ -148,12 +276,21 @@ export function quality(title: Title): number {
   return Math.min(1, Math.max(0, (title.rating - 6) / 2));
 }
 
-export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
-  const worth =
+/**
+ * What a title is worth before taste is consulted — new, watched, well liked. Exported because it says which
+ * candidates are worth asking TMDB about: taste can only judge a title whose genres are known, and there are
+ * far more candidates than are worth a request.
+ */
+export function worth(candidate: Candidate, now: Date, busiest = 0): number {
+  return (
     WEIGHTS.fresh * freshness(candidate.title, now) +
     WEIGHTS.attention * attention(candidate, busiest) +
-    WEIGHTS.quality * quality(candidate.title);
-  return worth * (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste));
+    WEIGHTS.quality * quality(candidate.title)
+  );
+}
+
+export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
+  return worth(candidate, now, busiest) * (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste));
 }
 
 /**
