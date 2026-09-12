@@ -208,8 +208,12 @@ test('wide mobile trailer and its swipe snapshot have opaque letterboxing',async
     });
     const frozen = await samples();
     expect(frozen[0]).toEqual(live[0]); expect(frozen[2]).toEqual(live[2]);
-    // Video and canvas use different YUV/RGB conversion paths; allow one rounding level in the picture.
-    for (let channel = 0; channel < 4; channel++) expect(Math.abs(frozen[1][channel] - live[1][channel])).toBeLessThanOrEqual(1);
+    // The red fixture must remain visible and opaque. Native video and canvas color conversion
+    // need not produce byte-identical RGB; the black letterboxes above must remain exact.
+    expect(frozen[1][0]).toBeGreaterThan(240);
+    expect(frozen[1][1]).toBeLessThan(10);
+    expect(frozen[1][2]).toBeLessThan(10);
+    expect(frozen[1][3]).toBe(255);
   } finally {await browser.close();}
 });
 

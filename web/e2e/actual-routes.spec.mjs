@@ -23,7 +23,17 @@ try {
   });
   await page.goto('http://127.0.0.1:5198/test/actual-routes.html#title/movie/42');
   await page.waitForSelector('[data-active="true"] .backdrop');
-  await page.evaluate(async()=>{await Promise.all(Array.from(document.images).map(i=>i.decode().catch(()=>{})));});
+  // Offscreen lazy actor images need not load before capturing the visible page.
+  await page.evaluate(async()=>{
+    const visible = Array.from(document.images).filter(image => {
+      const box = image.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && box.bottom > 0 && box.top < innerHeight;
+    });
+    await Promise.race([
+      Promise.all(visible.map(image => image.decode().catch(() => {}))),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('visible fixture images did not decode')), 5000)),
+    ]);
+  });
   const liveFrame=await page.screenshot({path:test.info().outputPath('live-detail-'+width+'.png')});
   await page.evaluate(async()=>{
     const {capturePage}=await import('/src/lib/pageSnapshot.ts');
