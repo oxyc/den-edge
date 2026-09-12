@@ -4,6 +4,14 @@
 import type { Title } from './library';
 import type { ConfigValue, SettingsRow } from './wire';
 
+/** A streaming service the viewer has, in one country: the same provider in two countries is two picks. */
+export interface ServicePick {
+  /** The provider id atlas tags its catalogs with (`denProviderId`). */
+  id: number;
+  /** ISO-3166 alpha-2, uppercase. Service catalogs are licensed per country, so this decides what is on it. */
+  country: string;
+}
+
 export interface Prefs {
   excludedGenres: Set<number>;
   excludedLanguages: Set<string>;
@@ -11,6 +19,8 @@ export interface Prefs {
   hideWatched: boolean;
   /** Titles released before this year stay out of browsing; nil shows every year. */
   minReleaseYear?: number;
+  /** The services the TV has picked (`den.myServicePicks`, each `"<id>@<CC>"`). */
+  services: ServicePick[];
 }
 
 /** TMDB tags anime and Western cartoons alike as Animation; anime is Animation plus Japanese. */
@@ -37,6 +47,12 @@ export function readPrefs(row: SettingsRow | undefined): Prefs {
     hideAnime: bool('den.hideAnime'),
     hideWatched: bool('den.hideWatched'),
     minReleaseYear: year && 'int' in year ? year.int : undefined,
+    services: strings('den.myServicePicks').flatMap((pick): ServicePick[] => {
+      const [id, country] = pick.split('@');
+      const numeric = Number(id);
+      const code = (country ?? '').toUpperCase();
+      return Number.isInteger(numeric) && numeric > 0 && /^[A-Z]{2}$/.test(code) ? [{ id: numeric, country: code }] : [];
+    }),
   };
 }
 

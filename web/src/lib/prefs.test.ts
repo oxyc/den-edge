@@ -15,6 +15,8 @@ const prefsRow: SettingsRow = {
     'den.hideAnime': { value: { bool: true }, at },
     'den.hideWatched': { value: { bool: true }, at },
     'den.minReleaseYear': { value: { int: 1990 }, at },
+    // The same provider in two countries is two picks; the rest is what a malformed one looks like.
+    'den.myServicePicks': { value: { strings: ['8@FI', '8@US', '1899@fi', 'nonsense', '0@FI', '8@FIN'] }, at },
   },
 };
 const film = (overrides: Partial<Title>): Title => ({
@@ -34,6 +36,12 @@ describe('prefs', () => {
     expect([...prefs.excludedGenres]).toEqual([27]);
     expect([...prefs.excludedLanguages]).toEqual(['hi']);
     expect([prefs.hideAnime, prefs.hideWatched, prefs.minReleaseYear]).toEqual([true, true, 1990]);
+    // Uppercased, and anything that isn't "<id>@<CC>" is dropped rather than guessed at.
+    expect(prefs.services).toEqual([
+      { id: 8, country: 'FI' },
+      { id: 8, country: 'US' },
+      { id: 1899, country: 'FI' },
+    ]);
     const cleared = { ...prefsRow, values: { 'den.minReleaseYear': { value: null, at } } };
     expect(readPrefs(cleared).minReleaseYear).toBeUndefined();
     expect(readPrefs(undefined)).toEqual({
@@ -42,6 +50,7 @@ describe('prefs', () => {
       hideAnime: false,
       hideWatched: false,
       minReleaseYear: undefined,
+      services: [],
     });
   });
 

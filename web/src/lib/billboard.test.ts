@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { affinity, buzz, freshness, pickBillboard, quality, tasteOf, type Candidate } from './billboard';
+import { affinity, arrival, buzz, freshness, pickBillboard, quality, tasteOf, type Candidate } from './billboard';
 import type { Title } from './library';
 
 const NOW = new Date('2026-09-12T00:00:00Z');
@@ -82,6 +82,20 @@ describe('taste', () => {
     const loudHorror = film(21, { releaseDate: '2026-09-05', genreIds: [HORROR], originalLanguage: 'en', popularity: 400 });
     const picked = pickBillboard([{ title: loudHorror }, { title: onTaste }], { now: NOW, taste: watched });
     expect(picked.map((t) => t.id)).toEqual([20, 21]);
+  });
+});
+
+describe('arrival', () => {
+  it('lifts an older title that has just landed on a service over a newer one that has not', () => {
+    const justLanded = { title: film(1, { releaseDate: '1997-06-01', popularity: 20 }), arrival: { rank: 0, of: 10 } };
+    const merelyNew = { title: film(2, { releaseDate: '2026-08-20', popularity: 20 }) };
+    expect(pickBillboard([merelyNew, justLanded], { now: NOW }).map((t) => t.id)).toEqual([1, 2]);
+  });
+
+  it('counts for nothing when the title arrived in no list', () => {
+    expect(arrival({ title: film(3) })).toBe(0);
+    expect(arrival({ title: film(4), arrival: { rank: 0, of: 0 } })).toBe(0);
+    expect(arrival({ title: film(5), arrival: { rank: 2, of: 10 } })).toBeCloseTo(0.8, 6);
   });
 });
 

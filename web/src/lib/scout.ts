@@ -109,6 +109,73 @@ export async function trendingEverywhere(
     .filter((title): title is Title => title !== undefined);
 }
 
+/** One of atlas's catalogs, as its manifest lists them. */
+interface CatalogEntry {
+  type: string;
+  id: string;
+  denProviderId?: number;
+  denProviderIds?: number[];
+}
+
+/**
+ * The catalogs of newly-added titles worth asking for.
+ *
+ * An install's own manifest already lists only the services that install was configured with — this household's
+ * atlas offers Netflix, Disney+ and Apple TV+ where the bare addon offers fourteen — so with no picks to go on,
+ * every "new on" catalog it advertises is one of theirs, and the install's own region answers for the country.
+ * Picks, when the TV has synced some, narrow it further and name the country outright, since the same provider
+ * in two countries is two different catalogs.
+ */
+function arrivalCatalogs(manifest: unknown, picks: { id: number; country: string }[]): { path: string; type: MediaType }[] {
+  const catalogs = (manifest as { catalogs?: unknown } | null)?.catalogs;
+  if (!Array.isArray(catalogs)) return [];
+  const wanted: { path: string; type: MediaType }[] = [];
+  for (const raw of catalogs as CatalogEntry[]) {
+    // "New on <service>", not "Popular on <service>": what changed is the point, not what is always there.
+    if (typeof raw?.id !== 'string' || !raw.id.endsWith('-new')) continue;
+    const type: MediaType = raw.type === 'series' ? 'tv' : 'movie';
+    if (picks.length === 0) {
+      wanted.push({ path: `/catalog/${raw.type}/${raw.id}.json`, type });
+      continue;
+    }
+    const providers = raw.denProviderIds ?? (raw.denProviderId === undefined ? [] : [raw.denProviderId]);
+    for (const pick of picks.filter((p) => providers.includes(p.id))) {
+      wanted.push({ path: `/catalog/${raw.type}/${raw.id}/country=${encodeURIComponent(pick.country)}.json`, type });
+    }
+  }
+  return wanted;
+}
+
+/**
+ * What has newly arrived on the services this library has, from atlas's JustWatch catalogs — a 1997 film that
+ * landed on Netflix yesterday is new to watch however old it is, which is a different thing from a new release
+ * and the one a billboard most wants to say. Empty when no service is picked, or atlas can't be reached.
+ */
+export async function arrivals(
+  base: string,
+  picks: { id: number; country: string }[] = [],
+  fetchImpl: typeof fetch = fetch,
+  most = 8,
+): Promise<Title[][]> {
+  try {
+    const res = await fetchImpl(`${base}${MANIFEST}`);
+    if (!res.ok) return [];
+    const lists = arrivalCatalogs(await res.json(), picks).slice(0, most);
+    return await Promise.all(
+      lists.map(async ({ path, type }) => {
+        try {
+          const answer = await fetchImpl(`${base}${path}`);
+          return answer.ok ? catalogTitles(await answer.json(), type) : [];
+        } catch {
+          return [];
+        }
+      }),
+    );
+  } catch {
+    return [];
+  }
+}
+
 /** The library's installs of the service `name` (den-subtitles, for den-remux), without their manifest file. */
 export function installsOf(plugins: string[], routes: Routes, name: string): string[] {
   return plugins.flatMap((url) => {

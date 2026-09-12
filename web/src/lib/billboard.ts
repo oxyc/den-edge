@@ -17,6 +17,8 @@ export interface Candidate {
   rank?: number;
   /** How long that list was, without which a rank says nothing. */
   of?: number;
+  /** Its place in a "new on <service>" list: newly watchable here, whatever year it came out. */
+  arrival?: { rank: number; of: number };
 }
 
 const DAY = 86_400_000;
@@ -36,7 +38,7 @@ const UNRELEASED = 0.8;
  * whatever came out last, and most of what comes out in any given week is an untracked micro-release nobody is
  * looking for. Attention is weighted to match it, so among new things the ones people are actually watching win.
  */
-export const WEIGHTS = { fresh: 0.22, buzz: 0.4, quality: 0.15, taste: 0.35 };
+export const WEIGHTS = { fresh: 0.22, buzz: 0.4, quality: 0.15, taste: 0.35, arrival: 0.28 };
 
 /** What a library says its viewer likes: how much of it sits in each genre, and in each original language. */
 export interface Taste {
@@ -104,6 +106,15 @@ export function buzz({ rank, of, title }: Candidate, busiest = 0): number {
 }
 
 /** Well-liked, on enough votes to mean it: 6.0 scores nothing, 8.0 and up scores 1. */
+/**
+ * Newly watchable on a service this household has. "New to you" rather than "new in the world": a 1997 film that
+ * landed on Netflix yesterday is worth a slide, and it is the only term that knows the title can be pressed play
+ * on at all.
+ */
+export function arrival({ arrival: at }: Candidate): number {
+  return !at || at.of <= 0 ? 0 : Math.max(0, 1 - at.rank / at.of);
+}
+
 export function quality(title: Title): number {
   if (title.rating === undefined || (title.votes ?? 0) < ENOUGH_VOTES) return 0;
   return Math.min(1, Math.max(0, (title.rating - 6) / 2));
@@ -114,7 +125,8 @@ export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Tast
     WEIGHTS.fresh * freshness(candidate.title, now) +
     WEIGHTS.buzz * buzz(candidate, busiest) +
     WEIGHTS.quality * quality(candidate.title) +
-    WEIGHTS.taste * affinity(candidate.title, taste)
+    WEIGHTS.taste * affinity(candidate.title, taste) +
+    WEIGHTS.arrival * arrival(candidate)
   );
 }
 
@@ -143,6 +155,7 @@ function merge(a: Candidate, b: Candidate): Candidate {
     },
     rank: a.rank ?? b.rank,
     of: a.of ?? b.of,
+    arrival: a.arrival ?? b.arrival,
   };
 }
 

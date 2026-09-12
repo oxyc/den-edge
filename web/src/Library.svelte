@@ -48,7 +48,7 @@
   import { titleHref, type Route } from './lib/route';
   import { findRemux } from './lib/remux';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
+  import { arrivals, findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -360,15 +360,31 @@
   }
 
   /**
-   * What Home's billboard cycles: the leading row's titles, as the TV's featured hero takes them — the first
-   * personal row when the library has one, else what is trending.
+   * What the billboard cycles. Not a row: a pool of its own, ranked by `pickBillboard` — what is being watched
+   * now, what is new or still to come, and what has just landed on this household's own services, weighted
+   * towards the library's taste and away from anything it already holds.
    */
   let featured = $state<Title[]>([]);
+  /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
+  let billboardRun = 0;
   $effect(() => {
-    const table = rows;
-    // Read once: this re-runs when atlas resolves, and the pool is rebuilt from whichever sources answered.
+    // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be
+    // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
+    // read without being watched. Those tick over continuously while the library is named, and watching them
+    // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
+    void route.page;
     const here = atlas;
+    if (!tmdbKey) return;
+    untrack(() => buildBillboard(here));
+  });
+
+  function buildBillboard(here: string | null) {
+    const table = rows;
     const type = facet;
+    // Not the rows' identity: that array is rebuilt every time a title is named, so comparing it when the
+    // fetches came back meant the answer was always judged stale and thrown away, and the billboard stayed
+    // empty. A build is stale only when a later build has started.
+    const run = ++billboardRun;
     featured = [];
     if (!table.length) return;
     const row = (id: string) => table.find((r) => r.id === id)?.load(1).catch(() => []) ?? Promise.resolve([]);
@@ -389,26 +405,27 @@
       row('new-releases'),
       row('upcoming'),
       row('popular'),
+      // What just landed on the services this household actually has — new to watch, whatever year it is from.
+      here ? arrivals(here, prefs.services) : Promise.resolve([] as Title[][]),
     ])
-      .then(([everywhere, hotMovies, hotSeries, fresh, soon, popular]) => {
+      .then(([everywhere, hotMovies, hotSeries, fresh, soon, popular, landed]) => {
         const ranked = (list: Title[]) => list.map((title, rank) => ({ title, rank, of: list.length }));
         const pool = [
+          ...landed.flatMap((list) => list.map((title, rank) => ({ title, arrival: { rank, of: list.length } }))),
           ...ranked(everywhere),
           ...ranked(hotMovies),
           ...ranked(hotSeries),
           ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
         ];
         // Never a title this library already holds: the billboard is for what hasn't been found yet.
-        // Read, not watched. The profile thickens with every title TMDB names, and a billboard that re-sorted
-        // on each of them would shuffle its slides under the viewer's finger — the rail stays where it is
-        // while the keyed slides reorder around it, so the picture and the words come apart.
-        const picked = untrack(() =>
-          pickBillboard(pool, { taste, keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) }),
-        );
-        if (rows === table) featured = picked;
+        const picked = pickBillboard(pool, {
+          taste,
+          keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
+        });
+        if (run === billboardRun) featured = picked;
       })
       .catch(() => undefined);
-  });
+  }
 
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;

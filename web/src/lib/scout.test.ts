@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere } from './scout';
+import { arrivals, denAddonOf, findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere } from './scout';
 
 const ROUTES: Routes = {
   scout: [{ url: 'http://192.168.86.193:8080' }, { url: 'https://pve.example:8443/scout' }, { url: 'https://d-scout.oxy.fi', access: true }],
@@ -39,6 +39,57 @@ describe('findAddon', () => {
   it('is null when no plugin is scout, or the table has none', async () => {
     expect(await findAddon([THEIRS], ROUTES, SCOUT, addons({}).fetchImpl)).toBeNull();
     expect(await findAddon([SCOUT_LAN], {}, SCOUT, addons({}).fetchImpl)).toBeNull();
+  });
+});
+
+describe('arrivals', () => {
+  const meta = (id: number, name: string) => ({ moviedb_id: id, name, releaseInfo: '2026' });
+  const manifest = {
+    catalogs: [
+      { type: 'movie', id: 'jw-trending' },
+      { type: 'movie', id: 'jw-nfx', denProviderId: 8, denProviderIds: [8] },
+      { type: 'movie', id: 'jw-nfx-new', denProviderId: 8, denProviderIds: [8] },
+      { type: 'series', id: 'jw-nfx-new', denProviderId: 8, denProviderIds: [8] },
+      { type: 'movie', id: 'jw-mxx-new', denProviderId: 1899, denProviderIds: [1899] },
+    ],
+  };
+  const atlas: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url === '/atlas/manifest.json') return new Response(JSON.stringify(manifest));
+    if (url === '/atlas/catalog/movie/jw-nfx-new/country=FI.json') {
+      return new Response(JSON.stringify({ metas: [meta(1, 'New film on Netflix FI')] }));
+    }
+    if (url === '/atlas/catalog/series/jw-nfx-new/country=FI.json') {
+      return new Response(JSON.stringify({ metas: [meta(2, 'New series on Netflix FI')] }));
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  it('asks only the "new on" catalogs of the services picked, in the countries picked', async () => {
+    const lists = await arrivals('/atlas', [{ id: 8, country: 'FI' }], atlas);
+    expect(lists.map((l) => l.map((t) => t.id))).toEqual([[1], [2]]);
+    expect(lists.flat().map((t) => t.type)).toEqual(['movie', 'tv']);
+  });
+
+  it('falls back to every catalog the install advertises, which is already only its own services', async () => {
+    // No picks synced: an install's manifest lists the services it was configured with, so all of them count.
+    const asked: string[] = [];
+    const watching: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return atlas(input);
+    };
+    await arrivals('/atlas', [], watching);
+    expect(asked).toEqual([
+      '/atlas/manifest.json',
+      '/atlas/catalog/movie/jw-nfx-new.json',
+      '/atlas/catalog/series/jw-nfx-new.json',
+      '/atlas/catalog/movie/jw-mxx-new.json',
+    ]);
+  });
+
+  it('survives a service whose catalog is missing', async () => {
+    const mixed = await arrivals('/atlas', [{ id: 1899, country: 'FI' }], atlas);
+    expect(mixed.flat()).toEqual([]);
   });
 });
 
