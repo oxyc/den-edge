@@ -6,7 +6,7 @@
 //! writes, and nothing expires.
 //!
 //!   POST /lib/{id}/batch  { writes: [{ k, base, v }] } → { head, applied: [{ k, seq }], conflicts: [{ k, seq, v }], generation }
-//!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation }
+//!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation } (gzip when accepted)
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
@@ -22,11 +22,12 @@
 //! rewritten without its superseded lines once they outnumber the live ones.
 
 use crate::handler::{
-    constant_time_eq, error, internal, json_reply, method_not_allowed, query_param, read_json,
+    constant_time_eq, error, internal, json_reply, method_not_allowed, query_param, raw_json, read_json,
 };
 use crate::AppState;
+use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{Method, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -176,7 +177,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_LIMIT)
                 .clamp(1, MAX_LIMIT);
-            changes(state, id, token_hash, since, limit).await
+            let (gzip, identity) = crate::web::encodings(req.headers());
+            changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity).await
         }
         ("", Method::DELETE) => forget(state, id, token_hash).await,
         ("batch" | "changes" | "", _) => method_not_allowed(),
@@ -344,7 +346,14 @@ fn json_string_bytes(value: &str) -> usize {
         .sum::<usize>()
 }
 
-async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, limit: usize) -> Response {
+async fn changes(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    since: u64,
+    limit: usize,
+    gzip: bool,
+) -> Response {
     let mut libs = state.libraries.lock().await;
     if let Err(e) = load(state, &mut libs, id).await {
         return read_error(e);
@@ -383,10 +392,31 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     let more = rows.len() > count;
     let entries: Vec<Value> =
         rows.iter().take(count).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
-    json_reply(
-        StatusCode::OK,
-        &json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() }),
-    )
+    let page =
+        json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() });
+    if gzip {
+        if let Some(response) = gzipped(&page) {
+            return response;
+        }
+    }
+    json_reply(StatusCode::OK, &page)
+}
+
+/// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
+/// request is echoed into them, so compression reveals nothing about what they say.
+fn gzipped(page: &Value) -> Option<Response> {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write as _;
+    let body = page.to_string();
+    if body.len() < 1024 {
+        return None;
+    }
+    let mut encoder = GzEncoder::new(Vec::with_capacity(body.len() / 2), Compression::default());
+    encoder.write_all(body.as_bytes()).ok()?;
+    let mut resp = raw_json(StatusCode::OK, Body::from(encoder.finish().ok()?), true);
+    resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    Some(resp)
 }
 
 /// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
@@ -966,6 +996,36 @@ mod tests {
         assert_eq!(page["entries"].as_array().unwrap().len(), 8);
         assert_eq!(page["more"], false);
         assert!(serde_json::to_vec(&page).unwrap().len() <= super::PAGE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn a_sync_page_is_gzipped_only_for_a_client_that_takes_it() {
+        let h = Harness::new();
+        let writes: Vec<_> =
+            (0..8).map(|i| json!({"k":format!("{i:016x}"),"base":0,"v":"x".repeat(1024)})).collect();
+        assert_eq!(batch(&h, TOKEN, json!(writes)).await.0, StatusCode::OK);
+        let path = format!("/lib/{LIB}/changes");
+        let ask = |encoding: &'static str| {
+            let (h, path) = (&h, &path);
+            async move {
+                h.send("GET", path, None, &[("x-den-library-token", TOKEN), ("accept-encoding", encoding)])
+                    .await
+            }
+        };
+        let plain = ask("identity").await;
+        assert!(!plain.headers().contains_key("content-encoding"));
+        let plain = body_json(plain).await;
+
+        let zipped = ask("br, gzip").await;
+        assert_eq!(zipped.headers()["content-encoding"], "gzip");
+        assert_eq!(zipped.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut text).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), plain);
+        assert!(bytes.len() < text.len() / 4, "{} of {}", bytes.len(), text.len());
+
+        assert!(!ask("gzip;q=0").await.headers().contains_key("content-encoding"));
     }
 
     #[tokio::test]

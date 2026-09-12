@@ -1,6 +1,6 @@
 [package]
 name = "den-edge"
-version = "0.50.2"
+version = "0.51.0"
 edition = "2021"
 description = "Den's sync relay on the homelab: pairing, the sealed inbox, the library's record log, and the Den web app."
 license = "MIT"
@@ -17,6 +17,8 @@ url = "2"
 # The addon relay's client (`relay.rs`); both already come with axum.
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+# Gzip for the library's sync pages (`library.rs`): mostly base64 ciphertext, which it still cuts by a quarter.
+flate2 = "1"
 
 # Small static binary, like every den addon.
 [profile.release]

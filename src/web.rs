@@ -44,7 +44,7 @@ pub async fn serve(dir: &Path, path: &str, remux: &[String], headers: &HeaderMap
 
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
 /// Missing/empty headers conservatively get identity; malformed weights are never permission to encode.
-fn encodings(headers: &HeaderMap) -> (u16, u16) {
+pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16) {
     let (mut gzip, mut identity, mut wildcard): (Option<u16>, Option<u16>, Option<u16>) = (None, None, None);
     for value in headers.get_all(header::ACCEPT_ENCODING) {
         let Ok(value) = value.to_str() else { continue };
