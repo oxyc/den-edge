@@ -38,7 +38,16 @@ const UNRELEASED = 0.8;
  * whatever came out last, and most of what comes out in any given week is an untracked micro-release nobody is
  * looking for. Attention is weighted to match it, so among new things the ones people are actually watching win.
  */
-export const WEIGHTS = { fresh: 0.22, attention: 0.4, quality: 0.15, taste: 0.35 };
+export const WEIGHTS = { fresh: 0.22, attention: 0.4, quality: 0.15 };
+/**
+ * What a title keeps when it matches nothing this library watches. Taste multiplies the rest rather than adding
+ * to it: as a fourth addend it could always be outvoted by the other three, so a film at the top of both the
+ * trending and the arrivals lists won whatever the household's taste, which is how the billboard came to lead
+ * with an action comedy for people who watch Nordic crime. As a multiplier it decides between contenders
+ * instead of shouting alongside them: a title that matches nothing this library watches keeps roughly a third
+ * of what it was otherwise worth, without any term having to drop it.
+ */
+const TASTE_FLOOR = 0.35;
 /** How much a second kind of attention adds once the first is counted. See `attention`. */
 const CORROBORATION = 0.3;
 
@@ -136,12 +145,11 @@ export function quality(title: Title): number {
 }
 
 export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
-  return (
+  const worth =
     WEIGHTS.fresh * freshness(candidate.title, now) +
     WEIGHTS.attention * attention(candidate, busiest) +
-    WEIGHTS.quality * quality(candidate.title) +
-    WEIGHTS.taste * affinity(candidate.title, taste)
-  );
+    WEIGHTS.quality * quality(candidate.title);
+  return worth * (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste));
 }
 
 /**

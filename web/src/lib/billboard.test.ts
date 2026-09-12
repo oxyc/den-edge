@@ -87,6 +87,28 @@ describe('taste', () => {
     expect(affinity(film(12, { genreIds: [CRIME] }), tasteOf([]))).toBe(0);
   });
 
+  it('lets taste beat a title that tops every list, since it multiplies rather than adds', () => {
+    // The Mayday case: first in trending and first in its service's arrivals, but nothing like what is watched.
+    const everywhere = {
+      title: film(30, { releaseDate: '2026-09-01', genreIds: [28], originalLanguage: 'en', popularity: 900 }),
+      rank: 0,
+      of: 100,
+      arrival: { rank: 0, of: 100 },
+    };
+    // Not a title nobody is watching — one doing respectably, which taste should be able to carry past a
+    // louder stranger. Taste multiplies what a title is already worth; it cannot conjure worth from nothing.
+    const onTaste = {
+      title: film(31, { releaseDate: '2026-09-01', genreIds: [CRIME], originalLanguage: 'sv' }),
+      rank: 20,
+      of: 100,
+    };
+    const profile = tasteOf([
+      { title: film(92, { genreIds: [CRIME], originalLanguage: 'sv' }) },
+      { title: film(93, { genreIds: [28], originalLanguage: 'en' }), weight: 0.2 },
+    ]);
+    expect(pickBillboard([everywhere, onTaste], { now: NOW, taste: profile }).map((t) => t.id)).toEqual([31, 30]);
+  });
+
   it('lifts the on-taste title above an equally new one that is louder', () => {
     const onTaste = film(20, { releaseDate: '2026-09-05', genreIds: [CRIME], originalLanguage: 'sv', popularity: 40 });
     const loudHorror = film(21, { releaseDate: '2026-09-05', genreIds: [HORROR], originalLanguage: 'en', popularity: 400 });
