@@ -1,7 +1,10 @@
 <!-- Home's billboard, built as the TV's featured hero is: the leading row's titles, full-bleed and running up
      behind the bar, one at a time, cycling every fifteen seconds and looping both ways. It pages by swipe, by the
-     arrow keys, or by its dots — and any of those stops the rotation, from then on it is yours to drive. A still
-     picture, not a trailer: motion here would cost a phone its data and its battery for decoration. -->
+     arrow keys, or by its dots — and any of those stops the rotation, from then on it is yours to drive.
+
+     The slide's trailer plays quietly behind it once it has settled, as the TV's hero does — muted, no chrome,
+     nothing to press. It is decoration, so it gives way whenever it would cost more than it gives: Reduce
+     Motion, Data Saver, or the billboard scrolled off the screen leave the still picture in its place. -->
 <script lang="ts">
   import { cubicInOut } from 'svelte/easing';
   import { fade, fly } from 'svelte/transition';
@@ -26,8 +29,13 @@
   const ADVANCE_MS = 15_000;
   /** At most this many dots, sliding to keep the current one in view: forty bullets is a bar, not a pager. */
   const DOT_WINDOW = 9;
-  /** How far a finger travels before it counts as a page rather than a tap. */
-  const SWIPE_PX = 40;
+  /** How far a finger travels sideways before it counts as a page rather than a tap. */
+  const SWIPE_PX = 28;
+  /**
+   * How much downward drift a sideways swipe may carry: the sideways travel must be at least this much of the
+   * up-and-down travel. No finger draws a straight line, and asking for one turned real swipes into scrolls.
+   */
+  const SWIPE_BIAS = 0.7;
 
   const shown = $derived(titles.slice(0, SLIDES));
   let index = $state(0);
@@ -68,6 +76,38 @@
         if (found?.backdropPath) new Image().src = backdropURL(found.backdropPath);
       });
     }
+  });
+
+  /** How long a slide stands still before its trailer starts: paging past five shouldn't start five videos. */
+  const SETTLE_MS = 2000;
+  /** The trailer playing behind the current slide, once it has earned it; null while the still picture stands. */
+  let ambient = $state<string | null>(null);
+  /** Held back until the embed has loaded and had a moment to start: an iframe paints its own black over the
+      still long before there is a picture in it, and a trailer that never plays would leave the slide blank. */
+  let playing = $state(false);
+  let frame = $state<HTMLElement>();
+  let onScreen = $state(true);
+  /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
+  const saving = () => Boolean((navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData);
+
+  // A trailer playing under the rows, heard by nobody and seen by nobody, is battery and data spent on nothing.
+  $effect(() => {
+    const box = frame;
+    if (!box || typeof IntersectionObserver === 'undefined') return;
+    const watch = new IntersectionObserver(([entry]) => (onScreen = (entry?.intersectionRatio ?? 0) > 0.5), {
+      threshold: [0, 0.5, 1],
+    });
+    watch.observe(box);
+    return () => watch.disconnect();
+  });
+
+  $effect(() => {
+    const key = detail?.trailer;
+    ambient = null;
+    playing = false;
+    if (!key || !onScreen || still() || saving()) return;
+    const timer = setTimeout(() => (ambient = key), SETTLE_MS);
+    return () => clearTimeout(timer);
   });
 
   // It cycles on its own until you page it, and holds while you are reading it — pointer over it, or a control in
@@ -113,16 +153,33 @@
   // A swipe pages it, the way the remote's Left/Right does on the TV. A mouse is left alone — it has the dots,
   // and a drag there is usually a selection.
   let from: { x: number; y: number } | null = null;
+  /** One page per gesture: the rest of the finger's travel is the same swipe, not the next one. */
+  let swiped = false;
+
   function down(event: PointerEvent) {
     from = event.pointerType === 'mouse' ? null : { x: event.clientX, y: event.clientY };
+    swiped = false;
   }
+
+  /**
+   * Turn the page the moment the swipe is unmistakable, rather than waiting for the finger to lift. The page
+   * scrolls up and down under the same finger, so the browser decides which of the two a gesture is within its
+   * first few pixels and takes the pointer away when it decides "scroll" — waiting for the lift lost every
+   * swipe that sagged a little on its way across.
+   */
+  function moved(event: PointerEvent) {
+    if (!from || swiped) return;
+    const dx = event.clientX - from.x;
+    const dy = event.clientY - from.y;
+    if (Math.abs(dx) < SWIPE_PX || Math.abs(dx) < Math.abs(dy) * SWIPE_BIAS) return;
+    swiped = true;
+    page(dx < 0 ? 1 : -1);
+  }
+
+  /** A gesture that ended before a move said so — a flick over in one event — is judged the same way. */
   function up(event: PointerEvent) {
-    const start = from;
+    if (from && !swiped) moved(event);
     from = null;
-    if (!start) return;
-    const dx = event.clientX - start.x;
-    // Sideways only: a diagonal drag down the page is a scroll, and paging on it would fight the scroll.
-    if (Math.abs(dx) > SWIPE_PX && Math.abs(dx) > Math.abs(event.clientY - start.y)) page(dx < 0 ? 1 : -1);
   }
 
   function keyed(event: KeyboardEvent) {
@@ -137,12 +194,16 @@
   $effect(() => {
     const box = stage;
     if (!box) return;
+    // The browser cancels the pointer when it takes the gesture for a scroll; by then `moved` has already had
+    // its say, so there is nothing to judge here — just forget the gesture.
     const cancel = () => (from = null);
     box.addEventListener('pointerdown', down);
+    box.addEventListener('pointermove', moved, { passive: true });
     box.addEventListener('pointerup', up);
     box.addEventListener('pointercancel', cancel);
     return () => {
       box.removeEventListener('pointerdown', down);
+      box.removeEventListener('pointermove', moved);
       box.removeEventListener('pointerup', up);
       box.removeEventListener('pointercancel', cancel);
     };
@@ -174,6 +235,20 @@
           out:fade={{ duration: slideMs() }}
         />
       {/key}
+    {/if}
+    {#if ambient}
+      <!-- Muted, chrome-less and untouchable: the swipe belongs to the billboard, not to YouTube's player. The
+           still picture stays underneath, so a trailer that refuses to be embedded costs the slide nothing. -->
+      <div class="ambient" class:playing aria-hidden="true">
+        <iframe
+          src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(ambient)}?autoplay=1&mute=1&controls=0&loop=1&playlist=${encodeURIComponent(ambient)}&playsinline=1&modestbranding=1&rel=0&disablekb=1&fs=0&iv_load_policy=3&start=10`}
+          title="Trailer"
+          tabindex="-1"
+          allow="autoplay; encrypted-media"
+          referrerpolicy="strict-origin-when-cross-origin"
+          onload={() => setTimeout(() => (playing = true), 900)}
+        ></iframe>
+      </div>
     {/if}
     <div class="scrim"></div>
     <div class="fade"></div>
@@ -237,7 +312,11 @@
     display: grid;
     align-items: end;
     width: 100vw;
+    /* The large viewport, not the dynamic one: `vh` grows as a phone's address bar rolls away, which would
+       resize the hero mid-scroll and drag the whole page with it. `lvh` is the height with the bar gone, so the
+       billboard is the same size before and after. The `vh` line is what a browser without `lvh` reads. */
     min-height: clamp(420px, 76vh, 860px);
+    min-height: clamp(420px, 76lvh, 860px);
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
@@ -262,6 +341,33 @@
     height: 100%;
     object-fit: cover;
     -webkit-user-drag: none;
+  }
+
+  /* Sized to cover the hero rather than fit it: a 16:9 video fills a taller box and is cropped, the way the
+     backdrop is, so there are never bars around it. It fades up over the still it replaces. */
+  .ambient {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+    pointer-events: none;
+  }
+
+  .ambient.playing {
+    opacity: 1;
+  }
+
+  .ambient iframe {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 177.78lvh;
+    min-width: 100vw;
+    height: 100lvh;
+    min-height: 56.25vw;
+    border: 0;
+    transform: translate(-50%, -50%);
   }
 
   /* Enough dark at the top for the bar to stay legible over a bright frame. */
