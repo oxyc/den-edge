@@ -8,6 +8,7 @@
 //
 // Pure and deterministic given `now`, so both clients can be held to the same answer.
 
+import type { Labels } from './atlasIndex';
 import type { Title } from './library';
 
 /** A title in the running, with where it came from. */
@@ -19,6 +20,13 @@ export interface Candidate {
   of?: number;
   /** Its place in a "new on <service>" list: newly watchable here, whatever year it came out. */
   arrival?: { rank: number; of: number };
+  /** What atlas has labelled it, where atlas has it at all: subgenres and moods. See `labelFit`. */
+  labels?: Labels;
+  /**
+   * How much of the library's own neighbourhood it already sits in, 0…1 — the share of this household's seeds
+   * that atlas answers with this title when asked for more like them. See `novelty`.
+   */
+  redundancy?: number;
 }
 
 const DAY = 86_400_000;
@@ -86,6 +94,14 @@ const DISLIKE_PATIENCE = 2;
 const FACET_FLOOR = 0.02;
 /** How sharply the summed facets separate: higher pulls the middle apart and flattens the extremes. */
 const FACET_SHARPNESS = 3;
+/**
+ * What a title keeps when it sits at the dead centre of what this household already watches — when every seed
+ * atlas was asked about leads back to it. Half, not nothing: resembling what someone likes is a reason to show
+ * them a thing, just not on the one surface that exists to show them what they haven't found.
+ */
+const NOVELTY_FLOOR = 0.5;
+/** How the two kinds of label trade off: a subgenre says what a thing is, a mood only how it feels. */
+const LABELS = { subgenres: 0.7, moods: 0.3 };
 
 /**
  * What a library says its viewer likes, facet by facet.
@@ -246,6 +262,91 @@ export function affinity(title: Title, taste?: Taste): number {
   return (followed ? match + (1 - match) * FRANCHISE_LIFT : match) * (1 - distaste(title, taste));
 }
 
+/**
+ * How much of this title is not already covered by what the household watches.
+ *
+ * The titles atlas offers as "more like" what is already watched are the wrong ones to lead a billboard with:
+ * they are the likeliest to have been seen already, to have been recommended everywhere else, or to be found
+ * without any help — and the rows below the billboard are where "more like that" belongs. Calendar freshness
+ * cannot say any of this; it only knows when a thing came out, not whether this viewer has already worn out its
+ * neighbourhood.
+ */
+export function novelty({ redundancy = 0 }: Candidate): number {
+  return 1 - (1 - NOVELTY_FLOOR) * Math.min(1, Math.max(0, redundancy));
+}
+
+/** What this library's own titles are labelled with, and what one of them typically scores against that. */
+export interface LabelProfile {
+  subgenres: Map<string, number>;
+  moods: Map<string, number>;
+  typical: { subgenres: number; moods: number };
+}
+
+/**
+ * The library read through atlas's labels rather than TMDB's genres.
+ *
+ * TMDB offers nineteen genres, and "Crime" cannot tell Nordic noir from a slasher. atlas labels a title from a
+ * taxonomy of fifty-nine subgenres and sixteen moods — `Police Procedural`, `Neo-Noir`, `Slow-burn` — each with
+ * a confidence, which is weighted in rather than rounded off.
+ */
+export function labelProfileOf(entries: { labels?: Labels; weight?: number }[]): LabelProfile {
+  const subgenres = new Map<string, number>();
+  const moods = new Map<string, number>();
+  const add = (map: Map<string, number>, pairs: [string, number][] | undefined, weight: number) => {
+    for (const [name, confidence] of pairs ?? [])
+      map.set(name, (map.get(name) ?? 0) + weight * confidence);
+  };
+  for (const { labels, weight = 1 } of entries) {
+    if (!labels || weight === 0) continue;
+    add(subgenres, labels.subgenres, weight);
+    add(moods, labels.moods, weight);
+  }
+  const liked = entries.flatMap((entry) =>
+    entry.labels && (entry.weight ?? 1) > 0
+      ? [{ labels: entry.labels, weight: entry.weight ?? 1 }]
+      : [],
+  );
+  const mean = (map: Map<string, number>, pick: (labels: Labels) => [string, number][]) => {
+    let sum = 0;
+    let total = 0;
+    for (const { labels, weight } of liked) {
+      sum += weight * shareOf(map, namesOf(pick(labels)));
+      total += weight;
+    }
+    return total > 0 ? sum / total : 0;
+  };
+  return {
+    subgenres,
+    moods,
+    typical: {
+      subgenres: mean(subgenres, (labels) => labels.subgenres),
+      moods: mean(moods, (labels) => labels.moods),
+    },
+  };
+}
+
+const namesOf = (pairs: [string, number][] | undefined) => (pairs ?? []).map(([name]) => name);
+
+/**
+ * How much a title's labels look like the library's, on the same scale `affinity` uses: a half where there is
+ * nothing to compare, above it for a title made of what this household watches and below for one that is not.
+ *
+ * This is what lets taste choose the field rather than merely order it. A pool of nine hundred can be labelled
+ * in two requests where naming it from TMDB would cost nine hundred, so the sixty that are worth naming can be
+ * picked on what they resemble instead of on which of them happens to be loudest.
+ */
+export function labelFit(labels: Labels | undefined, profile: LabelProfile): number {
+  if (!labels) return 0.5;
+  const facet = (map: Map<string, number>, pairs: [string, number][], typical: number) =>
+    pairs.length === 0 || typical <= 0
+      ? 0
+      : Math.tanh(Math.log((shareOf(map, namesOf(pairs)) + FACET_FLOOR) / (typical + FACET_FLOOR)));
+  const evidence =
+    LABELS.subgenres * facet(profile.subgenres, labels.subgenres ?? [], profile.typical.subgenres) +
+    LABELS.moods * facet(profile.moods, labels.moods ?? [], profile.typical.moods);
+  return 1 / (1 + Math.exp(-FACET_SHARPNESS * evidence));
+}
+
 /** When it came out, as a date. A title known only by its year is placed mid-year — coarse, but honest. */
 function released(title: Title): Date | undefined {
   if (title.releaseDate) {
@@ -332,7 +433,8 @@ export function worth(candidate: Candidate, now: Date, busiest = 0): number {
 export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
   return (
     worth(candidate, now, busiest) *
-    (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste))
+    (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste)) *
+    novelty(candidate)
   );
 }
 
@@ -381,6 +483,8 @@ function merge(a: Candidate, b: Candidate): Candidate {
     },
     ...best({ rank: a.rank, of: a.of }, { rank: b.rank, of: b.of }),
     arrival: best(a.arrival, b.arrival),
+    // A fact about the title, not about the list it arrived in, so either copy answers for both.
+    redundancy: a.redundancy ?? b.redundancy,
   };
 }
 

@@ -5,6 +5,9 @@ import {
   attention,
   buzz,
   freshness,
+  labelFit,
+  labelProfileOf,
+  novelty,
   pickBillboard,
   quality,
   tasteOf,
@@ -268,6 +271,67 @@ describe('taste beyond genre', () => {
     expect(alsoAction).toBeLessThan(drama);
     expect(onlyAction).toBeLessThan(alsoAction);
     expect(onlyAction).toBeLessThan(0.1);
+  });
+});
+
+describe('novelty', () => {
+  it('leaves a title alone until the library’s own neighbourhood reaches it', () => {
+    expect(novelty({ title: film(1) })).toBe(1);
+    expect(novelty({ title: film(2), redundancy: 0 })).toBe(1);
+    expect(novelty({ title: film(3), redundancy: 0.5 })).toBeCloseTo(0.75, 6);
+    // Every seed leads here, so it is the last thing worth a slide — marked down, not dropped.
+    expect(novelty({ title: film(4), redundancy: 1 })).toBeCloseTo(0.5, 6);
+  });
+
+  it('prefers the equal title the library has not already worn out', () => {
+    const worn = { title: film(1, { releaseDate: '2026-09-01', popularity: 100 }), redundancy: 1 };
+    const unworn = { title: film(2, { releaseDate: '2026-09-01', popularity: 100 }) };
+    expect(pickBillboard([worn, unworn], { now: NOW }).map((t) => t.id)).toEqual([2, 1]);
+  });
+});
+
+describe('labels', () => {
+  const labelled = (subgenres: [string, number][], moods: [string, number][] = []) => ({
+    subgenres,
+    moods,
+  });
+  // A library of slow Nordic procedurals.
+  const profile = labelProfileOf([
+    {
+      labels: labelled(
+        [
+          ['Police Procedural', 0.9],
+          ['Neo-Noir', 0.8],
+        ],
+        [['Slow-burn', 0.9]],
+      ),
+    },
+    { labels: labelled([['Police Procedural', 0.8]], [['Slow-burn', 0.8]]) },
+    { labels: labelled([['Neo-Noir', 0.7]], [['Dark & Gritty', 0.6]]) },
+  ]);
+
+  it('is neutral about a title atlas never indexed, rather than marking it down for atlas’s gaps', () => {
+    expect(labelFit(undefined, profile)).toBe(0.5);
+  });
+
+  it('separates two titles TMDB would both file under Crime', () => {
+    const noir = labelFit(
+      labelled(
+        [
+          ['Neo-Noir', 0.9],
+          ['Police Procedural', 0.7],
+        ],
+        [['Slow-burn', 0.8]],
+      ),
+      profile,
+    );
+    const slasher = labelFit(labelled([['Slasher', 0.9]], [['Tense/Edge-of-seat', 0.8]]), profile);
+    expect(noir).toBeGreaterThan(0.5);
+    expect(slasher).toBeLessThan(0.35);
+  });
+
+  it('says nothing either way when the library carries no labels at all', () => {
+    expect(labelFit(labelled([['Slasher', 0.9]]), labelProfileOf([]))).toBe(0.5);
   });
 });
 
