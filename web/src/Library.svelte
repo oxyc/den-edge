@@ -182,9 +182,9 @@
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
-      await ensureSyncPolicy();
     if (!log) return;
     try {
+      await ensureSyncPolicy();
       remember(title);
       const before = log.title(title) ?? blankTitle(title, Date.now());
       clock.see(log.newestStamp());
@@ -198,9 +198,9 @@
   }
 
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
-      await ensureSyncPolicy();
     if (!log) return;
     try {
+      await ensureSyncPolicy();
       remember(title);
       const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
       clock.see(log.newestStamp());
@@ -215,9 +215,9 @@
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
-      await ensureSyncPolicy();
     if (!log) return;
     try {
+      await ensureSyncPolicy();
       if (title.type === 'tv') {
         const shape = session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
         if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
@@ -309,9 +309,9 @@
 
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
-      await ensureSyncPolicy();
     if (!log) return;
     try {
+      await ensureSyncPolicy();
       const { title, season, episode } = target;
       remember(title);
       if (season !== undefined && episode !== undefined) {
