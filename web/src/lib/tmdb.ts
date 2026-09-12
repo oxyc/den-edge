@@ -17,7 +17,11 @@ export async function fetchDetails(
 ): Promise<Details | null> {
   let details: Record<string, unknown>;
   try {
-    const res = await fetchImpl(`https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}`);
+    // Credits ride along with the display: naming a title is the one fetch made for everything in the library,
+    // and who made it is wanted by the billboard's taste. A series bills its cast across seasons.
+    const credits = ref.type === 'tv' ? 'aggregate_credits' : 'credits';
+    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${credits}`;
+    const res = await fetchImpl(url);
     if (!res.ok) return null;
     details = (await res.json()) as Record<string, unknown>;
   } catch {
@@ -85,6 +89,31 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
       ? (details.genres as { id?: unknown }[]).map((g) => g.id).filter((g): g is number => typeof g === 'number')
       : undefined;
   const collection = details.belongs_to_collection as { id?: unknown } | null | undefined;
+  // Whoever the title is most identified with: its director, and the head of its billing. More than a few and
+  // the profile fills with people nobody chose a film for.
+  const credited = (details.credits ?? details.aggregate_credits) as
+    | { cast?: unknown; crew?: unknown }
+    | null
+    | undefined;
+  const ids = (value: unknown, take: number, keep: (entry: Record<string, unknown>) => boolean = () => true) =>
+    Array.isArray(value)
+      ? (value as Record<string, unknown>[])
+          .filter((entry) => entry && keep(entry))
+          .slice(0, take)
+          .flatMap((entry) => (typeof entry.id === 'number' ? [entry.id] : []))
+      : [];
+  const people = [
+    ...ids(credited?.crew, 1, (entry) => entry.job === 'Director'),
+    ...ids(credited?.cast, 3),
+  ];
+  // A film names its production countries; a series names the country it originates in.
+  const made = Array.isArray(details.production_countries)
+    ? (details.production_countries as { iso_3166_1?: unknown }[]).flatMap((c) =>
+        typeof c?.iso_3166_1 === 'string' ? [c.iso_3166_1] : [],
+      )
+    : Array.isArray(details.origin_country)
+      ? details.origin_country.filter((c): c is string => typeof c === 'string')
+      : [];
   return {
     type: ref.type,
     id: ref.id,
@@ -98,6 +127,8 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
     popularity: typeof details.popularity === 'number' ? details.popularity : undefined,
     genreIds,
     originalLanguage: text('original_language'),
+    countries: made.length ? made : undefined,
+    people: people.length ? people : undefined,
     adult: details.adult === true ? true : undefined,
   };
 }

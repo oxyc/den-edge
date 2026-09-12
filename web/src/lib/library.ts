@@ -20,6 +20,12 @@ export interface Title {
   /** TMDB's popularity: how much attention it is getting now, which an unreleased title can have and a rating
       can't measure. The billboard uses it to tell an awaited film from an untracked micro-release. */
   popularity?: number;
+  /** Where it was made (ISO-3166 alpha-2). A better reading of "Nordic" than the language is: the region's
+      co-productions are routinely in two or three languages, and often in English. */
+  countries?: string[];
+  /** Its director and the top of its billing, by TMDB person id: the people a household follows are a taste of
+      their own, and the one signal that crosses genres. */
+  people?: number[];
   /** The TMDB collection a movie belongs to (from a detail fetch), so search can group a franchise. */
   collectionId?: number;
   /** What the TV's hide rules look at (`prefs.ts`): TMDB genre ids, original language, the adult flag. */
