@@ -24,14 +24,23 @@ export interface Candidate {
 const DAY = 86_400_000;
 /** The same 120 days that New Releases calls new, so the billboard and that row can't disagree. */
 const FRESH_DAYS = 120;
-/** Below this a rating is one of a handful of opinions, not a verdict. */
-const ENOUGH_VOTES = 50;
 /**
- * What a title still to come is worth. High, because "out next month" is the most interesting thing a billboard
- * can say — but short of full marks, since an unreleased film nobody has seen yet shouldn't outrank the series
- * half the world is watching this week.
+ * How fast anticipation builds on the way to release — shorter than the decay after it, because "out on Friday"
+ * is worth saying and "out next December" is not.
+ *
+ * Everything unreleased used to score a flat 0.8, which put a film a year away level with one landing this week.
+ * Nearly every candidate the pool turns up is forthcoming, so that single constant sat under two-thirds of the
+ * board at once and no other term could be seen moving underneath it.
  */
-const UNRELEASED = 0.8;
+const ANTICIPATION_DAYS = 45;
+/**
+ * Votes at which a rating stands on its own; below it the score is pulled towards `RATING_PRIOR` in proportion.
+ * The old rule scored anything under fifty votes as a flat zero, which left the quality term dead on precisely
+ * the new releases this billboard is made of.
+ */
+const RATING_PRIOR_VOTES = 200;
+/** What a title is worth before anyone has said: a little above TMDB's middle, where most rated titles land. */
+const RATING_PRIOR = 6.6;
 
 /**
  * How the terms trade off. Freshness leads, but not alone: ranking on recency by itself fills a billboard with
@@ -52,11 +61,9 @@ const TASTE_FLOOR = 0.35;
 const CORROBORATION = 0.3;
 
 /**
- * How the facets of a taste trade off. The genre decides; the rest separate titles the genre can't tell apart.
- * Language is deliberately the smallest: in a library three-quarters in English it would otherwise hand a third
- * of the decision to every Hollywood release for the least interesting fact about it. Only the facets a title
- * can actually be judged on are counted (see `affinity`), which is why language is smaller still than it looks —
- * on a title that arrived with no credits and no countries it would otherwise inflate to a sixth of the answer.
+ * How the facets of a taste trade off; they sum to one. The genre decides; the rest separate titles the genre
+ * can't tell apart. Language is deliberately the smallest, since in a library three-quarters in English it would
+ * otherwise hand a large share of the decision to every Hollywood release for the least interesting fact about it.
  */
 const FACETS = { genres: 0.56, people: 0.22, countries: 0.1, languages: 0.06, decades: 0.06 };
 /** Weight of matching people at which the household counts as following them: one lead is a coincidence. */
@@ -65,6 +72,20 @@ const PEOPLE_ENOUGH = 2;
 const FRANCHISE_LIFT = 0.5;
 /** Weight of dislike that halves a title's affinity. Below it a single bad film marks a title down, not out. */
 const DISLIKE_PATIENCE = 2;
+/**
+ * How a facet is read: not how much of the profile a title matches, but how far that differs from what this
+ * library's own titles match.
+ *
+ * As a level a facet says almost nothing. This household is three-fifths American, three-quarters English and
+ * two-thirds from the 2020s, so an American English title from the 2020s "matched" all three outright, and every
+ * mainstream candidate came out at an identical 0.78 — leaving attention to decide the entire order with taste
+ * along for the ride. As a ratio against the typical, those same facts are correctly uninformative, and the
+ * facets that actually vary between candidates are the ones left deciding. The floor keeps the ratio finite when
+ * a share is zero.
+ */
+const FACET_FLOOR = 0.02;
+/** How sharply the summed facets separate: higher pulls the middle apart and flattens the extremes. */
+const FACET_SHARPNESS = 3;
 
 /**
  * What a library says its viewer likes, facet by facet.
@@ -168,9 +189,12 @@ export function tasteOf(entries: { title: Title; weight?: number }[]): Taste {
   return taste;
 }
 
-/** Whether the household follows the people behind this title, saturating: one shared lead is a coincidence. */
-function following(map: Map<number, number>, people: number[]): number | undefined {
-  if (people.length === 0 || map.size === 0) return undefined;
+/**
+ * Whether the household follows the people behind this title, saturating: one shared lead is a coincidence.
+ * One-sided, unlike the share facets — sharing nobody is the ordinary case and evidence of nothing.
+ */
+function following(map: Map<number, number>, people: number[]): number {
+  if (people.length === 0 || map.size === 0) return 0;
   let met = 0;
   for (const id of new Set(people)) met += Math.max(0, map.get(id) ?? 0);
   return 1 - Math.exp(-met / PEOPLE_ENOUGH);
@@ -195,27 +219,26 @@ function distaste(title: Title, taste: Taste): number {
 }
 
 /**
- * How much a title looks like the library, across every facet either of them knows about.
+ * How much a title looks like the library, read as how far it departs from the library's own average.
  *
- * Facets a title can't be judged on are left out rather than scored zero, and the rest are re-weighted between
- * them: an atlas catalog names a title by id, so most candidates arrive with no credits and no countries, and
- * counting those as "no match" would mark down every title for what TMDB simply wasn't asked.
+ * A facet contributes nothing at all where there is nothing to compare — the title never named it, or the
+ * library holds none of it. An addon catalog names a title by id, so most candidates arrive with no credits and
+ * no countries, and "unknown" has to mean the same as "no evidence" rather than quietly re-weighting whatever
+ * else happened to be known.
  */
 export function affinity(title: Title, taste?: Taste): number {
-  if (!taste) return 0;
+  if (!taste || taste.typical.genres <= 0) return 0;
   const facet = <K>(map: Map<K, number>, keys: K[], typical: number) =>
-    keys.length === 0 || typical <= 0 ? undefined : Math.min(1, shareOf(map, keys) / typical);
-  const parts: [number, number | undefined][] = [
-    [FACETS.genres, facet(taste.genres, genresOf(title), taste.typical.genres)],
-    [FACETS.languages, facet(taste.languages, languagesOf(title), taste.typical.languages)],
-    [FACETS.countries, facet(taste.countries, countriesOf(title), taste.typical.countries)],
-    [FACETS.decades, facet(taste.decades, decadesOf(title), taste.typical.decades)],
-    [FACETS.people, following(taste.people, peopleOf(title))],
-  ];
-  const known = parts.filter((part): part is [number, number] => part[1] !== undefined);
-  const total = known.reduce((sum, [weight]) => sum + weight, 0);
-  if (total <= 0) return 0;
-  const match = known.reduce((sum, [weight, value]) => sum + weight * value, 0) / total;
+    keys.length === 0 || typical <= 0
+      ? 0
+      : Math.tanh(Math.log((shareOf(map, keys) + FACET_FLOOR) / (typical + FACET_FLOOR)));
+  const evidence =
+    FACETS.genres * facet(taste.genres, genresOf(title), taste.typical.genres) +
+    FACETS.languages * facet(taste.languages, languagesOf(title), taste.typical.languages) +
+    FACETS.countries * facet(taste.countries, countriesOf(title), taste.typical.countries) +
+    FACETS.decades * facet(taste.decades, decadesOf(title), taste.typical.decades) +
+    FACETS.people * following(taste.people, peopleOf(title));
+  const match = 1 / (1 + Math.exp(-FACET_SHARPNESS * evidence));
   // The next of something already followed is wanted whatever else it is: a sequel shares a franchise, rarely a
   // genre profile, and nobody who watched the first three needs to be sold the fourth.
   const followed =
@@ -232,12 +255,15 @@ function released(title: Title): Date | undefined {
   return title.year === undefined ? undefined : new Date(Date.UTC(title.year, 6, 1));
 }
 
-/** High for anything not yet out, decaying over four months once it is. Unknown dates score as old. */
+/**
+ * Peaks on release day and falls away either side of it: anticipation building over six weeks before, interest
+ * decaying over four months after. Unknown dates score as old.
+ */
 export function freshness(title: Title, now: Date): number {
   const date = released(title);
   if (!date) return 0;
   const days = (now.getTime() - date.getTime()) / DAY;
-  return days <= 0 ? UNRELEASED : Math.exp(-days / FRESH_DAYS);
+  return days <= 0 ? Math.exp(days / ANTICIPATION_DAYS) : Math.exp(-days / FRESH_DAYS);
 }
 
 /**
@@ -252,7 +278,6 @@ export function buzz({ rank, of, title }: Candidate, busiest = 0): number {
   return Math.max(ranked, Math.min(1, popular));
 }
 
-/** Well-liked, on enough votes to mean it: 6.0 scores nothing, 8.0 and up scores 1. */
 /**
  * Newly watchable on a service this household has. "New to you" rather than "new in the world": a 1997 film that
  * landed on Netflix yesterday is worth a slide, and it is the only term that knows the title can be pressed play
@@ -278,9 +303,17 @@ export function attention(candidate: Candidate, busiest = 0): number {
   return strong + CORROBORATION * weak;
 }
 
+/**
+ * Well liked, on enough votes to mean it. The rating is pulled towards the prior in proportion to how few votes
+ * it rests on, so a 9.4 from eleven people barely leaves the prior while an 8.5 from five hundred arrives nearly
+ * intact — and a title nobody has rated yet scores the prior rather than a zero it has done nothing to earn.
+ */
 export function quality(title: Title): number {
-  if (title.rating === undefined || (title.votes ?? 0) < ENOUGH_VOTES) return 0;
-  return Math.min(1, Math.max(0, (title.rating - 6) / 2));
+  const votes = title.rating === undefined ? 0 : (title.votes ?? 0);
+  const rating = title.rating ?? RATING_PRIOR;
+  const settled =
+    (votes * rating + RATING_PRIOR_VOTES * RATING_PRIOR) / (votes + RATING_PRIOR_VOTES);
+  return Math.min(1, Math.max(0, (settled - 6) / 2));
 }
 
 /**

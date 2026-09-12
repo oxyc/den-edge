@@ -23,11 +23,13 @@ const film = (id: number, extra: Partial<Title> = {}): Title => ({
 });
 
 describe('freshness', () => {
-  it('is high but not full marks for the unreleased, and decays over four months', () => {
-    expect(freshness(film(1, { releaseDate: '2026-12-01' }), NOW)).toBe(0.8);
-    expect(freshness(film(2, { releaseDate: '2026-09-10' }), NOW)).toBeCloseTo(0.983, 2);
-    const old = freshness(film(3, { releaseDate: '2024-01-01' }), NOW);
-    expect(old).toBeLessThan(0.01);
+  it('peaks on release day and falls away either side, faster before than after', () => {
+    expect(freshness(film(1, { releaseDate: '2026-09-12' }), NOW)).toBeCloseTo(1, 6);
+    expect(freshness(film(2, { releaseDate: '2026-09-20' }), NOW)).toBeGreaterThan(0.8);
+    expect(freshness(film(3, { releaseDate: '2026-09-10' }), NOW)).toBeCloseTo(0.983, 2);
+    // Eleven weeks out is not the same thing as landing on Friday, and used to score identically.
+    expect(freshness(film(4, { releaseDate: '2026-12-01' }), NOW)).toBeCloseTo(0.169, 3);
+    expect(freshness(film(5, { releaseDate: '2024-01-01' }), NOW)).toBeLessThan(0.01);
   });
 
   it('places a title known only by its year mid-year, and scores an undated one as old', () => {
@@ -62,10 +64,14 @@ describe('buzz and quality', () => {
     ).toEqual([2, 1]);
   });
 
-  it('ignores a rating too few people gave', () => {
-    expect(quality(film(1, { rating: 8.5, votes: 12 }))).toBe(0);
-    expect(quality(film(2, { rating: 8.5, votes: 500 }))).toBe(1);
-    expect(quality(film(3, { rating: 6, votes: 500 }))).toBe(0);
+  it('pulls a rating towards the prior in proportion to how few votes it rests on', () => {
+    // An 8.5 from twelve people is mostly the prior; the same 8.5 from five hundred is mostly the rating.
+    expect(quality(film(1, { rating: 8.5, votes: 12 }))).toBeCloseTo(0.354, 3);
+    expect(quality(film(2, { rating: 8.5, votes: 500 }))).toBeGreaterThan(0.9);
+    expect(quality(film(3, { rating: 6, votes: 500 }))).toBeLessThan(0.1);
+    // Nobody has rated it yet, which is not the same as it being bad — the old rule scored this a flat zero,
+    // and almost everything a billboard shows is too new to have been rated.
+    expect(quality(film(4))).toBeCloseTo(0.3, 6);
   });
 });
 
@@ -90,7 +96,9 @@ describe('taste', () => {
       watched,
     );
     expect(nordicCrime).toBeGreaterThan(englishHorror);
-    expect(nordicCrime).toBeCloseTo(1, 6);
+    // Made of what this library watches, so well above the middle; made of what it doesn't, well below.
+    expect(nordicCrime).toBeGreaterThan(0.5);
+    expect(englishHorror).toBeLessThan(0.3);
   });
 
   it('lets the language nudge the score rather than decide it', () => {
@@ -107,9 +115,14 @@ describe('taste', () => {
       film(83, { genreIds: [CRIME], originalLanguage: 'sv' }),
       mostlyEnglish,
     );
-    // Both match the genre outright, so both score well and the language separates them barely at all.
-    expect(Math.min(english, swedish)).toBeGreaterThan(0.85);
+    const wrongGenre = affinity(
+      film(84, { genreIds: [HORROR], originalLanguage: 'en' }),
+      mostlyEnglish,
+    );
+    // Both match the genre outright, so the language separates them barely at all …
     expect(english - swedish).toBeLessThanOrEqual(0.1);
+    // … while getting the genre wrong costs several times as much.
+    expect(english - wrongGenre).toBeGreaterThan(3 * (english - swedish));
   });
 
   it('is nothing at all without a profile, so a fresh library still gets a billboard', () => {
@@ -233,8 +246,10 @@ describe('taste beyond genre', () => {
     const started = tasteOf([{ title: film(1, { genreIds: [ACTION], collectionId: 77 }) }]);
     const sequel = affinity(film(10, { genreIds: [DRAMA], collectionId: 77 }), started);
     const unrelated = affinity(film(11, { genreIds: [DRAMA] }), started);
-    expect(unrelated).toBe(0);
-    expect(sequel).toBeCloseTo(0.5, 6);
+    expect(sequel).toBeGreaterThan(unrelated);
+    // Half the remaining distance to a full match, whatever the rest of it scored.
+    expect(sequel).toBeCloseTo(unrelated + (1 - unrelated) * 0.5, 6);
+    expect(sequel).toBeGreaterThan(0.5);
   });
 
   it('marks down what was disliked, while a genre they otherwise watch survives one bad film', () => {
@@ -247,9 +262,12 @@ describe('taste beyond genre', () => {
     const drama = affinity(film(10, { genreIds: [DRAMA] }), turnedDown);
     const alsoAction = affinity(film(12, { genreIds: [DRAMA, ACTION] }), turnedDown);
     const onlyAction = affinity(film(11, { genreIds: [ACTION] }), turnedDown);
-    expect(drama).toBeGreaterThan(0.5);
+    // The genre they otherwise watch is still a match; carrying the rejected one as well costs; being made of
+    // nothing but the rejected one costs everything.
+    expect(drama).toBeGreaterThan(0.4);
     expect(alsoAction).toBeLessThan(drama);
-    expect(onlyAction).toBe(0);
+    expect(onlyAction).toBeLessThan(alsoAction);
+    expect(onlyAction).toBeLessThan(0.1);
   });
 });
 
