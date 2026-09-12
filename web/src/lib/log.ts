@@ -252,10 +252,15 @@ export class LibraryLog {
     const rows = [...this.entries.values()].filter((entry) => entry.seq > 0).map((entry) => entry.row);
     if (!rows.length) return true;
     try {
-      if (this.storage) this.storage.setItem(this.pendingPrefix + 'recovery', JSON.stringify({
+      if (this.storage) this.storage.setItem(this.pendingPrefix + 'recovery:' + crypto.randomUUID(), JSON.stringify({
         restore: await Promise.all(rows.map((row) => seal(this.keys, row))),
       }));
-      this.recoveryRows = rows;
+      const retained = new Map((this.recoveryRows ?? []).map((row) => [rowName(row), row]));
+      for (const row of rows) {
+        const previous = retained.get(rowName(row));
+        retained.set(rowName(row), previous ? merge(previous, row) : row);
+      }
+      this.recoveryRows = [...retained.values()];
       return true;
     } catch { return false; } // Do not discard the old cursors until recovery work is safely retained.
   }
@@ -339,7 +344,7 @@ export class LibraryLog {
         const key = this.storage.key(i);
         if (key?.startsWith(this.pendingPrefix)) keys.push(key);
       }
-      keys.sort((a, b) => Number(a === this.pendingPrefix + 'recovery') - Number(b === this.pendingPrefix + 'recovery'));
+      keys.sort((a, b) => Number(a.startsWith(this.pendingPrefix + 'recovery')) - Number(b.startsWith(this.pendingPrefix + 'recovery')));
       for (const key of keys) {
         try {
           const pending = JSON.parse(this.storage.getItem(key)!) as { k: string; v: string; bulk?: { k: string; v: string }[]; restore?: { k: string; v: string }[] };

@@ -64,6 +64,37 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
 }
 
 describe('LibraryLog', () => {
+  it('a second relay reset cannot overwrite unfinished recovery from the first', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: (k) => { data.delete(k); }, clear: () => data.clear(),
+    };
+    let server = await edge();
+    let writesAllowed = Infinity;
+    const connection: typeof fetch = (url, init) => {
+      if (init?.method === 'POST' && writesAllowed-- <= 0) return Promise.resolve(new Response('{}', { status: 503 }));
+      if (init?.method !== 'POST' && !server.stored.size) return Promise.resolve(new Response('{}', { status: 404 }));
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const journals = Array.from({ length: 40 }, (_, i) => {
+      const before = blankTitle({ type: 'movie', id: i + 1 }, 0);
+      return recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'recovery-' + i)!;
+    });
+    await log.writeActions(journals);
+    server = await edge(); writesAllowed = 1;
+    await log.refresh(); // Only the first 32 journals recover.
+    server = await edge(); writesAllowed = 0;
+    await log.refresh(); // Must retain the first checkpoint, including the unfinished remainder.
+    writesAllowed = Infinity;
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(reopened.pendingActions).toBe(0);
+    expect(reopened.title({ type: 'movie', id: 40 })?.status.value).toBe('watchlist');
+    expect(reopened.settings('tracker-event:recovery-39')).toBeDefined();
+  });
+
   it('republishes acknowledged actions after the relay is restored empty', async () => {
     const data = new Map<string, string>();
     const storage: Storage = {
