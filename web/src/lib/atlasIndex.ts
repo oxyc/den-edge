@@ -10,6 +10,8 @@
 // other index answers.
 
 import type { MediaType } from './library';
+import { loadLabels } from './labelsFile';
+import type { LookupAnswer, LookupRequest } from './labelsWorker';
 
 /**
  * What atlas calls a series.
@@ -46,71 +48,50 @@ async function getJson<T>(url: string, fetchImpl: typeof fetch): Promise<T | nul
   }
 }
 
-interface LabelsFile {
-  records?: {
-    tmdbId?: unknown;
-    mediaType?: unknown;
-    primaryGenre?: unknown;
-    animated?: unknown;
-    subgenres?: unknown;
-    moods?: unknown;
-  }[];
-}
-
-/** The labels file's `{label, confidence}` list as `[label, confidence]` pairs, as atlas's own answers give them. */
-function pairs(list: unknown): [string, number][] {
-  return Array.isArray(list)
-    ? list.flatMap((entry: { label?: unknown; confidence?: unknown } | null) =>
-        typeof entry?.label === 'string' && typeof entry.confidence === 'number'
-          ? [[entry.label, entry.confidence] as [string, number]]
-          : [],
-      )
-    : [];
-}
-
-/** One load per atlas for the page's life; a failed one is dropped, so the next caller asks again. */
+/** One load per atlas for the page's life, where there is no worker to read it; a failed one is dropped. */
 const loads = new Map<string, Promise<Map<string, Labels> | null>>();
 
-/** Every title's labels in the dataset atlas serves at `base`; null when atlas can't be reached. */
-function allLabels(base: string, fetchImpl: typeof fetch): Promise<Map<string, Labels> | null> {
+function loadHere(base: string, fetchImpl: typeof fetch): Promise<Map<string, Labels> | null> {
   const loading = loads.get(base);
   if (loading) return loading;
-  const load = (async () => {
-    const descriptor = await getJson<{ labels?: { url?: unknown } }>(
-      `${base}/dataset.json`,
-      fetchImpl,
-    );
-    const url = descriptor?.labels?.url;
-    if (typeof url !== 'string') return null;
-    // The descriptor names atlas's own address; this page asks atlas under its own origin, at `base`.
-    const blob = new URL(url, 'https://atlas.invalid');
-    const file = await getJson<LabelsFile>(`${base}${blob.pathname}${blob.search}`, fetchImpl);
-    if (!Array.isArray(file?.records)) return null;
-    const all = new Map<string, Labels>();
-    for (const record of file.records) {
-      const type =
-        record.mediaType === 'movie'
-          ? 'movie'
-          : record.mediaType === 'tv' || record.mediaType === 'series'
-            ? 'tv'
-            : null;
-      if (!type || typeof record.tmdbId !== 'number') continue;
-      const key = keyOf({ type, id: record.tmdbId });
-      if (all.has(key)) continue; // as atlas reads the file: the first row wins a duplicate
-      all.set(key, {
-        primaryGenre: typeof record.primaryGenre === 'string' ? record.primaryGenre : undefined,
-        animated: record.animated === true,
-        subgenres: pairs(record.subgenres),
-        moods: pairs(record.moods),
-      });
-    }
-    return all;
-  })();
+  const load = loadLabels(base, fetchImpl);
   loads.set(base, load);
   void load.then((all) => {
     if (!all) loads.delete(base);
   });
   return load;
+}
+
+let worker: Worker | null | undefined;
+let asked = 0;
+const waiting = new Map<number, (entries: [string, Labels][] | null) => void>();
+
+/** The labels of `keys`, looked up by the worker that holds the parsed file; null where no worker could. */
+function lookUpInWorker(base: string, keys: string[]): Promise<Map<string, Labels> | null> {
+  if (worker === undefined) {
+    try {
+      worker = new Worker(new URL('./labelsWorker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = ({ data }: MessageEvent<LookupAnswer>) => {
+        waiting.get(data.id)?.(data.entries);
+        waiting.delete(data.id);
+      };
+      worker.onerror = (event) => {
+        console.warn('den: the labels worker failed', event.message);
+        worker = null;
+        for (const answer of waiting.values()) answer(null);
+        waiting.clear();
+      };
+    } catch (error) {
+      console.warn('den: no labels worker', error);
+      worker = null;
+    }
+  }
+  if (!worker) return Promise.resolve(null);
+  const request: LookupRequest = { id: ++asked, base: new URL(base, location.href).href, keys };
+  return new Promise((resolve) => {
+    waiting.set(request.id, (entries) => resolve(entries && new Map(entries)));
+    worker!.postMessage(request);
+  });
 }
 
 /**
@@ -124,9 +105,13 @@ function allLabels(base: string, fetchImpl: typeof fetch): Promise<Map<string, L
 export async function labelsFor(
   base: string,
   refs: Ref[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<Map<string, Labels>> {
-  const all = await allLabels(base, fetchImpl);
+  // The file is parsed on the worker's thread; a caller bringing its own fetch (the tests) reads it here instead.
+  const all =
+    !fetchImpl && typeof Worker !== 'undefined'
+      ? await lookUpInWorker(base, refs.map(keyOf))
+      : await loadHere(base, fetchImpl ?? fetch);
   const found = new Map<string, Labels>();
   for (const ref of refs) {
     const labels = all?.get(keyOf(ref));
