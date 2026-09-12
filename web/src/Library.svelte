@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import Detail from './components/Detail.svelte';
@@ -22,7 +23,7 @@
     updateProgress,
     WATCHED,
   } from './lib/actions';
-  import { pickBillboard } from './lib/billboard';
+  import { pickBillboard, tasteOf } from './lib/billboard';
   import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
@@ -276,6 +277,20 @@
   /** The billboard's own rule: everything the rows hide, except the missing poster it doesn't draw. */
   const featuredShown = (title: Title) =>
     !isHidden(title, prefs, { requirePoster: false }) && !(prefs.hideWatched && watched.has(titleKey(title)));
+  /**
+   * What this library says it likes, for the billboard's taste term. Watched and part-watched titles are a
+   * verdict and count full; a watchlisted one is an intention and counts for less. Titles TMDB hasn't named yet
+   * carry no genres, so they simply don't vote.
+   */
+  const taste = $derived.by(() => {
+    const weightOf = (status: string) => (status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0);
+    return tasteOf(
+      (library?.records ?? []).flatMap((r) => {
+        const weight = r.deleted || r.title.title === '' ? 0 : weightOf(r.status);
+        return weight > 0 ? [{ title: r.title, weight }] : [];
+      }),
+    );
+  });
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -373,7 +388,12 @@
           ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
         ];
         // Never a title this library already holds: the billboard is for what hasn't been found yet.
-        const picked = pickBillboard(pool, { keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) });
+        // Read, not watched. The profile thickens with every title TMDB names, and a billboard that re-sorted
+        // on each of them would shuffle its slides under the viewer's finger — the rail stays where it is
+        // while the keyed slides reorder around it, so the picture and the words come apart.
+        const picked = untrack(() =>
+          pickBillboard(pool, { taste, keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) }),
+        );
         if (rows === table) featured = picked;
       })
       .catch(() => undefined);

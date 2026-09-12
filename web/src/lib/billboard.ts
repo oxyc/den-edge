@@ -30,7 +30,43 @@ const ENOUGH_VOTES = 50;
  * whatever came out last, and most of what comes out in any given week is an untracked micro-release nobody is
  * looking for. Attention is weighted to match it, so among new things the ones people are actually watching win.
  */
-export const WEIGHTS = { fresh: 0.3, buzz: 0.3, quality: 0.15 };
+export const WEIGHTS = { fresh: 0.3, buzz: 0.3, quality: 0.15, taste: 0.35 };
+
+/** What a library says its viewer likes: how much of it sits in each genre, and in each original language. */
+export interface Taste {
+  genres: Map<number, number>;
+  languages: Map<string, number>;
+}
+
+/**
+ * The shape of a library. Weights let a watched title count for more than a watchlisted one — the first is a
+ * verdict, the second only an intention.
+ */
+export function tasteOf(entries: { title: Title; weight?: number }[]): Taste {
+  const genres = new Map<number, number>();
+  const languages = new Map<string, number>();
+  for (const { title, weight = 1 } of entries) {
+    for (const id of title.genreIds ?? []) genres.set(id, (genres.get(id) ?? 0) + weight);
+    const language = title.originalLanguage;
+    if (language) languages.set(language, (languages.get(language) ?? 0) + weight);
+  }
+  return { genres, languages };
+}
+
+/**
+ * How much a title looks like the library. Its best-matching genre rather than its average one — a Nordic crime
+ * drama shouldn't be marked down for also being tagged Mystery — read against the strongest genre in the
+ * profile, since a large library spreads its shares thin. Language carries the rest: "Nordic" is a language
+ * before it is a genre.
+ */
+export function affinity(title: Title, taste?: Taste): number {
+  if (!taste) return 0;
+  const topGenre = Math.max(0, ...taste.genres.values());
+  const topLanguage = Math.max(0, ...taste.languages.values());
+  const genre = topGenre > 0 ? Math.max(0, ...(title.genreIds ?? []).map((id) => taste.genres.get(id) ?? 0)) / topGenre : 0;
+  const language = topLanguage > 0 ? (taste.languages.get(title.originalLanguage ?? '') ?? 0) / topLanguage : 0;
+  return 0.7 * genre + 0.3 * language;
+}
 
 /** When it came out, as a date. A title known only by its year is placed mid-year — coarse, but honest. */
 function released(title: Title): Date | undefined {
@@ -67,11 +103,12 @@ export function quality(title: Title): number {
   return Math.min(1, Math.max(0, (title.rating - 6) / 2));
 }
 
-export function score(candidate: Candidate, now: Date, busiest = 0): number {
+export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
   return (
     WEIGHTS.fresh * freshness(candidate.title, now) +
     WEIGHTS.buzz * buzz(candidate, busiest) +
-    WEIGHTS.quality * quality(candidate.title)
+    WEIGHTS.quality * quality(candidate.title) +
+    WEIGHTS.taste * affinity(candidate.title, taste)
   );
 }
 
@@ -84,7 +121,12 @@ const keyOf = (title: Title) => `${title.type}:${title.id}`;
  */
 export function pickBillboard(
   candidates: Candidate[],
-  { now = new Date(), slides = 40, keep = () => true }: { now?: Date; slides?: number; keep?: (title: Title) => boolean } = {},
+  {
+    now = new Date(),
+    slides = 40,
+    keep = () => true,
+    taste,
+  }: { now?: Date; slides?: number; keep?: (title: Title) => boolean; taste?: Taste } = {},
 ): Title[] {
   const seen = new Set<string>();
   const running: Candidate[] = [];
@@ -97,7 +139,7 @@ export function pickBillboard(
   const busiest = running.reduce((most, { title }) => Math.max(most, title.popularity ?? 0), 0);
   // A stable sort, so candidates that score the same keep the order their source put them in.
   return running
-    .map((candidate) => ({ candidate, score: score(candidate, now, busiest) }))
+    .map((candidate) => ({ candidate, score: score(candidate, now, busiest, taste) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, slides)
     .map(({ candidate }) => candidate.title);

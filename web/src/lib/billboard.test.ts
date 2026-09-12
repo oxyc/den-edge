@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buzz, freshness, pickBillboard, quality, type Candidate } from './billboard';
+import { affinity, buzz, freshness, pickBillboard, quality, tasteOf, type Candidate } from './billboard';
 import type { Title } from './library';
 
 const NOW = new Date('2026-09-12T00:00:00Z');
@@ -51,6 +51,37 @@ describe('buzz and quality', () => {
     expect(quality(film(1, { rating: 8.5, votes: 12 }))).toBe(0);
     expect(quality(film(2, { rating: 8.5, votes: 500 }))).toBe(1);
     expect(quality(film(3, { rating: 6, votes: 500 }))).toBe(0);
+  });
+});
+
+describe('taste', () => {
+  const CRIME = 80;
+  const HORROR = 27;
+  // A library of Nordic crime, with one horror film in it.
+  const watched = tasteOf([
+    { title: film(1, { genreIds: [CRIME], originalLanguage: 'sv' }) },
+    { title: film(2, { genreIds: [CRIME], originalLanguage: 'da' }) },
+    { title: film(3, { genreIds: [CRIME], originalLanguage: 'sv' }) },
+    { title: film(4, { genreIds: [HORROR], originalLanguage: 'en' }), weight: 0.6 },
+  ]);
+
+  it('scores a title by its best genre and its language, not by an average', () => {
+    const nordicCrime = affinity(film(9, { genreIds: [CRIME, 9648], originalLanguage: 'sv' }), watched);
+    const englishHorror = affinity(film(10, { genreIds: [HORROR], originalLanguage: 'en' }), watched);
+    expect(nordicCrime).toBeGreaterThan(englishHorror);
+    expect(nordicCrime).toBeCloseTo(1, 6);
+  });
+
+  it('is nothing at all without a profile, so a fresh library still gets a billboard', () => {
+    expect(affinity(film(11, { genreIds: [CRIME] }))).toBe(0);
+    expect(affinity(film(12, { genreIds: [CRIME] }), tasteOf([]))).toBe(0);
+  });
+
+  it('lifts the on-taste title above an equally new one that is louder', () => {
+    const onTaste = film(20, { releaseDate: '2026-09-05', genreIds: [CRIME], originalLanguage: 'sv', popularity: 40 });
+    const loudHorror = film(21, { releaseDate: '2026-09-05', genreIds: [HORROR], originalLanguage: 'en', popularity: 400 });
+    const picked = pickBillboard([{ title: loudHorror }, { title: onTaste }], { now: NOW, taste: watched });
+    expect(picked.map((t) => t.id)).toEqual([20, 21]);
   });
 });
 

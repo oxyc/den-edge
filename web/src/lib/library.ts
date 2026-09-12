@@ -136,11 +136,18 @@ export function applyLog(library: Library, rows: Row[]): Library {
 const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
   `${m.type}:${m.id}:${m.season}:${m.episode}`;
 
-/** Titles the rows would show that have no display yet: library titles, and series only episode progress names. */
+/**
+ * Titles with no display yet: the ones the rows would show, and series that only episode progress names.
+ *
+ * Watched titles are named too, though no row lists them. What has been watched is the only record of what this
+ * viewer likes — its genres and its language are the whole taste signal — and an unnamed record carries neither.
+ * Leaving them out let the billboard fill with horror and action for a household that watches Nordic crime.
+ */
 export function untitled(library: Library): { type: MediaType; id: number }[] {
   const refs = new Map<string, { type: MediaType; id: number }>();
   for (const r of library.records) {
-    if (!r.deleted && r.title.title === '' && (r.status === 'watchlist' || r.status === 'inProgress')) {
+    const wanted = r.status === 'watchlist' || r.status === 'inProgress' || r.status === 'watched';
+    if (!r.deleted && r.title.title === '' && wanted) {
       refs.set(titleKey(r.title), { type: r.title.type, id: r.title.id });
     }
   }
