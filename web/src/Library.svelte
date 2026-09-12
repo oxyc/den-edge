@@ -5,7 +5,13 @@
   import Browse from './components/Browse.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
-  import { DetailScreen, PersonScreen, PlayerScreen, SearchScreen } from './lib/screens.svelte';
+  import {
+    DetailScreen,
+    PersonScreen,
+    PlayerScreen,
+    preloadScreens,
+    SearchScreen,
+  } from './lib/screens.svelte';
   import {
     addToWatchlist,
     blankEpisode,
@@ -639,6 +645,22 @@
   let featured = $state<Title[]>([]);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
+  /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
+  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v1.${type ?? 'all'}`;
+  // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
+  // for the library's profile, and the page shouldn't.
+  $effect(() => {
+    const opened = log;
+    const name = keptBillboard(facet);
+    if (!opened || !tmdbKey) return;
+    void opened.kept<Title[]>(name).then((saved) => {
+      if (saved?.length && !featured.length) featured = saved;
+    });
+  });
+  // The screens Home doesn't draw load once its shelves are up, not while Home still needs the network.
+  $effect(() => {
+    if (shelvesReady) preloadScreens();
+  });
   $effect(() => {
     // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be
     // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
@@ -657,12 +679,7 @@
     // fetches came back meant the answer was always judged stale and thrown away, and the billboard stayed
     // empty. A build is stale only when a later build has started.
     const run = ++billboardRun;
-    // A return visit shows the billboard it picked last time while this one is built.
-    const kept = `billboard.v1.${type ?? 'all'}`;
-    if (!featured.length)
-      void log?.kept<Title[]>(kept).then((saved) => {
-        if (saved?.length && !featured.length) featured = saved;
-      });
+    const kept = keptBillboard(type);
     // A late discovery service can improve the pool. Keep the current slides while it loads.
     if (!table.length) return;
     const row = (id: string) =>
@@ -739,7 +756,8 @@
           keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
         });
         if (run === billboardRun && (picked.length || !featured.length)) {
-          featured = keepLead(picked, featured[0]);
+          const lead = featured[0];
+          featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
           if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
         }
       })
@@ -747,12 +765,13 @@
   }
 
   /**
-   * `picked`, with the title the billboard already shows kept in front when it is still among them: a rebuild — or
-   * this visit's pick replacing the last one's — must not swap the picture out from under someone looking at it.
+   * `picked`, with the title the billboard already shows kept in front, whether or not this pick chose it: a
+   * rebuild — or this visit's pick replacing the last one's — must not swap the picture out from under someone
+   * looking at it. The rest of the slides are this pick's, and the next visit leads with it.
    */
   function keepLead(picked: Title[], lead: Title | undefined): Title[] {
-    const at = lead ? picked.findIndex((t) => titleKey(t) === titleKey(lead)) : -1;
-    return at > 0 ? [picked[at]!, ...picked.slice(0, at), ...picked.slice(at + 1)] : picked;
+    if (!lead || !picked.length) return picked;
+    return [lead, ...picked.filter((t) => titleKey(t) !== titleKey(lead))];
   }
 
   /**

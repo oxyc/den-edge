@@ -34,8 +34,12 @@ export const PlayerScreen = lazy(() => import('../components/Player.svelte'));
 export const SettingsScreen = lazy(() => import('../Settings.svelte'));
 export const LinkScreen = lazy(() => import('../LinkTV.svelte'));
 
-/** Every screen a paired page can open, fetched while the browser is idle after Home has painted. */
+let preloading = false;
+
+/** Every screen a paired page can open, fetched once while the browser is idle after Home has painted. */
 export function preloadScreens(): void {
+  if (preloading) return;
+  preloading = true;
   const load = () => {
     if (!navigator.onLine) return;
     for (const screen of [DetailScreen, PersonScreen, SearchScreen, PlayerScreen, SettingsScreen])
