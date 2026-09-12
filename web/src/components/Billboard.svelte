@@ -499,12 +499,12 @@
     max-width: 720px;
     min-height: 190px;
     align-content: end;
-    text-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+    text-shadow: 0 1px 3px rgb(0 0 0 / 0.65), 0 0 18px rgb(0 0 0 / 0.4);
   }
 
   @media (max-width: 759px) {
     .text {
-      text-shadow: 0 1px 4px rgb(0 0 0 / 0.8), 0 0 20px rgb(0 0 0 / 0.5);
+      text-shadow: 0 1px 4px rgb(0 0 0 / 0.85), 0 0 22px rgb(0 0 0 / 0.55);
     }
   }
 
@@ -520,9 +520,12 @@
     text-decoration: none;
   }
 
+  /* Nearly white, not the app's secondary grey. That grey is chosen for the page's dark ground; over a
+     photograph — a white wall, a bright sky — it disappears entirely, and a year and two genres are exactly
+     the sort of small text that goes first. */
   .facts {
     margin: 0;
-    color: var(--muted);
+    color: rgb(255 255 255 / 0.92);
     font-size: 14px;
   }
 
@@ -534,7 +537,7 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 3;
     line-clamp: 3;
-    color: rgb(231 231 234 / 0.8);
+    color: rgb(255 255 255 / 0.88);
     font-size: 15px;
   }
 
