@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT } from './scout';
+import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere } from './scout';
 
 const ROUTES: Routes = {
   scout: [{ url: 'http://192.168.86.193:8080' }, { url: 'https://pve.example:8443/scout' }, { url: 'https://d-scout.oxy.fi', access: true }],
@@ -39,6 +39,36 @@ describe('findAddon', () => {
   it('is null when no plugin is scout, or the table has none', async () => {
     expect(await findAddon([THEIRS], ROUTES, SCOUT, addons({}).fetchImpl)).toBeNull();
     expect(await findAddon([SCOUT_LAN], {}, SCOUT, addons({}).fetchImpl)).toBeNull();
+  });
+});
+
+describe('trendingEverywhere', () => {
+  const meta = (id: number, name: string) => ({ moviedb_id: id, name, releaseInfo: '2026' });
+  const catalogs: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url === '/atlas/catalog/movie/jw-trending.json') {
+      return new Response(JSON.stringify({ metas: [meta(1, 'A movie'), meta(2, 'Another movie'), { name: 'No id' }] }));
+    }
+    if (url === '/atlas/catalog/series/jw-trending.json') {
+      return new Response(JSON.stringify({ metas: [meta(3, 'A series')] }));
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  it('reads both types by TMDB id and interleaves them', async () => {
+    expect(await trendingEverywhere('/atlas', catalogs)).toEqual([
+      { type: 'movie', id: 1, title: 'A movie', year: 2026 },
+      { type: 'tv', id: 3, title: 'A series', year: 2026 },
+      { type: 'movie', id: 2, title: 'Another movie', year: 2026 },
+    ]);
+  });
+
+  it('is empty when atlas is out of reach, so the caller can fall back', async () => {
+    const dead: typeof fetch = async () => {
+      throw new Error('offline');
+    };
+    expect(await trendingEverywhere('/atlas', dead)).toEqual([]);
+    expect(await trendingEverywhere('/nope', catalogs)).toEqual([]);
   });
 });
 

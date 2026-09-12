@@ -4,6 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
+import type { MediaType, Title } from './library';
 import { within, type Routes } from './routes';
 
 export interface Addon {
@@ -69,6 +70,37 @@ const DEN_ADDONS = [
 export function denAddonOf(url: string, routes: Routes): { label: string; role: string } | null {
   const install = url.endsWith(MANIFEST) ? url.slice(0, -MANIFEST.length) : url;
   return DEN_ADDONS.find((addon) => within(install, routes[addon.name]) !== null) ?? null;
+}
+
+/** The titles in one of atlas's catalogs, by TMDB id — the rest (backdrop, plot, genres) comes from TMDB. */
+function catalogTitles(body: unknown, type: MediaType): Title[] {
+  const metas = (body as { metas?: unknown } | null)?.metas;
+  if (!Array.isArray(metas)) return [];
+  return (metas as Record<string, unknown>[]).flatMap((meta) => {
+    const year = Number.parseInt(String(meta.releaseInfo ?? ''), 10);
+    if (typeof meta.moviedb_id !== 'number' || typeof meta.name !== 'string') return [];
+    return [{ type, id: meta.moviedb_id, title: meta.name, year: Number.isFinite(year) ? year : undefined }];
+  });
+}
+
+/**
+ * atlas's "Trending Everywhere" (`jw-trending`) — the catalog the TV's Movies and Series billboards lead with.
+ * Both types, interleaved so neither buries the other. Empty when atlas is out of reach, which leaves the caller
+ * to fall back rather than showing nothing.
+ */
+export async function trendingEverywhere(base: string, fetchImpl: typeof fetch = fetch): Promise<Title[]> {
+  const load = async (type: 'movie' | 'series'): Promise<Title[]> => {
+    try {
+      const res = await fetchImpl(`${base}/catalog/${type}/jw-trending.json`);
+      return res.ok ? catalogTitles(await res.json(), type === 'series' ? 'tv' : 'movie') : [];
+    } catch {
+      return [];
+    }
+  };
+  const [movies, series] = await Promise.all([load('movie'), load('series')]);
+  return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [movies[i], series[i]])
+    .flat()
+    .filter((title): title is Title => title !== undefined);
 }
 
 /** The library's installs of the service `name` (den-subtitles, for den-remux), without their manifest file. */

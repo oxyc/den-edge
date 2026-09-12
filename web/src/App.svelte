@@ -67,14 +67,17 @@
 </main>
 
 <style>
+  /* Fixed rather than sticky: it takes no space in the flow, so a hero can run the full height of the window
+     underneath it and the page's own top padding is one stated measure (--bar-space) instead of a sum. */
   .bar {
-    position: sticky;
+    position: fixed;
     top: max(12px, env(safe-area-inset-top));
+    right: var(--gutter);
+    left: var(--gutter);
     z-index: 10;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: 12px var(--gutter) 0;
     padding: 12px 20px;
     border-radius: 999px;
   }
@@ -104,6 +107,9 @@
   main {
     max-width: 1400px;
     margin: 0 auto;
-    padding: 28px var(--gutter) calc(32px + env(safe-area-inset-bottom));
+    /* Clip, not hidden: a full-bleed child is exactly as wide as the window, and a scrollbar would otherwise
+       make that an overflow. Clip leaves the page's own scrolling alone. */
+    overflow-x: clip;
+    padding: var(--bar-space) var(--gutter) calc(32px + env(safe-area-inset-bottom));
   }
 </style>

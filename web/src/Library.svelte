@@ -46,7 +46,7 @@
   import { titleHref, type Route } from './lib/route';
   import { findRemux } from './lib/remux';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { findAddon, findAtlas, installsOf, SCOUT, type Addon } from './lib/scout';
+  import { findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -343,10 +343,17 @@
   let featured = $state<Title[]>([]);
   $effect(() => {
     const lead = route.page === 'library' ? rows[0] : undefined;
+    // Read once: this re-runs when atlas resolves, and the billboard is rebuilt from whichever source answered.
+    const here = atlas;
     featured = [];
     if (!lead) return;
-    void lead
-      .load(1)
+    // atlas's "Trending Everywhere" leads it, as it leads the TV's Movies and Series billboards — the plugins
+    // are what Den knows about what is being watched. Where atlas is out of reach, the leading row stands in
+    // (two TMDB pages: the billboard carries forty slides and a page is twenty), as it does on the TV's Home.
+    const rowPages = () =>
+      Promise.all([lead.load(1), lead.load(2).catch(() => [])]).then(([first, second]) => [...first, ...second]);
+    void (here ? trendingEverywhere(here) : Promise.resolve([]))
+      .then((list) => (list.length ? list : rowPages()))
       .then((list) => {
         if (rows[0] === lead) featured = list;
       })
@@ -391,6 +398,11 @@
 {:else}
   {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
   {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
+  <!-- The billboard leads the page, as it does on the TV: it reaches the top of the window and runs up behind
+       the bar, so search follows it rather than pushing it down the screen. -->
+  {#if !hits && !facet && tmdbKey && featured.length}
+    <Billboard titles={featured.filter(browseShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
+  {/if}
   {#if sources && !facet}
     <input
       class="search glass"
@@ -403,9 +415,6 @@
     />
   {:else if !sources}
     <p class="note">Search needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
-  {/if}
-  {#if !hits && !facet && tmdbKey && featured.length}
-    <Billboard titles={featured.filter(browseShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
   {/if}
   {#if hits}
     {#if hits.length}

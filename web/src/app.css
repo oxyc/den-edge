@@ -12,6 +12,9 @@
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
+  /* What the floating bar takes off the top of a page: its own height, where it sits, and the air under it.
+     Pages pad by it, and a full-bleed hero pulls back through it to reach the top of the window. */
+  --bar-space: calc(max(12px, env(safe-area-inset-top)) + 46px + 16px);
   --glass-bg: rgb(28 28 34 / 0.55);
   --glass-edge: rgb(255 255 255 / 0.12);
   --glass-blur: blur(24px) saturate(160%);
