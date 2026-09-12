@@ -82,6 +82,19 @@ describe('taste', () => {
     expect(nordicCrime).toBeCloseTo(1, 6);
   });
 
+  it('lets the language nudge the score rather than decide it', () => {
+    // Nine parts English to one part Swedish, and two titles alike but for their language.
+    const mostlyEnglish = tasteOf([
+      { title: film(80, { genreIds: [CRIME], originalLanguage: 'en' }), weight: 9 },
+      { title: film(81, { genreIds: [CRIME], originalLanguage: 'sv' }) },
+    ]);
+    const english = affinity(film(82, { genreIds: [CRIME], originalLanguage: 'en' }), mostlyEnglish);
+    const swedish = affinity(film(83, { genreIds: [CRIME], originalLanguage: 'sv' }), mostlyEnglish);
+    // Both match the genre outright, so both score well and the language separates them barely at all.
+    expect(Math.min(english, swedish)).toBeGreaterThan(0.85);
+    expect(english - swedish).toBeLessThanOrEqual(0.1);
+  });
+
   it('is nothing at all without a profile, so a fresh library still gets a billboard', () => {
     expect(affinity(film(11, { genreIds: [CRIME] }))).toBe(0);
     expect(affinity(film(12, { genreIds: [CRIME] }), tasteOf([]))).toBe(0);

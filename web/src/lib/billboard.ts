@@ -84,7 +84,11 @@ export function affinity(title: Title, taste?: Taste): number {
   const topLanguage = Math.max(0, ...taste.languages.values());
   const genre = topGenre > 0 ? Math.max(0, ...(title.genreIds ?? []).map((id) => taste.genres.get(id) ?? 0)) / topGenre : 0;
   const language = topLanguage > 0 ? (taste.languages.get(title.originalLanguage ?? '') ?? 0) / topLanguage : 0;
-  return 0.7 * genre + 0.3 * language;
+  // Language nudges; the genre decides. It used to be worth a third, which in a library three-quarters in
+  // English handed that third to every Hollywood release for the least interesting fact about it. Weighting it
+  // by how rare the match is was worse: in a mostly-Swedish library a single English film would then make every
+  // English title look like a match. A tenth, and no cleverness.
+  return 0.9 * genre + 0.1 * language;
 }
 
 /** When it came out, as a date. A title known only by its year is placed mid-year — coarse, but honest. */
