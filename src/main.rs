@@ -30,6 +30,8 @@ pub struct AppState {
     /// The record logs loaded so far, by library id — one household's, a few MB at most. Held across a batch
     /// or a read, so each library's compare-and-set is one step.
     pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
+    /// Memory budgets include keys and conservative allocation overhead, not only ciphertext.
+    pub library_limits: library::Limits,
     /// Guesses per client address, to keep a pairing's nameplate from being guessed online.
     pub claims: Mutex<HashMap<String, link::Throttle>>,
     /// Pairing sessions by `sid`. Ten minutes long at most, so memory is enough: a restart costs a pairing in
@@ -75,6 +77,7 @@ impl AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
             libraries: tokio::sync::Mutex::new(HashMap::new()),
+            library_limits: library::Limits::default(),
             claims: Mutex::new(HashMap::new()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
@@ -151,6 +154,8 @@ async fn main() {
         })
     });
     let state = Arc::new(state);
+    inbox::sweep(&state).await;
+    tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);

@@ -51,11 +51,22 @@ ciphertext the clients seal and merge.
 Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
 the change, reads the log from the start and writes back what the snapshot lacks (den-spec library-v2 §2).
 
-A queue is kept for a week after its last message; everything else is kept until it is replaced. Pairing
+A queue is kept for a week after its last message. Expired queues are reclaimed at startup and hourly,
+including abandoned links, and their bytes are returned to the shared storage quota. Everything else is kept until it is replaced. Pairing
 sessions live in memory: a restart costs a pairing in progress, which the TV starts again.
 
 The whole store holds at most `STORE_CAP_BYTES`: a write that would pass it is refused with `507`, so whoever
-can reach den-edge can't fill the host's disk. A library holds at most 50,000 rows (`413`).
+can reach den-edge can't fill the host's disk. A library holds at most 50,000 rows and an 8 MiB memory charge
+(`413 library_full`). The charge includes twice the key/value byte lengths plus row/map overhead. The
+combined library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
+their durable logs. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
+preserved on disk and refused, rather than loaded into the 64 MiB container; their owner can still delete
+them. Changes pages are bounded by bytes as well as the requested row count, so follow `more` until done.
+
+The addon relay forwards only `Content-Type`, `Cache-Control`, `Server-Timing`, and `X-Den-Degraded` from
+upstream responses. Cookies, redirect locations, and upstream CORS permissions stay behind the relay.
+Host classification parses the authority before matching: explicit ports and DNS root dots do not move
+a configured public name into the LAN fallback. Malformed or duplicate Host fields are refused.
 
 ## Configuration
 

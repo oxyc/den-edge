@@ -69,10 +69,16 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     let Ok(bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     };
-    // The addon's answer and how long it may be kept; none of its other headers (a cookie, a CORS grant).
+    // Only the answer's cache policy and diagnostic fields cross this boundary. In particular an
+    // upstream cannot set a cookie, redirect the browser, or grant another origin access.
     let mut resp = Response::new(Body::from(bytes));
     *resp.status_mut() = parts.status;
-    for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::HeaderName::from_static("server-timing"),
+        header::HeaderName::from_static("x-den-degraded"),
+    ] {
         if let Some(value) = parts.headers.get(&name) {
             resp.headers_mut().insert(name, value.clone());
         }

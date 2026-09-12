@@ -48,6 +48,26 @@ export interface Want {
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
 
+/** A direct LAN/tailnet probe must finish even when an unreachable route silently drops packets. */
+export const REMUX_PROBE_TIMEOUT_MS = 3_000;
+
+// A cross-site remux cannot rely on cookies. Keep its short-lived signed credential in this page's
+// memory, scoped to exactly the service that issued it; never persist the browser's login key.
+const browserTokens = new Map<string, string>();
+const browserBase = (base: string) => new URL(base, globalThis.location?.href ?? 'https://den.invalid/').href.replace(/\/$/, '');
+
+/** Forget page-local credentials (tests). */
+export function forgetBrowserTokens(): void { browserTokens.clear(); }
+
+function browserHeaders(base: string): Record<string, string> {
+  const token = browserTokens.get(browserBase(base));
+  return { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) };
+}
+
+function forgetRefusedToken(base: string, response: Response): void {
+  if (response.status === 401) browserTokens.delete(browserBase(base));
+}
+
 /**
  * Where den-remux answers for this page: the first of its routes-table entries (den-spec routes-v1) this page can use
  * whose `/health` answers — none behind Access (a browser holds no token), and no plain http from an https page — or
@@ -60,11 +80,24 @@ export async function findRemux(
 ): Promise<string | null> {
   for (const entry of entries) {
     if (entry.access || (secure && entry.url.startsWith('http:'))) continue;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('remux health deadline'));
+      }, REMUX_PROBE_TIMEOUT_MS);
+    });
     try {
-      const res = await fetchImpl(`${entry.url}/health`);
-      if (res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string') return entry.url;
+      const probe = async () => {
+        const res = await fetchImpl(`${entry.url}/health`, { signal: controller.signal });
+        return res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string';
+      };
+      if (await Promise.race([probe(), expired])) return entry.url;
     } catch {
       // Out of reach from here, or not den-remux: the next.
+    } finally {
+      clearTimeout(timer);
     }
   }
   return null;
@@ -78,7 +111,13 @@ export async function login(key: string, fetchImpl: typeof fetch = fetch, base =
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ key }),
     });
-    if (res.ok) return true;
+    if (res.ok) {
+      const token = res.headers.get('x-den-browser-token');
+      if (token) browserTokens.set(browserBase(base), token);
+      else browserTokens.delete(browserBase(base)); // an older server still sets its same-origin cookie
+      return true;
+    }
+    forgetRefusedToken(base, res);
     return res.status === 401 ? false : null;
   } catch {
     return null;
@@ -113,7 +152,7 @@ export async function startSession(
     try {
       res = await fetchImpl(`${base}/session`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: browserHeaders(base),
         body: JSON.stringify(body),
       });
     } catch {
@@ -125,6 +164,7 @@ export async function startSession(
       const session = (await res.json()) as Session;
       return /^https?:/.test(base) ? { ...session, playlist: new URL(session.playlist, base).href } : session;
     }
+    forgetRefusedToken(base, res);
     const error = await errorCode(res);
     if (error === 'bad_subtitles' && candidate) {
       subtitleVerdicts.set(candidate, false); // not den-subtitles: the next, or none
@@ -175,9 +215,10 @@ export async function listReleases(
   try {
     const res = await fetchImpl(`${base}/releases`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: browserHeaders(base),
       body: JSON.stringify(title),
     });
+    forgetRefusedToken(base, res);
     if (!res.ok) return null;
     const releases = ((await res.json()) as { releases?: unknown }).releases;
     return Array.isArray(releases)

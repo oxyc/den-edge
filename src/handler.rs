@@ -152,6 +152,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes)),
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
+            resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             resp.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
@@ -177,12 +178,40 @@ pub enum Face {
     Web,
     Api,
     Both,
+    Invalid,
 }
 
 impl Face {
     fn of(state: &AppState, req: &Request) -> Face {
-        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).or_else(|| req.uri().host());
-        let named = |names: &[String]| host.is_some_and(|h| names.iter().any(|n| n.eq_ignore_ascii_case(h)));
+        let mut fields = req.headers().get_all(header::HOST).iter();
+        let first = fields.next();
+        if fields.next().is_some() {
+            return Face::Invalid;
+        }
+        let raw = match first {
+            Some(h) => match h.to_str() {
+                Ok(h) => Some(h),
+                Err(_) => return Face::Invalid,
+            },
+            None => req.uri().authority().map(|a| a.as_str()),
+        };
+        let host = match raw {
+            Some(raw) => match raw.parse::<axum::http::uri::Authority>() {
+                Ok(a) if !raw.contains('@') && (a.port().is_none() || a.port_u16().is_some()) => {
+                    let name = a.host().trim_end_matches('.').to_ascii_lowercase();
+                    if name.is_empty() {
+                        return Face::Invalid;
+                    }
+                    Some(name)
+                }
+                _ => return Face::Invalid,
+            },
+            None => None,
+        };
+        let named = |names: &[String]| {
+            host.as_ref()
+                .is_some_and(|h| names.iter().any(|n| n.trim_end_matches('.').eq_ignore_ascii_case(h)))
+        };
         if named(&state.web_hosts) {
             Face::Web
         } else if named(&state.api_hosts) {
@@ -202,6 +231,7 @@ impl Face {
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
         match (self, path) {
+            (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes") | (Face::Both, _) => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,
@@ -282,10 +312,9 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
     raw_json(status, Body::from(body.to_string()), true)
 }
 
-/// The router's own answers (health, version, the guards, 404), which the Worker sent without a
-/// cache-control header.
+/// Router answers must not pin health, a credential refusal, or an error in an intermediary cache.
 fn bare_json(status: StatusCode, body: &Value) -> Response {
-    raw_json(status, Body::from(body.to_string()), false)
+    raw_json(status, Body::from(body.to_string()), true)
 }
 
 pub fn raw_json(status: StatusCode, body: Body, no_store: bool) -> Response {
@@ -519,6 +548,15 @@ pub mod tests {
             let mut resp = Response::new(Body::from(seen.to_string()));
             resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             resp.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("tracking=1"));
+            resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            resp.headers_mut().insert("server-timing", HeaderValue::from_static("cache;desc=stale"));
+            resp.headers_mut().insert("x-den-degraded", HeaderValue::from_static("upstream_unavailable"));
+            resp.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("https://untrusted.example"),
+            );
+            resp.headers_mut()
+                .insert(header::LOCATION, HeaderValue::from_static("https://untrusted.example"));
             resp
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -545,6 +583,11 @@ pub mod tests {
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!resp.headers().contains_key(header::SET_COOKIE), "the addon's cookie stays behind");
+        assert_eq!(resp.headers()["server-timing"], "cache;desc=stale");
+        assert_eq!(resp.headers()["x-den-degraded"], "upstream_unavailable");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!resp.headers().contains_key(header::LOCATION));
+        assert!(!resp.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
         assert_eq!(
             body_json(resp).await,
             json!({
@@ -743,5 +786,30 @@ pub mod tests {
             text.contains(r#"route="/sync/:id",status="200""#) && !text.contains("0123456789abcdef"),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn authority_ports_and_dns_root_dots_do_not_bypass_public_host_boundaries() {
+        let h = split_harness();
+        for host in ["d-api.oxy.fi:443", "D-API.OXY.FI.:443", "d-api.oxy.fi."] {
+            for path in ["/", "/index.html", "/scout/cfg/manifest.json"] {
+                assert_eq!(
+                    h.send("GET", path, None, &[("host", host)]).await.status(),
+                    StatusCode::NOT_FOUND,
+                    "{host} {path}"
+                );
+            }
+            assert_eq!(h.send("GET", "/health", None, &[("host", host)]).await.status(), StatusCode::OK);
+        }
+        for host in ["d.oxy.fi:443", "D.OXY.FI.:443"] {
+            assert_eq!(h.send("GET", "/", None, &[("host", host)]).await.status(), StatusCode::OK);
+            assert_eq!(
+                h.send("GET", "/config", None, &[("host", host)]).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        for host in ["d-api.oxy.fi:bad", "d-api.oxy.fi:999999", "user@d-api.oxy.fi"] {
+            assert_eq!(h.send("GET", "/", None, &[("host", host)]).await.status(), StatusCode::NOT_FOUND);
+        }
     }
 }
