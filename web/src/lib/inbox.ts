@@ -2,12 +2,23 @@
 // can't read, forge or replay them. inbox.test.ts checks the sealing against den-spec's vectors, which the TV
 // opens too.
 
-import { hex } from './crypto';
+import { hex, hkdf } from './crypto';
 import type { Link } from './links.svelte';
-import { linkKeys } from './pair';
 import { toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
+
+/**
+ * What a link key derives: `inbox`, the link's credential at den-edge, and `enc`, its inbox messages' key. Here rather
+ * than in pair.ts, so sending to a TV doesn't load the pairing curve.
+ */
+export async function linkKeys(linkKey: Bytes): Promise<{ inbox: string; enc: Bytes }> {
+  const [inbox, enc] = await Promise.all([
+    hkdf(linkKey, 'den/link/v1', 'inbox', 24),
+    hkdf(linkKey, 'den/link/v1', 'enc', 32),
+  ]);
+  return { inbox: hex(inbox), enc };
+}
 
 const AAD = new TextEncoder().encode('den/inbox/v1');
 

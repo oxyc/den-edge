@@ -2,8 +2,7 @@
 // the same make share exactly — so the guess is only a starting point, and the name is the user's to change. It is
 // what the device on the other side asks to allow, and what its list of linked devices keeps.
 
-import { deviceLabel } from './edge';
-import { cleanLabel } from './pair';
+import { cleanLabel, deviceLabel } from './edge';
 
 const STORAGE_KEY = 'den.deviceName';
 

@@ -18,10 +18,11 @@ function reloadOnce(): void {
   location.reload();
 }
 
-// A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has.
+// A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has. Offline, the file is
+// simply out of reach, and reloading would not bring it back.
 window.addEventListener('vite:preloadError', (event) => {
   event.preventDefault();
-  reloadOnce();
+  if (navigator.onLine) reloadOnce();
 });
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {

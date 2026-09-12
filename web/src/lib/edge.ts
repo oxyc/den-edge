@@ -1,5 +1,15 @@
 // What this device calls itself when it pairs with a TV.
 
+const MAX_LABEL = 40;
+
+/** What a device calls itself, as the other's list of linked devices shows it. The same rule as den-edge's. */
+export function cleanLabel(raw: string): string {
+  return [...raw.trim()]
+    .filter((c) => !/\p{Cc}/u.test(c))
+    .slice(0, MAX_LABEL)
+    .join('');
+}
+
 /**
  * What this device is, as the TV's list of linked devices shows it: "Mac · Chrome". iPadOS asks for desktop
  * sites with a Mac's user agent, so an iPad is told apart by its touch screen. Browsers don't tell a MacBook

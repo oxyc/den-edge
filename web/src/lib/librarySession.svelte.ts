@@ -1,5 +1,6 @@
 import { LibraryLog } from './log';
 import type { Title, Shape } from './library';
+import { fetchRoutes, type Routes } from './routes';
 
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
 export class LibrarySession {
@@ -11,8 +12,17 @@ export class LibrarySession {
   log = $state<LibraryLog | null | undefined>(undefined);
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
+  /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
+  private early?: Promise<Routes> = fetchRoutes();
   constructor(private readonly key: string) {
     this.opened = this.refresh().then(() => this.log ?? null);
+  }
+
+  /** den-edge's routes: the ones asked at the start the first time, a fresh ask after that. */
+  routes(): Promise<Routes> {
+    const early = this.early;
+    this.early = undefined;
+    return early ?? fetchRoutes();
   }
 
   /** One refresh owner for every route, including Settings. Failed opens are retryable. */

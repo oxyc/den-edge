@@ -4,6 +4,7 @@
   import NavigationBar from '../src/components/NavigationBar.svelte';
   import { parseRoute } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
+  import { fetchRoutes } from '../src/lib/routes';
   import '../src/app.css';
   let query = $state('');
   let route = $state(parseRoute(location.hash));
@@ -27,6 +28,7 @@
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
+    routes: fetchRoutes,
   } as unknown as LibrarySession;
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>

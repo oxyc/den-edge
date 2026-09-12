@@ -3,11 +3,13 @@
   import RoutedLibrary from './RoutedLibrary.svelte';
   import { links } from './lib/links.svelte';
   import { parseRoute } from './lib/route';
-  import LinkTV from './LinkTV.svelte';
+  import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
 
   $effect(() => {
     if (links.current) preloadSyncPolicy();
+    // Pairing, and the curve it runs on, load only for a browser that isn't paired yet.
+    else void LinkScreen.load();
   });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
@@ -39,8 +41,8 @@
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
       <RoutedLibrary link={links.current} {query} onchange={(next) => (route = next)} />
     {/key}
-  {:else}
-    <LinkTV />
+  {:else if LinkScreen.current}
+    <LinkScreen.current />
   {/if}
 </main>
 

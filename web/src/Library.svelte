@@ -3,12 +3,9 @@
   import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
-  import Detail from './components/Detail.svelte';
-  import Person from './components/Person.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
-  import Player from './components/Player.svelte';
-  import Search from './components/Search.svelte';
+  import { DetailScreen, PersonScreen, PlayerScreen, SearchScreen } from './lib/screens.svelte';
   import {
     addToWatchlist,
     blankEpisode,
@@ -57,7 +54,7 @@
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
   import { discoverServices } from './lib/discoverServices';
-  import { fetchRoutes, type Routes } from './lib/routes';
+  import type { Routes } from './lib/routes';
   import { labelsFor, neighbourhood, type Labels } from './lib/atlasIndex';
   import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
@@ -160,7 +157,7 @@
         availability.connect(saved.scout, key);
       });
       void (async () => {
-        const foundRoutes = await fetchRoutes();
+        const foundRoutes = await session.routes();
         if (disposed) return;
         live = true;
         routes = foundRoutes;
@@ -207,6 +204,16 @@
 
   /** The title whose page is open, if one is. */
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
+
+  // A screen Home doesn't draw loads when this page is it (`screens.svelte.ts`).
+  $effect(() => {
+    if (page) void DetailScreen.load();
+    else if (route.page === 'person') void PersonScreen.load();
+    else if (route.page === 'search') void SearchScreen.load();
+  });
+  $effect(() => {
+    if (playing) void PlayerScreen.load();
+  });
   const pageRow = $derived.by(() => {
     void version;
     return page ? log?.title(page) : undefined;
@@ -574,11 +581,15 @@
   const wornSeeds = $derived(
     [...libraryEntries]
       .filter((entry) => entry.weight >= 1)
-      // Films before series. atlas holds 3,892 series against tens of thousands of films, so a series seed
-      // usually answers with nothing at all, and there are only eight seeds to spend.
+      // Whatever atlas actually holds, first: it answers for nothing it has never indexed, and there are only
+      // eight seeds to spend. This used to guess "films before series", on the grounds that it holds far fewer
+      // of the latter — a guess already wrong here, where the one series among these seeds is among the three
+      // that answer, and one that would go on being wrong as the dataset grows. Its own labels say which
+      // titles it knows, so nothing needs guessing.
       .sort(
         (a, b) =>
-          Number(b.title.type === 'movie') - Number(a.title.type === 'movie') ||
+          Number(libraryLabels.has(titleKey(b.title))) -
+            Number(libraryLabels.has(titleKey(a.title))) ||
           b.weight - a.weight ||
           b.at - a.at,
       )
@@ -819,8 +830,10 @@
   <p class="note">
     This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.
   </p>
+{:else if page && !DetailScreen.current}
+  <Loading label="Loading" page />
 {:else if page}
-  <Detail
+  <DetailScreen.current
     {reel}
     {routes}
     {active}
@@ -847,10 +860,12 @@
     onselect={open}
     {shown}
   />
+{:else if (route.page === 'person' && !PersonScreen.current) || (route.page === 'search' && !SearchScreen.current)}
+  <Loading label="Loading" page />
 {:else if route.page === 'person'}
-  <Person id={route.id} {tmdbKey} {active} onselect={open} />
+  <PersonScreen.current id={route.id} {tmdbKey} {active} onselect={open} />
 {:else if route.page === 'search'}
-  <Search {query} {tmdbKey} {atlas} {prefs} onselect={select} />
+  <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} onselect={select} />
 {:else}
   {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
   {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
@@ -895,11 +910,11 @@
   {/if}
 {/if}
 
-{#if playing && scout && remux !== null}
+{#if playing && scout && remux !== null && PlayerScreen.current}
   {@const target = playing}
   {@const after = following}
   {#key `${titleKey(target.title)}:${target.season}:${target.episode}`}
-    <Player
+    <PlayerScreen.current
       title={target.title}
       season={target.season}
       episode={target.episode}

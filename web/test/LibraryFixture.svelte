@@ -13,6 +13,7 @@
       ]
     : [];
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
+  import { fetchRoutes } from '../src/lib/routes';
   const log = {
     settings: (group: string) =>
       group === 'keys'
@@ -32,6 +33,7 @@
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
+    routes: fetchRoutes,
   } as unknown as LibrarySession);
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>

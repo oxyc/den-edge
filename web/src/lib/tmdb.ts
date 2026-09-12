@@ -18,9 +18,10 @@ export async function fetchDetails(
   let details: Record<string, unknown>;
   try {
     // Credits ride along with the display: naming a title is the one fetch made for everything in the library,
-    // and who made it is wanted by the billboard's taste. A series bills its cast across seasons.
-    const credits = ref.type === 'tv' ? 'aggregate_credits' : 'credits';
-    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${credits}`;
+    // and who made it is wanted by the billboard's taste. Only the head of the billing is read, so a series takes
+    // its latest season's credits: every season's (`aggregate_credits`, which the detail page shows) runs to every
+    // guest actor, about 13 KB a series compressed.
+    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=credits`;
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     details = (await res.json()) as Record<string, unknown>;

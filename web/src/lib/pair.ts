@@ -3,8 +3,9 @@
 // the CPace draft's own among them — which the TV runs too.
 
 import { ristretto255, ristretto255_hasher } from '@noble/curves/ed25519.js';
-import { hex, hkdf } from './crypto';
-import { deviceLabel } from './edge';
+import { hkdf } from './crypto';
+import { cleanLabel, deviceLabel } from './edge';
+import { linkKeys } from './inbox';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -16,7 +17,6 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DSI = utf8.encode('CPaceRistretto255');
 const CI = utf8.encode('den/pair/v1');
 const HANDOVER = utf8.encode('den/pair/v1/handover');
-const MAX_LABEL = 40;
 
 /** A typed or scanned code: uppercased, spaces and dashes dropped, and refused unless it is 12 alphabet characters. */
 export function parseCode(input: string): { nameplate: string; secret: string } | null {
@@ -37,14 +37,6 @@ export function formatCode(input: string, caret = input.length): { text: string;
     text: chars.match(/.{1,4}/g)?.join('-') ?? '',
     caret: n + Math.floor(Math.max(n - 1, 0) / 4),
   };
-}
-
-/** What a device calls itself, as the other's list of linked devices shows it. The same rule as den-edge's. */
-export function cleanLabel(raw: string): string {
-  return [...raw.trim()]
-    .filter((c) => !/\p{Cc}/u.test(c))
-    .slice(0, MAX_LABEL)
-    .join('');
 }
 
 function concat(...parts: Uint8Array[]): Bytes {
@@ -312,14 +304,8 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
   }
 }
 
-/** What a link key derives: `inbox`, the link's credential at den-edge, and `enc`, its inbox messages' key. */
-export async function linkKeys(linkKey: Bytes): Promise<{ inbox: string; enc: Bytes }> {
-  const [inbox, enc] = await Promise.all([
-    hkdf(linkKey, 'den/link/v1', 'inbox', 24),
-    hkdf(linkKey, 'den/link/v1', 'enc', 32),
-  ]);
-  return { inbox: hex(inbox), enc };
-}
+/** Where joining gets its link keys; kept on this module for the tests that pin den-spec's vectors here. */
+export { linkKeys };
 
 // --- Joining through den-edge ---
 
