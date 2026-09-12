@@ -21,6 +21,7 @@ import {
   type TitleRow,
 } from './wire';
 import { trackerEvent } from './trackerEvents';
+import { ensureSyncPolicy } from './syncLoader';
 
 interface Entry {
   seq: number;
@@ -65,6 +66,8 @@ export class LibraryLog {
   static async open(libraryKey: string, fetchImpl: typeof fetch = fetch,
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): Promise<LibraryLog | null> {
     const log = new LibraryLog(await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0))), fetchImpl, storage);
+    // Initialize outside per-row tampering catches: a loader failure must never skip valid rows.
+    await ensureSyncPolicy(true);
     let since = 0;
     for (;;) {
       let res: Response;

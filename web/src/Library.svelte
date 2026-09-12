@@ -45,6 +45,7 @@
   import type { LibraryLog } from './lib/log';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { navigate } from './lib/navigation';
+  import { ensureSyncPolicy } from './lib/syncLoader';
   import { nameLibraryTitles } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { availability } from './lib/availability.svelte';
@@ -181,6 +182,7 @@
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
+      await ensureSyncPolicy();
     if (!log) return;
     try {
       remember(title);
@@ -196,6 +198,7 @@
   }
 
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
+      await ensureSyncPolicy();
     if (!log) return;
     try {
       remember(title);
@@ -212,6 +215,7 @@
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
+      await ensureSyncPolicy();
     if (!log) return;
     try {
       if (title.type === 'tv') {
@@ -305,6 +309,7 @@
 
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
+      await ensureSyncPolicy();
     if (!log) return;
     try {
       const { title, season, episode } = target;

@@ -4,6 +4,10 @@
   import { links } from './lib/links.svelte';
   import { parseRoute } from './lib/route';
   import LinkTV from './LinkTV.svelte';
+  import { onMount } from 'svelte';
+  import { preloadSyncPolicy } from './lib/syncLoader';
+
+  onMount(preloadSyncPolicy);
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
   // installed or the storage is persistent — which would mean pairing again.

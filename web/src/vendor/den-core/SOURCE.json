@@ -5,7 +5,7 @@
   "rust": "1.95.0",
   "uniffi": "0.29.5",
   "wasmBindgen": "0.2.128",
-  "sourceDigest": "39bb4087ad05c010697dc30d66add904a84b053c2670219d0f771d5e36e44850",
+  "sourceDigest": "f0cf5b919e267ded5c579e81d40316aae4d70bf49fb8736bd446a90424a43c93",
   "sources": {
     "Cargo.lock": "792e491dc1abbd5bd3355bda8121c2257cc539fcbd918e59ee746ab7e3f38bad",
     "Cargo.toml": "dc95cc7e85d1a8a6e9b0f74c665cbf1a3ba078024a2e100156b9abd42564a6b2",
@@ -25,11 +25,10 @@
     "crates/den-sync/tests/conformance.rs": "cb0a7bfdacddf3bae6fc3565875e5ee218b8bf1522befc46c90c3b5fcdd281f2",
     "crates/den-sync/tests/fixtures/merge-v2.json": "8dbbbb681be4e68e1a7fd2badb33643d46d8f4568ca74514d5afa1e67ffa04a9",
     "crates/den-sync/tests/fixtures/policy-v1.json": "8a111bce2a25cf4286acd8764b52264334de10a941d602bd6b00a5afe2683381",
-    "scripts/build-bindings.sh": "bd82a83fbbd0fff368be7cc1433b35ce6407634f9e645a0790394f6a5176b5ab",
-    "scripts/embed-wasm.mjs": "51d913e6abd539b2ea83354c9711e3f5cf69328d35b650add15cbe3acbd44a9d",
-    "scripts/vendor.mjs": "e8a6ccd7095bcc61d34d8d76737969527707429b45adcc2c66d70ba33b3acc87",
-    "web/index.d.ts": "6ac6389eaa284d460c06e16002af6e8acf4cb4e1f5116cde03631c00c66da1a8",
-    "web/index.js": "7f96d271bc77489d7f301876e48ad49f3761619727ac670b3d7cf81f0e4e8d27"
+    "scripts/build-bindings.sh": "5e67aadfac2c983b2617d9b9ead61cc2cafb6ecd954c027b7ec033b5544ed920",
+    "scripts/vendor.mjs": "b7dcf1ff35a1439835cac6230bdeac06f16af614fc39ff82a1c01efc6a0c218b",
+    "web/index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
+    "web/index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87"
   },
   "artifacts": {
     "LICENSE": "78d07b0e03dde5590c86e9df27e9b7ba5d84b2f282ebea4c45022bf84cf86c0e",
@@ -37,9 +36,8 @@
     "generated/den_core.js": "f3a99a15fdb6a5c6a22713c9b4199c95286a87173afd989bdf8a58843327a139",
     "generated/den_core_bg.wasm": "1ac64a9d1d2c66e6d1eb5f6f1b96a7b09712be068e0222d531bd10aa64ddca2a",
     "generated/den_core_bg.wasm.d.ts": "1de059c9adfafeb5d797c76ee1b2277830ae11882cdfecbecec537d52b6a31e3",
-    "generated/wasm-data.js": "a8fc691732a84d7c27775af732646c0e9eddef40d78408cb30c4fe4277eff403",
-    "index.d.ts": "6ac6389eaa284d460c06e16002af6e8acf4cb4e1f5116cde03631c00c66da1a8",
-    "index.js": "7f96d271bc77489d7f301876e48ad49f3761619727ac670b3d7cf81f0e4e8d27",
+    "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
+    "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87",
     "policy-v1.json": "8a111bce2a25cf4286acd8764b52264334de10a941d602bd6b00a5afe2683381"
   }
 }

@@ -3,6 +3,7 @@
 <script lang="ts">
   import Loading from './components/Loading.svelte';
   import { browserClock } from './lib/clock';
+  import { ensureSyncPolicy } from './lib/syncLoader';
   import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
@@ -52,23 +53,28 @@
     if (!log) return false;
     saving = true;
     failure = null;
-    const base: SettingsRow = log.settings(group) ?? { kind: 'set', schema: 2, name: group, values: {} };
-    const at = clock.issue();
-    const values = { ...base.values };
-    for (const [name, value] of Object.entries(changes)) values[name] = { value, at };
-    const row: SettingsRow = { ...base, values };
-    const saved = await log.write(row);
-    saving = false;
-    if (log.moved) {
-      links.forgetMoved(link);
+    try {
+      await ensureSyncPolicy();
+      const base: SettingsRow = log.settings(group) ?? { kind: 'set', schema: 2, name: group, values: {} };
+      const at = clock.issue();
+      const values = { ...base.values };
+      for (const [name, value] of Object.entries(changes)) values[name] = { value, at };
+      const row: SettingsRow = { ...base, values };
+      const saved = await log.write(row);
+      if (log.moved) {
+        links.forgetMoved(link);
+        return false;
+      }
+      if (!saved) {
+        failure = 'Couldn’t save that. Check that this device is on your network.';
+        return false;
+      }
+      session.changed(true);
+      return true;
+    } catch {
+      failure = 'Couldn’t prepare or save that change. Please try again.';
       return false;
-    }
-    if (!saved) {
-      failure = 'Couldn’t save that. Check that this device is on your network.';
-      return false;
-    }
-    session.changed(true);
-    return true;
+    } finally { saving = false; }
   }
 
   async function save(name: string, value: string | null) {
