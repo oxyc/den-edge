@@ -24,13 +24,19 @@ const DAY = 86_400_000;
 const FRESH_DAYS = 120;
 /** Below this a rating is one of a handful of opinions, not a verdict. */
 const ENOUGH_VOTES = 50;
+/**
+ * What a title still to come is worth. High, because "out next month" is the most interesting thing a billboard
+ * can say — but short of full marks, since an unreleased film nobody has seen yet shouldn't outrank the series
+ * half the world is watching this week.
+ */
+const UNRELEASED = 0.8;
 
 /**
  * How the terms trade off. Freshness leads, but not alone: ranking on recency by itself fills a billboard with
  * whatever came out last, and most of what comes out in any given week is an untracked micro-release nobody is
  * looking for. Attention is weighted to match it, so among new things the ones people are actually watching win.
  */
-export const WEIGHTS = { fresh: 0.3, buzz: 0.3, quality: 0.15, taste: 0.35 };
+export const WEIGHTS = { fresh: 0.22, buzz: 0.4, quality: 0.15, taste: 0.35 };
 
 /** What a library says its viewer likes: how much of it sits in each genre, and in each original language. */
 export interface Taste {
@@ -77,12 +83,12 @@ function released(title: Title): Date | undefined {
   return title.year === undefined ? undefined : new Date(Date.UTC(title.year, 6, 1));
 }
 
-/** 1 for anything not yet out, decaying over four months to nothing. Unknown dates score as old. */
+/** High for anything not yet out, decaying over four months once it is. Unknown dates score as old. */
 export function freshness(title: Title, now: Date): number {
   const date = released(title);
   if (!date) return 0;
   const days = (now.getTime() - date.getTime()) / DAY;
-  return days <= 0 ? 1 : Math.exp(-days / FRESH_DAYS);
+  return days <= 0 ? UNRELEASED : Math.exp(-days / FRESH_DAYS);
 }
 
 /**

@@ -13,8 +13,8 @@ const film = (id: number, extra: Partial<Title> = {}): Title => ({
 });
 
 describe('freshness', () => {
-  it('is full marks for the unreleased and decays over four months', () => {
-    expect(freshness(film(1, { releaseDate: '2026-12-01' }), NOW)).toBe(1);
+  it('is high but not full marks for the unreleased, and decays over four months', () => {
+    expect(freshness(film(1, { releaseDate: '2026-12-01' }), NOW)).toBe(0.8);
     expect(freshness(film(2, { releaseDate: '2026-09-10' }), NOW)).toBeCloseTo(0.983, 2);
     const old = freshness(film(3, { releaseDate: '2024-01-01' }), NOW);
     expect(old).toBeLessThan(0.01);
