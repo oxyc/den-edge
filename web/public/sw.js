@@ -25,7 +25,12 @@ self.addEventListener('fetch', (event) => {
 async function page(event) {
   const cache = await caches.open(PAGE);
   const kept = await cache.match('/');
-  const checked = fetch(event.request).then(async (response) => {
+  // A request of its own, not the navigation's: that one belongs to a page the kept copy has already answered, and
+  // re-sending it never stored a new release.
+  const request = kept
+    ? new Request('/', { cache: 'no-cache', credentials: 'same-origin', redirect: 'manual' })
+    : event.request;
+  const checked = fetch(request).then(async (response) => {
     if (response.ok && response.type === 'basic') {
       const release = response.headers.get('etag');
       await cache.put('/', response.clone());
