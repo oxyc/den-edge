@@ -134,6 +134,44 @@
     box.scrollTo({ left: n * box.clientWidth, behavior: smooth && !still() ? 'smooth' : 'auto' });
   }
 
+  /**
+   * How far each slide is from the middle, written onto it as `--p` (-1 a slide to the left, 0 dead centre,
+   * 1 to the right) and `--fade`. The picture is then drawn at a fraction of that offset, so it travels slower
+   * than the slide carrying it and the billboard has some depth instead of sliding like a filmstrip. It tracks
+   * the finger rather than playing a fixed animation, so a half-finished swipe is half-way through the effect.
+   */
+  function paint() {
+    const box = rail;
+    if (!box) return;
+    const width = box.clientWidth || 1;
+    const flat = still();
+    for (const slide of Array.from(box.children) as HTMLElement[]) {
+      const p = flat ? 0 : Math.max(-1.5, Math.min(1.5, (slide.offsetLeft - box.scrollLeft) / width));
+      slide.style.setProperty('--p', p.toFixed(3));
+      slide.style.setProperty('--fade', Math.max(0, 1 - Math.abs(p) * 1.6).toFixed(3));
+    }
+  }
+
+  /** One paint per frame however many scroll events arrive: the browser fires them faster than it draws. */
+  let painting = 0;
+  function onScroll() {
+    scrolled();
+    if (painting) return;
+    painting = requestAnimationFrame(() => {
+      painting = 0;
+      paint();
+    });
+  }
+
+  // The slides start where the rail left them, and a resize moves every one of them.
+  $effect(() => {
+    if (!rail || shown.length === 0) return;
+    paint();
+    const again = () => paint();
+    addEventListener('resize', again);
+    return () => removeEventListener('resize', again);
+  });
+
   /** Which slide the rail has come to rest on, and whether the viewer put it there. */
   function scrolled() {
     const box = rail;
@@ -195,7 +233,7 @@
   onfocusin={() => (held = true)}
   onfocusout={() => (held = false)}
 >
-  <div class="rail" bind:this={rail} onscroll={scrolled}>
+  <div class="rail" bind:this={rail} onscroll={onScroll}>
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
       <article class="slide" aria-roledescription="slide" aria-label={title.title}>
@@ -314,6 +352,15 @@
     scroll-snap-stop: always;
   }
 
+  /* Drawn wider than the slide and shifted by a fraction of the slide's own travel (`--p`, set as the rail
+     scrolls): the picture falls behind the words instead of moving in lockstep with them. The extra scale is
+     what keeps its edges outside the frame while it lags. */
+  .backdrop,
+  .ambient {
+    transform: translate3d(calc(var(--p, 0) * -11%), 0, 0) scale(1.26);
+    will-change: transform;
+  }
+
   .backdrop {
     position: absolute;
     inset: 0;
@@ -379,12 +426,15 @@
     padding: var(--bar-space) var(--gutter) 76px;
   }
 
+  /* The words go with their own slide, but fade out as it leaves, so two slides' text never reads as one
+     jumble mid-swipe. */
   .text {
     display: grid;
     gap: 8px;
     max-width: 720px;
     min-height: 190px;
     align-content: end;
+    opacity: var(--fade, 1);
   }
 
   h2 {
