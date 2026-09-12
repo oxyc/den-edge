@@ -27,6 +27,27 @@ it('shares in-flight naming across retained pages and skips already named titles
   expect(state.displays).toEqual([title]);
 });
 
+it('publishes names in batches, not one Home update per title', async () => {
+  let assignments = 0;
+  let displays: Title[] = [];
+  const state = {
+    get displays() {
+      return displays;
+    },
+    set displays(next) {
+      assignments++;
+      displays = next;
+    },
+    shapes: new Map<string, Shape>(),
+  };
+  const refs = Array.from({ length: 40 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
+  await nameLibraryTitles(state, refs, 'key', async (r) => ({
+    title: { ...r, title: `#${r.id}` },
+  }));
+  expect(displays).toHaveLength(40);
+  expect(assignments).toBe(1);
+});
+
 it('does not duplicate a title remembered while its naming request was pending', async () => {
   const state = session();
   const task = nameLibraryTitles(state, [ref], 'key', async () => {

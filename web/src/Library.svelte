@@ -196,14 +196,14 @@
     return () => clearTimeout(timer);
   });
 
-  const library = $derived.by(() => {
+  /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */
+  const applied = $derived.by(() => {
     void version;
-    if (!log) return null;
-    return {
-      ...withDisplay(applyLog(emptyLibrary(), log.rows()), session.displays),
-      shapes: session.shapes,
-    };
+    return log ? applyLog(emptyLibrary(), log.rows()) : null;
   });
+  const library = $derived(
+    applied && { ...withDisplay(applied, session.displays), shapes: session.shapes },
+  );
 
   /** The title whose page is open, if one is. */
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);

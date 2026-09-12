@@ -99,6 +99,9 @@ export function applyLog(library: Library, rows: Row[]): Library {
   const records = new Map(library.records.map((r) => [titleKey(r.title), r]));
   const dismissed = new Map(library.dismissed);
   const marks = new Map(library.marks.map((m) => [markKey(m), m]));
+  // A mark of each series, for the display a new episode mark borrows: scanning every mark per episode row was
+  // quadratic in a long watch history.
+  const seriesMarks = new Map(library.marks.map((m) => [titleKey(m), m]));
   const resets = new Map<string, number>();
   for (const row of rows) {
     if (row.kind === 'set') continue; // settings are read by prefs.ts
@@ -113,16 +116,17 @@ export function applyLog(library: Library, rows: Row[]): Library {
       };
       if (row.progress.value > 0) {
         // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
-        const series =
-          marks.get(markKey(episode)) ?? [...marks.values()].find((m) => titleKey(m) === key);
-        marks.set(markKey(episode), {
+        const series = marks.get(markKey(episode)) ?? seriesMarks.get(key);
+        const mark = {
           ...episode,
           fraction: row.progress.value,
           updatedAt: row.progress.at[0],
           title: series?.title ?? '',
           posterPath: series?.posterPath,
           voteAverage: series?.voteAverage ?? 0,
-        });
+        };
+        marks.set(markKey(episode), mark);
+        seriesMarks.set(key, mark);
       } else {
         marks.delete(markKey(episode)); // un-watched
       }
