@@ -376,15 +376,26 @@
     // watched" row is the nearest neighbours of something already seen, which at the top of the page reads as
     // a shelf of old, half-familiar titles — so what goes in is what is being watched now (atlas's "Trending
     // Everywhere", the catalog the TV's browse billboards lead with) and what is new or not yet out.
+    // TMDB's trending as well as atlas's: atlas names a title by id and year, so its titles arrive with no
+    // genres and no rating and can only score on their ranking, while TMDB's arrive complete. The two lists
+    // overlap heavily and the picker merges what they share, which is how a trending title ends up scored on
+    // everything rather than on its place in one list.
+    const feed = pages;
+    const trendingTv = feed ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => []) : Promise.resolve([]);
     void Promise.all([
       here ? trendingEverywhere(here, fetch, type ?? undefined) : Promise.resolve([] as Title[]),
+      row('trending'),
+      trendingTv,
       row('new-releases'),
       row('upcoming'),
       row('popular'),
     ])
-      .then(([trending, fresh, soon, popular]) => {
+      .then(([everywhere, hotMovies, hotSeries, fresh, soon, popular]) => {
+        const ranked = (list: Title[]) => list.map((title, rank) => ({ title, rank, of: list.length }));
         const pool = [
-          ...trending.map((title, rank) => ({ title, rank, of: trending.length })),
+          ...ranked(everywhere),
+          ...ranked(hotMovies),
+          ...ranked(hotSeries),
           ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
         ];
         // Never a title this library already holds: the billboard is for what hasn't been found yet.

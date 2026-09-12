@@ -115,6 +115,32 @@ export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Tast
 const keyOf = (title: Title) => `${title.type}:${title.id}`;
 
 /**
+ * The same title from two sources is one candidate holding everything both knew about it. This matters more
+ * than it sounds: atlas's catalogs name a title by id, year and nothing else, so a trending title arrived with
+ * no genres to match a taste against and no rating to be judged on — it could only ever score on its ranking,
+ * and lost to a new release that came from TMDB with every field filled in. Merged, it keeps its ranking AND
+ * gets scored on the rest.
+ */
+function merge(a: Candidate, b: Candidate): Candidate {
+  return {
+    title: {
+      ...b.title,
+      ...a.title,
+      posterPath: a.title.posterPath ?? b.title.posterPath,
+      year: a.title.year ?? b.title.year,
+      releaseDate: a.title.releaseDate ?? b.title.releaseDate,
+      rating: a.title.rating ?? b.title.rating,
+      votes: a.title.votes ?? b.title.votes,
+      popularity: a.title.popularity ?? b.title.popularity,
+      genreIds: a.title.genreIds ?? b.title.genreIds,
+      originalLanguage: a.title.originalLanguage ?? b.title.originalLanguage,
+    },
+    rank: a.rank ?? b.rank,
+    of: a.of ?? b.of,
+  };
+}
+
+/**
  * The slides, best first. Deduped, filtered and only then cut to `slides` — cutting first would let the filter
  * empty a list that had plenty of candidates behind the cut, which is how the old billboard ended up with two
  * slides on a strict library.
@@ -128,14 +154,14 @@ export function pickBillboard(
     taste,
   }: { now?: Date; slides?: number; keep?: (title: Title) => boolean; taste?: Taste } = {},
 ): Title[] {
-  const seen = new Set<string>();
-  const running: Candidate[] = [];
+  const byKey = new Map<string, Candidate>();
   for (const candidate of candidates) {
+    if (!keep(candidate.title)) continue;
     const key = keyOf(candidate.title);
-    if (seen.has(key) || !keep(candidate.title)) continue;
-    seen.add(key);
-    running.push(candidate);
+    const already = byKey.get(key);
+    byKey.set(key, already ? merge(already, candidate) : candidate);
   }
+  const running = [...byKey.values()];
   const busiest = running.reduce((most, { title }) => Math.max(most, title.popularity ?? 0), 0);
   // A stable sort, so candidates that score the same keep the order their source put them in.
   return running

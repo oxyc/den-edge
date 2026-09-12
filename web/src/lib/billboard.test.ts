@@ -94,6 +94,20 @@ describe('pickBillboard', () => {
     expect(pickBillboard(pool, { now: NOW }).map((t) => t.id)).toEqual([2, 1]);
   });
 
+  it('merges a title two sources both offered, so a ranking and a genre reach the same candidate', () => {
+    const CRIME = 80;
+    // atlas knows it is trending and nothing else; TMDB knows what it is.
+    const fromAtlas = { title: film(5, { title: 'Both', year: 2026 }), rank: 0, of: 10 };
+    const fromTmdb = {
+      title: film(5, { title: 'Both', releaseDate: '2026-09-01', genreIds: [CRIME], originalLanguage: 'sv', votes: 120, rating: 8 }),
+    };
+    const taste = tasteOf([{ title: film(99, { genreIds: [CRIME], originalLanguage: 'sv' }) }]);
+    const alone = film(6, { releaseDate: '2026-09-01', genreIds: [CRIME], originalLanguage: 'sv', votes: 120, rating: 8 });
+    // Unmerged, the atlas copy would score on its ranking alone and lose to the plain TMDB title.
+    const picked = pickBillboard([fromAtlas, fromTmdb, { title: alone }], { now: NOW, taste });
+    expect(picked.map((t) => t.id)).toEqual([5, 6]);
+  });
+
   it('drops what the caller hides, and dedupes what two sources both offered', () => {
     const twice = film(7, { releaseDate: '2026-09-01' });
     const pool: Candidate[] = [
