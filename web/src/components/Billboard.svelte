@@ -83,20 +83,34 @@
   ]);
   let lit = $state(0);
 
+  /** The picture this slide should be showing; anything that finishes loading after this changed is stale. */
+  let wanted = '';
+
   $effect(() => {
     const url = detail?.backdropPath ? backdropURL(detail.backdropPath) : '';
+    // Warm the neighbours, so paging usually finds the picture already decoded and swaps without a gap.
+    for (const step of [1, -1]) {
+      const near = shown[index + step];
+      const path = near && known.get(keyOf(near))?.backdropPath;
+      if (path) new Image().src = backdropURL(path);
+    }
     untrack(() => {
       if (lit >= 0 && layers[lit]?.url === url) return;
-      if (!url) {
-        // This slide's artwork isn't known yet. Leaving the last one lit shows one title's picture behind
-        // another title's name — the same backdrop appearing twice, once against the wrong words. Better to
-        // show none: it dissolves out and the scrim carries the words until the right picture arrives.
-        lit = -1;
-        return;
-      }
-      const next = lit === 0 ? 1 : 0;
-      layers[next] = { id: next, url };
-      lit = next;
+      wanted = url;
+      // Nothing is lit while the right picture is on its way. Keeping the last one up would show one title's
+      // artwork behind another title's name — which is the same picture appearing twice, once against the
+      // wrong words. The scrim carries the words for the moment it takes.
+      lit = -1;
+      if (!url) return;
+      const image = new Image();
+      image.onload = () => {
+        // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
+        if (wanted !== url) return;
+        const next = layers[0]?.url === url ? 0 : 1;
+        layers[next] = { id: next, url };
+        lit = next;
+      };
+      image.src = url;
     });
   });
 
