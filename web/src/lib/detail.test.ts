@@ -72,7 +72,7 @@ describe('title pages', () => {
     expect(parseDetail({ type: 'movie', id: 1 }, movie)!.trailer).toBeUndefined();
   });
 
-  it('asks TMDB for the credits, recommendations and videos in the same fetch', async () => {
+  it('asks TMDB for the credits, recommendations, videos and external ids in the same fetch', async () => {
     const asked: string[] = [];
     const fetchImpl = (async (url: string) => {
       asked.push(url);
@@ -82,7 +82,7 @@ describe('title pages', () => {
     const url = new URL(asked[0]!);
     expect([url.pathname, url.searchParams.get('append_to_response')]).toEqual([
       '/3/tv/95396',
-      'aggregate_credits,recommendations,videos',
+      'aggregate_credits,recommendations,videos,external_ids',
     ]);
     const down = (async () => new Response('{}', { status: 401 })) as typeof fetch;
     expect(await fetchDetail({ type: 'movie', id: 1 }, 'k', down)).toBeNull();

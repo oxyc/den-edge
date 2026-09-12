@@ -44,6 +44,8 @@ export interface TitleDetail {
   more: Title[];
   /** Its trailer's YouTube id, from TMDB's videos: what the web plays, embedded. */
   trailer?: string;
+  /** Its IMDb id: what den-reel names a title by, so the billboard can ask it for a trailer to play. */
+  imdbId?: string;
 }
 
 export interface Episode {
@@ -102,6 +104,8 @@ export function parseDetail(ref: { type: MediaType; id: number }, body: Json): T
     cast: cast.slice(0, CAST_LIMIT),
     more,
     trailer: trailerOf(body),
+    // A movie carries it at the top level, a series only under external_ids.
+    imdbId: text(body.imdb_id) ?? text(obj(body.external_ids).imdb_id),
   };
 }
 
@@ -155,7 +159,10 @@ export async function fetchDetail(
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
 ): Promise<TitleDetail | null> {
-  const append = ref.type === 'tv' ? 'aggregate_credits,recommendations,videos' : 'credits,recommendations,videos';
+  const append =
+    ref.type === 'tv'
+      ? 'aggregate_credits,recommendations,videos,external_ids'
+      : 'credits,recommendations,videos,external_ids';
   const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
   return body && parseDetail(ref, body);
 }

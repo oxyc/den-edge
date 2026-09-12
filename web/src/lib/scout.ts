@@ -16,6 +16,7 @@ export interface Addon {
 
 export const SCOUT = { name: 'scout', id: 'com.den.scout', path: '/scout' };
 export const ATLAS = { name: 'atlas', id: 'com.den.atlas', path: '/atlas' };
+export const REEL = { name: 'reel', id: 'com.den.reel', path: '/reel' };
 
 const MANIFEST = '/manifest.json';
 

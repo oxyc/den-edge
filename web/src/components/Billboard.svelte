@@ -10,18 +10,26 @@
   import { fade, fly } from 'svelte/transition';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
+  import { trailerURL } from '../lib/reel';
   import { titleHref } from '../lib/route';
+  import type { Routes } from '../lib/routes';
 
   let {
     titles,
     tmdbKey,
     onplay,
+    reel,
+    routes,
   }: {
     /** What the leading row holds; the first of them cycle here. */
     titles: Title[];
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
     onplay?: (title: Title) => void;
+    /** Where this page asks den-reel (`/reel/<config>`); without it a slide keeps its still picture. */
+    reel?: string | null;
+    /** The routes table, for the address the trailer's video is loaded from. */
+    routes?: Routes;
   } = $props();
 
   /** As many as the TV's hero carries. The row behind it holds about a hundred, so this costs no extra request. */
@@ -94,20 +102,31 @@
   $effect(() => {
     const box = frame;
     if (!box || typeof IntersectionObserver === 'undefined') return;
-    const watch = new IntersectionObserver(([entry]) => (onScreen = (entry?.intersectionRatio ?? 0) > 0.5), {
-      threshold: [0, 0.5, 1],
-    });
+    // Any of it in view is enough. Asking for half of it meant that reading the rows below turned the trailer
+    // off, and it did not come back when the billboard did.
+    const watch = new IntersectionObserver(([entry]) => (onScreen = entry?.isIntersecting ?? true), { threshold: 0 });
     watch.observe(box);
     return () => watch.disconnect();
   });
 
   $effect(() => {
-    const key = detail?.trailer;
+    const title = current;
+    const imdbId = detail?.imdbId;
+    const base = reel;
+    const table = routes;
     ambient = null;
     playing = false;
-    if (!key || !onScreen || still() || saving()) return;
-    const timer = setTimeout(() => (ambient = key), SETTLE_MS);
-    return () => clearTimeout(timer);
+    if (!title || !imdbId || !base || !onScreen || still() || saving()) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      void trailerURL(base, title.type, imdbId, table ?? {}).then((url) => {
+        if (live && url) ambient = url;
+      });
+    }, SETTLE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   });
 
   // It cycles on its own until you page it, and holds while you are reading it — pointer over it, or a control in
@@ -237,18 +256,23 @@
       {/key}
     {/if}
     {#if ambient}
-      <!-- Muted, chrome-less and untouchable: the swipe belongs to the billboard, not to YouTube's player. The
-           still picture stays underneath, so a trailer that refuses to be embedded costs the slide nothing. -->
-      <div class="ambient" class:playing aria-hidden="true">
-        <iframe
-          src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(ambient)}?autoplay=1&mute=1&controls=0&loop=1&playlist=${encodeURIComponent(ambient)}&playsinline=1&modestbranding=1&rel=0&disablekb=1&fs=0&iv_load_policy=3&start=10`}
-          title="Trailer"
-          tabindex="-1"
-          allow="autoplay; encrypted-media"
-          referrerpolicy="strict-origin-when-cross-origin"
-          onload={() => setTimeout(() => (playing = true), 900)}
-        ></iframe>
-      </div>
+      <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
+           started. The still picture stays underneath until it does, and stays put if it never does. -->
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video
+        class="ambient"
+        class:playing
+        src={ambient}
+        autoplay
+        muted
+        loop
+        playsinline
+        preload="auto"
+        tabindex="-1"
+        aria-hidden="true"
+        onplaying={() => (playing = true)}
+        onloadstart={(event) => (event.currentTarget.muted = true)}
+      ></video>
     {/if}
     <div class="scrim"></div>
     <div class="fade"></div>
@@ -348,7 +372,9 @@
   .ambient {
     position: absolute;
     inset: 0;
-    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
     opacity: 0;
     transition: opacity 0.8s ease;
     pointer-events: none;
@@ -356,18 +382,6 @@
 
   .ambient.playing {
     opacity: 1;
-  }
-
-  .ambient iframe {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 177.78lvh;
-    min-width: 100vw;
-    height: 100lvh;
-    min-height: 56.25vw;
-    border: 0;
-    transform: translate(-50%, -50%);
   }
 
   /* Enough dark at the top for the bar to stay legible over a bright frame. */

@@ -7,6 +7,8 @@ const edge = process.env.DEN_EDGE ?? 'http://192.168.86.193:8094';
 const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout'];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
+// reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
+const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
 
 export default defineConfig({
   plugins: [svelte({ compilerOptions: { experimental: { async: true } } })],
@@ -18,6 +20,7 @@ export default defineConfig({
     proxy: {
       ...Object.fromEntries(api.map((path) => [path, { target: edge, changeOrigin: true }])),
       '/atlas': { target: atlas, changeOrigin: true, rewrite: (path) => path.replace(/^\/atlas/, '') },
+      '/reel': { target: reel, changeOrigin: true, rewrite: (path) => path.replace(/^\/reel/, '') },
     },
   },
   build: { target: 'es2022' },

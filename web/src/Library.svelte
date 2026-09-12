@@ -46,7 +46,7 @@
   import { titleHref, type Route } from './lib/route';
   import { findRemux } from './lib/remux';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
+  import { findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -75,6 +75,8 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
+  /** Where this page reaches reel, the billboard's trailers; null where it can't. */
+  let reel = $state<string | null>(null);
   /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
   let routes = $state<Routes>({});
   /** Where den-remux answers for this page (`findRemux`), so a title can play here; null where no route reaches it. */
@@ -96,13 +98,15 @@
       const [key, installed] = [tmdbKey, plugins];
       void (async () => {
         routes = await fetchRoutes();
-        const [foundScout, foundAtlas, foundRemux] = await Promise.all([
+        const [foundScout, foundAtlas, foundReel, foundRemux] = await Promise.all([
           findAddon(installed, routes, SCOUT),
           findAtlas(installed, routes),
+          findAddon(installed, routes, REEL),
           findRemux(routes.remux ?? []),
         ]);
         scout = foundScout;
         atlas = foundAtlas?.base ?? null;
+        reel = foundReel?.base ?? null;
         remux = foundRemux;
         availability.connect(foundScout, key);
       })();
@@ -408,7 +412,13 @@
   <!-- Kept in the page while the library is still opening, so its space is held from the first paint and the
        rows below don't jump down when the titles arrive. -->
   {#if !hits && (tmdbKey || log === undefined)}
-    <Billboard titles={featured.filter(featuredShown)} {tmdbKey} onplay={playHere && ((title) => playHere(title))} />
+    <Billboard
+      titles={featured.filter(featuredShown)}
+      {tmdbKey}
+      {reel}
+      {routes}
+      onplay={playHere && ((title) => playHere(title))}
+    />
   {/if}
   {#if sources && !facet}
     <input
