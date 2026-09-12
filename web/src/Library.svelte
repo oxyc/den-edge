@@ -22,6 +22,7 @@
     updateProgress,
     WATCHED,
   } from './lib/actions';
+  import { pickBillboard } from './lib/billboard';
   import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
@@ -349,22 +350,31 @@
    */
   let featured = $state<Title[]>([]);
   $effect(() => {
-    const lead = rows[0];
-    // Read once: this re-runs when atlas resolves, and the billboard is rebuilt from whichever source answered.
+    const table = rows;
+    // Read once: this re-runs when atlas resolves, and the pool is rebuilt from whichever sources answered.
     const here = atlas;
     const type = facet;
     featured = [];
-    if (!lead) return;
-    // Each tab's billboard takes what the TV's takes. Home: its own leading row — the "Because you watched" row
-    // when there is one, else Trending — which is exactly what `HomeView.heroRow` picks. Movies and Series:
-    // atlas's "Trending Everywhere", the catalog their billboards lead with there, falling back to the tab's
-    // leading row when atlas is out of reach. Two pages, since a page is twenty and the billboard carries forty.
-    const rowPages = () =>
-      Promise.all([lead.load(1), lead.load(2).catch(() => [])]).then(([first, second]) => [...first, ...second]);
-    void (type && here ? trendingEverywhere(here, fetch, type) : Promise.resolve([] as Title[]))
-      .then((list) => (list.length ? list : rowPages()))
-      .then((list) => {
-        if (rows[0] === lead) featured = list;
+    if (!table.length) return;
+    const row = (id: string) => table.find((r) => r.id === id)?.load(1).catch(() => []) ?? Promise.resolve([]);
+    // The billboard gets a pool of its own rather than whatever row happens to lead the page. A "Because you
+    // watched" row is the nearest neighbours of something already seen, which at the top of the page reads as
+    // a shelf of old, half-familiar titles — so what goes in is what is being watched now (atlas's "Trending
+    // Everywhere", the catalog the TV's browse billboards lead with) and what is new or not yet out.
+    void Promise.all([
+      here ? trendingEverywhere(here, fetch, type ?? undefined) : Promise.resolve([] as Title[]),
+      row('new-releases'),
+      row('upcoming'),
+      row('popular'),
+    ])
+      .then(([trending, fresh, soon, popular]) => {
+        const pool = [
+          ...trending.map((title, rank) => ({ title, rank, of: trending.length })),
+          ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
+        ];
+        // Never a title this library already holds: the billboard is for what hasn't been found yet.
+        const picked = pickBillboard(pool, { keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) });
+        if (rows === table) featured = picked;
       })
       .catch(() => undefined);
   });

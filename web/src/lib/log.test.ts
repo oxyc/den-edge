@@ -198,7 +198,15 @@ describe('tmdb', () => {
   it('names a movie and a series from their details', async () => {
     const movie = { title: 'Arrival', poster_path: '/a.jpg', release_date: '2016-11-11', vote_average: 7.6 };
     expect(await fetchDetails({ type: 'movie', id: 329865 }, 'k', answer(movie))).toEqual({
-      title: { type: 'movie', id: 329865, title: 'Arrival', posterPath: '/a.jpg', year: 2016, rating: 7.6 },
+      title: {
+        type: 'movie',
+        id: 329865,
+        title: 'Arrival',
+        posterPath: '/a.jpg',
+        year: 2016,
+        releaseDate: '2016-11-11',
+        rating: 7.6,
+      },
     });
     const series = await fetchDetails({ type: 'tv', id: 95396 }, 'k', answer({ name: 'Severance', first_air_date: '2022-02-17' }));
     expect(series?.title).toMatchObject({ title: 'Severance', year: 2022 });

@@ -76,7 +76,8 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
   const text = (field: string) => (typeof details[field] === 'string' ? (details[field] as string) : undefined);
   const name = text('title') ?? text('name');
   if (!name) return null;
-  const year = parseInt((text('release_date') ?? text('first_air_date') ?? '').slice(0, 4), 10);
+  const released = text('release_date') ?? text('first_air_date');
+  const year = parseInt((released ?? '').slice(0, 4), 10);
   // A list or search result names genres by id; a detail lists them as objects.
   const genreIds = Array.isArray(details.genre_ids)
     ? details.genre_ids.filter((g): g is number => typeof g === 'number')
@@ -91,7 +92,10 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
     collectionId: typeof collection?.id === 'number' ? collection.id : undefined,
     posterPath: text('poster_path'),
     year: Number.isFinite(year) ? year : undefined,
+    releaseDate: released,
     rating: typeof details.vote_average === 'number' ? details.vote_average : undefined,
+    votes: typeof details.vote_count === 'number' ? details.vote_count : undefined,
+    popularity: typeof details.popularity === 'number' ? details.popularity : undefined,
     genreIds,
     originalLanguage: text('original_language'),
     adult: details.adult === true ? true : undefined,

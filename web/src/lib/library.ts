@@ -12,7 +12,14 @@ export interface Title {
   title: string;
   posterPath?: string;
   year?: number;
+  /** The full release date (`YYYY-MM-DD`) where TMDB gave one: a year can't tell last month from last January. */
+  releaseDate?: string;
   rating?: number;
+  /** How many votes that rating rests on — a 9.4 from eleven people is not a recommendation. */
+  votes?: number;
+  /** TMDB's popularity: how much attention it is getting now, which an unreleased title can have and a rating
+      can't measure. The billboard uses it to tell an awaited film from an untracked micro-release. */
+  popularity?: number;
   /** The TMDB collection a movie belongs to (from a detail fetch), so search can group a franchise. */
   collectionId?: number;
   /** What the TV's hide rules look at (`prefs.ts`): TMDB genre ids, original language, the adult flag. */
