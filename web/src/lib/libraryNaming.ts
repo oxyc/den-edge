@@ -1,4 +1,5 @@
-import { titleKey, type MediaType, type Shape, type Title } from './library';
+import { titleKey, type Library, type MediaType, type Shape, type Title } from './library';
+import type { Row, TitleRow } from './wire';
 import { fetchDetails } from './tmdb';
 
 interface NamedLibrary {
@@ -30,7 +31,11 @@ export async function nameLibraryTitles(
     for (let ref = queue.shift(); ref; ref = queue.shift()) {
       if (runs.get(session) !== current) return;
       const id = titleKey(ref);
-      if (session.displays.some((title) => titleKey(title) === id)) continue;
+      if (
+        session.displays.some((title) => titleKey(title) === id) &&
+        (ref.type !== 'tv' || session.shapes.has(id))
+      )
+        continue;
       let work = current.pending.get(id);
       if (!work) {
         const requested = ref;
@@ -52,4 +57,39 @@ export async function nameLibraryTitles(
     }
   };
   await Promise.all(Array.from({ length: 6 }, worker));
+}
+
+/** Select by log recency before looking up names: network order must never select the recommendation seeds. */
+export function personalSeedRows(rows: Row[]) {
+  const titles = rows.filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value);
+  const recency = (r: TitleRow) => Math.max(r.watchedAt ?? 0, r.reaction.at[0], r.addedAt);
+  const latest = (keep: (r: TitleRow) => boolean) =>
+    titles
+      .filter(keep)
+      .sort((a, b) => recency(b) - recency(a) || titleKey(a.title).localeCompare(titleKey(b.title)))
+      .slice(0, 2);
+  return {
+    watched: latest(
+      (r) =>
+        r.status.value === 'watched' || r.reaction.value === 'like' || r.reaction.value === 'love',
+    ),
+    watchlisted: latest((r) => r.status.value === 'watchlist'),
+  };
+}
+
+/** Only titles that can determine a visible shelf; older watched history can be named afterward. */
+export function shelfTitleRefs(library: Library, rows: Row[]): Ref[] {
+  const seeds = personalSeedRows(rows);
+  const refs: Ref[] = [...seeds.watched, ...seeds.watchlisted].map((r) => r.title);
+  refs.push(
+    ...library.records
+      .filter((r) => !r.deleted && (r.status === 'watchlist' || r.status === 'inProgress'))
+      .map((r) => r.title),
+  );
+  refs.push(
+    ...library.marks.filter(
+      (m): m is typeof m & { type: 'tv' | 'movie' } => m.type === 'tv' || m.type === 'movie',
+    ),
+  );
+  return [...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values()];
 }

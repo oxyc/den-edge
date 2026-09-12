@@ -21,7 +21,7 @@ export async function fetchDetails(
     // and who made it is wanted by the billboard's taste. A series bills its cast across seasons.
     const credits = ref.type === 'tv' ? 'aggregate_credits' : 'credits';
     const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${credits}`;
-    const res = await fetchImpl(url);
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     details = (await res.json()) as Record<string, unknown>;
   } catch {
@@ -129,6 +129,7 @@ export function toTitle(
     title: name,
     collectionId: typeof collection?.id === 'number' ? collection.id : undefined,
     posterPath: text('poster_path'),
+    backdropPath: text('backdrop_path'),
     year: Number.isFinite(year) ? year : undefined,
     releaseDate: released,
     rating: typeof details.vote_average === 'number' ? details.vote_average : undefined,

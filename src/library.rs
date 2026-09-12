@@ -331,6 +331,19 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     )
 }
 
+/// Encoded UTF-8 length, including JSON quotes. Most values are encrypted base64; charging the
+/// worst-case six bytes for every byte made 512 KiB pages only ~85 KiB and multiplied sync round trips.
+fn json_string_bytes(value: &str) -> usize {
+    2 + value
+        .bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 2,
+            0..=31 => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
+}
+
 async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, limit: usize) -> Response {
     let mut libs = state.libraries.lock().await;
     if let Err(e) = load(state, &mut libs, id).await {
@@ -359,7 +372,7 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
         .iter()
         .take(limit)
         .take_while(|(k, r)| {
-            let cost = 6 * (k.len() + r.v.len()) + 128;
+            let cost = json_string_bytes(k) + json_string_bytes(&r.v) + 128;
             if page_bytes > 0 && page_bytes + cost > PAGE_BYTES {
                 return false;
             }
@@ -930,11 +943,36 @@ mod tests {
         assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
     }
 
+    #[test]
+    fn json_string_budget_matches_the_serializer() {
+        for text in [
+            String::new(),
+            "opaque-base64+/=".into(),
+            "å日本🎬".into(),
+            "\"\\\n\r\t".into(),
+            (0_u8..32).map(char::from).collect(),
+        ] {
+            assert_eq!(super::json_string_bytes(&text), serde_json::to_vec(&text).unwrap().len());
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_encrypted_values_use_the_page_budget() {
+        let h = Harness::new();
+        let writes: Vec<_> =
+            (0..8).map(|i| json!({"k":format!("{i:016x}"),"base":0,"v":"x".repeat(16 * 1024)})).collect();
+        assert_eq!(batch(&h, TOKEN, json!(writes)).await.0, StatusCode::OK);
+        let (_, page) = changes(&h, TOKEN, "?limit=1000").await;
+        assert_eq!(page["entries"].as_array().unwrap().len(), 8);
+        assert_eq!(page["more"], false);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= super::PAGE_BYTES);
+    }
+
     #[tokio::test]
     async fn changes_page_by_bytes_without_skipping_rows() {
         let h = Harness::new();
         let writes: Vec<_> = (0..8)
-            .map(|i| json!({"k":format!("{i:016x}"),"base":0,"v":"x".repeat(super::MAX_VALUE)}))
+            .map(|i| json!({"k":format!("{i:016x}"),"base":0,"v":"\u{0001}".repeat(super::MAX_VALUE)}))
             .collect();
         assert_eq!(batch(&h, TOKEN, json!(writes)).await.0, StatusCode::OK);
         let mut since = 0;
@@ -943,6 +981,7 @@ mod tests {
             let (_, page) = changes(&h, TOKEN, &format!("?since={since}&limit=1000")).await;
             let entries = page["entries"].as_array().unwrap();
             assert!(entries.len() < 8);
+            assert!(serde_json::to_vec(&page).unwrap().len() <= super::PAGE_BYTES);
             assert!(!entries.is_empty());
             count += entries.len();
             since = entries.last().unwrap()["seq"].as_u64().unwrap();

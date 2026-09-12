@@ -4,10 +4,11 @@
   import { links } from './lib/links.svelte';
   import { parseRoute } from './lib/route';
   import LinkTV from './LinkTV.svelte';
-  import { onMount } from 'svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
 
-  onMount(preloadSyncPolicy);
+  $effect(() => {
+    if (links.current) preloadSyncPolicy();
+  });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
   // installed or the storage is persistent — which would mean pairing again.
@@ -23,6 +24,13 @@
     query = '';
   });
 </script>
+
+<svelte:head>
+  {#if links.current}
+    <link rel="preconnect" href="https://api.themoviedb.org" crossorigin="anonymous" />
+    <link rel="preconnect" href="https://image.tmdb.org" />
+  {/if}
+</svelte:head>
 
 <NavigationBar {route} paired={!!links.current} bind:query />
 

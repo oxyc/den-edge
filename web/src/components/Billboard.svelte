@@ -103,12 +103,17 @@
   let wanted = '';
 
   $effect(() => {
-    const url = detail?.backdropPath ? backdropURL(detail.backdropPath) : '';
+    const path = current?.backdropPath ?? detail?.backdropPath;
+    const url = path ? backdropURL(path) : '';
     // Warm the neighbours, so paging usually finds the picture already decoded and swaps without a gap.
     for (const step of [1, -1]) {
       const near = shown[index + step];
-      const path = near && known.get(keyOf(near))?.backdropPath;
-      if (path) new Image().src = backdropURL(path);
+      const path = near && (near.backdropPath ?? known.get(keyOf(near))?.backdropPath);
+      if (path) {
+        const image = new Image();
+        image.fetchPriority = 'low';
+        image.src = backdropURL(path);
+      }
     }
     untrack(() => {
       if (lit >= 0 && layers[lit]?.url === url) return;
@@ -119,6 +124,7 @@
       lit = -1;
       if (!url) return;
       const image = new Image();
+      image.fetchPriority = 'high';
       image.onload = () => {
         // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
         if (wanted !== url) return;
@@ -185,7 +191,10 @@
     const box = rail;
     if (!box) return;
     driving = Date.now();
-    box.scrollTo({ left: n * box.clientWidth, behavior: smooth && !still() ? 'smooth' : 'auto' });
+    box.scrollTo({
+      left: n === 0 ? 0 : n * box.clientWidth,
+      behavior: smooth && !still() ? 'smooth' : 'auto',
+    });
   }
 
   /**
@@ -235,12 +244,15 @@
 
   // A different set of titles is a different billboard: start it at the beginning rather than leaving the rail
   // parked where the last set had scrolled to, which would show slide seven of a list that just changed.
+  let previousFirst = '';
   $effect(() => {
     const first = firstTitleKey;
     if (!first) return;
     untrack(() => {
       index = 0;
-      goTo(0, false);
+      // A new rail is already at zero. scrollTo itself forces layout if slides were just inserted.
+      if (previousFirst) goTo(0, false);
+      previousFirst = first;
     });
   });
 
@@ -307,6 +319,7 @@
           class="backdrop"
           class:lit={layer.id === lit}
           src={layer.url}
+          fetchpriority={layer.id === lit ? 'high' : 'low'}
           alt=""
           draggable="false"
         />
@@ -338,7 +351,13 @@
   <div class="rail" bind:this={rail} onscroll={scrolled} onscrollend={scrolled}>
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
-      <article class="slide" aria-roledescription="slide" aria-label={title.title}>
+      <article
+        class="slide"
+        aria-roledescription="slide"
+        aria-label={title.title}
+        aria-hidden={n !== index}
+        inert={n !== index}
+      >
         <a
           class="slide-link"
           href={titleHref(title)}

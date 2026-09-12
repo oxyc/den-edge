@@ -8,6 +8,7 @@
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
@@ -20,7 +21,7 @@ fn csp(remux: &[String]) -> String {
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:{remux}; \
          connect-src 'self' https://api.themoviedb.org{remux}; frame-src https://www.youtube-nocookie.com; \
-         frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+         object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
 }
 
@@ -106,17 +107,37 @@ async fn encoded(
             if let Ok(compressed) = tokio::fs::read(sidecar).await {
                 let mut response = respond(compressed, file, immutable, remux);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                return response;
+                return revalidate(response, headers);
             }
         }
     }
     if identity == 0 {
         let mut response = Response::new(Body::empty());
         *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
+        response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
         return response;
     }
-    respond(bytes, file, immutable, remux)
+    revalidate(respond(bytes, file, immutable, remux), headers)
+}
+
+/// Validators name the selected representation, so a gzip response cannot validate identity bytes.
+/// GET/HEAD use weak comparison, including a list of tags or `*` (RFC 9110 §13.1.2).
+fn revalidate(mut response: Response, request: &HeaderMap) -> Response {
+    let Some(etag) = response.headers().get(header::ETAG) else { return response };
+    let matched = request.get_all(header::IF_NONE_MATCH).iter().any(|line| {
+        line.to_str().is_ok_and(|line| {
+            line.split(',').any(|tag| {
+                let tag = tag.trim();
+                tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+            })
+        })
+    });
+    if matched {
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        *response.body_mut() = Body::empty();
+    }
+    response
 }
 
 /// The request path as a path under the web directory, or `None` if it would step outside it.
@@ -141,9 +162,11 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
+    let etag = format!("\"{}\"", crate::hex(&Sha256::digest(&bytes)));
     let length = bytes.len();
     let mut resp = Response::new(Body::from(bytes));
     let headers = resp.headers_mut();
+    headers.insert(header::ETAG, HeaderValue::from_str(&etag).expect("a quoted SHA-256 digest"));
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -164,6 +187,7 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
 fn not_found() -> Response {
     let mut resp = Response::new(Body::from("not found"));
     *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
     resp
 }
@@ -207,6 +231,40 @@ mod tests {
         headers.append(header::ACCEPT_ENCODING, "*".parse().unwrap());
         headers.append(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
         assert_eq!(super::encodings(&headers), (0, 1000));
+    }
+
+    #[tokio::test]
+    async fn conditional_requests_validate_the_selected_representation() {
+        let h = with_app();
+        let first = h.send("GET", "/", None, &[]).await;
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        for method in ["GET", "HEAD"] {
+            for condition in [etag.clone(), format!("\"old\", W/{etag}"), "*".into()] {
+                let response = h.send(method, "/", None, &[("if-none-match", &condition)]).await;
+                assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+                assert_eq!(response.headers()[header::VARY], "accept-encoding");
+                assert_eq!(response.headers()[header::ETAG], etag);
+                assert!(response.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+                assert!(body_text(response).await.is_empty());
+            }
+        }
+        let mismatch = h.send("GET", "/", None, &[("if-none-match", "invalid")]).await;
+        assert_eq!(mismatch.status(), StatusCode::OK);
+        std::fs::write(h.dir.join("web/index.html"), "new app").unwrap();
+        let changed = h.send("GET", "/", None, &[("if-none-match", &etag)]).await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_ne!(changed.headers()[header::ETAG], etag);
+        std::fs::write(h.dir.join("web/index.html.gz"), b"compressed representation").unwrap();
+        let gzip = h.send("GET", "/", None, &[("accept-encoding", "gzip")]).await;
+        let gzip_etag = gzip.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let response =
+            h.send("GET", "/", None, &[("accept-encoding", "gzip"), ("if-none-match", &gzip_etag)]).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        let identity = h.send("GET", "/", None, &[("if-none-match", &gzip_etag)]).await;
+        assert_eq!(identity.status(), StatusCode::OK);
+        assert_ne!(identity.headers()[header::ETAG], gzip_etag);
     }
 
     #[tokio::test]

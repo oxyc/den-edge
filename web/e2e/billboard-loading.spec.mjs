@@ -66,6 +66,10 @@ for (const width of [320, 393, 844, 1280])
       const lines = width >= 360 && width < 760 ? 1 : 2;
       expect(Math.abs(before[1].height - lineHeight * lines)).toBeLessThan(0.1);
       expect(before[0].height).toBe(empty.height);
+      releaseImages();
+      await expect(hero.locator('img.backdrop.lit')).toHaveAttribute('src', /early.jpg$/);
+      await expect(hero.locator('img.backdrop.lit')).toHaveAttribute('fetchpriority', 'high');
+      expect(await geometry()).toEqual(before);
       releaseMetadata();
       await expect(page.locator('.overview').first()).toContainText('substantial movie overview');
       expect(await geometry()).toEqual(before);

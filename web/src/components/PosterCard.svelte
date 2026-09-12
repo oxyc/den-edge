@@ -52,16 +52,6 @@
     width: var(--card-w);
   }
 
-  /* The TV's fade: dim, and less so under the pointer or focus so the card stays legible. */
-  .faded {
-    opacity: 0.5;
-  }
-
-  .faded:hover,
-  .faded:focus-visible {
-    opacity: 0.8;
-  }
-
   .pick {
     padding: 0;
     border: 0;
@@ -79,6 +69,16 @@
     overflow: hidden;
     border-radius: 12px;
     background: var(--card);
+  }
+
+  /* The TV's fade: dim, and less so under the pointer or focus so the card stays legible. */
+  .faded .art {
+    opacity: 0.5;
+  }
+
+  .faded:hover .art,
+  .faded:focus-visible .art {
+    opacity: 0.8;
   }
 
   .pick:focus-visible .art {
@@ -131,7 +131,10 @@
   .meta {
     display: grid;
     margin-top: 8px;
+    min-height: 2.8em;
+    grid-template-rows: 1.4em 1.4em;
     font-size: 14px;
+    line-height: 1.4;
   }
 
   .name {

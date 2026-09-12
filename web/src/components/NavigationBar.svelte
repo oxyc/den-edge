@@ -67,6 +67,7 @@
         ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
       >
       <input
+        name="search"
         bind:this={input}
         bind:value={query}
         type="search"

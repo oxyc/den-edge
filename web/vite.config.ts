@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { previewBuild } from './scripts/previewBuild.ts';
 
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another.
@@ -11,7 +12,7 @@ const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [previewBuild(), svelte()],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
     // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`

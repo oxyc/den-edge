@@ -7,7 +7,7 @@
   onMount(() => {
     const load = () => {
       titles = [
-        { type: 'movie', id: 42, title: 'A short title', year: 2026 },
+        { type: 'movie', id: 42, title: 'A short title', year: 2026, backdropPath: '/early.jpg' },
         {
           type: 'movie',
           id: 43,

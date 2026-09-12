@@ -40,10 +40,9 @@
     type Title,
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
-  import type { LibraryLog } from './lib/log';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { navigate } from './lib/navigation';
-  import { nameLibraryTitles } from './lib/libraryNaming';
+  import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { availability } from './lib/availability.svelte';
@@ -75,6 +74,8 @@
 
   /** The TMDB key the library shares (`set:keys`). */
   let tmdbKey = $state('');
+  /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
+  let shelvesReady = $state(false);
   const clock = browserClock();
   /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
   const log = $derived(session.log);
@@ -114,7 +115,22 @@
     // Service state below is an output, not a dependency of this effect.
     untrack(() => {
       tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
-      if (tmdbKey) void name(opened, tmdbKey);
+      if (tmdbKey) {
+        const key = tmdbKey;
+        const raw = applyLog(emptyLibrary(), opened.rows());
+        const priority = shelfTitleRefs(raw, opened.rows());
+        const reserved = new Set(priority.map(titleKey));
+        void nameLibraryTitles(session, priority, key).then(() => {
+          if (disposed) return;
+          shelvesReady = true;
+          // Watched history enriches taste in the background; it cannot change the initial shelf order.
+          void nameLibraryTitles(
+            session,
+            untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
+            key,
+          );
+        });
+      } else shelvesReady = true;
       plugins = readPlugins(opened.settings('plugins'));
       const [key, installed] = [tmdbKey, plugins];
       void (async () => {
@@ -143,11 +159,6 @@
       stopDiscovery?.();
     };
   });
-
-  /** Naming belongs to the shared session, including lookups still in flight on another page. */
-  function name(opened: LibraryLog, key: string) {
-    return nameLibraryTitles(session, untitled(applyLog(emptyLibrary(), opened.rows())), key);
-  }
 
   const library = $derived.by(() => {
     void version;
@@ -470,21 +481,12 @@
         .filter((r) => r.title.title)
         .map((r) => [titleKey(r.title), r.title]),
     );
-    const recency = (r: TitleRow) => Math.max(r.watchedAt ?? 0, r.reaction.at[0], r.addedAt);
-    const latest = (keep: (r: TitleRow) => boolean) =>
-      titleRows
-        .filter(keep)
-        .sort((a, b) => recency(b) - recency(a))
-        .flatMap((r) => named.get(titleKey(r.title)) ?? [])
-        .slice(0, 2);
+    const selected = personalSeedRows(titleRows);
+    const namedSeeds = (refs: TitleRow[]) =>
+      refs.flatMap((r) => named.get(titleKey(r.title)) ?? []);
     return {
-      watched: latest(
-        (r) =>
-          r.status.value === 'watched' ||
-          r.reaction.value === 'like' ||
-          r.reaction.value === 'love',
-      ),
-      watchlisted: latest((r) => r.status.value === 'watchlist'),
+      watched: namedSeeds(selected.watched),
+      watchlisted: namedSeeds(selected.watchlisted),
       owned: new Set(titleRows.map((r) => titleKey(r.title))),
     };
   });
@@ -680,9 +682,7 @@
   {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
   {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
-  <!-- Kept in the page while the library is still opening, so its space is held from the first paint and the
-       rows below don't jump down when the titles arrive. -->
-  {#if tmdbKey || log === undefined}
+  {#if tmdbKey}
     <Billboard
       {active}
       titles={featured.filter(featuredShown)}
@@ -692,30 +692,34 @@
       onplay={playHere && ((title) => playHere(title))}
     />
   {/if}
-  {#if resume.length}
-    <PosterRow heading="Continue Watching">
-      {#each resume as entry (`${entry.title.type}:${entry.title.id}`)}
-        <PosterCard
-          title={entry.title}
-          caption={caption(entry)}
-          progress={entry.fraction}
-          onselect={select && (() => select(entry.title))}
-        />
-      {/each}
-    </PosterRow>
+  {#if !shelvesReady}
+    <div data-route-loading><Loading label="Loading your shelves" /></div>
+  {:else}
+    {#if resume.length}
+      <PosterRow heading="Continue Watching">
+        {#each resume as entry (`${entry.title.type}:${entry.title.id}`)}
+          <PosterCard
+            title={entry.title}
+            caption={caption(entry)}
+            progress={entry.fraction}
+            onselect={select && (() => select(entry.title))}
+          />
+        {/each}
+      </PosterRow>
+    {/if}
+    {#if saved.length}
+      <PosterRow heading="Watchlist">
+        {#each saved as title (`${title.type}:${title.id}`)}
+          <PosterCard
+            {title}
+            caption={title.year ? String(title.year) : undefined}
+            onselect={select && (() => select(title))}
+          />
+        {/each}
+      </PosterRow>
+    {/if}
+    <Browse {rows} shown={browseShown} onselect={open} />
   {/if}
-  {#if saved.length}
-    <PosterRow heading="Watchlist">
-      {#each saved as title (`${title.type}:${title.id}`)}
-        <PosterCard
-          {title}
-          caption={title.year ? String(title.year) : undefined}
-          onselect={select && (() => select(title))}
-        />
-      {/each}
-    </PosterRow>
-  {/if}
-  <Browse {rows} shown={browseShown} onselect={open} />
 {/if}
 
 {#if playing && scout && remux !== null}

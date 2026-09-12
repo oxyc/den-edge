@@ -90,9 +90,11 @@
 
   .skeleton {
     width: var(--card-w);
-    aspect-ratio: 2 / 3;
+
+    /* Match PosterCard art, gap, and two metadata lines before any title is known. */
+    height: calc(var(--card-w) * 1.5 + 8px + 39.2px);
     border-radius: 12px;
-    background: var(--card);
+    background: linear-gradient(var(--card), var(--card)) top / 100% calc(100% - 47.2px) no-repeat;
   }
 
   .end {

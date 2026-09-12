@@ -11,6 +11,8 @@ export interface Title {
   id: number;
   title: string;
   posterPath?: string;
+  /** Available in discovery results, before the full detail request finishes. */
+  backdropPath?: string;
   year?: number;
   /** The full release date (`YYYY-MM-DD`) where TMDB gave one: a year can't tell last month from last January. */
   releaseDate?: string;

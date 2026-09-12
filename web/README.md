@@ -31,3 +31,9 @@ See [the browser test guide](e2e/README.md) for Playwright setup and [detail par
 - Preserve explicit WebKit fallbacks for line clamping, glass, and touch selection. Stylelint's narrow exceptions document the intentional browser compatibility rules; they are not generated prefixes to remove.
 - Keep reduced-motion behavior and stable media dimensions. A styling change must preserve retained route layouts, scroll restoration, and snapshot transitions.
 - Explain any local Stylelint suppression with a reason. Unused or unexplained suppressions fail lint.
+
+To measure production bundles using the existing secure preview and pairing, run `npm run build`
+and visit `/__build/#library` on the Vite preview origin. `/` keeps its normal development/HMR
+behavior. The build preview shares the API proxies and browser storage; it never copies credentials.
+Rebuild after source changes. This measures the built frontend, not the production Rust server's
+HTTP policy: validate CSP, conditional requests, and cache headers against the deployed service.
