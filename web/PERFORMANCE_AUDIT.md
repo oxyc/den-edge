@@ -6,20 +6,23 @@ The audit found real layout instability during initial library naming and excess
 
 ## Measurements
 
-The authenticated tests used the requested Tailscale preview, a 393 × 852 viewport at 3× device scale, Chrome's **4× CPU slowdown and Slow 4G** network preset. Browser pairing and TMDB's IndexedDB cache were preserved. Reload measurements below use warm HTTP/image caches unless stated otherwise; they still fetch the encrypted library from the server.
+The authenticated tests used [the requested Tailscale preview](https://oskars-macbook-pro.tailce93d3.ts.net:8443/#library), a 393 × 852 viewport at 3× device scale, Chrome's **4× CPU slowdown and Slow 4G** network preset. Browser pairing and TMDB's IndexedDB cache were preserved. Reload measurements below use warm HTTP/image caches unless stated otherwise; they still fetch the encrypted library from the server.
 
-| Scenario                                      |                       FCP |                       LCP |                       CLS |
-| --------------------------------------------- | ------------------------: | ------------------------: | ------------------------: |
-| Original Vite preview, paired Home            |                   5.524 s |                  13.157 s |                     0.362 |
-| Frontend fixes, Vite preview, old sync server |                         — |                  13.369 s |                     0.000 |
-| Production bundles, old sync server           |                   0.864 s |                   7.214 s |                     0.000 |
-| Production bundles, updated sync server       | Pending final measurement | Pending final measurement | Pending final measurement |
+| Scenario                                      |     FCP |      LCP |   CLS |
+| --------------------------------------------- | ------: | -------: | ----: |
+| Original Vite preview, paired Home            | 5.524 s | 13.157 s | 0.362 |
+| Frontend fixes, Vite preview, old sync server |       — | 13.369 s | 0.000 |
+| Production bundles, old sync server           | 0.864 s |  7.214 s | 0.000 |
+| Production bundles, updated sync server       | 1.240 s |  5.320 s | 0.000 |
+| Vite preview, updated sync server             | 5.556 s |  9.855 s | 0.000 |
+
+After deployment, the same library sync took **one request instead of five**: 367,957 response-body bytes in 2.621 s under Slow 4G. The matching production-bundle runs measured LCP 7.214 → 5.320 s (about 26% lower); the original preview measured 13.157 → 9.855 s (about 25% lower). FCP on Vite stayed near 5.5 s, consistent with its development-module waterfall. These are individual lab runs with normal timing variation, not statistical or field results. The remaining 5.320 s production-bundle LCP under these conditions still warrants the follow-up work below.
 
 The production-bundle path is `/__build/#library` on the same preview origin. It serves the built files while sharing the existing API proxies and browser pairing. The normal `/#library` stays a Vite development preview. The production-bundle comparison demonstrates development-server overhead; it is **not** a before/after speedup attributable solely to the code changes. A first request of the new production bundle measured FCP 1.892 s, compared with 0.864 s on the cached reload.
 
 The original unpaired production entry page measured LCP 237 ms and CLS 0.00 without throttling. That is a different screen and network condition, so it cannot stand in for authenticated library performance.
 
-Lighthouse on the populated, fixed production-bundle preview scored **Accessibility 100, Best Practices 100, SEO 83**. The SEO failure is the development server returning its HTML fallback for missing `robots.txt`; production returns a proper missing-file response. The optional/nonstandard `llms.txt` audit is also affected by that fallback and is not an application performance requirement. No performance score is quoted: this Lighthouse integration excludes that category; FCP/LCP/CLS came from Chrome Performance traces and Paint Timing instead. No field INP/CrUX data are available for this private preview.
+Lighthouse on the populated, fixed production-bundle preview scored **Accessibility 100, Best Practices 100, SEO 83**. The SEO failure is the development server returning its HTML fallback for missing `robots.txt`; production returns a proper missing-file response. The optional/nonstandard `llms.txt` audit is also affected by that fallback and is not an application performance requirement. No performance score is quoted: this Lighthouse integration excludes that category; FCP/LCP/CLS came from Chrome Performance traces and Paint Timing instead. No field INP/CrUX data are available for this private preview. After deployment, Lighthouse on the actual unpaired production entry page scored **100 accessibility, 100 best practices, and 100 SEO**, with zero failed audits. This confirms the production crawler-metadata response differs from the development fallback; it does not establish an authenticated-page SEO score. The unpaired startup made only the entry JS, CSS, and logo requests; no WASM or HLS was downloaded.
 
 ## Findings and implemented improvements
 
@@ -46,7 +49,7 @@ The page budget now counts actual JSON string encoding costs while retaining the
 - The app already loads HLS dynamically and uses native HLS when supported. The large HLS chunk is absent from the measured Home startup requests.
 - Production assets retain verified gzip sidecars and long-lived caching for hashed filenames. The stylesheet's estimated render-blocking savings were zero in the measured warm traces, so it was not inlined.
 
-The final build is approximately **97.8 kB gzip entry JavaScript**, **8.4 kB gzip CSS**, **86.5 kB gzip WASM**, and **179.0 kB gzip HLS** when playback requires it. The HLS chunk still triggers Vite's 500 kB uncompressed warning. Its deferred loading is verified; splitting the same library into arbitrary files would not reduce the amount needed for playback.
+The verified level-9 gzip sidecars are approximately **96.9 kB gzip entry JavaScript**, **8.4 kB gzip CSS**, **85.8 kB gzip WASM**, and **176.8 kB gzip HLS** when playback requires it. The HLS chunk still triggers Vite's 500 kB uncompressed warning. Its deferred loading is verified; splitting the same library into arbitrary files would not reduce the amount needed for playback.
 
 ### HTTP caching and CSP
 
@@ -62,7 +65,7 @@ The final build is approximately **97.8 kB gzip entry JavaScript**, **8.4 kB gzi
 | Styles                            | Inline styles remain permitted because dynamic layout, progress, and snapshot state use style attributes        |
 | Existing hardening                | HSTS, nosniff, no-referrer, frame-ancestors, COOP/CORP, restricted permissions policy, and request IDs retained |
 
-Tests cover GET and HEAD, wildcard and weak/list validators, stale validators after content changes, representation separation, retained response policy headers, gzip refusal/quality negotiation, and stale sidecar handling. The existing real-browser CSP smoke test still passes its positive WASM and negative-control checks.
+Tests cover GET and HEAD, wildcard and weak/list validators, stale validators after content changes, representation separation, retained response policy headers, gzip refusal/quality negotiation, and stale sidecar handling. The existing real-browser CSP smoke test still passes its positive WASM and negative-control checks. Live HTTPS checks after deployment confirmed conditional GET and HEAD return 304 for matching representation validators, the deployed JavaScript is gzip-encoded and immutable, `/health` remains `no-store`, and missing `robots.txt` returns `404` with `no-store`. The proxy can negotiate gzip for a GET without an explicit Accept-Encoding header; compare validators using the same encoding, or use the validator returned by that GET.
 
 ### Accessibility and maintainability
 
@@ -74,11 +77,11 @@ Prettier, ESLint, Stylelint, and Svelte/TypeScript checks are installed and enfo
 
 - Rust: 65 unit/integration tests passed locally, including JSON byte budgeting and conditional caching.
 - Web: 252 unit tests passed.
-- Full browser suite: 45 tests passed before the final unavailable-metadata case was added; all nine affected loading/billboard tests passed afterward. CI runs all 46 together.
+- Full browser suite: **all 46 tests passed in release CI**. The corrected actor snapshot scenarios also passed **30 repeated local runs**, keeping strict pixel comparisons. The test now waits for actual credits, completed pagination, and View Transitions, rather than treating the always-visible Filmography heading as readiness.
 - Existing browser coverage includes nested movie/actor Back and Forward, fresh navigation at the top, repeated visits with separate scroll positions, canceled/overlapping gestures, retained carousel positions, rotation, loading snapshots, trailer fallbacks, and detail feature parity.
 - New browser coverage includes staggered initial metadata, delayed older watched history, unavailable metadata, poster-row geometry, and showing the high-priority backdrop before details resolve.
 - Full lint: zero errors and warnings. Production build and compression round trips passed. Browser WASM/CSP, idle initialization, early-action single-flight, offline calls, and retry checks passed.
-- Release CI, deployment, and final live header checks: to be recorded after deployment.
+- [Release workflow 34713958173](https://github.com/oxyc/den-edge/actions/runs/34713958173) passed Rust tests, Clippy, formatting, web lint/unit/browser checks, the dependency audit, production build, image scan, and signing. **[v0.50.1](https://github.com/oxyc/den-edge/releases/tag/v0.50.1) is released and deployed.** The updater verified the signature, tested the replacement, and confirmed it serving; live `/version` returned `0.50.1` and `/health` returned `ok` on 12 September 2026 around 19:29 UTC. Final HTTPS header checks and both authenticated post-deployment traces passed as described above.
 
 ## Remaining suggestions and limits
 
@@ -90,3 +93,13 @@ Prettier, ESLint, Stylelint, and Svelte/TypeScript checks are installed and enfo
 6. **Treat SEO/tooling warnings in context.** This is a paired application. Missing crawler metadata on a development SPA fallback is separate from LCP, accessibility, CSP, and private data protection. A published landing page can have its own explicit indexing policy.
 
 Reference material: [Chrome LCP diagnostics](https://developer.chrome.com/docs/performance/insights/lcp-breakdown), [layout shift guidance](https://web.dev/articles/optimize-cls), [HTTP caching](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching), and [CSP worker policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/worker-src).
+
+## Delivery record
+
+- Feature release v0.50.0: `da3c475cc3aa7f39ddf20d983e6690a1dfdfc15e`.
+- Formatting and lint enforcement: `4499b676259629d9d8476f90a2bc73578d0cd418`.
+- Performance and HTTP fixes: `69172bdc433a0c3bcf810313607dda708c1a81ef`.
+- Final v0.50.1 tag: `e081b1f78e773c58e8136205dd6e42b555aa7c96`, including corrected test readiness.
+- Deployed image: `ghcr.io/oxyc/den-edge@sha256:762e28dfddaca7745da2b058a32dd34c1d048c13507aece1df0ca529bafd5ee0`.
+
+The paired browser is preserved at the original `/#library` preview URL. Audit CPU/network throttling was disabled afterward. No release/deployment work remains; the suggestions above are follow-up opportunities and known limits. Operational context is retained in [the handoff notes](PERFORMANCE_HANDOFF.md).
