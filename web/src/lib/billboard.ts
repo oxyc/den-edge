@@ -153,15 +153,23 @@ export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Tast
 }
 
 /**
- * Whether a title resembles nothing this library holds — not one of its genres, not its language. Worth
- * dropping from a billboard that is meant to be personal, but only when the question was actually asked: a
- * title whose genres were never fetched scores zero for want of an answer, not for want of a match, and a
- * library with no profile yet would otherwise reject everything.
+ * How much of a match is too little to belong on a personal billboard. Not zero: a title sharing one genre this
+ * library has watched once scores a sliver, which is not a reason to feature it — an action comedy is not
+ * "for you" because you once watched an action film. Above this, the multiplier decides; below it, the title
+ * doesn't take a slide from something the household would actually pick.
+ */
+const STRANGER = 0.15;
+
+/**
+ * Whether a title resembles too little of what this library holds. Only asked when there is an answer: a title
+ * whose genres were never fetched scores zero for want of an answer rather than for want of a match — dropping
+ * those would quietly delete every arrival past the handful that get named — and a library with no profile yet
+ * would otherwise reject everything it was offered.
  */
 function strangerHere(title: Title, taste?: Taste): boolean {
   if (!taste || taste.genres.size === 0) return false;
   if (!title.genreIds || title.genreIds.length === 0) return false;
-  return affinity(title, taste) === 0;
+  return affinity(title, taste) < STRANGER;
 }
 
 const keyOf = (title: Title) => `${title.type}:${title.id}`;

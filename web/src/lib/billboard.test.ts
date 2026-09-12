@@ -171,12 +171,20 @@ describe('pickBillboard', () => {
     expect(pickBillboard([inUS, inFI, rival], { now: NOW, taste }).map((t) => t.id)).toEqual([5, 6]);
   });
 
-  it('drops a title that resembles nothing the library holds, but only when its genres are known', () => {
+  it('drops a title that resembles too little of the library, but only when its genres are known', () => {
     const CRIME = 80;
-    const taste = tasteOf([{ title: film(90, { genreIds: [CRIME], originalLanguage: 'sv' }) }]);
+    const ACTION = 28;
+    // A library of Nordic crime that half-watched one action film: a tenth of the weight of its strongest.
+    const taste = tasteOf([
+      { title: film(90, { genreIds: [CRIME], originalLanguage: 'sv' }), weight: 3 },
+      { title: film(96, { genreIds: [ACTION], originalLanguage: 'en' }), weight: 0.3 },
+    ]);
     const alien = film(2, { genreIds: [16], originalLanguage: 'ja', releaseDate: '2026-09-01' });
+    // A sliver of a match is still not a reason to feature it.
+    const barely = film(4, { genreIds: [ACTION], originalLanguage: 'en', releaseDate: '2026-09-01' });
     const unknown = film(3, { releaseDate: '2026-09-01' });
-    expect(pickBillboard([{ title: alien }, { title: unknown }], { now: NOW, taste }).map((t) => t.id)).toEqual([3]);
+    const picked = pickBillboard([{ title: alien }, { title: barely }, { title: unknown }], { now: NOW, taste });
+    expect(picked.map((t) => t.id)).toEqual([3]);
     // With no profile to judge against, nothing is a stranger.
     expect(pickBillboard([{ title: alien }], { now: NOW }).map((t) => t.id)).toEqual([2]);
   });
