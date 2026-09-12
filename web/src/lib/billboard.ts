@@ -38,7 +38,9 @@ const UNRELEASED = 0.8;
  * whatever came out last, and most of what comes out in any given week is an untracked micro-release nobody is
  * looking for. Attention is weighted to match it, so among new things the ones people are actually watching win.
  */
-export const WEIGHTS = { fresh: 0.22, buzz: 0.4, quality: 0.15, taste: 0.35, arrival: 0.28 };
+export const WEIGHTS = { fresh: 0.22, attention: 0.4, quality: 0.15, taste: 0.35 };
+/** How much a second kind of attention adds once the first is counted. See `attention`. */
+const CORROBORATION = 0.3;
 
 /** What a library says its viewer likes: how much of it sits in each genre, and in each original language. */
 export interface Taste {
@@ -115,6 +117,19 @@ export function arrival({ arrival: at }: Candidate): number {
   return !at || at.of <= 0 ? 0 : Math.max(0, 1 - at.rank / at.of);
 }
 
+/**
+ * The two kinds of attention, counted once rather than twice.
+ *
+ * They are not independent: a service pushing its own new release puts it at the top of that service's arrivals
+ * AND at the top of what is trending, so adding the two together let anything being marketed collect nearly
+ * every point going and finish above titles the library actually likes. The stronger signal counts in full and
+ * the second only corroborates it.
+ */
+export function attention(candidate: Candidate, busiest = 0): number {
+  const [strong, weak] = [buzz(candidate, busiest), arrival(candidate)].sort((a, b) => b - a) as [number, number];
+  return strong + CORROBORATION * weak;
+}
+
 export function quality(title: Title): number {
   if (title.rating === undefined || (title.votes ?? 0) < ENOUGH_VOTES) return 0;
   return Math.min(1, Math.max(0, (title.rating - 6) / 2));
@@ -123,11 +138,22 @@ export function quality(title: Title): number {
 export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
   return (
     WEIGHTS.fresh * freshness(candidate.title, now) +
-    WEIGHTS.buzz * buzz(candidate, busiest) +
+    WEIGHTS.attention * attention(candidate, busiest) +
     WEIGHTS.quality * quality(candidate.title) +
-    WEIGHTS.taste * affinity(candidate.title, taste) +
-    WEIGHTS.arrival * arrival(candidate)
+    WEIGHTS.taste * affinity(candidate.title, taste)
   );
+}
+
+/**
+ * Whether a title resembles nothing this library holds — not one of its genres, not its language. Worth
+ * dropping from a billboard that is meant to be personal, but only when the question was actually asked: a
+ * title whose genres were never fetched scores zero for want of an answer, not for want of a match, and a
+ * library with no profile yet would otherwise reject everything.
+ */
+function strangerHere(title: Title, taste?: Taste): boolean {
+  if (!taste || taste.genres.size === 0) return false;
+  if (!title.genreIds || title.genreIds.length === 0) return false;
+  return affinity(title, taste) === 0;
 }
 
 const keyOf = (title: Title) => `${title.type}:${title.id}`;
@@ -153,10 +179,21 @@ function merge(a: Candidate, b: Candidate): Candidate {
       genreIds: a.title.genreIds ?? b.title.genreIds,
       originalLanguage: a.title.originalLanguage ?? b.title.originalLanguage,
     },
-    rank: a.rank ?? b.rank,
-    of: a.of ?? b.of,
-    arrival: a.arrival ?? b.arrival,
+    ...best({ rank: a.rank, of: a.of }, { rank: b.rank, of: b.of }),
+    arrival: best(a.arrival, b.arrival),
   };
+}
+
+/**
+ * The better of two placings. The same service in two countries is two lists, and a title can sit first in one
+ * and fortieth in the other; which of those the merge happened to see first is no basis for judging it.
+ */
+function best<T extends { rank?: number; of?: number }>(a: T | undefined, b: T | undefined): T | undefined {
+  const standing = (p?: { rank?: number; of?: number }) =>
+    p?.rank === undefined || !p.of ? -1 : 1 - p.rank / p.of;
+  if (standing(a) < 0) return b;
+  if (standing(b) < 0) return a;
+  return standing(a) >= standing(b) ? a : b;
 }
 
 /**
@@ -175,7 +212,7 @@ export function pickBillboard(
 ): Title[] {
   const byKey = new Map<string, Candidate>();
   for (const candidate of candidates) {
-    if (!keep(candidate.title)) continue;
+    if (!keep(candidate.title) || strangerHere(candidate.title, taste)) continue;
     const key = keyOf(candidate.title);
     const already = byKey.get(key);
     byKey.set(key, already ? merge(already, candidate) : candidate);

@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { affinity, arrival, buzz, freshness, pickBillboard, quality, tasteOf, type Candidate } from './billboard';
+import {
+  affinity,
+  arrival,
+  attention,
+  buzz,
+  freshness,
+  pickBillboard,
+  quality,
+  tasteOf,
+  type Candidate,
+} from './billboard';
 import type { Title } from './library';
 
 const NOW = new Date('2026-09-12T00:00:00Z');
@@ -87,9 +97,17 @@ describe('taste', () => {
 
 describe('arrival', () => {
   it('lifts an older title that has just landed on a service over a newer one that has not', () => {
-    const justLanded = { title: film(1, { releaseDate: '1997-06-01', popularity: 20 }), arrival: { rank: 0, of: 10 } };
-    const merelyNew = { title: film(2, { releaseDate: '2026-08-20', popularity: 20 }) };
+    const justLanded = { title: film(1, { releaseDate: '1997-06-01' }), arrival: { rank: 0, of: 10 } };
+    const merelyNew = { title: film(2, { releaseDate: '2026-08-20' }) };
     expect(pickBillboard([merelyNew, justLanded], { now: NOW }).map((t) => t.id)).toEqual([1, 2]);
+  });
+
+  it('counts a service pushing its own release once, not twice', () => {
+    // Top of that service's arrivals AND top of trending is one fact about one marketing campaign.
+    const pushed = { title: film(1), rank: 0, of: 100, arrival: { rank: 0, of: 100 } };
+    const trendingOnly = { title: film(2), rank: 0, of: 100 };
+    expect(attention(pushed)).toBeCloseTo(1.3, 6);
+    expect(attention(trendingOnly)).toBeCloseTo(1, 6);
   });
 
   it('counts for nothing when the title arrived in no list', () => {
@@ -120,6 +138,25 @@ describe('pickBillboard', () => {
     // Unmerged, the atlas copy would score on its ranking alone and lose to the plain TMDB title.
     const picked = pickBillboard([fromAtlas, fromTmdb, { title: alone }], { now: NOW, taste });
     expect(picked.map((t) => t.id)).toEqual([5, 6]);
+  });
+
+  it('takes the better of two placings for the same title, not the first one seen', () => {
+    const CRIME = 80;
+    const taste = tasteOf([{ title: film(90, { genreIds: [CRIME] }) }]);
+    const inUS = { title: film(5, { genreIds: [CRIME] }), arrival: { rank: 60, of: 100 } };
+    const inFI = { title: film(5, { genreIds: [CRIME] }), arrival: { rank: 0, of: 100 } };
+    const rival = { title: film(6, { genreIds: [CRIME] }), arrival: { rank: 30, of: 100 } };
+    expect(pickBillboard([inUS, inFI, rival], { now: NOW, taste }).map((t) => t.id)).toEqual([5, 6]);
+  });
+
+  it('drops a title that resembles nothing the library holds, but only when its genres are known', () => {
+    const CRIME = 80;
+    const taste = tasteOf([{ title: film(90, { genreIds: [CRIME], originalLanguage: 'sv' }) }]);
+    const alien = film(2, { genreIds: [16], originalLanguage: 'ja', releaseDate: '2026-09-01' });
+    const unknown = film(3, { releaseDate: '2026-09-01' });
+    expect(pickBillboard([{ title: alien }, { title: unknown }], { now: NOW, taste }).map((t) => t.id)).toEqual([3]);
+    // With no profile to judge against, nothing is a stranger.
+    expect(pickBillboard([{ title: alien }], { now: NOW }).map((t) => t.id)).toEqual([2]);
   });
 
   it('drops what the caller hides, and dedupes what two sources both offered', () => {
