@@ -1,6 +1,9 @@
 // The library's record log on den-edge (`/lib/<id>/…`, den-spec wire/library-v2.md): read whole, and written a
-// row at a time with compare-and-set. The TV writes it whenever the library changes.
+// row at a time with compare-and-set. The TV writes it whenever the library changes. What den-edge last said is kept
+// in this browser (`localVault.ts`), so a return visit starts from it and asks only for what changed since.
 
+import { hkdf } from './crypto';
+import { libraryVault, type Vault } from './localVault';
 import {
   believe,
   compareStamps,
@@ -40,41 +43,79 @@ interface Batch {
   conflicts: { k: string; seq: number; v: string | null }[];
 }
 
+/** What a return visit starts from: the rows as den-edge last gave them, and where in its log that was. */
+interface Snapshot {
+  generation?: string;
+  head: number;
+  entries: [name: string, seq: number, row: Row][];
+}
+
+/** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
+const SNAPSHOT = 'log.v1';
+
 /** Conflict rounds per write: another device writing the same row every time is not a thing a person does. */
 const ROUNDS = 3;
+
+const utf8 = new TextEncoder();
 
 export class LibraryLog {
   /** Each row as last read or written, by the name its key is the HMAC of. */
   private readonly entries = new Map<string, Entry>();
+  /** Each row exactly as den-edge last gave it, without this browser's unsent edits: what the next visit starts from. */
+  private readonly acknowledged = new Map<string, Entry>();
+  /** `acknowledged` changed since it was last kept. */
+  private dirty = false;
+  private saving: Promise<void> = Promise.resolve();
   private writes: Promise<unknown> = Promise.resolve();
   private head = 0;
   private generation?: string;
   private recoveryRows?: Row[];
   /** The TV reset the library key: this log is deleted, its id retired, and this browser's key reaches nothing. */
   moved = false;
+  /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
+  fromCache = false;
 
   private constructor(
     private readonly keys: LibraryKeys,
     private readonly fetchImpl: typeof fetch,
     private readonly storage?: Storage,
+    private readonly local: { vault: Vault; key: CryptoKey } | null = null,
   ) {}
 
   /**
    * Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. A library
-   * that moved to a new key comes back empty and `moved`.
+   * that moved to a new key comes back empty and `moved`. With a copy kept from an earlier visit it opens from that
+   * at once, `fromCache`, and asks den-edge nothing until `refresh`.
    */
   static async open(
     libraryKey: string,
     fetchImpl: typeof fetch = fetch,
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+    vault: Vault | null = libraryVault,
   ): Promise<LibraryLog | null> {
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const log = new LibraryLog(
-      await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0))),
+      await deriveKeys(raw),
       fetchImpl,
       storage,
+      vault && { vault, key: await localKey(raw) },
     );
-    // Initialize outside per-row tampering catches: a loader failure must never skip valid rows.
-    await ensureSyncPolicy(true);
+    // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
+    // never skip valid rows.
+    const policy = ensureSyncPolicy();
+    void policy.catch(() => undefined);
+    const saved = await log.kept<Snapshot>(SNAPSHOT);
+    if (saved) {
+      await policy;
+      log.generation = saved.generation;
+      log.head = saved.head;
+      for (const [name, seq, row] of saved.entries) {
+        log.acknowledged.set(name, { seq, row });
+        log.entries.set(name, { seq, row });
+      }
+      log.fromCache = true;
+      return log.restoreJournal();
+    }
     let since = 0;
     for (;;) {
       let res: Response;
@@ -85,6 +126,7 @@ export class LibraryLog {
       } catch {
         return null;
       }
+      await policy;
       if (res.status === 404) {
         if (!(await log.stageRecovery())) return null;
         log.head = 0;
@@ -102,6 +144,7 @@ export class LibraryLog {
         log.generation = page.generation;
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
+        log.acknowledged.clear();
         continue;
       }
       log.generation = page.generation;
@@ -113,12 +156,17 @@ export class LibraryLog {
             seq: entry.seq,
             row: previous ? merge(previous.row, row) : row,
           });
+          log.acknowledged.set(rowName(row), { seq: entry.seq, row });
         } catch {
           // Tampered with, or sealed under another library's key.
         }
       }
       log.head = page.entries.at(-1)?.seq ?? page.head;
-      if (!page.more || page.entries.length === 0) return log.restoreJournal();
+      if (!page.more || page.entries.length === 0) {
+        log.dirty = true;
+        log.persist();
+        return log.restoreJournal();
+      }
       since = page.entries.at(-1)?.seq ?? page.head;
     }
   }
@@ -141,6 +189,8 @@ export class LibraryLog {
             if (!(await this.stageRecovery())) return false;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
+            this.acknowledged.clear();
+            this.dirty = true;
             return true; // A first offline action must be able to create the log on reconnect.
           }
           if (!res.ok) return false;
@@ -153,6 +203,8 @@ export class LibraryLog {
             this.generation = page.generation;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
+            this.acknowledged.clear();
+            this.dirty = true;
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
@@ -165,6 +217,11 @@ export class LibraryLog {
                   seq: entry.seq,
                   row: previous ? merge(previous.row, row) : row,
                 });
+              // Compared with den-edge's own copy, not `entries`: this browser's write already carries its seq there.
+              if (entry.seq > (this.acknowledged.get(rowName(row))?.seq ?? 0)) {
+                this.acknowledged.set(rowName(row), { seq: entry.seq, row });
+                this.dirty = true;
+              }
             } catch {
               /* Skip unreadable rows individually, as on initial open. */
             }
@@ -178,8 +235,68 @@ export class LibraryLog {
     });
     this.writes = run.catch(() => false);
     const refreshed = await run;
-    if (refreshed) await this.restoreJournal();
+    if (refreshed) {
+      this.persist();
+      await this.restoreJournal();
+    }
     return refreshed;
+  }
+
+  /**
+   * `value`, kept in this browser under `name` for the next visit. Sealed under a key the library key derives, so it
+   * is no more readable here than the log is on den-edge.
+   */
+  async keep(name: string, value: unknown): Promise<void> {
+    if (!this.local) return;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sealed = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: utf8.encode(name) },
+      this.local.key,
+      utf8.encode(JSON.stringify(value)),
+    );
+    const bytes = new Uint8Array(iv.length + sealed.byteLength);
+    bytes.set(iv);
+    bytes.set(new Uint8Array(sealed), iv.length);
+    await this.local.vault.put(`${this.keys.id}:${name}`, bytes);
+  }
+
+  /** What `keep` kept under `name`; undefined when nothing was, or it doesn't open under this library's key. */
+  async kept<T>(name: string): Promise<T | undefined> {
+    if (!this.local) return undefined;
+    try {
+      const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
+      if (!bytes) return undefined;
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode(name) },
+        this.local.key,
+        bytes.slice(12),
+      );
+      return JSON.parse(new TextDecoder().decode(plain)) as T;
+    } catch (error) {
+      console.warn(`den: the kept ${name} could not be read`, error);
+      return undefined;
+    }
+  }
+
+  /** Keep den-edge's rows for the next visit, in the order they changed; a failure only costs that visit a full read. */
+  private persist(): void {
+    if (!this.dirty || !this.local) return;
+    this.dirty = false;
+    const snapshot: Snapshot = {
+      generation: this.generation,
+      head: this.head,
+      entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
+    };
+    this.saving = this.saving
+      .then(() =>
+        snapshot.entries.length
+          ? this.keep(SNAPSHOT, snapshot)
+          : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`),
+      )
+      .catch((error: unknown) => {
+        this.dirty = true;
+        console.warn('den: the library could not be kept for the next visit', error);
+      });
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
@@ -462,6 +579,12 @@ export class LibraryLog {
     }
     return this;
   }
+}
+
+/** The key what this browser keeps is sealed under: the library key's, and good for nothing else. */
+async function localKey(libraryKey: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
+  const bytes = await hkdf(libraryKey, 'den/web/local/v1', 'enc', 32);
+  return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
 function merge(theirs: Row, ours: Row): Row {

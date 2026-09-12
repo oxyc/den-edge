@@ -29,6 +29,15 @@ it('retries an initially failed open without discarding a recovered log', async 
   expect(session.log).toBe(log);
 });
 
+it('shows a copy kept from the last visit at once and brings it up to date straight after', async () => {
+  const log = { ...fakeLog(), fromCache: true };
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+  expect(session.log).toBe(log);
+  expect(log.refresh).toHaveBeenCalledTimes(1);
+});
+
 it('refreshes remote configuration only when settings changed and serializes refreshes', async () => {
   const log = fakeLog();
   vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);

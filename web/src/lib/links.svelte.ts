@@ -1,5 +1,7 @@
 // The TVs this browser is paired with (den-spec pairing v1), in localStorage.
 
+import { forgetLibrary } from './localVault';
+
 export interface Link {
   /** The link's credential at den-edge, derived from `linkKey`. */
   inboxKey: string;
@@ -117,8 +119,14 @@ class Links {
   }
 
   remove(inboxKey: string): void {
+    const gone = this.list.find((l) => l.inboxKey === inboxKey);
     this.list = this.list.filter((l) => l.inboxKey !== inboxKey);
     writeLinks(this.list);
+    // What this browser kept of the library goes with the last link that reaches it.
+    if (gone && !this.list.some((l) => l.libraryKey === gone.libraryKey))
+      void forgetLibrary(gone.libraryKey).catch((error: unknown) =>
+        console.warn('den: the kept library could not be dropped', error),
+      );
   }
 
   /** The TV reset its library key and dropped this browser: its keys reach nothing, so it pairs again. */

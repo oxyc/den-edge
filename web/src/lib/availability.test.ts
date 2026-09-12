@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Availability, RETRY_MS } from './availability.svelte';
+import { Availability, KEPT_MS, RETRY_MS } from './availability.svelte';
 
 const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
 
@@ -49,6 +49,34 @@ describe('Availability', () => {
     await vi.advanceTimersByTimeAsync(RETRY_MS + 100);
     expect(asked()).toEqual([['tt0000001', 'tt0000002', 'tt0000003'], ['tt0000002']]);
     expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(true);
+  });
+
+  it('fades what the last day found at once, still asks scout, and keeps its answer', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+    } as Storage;
+    const now = 5 * KEPT_MS;
+    data.set(
+      'den.availability',
+      JSON.stringify({ 1: ['unavailable', now - 1000], 2: ['unavailable', now - KEPT_MS - 1] }),
+    );
+    const { calls, fetchImpl } = fake(() => ({ tt0000001: 'available', tt0000002: 'available' }));
+    const availability = new Availability(fetchImpl, storage, () => now);
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
+    expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(false);
+
+    availability.connect(SCOUT, 'key');
+    availability.want({ type: 'movie', id: 1 });
+    availability.want({ type: 'movie', id: 2 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls.filter((c) => c.url.endsWith('/availability'))).toHaveLength(1);
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(false);
+    expect(JSON.parse(data.get('den.availability')!)).toEqual({
+      1: ['available', now],
+      2: ['available', now],
+    });
   });
 
   it('asks nothing until there is a scout to ask', async () => {

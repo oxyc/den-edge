@@ -13,6 +13,8 @@
     rows: () => [],
     newestStamp: () => [1, 0, 'test'],
     title: () => undefined,
+    kept: async () => undefined,
+    keep: async () => {},
   };
   const session = {
     changed: () => {},

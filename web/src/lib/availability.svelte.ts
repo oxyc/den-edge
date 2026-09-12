@@ -23,10 +23,19 @@ const LOOKUPS = 6;
 /** How long before asking again about a movie scout was still checking, and how many times. */
 export const RETRY_MS = 10_000;
 const RETRIES = 3;
+/** How long a verdict from an earlier visit fades a poster before scout has been asked again. */
+export const KEPT_MS = 24 * 60 * 60 * 1000;
+const STORAGE_KEY = 'den.availability';
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
   private readonly verdicts = new SvelteMap<number, Verdict>();
+  /** The movies scout answered for this visit; the rest of `verdicts` came from an earlier one and is asked again. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
+  private readonly settled = new Set<number>();
+  /** When each verdict was given, so a kept one expires. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Persistence bookkeeping; only verdicts are UI state.
+  private readonly givenAt = new Map<number, number>();
   /** A movie's IMDb id, or null when TMDB has none. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Lookup cache; only verdicts are UI state.
   private readonly imdbIds = new Map<number, string | null>();
@@ -37,8 +46,31 @@ export class Availability {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private scout: { base: string; tmdbKey: string; fetch: typeof fetch } | null = null;
 
-  /** TMDB's answers come from this browser's cache; scout's pass straight through it. */
-  constructor(private readonly fetchImpl: typeof fetch = tmdbFetch) {}
+  /**
+   * TMDB's answers come from this browser's cache; scout's pass straight through it. The last day's verdicts from
+   * `storage` fade their posters at once, and scout is still asked, so one that changed is corrected.
+   */
+  constructor(
+    private readonly fetchImpl: typeof fetch = tmdbFetch,
+    private readonly storage: Storage | undefined = typeof localStorage === 'undefined'
+      ? undefined
+      : localStorage,
+    private readonly now: () => number = Date.now,
+  ) {
+    try {
+      const kept = JSON.parse(storage?.getItem(STORAGE_KEY) ?? '{}') as Record<
+        string,
+        [Verdict, number]
+      >;
+      for (const [id, [verdict, at]] of Object.entries(kept)) {
+        if (verdict === 'unknown' || !(now() - at < KEPT_MS)) continue;
+        this.verdicts.set(Number(id), verdict);
+        this.givenAt.set(Number(id), at);
+      }
+    } catch {
+      // Unreadable or refused storage: this visit starts without them.
+    }
+  }
 
   /**
    * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none — through `fetchImpl`, which
@@ -47,8 +79,9 @@ export class Availability {
   connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = this.fetchImpl): void {
     const previous = this.scout?.base;
     this.scout = scout && tmdbKey ? { base: scout.base, tmdbKey, fetch: fetchImpl } : null;
-    if (this.scout && this.scout.base !== previous) {
+    if (this.scout && previous !== undefined && this.scout.base !== previous) {
       this.verdicts.clear();
+      this.settled.clear();
       this.tries.clear();
     }
     this.gather();
@@ -56,7 +89,7 @@ export class Availability {
 
   /** A poster is showing: its movie is asked about along with the others showing now. */
   want(title: Pick<Title, 'type' | 'id'>): void {
-    if (title.type !== 'movie' || this.verdicts.has(title.id) || this.wanted.has(title.id)) return;
+    if (title.type !== 'movie' || this.settled.has(title.id) || this.wanted.has(title.id)) return;
     this.wanted.add(title.id);
     this.gather();
   }
@@ -86,7 +119,7 @@ export class Availability {
     await each(ids, LOOKUPS, async (id) => {
       const imdb = await this.imdbId(id, scout.tmdbKey);
       if (imdb === undefined) again.push(id);
-      else if (imdb === null) this.verdicts.set(id, 'unknown');
+      else if (imdb === null) this.settle(id, 'unknown');
       else byImdb.set(imdb, id);
     });
 
@@ -108,10 +141,31 @@ export class Availability {
     for (const [imdb, id] of byImdb) {
       const verdict = answer[imdb] ?? 'unknown';
       if (verdict === 'unknown') again.push(id);
-      else this.verdicts.set(id, verdict);
+      else this.settle(id, verdict);
     }
+    this.keep();
     this.later(again);
     this.gather();
+  }
+
+  private settle(id: number, verdict: Verdict): void {
+    this.verdicts.set(id, verdict);
+    this.settled.add(id);
+    this.givenAt.set(id, this.now());
+  }
+
+  /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */
+  private keep(): void {
+    const kept: Record<string, [Verdict, number]> = {};
+    for (const [id, verdict] of this.verdicts) {
+      const at = this.givenAt.get(id);
+      if (verdict !== 'unknown' && at !== undefined) kept[id] = [verdict, at];
+    }
+    try {
+      this.storage?.setItem(STORAGE_KEY, JSON.stringify(kept));
+    } catch {
+      // Refused storage: the verdicts are this visit's.
+    }
   }
 
   /** Ask again after scout has had time to check — until the tries run out, when unknown is the answer. */
@@ -119,7 +173,7 @@ export class Availability {
     const retry = ids.filter((id) => {
       const tries = (this.tries.get(id) ?? 0) + 1;
       this.tries.set(id, tries);
-      if (tries > RETRIES) this.verdicts.set(id, 'unknown');
+      if (tries > RETRIES) this.settle(id, 'unknown');
       return tries <= RETRIES;
     });
     if (retry.length === 0) return;

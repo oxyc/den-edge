@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { cachingFetch, freshFor, RETENTION, type Entry, type Store } from './tmdbCache';
 
 const HOUR = 3_600_000;
@@ -49,6 +49,22 @@ describe('cachingFetch', () => {
     await cached(detail);
     expect(net.asked.filter((u) => u.includes('discover'))).toHaveLength(2);
     expect(net.asked.filter((u) => u.includes('/movie/603'))).toHaveLength(1);
+  });
+
+  it('shows a recently stale answer at once and refreshes it behind the page, once', async () => {
+    const { entries, store } = memory();
+    const net = network();
+    let clock = 0;
+    const cached = cachingFetch(store, net.fetchImpl, () => clock);
+    await cached(discover);
+    await new Promise((resolve) => setTimeout(resolve));
+    clock = 2 * 24 * HOUR;
+    const aborted = AbortSignal.abort();
+    const both = await Promise.all([cached(discover, { signal: aborted }), cached(discover)]);
+    expect(await Promise.all(both.map((r) => r.json()))).toEqual([{ n: 1 }, { n: 1 }]);
+    await vi.waitFor(() => expect([...entries.values()][0]?.body).toBe('{"n":2}'));
+    expect(net.asked).toHaveLength(2);
+    expect(await (await cached(discover)).json()).toEqual({ n: 2 });
   });
 
   it('serves a stale answer when TMDB cannot be reached', async () => {

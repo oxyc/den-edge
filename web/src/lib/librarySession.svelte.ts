@@ -23,7 +23,8 @@ export class LibrarySession {
         if (!this.log) {
           this.log = await LibraryLog.open(this.key);
           if (this.log) this.changed(true);
-          return;
+          // The copy kept from the last visit shows at once; what changed since follows it.
+          if (!this.log?.fromCache) return;
         }
         const settings = () =>
           JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));

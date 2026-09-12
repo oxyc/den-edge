@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { addToWatchlist, blankTitle, react } from './actions';
+import type { Vault } from './localVault';
 import {
   applyLog,
   continueWatching,
@@ -75,7 +76,81 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
   return { fetchImpl, stored };
 }
 
+function memoryVault() {
+  const data = new Map<string, Uint8Array>();
+  const vault: Vault = {
+    get: async (key) => data.get(key),
+    put: async (key, value) => void data.set(key, value),
+    remove: async (prefix) => {
+      for (const key of [...data.keys()]) if (key.startsWith(prefix)) data.delete(key);
+    },
+  };
+  return { data, vault };
+}
+
 describe('LibraryLog', () => {
+  it('starts a return visit from the kept copy and asks only for what changed since', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1), row(2), row(3)]);
+    const asked: string[] = [];
+    const counting: typeof fetch = (input, init) => {
+      asked.push(String(input));
+      return server.fetchImpl(input, init);
+    };
+    await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault);
+    await vi.waitFor(() => expect(data.size).toBe(1));
+    const kept = new TextDecoder().decode([...data.values()][0]);
+    expect(kept).not.toContain('watchlist');
+
+    // Meanwhile the TV adds a title and changes another.
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    await tv.write(row(4));
+    await tv.write(row(1, { status: { value: 'watched', at: at(2000) } }));
+
+    asked.length = 0;
+    const log = (await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault))!;
+    expect(asked).toEqual([]);
+    expect(log.fromCache).toBe(true);
+    expect(log.rows()).toHaveLength(3);
+    expect(await log.refresh()).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('since=3');
+    expect(log.title({ type: 'movie', id: 4 })?.status.value).toBe('watchlist');
+    expect(log.title({ type: 'movie', id: 1 })?.status.value).toBe('watched');
+
+    // The refresh is kept too: the next visit already knows both.
+    await vi.waitFor(async () => {
+      const next = (await LibraryLog.open(LIBRARY_KEY, counting, undefined, vault))!;
+      expect(next.title({ type: 'movie', id: 1 })?.status.value).toBe('watched');
+    });
+  });
+
+  it('keeps its own write for the next visit once den-edge has echoed it', async () => {
+    const { vault } = memoryVault();
+    const server = await edge([row(1)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    await log.write(row(2));
+    await log.refresh();
+    await vi.waitFor(async () => {
+      const next = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+      expect(next.title({ type: 'movie', id: 2 })).toBeDefined();
+    });
+  });
+
+  it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1)]);
+    await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault);
+    await vi.waitFor(() => expect(data.size).toBe(1));
+    const [key, value] = [...data][0]!;
+    const tampered = value.slice();
+    tampered[20] = tampered[20]! ^ 1;
+    data.set(key, tampered);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, vault))!;
+    expect(log.fromCache).toBe(false);
+    expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
+  });
+
   it('a second relay reset cannot overwrite unfinished recovery from the first', async () => {
     const data = new Map<string, string>();
     const storage: Storage = {

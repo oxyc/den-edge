@@ -34,6 +34,10 @@ export default defineConfig(
     languageOptions: { globals: globals.browser },
   },
   {
+    files: ['public/sw.js'],
+    languageOptions: { globals: globals.serviceworker },
+  },
+  {
     files: [
       '*.{js,mjs,ts}',
       'scripts/**',

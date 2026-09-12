@@ -21,6 +21,8 @@
     refresh: async () => false,
     rows: () => rows,
     newestStamp: () => [1, 0, 'test'],
+    kept: async () => undefined,
+    keep: async () => {},
   };
   const session = $state({
     changed: () => {},

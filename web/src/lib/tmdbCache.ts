@@ -1,12 +1,15 @@
 // TMDB's answers kept in this browser (IndexedDB), as the TV keeps them on disk: a title's own details for 30 days,
 // lists and search for 6 hours — so a reload paints from here and asks TMDB only for what is missing or old. The API
-// key is never part of what is kept. An answer TMDB can't refresh is served stale rather than not at all, and
-// nothing is kept past TMDB's six-month limit on cached content.
+// key is never part of what is kept. An answer up to a week past that is served at once and refreshed behind it, so
+// a return visit never waits on TMDB for what it showed last time; an older one TMDB can't refresh is served stale
+// rather than not at all, and nothing is kept past TMDB's six-month limit on cached content.
 
 const TMDB = 'https://api.themoviedb.org/3/';
 const DAY = 86_400_000;
 /** TMDB's terms cap how long its content may be cached. */
 export const RETENTION = 180 * DAY;
+/** How long past fresh an answer is still shown at once while it is refreshed. */
+export const STALE_FOR = 7 * DAY;
 
 export interface Entry {
   body: string;
@@ -51,6 +54,7 @@ export function cachingFetch(
   now: () => number = Date.now,
 ): typeof fetch {
   let pruned = false;
+  const refreshing = new Set<string>();
   return async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!store || !href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET')
@@ -62,7 +66,22 @@ export function cachingFetch(
     const url = new URL(href);
     const key = keyOf(url);
     const kept = await store.get(key).catch(() => undefined);
-    if (kept && now() - kept.fetchedAt < freshFor(url.pathname)) return answer(kept.body);
+    const fresh = freshFor(url.pathname);
+    const age = kept ? now() - kept.fetchedAt : Infinity;
+    if (kept && age < fresh) return answer(kept.body);
+    if (kept && age < fresh + STALE_FOR) {
+      if (!refreshing.has(key)) {
+        refreshing.add(key);
+        // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
+        void network(href, { ...init, signal: undefined })
+          .then(async (res) => {
+            if (res.ok) await store.put(key, { body: await res.text(), fetchedAt: now() });
+          })
+          .catch(() => undefined)
+          .finally(() => refreshing.delete(key));
+      }
+      return answer(kept.body);
+    }
     try {
       const res = await network(input, init);
       if (!res.ok) return kept && res.status >= 500 ? answer(kept.body) : res;

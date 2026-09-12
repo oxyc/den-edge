@@ -70,6 +70,16 @@
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
+  /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
+  const SERVICES = 'services.v1';
+  type Services = {
+    routes: Routes;
+    scout: Addon | null;
+    atlas: string | null;
+    reel: string | null;
+    remux: string | null;
+  };
+  const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
   /** The TMDB key the library shares (`set:keys`). */
@@ -133,9 +143,17 @@
       } else shelvesReady = true;
       plugins = readPlugins(opened.settings('plugins'));
       const [key, installed] = [tmdbKey, plugins];
+      // Where the last visit found the addons, used until this visit's discovery answers.
+      let live = false;
+      void opened.kept<Services>(SERVICES).then((saved) => {
+        if (disposed || live || !saved) return;
+        ({ routes, scout, atlas, reel, remux } = saved);
+        availability.connect(saved.scout, key);
+      });
       void (async () => {
         const foundRoutes = await fetchRoutes();
         if (disposed) return;
+        live = true;
         routes = foundRoutes;
         stopDiscovery = discoverServices(installed, foundRoutes, {
           scout: (found) => {
@@ -158,6 +176,15 @@
       disposed = true;
       stopDiscovery?.();
     };
+  });
+
+  // What discovery found, kept for the next visit once it has settled for a moment.
+  $effect(() => {
+    const opened = log;
+    const found: Services = $state.snapshot({ routes, scout, atlas, reel, remux });
+    if (!opened || !Object.keys(found.routes).length) return;
+    const timer = setTimeout(() => void opened.keep(SERVICES, found).catch(warnKeep), 1000);
+    return () => clearTimeout(timer);
   });
 
   const library = $derived.by(() => {
@@ -529,6 +556,12 @@
     // fetches came back meant the answer was always judged stale and thrown away, and the billboard stayed
     // empty. A build is stale only when a later build has started.
     const run = ++billboardRun;
+    // A return visit shows the billboard it picked last time while this one is built.
+    const kept = `billboard.v1.${type ?? 'all'}`;
+    if (!featured.length)
+      void log?.kept<Title[]>(kept).then((saved) => {
+        if (saved?.length && !featured.length) featured = saved;
+      });
     // A late discovery service can improve the pool. Keep the current slides while it loads.
     if (!table.length) return;
     const row = (id: string) =>
@@ -583,9 +616,21 @@
           taste,
           keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
         });
-        if (run === billboardRun && (picked.length || !featured.length)) featured = picked;
+        if (run === billboardRun && (picked.length || !featured.length)) {
+          featured = keepLead(picked, featured[0]);
+          if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
+        }
       })
       .catch(() => undefined);
+  }
+
+  /**
+   * `picked`, with the title the billboard already shows kept in front when it is still among them: a rebuild — or
+   * this visit's pick replacing the last one's — must not swap the picture out from under someone looking at it.
+   */
+  function keepLead(picked: Title[], lead: Title | undefined): Title[] {
+    const at = lead ? picked.findIndex((t) => titleKey(t) === titleKey(lead)) : -1;
+    return at > 0 ? [picked[at]!, ...picked.slice(0, at), ...picked.slice(at + 1)] : picked;
   }
 
   /**
