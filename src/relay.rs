@@ -46,15 +46,23 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE]
+        .into_iter()
+        .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
+        .collect();
     let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await else {
         return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
     };
     // Nothing of the browser's goes along but what the addon reads: not its cookies, which carry its Access
-    // session, nor anything Cloudflare added.
+    // session, nor anything Cloudflare added. Its validators do, so a revalidation is the addon's 304 rather
+    // than the whole answer again.
     let mut out =
         axum::http::Request::builder().method(method).uri(&target).header(header::ACCEPT, "application/json");
     if let Some(content_type) = content_type {
         out = out.header(header::CONTENT_TYPE, content_type);
+    }
+    for (name, value) in conditions {
+        out = out.header(name, value);
     }
     let Ok(out) = out.body(Full::new(body)) else { return json(StatusCode::BAD_REQUEST, "bad_request") };
     let answer = match tokio::time::timeout(TIMEOUT, state.relay_client.request(out)).await {
@@ -69,13 +77,16 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     let Ok(bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     };
-    // Only the answer's cache policy and diagnostic fields cross this boundary. In particular an
-    // upstream cannot set a cookie, redirect the browser, or grant another origin access.
+    // Only the answer's cache policy, its validators and diagnostic fields cross this boundary. In particular
+    // an upstream cannot set a cookie, redirect the browser, or grant another origin access.
     let mut resp = Response::new(Body::from(bytes));
     *resp.status_mut() = parts.status;
     for name in [
         header::CONTENT_TYPE,
         header::CACHE_CONTROL,
+        header::ETAG,
+        header::LAST_MODIFIED,
+        header::VARY,
         header::HeaderName::from_static("server-timing"),
         header::HeaderName::from_static("x-den-degraded"),
     ] {
