@@ -553,7 +553,10 @@
       profileReady = true;
       return;
     }
-    const timer = setTimeout(() => (profileReady = true), 8000);
+    // Long enough for labels that are on their way, but barely at all until an atlas has been found: with none
+    // there is nothing to wait for, and a billboard that holds itself back for eight seconds on a page whose
+    // addons are still being discovered is just a billboard that isn't there.
+    const timer = setTimeout(() => (profileReady = true), atlas ? 8000 : 1200);
     return () => clearTimeout(timer);
   });
   const labelProfile = $derived(

@@ -29,6 +29,12 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
     await catalogueGate;
     return r.fulfill({ json: { metas: [] } });
   });
+  // The billboard asks atlas what the pool is labelled with, and which of it the library has already worn out.
+  await page.route('**/atlas/index/**', (r) =>
+    r.fulfill({
+      json: r.request().url().includes('suggest') ? { perSeed: [], pooled: [] } : { labels: [] },
+    }),
+  );
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',
