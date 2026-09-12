@@ -6,7 +6,8 @@
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
   import type { Route } from './lib/route';
-  let { link, query, onchange }: { link: Link; query: string; onchange: (route: Route) => void } = $props();
+  let { link, query, onchange }: { link: Link; query: string; onchange: (route: Route) => void } =
+    $props();
   const session = untrack(() => new LibrarySession(link.libraryKey));
   onMount(() => session.start(() => links.forgetMoved(link)));
 </script>

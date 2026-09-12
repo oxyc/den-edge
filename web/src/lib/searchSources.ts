@@ -15,7 +15,8 @@ const records = (value: unknown): Json[] => (Array.isArray(value) ? (value as Js
 /** atlas names a series `series`; Den says `tv`. */
 function refs(value: unknown): Ref[] {
   return records(value).flatMap((r) => {
-    const type = r.type === 'series' || r.type === 'tv' ? 'tv' : r.type === 'movie' ? 'movie' : undefined;
+    const type =
+      r.type === 'series' || r.type === 'tv' ? 'tv' : r.type === 'movie' ? 'movie' : undefined;
     return type && typeof r.id === 'number' ? [{ type, id: r.id }] : [];
   });
 }
@@ -30,16 +31,27 @@ function titles(body: Json, type: MediaType): Title[] {
 /** Talk-show "Self" spots and one-off TV guest roles: the title is popular, the person's part in it isn't. */
 function isCameo(credit: Json): boolean {
   const role = typeof credit.character === 'string' ? credit.character.toLowerCase() : undefined;
-  if (role !== undefined && (role === 'self' || role.startsWith('self ') || role.startsWith('self-') ||
-    ['himself', 'herself', 'themselves'].includes(role))) {
+  if (
+    role !== undefined &&
+    (role === 'self' ||
+      role.startsWith('self ') ||
+      role.startsWith('self-') ||
+      ['himself', 'herself', 'themselves'].includes(role))
+  ) {
     return true;
   }
-  return credit.media_type === 'tv' && typeof credit.episode_count === 'number' && credit.episode_count < 3;
+  return (
+    credit.media_type === 'tv' &&
+    typeof credit.episode_count === 'number' &&
+    credit.episode_count < 3
+  );
 }
 
 const notability = (credit: Json) =>
-  Math.sqrt((typeof credit.popularity === 'number' ? credit.popularity : 0) *
-    Math.max(1, typeof credit.vote_count === 'number' ? credit.vote_count : 0));
+  Math.sqrt(
+    (typeof credit.popularity === 'number' ? credit.popularity : 0) *
+      Math.max(1, typeof credit.vote_count === 'number' ? credit.vote_count : 0),
+  );
 
 /** `atlas` is where this page reaches atlas (`findAtlas`); null leaves search to TMDB alone. */
 export function searchSources(
@@ -51,7 +63,8 @@ export function searchSources(
 
   async function tmdb(path: string, params: Record<string, string> = {}): Promise<Json> {
     const url = new URL(TMDB + path);
-    for (const [name, value] of Object.entries({ ...params, api_key: tmdbKey })) url.searchParams.set(name, value);
+    for (const [name, value] of Object.entries({ ...params, api_key: tmdbKey }))
+      url.searchParams.set(name, value);
     const res = await fetchImpl(url.toString());
     if (!res.ok) throw new Error(`TMDB answered ${res.status}`);
     return (await res.json()) as Json;
@@ -72,12 +85,17 @@ export function searchSources(
         fromAtlas(`/catalog/${type}/den-titles/search=${encodeURIComponent(query)}.json`)
           .then((body) =>
             records(body.metas).flatMap((m): Ref[] =>
-              typeof m.moviedb_id === 'number' ? [{ type: type === 'series' ? 'tv' : 'movie', id: m.moviedb_id }] : [],
+              typeof m.moviedb_id === 'number'
+                ? [{ type: type === 'series' ? 'tv' : 'movie', id: m.moviedb_id }]
+                : [],
             ),
           )
           .catch((): Ref[] => []);
       const [movies, series] = await Promise.all([search('movie'), search('series')]);
-      return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [movies[i], series[i]])
+      return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [
+        movies[i],
+        series[i],
+      ])
         .flat()
         .filter((ref): ref is Ref => ref !== undefined);
     },
@@ -90,7 +108,10 @@ export function searchSources(
           const profilePath = typeof r.profile_path === 'string' ? r.profile_path : undefined;
           return [{ kind: 'person', person: { id: r.id, name: r.name, profilePath } }];
         }
-        const title = r.media_type === 'movie' || r.media_type === 'tv' ? toTitle({ type: r.media_type, id: r.id }, r) : null;
+        const title =
+          r.media_type === 'movie' || r.media_type === 'tv'
+            ? toTitle({ type: r.media_type, id: r.id }, r)
+            : null;
         return title ? [{ kind: 'title', title }] : [];
       });
     },
@@ -113,7 +134,8 @@ export function searchSources(
       );
       const seen = new Set<string>();
       return ranked.flatMap((c) => {
-        if ((c.media_type !== 'movie' && c.media_type !== 'tv') || typeof c.id !== 'number') return [];
+        if ((c.media_type !== 'movie' && c.media_type !== 'tv') || typeof c.id !== 'number')
+          return [];
         const title = toTitle({ type: c.media_type, id: c.id }, c);
         if (!title || seen.has(`${title.type}-${title.id}`)) return [];
         seen.add(`${title.type}-${title.id}`);
@@ -141,7 +163,9 @@ export function searchSources(
     },
 
     async similar(ref) {
-      const body = await fromAtlas(`/index/similar/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`);
+      const body = await fromAtlas(
+        `/index/similar/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`,
+      );
       return (Array.isArray(body.ids) ? body.ids : [])
         .filter((id): id is number => typeof id === 'number')
         .map((id) => ({ type: ref.type, id }));

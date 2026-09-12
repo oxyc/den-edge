@@ -25,6 +25,7 @@
 <style>
   .grid {
     --card-w: 100%;
+
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 28vw, 170px), 1fr));
     gap: 20px 14px;

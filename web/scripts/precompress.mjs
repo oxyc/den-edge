@@ -5,8 +5,20 @@ import { fileURLToPath } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import assert from 'node:assert/strict';
 
-const extensions = new Set(['.html', '.js', '.mjs', '.css', '.json', '.webmanifest', '.svg', '.wasm', '.txt']);
-let count = 0, raw = 0, compressed = 0;
+const extensions = new Set([
+  '.html',
+  '.js',
+  '.mjs',
+  '.css',
+  '.json',
+  '.webmanifest',
+  '.svg',
+  '.wasm',
+  '.txt',
+]);
+let count = 0,
+  raw = 0,
+  compressed = 0;
 async function compress(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const file = join(dir, entry.name);
@@ -17,7 +29,9 @@ async function compress(dir) {
       if (gz.length >= bytes.length) continue;
       assert.deepEqual(gunzipSync(gz), bytes, `gzip round trip: ${file}`);
       await writeFile(`${file}.gz`, gz);
-      count++; raw += bytes.length; compressed += gz.length;
+      count++;
+      raw += bytes.length;
+      compressed += gz.length;
     }
   }
 }

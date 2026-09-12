@@ -59,25 +59,49 @@
 
 <div class="actions" class:detail-page={detailPage} aria-busy={busy}>
   {#if onplayhere}
-    <button class="primary" disabled={busy} onclick={onplayhere}>{@render play()}<span>{playLabel}</span></button>
+    <button class="primary" disabled={busy} onclick={onplayhere}
+      >{@render play()}<span>{playLabel}</span></button
+    >
   {:else if onplay}
-    <button class="primary" disabled={busy} onclick={onplay}>{@render tv()}<span>{playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}</span></button>
+    <button class="primary" disabled={busy} onclick={onplay}
+      >{@render tv()}<span>{playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}</span
+      ></button
+    >
   {/if}
 
   <div class="pills">
     {#if trailerHref}
       <!-- A normal link lets iOS hand off to YouTube, with the website as its fallback.
            Avoid a new mobile tab that can be left blank after the app handoff. -->
-      <a class="pill trailer" href={trailerHref} target={viewportWidth < 760 ? undefined : '_blank'} rel="noopener noreferrer"
-        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a>
+      <a
+        class="pill trailer"
+        href={trailerHref}
+        target={viewportWidth < 760 ? undefined : '_blank'}
+        rel="noopener noreferrer"
+        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a
+      >
     {/if}
     {#if onplayhere && onplay}
-      <button class="pill" disabled={busy} onclick={onplay}>{@render tv()}<span class="label">Play on TV</span></button>
+      <button class="pill" disabled={busy} onclick={onplay}
+        >{@render tv()}<span class="label">Play on TV</span></button
+      >
     {/if}
-    <button class="pill" class:on={listed} aria-pressed={listed} disabled={busy} onclick={() => onwatchlist(!listed)}>
+    <button
+      class="pill"
+      class:on={listed}
+      aria-pressed={listed}
+      disabled={busy}
+      onclick={() => onwatchlist(!listed)}
+    >
       {@render bookmark()}<span class="label">Watchlist</span>
     </button>
-    <button class="pill" class:on={seen} aria-pressed={seen} disabled={busy} onclick={() => onseen(!seen)}>
+    <button
+      class="pill"
+      class:on={seen}
+      aria-pressed={seen}
+      disabled={busy}
+      onclick={() => onseen(!seen)}
+    >
       {@render eye()}<span class="label">Seen</span>
     </button>
 
@@ -99,7 +123,12 @@
     </div>
   </div>
 </div>
-{#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p class="notice" role="status">{notice}</p>{/if}
+{#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
+    class="notice"
+    role="status"
+  >
+    {notice}
+  </p>{/if}
 
 {#snippet tv()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -141,36 +170,39 @@
   {#if value === 'like' || value === 'dislike'}
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g transform={value === 'dislike' ? 'rotate(180 12 12)' : undefined}>
-        <path d="M8.6 20.2v-9.8l3.6-6.1a1.3 1.3 0 0 1 2.4.9l-.8 4.3h4.6a2 2 0 0 1 2 2.4l-1.2 6a2 2 0 0 1-2 1.6H8.6Z" />
+        <path
+          d="M8.6 20.2v-9.8l3.6-6.1a1.3 1.3 0 0 1 2.4.9l-.8 4.3h4.6a2 2 0 0 1 2 2.4l-1.2 6a2 2 0 0 1-2 1.6H8.6Z"
+        />
         <path d="M8.6 20.2H5.9a1.4 1.4 0 0 1-1.4-1.4v-7a1.4 1.4 0 0 1 1.4-1.4h2.7" />
       </g>
     </svg>
   {:else}
-    <svg class="icon" class:filled={value === 'love'} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M12 19.6S4.4 15.1 4.4 10a3.9 3.9 0 0 1 7.6-1.4A3.9 3.9 0 0 1 19.6 10c0 5.1-7.6 9.6-7.6 9.6Z" />
+    <svg
+      class="icon"
+      class:filled={value === 'love'}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d="M12 19.6S4.4 15.1 4.4 10a3.9 3.9 0 0 1 7.6-1.4A3.9 3.9 0 0 1 19.6 10c0 5.1-7.6 9.6-7.6 9.6Z"
+      />
     </svg>
   {/if}
 {/snippet}
 
 {#snippet chevron()}
-  <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9.5 6 6 6-6" /></svg>
+  <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+    ><path d="m6 9.5 6 6 6-6" /></svg
+  >
 {/snippet}
 
 <style>
-  .detail-page .primary { background:var(--fg); border-color:var(--fg); color:var(--bg); }
-  .detail-page .pill, .detail-page .pick { background:rgb(255 255 255 / .09); border-color:rgb(255 255 255 / .13); }
-  .detail-page .pill.on, .detail-page .pick.on { background:var(--fg); color:var(--bg); }
-  @media(min-width:760px) {
-    .detail-page { gap:16px; }
-    .detail-page .pills { gap:16px; }
-    .detail-page .pick { display:none; }
-    .detail-page .primary, .detail-page .pill { padding-inline:20px; border-radius:12px; }
-  }
-
   .actions {
     display: grid;
     gap: 10px;
     margin-bottom: 16px;
+
     /* No grey flash, and no wait for a double-tap before a tap is passed on, as in the player. */
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
@@ -222,12 +254,40 @@
     position: relative;
   }
 
-  .trailer { flex:0 0 auto; }
+  .trailer {
+    flex: 0 0 auto;
+  }
 
   .on {
     border-color: var(--fg);
     background: var(--fg);
     color: var(--bg);
+  }
+
+  .detail-page .primary {
+    background: var(--fg);
+    border-color: var(--fg);
+    color: var(--bg);
+  }
+
+  .detail-page .pill,
+  .detail-page .pick {
+    background: rgb(255 255 255 / 0.09);
+    border-color: rgb(255 255 255 / 0.13);
+  }
+
+  .detail-page .pill.on,
+  .detail-page .pick.on {
+    background: var(--fg);
+    color: var(--bg);
+  }
+
+  /* The focused element in the picker is the select inside, so the pill lights up with it. */
+  .primary:focus-visible,
+  .pill:focus-visible,
+  .pick:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .primary:disabled,
@@ -268,40 +328,6 @@
     display: none;
   }
 
-  @media (max-width: 359px) {
-    .pills { gap:6px; }
-    .pill, .pick { min-width:44px; padding:0 6px; }
-    .trailer { gap:6px; font-size:14px; }
-  }
-
-  @media (min-width: 760px) {
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-
-    .pill,
-    .pick {
-      flex: 0 0 auto;
-    }
-
-    .chevron {
-      display: block;
-    }
-
-    .label {
-      position: static;
-      width: auto;
-      height: auto;
-      clip-path: none;
-    }
-
-    .value {
-      display: inline;
-    }
-  }
-
   .icon {
     width: 20px;
     height: 20px;
@@ -329,19 +355,74 @@
     fill: currentcolor;
   }
 
-  /* The focused element in the picker is the select inside, so the pill lights up with it. */
-  .primary:focus-visible,
-  .pill:focus-visible,
-  .pick:focus-within {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-
   .failure {
     color: var(--danger);
   }
 
   .notice {
     color: var(--muted);
+  }
+
+  @media (width <= 359px) {
+    .pills {
+      gap: 6px;
+    }
+
+    .pill,
+    .pick {
+      min-width: 44px;
+      padding: 0 6px;
+    }
+
+    .trailer {
+      gap: 6px;
+      font-size: 14px;
+    }
+  }
+
+  @media (width >= 760px) {
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .pill,
+    .pick {
+      flex: 0 0 auto;
+    }
+
+    .chevron {
+      display: block;
+    }
+
+    .label {
+      position: static;
+      width: auto;
+      height: auto;
+      clip-path: none;
+    }
+
+    .value {
+      display: inline;
+    }
+
+    .detail-page {
+      gap: 16px;
+    }
+
+    .detail-page .pills {
+      gap: 16px;
+    }
+
+    .detail-page .pick {
+      display: none;
+    }
+
+    .detail-page .primary,
+    .detail-page .pill {
+      padding-inline: 20px;
+      border-radius: 12px;
+    }
   }
 </style>

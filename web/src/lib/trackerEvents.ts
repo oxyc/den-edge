@@ -13,11 +13,21 @@ export interface TrackerEvent {
   changes: Record<string, { before: unknown; after: unknown }>;
 }
 
-export function recordTrackerEvent(before: Row, after: Row, at: Stamp, id: string = crypto.randomUUID()): SettingsRow | null {
+export function recordTrackerEvent(
+  before: Row,
+  after: Row,
+  at: Stamp,
+  id: string = crypto.randomUUID(),
+): SettingsRow | null {
   if (rowName(before) !== rowName(after) || after.kind === 'set') return null;
   const event = syncPolicy<TrackerEvent | null>({ op: 'capture', before, after, at, id });
   if (!event) return null;
-  return { kind: 'set', schema: 2, name: `tracker-event:${id}`, values: { event: { value: { string: JSON.stringify(event) }, at } } };
+  return {
+    kind: 'set',
+    schema: 2,
+    name: `tracker-event:${id}`,
+    values: { event: { value: { string: JSON.stringify(event) }, at } },
+  };
 }
 
 export function trackerEvent(row: Row): TrackerEvent | null {
@@ -26,8 +36,16 @@ export function trackerEvent(row: Row): TrackerEvent | null {
     const stored = row.values.event;
     if (!stored?.value || !('string' in stored.value)) return null;
     const event = JSON.parse(stored.value.string) as TrackerEvent;
-    if (event.schema !== 1 || row.name !== `tracker-event:${event.id}` || event.after.kind === 'set'
-      || rowName(event.before) !== rowName(event.after) || compareStamps(event.at, stored.at) !== 0) return null;
+    if (
+      event.schema !== 1 ||
+      row.name !== `tracker-event:${event.id}` ||
+      event.after.kind === 'set' ||
+      rowName(event.before) !== rowName(event.after) ||
+      compareStamps(event.at, stored.at) !== 0
+    )
+      return null;
     return event;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }

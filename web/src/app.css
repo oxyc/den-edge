@@ -3,6 +3,7 @@
    frames on a phone. */
 :root {
   color-scheme: dark;
+
   --bg: #0b0b0f;
   --fg: #e7e7ea;
   --muted: #9a9aa6;
@@ -12,13 +13,21 @@
   --danger: #ff6b6b;
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
+
   /* What the floating bar takes off the top of a page: its own height, where it sits, and the air under it.
      Pages pad by it, and a full-bleed hero pulls back through it to reach the top of the window. */
   --bar-space: calc(max(12px, env(safe-area-inset-top)) + 46px + 16px);
   --glass-bg: rgb(28 28 34 / 0.55);
   --glass-edge: rgb(255 255 255 / 0.12);
   --glass-blur: blur(24px) saturate(160%);
-  font: 16px/1.4 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+
+  font:
+    16px/1.4 -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    'Segoe UI',
+    Roboto,
+    sans-serif;
 }
 
 * {
@@ -42,7 +51,9 @@ input {
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 8px 32px rgb(0 0 0 / 0.35);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 8px 32px rgb(0 0 0 / 0.35);
 }
 
 /* Solid where the blur isn't available, or isn't wanted. */

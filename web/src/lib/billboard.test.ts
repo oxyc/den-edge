@@ -31,7 +31,10 @@ describe('freshness', () => {
   });
 
   it('places a title known only by its year mid-year, and scores an undated one as old', () => {
-    expect(freshness(film(4, { year: 2026 }), NOW)).toBeCloseTo(freshness(film(5, { releaseDate: '2026-07-01' }), NOW), 6);
+    expect(freshness(film(4, { year: 2026 }), NOW)).toBeCloseTo(
+      freshness(film(5, { releaseDate: '2026-07-01' }), NOW),
+      6,
+    );
     expect(freshness(film(6), NOW)).toBe(0);
   });
 });
@@ -54,7 +57,9 @@ describe('buzz and quality', () => {
   it('among new titles, prefers the one people are watching', () => {
     const unknown = film(1, { releaseDate: '2026-09-05', popularity: 2 });
     const awaited = film(2, { releaseDate: '2026-09-05', popularity: 900 });
-    expect(pickBillboard([{ title: unknown }, { title: awaited }], { now: NOW }).map((t) => t.id)).toEqual([2, 1]);
+    expect(
+      pickBillboard([{ title: unknown }, { title: awaited }], { now: NOW }).map((t) => t.id),
+    ).toEqual([2, 1]);
   });
 
   it('ignores a rating too few people gave', () => {
@@ -76,8 +81,14 @@ describe('taste', () => {
   ]);
 
   it('marks a title up for the genres this library watches and down for the ones it does not', () => {
-    const nordicCrime = affinity(film(9, { genreIds: [CRIME, 9648], originalLanguage: 'sv' }), watched);
-    const englishHorror = affinity(film(10, { genreIds: [HORROR], originalLanguage: 'en' }), watched);
+    const nordicCrime = affinity(
+      film(9, { genreIds: [CRIME, 9648], originalLanguage: 'sv' }),
+      watched,
+    );
+    const englishHorror = affinity(
+      film(10, { genreIds: [HORROR], originalLanguage: 'en' }),
+      watched,
+    );
     expect(nordicCrime).toBeGreaterThan(englishHorror);
     expect(nordicCrime).toBeCloseTo(1, 6);
   });
@@ -88,8 +99,14 @@ describe('taste', () => {
       { title: film(80, { genreIds: [CRIME], originalLanguage: 'en' }), weight: 9 },
       { title: film(81, { genreIds: [CRIME], originalLanguage: 'sv' }) },
     ]);
-    const english = affinity(film(82, { genreIds: [CRIME], originalLanguage: 'en' }), mostlyEnglish);
-    const swedish = affinity(film(83, { genreIds: [CRIME], originalLanguage: 'sv' }), mostlyEnglish);
+    const english = affinity(
+      film(82, { genreIds: [CRIME], originalLanguage: 'en' }),
+      mostlyEnglish,
+    );
+    const swedish = affinity(
+      film(83, { genreIds: [CRIME], originalLanguage: 'sv' }),
+      mostlyEnglish,
+    );
     // Both match the genre outright, so both score well and the language separates them barely at all.
     expect(Math.min(english, swedish)).toBeGreaterThan(0.85);
     expect(english - swedish).toBeLessThanOrEqual(0.1);
@@ -103,7 +120,12 @@ describe('taste', () => {
   it('lets taste beat a title that tops every list, since it multiplies rather than adds', () => {
     // The Mayday case: first in trending and first in its service's arrivals, but nothing like what is watched.
     const everywhere = {
-      title: film(30, { releaseDate: '2026-09-01', genreIds: [28], originalLanguage: 'en', popularity: 900 }),
+      title: film(30, {
+        releaseDate: '2026-09-01',
+        genreIds: [28],
+        originalLanguage: 'en',
+        popularity: 900,
+      }),
       rank: 0,
       of: 100,
       arrival: { rank: 0, of: 100 },
@@ -119,13 +141,28 @@ describe('taste', () => {
       { title: film(92, { genreIds: [CRIME], originalLanguage: 'sv' }) },
       { title: film(93, { genreIds: [28], originalLanguage: 'en' }), weight: 0.2 },
     ]);
-    expect(pickBillboard([everywhere, onTaste], { now: NOW, taste: profile }).map((t) => t.id)).toEqual([31, 30]);
+    expect(
+      pickBillboard([everywhere, onTaste], { now: NOW, taste: profile }).map((t) => t.id),
+    ).toEqual([31, 30]);
   });
 
   it('lifts the on-taste title above an equally new one that is louder', () => {
-    const onTaste = film(20, { releaseDate: '2026-09-05', genreIds: [CRIME], originalLanguage: 'sv', popularity: 40 });
-    const loudHorror = film(21, { releaseDate: '2026-09-05', genreIds: [HORROR], originalLanguage: 'en', popularity: 400 });
-    const picked = pickBillboard([{ title: loudHorror }, { title: onTaste }], { now: NOW, taste: watched });
+    const onTaste = film(20, {
+      releaseDate: '2026-09-05',
+      genreIds: [CRIME],
+      originalLanguage: 'sv',
+      popularity: 40,
+    });
+    const loudHorror = film(21, {
+      releaseDate: '2026-09-05',
+      genreIds: [HORROR],
+      originalLanguage: 'en',
+      popularity: 400,
+    });
+    const picked = pickBillboard([{ title: loudHorror }, { title: onTaste }], {
+      now: NOW,
+      taste: watched,
+    });
     expect(picked.map((t) => t.id)).toEqual([20, 21]);
   });
 });
@@ -171,8 +208,14 @@ describe('taste beyond genre', () => {
       { title: film(1, { genreIds: [CRIME], countries: ['SE'], originalLanguage: 'sv' }) },
       { title: film(2, { genreIds: [CRIME], countries: ['DK'], originalLanguage: 'da' }) },
     ]);
-    const coproduction = affinity(film(10, { genreIds: [CRIME], countries: ['SE', 'GB'], originalLanguage: 'en' }), nordic);
-    const american = affinity(film(11, { genreIds: [CRIME], countries: ['US'], originalLanguage: 'en' }), nordic);
+    const coproduction = affinity(
+      film(10, { genreIds: [CRIME], countries: ['SE', 'GB'], originalLanguage: 'en' }),
+      nordic,
+    );
+    const american = affinity(
+      film(11, { genreIds: [CRIME], countries: ['US'], originalLanguage: 'en' }),
+      nordic,
+    );
     expect(coproduction).toBeGreaterThan(american);
   });
 
@@ -212,7 +255,10 @@ describe('taste beyond genre', () => {
 
 describe('arrival', () => {
   it('lifts an older title that has just landed on a service over a newer one that has not', () => {
-    const justLanded = { title: film(1, { releaseDate: '1997-06-01' }), arrival: { rank: 0, of: 10 } };
+    const justLanded = {
+      title: film(1, { releaseDate: '1997-06-01' }),
+      arrival: { rank: 0, of: 10 },
+    };
     const merelyNew = { title: film(2, { releaseDate: '2026-08-20' }) };
     expect(pickBillboard([merelyNew, justLanded], { now: NOW }).map((t) => t.id)).toEqual([1, 2]);
   });
@@ -246,10 +292,23 @@ describe('pickBillboard', () => {
     // atlas knows it is trending and nothing else; TMDB knows what it is.
     const fromAtlas = { title: film(5, { title: 'Both', year: 2026 }), rank: 0, of: 10 };
     const fromTmdb = {
-      title: film(5, { title: 'Both', releaseDate: '2026-09-01', genreIds: [CRIME], originalLanguage: 'sv', votes: 120, rating: 8 }),
+      title: film(5, {
+        title: 'Both',
+        releaseDate: '2026-09-01',
+        genreIds: [CRIME],
+        originalLanguage: 'sv',
+        votes: 120,
+        rating: 8,
+      }),
     };
     const taste = tasteOf([{ title: film(99, { genreIds: [CRIME], originalLanguage: 'sv' }) }]);
-    const alone = film(6, { releaseDate: '2026-09-01', genreIds: [CRIME], originalLanguage: 'sv', votes: 120, rating: 8 });
+    const alone = film(6, {
+      releaseDate: '2026-09-01',
+      genreIds: [CRIME],
+      originalLanguage: 'sv',
+      votes: 120,
+      rating: 8,
+    });
     // Unmerged, the atlas copy would score on its ranking alone and lose to the plain TMDB title.
     const picked = pickBillboard([fromAtlas, fromTmdb, { title: alone }], { now: NOW, taste });
     expect(picked.map((t) => t.id)).toEqual([5, 6]);
@@ -261,7 +320,9 @@ describe('pickBillboard', () => {
     const inUS = { title: film(5, { genreIds: [CRIME] }), arrival: { rank: 60, of: 100 } };
     const inFI = { title: film(5, { genreIds: [CRIME] }), arrival: { rank: 0, of: 100 } };
     const rival = { title: film(6, { genreIds: [CRIME] }), arrival: { rank: 30, of: 100 } };
-    expect(pickBillboard([inUS, inFI, rival], { now: NOW, taste }).map((t) => t.id)).toEqual([5, 6]);
+    expect(pickBillboard([inUS, inFI, rival], { now: NOW, taste }).map((t) => t.id)).toEqual([
+      5, 6,
+    ]);
   });
 
   it('drops a title that resembles too little of the library, but only when its genres are known', () => {
@@ -274,9 +335,16 @@ describe('pickBillboard', () => {
     ]);
     const alien = film(2, { genreIds: [16], originalLanguage: 'ja', releaseDate: '2026-09-01' });
     // A sliver of a match is still not a reason to feature it.
-    const barely = film(4, { genreIds: [ACTION], originalLanguage: 'en', releaseDate: '2026-09-01' });
+    const barely = film(4, {
+      genreIds: [ACTION],
+      originalLanguage: 'en',
+      releaseDate: '2026-09-01',
+    });
     const unknown = film(3, { releaseDate: '2026-09-01' });
-    const picked = pickBillboard([{ title: alien }, { title: barely }, { title: unknown }], { now: NOW, taste });
+    const picked = pickBillboard([{ title: alien }, { title: barely }, { title: unknown }], {
+      now: NOW,
+      taste,
+    });
     expect(picked.map((t) => t.id)).toEqual([3]);
     // With no profile to judge against, nothing is a stranger.
     expect(pickBillboard([{ title: alien }], { now: NOW }).map((t) => t.id)).toEqual([2]);
@@ -294,9 +362,9 @@ describe('pickBillboard', () => {
   });
 
   it('cuts to the slide count only after filtering, so a strict library still fills the billboard', () => {
-    const pool: Candidate[] = Array.from({ length: 60 }, (_, i) =>
-      ({ title: film(i, { releaseDate: '2026-08-01' }) }),
-    );
+    const pool: Candidate[] = Array.from({ length: 60 }, (_, i) => ({
+      title: film(i, { releaseDate: '2026-08-01' }),
+    }));
     // Half the pool is hidden; the billboard should still be full rather than half empty.
     const picked = pickBillboard(pool, { now: NOW, slides: 20, keep: (t) => t.id % 2 === 0 });
     expect(picked).toHaveLength(20);

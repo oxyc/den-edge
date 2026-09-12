@@ -26,7 +26,9 @@
   const log = $derived(session.log);
   /** Bumped after a write: the log isn't reactive. */
   const version = $derived(session.revision);
-  let drafts = $state<Record<string, string>>(Object.fromEntries(services.map((s) => [s.name, ''])));
+  let drafts = $state<Record<string, string>>(
+    Object.fromEntries(services.map((s) => [s.name, ''])),
+  );
   let saving = $state(false);
   let failure = $state<string | null>(null);
   const clock = browserClock();
@@ -49,13 +51,21 @@
   });
 
   /** Set settings in one group, or clear one with null — stamped now, together, merged over what the TV last wrote. */
-  async function write(group: string, changes: Record<string, ConfigValue | null>): Promise<boolean> {
+  async function write(
+    group: string,
+    changes: Record<string, ConfigValue | null>,
+  ): Promise<boolean> {
     if (!log) return false;
     saving = true;
     failure = null;
     try {
       await ensureSyncPolicy();
-      const base: SettingsRow = log.settings(group) ?? { kind: 'set', schema: 2, name: group, values: {} };
+      const base: SettingsRow = log.settings(group) ?? {
+        kind: 'set',
+        schema: 2,
+        name: group,
+        values: {},
+      };
       const at = clock.issue();
       const values = { ...base.values };
       for (const [name, value] of Object.entries(changes)) values[name] = { value, at };
@@ -74,7 +84,9 @@
     } catch {
       failure = 'Couldn’t prepare or save that change. Please try again.';
       return false;
-    } finally { saving = false; }
+    } finally {
+      saving = false;
+    }
   }
 
   async function save(name: string, value: string | null) {
@@ -90,7 +102,8 @@
 
   async function addPlugin() {
     if (!acceptsAddonURL(addonURL)) {
-      failure = 'Use https://, or http:// for an address on your network (localhost, *.local, 10.x, 172.16–31.x, 192.168.x).';
+      failure =
+        'Use https://, or http:// for an address on your network (localhost, *.local, 10.x, 172.16–31.x, 192.168.x).';
       return;
     }
     if (await write('plugins', { [addonURL]: { bool: true } })) addonDraft = '';
@@ -100,7 +113,9 @@
   // be entered here and reaches every TV through the library.
   let accessId = $state('');
   let accessSecret = $state('');
-  const hasAccess = $derived(!!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'));
+  const hasAccess = $derived(
+    !!readApiKey(keys, 'cfAccessId') && !!readApiKey(keys, 'cfAccessSecret'),
+  );
 
   /** Both halves together, or both cleared: one without the other opens nothing. */
   async function saveAccess(clear = false) {
@@ -132,7 +147,8 @@
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
     busy: 'Too many pairings started here just now. Wait a minute and try again.',
     failed: 'That pairing didn’t finish. Show a new code and try again.',
-    insecure: 'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
+    insecure:
+      'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
 
   async function linkBrowser() {
@@ -157,10 +173,12 @@
     code = null;
     pairing = false;
     if ('joiner' in result) links.share(result.joiner);
-    pairNotice = 'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
+    pairNotice =
+      'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
   }
 
-  const when = (at: number) => new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const when = (at: number) =>
+    new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
   // Unlinking asks twice: a second press within a few seconds confirms, so a stray tap does nothing. The link
   // awaiting its second press is held by key, so one row's confirmation never arms another's.
@@ -182,7 +200,10 @@
   <h1>Settings</h1>
 
   <h2>Your keys</h2>
-  <p class="sub">Your own API keys, shared with your Apple TV through your library. They’re sealed: den-edge can’t read them.</p>
+  <p class="sub">
+    Your own API keys, shared with your Apple TV through your library. They’re sealed: den-edge
+    can’t read them.
+  </p>
   {#if log === undefined}
     <Loading label="Loading settings" page />
   {:else if log === null}
@@ -209,7 +230,12 @@
           />
           <button class="primary" disabled={saving || !drafts[service.name]?.trim()}>Save</button>
           {#if current}
-            <button type="button" class="quiet" disabled={saving} onclick={() => save(service.name, null)}>Remove</button>
+            <button
+              type="button"
+              class="quiet"
+              disabled={saving}
+              onclick={() => save(service.name, null)}>Remove</button
+            >
           {/if}
         </div>
       </form>
@@ -217,8 +243,8 @@
 
     <h2>Away from home</h2>
     <p class="sub">
-      The Cloudflare Access service token that lets your Apple TVs in other homes reach your plugins. Enter it once:
-      it reaches every TV through your library.
+      The Cloudflare Access service token that lets your Apple TVs in other homes reach your
+      plugins. Enter it once: it reaches every TV through your library.
     </p>
     <form
       class="key"
@@ -246,20 +272,31 @@
           aria-label="Access client secret"
           bind:value={accessSecret}
         />
-        <button class="primary" disabled={saving || !accessId.trim() || !accessSecret.trim()}>Save</button>
+        <button class="primary" disabled={saving || !accessId.trim() || !accessSecret.trim()}
+          >Save</button
+        >
         {#if hasAccess}
-          <button type="button" class="quiet" disabled={saving} onclick={() => saveAccess(true)}>Remove</button>
+          <button type="button" class="quiet" disabled={saving} onclick={() => saveAccess(true)}
+            >Remove</button
+          >
         {/if}
       </div>
     </form>
 
     <h2>Plugins</h2>
-    <p class="sub">Your addons, shared with your Apple TV through your library. One you add here waits on the TV until you install it there.</p>
+    <p class="sub">
+      Your addons, shared with your Apple TV through your library. One you add here waits on the TV
+      until you install it there.
+    </p>
     {#each plugins as url (url)}
       {@const den = denAddonOf(url, routes)}
       <div class="plugin">
-        <div class="label"><b>{den?.label ?? hostOf(url)}</b><span>{den?.role ?? 'Plugin'}</span></div>
-        <button class="quiet" disabled={saving} onclick={() => write('plugins', { [url]: null })}>Remove</button>
+        <div class="label">
+          <b>{den?.label ?? hostOf(url)}</b><span>{den?.role ?? 'Plugin'}</span>
+        </div>
+        <button class="quiet" disabled={saving} onclick={() => write('plugins', { [url]: null })}
+          >Remove</button
+        >
       </div>
     {:else}
       <p class="sub">No plugins yet.</p>
@@ -286,8 +323,8 @@
 
   <h2>This device</h2>
   <p class="sub">
-    What the other device asks to allow, and lists this one under. Two phones of the same make guess the same name,
-    so give this one its own.
+    What the other device asks to allow, and lists this one under. Two phones of the same make guess
+    the same name, so give this one its own.
   </p>
   <div class="row">
     <input
@@ -301,7 +338,10 @@
   </div>
 
   <h2>Linked devices</h2>
-  <p class="sub">The libraries this browser can open. Unlinking is this browser’s own business; the device keeps running.</p>
+  <p class="sub">
+    The libraries this browser can open. Unlinking is this browser’s own business; the device keeps
+    running.
+  </p>
   {#each links.list as linked (linked.inboxKey)}
     <div class="device">
       <div class="label">
@@ -316,8 +356,8 @@
 
   <h2>Another browser</h2>
   <p class="sub">
-    Give this library to a browser on another device — a laptop, or Den opened at another address — without going to
-    the TV. Open Den there and type the code this shows.
+    Give this library to a browser on another device — a laptop, or Den opened at another address —
+    without going to the TV. Open Den there and type the code this shows.
   </p>
   <div class="tv">
     {#if code}
@@ -331,7 +371,9 @@
       <button class="primary" onclick={() => answer?.(true)}>Allow</button>
       <button class="quiet" onclick={() => answer?.(false)}>Refuse</button>
     {:else}
-      <button class="quiet" disabled={pairing} onclick={linkBrowser}>{pairing ? 'Waiting…' : 'Show a code'}</button>
+      <button class="quiet" disabled={pairing} onclick={linkBrowser}
+        >{pairing ? 'Waiting…' : 'Show a code'}</button
+      >
     {/if}
   </div>
   {#each links.shared as device (device.name + device.at)}
@@ -344,7 +386,9 @@
     </div>
   {/each}
   {#if links.shared.length}
-    <p class="sub note">Forgetting one only stops listing it here — it keeps the copy of your library it was given.</p>
+    <p class="sub note">
+      Forgetting one only stops listing it here — it keeps the copy of your library it was given.
+    </p>
   {/if}
 </section>
 
@@ -468,7 +512,12 @@
   /* The code is read aloud to whoever is typing it: spaced, and in the app's one monospace. */
   .code {
     margin-right: auto;
-    font: 700 20px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font:
+      700 20px/1.2 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Consolas,
+      monospace;
     letter-spacing: 0.18em;
   }
 

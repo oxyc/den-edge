@@ -5,7 +5,9 @@
  * sites with a Mac's user agent, so an iPad is told apart by its touch screen. Browsers don't tell a MacBook
  * from an iMac.
  */
-export function deviceLabel(nav: { userAgent: string; maxTouchPoints?: number } = navigator): string {
+export function deviceLabel(
+  nav: { userAgent: string; maxTouchPoints?: number } = navigator,
+): string {
   const ua = nav.userAgent;
   const platform = /iPhone/.test(ua)
     ? 'iPhone'

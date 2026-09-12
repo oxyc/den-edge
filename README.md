@@ -96,8 +96,10 @@ answers first.
 
 ```
 cd web && npm install && npm run dev    # Vite on :5173, proxying the API to the homelab den-edge
-npm run check && npm test && npm run build
+npm run lint && npm test && npm run build
 ```
+
+See [web development and CSS conventions](web/README.md) for formatting and lint commands.
 
 `DEN_EDGE=http://localhost:8080 npm run dev` proxies to a local den-edge instead. Installs run with
 `--ignore-scripts` in CI and the image.

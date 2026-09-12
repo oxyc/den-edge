@@ -6,7 +6,7 @@ From `web/`:
 npm ci
 npx playwright install chromium
 npm test
-npm run check
+npm run lint
 npm run test:e2e
 ```
 

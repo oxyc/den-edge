@@ -18,7 +18,8 @@ import {
 
 // den-spec, checked out at the repository root. The TV runs the same vectors, so passing here means both
 // read and write the same rows.
-const spec = (file: string) => JSON.parse(readFileSync(new URL(`../../../spec/vectors/${file}`, import.meta.url), 'utf8'));
+const spec = (file: string) =>
+  JSON.parse(readFileSync(new URL(`../../../spec/vectors/${file}`, import.meta.url), 'utf8'));
 const library = spec('library-v2.json') as {
   libraryKey: string;
   derived: { id: string; token: string };
@@ -52,7 +53,10 @@ describe('library wire v2 matches den-spec', () => {
   });
 
   it.each(merges.merge)('merges: $case', ({ a, b, merged }) => {
-    const [left, right] = [{ ...merges.base, ...a }, { ...merges.base, ...b }];
+    const [left, right] = [
+      { ...merges.base, ...a },
+      { ...merges.base, ...b },
+    ];
     const expected = { ...merges.base, ...merged };
     expect(mergeTitle(left, right)).toEqual(expected);
     expect(mergeTitle(right, left)).toEqual(expected);
@@ -83,7 +87,11 @@ describe('library wire v2 matches den-spec', () => {
 
   it('keeps the fields it does not know from the newer version', () => {
     const older = { ...merges.base, future: 'old' };
-    const newer = { ...merges.base, status: { value: 'watched' as const, at: [9000, 0, 'bbbb'] as Stamp }, future: 'new' };
+    const newer = {
+      ...merges.base,
+      status: { value: 'watched' as const, at: [9000, 0, 'bbbb'] as Stamp },
+      future: 'new',
+    };
     expect(mergeTitle(older, newer).future).toBe('new');
     expect(mergeTitle(newer, older).future).toBe('new');
   });

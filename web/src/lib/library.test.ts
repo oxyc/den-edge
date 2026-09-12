@@ -19,7 +19,16 @@ function record(
 }
 
 function mark(id: number, season: number, episode: number, fraction: number, updatedAt: number) {
-  return { type: 'tv', id, season, episode, fraction, updatedAt, title: `tv ${id}`, voteAverage: 8 };
+  return {
+    type: 'tv',
+    id,
+    season,
+    episode,
+    fraction,
+    updatedAt,
+    title: `tv ${id}`,
+    voteAverage: 8,
+  };
 }
 
 const library: Library = {
@@ -40,8 +49,26 @@ const library: Library = {
     mark(5, 1, 1, 0.5, 900), // the series is marked watched in the library
   ],
   shapes: new Map([
-    ['tv:2', { counts: new Map([[1, 10], [2, 8]]), lastAired: { season: 2, episode: 3 } }],
-    ['tv:3', { counts: new Map([[1, 10], [2, 3]]), lastAired: { season: 2, episode: 3 } }],
+    [
+      'tv:2',
+      {
+        counts: new Map([
+          [1, 10],
+          [2, 8],
+        ]),
+        lastAired: { season: 2, episode: 3 },
+      },
+    ],
+    [
+      'tv:3',
+      {
+        counts: new Map([
+          [1, 10],
+          [2, 3],
+        ]),
+        lastAired: { season: 2, episode: 3 },
+      },
+    ],
   ]),
   dismissed: new Map([
     ['tv:4', 850],
@@ -52,11 +79,21 @@ const library: Library = {
 describe("the TV's rows", () => {
   it('lists the watchlist newest first, without deleted titles', () => {
     expect(watchlist(library).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:11', 'movie:10']);
-    expect(watchlist(library)[0]).toMatchObject({ title: 'tv 11', posterPath: '/11.jpg', rating: 7.5 });
+    expect(watchlist(library)[0]).toMatchObject({
+      title: 'tv 11',
+      posterPath: '/11.jpg',
+      rating: 7.5,
+    });
   });
 
   it('continues series then movies, newest first, the way the TV does', () => {
-    expect(continueWatching(library).map((e) => [`${e.title.type}:${e.title.id}`, e.episode, e.fraction])).toEqual([
+    expect(
+      continueWatching(library).map((e) => [
+        `${e.title.type}:${e.title.id}`,
+        e.episode,
+        e.fraction,
+      ]),
+    ).toEqual([
       ['tv:2', { season: 2, episode: 1 }, 0],
       ['tv:1', { season: 1, episode: 3 }, 0.4],
       // movie 12 was dismissed after its last activity

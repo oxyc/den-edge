@@ -7,8 +7,18 @@ interface SwipeDestination {
 }
 
 /** One controller owns both edges, including the animation and the handoff after touchend. */
-export function swipeHistory(target: Document, destinations: { back: SwipeDestination; forward: SwipeDestination }): () => void {
-  let start: { x: number; y: number; id: number; direction: 1 | -1 | null; element: Element; blocked: boolean } | null = null;
+export function swipeHistory(
+  target: Document,
+  destinations: { back: SwipeDestination; forward: SwipeDestination },
+): () => void {
+  let start: {
+    x: number;
+    y: number;
+    id: number;
+    direction: 1 | -1 | null;
+    element: Element;
+    blocked: boolean;
+  } | null = null;
   let destination: SwipeDestination | null = null;
   let visual: SwipePreview | null = null;
   let claimed = false;
@@ -31,7 +41,9 @@ export function swipeHistory(target: Document, destinations: { back: SwipeDestin
     if (!held) return reset();
     if (releasing) return;
     releasing = true;
-    void held.release().then(() => { if (visual === held) reset(); });
+    void held.release().then(() => {
+      if (visual === held) reset();
+    });
   };
   const begin = (event: TouchEvent) => {
     const touch = event.touches[0];
@@ -44,22 +56,42 @@ export function swipeHistory(target: Document, destinations: { back: SwipeDestin
     if (event.defaultPrevented || event.touches.length !== 1 || !touch || !event.cancelable) return;
     const atEdge = edge(touch.clientX);
     const direction = atEdge ? (touch.clientX <= 24 ? 1 : -1) : null;
-    const next = direction === 1 ? destinations.back : direction === -1 ? destinations.forward : null;
-    if (next ? !next.canNavigate() : !destinations.back.canNavigate() && !destinations.forward.canNavigate()) return;
+    const next =
+      direction === 1 ? destinations.back : direction === -1 ? destinations.forward : null;
+    if (
+      next
+        ? !next.canNavigate()
+        : !destinations.back.canNavigate() && !destinations.forward.canNavigate()
+    )
+      return;
     const element = event.target as Element;
-    if (element.closest('input, textarea, select, [contenteditable], [role="dialog"], video, iframe')) return;
+    if (
+      element.closest('input, textarea, select, [contenteditable], [role="dialog"], video, iframe')
+    )
+      return;
     // Interior drags belong to carousels. At the screen edge, history owns the gesture,
     // even when a full-width carousel or one of its buttons is underneath the finger.
     if (!atEdge) {
       for (let node: Element | null = element; node; node = node.parentElement) {
-        if (node.scrollWidth > node.clientWidth && /auto|scroll/.test(getComputedStyle(node).overflowX)) return;
+        if (
+          node.scrollWidth > node.clientWidth &&
+          /auto|scroll/.test(getComputedStyle(node).overflowX)
+        )
+          return;
       }
     }
     // Cancel native edge navigation immediately. Snapshot work waits until horizontal intent
     // is known, keeping touchstart fast and leaving ordinary interior taps/vertical scroll alone.
     if (atEdge) event.preventDefault();
     destination = next;
-    start = { x: touch.clientX, y: touch.clientY, id: touch.identifier, direction, element, blocked: atEdge };
+    start = {
+      x: touch.clientX,
+      y: touch.clientY,
+      id: touch.identifier,
+      direction,
+      element,
+      blocked: atEdge,
+    };
   };
   const move = (event: TouchEvent) => {
     if (finishing) {
@@ -68,7 +100,7 @@ export function swipeHistory(target: Document, destinations: { back: SwipeDestin
     }
     if (!start) return;
     if (event.touches.length !== 1) return reset();
-    const touch = Array.from(event.touches).find(touch => touch.identifier === start?.id);
+    const touch = Array.from(event.touches).find((touch) => touch.identifier === start?.id);
     if (!touch) return reset();
     const rawX = touch.clientX - start.x;
     const dy = Math.abs(touch.clientY - start.y);
@@ -94,10 +126,14 @@ export function swipeHistory(target: Document, destinations: { back: SwipeDestin
       if (finishing && event.cancelable) event.preventDefault();
       return;
     }
-    const touch = Array.from(event.changedTouches).find(touch => touch.identifier === start?.id);
-    const go = !!touch && claimed && isBackSwipe(start.direction! * (touch.clientX - start.x), touch.clientY - start.y);
+    const touch = Array.from(event.changedTouches).find((touch) => touch.identifier === start?.id);
+    const go =
+      !!touch &&
+      claimed &&
+      isBackSwipe(start.direction! * (touch.clientX - start.x), touch.clientY - start.y);
     if (!claimed) {
-      const tapped = touch && Math.abs(touch.clientX - start.x) < 8 && Math.abs(touch.clientY - start.y) < 8;
+      const tapped =
+        touch && Math.abs(touch.clientX - start.x) < 8 && Math.abs(touch.clientY - start.y) < 8;
       const element = start.element;
       const blocked = start.blocked;
       reset();
@@ -121,15 +157,22 @@ export function swipeHistory(target: Document, destinations: { back: SwipeDestin
       if (go && next.canNavigate()) {
         traversing = true;
         next.navigate();
-        fallback = setTimeout(() => { if (visual === held) completed(); }, 1500);
+        fallback = setTimeout(() => {
+          if (visual === held) completed();
+        }, 1500);
       } else completed();
     });
   };
   const clicked = (event: MouseEvent) => {
     // Some mobile browsers synthesize a click after touchend. It must not open a title underneath
     // the completed swipe and look like an extra navigation or reload. Keyboard clicks still work.
-    if (event.detail && lastEnd && Date.now() < lastEnd.until &&
-      Math.abs(event.clientX - lastEnd.x) < 32 && Math.abs(event.clientY - lastEnd.y) < 32) {
+    if (
+      event.detail &&
+      lastEnd &&
+      Date.now() < lastEnd.until &&
+      Math.abs(event.clientX - lastEnd.x) < 32 &&
+      Math.abs(event.clientY - lastEnd.y) < 32
+    ) {
       event.preventDefault();
       event.stopImmediatePropagation();
       lastEnd = null;

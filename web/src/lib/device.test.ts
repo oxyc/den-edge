@@ -8,7 +8,8 @@ vi.stubGlobal('localStorage', {
   removeItem: (key: string) => void store.delete(key),
 });
 vi.stubGlobal('navigator', {
-  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Safari/604.1',
+  userAgent:
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Safari/604.1',
   maxTouchPoints: 5,
 });
 

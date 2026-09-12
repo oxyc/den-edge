@@ -5,7 +5,11 @@
   import type { Title } from '../lib/library';
   import BrowseRow from './BrowseRow.svelte';
 
-  let { rows, shown, onselect }: { rows: RowDef[]; shown: (title: Title) => boolean; onselect: (title: Title) => void } =
+  let {
+    rows,
+    shown,
+    onselect,
+  }: { rows: RowDef[]; shown: (title: Title) => boolean; onselect: (title: Title) => void } =
     $props();
 
   const STEP = 6;

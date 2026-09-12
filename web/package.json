@@ -9,17 +9,34 @@
     "build": "vite build && node scripts/precompress.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint:css": "stylelint \"{src,test}/**/*.{css,svelte}\" --max-warnings 0",
+    "lint": "npm run format:check && npm run lint:js && npm run lint:css && npm run check",
+    "lint:js": "eslint . --max-warnings 0"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "^1.58.2",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^24.13.3",
+    "eslint": "10.10.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-svelte": "3.23.0",
+    "globals": "17.12.0",
+    "postcss-html": "2.0.0",
+    "prettier": "3.9.6",
+    "prettier-plugin-svelte": "4.1.1",
+    "stylelint": "17.15.0",
+    "stylelint-config-html": "2.0.0",
+    "stylelint-config-standard": "40.0.0",
     "svelte": "^5.46.4",
     "svelte-check": "^4.0.0",
     "typescript": "^6.0.0",
+    "typescript-eslint": "8.69.0",
     "vite": "^8.0.0",
-    "vitest": "^4.0.0 || ^5.0.0",
-    "@playwright/test": "^1.58.2"
+    "vitest": "^4.0.0 || ^5.0.0"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",

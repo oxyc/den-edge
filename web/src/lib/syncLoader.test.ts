@@ -1,15 +1,22 @@
 import { afterEach, expect, it, vi } from 'vitest';
 
-afterEach(() => { vi.doUnmock('../vendor/den-core/index.js'); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => {
+  vi.doUnmock('../vendor/den-core/index.js');
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 async function loader(initialize = vi.fn().mockResolvedValue(undefined)) {
   vi.resetModules();
   vi.doMock('../vendor/den-core/index.js', () => ({ initialize }));
-  return { ...await import('./syncLoader'), initialize };
+  return { ...(await import('./syncLoader')), initialize };
 }
 
 it('defers idle work and accelerates the same initialization when clicked', async () => {
   const cancel = vi.fn();
-  vi.stubGlobal('requestIdleCallback', vi.fn(() => 17));
+  vi.stubGlobal(
+    'requestIdleCallback',
+    vi.fn(() => 17),
+  );
   vi.stubGlobal('cancelIdleCallback', cancel);
   const core = await loader();
   const background = core.ensureSyncPolicy(true);
@@ -34,7 +41,10 @@ it('uses a timer fallback without eagerly loading', async () => {
 });
 
 it('rejects waiting actions on failure and retries on the next action', async () => {
-  const initialize = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
+  const initialize = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('offline'))
+    .mockResolvedValue(undefined);
   const core = await loader(initialize);
   await expect(core.ensureSyncPolicy()).rejects.toThrow('offline');
   await expect(core.ensureSyncPolicy()).resolves.toBeUndefined();
@@ -42,7 +52,12 @@ it('rejects waiting actions on failure and retries on the next action', async ()
 });
 
 it('also retries when initialization throws before returning a promise', async () => {
-  const initialize = vi.fn().mockImplementationOnce(() => { throw new Error('setup failed'); }).mockResolvedValue(undefined);
+  const initialize = vi
+    .fn()
+    .mockImplementationOnce(() => {
+      throw new Error('setup failed');
+    })
+    .mockResolvedValue(undefined);
   const core = await loader(initialize);
   await expect(core.ensureSyncPolicy()).rejects.toThrow('setup failed');
   await expect(core.ensureSyncPolicy()).resolves.toBeUndefined();

@@ -4,6 +4,7 @@ import type { Title, Shape } from './library';
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
 export class LibrarySession {
   displays = $state<Title[]>([]);
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Consumers assign complete shape snapshots to state; they never mutate this map in place.
   shapes = $state(new Map<string, Shape>());
   revision = $state(0);
   settingsRevision = $state(0);
@@ -24,13 +25,16 @@ export class LibrarySession {
           if (this.log) this.changed(true);
           return;
         }
-        const settings = () => JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));
+        const settings = () =>
+          JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));
         const before = settings();
         if (await this.log.refresh()) this.changed(before !== settings());
       } catch {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
         if (!this.log) this.log = null;
-      } finally { this.refreshing = undefined; }
+      } finally {
+        this.refreshing = undefined;
+      }
     })();
     return this.refreshing;
   }

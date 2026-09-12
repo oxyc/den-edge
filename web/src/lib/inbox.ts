@@ -19,7 +19,11 @@ export interface Sealing {
 }
 
 /** `message` sealed under the link's `enc` key, as den-edge's `sealed` field carries it. */
-export async function sealMessage(enc: Bytes, message: object, sealing: Sealing = {}): Promise<string> {
+export async function sealMessage(
+  enc: Bytes,
+  message: object,
+  sealing: Sealing = {},
+): Promise<string> {
   const {
     id = hex(crypto.getRandomValues(new Uint8Array(16))),
     sentAt = Date.now(),
@@ -27,7 +31,13 @@ export async function sealMessage(enc: Bytes, message: object, sealing: Sealing 
   } = sealing;
   const plaintext = new TextEncoder().encode(JSON.stringify({ id, sentAt, message }));
   const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['encrypt']);
-  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce, additionalData: AAD }, key, plaintext));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: AAD },
+      key,
+      plaintext,
+    ),
+  );
   const out = new Uint8Array(nonce.length + sealed.length);
   out.set(nonce);
   out.set(sealed, nonce.length);

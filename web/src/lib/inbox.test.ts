@@ -5,7 +5,9 @@ import { linkKeys } from './pair';
 import { fromHex } from './wire';
 
 // den-spec, checked out at the repository root; the TV opens the same messages.
-const vectors = JSON.parse(readFileSync(new URL('../../../spec/vectors/inbox-v1.json', import.meta.url), 'utf8')) as {
+const vectors = JSON.parse(
+  readFileSync(new URL('../../../spec/vectors/inbox-v1.json', import.meta.url), 'utf8'),
+) as {
   linkKey: string;
   enc: string;
   cases: { nonce: string; plaintext: string; sealed: string }[];
@@ -17,8 +19,14 @@ describe('inbox v1 matches den-spec', () => {
   });
 
   it.each(vectors.cases)('seals $plaintext', async ({ nonce, plaintext, sealed }) => {
-    const { id, sentAt, message } = JSON.parse(plaintext) as { id: string; sentAt: number; message: object };
-    expect(await sealMessage(fromHex(vectors.enc), message, { id, sentAt, nonce: fromHex(nonce) })).toBe(sealed);
+    const { id, sentAt, message } = JSON.parse(plaintext) as {
+      id: string;
+      sentAt: number;
+      message: object;
+    };
+    expect(
+      await sealMessage(fromHex(vectors.enc), message, { id, sentAt, nonce: fromHex(nonce) }),
+    ).toBe(sealed);
   });
 });
 
@@ -27,13 +35,19 @@ describe('sending to a TV', () => {
   function capture() {
     const sent: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
     const fetchImpl = (async (_: string, init?: RequestInit) => {
-      sent.push({ headers: init?.headers as Record<string, string>, body: JSON.parse(String(init?.body)) });
+      sent.push({
+        headers: init?.headers as Record<string, string>,
+        body: JSON.parse(String(init?.body)),
+      });
       return new Response('{"ok":true}', { status: 200 });
     }) as typeof fetch;
     return { sent, fetchImpl };
   }
 
-  const link = { inboxKey: 'abcdef0123456789', linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))) };
+  const link = {
+    inboxKey: 'abcdef0123456789',
+    linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
+  };
 
   it('seals, and sends nothing readable', async () => {
     const { sent, fetchImpl } = capture();

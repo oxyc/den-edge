@@ -23,7 +23,12 @@ export type Hit = { kind: 'title'; title: Title } | { kind: 'person'; person: Pe
 
 export interface FacetAnswer {
   /** What atlas read in the query; null when it names no facet. */
-  facet: { mediaType: MediaType | null; country: string | null; decade: number | null; leftover: string } | null;
+  facet: {
+    mediaType: MediaType | null;
+    country: string | null;
+    decade: number | null;
+    leftover: string;
+  } | null;
   /** The matching titles, a leftover theme ranked to the front. */
   titles: Ref[];
 }
@@ -100,7 +105,8 @@ export function foldedTitle(text: string): string {
   return folded;
 }
 
-const isExact = (hit: Hit, query: string) => hit.kind === 'title' && foldedTitle(hit.title.title) === foldedTitle(query);
+const isExact = (hit: Hit, query: string) =>
+  hit.kind === 'title' && foldedTitle(hit.title.title) === foldedTitle(query);
 
 /** Exact title matches moved to the front, in order; nothing moves when none matches. */
 export function promoteExact(hits: Hit[], query: string): Hit[] {
@@ -110,7 +116,9 @@ export function promoteExact(hits: Hit[], query: string): Hit[] {
 }
 
 async function hydrate(refs: Ref[], limit: number, sources: SearchSources): Promise<Hit[]> {
-  const titles = await Promise.all(refs.slice(0, limit).map((ref) => sources.title(ref).catch(() => null)));
+  const titles = await Promise.all(
+    refs.slice(0, limit).map((ref) => sources.title(ref).catch(() => null)),
+  );
   return titles.filter((t): t is Title => t !== null).map(titleHit);
 }
 
@@ -128,8 +136,13 @@ async function titleIndexHits(text: string, sources: SearchSources): Promise<Hit
 }
 
 /** Year-scoped matches lead, then TMDB's own ranking, then what only the plural variant found. */
-async function tmdbHits(text: string, year: number | undefined, sources: SearchSources): Promise<Hit[]> {
-  const byYear = year === undefined ? Promise.resolve([]) : sources.byYear(text, year).catch(() => []);
+async function tmdbHits(
+  text: string,
+  year: number | undefined,
+  sources: SearchSources,
+): Promise<Hit[]> {
+  const byYear =
+    year === undefined ? Promise.resolve([]) : sources.byYear(text, year).catch(() => []);
   const variant = pluralVariant(text);
   const variantHits = variant ? sources.multi(variant).catch(() => []) : Promise.resolve([]);
   const primary = await sources.multi(text);
@@ -149,7 +162,11 @@ async function anchorExact(fused: Hit[], query: string, sources: SearchSources):
   const anchor = fused.find((h) => isExact(h, query));
   if (!anchor) return fused;
   if (anchor.kind !== 'title') return dedupe([anchor, ...fused]);
-  const similar = await hydrate(await sources.similar(anchor.title).catch(() => []), TAIL_LIMIT, sources);
+  const similar = await hydrate(
+    await sources.similar(anchor.title).catch(() => []),
+    TAIL_LIMIT,
+    sources,
+  );
   return dedupe([anchor, ...similar, ...fused]);
 }
 
@@ -157,7 +174,11 @@ async function anchorExact(fused: Hit[], query: string, sources: SearchSources):
  * "<facet> <person>" — "spanish series jose coronado" — is that person's work of the facet's type. Only when the
  * top multi hit is a person whose name matches the leftover, so a theme ("about a heist") isn't hijacked.
  */
-async function facetPersonHits(leftover: string, mediaType: MediaType | null, sources: SearchSources) {
+async function facetPersonHits(
+  leftover: string,
+  mediaType: MediaType | null,
+  sources: SearchSources,
+) {
   const top = (await sources.multi(leftover).catch(() => []))[0];
   if (top?.kind !== 'person') return undefined;
   const [want, name] = [leftover.toLowerCase(), top.person.name.toLowerCase()];
@@ -170,7 +191,9 @@ async function facetPersonHits(leftover: string, mediaType: MediaType | null, so
 
 async function facetLane(answer: FacetAnswer, sources: SearchSources): Promise<Hit[]> {
   const leftover = answer.facet?.leftover ?? '';
-  const person = leftover ? facetPersonHits(leftover, answer.facet?.mediaType ?? null, sources) : undefined;
+  const person = leftover
+    ? facetPersonHits(leftover, answer.facet?.mediaType ?? null, sources)
+    : undefined;
   if (answer.titles.length === 0) return (await person) ?? [];
   const matches = await hydrate(answer.titles, FACET_LIMIT, sources);
   return dedupe((await person) ?? matches);

@@ -61,7 +61,9 @@ describe('cachingFetch', () => {
     clock = 10 * 24 * HOUR;
     net.fail();
     expect(await (await cached(discover)).json()).toEqual({ n: 1 });
-    await expect(cached('https://api.themoviedb.org/3/search/multi?query=x')).rejects.toThrow('offline');
+    await expect(cached('https://api.themoviedb.org/3/search/multi?query=x')).rejects.toThrow(
+      'offline',
+    );
   });
 
   it('leaves everything but TMDB alone, and prunes past the retention limit once', async () => {

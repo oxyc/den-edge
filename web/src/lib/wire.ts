@@ -58,7 +58,9 @@ export async function deriveKeys(libraryKey: Uint8Array<ArrayBuffer>): Promise<L
     id: hex(id),
     token: hex(token),
     enc: await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['encrypt', 'decrypt']),
-    mac: await crypto.subtle.importKey('raw', mac, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
+    mac: await crypto.subtle.importKey('raw', mac, { name: 'HMAC', hash: 'SHA-256' }, false, [
+      'sign',
+    ]),
   };
 }
 
@@ -105,7 +107,12 @@ export interface EpisodeRow {
 }
 
 /** A setting's value, tagged as the TV's ConfigValue encodes it. */
-export type ConfigValue = { bool: boolean } | { int: number } | { string: string } | { ints: number[] } | { strings: string[] };
+export type ConfigValue =
+  | { bool: boolean }
+  | { int: number }
+  | { string: string }
+  | { ints: number[] }
+  | { strings: string[] };
 
 /** A group of settings, `set:<name>`: each setting its own stamped value, null a cleared one. */
 export interface SettingsRow {
@@ -138,7 +145,12 @@ export function believe<T extends Row>(row: T, now = Date.now()): T {
   const fixed = <V>(s: Stamped<V>): Stamped<V> => ({ ...s, at: fix(s.at) });
   if (row.kind === 'ep') return { ...row, progress: { ...row.progress, at: fix(row.progress.at) } };
   if (row.kind === 'set') {
-    return { ...row, values: Object.fromEntries(Object.entries(row.values).map(([key, value]) => [key, fixed(value)])) };
+    return {
+      ...row,
+      values: Object.fromEntries(
+        Object.entries(row.values).map(([key, value]) => [key, fixed(value)]),
+      ),
+    };
   }
   return {
     ...row,
@@ -186,7 +198,8 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
     throw new Error(`unknown row kind ${String(parsed.kind)}`);
   }
   const row = parsed as Row;
-  if (hex(await rowMac(keys, rowName(row))) !== k) throw new Error('the row names a different record than its key');
+  if (hex(await rowMac(keys, rowName(row))) !== k)
+    throw new Error('the row names a different record than its key');
   return row;
 }
 
@@ -197,7 +210,14 @@ export function newest(row: Row): Stamp {
       ? [row.progress.at]
       : row.kind === 'set'
         ? Object.values(row.values).map((v) => v.at)
-        : [row.status.at, row.resume.at, row.reaction.at, row.deleted.at, row.dismissed.at, row.episodesReset ?? ZERO_STAMP];
+        : [
+            row.status.at,
+            row.resume.at,
+            row.reaction.at,
+            row.deleted.at,
+            row.dismissed.at,
+            row.episodesReset ?? ZERO_STAMP,
+          ];
   return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP);
 }
 
@@ -219,9 +239,14 @@ export function fromHex(text: string): Uint8Array<ArrayBuffer> {
 }
 
 export function toBase64url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
 }
 
 export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0));
+  return Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll('_', '/')), (c) =>
+    c.charCodeAt(0),
+  );
 }

@@ -5,7 +5,9 @@
 
   // The page behind stays put: it would otherwise scroll under the overlay.
   $effect(() => {
-    const scrolls = [document.documentElement, document.body].map((el) => [el, el.style.overflow] as const);
+    const scrolls = [document.documentElement, document.body].map(
+      (el) => [el, el.style.overflow] as const,
+    );
     for (const [el] of scrolls) el.style.overflow = 'hidden';
     return () => {
       for (const [el, overflow] of scrolls) el.style.overflow = overflow;
@@ -13,7 +15,9 @@
   });
 </script>
 
-<svelte:window onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && onclose()} />
+<svelte:window
+  onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && onclose()}
+/>
 
 <div class="trailer" role="dialog" aria-modal="true" aria-label={`${title}: trailer`}>
   <header>
@@ -51,7 +55,9 @@
 {/snippet}
 
 {#snippet cross()}
-  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18" /></svg>
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+    ><path d="m6 6 12 12M18 6 6 18" /></svg
+  >
 {/snippet}
 
 <style>
@@ -63,6 +69,7 @@
     grid-template-rows: auto minmax(0, 1fr);
     height: 100vh;
     height: 100dvh;
+
     /* Clear of a phone's camera cutout on every side, as the player is. */
     padding: max(12px, env(safe-area-inset-top)) max(var(--gutter), env(safe-area-inset-right))
       max(12px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
@@ -121,7 +128,7 @@
     white-space: nowrap;
   }
 
-  @media (min-width: 560px) {
+  @media (width >= 560px) {
     .out .label {
       position: static;
       width: auto;

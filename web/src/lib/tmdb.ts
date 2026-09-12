@@ -67,7 +67,8 @@ export function seriesShape(details: Record<string, unknown>): Shape | undefined
       counts.set(season.season_number, season.episode_count);
     }
   }
-  const last = details.last_episode_to_air as { season_number?: unknown; episode_number?: unknown } | null | undefined;
+  const last = details.last_episode_to_air as
+    { season_number?: unknown; episode_number?: unknown } | null | undefined;
   const lastAired =
     typeof last?.season_number === 'number' && typeof last.episode_number === 'number'
       ? { season: last.season_number, episode: last.episode_number }
@@ -76,8 +77,12 @@ export function seriesShape(details: Record<string, unknown>): Shape | undefined
 }
 
 /** A TMDB movie or series object (detail, search result or credit) as a title; null without a name. */
-export function toTitle(ref: { type: MediaType; id: number }, details: Record<string, unknown>): Title | null {
-  const text = (field: string) => (typeof details[field] === 'string' ? (details[field] as string) : undefined);
+export function toTitle(
+  ref: { type: MediaType; id: number },
+  details: Record<string, unknown>,
+): Title | null {
+  const text = (field: string) =>
+    typeof details[field] === 'string' ? (details[field] as string) : undefined;
   const name = text('title') ?? text('name');
   if (!name) return null;
   const released = text('release_date') ?? text('first_air_date');
@@ -86,16 +91,20 @@ export function toTitle(ref: { type: MediaType; id: number }, details: Record<st
   const genreIds = Array.isArray(details.genre_ids)
     ? details.genre_ids.filter((g): g is number => typeof g === 'number')
     : Array.isArray(details.genres)
-      ? (details.genres as { id?: unknown }[]).map((g) => g.id).filter((g): g is number => typeof g === 'number')
+      ? (details.genres as { id?: unknown }[])
+          .map((g) => g.id)
+          .filter((g): g is number => typeof g === 'number')
       : undefined;
   const collection = details.belongs_to_collection as { id?: unknown } | null | undefined;
   // Whoever the title is most identified with: its director, and the head of its billing. More than a few and
   // the profile fills with people nobody chose a film for.
   const credited = (details.credits ?? details.aggregate_credits) as
-    | { cast?: unknown; crew?: unknown }
-    | null
-    | undefined;
-  const ids = (value: unknown, take: number, keep: (entry: Record<string, unknown>) => boolean = () => true) =>
+    { cast?: unknown; crew?: unknown } | null | undefined;
+  const ids = (
+    value: unknown,
+    take: number,
+    keep: (entry: Record<string, unknown>) => boolean = () => true,
+  ) =>
     Array.isArray(value)
       ? (value as Record<string, unknown>[])
           .filter((entry) => entry && keep(entry))

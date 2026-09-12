@@ -33,7 +33,10 @@ export function formatCode(input: string, caret = input.length): { text: string;
   const keep = (s: string) => [...s.toUpperCase()].filter((c) => ALPHABET.includes(c)).join('');
   const chars = keep(input).slice(0, 12);
   const n = Math.min(keep(input.slice(0, caret)).length, chars.length);
-  return { text: chars.match(/.{1,4}/g)?.join('-') ?? '', caret: n + Math.floor(Math.max(n - 1, 0) / 4) };
+  return {
+    text: chars.match(/.{1,4}/g)?.join('-') ?? '',
+    caret: n + Math.floor(Math.max(n - 1, 0) / 4),
+  };
 }
 
 /** What a device calls itself, as the other's list of linked devices shows it. The same rule as den-edge's. */
@@ -86,10 +89,13 @@ function lvSplit(data: Uint8Array): Bytes[] | null {
   return fields;
 }
 
-const sha512 = async (data: Bytes): Promise<Bytes> => new Uint8Array(await crypto.subtle.digest('SHA-512', data));
+const sha512 = async (data: Bytes): Promise<Bytes> =>
+  new Uint8Array(await crypto.subtle.digest('SHA-512', data));
 
 async function hmac512(key: Bytes, data: Bytes): Promise<Bytes> {
-  const mac = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-512' }, false, ['sign']);
+  const mac = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-512' }, false, [
+    'sign',
+  ]);
   return new Uint8Array(await crypto.subtle.sign('HMAC', mac, data));
 }
 
@@ -117,9 +123,11 @@ export function sampleScalar(): Bytes {
   return y;
 }
 
-const scalar = (littleEndian: Uint8Array): bigint => littleEndian.reduceRight((n, byte) => (n << 8n) | BigInt(byte), 0n);
+const scalar = (littleEndian: Uint8Array): bigint =>
+  littleEndian.reduceRight((n, byte) => (n << 8n) | BigInt(byte), 0n);
 
-export const scalarMult = (y: Uint8Array, g: Point): Bytes => new Uint8Array(g.multiply(scalar(y)).toBytes());
+export const scalarMult = (y: Uint8Array, g: Point): Bytes =>
+  new Uint8Array(g.multiply(scalar(y)).toBytes());
 
 /** `y` times the encoded point, or the identity (32 zero bytes) when it doesn't decode. */
 export function scalarMultVfy(y: Uint8Array, encoded: Uint8Array): Bytes {
@@ -132,13 +140,23 @@ export function scalarMultVfy(y: Uint8Array, encoded: Uint8Array): Bytes {
   return point.is0() ? new Uint8Array(32) : new Uint8Array(point.multiply(scalar(y)).toBytes());
 }
 
-export function intermediateKey(sid: Bytes, K: Bytes, Ya: Bytes, ADa: Bytes, Yb: Bytes, ADb: Bytes): Promise<Bytes> {
-  return sha512(concat(lvCat(concat(DSI, utf8.encode('_ISK')), sid, K), lvCat(Ya, ADa), lvCat(Yb, ADb)));
+export function intermediateKey(
+  sid: Bytes,
+  K: Bytes,
+  Ya: Bytes,
+  ADa: Bytes,
+  Yb: Bytes,
+  ADb: Bytes,
+): Promise<Bytes> {
+  return sha512(
+    concat(lvCat(concat(DSI, utf8.encode('_ISK')), sid, K), lvCat(Ya, ADa), lvCat(Yb, ADb)),
+  );
 }
 
 // --- Den's layer: associated data, confirmation, handover ---
 
-const partyData = (role: Role, label: string): Bytes => lvCat(utf8.encode(role), utf8.encode(label));
+const partyData = (role: Role, label: string): Bytes =>
+  lvCat(utf8.encode(role), utf8.encode(label));
 
 /** The label in a party's associated data, when the role is right and the label is one a device could send. */
 function partyLabel(data: Uint8Array, role: Role): string | null {
@@ -147,7 +165,9 @@ function partyLabel(data: Uint8Array, role: Role): string | null {
   const [given, raw] = fields as [Bytes, Bytes];
   try {
     const label = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-    return new TextDecoder().decode(given) === role && label && cleanLabel(label) === label ? label : null;
+    return new TextDecoder().decode(given) === role && label && cleanLabel(label) === label
+      ? label
+      : null;
   } catch {
     return null;
   }
@@ -159,7 +179,14 @@ interface SessionKeys {
 }
 
 /** The keys both sides confirm and seal with; null when `K` is the identity, where CPace aborts. */
-async function sessionKeys(sid: Bytes, K: Bytes, Ya: Bytes, ADa: Bytes, Yb: Bytes, ADb: Bytes): Promise<SessionKeys | null> {
+async function sessionKeys(
+  sid: Bytes,
+  K: Bytes,
+  Ya: Bytes,
+  ADa: Bytes,
+  Yb: Bytes,
+  ADb: Bytes,
+): Promise<SessionKeys | null> {
   if (equal(K, new Uint8Array(32))) return null;
   const isk = await intermediateKey(sid, K, Ya, ADa, Yb, ADb);
   return {
@@ -189,9 +216,20 @@ export async function joinerFinish(state: JoinerState, b: Uint8Array) {
   const [Yb, ADb, Tb] = fields as [Bytes, Bytes, Bytes];
   const host = Yb.length === 32 && Tb.length === 64 ? partyLabel(ADb, 'host') : null;
   if (host === null) return null;
-  const keys = await sessionKeys(state.sid, scalarMultVfy(state.y, Yb), state.Ya, state.ADa, Yb, ADb);
+  const keys = await sessionKeys(
+    state.sid,
+    scalarMultVfy(state.y, Yb),
+    state.Ya,
+    state.ADa,
+    Yb,
+    ADb,
+  );
   if (!keys || !equal(Tb, await hmac512(keys.macKey, lvCat(Yb, ADb)))) return null;
-  return { c: await hmac512(keys.macKey, lvCat(state.Ya, state.ADa)), handoverKey: keys.handoverKey, host };
+  return {
+    c: await hmac512(keys.macKey, lvCat(state.Ya, state.ADa)),
+    handoverKey: keys.handoverKey,
+    host,
+  };
 }
 
 export interface HostState extends SessionKeys {
@@ -202,7 +240,13 @@ export interface HostState extends SessionKeys {
 }
 
 /** The host answers the joiner's `a` with `b`. Null ends the pairing. */
-export async function hostRespond(secret: string, sid: Bytes, label: string, a: Uint8Array, y = sampleScalar()) {
+export async function hostRespond(
+  secret: string,
+  sid: Bytes,
+  label: string,
+  a: Uint8Array,
+  y = sampleScalar(),
+) {
   const fields = lvSplit(a);
   if (fields?.length !== 2) return null;
   const [Ya, ADa] = fields as [Bytes, Bytes];
@@ -231,7 +275,11 @@ async function aes(key: Bytes, use: KeyUsage): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', key, 'AES-GCM', false, [use]);
 }
 
-export async function sealHandover(key: Bytes, handover: Handover, nonce = crypto.getRandomValues(new Uint8Array(12))) {
+export async function sealHandover(
+  key: Bytes,
+  handover: Handover,
+  nonce = crypto.getRandomValues(new Uint8Array(12)),
+) {
   const plaintext = JSON.stringify({
     v: 1,
     host: handover.host,
@@ -239,7 +287,12 @@ export async function sealHandover(key: Bytes, handover: Handover, nonce = crypt
     libraryKey: toBase64url(handover.libraryKey),
   });
   const params = { name: 'AES-GCM', iv: nonce, additionalData: HANDOVER };
-  return concat(nonce, new Uint8Array(await crypto.subtle.encrypt(params, await aes(key, 'encrypt'), utf8.encode(plaintext))));
+  return concat(
+    nonce,
+    new Uint8Array(
+      await crypto.subtle.encrypt(params, await aes(key, 'encrypt'), utf8.encode(plaintext)),
+    ),
+  );
 }
 
 /** The host's handover, or null when it doesn't open or lacks a key. */
@@ -251,7 +304,8 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
     const body = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
     const linkKey = typeof body.linkKey === 'string' ? fromBase64url(body.linkKey) : null;
     const libraryKey = typeof body.libraryKey === 'string' ? fromBase64url(body.libraryKey) : null;
-    if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32) return null;
+    if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32)
+      return null;
     return { host: body.host, linkKey, libraryKey };
   } catch {
     return null;
@@ -260,13 +314,17 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
 
 /** What a link key derives: `inbox`, the link's credential at den-edge, and `enc`, its inbox messages' key. */
 export async function linkKeys(linkKey: Bytes): Promise<{ inbox: string; enc: Bytes }> {
-  const [inbox, enc] = await Promise.all([hkdf(linkKey, 'den/link/v1', 'inbox', 24), hkdf(linkKey, 'den/link/v1', 'enc', 32)]);
+  const [inbox, enc] = await Promise.all([
+    hkdf(linkKey, 'den/link/v1', 'inbox', 24),
+    hkdf(linkKey, 'den/link/v1', 'enc', 32),
+  ]);
   return { inbox: hex(inbox), enc };
 }
 
 // --- Joining through den-edge ---
 
-export type JoinError = 'mistyped' | 'expired' | 'claimed' | 'throttled' | 'failed' | 'unreachable' | 'insecure';
+export type JoinError =
+  'mistyped' | 'expired' | 'claimed' | 'throttled' | 'failed' | 'unreachable' | 'insecure';
 export type JoinResult = { handover: Handover; inboxKey: string } | { error: JoinError };
 
 interface JoinOptions {
@@ -301,11 +359,16 @@ function relay(sid: string, fetchImpl: typeof fetch, wait: (ms: number) => Promi
   const session = `/pair/${sid}`;
   const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
   const send = (path: string, method: string, body: unknown) =>
-    call(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    call(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   return {
     call,
     send,
-    put: async (slot: string, m: Uint8Array) => (await send(`${session}/${slot}`, 'PUT', { m: toBase64url(m) }))?.ok ?? false,
+    put: async (slot: string, m: Uint8Array) =>
+      (await send(`${session}/${slot}`, 'PUT', { m: toBase64url(m) }))?.ok ?? false,
     /** The slot's message once the other side writes it; null when the session ends or the ten minutes run out. */
     read: async (slot: string): Promise<Bytes | null> => {
       for (let waited = 0; waited < SESSION_MS; waited += POLL_MS) {
@@ -324,13 +387,18 @@ function relay(sid: string, fetchImpl: typeof fetch, wait: (ms: number) => Promi
 }
 
 export async function join(code: string, options: JoinOptions = {}): Promise<JoinResult> {
-  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
+  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } =
+    options;
   const parsed = parseCode(code);
   if (!parsed) return { error: 'mistyped' };
   if (!secureContext()) return { error: 'insecure' };
   const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
   const send = (path: string, method: string, body: unknown) =>
-    call(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    call(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
 
   const opened = await send('/pair/open', 'POST', { nameplate: parsed.nameplate });
   if (!opened) return { error: 'unreachable' };
@@ -384,7 +452,9 @@ const randomSecret = (): string =>
   [...crypto.getRandomValues(new Uint8Array(8))].map((b) => ALPHABET[b & 31]).join('');
 
 const randomSid = (): string =>
-  [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  [...crypto.getRandomValues(new Uint8Array(16))]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 
 /**
  * Host a pairing, so another browser joins this one's library without the TV: mint a session, show its code, run
@@ -392,7 +462,8 @@ const randomSid = (): string =>
  * that ran the same code can derive. The secret half of the code never reaches den-edge.
  */
 export async function host(options: HostOptions): Promise<HostResult> {
-  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = options;
+  const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } =
+    options;
   if (!secureContext()) return { error: 'insecure' };
   const sid = options.sid ?? randomSid();
   const secret = options.secret ?? randomSecret();
@@ -400,9 +471,12 @@ export async function host(options: HostOptions): Promise<HostResult> {
 
   const made = await send('/pair/new', 'POST', { sid });
   if (!made) return { error: 'unreachable' };
-  if (made.status !== 200) return { error: made.status === 429 || made.status === 503 ? 'busy' : 'unreachable' };
-  const nameplate = ((await made.json().catch(() => null)) as { nameplate?: unknown } | null)?.nameplate;
-  if (typeof nameplate !== 'string' || !parseCode(nameplate + secret)) return { error: 'unreachable' };
+  if (made.status !== 200)
+    return { error: made.status === 429 || made.status === 503 ? 'busy' : 'unreachable' };
+  const nameplate = ((await made.json().catch(() => null)) as { nameplate?: unknown } | null)
+    ?.nameplate;
+  if (typeof nameplate !== 'string' || !parseCode(nameplate + secret))
+    return { error: 'unreachable' };
   options.onCode(nameplate + secret);
 
   const fail = async (): Promise<HostResult> => {

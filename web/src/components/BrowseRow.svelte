@@ -7,8 +7,11 @@
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
 
-  let { row, shown, onselect }: { row: RowDef; shown: (title: Title) => boolean; onselect: (title: Title) => void } =
-    $props();
+  let {
+    row,
+    shown,
+    onselect,
+  }: { row: RowDef; shown: (title: Title) => boolean; onselect: (title: Title) => void } = $props();
 
   /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
   const FILL = 8;
@@ -66,7 +69,11 @@
 <div bind:this={wrapper} class:gone={done && visible.length === 0}>
   <PosterRow heading={row.title}>
     {#each visible as title (key(title))}
-      <PosterCard {title} caption={title.year ? String(title.year) : undefined} onselect={() => onselect(title)} />
+      <PosterCard
+        {title}
+        caption={title.year ? String(title.year) : undefined}
+        onselect={() => onselect(title)}
+      />
     {:else}
       {#if !done}
         {#each { length: 6 } as _, i (i)}<span class="skeleton" aria-hidden="true"></span>{/each}

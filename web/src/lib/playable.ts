@@ -35,12 +35,17 @@ export interface Probe {
 
 export function browserProbe(): Probe {
   const element = document.createElement('video');
-  const source = globalThis.MediaSource ?? (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
+  const source =
+    globalThis.MediaSource ??
+    (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
   const capabilities = globalThis.navigator?.mediaCapabilities;
   return {
-    supports: (type) => (source?.isTypeSupported(type) ?? false) || element.canPlayType(type) !== '',
+    supports: (type) =>
+      (source?.isTypeSupported(type) ?? false) || element.canPlayType(type) !== '',
     decodes: capabilities
-      ? async (video) => (await capabilities.decodingInfo({ type: source ? 'media-source' : 'file', video })).supported
+      ? async (video) =>
+          (await capabilities.decodingInfo({ type: source ? 'media-source' : 'file', video }))
+            .supported
       : undefined,
     apple: globalThis.navigator?.vendor?.startsWith('Apple') ?? false,
   };
@@ -59,7 +64,8 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
     h264: highest(H264_LEVELS, (level) => `avc1.6400${level.toString(16)}`),
     hevcMain: highest(HEVC_LEVELS, (level) => `hvc1.1.6.L${level}.B0`),
     hevcMain10,
-    hevcHighTier: highTier > 0 && (await decodes(probe, { contentType: tierCodec, ...uhd })) ? highTier : 0,
+    hevcHighTier:
+      highTier > 0 && (await decodes(probe, { contentType: tierCodec, ...uhd })) ? highTier : 0,
     hdr:
       hevcMain10 > 0 &&
       (await decodes(probe, {

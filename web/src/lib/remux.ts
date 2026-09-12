@@ -13,7 +13,13 @@ export interface Session {
   duration: number;
   release: { label: string; filename: string; size: number };
   /** What plays: the codec, the size it plays at, and whether den-remux converted and tone-mapped it. */
-  video?: { codec: string; transcoded: boolean; width?: number; height?: number; tonemapped?: boolean };
+  video?: {
+    codec: string;
+    transcoded: boolean;
+    width?: number;
+    height?: number;
+    tonemapped?: boolean;
+  };
   /** The audio track playing, by index into `audioTracks`: one per session, re-encoded to AAC. */
   audioTrack: number;
   audioTracks: AudioTrack[];
@@ -54,14 +60,20 @@ export const REMUX_PROBE_TIMEOUT_MS = 3_000;
 // A cross-site remux cannot rely on cookies. Keep its short-lived signed credential in this page's
 // memory, scoped to exactly the service that issued it; never persist the browser's login key.
 const browserTokens = new Map<string, string>();
-const browserBase = (base: string) => new URL(base, globalThis.location?.href ?? 'https://den.invalid/').href.replace(/\/$/, '');
+const browserBase = (base: string) =>
+  new URL(base, globalThis.location?.href ?? 'https://den.invalid/').href.replace(/\/$/, '');
 
 /** Forget page-local credentials (tests). */
-export function forgetBrowserTokens(): void { browserTokens.clear(); }
+export function forgetBrowserTokens(): void {
+  browserTokens.clear();
+}
 
 function browserHeaders(base: string): Record<string, string> {
   const token = browserTokens.get(browserBase(base));
-  return { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) };
+  return {
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
 }
 
 function forgetRefusedToken(base: string, response: Response): void {
@@ -104,7 +116,11 @@ export async function findRemux(
 }
 
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */
-export async function login(key: string, fetchImpl: typeof fetch = fetch, base = '/remux'): Promise<boolean | null> {
+export async function login(
+  key: string,
+  fetchImpl: typeof fetch = fetch,
+  base = '/remux',
+): Promise<boolean | null> {
   try {
     const res = await fetchImpl(`${base}/login`, {
       method: 'POST',
@@ -144,8 +160,12 @@ export async function startSession(
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
     .filter((install) => subtitleVerdicts.get(install) !== false)
-    .sort((a, b) => Number(subtitleVerdicts.get(b) === true) - Number(subtitleVerdicts.get(a) === true));
-  const candidates: (string | undefined)[] = subtitleLanguages.length ? [...offered, undefined] : [undefined];
+    .sort(
+      (a, b) => Number(subtitleVerdicts.get(b) === true) - Number(subtitleVerdicts.get(a) === true),
+    );
+  const candidates: (string | undefined)[] = subtitleLanguages.length
+    ? [...offered, undefined]
+    : [undefined];
   for (const candidate of candidates) {
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
@@ -162,7 +182,9 @@ export async function startSession(
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const session = (await res.json()) as Session;
-      return /^https?:/.test(base) ? { ...session, playlist: new URL(session.playlist, base).href } : session;
+      return /^https?:/.test(base)
+        ? { ...session, playlist: new URL(session.playlist, base).href }
+        : session;
     }
     forgetRefusedToken(base, res);
     const error = await errorCode(res);
@@ -222,7 +244,9 @@ export async function listReleases(
     if (!res.ok) return null;
     const releases = ((await res.json()) as { releases?: unknown }).releases;
     return Array.isArray(releases)
-      ? releases.filter((r): r is Release => typeof r?.label === 'string' && typeof r?.filename === 'string')
+      ? releases.filter(
+          (r): r is Release => typeof r?.label === 'string' && typeof r?.filename === 'string',
+        )
       : null;
   } catch {
     return null;
@@ -231,7 +255,10 @@ export async function listReleases(
 
 /** End the session, so it stops counting against den-remux's cap — sent even as the page goes away. */
 export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
-  void fetchImpl(session.playlist.replace(/\/master\.m3u8$/, ''), { method: 'DELETE', keepalive: true }).catch(
+  void fetchImpl(session.playlist.replace(/\/master\.m3u8$/, ''), {
+    method: 'DELETE',
+    keepalive: true,
+  }).catch(
     () => undefined, // it ends on its own once idle
   );
 }
@@ -240,7 +267,12 @@ export function endSession(session: Session, fetchImpl: typeof fetch = fetch): v
  * Tell den-remux this browser couldn't play the session — its MediaError code (0 for hls.js) and message — for its
  * log: the browser's verdict is otherwise seen by nobody. A beacon, so it goes even as the page closes.
  */
-export function reportFailure(session: Session, code: number, message: string, fetchImpl: typeof fetch = fetch): void {
+export function reportFailure(
+  session: Session,
+  code: number,
+  message: string,
+  fetchImpl: typeof fetch = fetch,
+): void {
   const url = session.playlist.replace(/\/master\.m3u8$/, '/report');
   const body = JSON.stringify({ code, message: message.slice(0, 200) });
   if (globalThis.navigator?.sendBeacon?.(url, body)) return;

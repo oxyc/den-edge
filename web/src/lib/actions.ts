@@ -17,15 +17,26 @@ function moved(progress: Progress, fraction: number, seconds: number, at: Stamp)
 }
 
 /** Where playback of a movie got to: in progress, or seen past the credits' start. */
-export function updateProgress(row: TitleRow, fraction: number, seconds: number, at: Stamp): TitleRow {
+export function updateProgress(
+  row: TitleRow,
+  fraction: number,
+  seconds: number,
+  at: Stamp,
+): TitleRow {
   const resume = moved(row.resume, fraction, seconds, at);
-  if (resume.value >= WATCHED) return { ...row, resume, status: { value: 'watched', at }, watchedAt: row.watchedAt ?? at[0] };
+  if (resume.value >= WATCHED)
+    return { ...row, resume, status: { value: 'watched', at }, watchedAt: row.watchedAt ?? at[0] };
   if (resume.value > 0) return { ...row, resume, status: { value: 'inProgress', at } };
   return { ...row, resume };
 }
 
 /** Where playback of an episode got to. */
-export function updateEpisodeProgress(row: EpisodeRow, fraction: number, seconds: number, at: Stamp): EpisodeRow {
+export function updateEpisodeProgress(
+  row: EpisodeRow,
+  fraction: number,
+  seconds: number,
+  at: Stamp,
+): EpisodeRow {
   return { ...row, progress: moved(row.progress, fraction, seconds, at) };
 }
 
@@ -48,7 +59,10 @@ export function blankTitle(ref: { type: 'movie' | 'tv'; id: number }, now: numbe
 
 /** On the watchlist, and back in the library if it was removed. A title in progress stays in progress. */
 export function addToWatchlist(row: TitleRow, at: Stamp): TitleRow {
-  const status = row.status.value === 'none' || row.status.value === 'watched' ? { value: 'watchlist' as const, at } : row.status;
+  const status =
+    row.status.value === 'none' || row.status.value === 'watched'
+      ? { value: 'watchlist' as const, at }
+      : row.status;
   return { ...row, deleted: { value: false, at }, status };
 }
 
@@ -82,7 +96,11 @@ export function react(row: TitleRow, reaction: Reaction | null, at: Stamp): Titl
 }
 
 /** An episode the library has never held: no progress, at the zero stamp. */
-export function blankEpisode(ref: { type: 'movie' | 'tv'; id: number }, season: number, episode: number): EpisodeRow {
+export function blankEpisode(
+  ref: { type: 'movie' | 'tv'; id: number },
+  season: number,
+  episode: number,
+): EpisodeRow {
   return {
     kind: 'ep',
     schema: 2,

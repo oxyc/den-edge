@@ -18,7 +18,10 @@
   let route = $state(parseRoute(location.hash));
   let query = $state('');
   const searchLibrary = $derived(links.current?.libraryKey);
-  $effect(() => { void searchLibrary; query = ''; });
+  $effect(() => {
+    void searchLibrary;
+    query = '';
+  });
 </script>
 
 <NavigationBar {route} paired={!!links.current} bind:query />
@@ -37,6 +40,7 @@
   main {
     max-width: 1400px;
     margin: 0 auto;
+
     /* Clip, not hidden: a full-bleed child is exactly as wide as the window, and a scrollbar would otherwise
        make that an overflow. Clip leaves the page's own scrolling alone. */
     overflow-x: clip;

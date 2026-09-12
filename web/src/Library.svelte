@@ -55,7 +55,19 @@
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
-  let { link, route, active, session, query = '' }: { link: Link; route: Route; active: boolean; session: LibrarySession; query?: string } = $props();
+  let {
+    link,
+    route,
+    active,
+    session,
+    query = '',
+  }: {
+    link: Link;
+    route: Route;
+    active: boolean;
+    session: LibrarySession;
+    query?: string;
+  } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
@@ -110,14 +122,26 @@
         if (disposed) return;
         routes = foundRoutes;
         stopDiscovery = discoverServices(installed, foundRoutes, {
-          scout: (found) => { scout = found; availability.connect(found, key); },
-          atlas: (found) => { atlas = found?.base ?? null; },
-          reel: (found) => { reel = found?.base ?? null; },
-          remux: (found) => { remux = found; },
+          scout: (found) => {
+            scout = found;
+            availability.connect(found, key);
+          },
+          atlas: (found) => {
+            atlas = found?.base ?? null;
+          },
+          reel: (found) => {
+            reel = found?.base ?? null;
+          },
+          remux: (found) => {
+            remux = found;
+          },
         });
       })();
     });
-    return () => { disposed = true; stopDiscovery?.(); };
+    return () => {
+      disposed = true;
+      stopDiscovery?.();
+    };
   });
 
   /** Naming belongs to the shared session, including lookups still in flight on another page. */
@@ -128,7 +152,10 @@
   const library = $derived.by(() => {
     void version;
     if (!log) return null;
-    return { ...withDisplay(applyLog(emptyLibrary(), log.rows()), session.displays), shapes: session.shapes };
+    return {
+      ...withDisplay(applyLog(emptyLibrary(), log.rows()), session.displays),
+      shapes: session.shapes,
+    };
   });
 
   /** The title whose page is open, if one is. */
@@ -139,6 +166,7 @@
   });
   const pageEpisodes = $derived.by(() => {
     void version;
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- This derived value publishes a completed snapshot; intermediate inserts must not be reactive.
     const rows = new Map<string, EpisodeRow>();
     if (!page || !log) return rows;
     for (const row of log.rows()) {
@@ -157,7 +185,8 @@
   });
 
   function remember(title: Title) {
-    if (!session.displays.some((d) => d.type === title.type && d.id === title.id)) session.displays = [...session.displays, title];
+    if (!session.displays.some((d) => d.type === title.type && d.id === title.id))
+      session.displays = [...session.displays, title];
   }
 
   /** Write one row and re-derive what shows it. */
@@ -166,16 +195,21 @@
     busy = true;
     failure = null;
     try {
-      const saved = journal && row.kind === 'set' ? await log.writeAction(row) : await log.write(row);
+      const saved =
+        journal && row.kind === 'set' ? await log.writeAction(row) : await log.write(row);
       if (log.moved) return links.forgetMoved(link);
       if (!saved) failure = SAVE_FAILED;
-      else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+      else if (log.pendingActions > 0)
+        notice =
+          'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
       session.changed();
       return saved !== null;
     } catch {
       failure = SAVE_FAILED;
       return false;
-    } finally { busy = false; }
+    } finally {
+      busy = false;
+    }
   }
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
@@ -217,15 +251,20 @@
     try {
       await ensureSyncPolicy();
       if (title.type === 'tv') {
-        const shape = session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
-        if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
+        const shape =
+          session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
+        if (!shape) {
+          failure = 'Couldn’t load the episodes. Nothing was marked Seen.';
+          return;
+        }
         const journals: SettingsRow[] = [];
         clock.see(log.newestStamp());
         for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
           if (season <= 0) continue;
           for (let episode = 1; episode <= count; episode++) {
             if (!isAired({ season, episode }, shape.lastAired)) continue;
-            const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+            const before =
+              log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
             const at = clock.issue();
             const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
             if (event) journals.push(event);
@@ -238,11 +277,16 @@
         busy = true;
         failure = null;
         try {
-          if (!await log.writeActions(journals)) failure = SAVE_FAILED;
-          else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+          if (!(await log.writeActions(journals))) failure = SAVE_FAILED;
+          else if (log.pendingActions > 0)
+            notice =
+              'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
           session.changed();
-        } catch { failure = SAVE_FAILED; }
-        finally { busy = false; }
+        } catch {
+          failure = SAVE_FAILED;
+        } finally {
+          busy = false;
+        }
         return;
       }
       await act(title, seen ? markWatched : unwatch);
@@ -257,9 +301,17 @@
     busy = true;
     failure = null;
     notice = null;
-    const sent = await sendToTV(link, { type: 'play', tmdbId: title.id, mediaType: title.type, title: title.title, season, episode });
+    const sent = await sendToTV(link, {
+      type: 'play',
+      tmdbId: title.id,
+      mediaType: title.type,
+      title: title.title,
+      season,
+      episode,
+    });
     busy = false;
-    if (sent) notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
+    if (sent)
+      notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
   }
 
@@ -271,7 +323,9 @@
     scout && tmdbKey && remux !== null
       ? (title: Title, season?: number, episode?: number, filename?: string) => {
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
-            const up = library && continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode;
+            const up =
+              library &&
+              continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode;
             playing = { title, ...(up ?? { season: 1, episode: 1 }) };
           } else {
             playing = { title, season, episode, filename };
@@ -288,21 +342,28 @@
     if (!target || target.season === undefined || target.episode === undefined) return;
     const at = { season: target.season, episode: target.episode };
     void (async () => {
-      const shape = session.shapes.get(titleKey(target.title)) ?? (await fetchDetails(target.title, tmdbKey))?.shape;
+      const shape =
+        session.shapes.get(titleKey(target.title)) ??
+        (await fetchDetails(target.title, tmdbKey))?.shape;
       const next = shape && episodeAfter(at, shape);
-      if (playing === target && next && isAired(next, shape.lastAired)) following = { title: target.title, ...next };
+      if (playing === target && next && isAired(next, shape.lastAired))
+        following = { title: target.title, ...next };
     })();
   });
 
   function progressOf(target: Target) {
     const { title, season, episode } = target;
-    return season !== undefined && episode !== undefined ? log?.episode(title, season, episode)?.progress : log?.title(title)?.resume;
+    return season !== undefined && episode !== undefined
+      ? log?.episode(title, season, episode)?.progress
+      : log?.title(title)?.resume;
   }
 
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
   function resumePoint(target: Target): { fraction: number; seconds?: number } {
     const progress = progressOf(target);
-    return progress && progress.value < WATCHED ? { fraction: progress.value, seconds: progress.seconds } : { fraction: 0 };
+    return progress && progress.value < WATCHED
+      ? { fraction: progress.value, seconds: progress.seconds }
+      : { fraction: 0 };
   }
 
   /** Where playback got to, written as the TV's player writes it. */
@@ -316,7 +377,14 @@
         const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
         await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
       } else {
-        await save(updateProgress(log.title(title) ?? blankTitle(title, Date.now()), fraction, seconds, clock.issue()));
+        await save(
+          updateProgress(
+            log.title(title) ?? blankTitle(title, Date.now()),
+            fraction,
+            seconds,
+            clock.issue(),
+          ),
+        );
       }
     } catch {
       failure = SAVE_FAILED;
@@ -333,18 +401,33 @@
     void version;
     return readPrefs(log?.settings('prefs'));
   });
-  const detailPrefs = $derived.by(() => { void session.settingsRevision; return readDetailPrefs(log?.settings('prefs')); });
-  const warningKey = $derived.by(() => { void session.settingsRevision; return readApiKey(log?.settings('keys'), 'doesthedogdie') ?? ''; });
-  const omdbKey = $derived.by(() => { void session.settingsRevision; return readApiKey(log?.settings('keys'), 'omdb') ?? ''; });
+  const detailPrefs = $derived.by(() => {
+    void session.settingsRevision;
+    return readDetailPrefs(log?.settings('prefs'));
+  });
+  const warningKey = $derived.by(() => {
+    void session.settingsRevision;
+    return readApiKey(log?.settings('keys'), 'doesthedogdie') ?? '';
+  });
+  const omdbKey = $derived.by(() => {
+    void session.settingsRevision;
+    return readApiKey(log?.settings('keys'), 'omdb') ?? '';
+  });
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
-    new Set(library?.records.filter((r) => !r.deleted && r.status === 'watched').map((r) => titleKey(r.title)) ?? []),
+    new Set(
+      library?.records
+        .filter((r) => !r.deleted && r.status === 'watched')
+        .map((r) => titleKey(r.title)) ?? [],
+    ),
   );
-  const browseShown = (title: Title) => shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
+  const browseShown = (title: Title) =>
+    shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /** The billboard's own rule: everything the rows hide, except the missing poster it doesn't draw. */
   const featuredShown = (title: Title) =>
-    !isHidden(title, prefs, { requirePoster: false }) && !(prefs.hideWatched && watched.has(titleKey(title)));
+    !isHidden(title, prefs, { requirePoster: false }) &&
+    !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
    * What this library says it likes, for the billboard's taste term. Watched and part-watched titles are a
    * verdict and count full; a watchlisted one is an intention and counts for less; a reaction is the one thing
@@ -362,7 +445,8 @@
     const weightOf = (status: string, reaction: string | null | undefined) => {
       // Turning something down is the whole verdict; that they sat through it doesn't soften it.
       if (reaction === 'dislike') return -1.5;
-      const seen = status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
+      const seen =
+        status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
       return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
     };
     return tasteOf(
@@ -378,8 +462,14 @@
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
   const seeds = $derived.by(() => {
     void version;
-    const titleRows = (log?.rows() ?? []).filter((r): r is TitleRow => r.kind === 'rec' && !r.deleted.value);
-    const named = new Map((library?.records ?? []).filter((r) => r.title.title).map((r) => [titleKey(r.title), r.title]));
+    const titleRows = (log?.rows() ?? []).filter(
+      (r): r is TitleRow => r.kind === 'rec' && !r.deleted.value,
+    );
+    const named = new Map(
+      (library?.records ?? [])
+        .filter((r) => r.title.title)
+        .map((r) => [titleKey(r.title), r.title]),
+    );
     const recency = (r: TitleRow) => Math.max(r.watchedAt ?? 0, r.reaction.at[0], r.addedAt);
     const latest = (keep: (r: TitleRow) => boolean) =>
       titleRows
@@ -388,7 +478,12 @@
         .flatMap((r) => named.get(titleKey(r.title)) ?? [])
         .slice(0, 2);
     return {
-      watched: latest((r) => r.status.value === 'watched' || r.reaction.value === 'like' || r.reaction.value === 'love'),
+      watched: latest(
+        (r) =>
+          r.status.value === 'watched' ||
+          r.reaction.value === 'like' ||
+          r.reaction.value === 'love',
+      ),
       watchlisted: latest((r) => r.status.value === 'watchlist'),
       owned: new Set(titleRows.map((r) => titleKey(r.title))),
     };
@@ -397,7 +492,10 @@
     if (!pages) return [];
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
-      return browseRows(route.page === 'movies' ? 'movie' : 'tv', pages, { minYear, hiddenGenres: prefs.excludedGenres });
+      return browseRows(route.page === 'movies' ? 'movie' : 'tv', pages, {
+        minYear,
+        hiddenGenres: prefs.excludedGenres,
+      });
     }
     return [...personalRows(pages, seeds), ...homeRows(pages, { minYear })];
   });
@@ -431,7 +529,11 @@
     const run = ++billboardRun;
     // A late discovery service can improve the pool. Keep the current slides while it loads.
     if (!table.length) return;
-    const row = (id: string) => table.find((r) => r.id === id)?.load(1).catch(() => []) ?? Promise.resolve([]);
+    const row = (id: string) =>
+      table
+        .find((r) => r.id === id)
+        ?.load(1)
+        .catch(() => []) ?? Promise.resolve([]);
     // The billboard gets a pool of its own rather than whatever row happens to lead the page. A "Because you
     // watched" row is the nearest neighbours of something already seen, which at the top of the page reads as
     // a shelf of old, half-familiar titles — so what goes in is what is being watched now (atlas's "Trending
@@ -441,7 +543,9 @@
     // overlap heavily and the picker merges what they share, which is how a trending title ends up scored on
     // everything rather than on its place in one list.
     const feed = pages;
-    const trendingTv = feed ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => []) : Promise.resolve([]);
+    const trendingTv = feed
+      ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => [])
+      : Promise.resolve([]);
     void Promise.all([
       here ? trendingEverywhere(here, fetch, type ?? undefined) : Promise.resolve([] as Title[]),
       row('trending'),
@@ -453,9 +557,12 @@
       here ? arrivals(here, prefs.services) : Promise.resolve([] as Title[][]),
     ])
       .then(async ([everywhere, hotMovies, hotSeries, fresh, soon, popular, landed]) => {
-        const ranked = (list: Title[]) => list.map((title, rank) => ({ title, rank, of: list.length }));
+        const ranked = (list: Title[]) =>
+          list.map((title, rank) => ({ title, rank, of: list.length }));
         const pool: Candidate[] = [
-          ...landed.flatMap((list) => list.map((title, rank) => ({ title, arrival: { rank, of: list.length } }))),
+          ...landed.flatMap((list) =>
+            list.map((title, rank) => ({ title, arrival: { rank, of: list.length } })),
+          ),
           ...ranked(everywhere),
           ...ranked(hotMovies),
           ...ranked(hotSeries),
@@ -502,10 +609,13 @@
       .slice(0, most);
     if (!key || bare.length === 0) return pool;
     const queue = [...bare];
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local lookup accumulator; publish the completed pool after all workers finish.
     const found = new Map<string, Title>();
     const lookup = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) {
-        const title = await fetchTitle({ type: next.title.type, id: next.title.id }, key).catch(() => null);
+        const title = await fetchTitle({ type: next.title.type, id: next.title.id }, key).catch(
+          () => null,
+        );
         if (title) found.set(titleKey(title), title);
       }
     };
@@ -526,11 +636,14 @@
   <Loading label="Loading your library" page />
 {:else if log === null || !library}
   <p class="note">
-    Couldn’t open your library. Check that this device is on your network. If your TV reset its library key, unlink in
+    Couldn’t open your library. Check that this device is on your network. If your TV reset its
+    library key, unlink in
     <a href="#settings">Settings</a> and pair again.
   </p>
 {:else if route.page !== 'library' && !tmdbKey}
-  <p class="note">This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
+  <p class="note">
+    This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.
+  </p>
 {:else if page}
   <Detail
     {reel}

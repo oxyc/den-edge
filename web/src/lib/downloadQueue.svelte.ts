@@ -4,6 +4,7 @@ import { prepareSource, type Preparation, type TitleSource } from './titleSource
 /** Page-independent jobs: navigation must never turn a status poll into another download request. */
 export class DownloadQueue {
   readonly states = new SvelteMap<string, Preparation>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight deduplication is private bookkeeping; states alone drives the UI.
   private pending = new Map<string, Promise<Preparation>>();
   constructor(private readonly prepare = prepareSource) {}
 
@@ -13,13 +14,19 @@ export class DownloadQueue {
     const previous = this.states.get(key);
     if (previous && previous.state !== 'not-queued' && previous.state !== 'failed') return previous;
     if (source.cached === true) {
-      const ready: Preparation = { state: 'ready' }; this.states.set(key, ready); return ready;
+      const ready: Preparation = { state: 'ready' };
+      this.states.set(key, ready);
+      return ready;
     }
     // Even an uncertain response may mean the service accepted the request. Only probe after it.
     const request = this.prepare(source.url, true).then((state) => {
-      this.states.set(key, state); this.pending.delete(key); this.trim(); return state;
+      this.states.set(key, state);
+      this.pending.delete(key);
+      this.trim();
+      return state;
     });
-    this.pending.set(key, request); this.states.set(key, { state: 'unknown', message: 'Starting download…' });
+    this.pending.set(key, request);
+    this.states.set(key, { state: 'unknown', message: 'Starting download…' });
     return request;
   }
 
@@ -27,15 +34,19 @@ export class DownloadQueue {
     const pending = this.pending.get(key);
     if (pending) return pending;
     const request = this.prepare(source.url, false).then((state) => {
-      this.states.set(key, state); this.pending.delete(key); return state;
+      this.states.set(key, state);
+      this.pending.delete(key);
+      return state;
     });
-    this.pending.set(key, request); return request;
+    this.pending.set(key, request);
+    return request;
   }
 
   private trim() {
     if (this.states.size <= 100) return;
     for (const [key, state] of this.states) {
-      if (!this.pending.has(key) && ['ready', 'failed', 'not-queued'].includes(state.state)) this.states.delete(key);
+      if (!this.pending.has(key) && ['ready', 'failed', 'not-queued'].includes(state.state))
+        this.states.delete(key);
       if (this.states.size <= 100) break;
     }
   }

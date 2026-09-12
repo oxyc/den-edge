@@ -28,8 +28,11 @@ export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
   private readonly verdicts = new SvelteMap<number, Verdict>();
   /** A movie's IMDb id, or null when TMDB has none. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Lookup cache; only verdicts are UI state.
   private readonly imdbIds = new Map<number, string | null>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request scheduling must not subscribe the components that enqueue titles.
   private readonly wanted = new Set<number>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Retry bookkeeping; only verdict changes are observable.
   private readonly tries = new Map<number, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private scout: { base: string; tmdbKey: string; fetch: typeof fetch } | null = null;
@@ -77,6 +80,7 @@ export class Availability {
     const ids = [...this.wanted].slice(0, MAX_IDS);
     for (const id of ids) this.wanted.delete(id);
 
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local request accumulator, published through verdicts after the response.
     const byImdb = new Map<string, number>();
     const again: number[] = [];
     await each(ids, LOOKUPS, async (id) => {
@@ -94,7 +98,9 @@ export class Availability {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ids: [...byImdb.keys()] }),
         });
-        if (res.ok) answer = ((await res.json()) as { availability?: Record<string, Verdict> }).availability ?? {};
+        if (res.ok)
+          answer =
+            ((await res.json()) as { availability?: Record<string, Verdict> }).availability ?? {};
       } catch {
         // Out of reach: every movie stays unknown, and is asked again.
       }

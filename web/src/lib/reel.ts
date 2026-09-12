@@ -11,7 +11,10 @@ import type { MediaType } from './library';
 import type { Entry, Routes } from './routes';
 
 /** reel's first address this page can load a video from: never plaintext on an https page, never behind Access. */
-function reachable(entries: Entry[], secure = globalThis.location?.protocol !== 'http:'): string | null {
+function reachable(
+  entries: Entry[],
+  secure = globalThis.location?.protocol !== 'http:',
+): string | null {
   for (const entry of entries) {
     if (entry.access || (secure && entry.url.startsWith('http:'))) continue;
     return entry.url.replace(/\/$/, '');
@@ -21,15 +24,27 @@ function reachable(entries: Entry[], secure = globalThis.location?.protocol !== 
 
 /** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
 export async function trailerURLs(
-  base: string, type: MediaType, imdbId: string, routes: Routes,
-  { fetchImpl = fetch, secure = globalThis.location?.protocol !== 'http:', signal }: {
-    fetchImpl?: typeof fetch; secure?: boolean; signal?: AbortSignal;
+  base: string,
+  type: MediaType,
+  imdbId: string,
+  routes: Routes,
+  {
+    fetchImpl = fetch,
+    secure = globalThis.location?.protocol !== 'http:',
+    signal,
+  }: {
+    fetchImpl?: typeof fetch;
+    secure?: boolean;
+    signal?: AbortSignal;
   } = {},
 ): Promise<string[]> {
   const origin = reachable(routes.reel ?? [], secure);
   if (!origin) return [];
   try {
-    const res = await fetchImpl(`${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`, { signal, cache: 'no-cache' });
+    const res = await fetchImpl(
+      `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`,
+      { signal, cache: 'no-cache' },
+    );
     if (!res.ok) return [];
     const body = await res.json();
     if (!Array.isArray(body?.meta?.links)) return [];
@@ -44,15 +59,22 @@ export async function trailerURLs(
         if (!play) continue;
         const url = `${origin}${play}${link.search}`;
         if (!urls.includes(url)) urls.push(url);
-      } catch { /* One malformed link does not discard the remaining candidates. */ }
+      } catch {
+        /* One malformed link does not discard the remaining candidates. */
+      }
     }
     return urls;
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 /** Browse billboards use the first candidate; detail playback can advance through the full list. */
 export async function trailerURL(
-  base: string, type: MediaType, imdbId: string, routes: Routes,
+  base: string,
+  type: MediaType,
+  imdbId: string,
+  routes: Routes,
   options: { fetchImpl?: typeof fetch; secure?: boolean; signal?: AbortSignal } = {},
 ): Promise<string | null> {
   return (await trailerURLs(base, type, imdbId, routes, options))[0] ?? null;

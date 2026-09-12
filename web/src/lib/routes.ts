@@ -23,7 +23,9 @@ export async function fetchRoutes(fetchImpl: typeof fetch = fetch): Promise<Rout
         name,
         (Array.isArray(list) ? list : []).flatMap((raw): Entry[] => {
           const entry = raw as { url?: unknown; access?: unknown } | null;
-          return typeof entry?.url === 'string' ? [{ url: entry.url, access: entry.access === true }] : [];
+          return typeof entry?.url === 'string'
+            ? [{ url: entry.url, access: entry.access === true }]
+            : [];
         }),
       ]),
     );

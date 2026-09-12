@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
-import { foldedTitle, hitKey, normalizeQuery, pluralVariant, searchStream, type Hit, type SearchSources } from './search';
+import {
+  foldedTitle,
+  hitKey,
+  normalizeQuery,
+  pluralVariant,
+  searchStream,
+  type Hit,
+  type SearchSources,
+} from './search';
 import { searchSources } from './searchSources';
 
 // The TV's DiscoverySearchFusionTests, over the same stub answers: TMDB's multi search knows The Matrix and its
 // sequel, and Brad Pitt.
-const movie = (id: number, title: string, rating?: number): Title => ({ type: 'movie', id, title, rating });
+const movie = (id: number, title: string, rating?: number): Title => ({
+  type: 'movie',
+  id,
+  title,
+  rating,
+});
 const matrix = movie(603, 'The Matrix');
 const reloaded = movie(604, 'The Matrix Reloaded');
 const pitt: Hit = { kind: 'person', person: { id: 287, name: 'Brad Pitt' } };
@@ -68,7 +81,10 @@ describe('the title index', () => {
     const fetchImpl = (async (input: string) => {
       const url = String(input);
       const metas = url.startsWith('/atlas/catalog/movie/den-titles/search=blade%20runer.json')
-        ? [{ moviedb_id: 78, type: 'movie' }, { moviedb_id: 335984, type: 'movie' }]
+        ? [
+            { moviedb_id: 78, type: 'movie' },
+            { moviedb_id: 335984, type: 'movie' },
+          ]
         : url.startsWith('/atlas/catalog/series/den-titles/')
           ? [{ moviedb_id: 84553, type: 'series' }]
           : [];
@@ -84,9 +100,15 @@ describe('the title index', () => {
 
 describe('searchStream, as the TV fuses it', () => {
   it('paints TMDB first, then appends the semantic tail deduped', async () => {
-    const s = sources({ semantic: async () => [{ type: 'movie', id: 157336 }, { type: 'movie', id: 604 }] });
+    const s = sources({
+      semantic: async () => [
+        { type: 'movie', id: 157336 },
+        { type: 'movie', id: 604 },
+      ],
+    });
     const batches: string[][] = [];
-    for await (const batch of searchStream('mind-bending space travel', s)) batches.push(batch.map(hitKey));
+    for await (const batch of searchStream('mind-bending space travel', s))
+      batches.push(batch.map(hitKey));
     expect(batches[0]).toEqual(['movie-603', 'movie-604']);
     expect(batches[1]).toEqual(['movie-603', 'movie-604', 'movie-157336']);
   });
@@ -130,15 +152,25 @@ describe('searchStream, as the TV fuses it', () => {
     };
     const s = sources({
       titles: async () => [78, 9999, 335984].map((id) => ({ type: 'movie' as const, id })),
-      title: async (ref) => indexed[`${ref.type}-${ref.id}`] ?? catalog[`${ref.type}-${ref.id}`] ?? null,
+      title: async (ref) =>
+        indexed[`${ref.type}-${ref.id}`] ?? catalog[`${ref.type}-${ref.id}`] ?? null,
     });
     const batches: string[][] = [];
     for await (const batch of searchStream('blade runer', s)) batches.push(batch.map(hitKey));
-    expect(batches[0]).toEqual(['movie-78', 'movie-335984', 'movie-9999', 'movie-603', 'movie-604']);
+    expect(batches[0]).toEqual([
+      'movie-78',
+      'movie-335984',
+      'movie-9999',
+      'movie-603',
+      'movie-604',
+    ]);
   });
 
   it('answers from the title index when TMDB is down', async () => {
-    const s = sources({ multi: () => Promise.reject(new Error('TMDB down')), titles: async () => [{ type: 'tv', id: 1 }] });
+    const s = sources({
+      multi: () => Promise.reject(new Error('TMDB down')),
+      titles: async () => [{ type: 'tv', id: 1 }],
+    });
     expect(await final('casa de papel', s)).toEqual(['tv-1']);
   });
 
@@ -146,32 +178,70 @@ describe('searchStream, as the TV fuses it', () => {
     const spanish = {
       facets: async () => ({
         facet: { mediaType: 'tv' as const, country: 'ES', decade: null, leftover: '' },
-        titles: [{ type: 'tv' as const, id: 1 }, { type: 'tv' as const, id: 2 }],
+        titles: [
+          { type: 'tv' as const, id: 1 },
+          { type: 'tv' as const, id: 2 },
+        ],
       }),
     };
     expect(await final('spanish series', sources(spanish))).toEqual(['tv-1', 'tv-2']);
 
     const withPerson = sources({
-      facets: async () => ({ facet: { mediaType: 'movie', country: 'US', decade: null, leftover: 'brad pitt' }, titles: [] }),
+      facets: async () => ({
+        facet: { mediaType: 'movie', country: 'US', decade: null, leftover: 'brad pitt' },
+        titles: [],
+      }),
     });
-    expect(await final('american movies brad pitt', withPerson)).toEqual(['movie-550', 'movie-807']);
+    expect(await final('american movies brad pitt', withPerson)).toEqual([
+      'movie-550',
+      'movie-807',
+    ]);
   });
 
   it('treats a bare media type as a title search, not a facet', async () => {
-    const s = sources({ facets: async () => ({ facet: { mediaType: 'movie', country: null, decade: null, leftover: 'matrix' }, titles: [] }) });
+    const s = sources({
+      facets: async () => ({
+        facet: { mediaType: 'movie', country: null, decade: null, leftover: 'matrix' },
+        titles: [],
+      }),
+    });
     expect(await final('matrix movies', s)).toEqual(['movie-603', 'movie-604']);
   });
 });
 
 describe('searchSources', () => {
-  const answer = (body: unknown): typeof fetch => async () => new Response(JSON.stringify(body), { status: 200 });
+  const answer =
+    (body: unknown): typeof fetch =>
+    async () =>
+      new Response(JSON.stringify(body), { status: 200 });
 
   it("ranks a person's films by notability and leaves out cameos, as the TV's notableFilms does", async () => {
     const credits = {
       cast: [
-        { media_type: 'movie', id: 550, title: 'Fight Club', popularity: 80, vote_count: 30000, character: 'The Narrator' },
-        { media_type: 'movie', id: 807, title: 'Se7en', popularity: 60, vote_count: 20000, character: 'Mills' },
-        { media_type: 'tv', id: 1668, name: 'Friends', popularity: 300, character: 'Will Colbert', episode_count: 1 },
+        {
+          media_type: 'movie',
+          id: 550,
+          title: 'Fight Club',
+          popularity: 80,
+          vote_count: 30000,
+          character: 'The Narrator',
+        },
+        {
+          media_type: 'movie',
+          id: 807,
+          title: 'Se7en',
+          popularity: 60,
+          vote_count: 20000,
+          character: 'Mills',
+        },
+        {
+          media_type: 'tv',
+          id: 1668,
+          name: 'Friends',
+          popularity: 300,
+          character: 'Will Colbert',
+          episode_count: 1,
+        },
         { media_type: 'tv', id: 2224, name: 'The Daily Show', popularity: 250, character: 'Self' },
       ],
       crew: [],
@@ -184,11 +254,17 @@ describe('searchSources', () => {
     const s = searchSources(
       'k',
       answer({
-        titles: [{ type: 'series', id: 1 }, { type: 'movie', id: 2 }],
+        titles: [
+          { type: 'series', id: 1 },
+          { type: 'movie', id: 2 },
+        ],
         facet: { mediaType: 'series', country: 'ES', decade: null, leftover: 'heist' },
       }),
     );
-    expect(await s.semantic('heist')).toEqual([{ type: 'tv', id: 1 }, { type: 'movie', id: 2 }]);
+    expect(await s.semantic('heist')).toEqual([
+      { type: 'tv', id: 1 },
+      { type: 'movie', id: 2 },
+    ]);
     expect((await s.facets('spanish heist series')).facet).toEqual({
       mediaType: 'tv',
       country: 'ES',

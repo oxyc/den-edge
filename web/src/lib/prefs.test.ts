@@ -16,7 +16,10 @@ const prefsRow: SettingsRow = {
     'den.hideWatched': { value: { bool: true }, at },
     'den.minReleaseYear': { value: { int: 1990 }, at },
     // The same provider in two countries is two picks; the rest is what a malformed one looks like.
-    'den.myServicePicks': { value: { strings: ['8@FI', '8@US', '1899@fi', 'nonsense', '0@FI', '8@FIN'] }, at },
+    'den.myServicePicks': {
+      value: { strings: ['8@FI', '8@US', '1899@fi', 'nonsense', '0@FI', '8@FIN'] },
+      at,
+    },
   },
 };
 const film = (overrides: Partial<Title>): Title => ({
@@ -70,13 +73,21 @@ describe('prefs', () => {
     expect(isHidden(film({ genreIds: [27, 53] }), prefs)).toBe(true);
     expect(isHidden(film({ originalLanguage: 'hi' }), prefs)).toBe(true);
     expect(isHidden(film({ genreIds: [16], originalLanguage: 'ja' }), prefs)).toBe(true);
-    expect(isHidden(film({ genreIds: [16], originalLanguage: 'en' }), prefs), 'Western animation stays').toBe(false);
+    expect(
+      isHidden(film({ genreIds: [16], originalLanguage: 'en' }), prefs),
+      'Western animation stays',
+    ).toBe(false);
     expect(isHidden(film({ year: 1985 }), prefs)).toBe(true);
     expect(isHidden(film({ year: 1985 }), prefs, { ignoringYearFloor: true })).toBe(false);
   });
 
   it('reads an API key the TV shares', () => {
-    const keys: SettingsRow = { kind: 'set', schema: 2, name: 'keys', values: { tmdb: { value: { string: 'K1' }, at } } };
+    const keys: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'keys',
+      values: { tmdb: { value: { string: 'K1' }, at } },
+    };
     expect(readApiKey(keys, 'tmdb')).toBe('K1');
     expect(readApiKey(keys, 'omdb')).toBeUndefined();
   });
@@ -92,7 +103,10 @@ describe('prefs', () => {
         'http://192.168.1.5:8080/manifest.json': { value: { bool: true }, at },
       },
     };
-    expect(readPlugins(plugins)).toEqual(['http://192.168.1.5:8080/manifest.json', 'https://b.example/manifest.json']);
+    expect(readPlugins(plugins)).toEqual([
+      'http://192.168.1.5:8080/manifest.json',
+      'https://b.example/manifest.json',
+    ]);
     expect(readPlugins(undefined)).toEqual([]);
   });
 
@@ -102,15 +116,24 @@ describe('prefs', () => {
     expect(acceptsAddonURL('http://den.local/manifest.json')).toBe(true);
     expect(acceptsAddonURL('http://172.20.0.1/manifest.json')).toBe(true);
     expect(acceptsAddonURL('http://addon.example/manifest.json')).toBe(false);
-    expect(acceptsAddonURL('http://10.0.0.1.attacker.example/manifest.json'), 'a public name ending like an address').toBe(false);
+    expect(
+      acceptsAddonURL('http://10.0.0.1.attacker.example/manifest.json'),
+      'a public name ending like an address',
+    ).toBe(false);
     expect(acceptsAddonURL('http://172.32.0.1/manifest.json')).toBe(false);
     expect(acceptsAddonURL('ftp://addon.example/manifest.json')).toBe(false);
     expect(acceptsAddonURL('not a url')).toBe(false);
   });
 
   it('takes genres, language and the adult flag from any TMDB shape', () => {
-    const fromSearch = toTitle({ type: 'movie', id: 1 }, { title: 'A', genre_ids: [16, 35], original_language: 'ja' });
-    const fromDetail = toTitle({ type: 'tv', id: 2 }, { name: 'B', genres: [{ id: 18, name: 'Drama' }], adult: true });
+    const fromSearch = toTitle(
+      { type: 'movie', id: 1 },
+      { title: 'A', genre_ids: [16, 35], original_language: 'ja' },
+    );
+    const fromDetail = toTitle(
+      { type: 'tv', id: 2 },
+      { name: 'B', genres: [{ id: 18, name: 'Drama' }], adult: true },
+    );
     expect([fromSearch?.genreIds, fromSearch?.originalLanguage]).toEqual([[16, 35], 'ja']);
     expect([fromDetail?.genreIds, fromDetail?.adult]).toEqual([[18], true]);
   });

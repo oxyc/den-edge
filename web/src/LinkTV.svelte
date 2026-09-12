@@ -40,8 +40,10 @@
     throttled: 'Too many tries. Wait a minute and try again.',
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
     mistyped: 'That isn’t a whole code. Check it against the TV.',
-    failed: 'The TV didn’t link this device: the code didn’t match, or it wasn’t allowed. Get a new code on the TV.',
-    insecure: 'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
+    failed:
+      'The TV didn’t link this device: the code didn’t match, or it wasn’t allowed. Get a new code on the TV.',
+    insecure:
+      'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
 
   /** The twelve characters the TV shows. */
@@ -58,7 +60,11 @@
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
     const { host, libraryKey, linkKey } = result.handover;
-    links.add(result.inboxKey, { name: host, libraryKey: base64(libraryKey), linkKey: base64(linkKey) });
+    links.add(result.inboxKey, {
+      name: host,
+      libraryKey: base64(libraryKey),
+      linkKey: base64(linkKey),
+    });
   }
 
   // A scanned code starts at once: the next step is on the TV.
@@ -68,9 +74,13 @@
 <section>
   <h1>Link your Apple TV</h1>
   {#if links.moved}
-    <p class="sub" role="status">{links.moved} reset its library key, so this device needs to link again.</p>
+    <p class="sub" role="status">
+      {links.moved} reset its library key, so this device needs to link again.
+    </p>
   {/if}
-  <p class="sub">On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.</p>
+  <p class="sub">
+    On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
+  </p>
   <form
     onsubmit={(event) => {
       event.preventDefault();
@@ -78,7 +88,9 @@
     }}
   >
     <div class="code">
-      <span class="mask" aria-hidden="true"><span class="typed">{code}</span>{MASK.slice(code.length)}</span>
+      <span class="mask" aria-hidden="true"
+        ><span class="typed">{code}</span>{MASK.slice(code.length)}</span
+      >
       <input
         value={code}
         oninput={typed}
@@ -101,7 +113,9 @@
         disabled={busy}
       />
     </label>
-    <button class="primary" disabled={busy || !whole}>{busy ? 'Allow this device on your TV…' : 'Link'}</button>
+    <button class="primary" disabled={busy || !whole}
+      >{busy ? 'Allow this device on your TV…' : 'Link'}</button
+    >
   </form>
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>
@@ -148,7 +162,12 @@
   .mask,
   .code input {
     padding: 16px 20px;
-    font: 700 24px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font:
+      700 24px/1.2 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Consolas,
+      monospace;
     letter-spacing: 0.18em;
   }
 

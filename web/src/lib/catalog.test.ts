@@ -48,15 +48,30 @@ describe('discover queries, as DenKit builds them', () => {
 
 describe('the endless tail', () => {
   it('interleaves one of each kind in turn', () => {
-    expect(interleave<number | string | boolean>([[1, 2, 3], ['a'], [true, false]])).toEqual([1, 'a', true, 2, false, 3]);
+    expect(interleave<number | string | boolean>([[1, 2, 3], ['a'], [true, false]])).toEqual([
+      1,
+      'a',
+      true,
+      2,
+      false,
+      3,
+    ]);
   });
 
   it('leads with a genre, then a recipe, a decade and a country, and ends Critically Acclaimed', () => {
     const rows = categories('movie', 2026);
-    expect(rows.slice(0, 4).map((c) => c.id)).toEqual(['genre-28-movie', 'recipe-romantic-comedy-movie', 'decade-2020-movie', 'country-KR-movie']);
+    expect(rows.slice(0, 4).map((c) => c.id)).toEqual([
+      'genre-28-movie',
+      'recipe-romantic-comedy-movie',
+      'decade-2020-movie',
+      'country-KR-movie',
+    ]);
     expect(rows.at(-1)).toMatchObject({ id: 'acclaimed-movie', title: 'Critically Acclaimed' });
     expect(rows.find((c) => c.id === 'genre-28-movie')?.title).toBe('Action Movies');
-    expect(rows.some((c) => c.id === 'recipe-k-drama-movie'), 'K-Drama is a series recipe').toBe(false);
+    expect(
+      rows.some((c) => c.id === 'recipe-k-drama-movie'),
+      'K-Drama is a series recipe',
+    ).toBe(false);
     expect(categories('tv', 2026).some((c) => c.id === 'recipe-k-drama-tv')).toBe(true);
   });
 
@@ -119,7 +134,11 @@ describe('the screens', () => {
     };
     const arrival = { type: 'movie' as const, id: 329865, title: 'Arrival' };
     const dune = { type: 'movie' as const, id: 693134, title: 'Dune: Part Two' };
-    const rows = personalRows(recs, { watched: [arrival], watchlisted: [dune], owned: new Set(['movie:1']) });
+    const rows = personalRows(recs, {
+      watched: [arrival],
+      watchlisted: [dune],
+      owned: new Set(['movie:1']),
+    });
     expect(rows.map((r) => [r.id, r.title])).toEqual([
       ['byw-movie-329865', 'Because you watched Arrival'],
       ['wl-movie-693134', 'Because you added Dune: Part Two to your Watchlist'],
@@ -132,10 +151,16 @@ describe('the screens', () => {
     const asked: string[] = [];
     const fetchImpl = (async (url: string) => {
       asked.push(url);
-      return new Response(JSON.stringify({ results: [{ id: 550, title: 'Fight Club', poster_path: '/f.jpg' }, { id: 'x' }] }));
+      return new Response(
+        JSON.stringify({
+          results: [{ id: 550, title: 'Fight Club', poster_path: '/f.jpg' }, { id: 'x' }],
+        }),
+      );
     }) as typeof fetch;
     const [trending] = homeRows(tmdbPages('k', fetchImpl));
-    expect(await trending!.load(2)).toMatchObject([{ type: 'movie', id: 550, title: 'Fight Club' }]);
+    expect(await trending!.load(2)).toMatchObject([
+      { type: 'movie', id: 550, title: 'Fight Club' },
+    ]);
     const url = new URL(asked[0]!);
     expect([url.pathname, url.searchParams.get('page')]).toEqual(['/3/trending/movie/week', '2']);
     expect(await trending!.load(501)).toEqual([]);

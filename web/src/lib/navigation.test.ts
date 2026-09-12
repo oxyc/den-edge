@@ -32,10 +32,25 @@ describe('retained routes', () => {
 describe('link interception', () => {
   const base = 'https://den.test/?preview=1#library';
   it('accepts only app routes on the same document', () => {
-    for (const hash of ['#library', '#movies', '#series', '#settings', '#search', '#title/movie/42', '#person/287']) {
+    for (const hash of [
+      '#library',
+      '#movies',
+      '#series',
+      '#settings',
+      '#search',
+      '#title/movie/42',
+      '#person/287',
+    ]) {
       expect(appHash(hash, base)).toBe(hash);
     }
-    for (const href of ['https://other.test/#library', '/api#library', '/?preview=2#library', '#pair=secret', '#section', '#title/tv/0']) {
+    for (const href of [
+      'https://other.test/#library',
+      '/api#library',
+      '/?preview=2#library',
+      '#pair=secret',
+      '#section',
+      '#title/tv/0',
+    ]) {
       expect(appHash(href, base)).toBeNull();
     }
   });

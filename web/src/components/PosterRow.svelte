@@ -17,6 +17,7 @@
   .row {
     /* ~2.3 posters on a phone, so the cut-off one says "scroll"; 6–8 on a desktop. */
     --card-w: clamp(140px, 38vw, 190px);
+
     margin-bottom: 32px;
   }
 

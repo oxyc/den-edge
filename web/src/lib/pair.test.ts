@@ -5,13 +5,21 @@ import * as pair from './pair';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 // den-spec, checked out at the repository root; the TV runs the same file.
-const vectors = JSON.parse(readFileSync(new URL('../../../spec/vectors/pairing-v1.json', import.meta.url), 'utf8')) as {
-  cpace: Record<'prs' | 'ci' | 'sid' | 'g' | 'ya' | 'ADa' | 'Ya' | 'yb' | 'ADb' | 'Yb' | 'K' | 'ISK', string> & {
+const vectors = JSON.parse(
+  readFileSync(new URL('../../../spec/vectors/pairing-v1.json', import.meta.url), 'utf8'),
+) as {
+  cpace: Record<
+    'prs' | 'ci' | 'sid' | 'g' | 'ya' | 'ADa' | 'Ya' | 'yb' | 'ADb' | 'Yb' | 'K' | 'ISK',
+    string
+  > & {
     scalarMultVfy: { s: string; X: string; result: string };
     invalidPoints: string[];
   };
   codes: { input: string; parsed: { nameplate: string; secret: string } | null }[];
-  pairing: Record<'secret' | 'sid' | 'joinerLabel' | 'hostLabel' | 'ya' | 'yb' | 'a' | 'b' | 'c', string> & {
+  pairing: Record<
+    'secret' | 'sid' | 'joinerLabel' | 'hostLabel' | 'ya' | 'yb' | 'a' | 'b' | 'c',
+    string
+  > & {
     wrongSecret: { b: string };
     handover: { key: string; nonce: string; d: string };
     link: { linkKey: string; inbox: string; enc: string };
@@ -33,12 +41,23 @@ describe('pairing v1 matches den-spec', () => {
     const Ya = pair.scalarMult(fromHex(c.ya), g);
     const Yb = pair.scalarMult(fromHex(c.yb), g);
     expect([hex(Ya), hex(Yb)]).toEqual([c.Ya, c.Yb]);
-    expect([hex(pair.scalarMultVfy(fromHex(c.ya), Yb)), hex(pair.scalarMultVfy(fromHex(c.yb), Ya))]).toEqual([c.K, c.K]);
-    const isk = await pair.intermediateKey(fromHex(c.sid), fromHex(c.K), Ya, fromHex(c.ADa), Yb, fromHex(c.ADb));
+    expect([
+      hex(pair.scalarMultVfy(fromHex(c.ya), Yb)),
+      hex(pair.scalarMultVfy(fromHex(c.yb), Ya)),
+    ]).toEqual([c.K, c.K]);
+    const isk = await pair.intermediateKey(
+      fromHex(c.sid),
+      fromHex(c.K),
+      Ya,
+      fromHex(c.ADa),
+      Yb,
+      fromHex(c.ADb),
+    );
     expect(hex(isk)).toBe(c.ISK);
     const { s, X, result } = c.scalarMultVfy;
     expect(hex(pair.scalarMultVfy(fromHex(s), fromHex(X)))).toBe(result);
-    for (const bad of c.invalidPoints) expect(hex(pair.scalarMultVfy(fromHex(s), fromHex(bad)))).toBe(IDENTITY);
+    for (const bad of c.invalidPoints)
+      expect(hex(pair.scalarMultVfy(fromHex(s), fromHex(bad)))).toBe(IDENTITY);
   });
 
   it.each(vectors.codes)('reads the code $input', ({ input, parsed }) => {
@@ -64,13 +83,20 @@ describe('pairing v1 matches den-spec', () => {
     expect([toBase64url(host.b), host.state.joiner]).toEqual([p.b, p.joinerLabel]);
     const finished = await pair.joinerFinish(joiner.state, host.b);
     if (!finished) throw new Error('the joiner refused b');
-    expect([toBase64url(finished.c), finished.host, hex(finished.handoverKey)]).toEqual([p.c, p.hostLabel, p.handover.key]);
+    expect([toBase64url(finished.c), finished.host, hex(finished.handoverKey)]).toEqual([
+      p.c,
+      p.hostLabel,
+      p.handover.key,
+    ]);
     expect(await pair.hostConfirm(host.state, finished.c)).toBe(true);
 
     const d = await pair.sealHandover(finished.handoverKey, handover, fromHex(p.handover.nonce));
     expect(toBase64url(d)).toBe(p.handover.d);
     expect(await pair.openHandover(finished.handoverKey, d)).toEqual(handover);
-    expect(await pair.linkKeys(handover.linkKey)).toEqual({ inbox: p.link.inbox, enc: fromHex(p.link.enc) });
+    expect(await pair.linkKeys(handover.linkKey)).toEqual({
+      inbox: p.link.inbox,
+      enc: fromHex(p.link.enc),
+    });
   });
 
   it("stops at the host's message when the host has another secret", async () => {
@@ -81,16 +107,33 @@ describe('pairing v1 matches den-spec', () => {
   it('refuses malformed messages and the identity share', async () => {
     const sid = fromHex(p.sid);
     const a = fromBase64url(p.a);
-    const respond = (message: Uint8Array) => pair.hostRespond(p.secret, sid, p.hostLabel, message, fromHex(p.yb));
+    const respond = (message: Uint8Array) =>
+      pair.hostRespond(p.secret, sid, p.hostLabel, message, fromHex(p.yb));
     expect(await respond(Uint8Array.from([...a, 0]))).toBeNull();
     expect(await respond(a.slice(0, -1))).toBeNull();
-    expect(await respond(pair.lvCat(a.slice(1, 33), pair.lvCat(new TextEncoder().encode('host'), new TextEncoder().encode('Mac'))))).toBeNull();
-    expect(await respond(pair.lvCat(new Uint8Array(32), pair.lvCat(new TextEncoder().encode('joiner'), new TextEncoder().encode('Mac'))))).toBeNull();
+    expect(
+      await respond(
+        pair.lvCat(
+          a.slice(1, 33),
+          pair.lvCat(new TextEncoder().encode('host'), new TextEncoder().encode('Mac')),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      await respond(
+        pair.lvCat(
+          new Uint8Array(32),
+          pair.lvCat(new TextEncoder().encode('joiner'), new TextEncoder().encode('Mac')),
+        ),
+      ),
+    ).toBeNull();
 
     const joiner = await pair.joinerStart(p.secret, sid, p.joinerLabel, fromHex(p.ya));
     const b = fromBase64url(p.b);
     expect(await pair.joinerFinish(joiner.state, b.slice(0, -1))).toBeNull();
-    expect(await pair.openHandover(fromHex(p.handover.key), fromBase64url(p.handover.d).slice(0, -1))).toBeNull();
+    expect(
+      await pair.openHandover(fromHex(p.handover.key), fromBase64url(p.handover.d).slice(0, -1)),
+    ).toBeNull();
   });
 });
 
@@ -149,7 +192,8 @@ function fakeEdge(nameplate = 'ABCD') {
       sid = body.sid ?? '';
       return json(200, { nameplate });
     }
-    if (url === '/pair/open') return body.nameplate === nameplate ? json(200, { sid }) : json(410, {});
+    if (url === '/pair/open')
+      return body.nameplate === nameplate ? json(200, { sid }) : json(410, {});
     const slot = url.startsWith(`/pair/${sid}/`) ? url.slice(`/pair/${sid}/`.length) : null;
     if (!slot) return json(404, {});
     if (init?.method === 'PUT') {
@@ -172,9 +216,22 @@ describe('hosting a pairing', () => {
     const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
     let give: (code: string) => void = () => undefined;
     const code = new Promise<string>((resolve) => (give = resolve));
-    const hosted = pair.host({ libraryKey, label: 'Safari on Mac', onCode: give, allow, fetchImpl, wait });
+    const hosted = pair.host({
+      libraryKey,
+      label: 'Safari on Mac',
+      onCode: give,
+      allow,
+      fetchImpl,
+      wait,
+    });
     const joined = pair.join(await code, { label: 'Chrome on Android', fetchImpl, wait });
-    return { libraryKey, ...Object.fromEntries([['host', await hosted], ['join', await joined]]) };
+    return {
+      libraryKey,
+      ...Object.fromEntries([
+        ['host', await hosted],
+        ['join', await joined],
+      ]),
+    };
   }
 
   it('hands this browser’s library to another, with no TV in it', async () => {
@@ -194,7 +251,11 @@ describe('hosting a pairing', () => {
 });
 
 describe('joining through den-edge', () => {
-  const options = (fetchImpl: typeof fetch) => ({ label: p.joinerLabel, fetchImpl, wait: async () => {} });
+  const options = (fetchImpl: typeof fetch) => ({
+    label: p.joinerLabel,
+    fetchImpl,
+    wait: async () => {},
+  });
 
   it('gets the library and link keys once the TV allows it', async () => {
     const { fetchImpl } = relay(p.secret);
@@ -204,9 +265,13 @@ describe('joining through den-edge', () => {
 
   it('fails, and ends the session, on a declined prompt or a wrong code', async () => {
     const declined = relay(p.secret, false);
-    expect(await pair.join('ABCD-EFGH-JKLM', options(declined.fetchImpl))).toEqual({ error: 'failed' });
+    expect(await pair.join('ABCD-EFGH-JKLM', options(declined.fetchImpl))).toEqual({
+      error: 'failed',
+    });
     const wrong = relay('EFGHJKLN');
-    expect(await pair.join('ABCD-EFGH-JKLM', options(wrong.fetchImpl))).toEqual({ error: 'failed' });
+    expect(await pair.join('ABCD-EFGH-JKLM', options(wrong.fetchImpl))).toEqual({
+      error: 'failed',
+    });
     expect(wrong.wasDeleted()).toBe(true);
   });
 
@@ -215,10 +280,17 @@ describe('joining through den-edge', () => {
       throw new Error('no request expected');
     }) as typeof fetch;
     expect(await pair.join('ABCD-EFGH-JKL0', options(never))).toEqual({ error: 'mistyped' });
-    const answering = (status: number) => (async () => new Response('{}', { status })) as typeof fetch;
-    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(409)))).toEqual({ error: 'claimed' });
-    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(410)))).toEqual({ error: 'expired' });
-    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(429)))).toEqual({ error: 'throttled' });
+    const answering = (status: number) =>
+      (async () => new Response('{}', { status })) as typeof fetch;
+    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(409)))).toEqual({
+      error: 'claimed',
+    });
+    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(410)))).toEqual({
+      error: 'expired',
+    });
+    expect(await pair.join('ABCD-EFGH-JKLM', options(answering(429)))).toEqual({
+      error: 'throttled',
+    });
     expect(await pair.join('ABCD-EFGH-JKLM', options(never))).toEqual({ error: 'unreachable' });
   });
 
@@ -231,7 +303,11 @@ describe('joining through den-edge', () => {
     vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes });
     try {
       expect(await pair.join('ABCD-EFGH-JKLM', options(never))).toEqual({ error: 'insecure' });
-      const hosting = { libraryKey: new Uint8Array(32), onCode: () => undefined, allow: async () => true };
+      const hosting = {
+        libraryKey: new Uint8Array(32),
+        onCode: () => undefined,
+        allow: async () => true,
+      };
       expect(await pair.host({ ...hosting, fetchImpl: never })).toEqual({ error: 'insecure' });
     } finally {
       vi.unstubAllGlobals();

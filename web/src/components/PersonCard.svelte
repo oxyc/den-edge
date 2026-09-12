@@ -2,13 +2,23 @@
 <script lang="ts">
   import { personHref } from '../lib/route';
 
-  let { id, name, role, profilePath }: { id: number; name: string; role?: string; profilePath?: string } = $props();
+  let {
+    id,
+    name,
+    role,
+    profilePath,
+  }: { id: number; name: string; role?: string; profilePath?: string } = $props();
 </script>
 
 <a class="person" href={personHref(id)}>
   <span class="portrait">
     {#if profilePath}
-      <img src="https://image.tmdb.org/t/p/w185{profilePath}" alt="" loading="lazy" decoding="async" />
+      <img
+        src="https://image.tmdb.org/t/p/w185{profilePath}"
+        alt=""
+        loading="lazy"
+        decoding="async"
+      />
     {/if}
   </span>
   <span class="name">{name}</span>

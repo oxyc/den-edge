@@ -63,21 +63,30 @@ export class LibraryLog {
    * Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. A library
    * that moved to a new key comes back empty and `moved`.
    */
-  static async open(libraryKey: string, fetchImpl: typeof fetch = fetch,
-    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): Promise<LibraryLog | null> {
-    const log = new LibraryLog(await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0))), fetchImpl, storage);
+  static async open(
+    libraryKey: string,
+    fetchImpl: typeof fetch = fetch,
+    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+  ): Promise<LibraryLog | null> {
+    const log = new LibraryLog(
+      await deriveKeys(Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0))),
+      fetchImpl,
+      storage,
+    );
     // Initialize outside per-row tampering catches: a loader failure must never skip valid rows.
     await ensureSyncPolicy(true);
     let since = 0;
     for (;;) {
       let res: Response;
       try {
-        res = await fetchImpl(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, { headers: log.headers() });
+        res = await fetchImpl(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, {
+          headers: log.headers(),
+        });
       } catch {
         return null;
       }
       if (res.status === 404) {
-        if (!await log.stageRecovery()) return null;
+        if (!(await log.stageRecovery())) return null;
         log.head = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
         return log.restoreJournal();
@@ -89,7 +98,7 @@ export class LibraryLog {
       if (!res.ok) return null;
       const page = (await res.json()) as Page;
       if (log.generation && page.generation && log.generation !== page.generation) {
-        if (!await log.stageRecovery()) return null;
+        if (!(await log.stageRecovery())) return null;
         log.generation = page.generation;
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
@@ -100,7 +109,10 @@ export class LibraryLog {
         try {
           const row = believe(await open(log.keys, entry.k, entry.v));
           const previous = log.entries.get(rowName(row));
-          log.entries.set(rowName(row), { seq: entry.seq, row: previous ? merge(previous.row, row) : row });
+          log.entries.set(rowName(row), {
+            seq: entry.seq,
+            row: previous ? merge(previous.row, row) : row,
+          });
         } catch {
           // Tampered with, or sealed under another library's key.
         }
@@ -120,18 +132,24 @@ export class LibraryLog {
     const run = this.writes.then(async () => {
       try {
         for (;;) {
-          const res = await this.fetchImpl(`/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`, { headers: this.headers() });
+          const res = await this.fetchImpl(
+            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
+            { headers: this.headers() },
+          );
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
-            if (!await this.stageRecovery()) return false;
+            if (!(await this.stageRecovery())) return false;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             return true; // A first offline action must be able to create the log on reconnect.
           }
           if (!res.ok) return false;
-          const page = await res.json() as Page;
-          if ((this.generation && page.generation && this.generation !== page.generation) || page.head < this.head) {
-            if (!await this.stageRecovery()) return false;
+          const page = (await res.json()) as Page;
+          if (
+            (this.generation && page.generation && this.generation !== page.generation) ||
+            page.head < this.head
+          ) {
+            if (!(await this.stageRecovery())) return false;
             this.generation = page.generation;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
@@ -142,15 +160,21 @@ export class LibraryLog {
             try {
               const row = believe(await open(this.keys, entry.k, entry.v));
               const previous = this.entries.get(rowName(row));
-              if (!previous || entry.seq > previous.seq) this.entries.set(rowName(row), {
-                seq: entry.seq, row: previous ? merge(previous.row, row) : row,
-              });
-            } catch { /* Skip unreadable rows individually, as on initial open. */ }
+              if (!previous || entry.seq > previous.seq)
+                this.entries.set(rowName(row), {
+                  seq: entry.seq,
+                  row: previous ? merge(previous.row, row) : row,
+                });
+            } catch {
+              /* Skip unreadable rows individually, as on initial open. */
+            }
           }
           this.head = page.entries.at(-1)?.seq ?? page.head;
           if (!page.more || page.entries.length === 0) return true;
         }
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     });
     this.writes = run.catch(() => false);
     const refreshed = await run;
@@ -163,7 +187,11 @@ export class LibraryLog {
     return row?.kind === 'rec' ? row : undefined;
   }
 
-  episode(ref: { type: string; id: number }, season: number, episode: number): EpisodeRow | undefined {
+  episode(
+    ref: { type: string; id: number },
+    season: number,
+    episode: number,
+  ): EpisodeRow | undefined {
     const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
     return row?.kind === 'ep' ? row : undefined;
   }
@@ -245,19 +273,27 @@ export class LibraryLog {
     try {
       const sealed = await Promise.all(journals.map((row) => seal(this.keys, row)));
       this.storage.setItem(key, JSON.stringify({ bulk: sealed }));
-    } catch { return false; }
+    } catch {
+      return false;
+    }
     for (const row of journals) this.project(trackerEvent(row)!.after);
     await this.flushRows(key, [journals, journals.map((row) => trackerEvent(row)!.after)]);
     return true; // Either on the relay or the complete intent is still durable locally.
   }
 
   private async stageRecovery(): Promise<boolean> {
-    const rows = [...this.entries.values()].filter((entry) => entry.seq > 0).map((entry) => entry.row);
+    const rows = [...this.entries.values()]
+      .filter((entry) => entry.seq > 0)
+      .map((entry) => entry.row);
     if (!rows.length) return true;
     try {
-      if (this.storage) this.storage.setItem(this.pendingPrefix + 'recovery:' + crypto.randomUUID(), JSON.stringify({
-        restore: await Promise.all(rows.map((row) => seal(this.keys, row))),
-      }));
+      if (this.storage)
+        this.storage.setItem(
+          this.pendingPrefix + 'recovery:' + crypto.randomUUID(),
+          JSON.stringify({
+            restore: await Promise.all(rows.map((row) => seal(this.keys, row))),
+          }),
+        );
       const retained = new Map((this.recoveryRows ?? []).map((row) => [rowName(row), row]));
       for (const row of rows) {
         const previous = retained.get(rowName(row));
@@ -265,33 +301,43 @@ export class LibraryLog {
       }
       this.recoveryRows = [...retained.values()];
       return true;
-    } catch { return false; } // Do not discard the old cursors until recovery work is safely retained.
+    } catch {
+      return false;
+    } // Do not discard the old cursors until recovery work is safely retained.
   }
 
   private async flushRows(key: string, groups: Row[][]): Promise<boolean> {
     const run = this.writes.then(async () => {
       for (const rows of groups) {
         for (let offset = 0; offset < rows.length; offset += 32) {
-          const chunk = await Promise.all(rows.slice(offset, offset + 32).map(async (local) => {
-            const name = rowName(local), previous = this.entries.get(name);
-            const row = previous ? merge(previous.row, local) : local;
-            return { row, name, base: previous?.seq ?? 0, ...await seal(this.keys, row) };
-          }));
+          const chunk = await Promise.all(
+            rows.slice(offset, offset + 32).map(async (local) => {
+              const name = rowName(local),
+                previous = this.entries.get(name);
+              const row = previous ? merge(previous.row, local) : local;
+              return { row, name, base: previous?.seq ?? 0, ...(await seal(this.keys, row)) };
+            }),
+          );
           const res = await this.fetchImpl(`/lib/${this.keys.id}/batch`, {
-            method: 'POST', headers: { ...this.headers(), 'content-type': 'application/json' },
+            method: 'POST',
+            headers: { ...this.headers(), 'content-type': 'application/json' },
             body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
           });
           if (res.status === 410) this.moved = true;
           if (!res.ok) return false;
-          const result = await res.json() as Batch;
+          const result = (await res.json()) as Batch;
           for (const entry of chunk) {
             const applied = result.applied.find(({ k }) => k === entry.k);
             if (applied) this.entries.set(entry.name, { seq: applied.seq, row: entry.row });
-            else if (!await this.writeSerial(entry.row)) return false; // CAS merge/retry without leaving the lock.
+            else if (!(await this.writeSerial(entry.row))) return false; // CAS merge/retry without leaving the lock.
           }
         }
       }
-      try { this.storage?.removeItem(key); } catch { /* Retain harmless replayable work. */ }
+      try {
+        this.storage?.removeItem(key);
+      } catch {
+        /* Retain harmless replayable work. */
+      }
       return true;
     });
     this.writes = run.catch(() => false);
@@ -305,12 +351,19 @@ export class LibraryLog {
     const storageKey = this.pendingPrefix + event.id;
     // Persist ciphertext before starting the network operation. Quota/privacy errors fail visibly.
     try {
-      if (this.storage) this.storage.setItem(storageKey, JSON.stringify(await seal(this.keys, journal)));
-    } catch { return null; }
+      if (this.storage)
+        this.storage.setItem(storageKey, JSON.stringify(await seal(this.keys, journal)));
+    } catch {
+      return null;
+    }
     const accepted = await this.write(journal);
     if (!accepted && !this.storage) return null;
     if (accepted) {
-      try { this.storage?.removeItem(storageKey); } catch { /* Retrying an accepted event is harmless. */ }
+      try {
+        this.storage?.removeItem(storageKey);
+      } catch {
+        /* Retrying an accepted event is harmless. */
+      }
     }
     if (!accepted) return this.project(event.after);
     const saved = await this.write(event.after);
@@ -326,12 +379,15 @@ export class LibraryLog {
     return row;
   }
 
-  private get pendingPrefix(): string { return `den.pendingTracker.${this.keys.id}.`; }
+  private get pendingPrefix(): string {
+    return `den.pendingTracker.${this.keys.id}.`;
+  }
 
   get pendingActions(): number {
     if (!this.storage) return 0;
     let count = 0;
-    for (let i = 0; i < this.storage.length; i++) if (this.storage.key(i)?.startsWith(this.pendingPrefix)) count++;
+    for (let i = 0; i < this.storage.length; i++)
+      if (this.storage.key(i)?.startsWith(this.pendingPrefix)) count++;
     return count;
   }
 
@@ -347,19 +403,41 @@ export class LibraryLog {
         const key = this.storage.key(i);
         if (key?.startsWith(this.pendingPrefix)) keys.push(key);
       }
-      keys.sort((a, b) => Number(a.startsWith(this.pendingPrefix + 'recovery')) - Number(b.startsWith(this.pendingPrefix + 'recovery')));
+      keys.sort(
+        (a, b) =>
+          Number(a.startsWith(this.pendingPrefix + 'recovery')) -
+          Number(b.startsWith(this.pendingPrefix + 'recovery')),
+      );
       for (const key of keys) {
         try {
-          const pending = JSON.parse(this.storage.getItem(key)!) as { k: string; v: string; bulk?: { k: string; v: string }[]; restore?: { k: string; v: string }[] };
+          const pending = JSON.parse(this.storage.getItem(key)!) as {
+            k: string;
+            v: string;
+            bulk?: { k: string; v: string }[];
+            restore?: { k: string; v: string }[];
+          };
           if (pending.restore) {
-            const rows = await Promise.all(pending.restore.map(({ k, v }) => open(this.keys, k, v)));
+            const rows = await Promise.all(
+              pending.restore.map(({ k, v }) => open(this.keys, k, v)),
+            );
             for (const row of rows) this.project(row);
-            if (await this.flushRows(key, [rows.filter(trackerEvent), rows.filter((row) => !trackerEvent(row))])) this.recoveryRows = undefined;
+            if (
+              await this.flushRows(key, [
+                rows.filter(trackerEvent),
+                rows.filter((row) => !trackerEvent(row)),
+              ])
+            )
+              this.recoveryRows = undefined;
             continue;
           }
           if (pending.bulk) {
             const rows = await Promise.all(pending.bulk.map(({ k, v }) => open(this.keys, k, v)));
-            if (!rows.every((row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null)) continue;
+            if (
+              !rows.every(
+                (row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null,
+              )
+            )
+              continue;
             for (const row of rows) this.project(trackerEvent(row)!.after);
             await this.flushRows(key, [rows, rows.map((row) => trackerEvent(row)!.after)]);
             continue;
@@ -367,12 +445,20 @@ export class LibraryLog {
           const { k, v } = pending;
           const row = await open(this.keys, k, v);
           if (row.kind === 'set' && trackerEvent(row)) await this.writeAction(row);
-        } catch { /* Keep unreadable pending data; never acknowledge or delete it. */ }
+        } catch {
+          /* Keep unreadable pending data; never acknowledge or delete it. */
+        }
       }
     }
     if (!this.storage && this.recoveryRows) {
       const rows = this.recoveryRows;
-      if (await this.flushRows(this.pendingPrefix + 'recovery', [rows.filter(trackerEvent), rows.filter((row) => !trackerEvent(row))])) this.recoveryRows = undefined;
+      if (
+        await this.flushRows(this.pendingPrefix + 'recovery', [
+          rows.filter(trackerEvent),
+          rows.filter((row) => !trackerEvent(row)),
+        ])
+      )
+        this.recoveryRows = undefined;
     }
     return this;
   }

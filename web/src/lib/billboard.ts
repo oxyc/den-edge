@@ -100,7 +100,8 @@ const genresOf = (title: Title) => title.genreIds ?? [];
 const languagesOf = (title: Title) => (title.originalLanguage ? [title.originalLanguage] : []);
 const countriesOf = (title: Title) => title.countries ?? [];
 const peopleOf = (title: Title) => title.people ?? [];
-const franchisesOf = (title: Title) => (title.collectionId === undefined ? [] : [title.collectionId]);
+const franchisesOf = (title: Title) =>
+  title.collectionId === undefined ? [] : [title.collectionId];
 
 /** The decade it belongs to, from the fullest date it has. */
 function decadesOf(title: Title): number[] {
@@ -187,7 +188,9 @@ function distaste(title: Title, taste: Taste): number {
     return against;
   };
   const against =
-    owed(taste.genres, genresOf(title)) + owed(taste.people, peopleOf(title)) + owed(taste.franchises, franchisesOf(title));
+    owed(taste.genres, genresOf(title)) +
+    owed(taste.people, peopleOf(title)) +
+    owed(taste.franchises, franchisesOf(title));
   return against <= 0 ? 0 : against / (against + DISLIKE_PATIENCE);
 }
 
@@ -215,7 +218,8 @@ export function affinity(title: Title, taste?: Taste): number {
   const match = known.reduce((sum, [weight, value]) => sum + weight * value, 0) / total;
   // The next of something already followed is wanted whatever else it is: a sequel shares a franchise, rarely a
   // genre profile, and nobody who watched the first three needs to be sold the fourth.
-  const followed = title.collectionId !== undefined && (taste.franchises.get(title.collectionId) ?? 0) > 0;
+  const followed =
+    title.collectionId !== undefined && (taste.franchises.get(title.collectionId) ?? 0) > 0;
   return (followed ? match + (1 - match) * FRANCHISE_LIFT : match) * (1 - distaste(title, taste));
 }
 
@@ -267,7 +271,10 @@ export function arrival({ arrival: at }: Candidate): number {
  * the second only corroborates it.
  */
 export function attention(candidate: Candidate, busiest = 0): number {
-  const [strong, weak] = [buzz(candidate, busiest), arrival(candidate)].sort((a, b) => b - a) as [number, number];
+  const [strong, weak] = [buzz(candidate, busiest), arrival(candidate)].sort((a, b) => b - a) as [
+    number,
+    number,
+  ];
   return strong + CORROBORATION * weak;
 }
 
@@ -290,7 +297,10 @@ export function worth(candidate: Candidate, now: Date, busiest = 0): number {
 }
 
 export function score(candidate: Candidate, now: Date, busiest = 0, taste?: Taste): number {
-  return worth(candidate, now, busiest) * (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste));
+  return (
+    worth(candidate, now, busiest) *
+    (TASTE_FLOOR + (1 - TASTE_FLOOR) * affinity(candidate.title, taste))
+  );
 }
 
 /**
@@ -345,7 +355,10 @@ function merge(a: Candidate, b: Candidate): Candidate {
  * The better of two placings. The same service in two countries is two lists, and a title can sit first in one
  * and fortieth in the other; which of those the merge happened to see first is no basis for judging it.
  */
-function best<T extends { rank?: number; of?: number }>(a: T | undefined, b: T | undefined): T | undefined {
+function best<T extends { rank?: number; of?: number }>(
+  a: T | undefined,
+  b: T | undefined,
+): T | undefined {
   const standing = (p?: { rank?: number; of?: number }) =>
     p?.rank === undefined || !p.of ? -1 : 1 - p.rank / p.of;
   if (standing(a) < 0) return b;

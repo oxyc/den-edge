@@ -73,7 +73,8 @@
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
     busy: 'Den is already playing two things. Waiting for one to stop…',
-    transcode: 'This needs converting for this browser, and the homelab is converting another. Waiting for it to finish…',
+    transcode:
+      'This needs converting for this browser, and the homelab is converting another. Waiting for it to finish…',
   };
 
   let video = $state<HTMLVideoElement>();
@@ -97,7 +98,9 @@
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
 
-  const heading = $derived(season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title);
+  const heading = $derived(
+    season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
+  );
   const names = (() => {
     try {
       return new Intl.DisplayNames([navigator.language], { type: 'language' });
@@ -107,7 +110,11 @@
   })();
 
   /** Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. */
-  async function begin(pick: { audioTrack?: number; filename: string } | undefined = filename ? { filename } : undefined) {
+  async function begin(
+    pick: { audioTrack?: number; filename: string } | undefined = filename
+      ? { filename }
+      : undefined,
+  ) {
     clearTimeout(retry);
     failure = null;
     if (!imdb) {
@@ -120,32 +127,39 @@
     }
     const languages = [...new Set(navigator.languages.map((l) => l.split('-')[0]!.toLowerCase()))];
     const can = (decodes ??= await playable());
-    const result = await startSession({
-      imdb,
-      season,
-      episode,
-      scout: scout.install,
-      subtitles,
-      subtitleLanguages: languages.slice(0, 2),
-      audio: [...navigator.languages],
-      videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
-      playable: can,
-      ...pick,
-    }, undefined, remux);
+    const result = await startSession(
+      {
+        imdb,
+        season,
+        episode,
+        scout: scout.install,
+        subtitles,
+        subtitleLanguages: languages.slice(0, 2),
+        audio: [...navigator.languages],
+        videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
+        playable: can,
+        ...pick,
+      },
+      undefined,
+      remux,
+    );
     if (ended) {
       if (!('failure' in result)) endSession(result);
       return;
     }
     if ('failure' in result) {
       failure = result.failure;
-      if (result.failure === 'busy' || result.failure === 'transcode') retry = setTimeout(() => void begin(pick), RETRY_MS);
+      if (result.failure === 'busy' || result.failure === 'transcode')
+        retry = setTimeout(() => void begin(pick), RETRY_MS);
       return;
     }
     session = result;
     if (!releases.length) {
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then((list) => {
-        releases = list ?? [];
-      });
+      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then(
+        (list) => {
+          releases = list ?? [];
+        },
+      );
     }
   }
 
@@ -166,8 +180,14 @@
     // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that.
     const stuck = setTimeout(() => {
       const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
-      if (noSource || (!element.paused && element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)) {
-        broke(element.error?.code ?? 0, `no picture after ${STUCK_MS / 1000} s (readyState ${element.readyState}, networkState ${element.networkState})`);
+      if (
+        noSource ||
+        (!element.paused && element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
+      ) {
+        broke(
+          element.error?.code ?? 0,
+          `no picture after ${STUCK_MS / 1000} s (readyState ${element.readyState}, networkState ${element.networkState})`,
+        );
       }
     }, STUCK_MS);
     const cleanup = () => clearTimeout(stuck);
@@ -305,7 +325,9 @@
   $effect(() => {
     untrack(() => void begin());
     // The page behind stays put: it would otherwise scroll under a player that covers it.
-    const scrolls = [document.documentElement, document.body].map((el) => [el, el.style.overflow] as const);
+    const scrolls = [document.documentElement, document.body].map(
+      (el) => [el, el.style.overflow] as const,
+    );
     for (const [el] of scrolls) el.style.overflow = 'hidden';
     addEventListener('pagehide', finish);
     return () => {
@@ -316,7 +338,9 @@
   });
 </script>
 
-<svelte:window onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && close()} />
+<svelte:window
+  onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && close()}
+/>
 
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
@@ -331,12 +355,20 @@
     {#if failure === 'login'}
       <form onsubmit={letIn}>
         <p>
-          Your library’s scout install can only check what’s available, so playing it here needs a browser key from
-          the homelab (<code>remux-browser-key.txt</code>) — once; the browser keeps it for a month.
+          Your library’s scout install can only check what’s available, so playing it here needs a
+          browser key from the homelab (<code>remux-browser-key.txt</code>) — once; the browser
+          keeps it for a month.
         </p>
-        <input type="password" bind:value={key} autocomplete="current-password" aria-label="Browser key" />
+        <input
+          type="password"
+          bind:value={key}
+          autocomplete="current-password"
+          aria-label="Browser key"
+        />
         <button class="primary" disabled={!key.trim()}>Let this browser in</button>
-        {#if badKey}<p class="error" role="alert">That isn’t one of the homelab’s browser keys.</p>{/if}
+        {#if badKey}<p class="error" role="alert">
+            That isn’t one of the homelab’s browser keys.
+          </p>{/if}
       </form>
     {:else if failure === 'busy' || failure === 'transcode'}
       <p class="note" role="status">{waits[failure]}</p>
@@ -345,7 +377,7 @@
     {:else if !session}
       <p class="note">Finding a release this browser can play…</p>
     {:else}
-      <!-- svelte-ignore a11y_media_has_caption: den-remux's subtitles are renditions in the playlist, not <track>s -->
+      <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
       <video
         bind:this={video}
         controls
@@ -380,7 +412,9 @@
                form of what is chosen. -->
           <div class="pick">
             {@render plates()}
-            <span class="value" aria-hidden="true">{session.release.label.split('•')[0]?.trim()}</span>
+            <span class="value" aria-hidden="true"
+              >{session.release.label.split('•')[0]?.trim()}</span
+            >
             {@render chevron()}
             <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
               {#each releases as release (release.filename)}
@@ -392,7 +426,9 @@
         {#if session.audioTracks.length > 1 && playingTrack}
           <div class="pick">
             {@render globe()}
-            <span class="value" aria-hidden="true">{trackLabel(playingTrack, session.audioTrack)}</span>
+            <span class="value" aria-hidden="true"
+              >{trackLabel(playingTrack, session.audioTrack)}</span
+            >
             {@render chevron()}
             <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
               {#each session.audioTracks as track, n (n)}
@@ -435,7 +471,9 @@
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <circle cx="12" cy="12" r="8.5" />
     <path d="M3.5 12h17" />
-    <path d="M12 3.5c2.4 2.4 3.7 5.3 3.7 8.5s-1.3 6.1-3.7 8.5c-2.4-2.4-3.7-5.3-3.7-8.5s1.3-6.1 3.7-8.5Z" />
+    <path
+      d="M12 3.5c2.4 2.4 3.7 5.3 3.7 8.5s-1.3 6.1-3.7 8.5c-2.4-2.4-3.7-5.3-3.7-8.5s1.3-6.1 3.7-8.5Z"
+    />
   </svg>
 {/snippet}
 
@@ -461,6 +499,7 @@
       max(12px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
     background: #000;
     color: #fff;
+
     /* A tap near the video's own controls acts on them: no text selected under the finger, no grey flash, and no
        double-tap zoom, which a phone otherwise waits for before passing the tap on. */
     user-select: none;
@@ -508,12 +547,6 @@
     width: 44px;
     padding: 0;
     border-color: transparent;
-  }
-
-  .close .icon {
-    width: 22px;
-    height: 22px;
-    opacity: 0.85;
   }
 
   /* Where the browser draws the open menu itself, on its own ground. */
@@ -624,7 +657,7 @@
 
   /* One picker on a phone gets the row to itself, filling it: at 18rem it sat just short of the width, pushed
      against the right edge. Wider, the row is shared with the release line and 18rem is the right size again. */
-  @media (max-width: 40rem) {
+  @media (width <= 40rem) {
     .controls > .pick:only-child {
       max-width: none;
     }
@@ -659,6 +692,12 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .close .icon {
+    width: 22px;
+    height: 22px;
+    opacity: 0.85;
   }
 
   /* The control itself fills the pill — never hidden, which would stop a phone opening it. */

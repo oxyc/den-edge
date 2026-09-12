@@ -30,9 +30,17 @@ describe('actions, as the TV does them', () => {
 
   it('marks seen, and un-seeing starts a new viewing that beats the TV’s finished one', () => {
     const watched = markWatched(dune, at(2000, 'tv01'));
-    expect([watched.status.value, watched.resume.value, watched.watchedAt]).toEqual(['watched', 1, 2000]);
+    expect([watched.status.value, watched.resume.value, watched.watchedAt]).toEqual([
+      'watched',
+      1,
+      2000,
+    ]);
     const unseen = unwatch(watched, at(3000));
-    expect([unseen.status.value, unseen.resume.value, unseen.resume.viewing]).toEqual(['none', 0, 1]);
+    expect([unseen.status.value, unseen.resume.value, unseen.resume.viewing]).toEqual([
+      'none',
+      0,
+      1,
+    ]);
     const merged = mergeTitle(watched, unseen);
     expect([merged.status.value, merged.resume.value]).toEqual(['none', 0]);
   });
@@ -50,6 +58,10 @@ describe('actions, as the TV does them', () => {
     const unseen = markEpisode(seen, false, at(3000));
     expect([unseen.progress.value, unseen.progress.viewing]).toEqual([0, 1]);
     expect(mergeEpisode(seen, unseen).progress.value).toBe(0);
-    expect(markEpisode(unseen, true, at(4000)).progress).toEqual({ value: 1, at: at(4000), viewing: 1 });
+    expect(markEpisode(unseen, true, at(4000)).progress).toEqual({
+      value: 1,
+      at: at(4000),
+      viewing: 1,
+    });
   });
 });

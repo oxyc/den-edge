@@ -1,11 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import { arrivals, denAddonOf, findAddon, findAtlas, installsOf, SCOUT, trendingEverywhere } from './scout';
+import {
+  arrivals,
+  denAddonOf,
+  findAddon,
+  findAtlas,
+  installsOf,
+  SCOUT,
+  trendingEverywhere,
+} from './scout';
 
 const ROUTES: Routes = {
-  scout: [{ url: 'http://192.168.86.193:8080' }, { url: 'https://pve.example:8443/scout' }, { url: 'https://d-scout.oxy.fi', access: true }],
-  subs: [{ url: 'http://192.168.86.193:8093' }, { url: 'https://pve.example:8443/subs' }, { url: 'https://d-subs.oxy.fi', access: true }],
-  atlas: [{ url: 'http://192.168.86.193:8081' }, { url: 'https://pve.example:8443/atlas' }, { url: 'https://d-atlas.oxy.fi', access: true }],
+  scout: [
+    { url: 'http://192.168.86.193:8080' },
+    { url: 'https://pve.example:8443/scout' },
+    { url: 'https://d-scout.oxy.fi', access: true },
+  ],
+  subs: [
+    { url: 'http://192.168.86.193:8093' },
+    { url: 'https://pve.example:8443/subs' },
+    { url: 'https://d-subs.oxy.fi', access: true },
+  ],
+  atlas: [
+    { url: 'http://192.168.86.193:8081' },
+    { url: 'https://pve.example:8443/atlas' },
+    { url: 'https://d-atlas.oxy.fi', access: true },
+  ],
 };
 const SCOUT_LAN = 'http://192.168.86.193:8080/sealed-cfg/manifest.json';
 const SCOUT_PUBLIC = 'https://d-scout.oxy.fi/sealed-cfg/manifest.json';
@@ -19,7 +39,9 @@ function addons(manifests: Record<string, string>) {
   const fetchImpl: typeof fetch = async (input) => {
     asked.push(String(input));
     const id = manifests[String(input)];
-    return id ? new Response(JSON.stringify({ id })) : new Response('<!doctype html>', { status: 200 });
+    return id
+      ? new Response(JSON.stringify({ id }))
+      : new Response('<!doctype html>', { status: 200 });
   };
   return { asked, fetchImpl };
 }
@@ -98,7 +120,11 @@ describe('trendingEverywhere', () => {
   const catalogs: typeof fetch = async (input) => {
     const url = String(input);
     if (url === '/atlas/catalog/movie/jw-trending.json') {
-      return new Response(JSON.stringify({ metas: [meta(1, 'A movie'), meta(2, 'Another movie'), { name: 'No id' }] }));
+      return new Response(
+        JSON.stringify({
+          metas: [meta(1, 'A movie'), meta(2, 'Another movie'), { name: 'No id' }],
+        }),
+      );
     }
     if (url === '/atlas/catalog/series/jw-trending.json') {
       return new Response(JSON.stringify({ metas: [meta(3, 'A series')] }));
@@ -126,18 +152,27 @@ describe('trendingEverywhere', () => {
 describe('findAtlas', () => {
   it('is a plugin, else this origin’s own, else none', async () => {
     const plugin = addons({ '/atlas/manifest.json': 'com.den.atlas' });
-    expect(await findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ROUTES, plugin.fetchImpl)).toEqual({
+    expect(
+      await findAtlas(['https://d-atlas.oxy.fi/manifest.json'], ROUTES, plugin.fetchImpl),
+    ).toEqual({
       install: 'https://d-atlas.oxy.fi',
       base: '/atlas',
     });
     expect((await findAtlas([], ROUTES, plugin.fetchImpl))?.base).toBe('/atlas');
-    expect(await findAtlas([], ROUTES, addons({}).fetchImpl), 'nothing under /atlas here').toBeNull();
+    expect(
+      await findAtlas([], ROUTES, addons({}).fetchImpl),
+      'nothing under /atlas here',
+    ).toBeNull();
   });
 });
 
 describe('denAddonOf', () => {
   it('names Den’s own plugins on any of their addresses, and nobody else’s', () => {
-    expect(denAddonOf(SUBS_LAN, ROUTES)).toEqual({ name: 'subs', label: 'Den Subtitles', role: 'Subtitles' });
+    expect(denAddonOf(SUBS_LAN, ROUTES)).toEqual({
+      name: 'subs',
+      label: 'Den Subtitles',
+      role: 'Subtitles',
+    });
     expect(denAddonOf(SCOUT_PUBLIC, ROUTES)?.label).toBe('Den Scout');
     expect(denAddonOf(THEIRS, ROUTES)).toBeNull();
     expect(denAddonOf(SUBS_LAN, {}), 'before the table arrives').toBeNull();

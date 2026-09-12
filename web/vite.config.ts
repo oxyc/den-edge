@@ -11,7 +11,7 @@ const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
 
 export default defineConfig({
-  plugins: [svelte({ compilerOptions: { experimental: { async: true } } })],
+  plugins: [svelte()],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
     // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`
@@ -19,7 +19,11 @@ export default defineConfig({
     allowedHosts: ['.ts.net', 'localhost'],
     proxy: {
       ...Object.fromEntries(api.map((path) => [path, { target: edge, changeOrigin: true }])),
-      '/atlas': { target: atlas, changeOrigin: true, rewrite: (path) => path.replace(/^\/atlas/, '') },
+      '/atlas': {
+        target: atlas,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/atlas/, ''),
+      },
       '/reel': { target: reel, changeOrigin: true, rewrite: (path) => path.replace(/^\/reel/, '') },
     },
   },

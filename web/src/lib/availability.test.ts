@@ -24,16 +24,26 @@ describe('Availability', () => {
 
   it('fades what scout says has nothing, asks again about what it was still checking, and skips series', async () => {
     let second = 'unknown';
-    const { calls, fetchImpl } = fake(() => ({ tt0000001: 'unavailable', tt0000002: second, tt0000003: 'available' }));
+    const { calls, fetchImpl } = fake(() => ({
+      tt0000001: 'unavailable',
+      tt0000002: second,
+      tt0000003: 'available',
+    }));
     const availability = new Availability(fetchImpl);
     availability.connect(SCOUT, 'key');
     for (const id of [1, 2, 3, 404]) availability.want({ type: 'movie', id });
     availability.want({ type: 'tv', id: 5 });
     await vi.advanceTimersByTimeAsync(100);
 
-    const asked = () => calls.filter((c) => c.url.endsWith('/availability')).map((c) => JSON.parse(c.body!).ids);
+    const asked = () =>
+      calls.filter((c) => c.url.endsWith('/availability')).map((c) => JSON.parse(c.body!).ids);
     expect(asked()).toEqual([['tt0000001', 'tt0000002', 'tt0000003']]);
-    expect([1, 2, 3, 404].map((id) => availability.unavailable({ type: 'movie', id }))).toEqual([true, false, false, false]);
+    expect([1, 2, 3, 404].map((id) => availability.unavailable({ type: 'movie', id }))).toEqual([
+      true,
+      false,
+      false,
+      false,
+    ]);
 
     second = 'unavailable';
     await vi.advanceTimersByTimeAsync(RETRY_MS + 100);

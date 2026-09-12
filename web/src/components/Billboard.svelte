@@ -61,6 +61,7 @@
   // Details arrive per slide and are kept, so coming back to one shows it at once.
   let known = $state(new Map<string, TitleDetail>());
 
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight deduplication must not retrigger the effect that schedules lookups.
   const learning = new Set<string>();
 
   async function learn(title: Title | undefined): Promise<void> {
@@ -68,9 +69,14 @@
     const key = keyOf(title);
     learning.add(key);
     try {
-      const found = await fetchDetail({ type: title.type, id: title.id }, tmdbKey).catch(() => null);
+      const found = await fetchDetail({ type: title.type, id: title.id }, tmdbKey).catch(
+        () => null,
+      );
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Publish one completed immutable map through the existing state assignment.
       if (found) known = new Map(known).set(key, found);
-    } finally { learning.delete(key); }
+    } finally {
+      learning.delete(key);
+    }
   }
 
   const detail = $derived(current ? known.get(keyOf(current)) : undefined);
@@ -131,13 +137,19 @@
   let frame = $state<HTMLElement>();
   let onScreen = $state(true);
   /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
-  const saving = () => Boolean((navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData);
+  const saving = () =>
+    Boolean(
+      (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData,
+    );
 
   // A trailer playing under the rows, heard by nobody and seen by nobody, is battery and data spent on nothing.
   $effect(() => {
     const box = frame;
     if (!box || typeof IntersectionObserver === 'undefined') return;
-    const watch = new IntersectionObserver(([entry]) => (onScreen = entry?.isIntersecting ?? true), { threshold: 0 });
+    const watch = new IntersectionObserver(
+      ([entry]) => (onScreen = entry?.isIntersecting ?? true),
+      { threshold: 0 },
+    );
     watch.observe(box);
     return () => watch.disconnect();
   });
@@ -258,13 +270,18 @@
 
   const facts = (title: Title) => {
     const found = known.get(keyOf(title));
-    return [title.year ? String(title.year) : undefined, ...(found?.genres ?? []).slice(0, 2)].filter(Boolean).join(' · ');
+    return [title.year ? String(title.year) : undefined, ...(found?.genres ?? []).slice(0, 2)]
+      .filter(Boolean)
+      .join(' · ');
   };
 
   /** The dots in view: a window that slides with the current slide, its edges shrunk where the set carries on. */
   const window9 = $derived.by(() => {
     const count = shown.length;
-    const start = count <= DOT_WINDOW ? 0 : Math.min(Math.max(index - (DOT_WINDOW >> 1), 0), count - DOT_WINDOW);
+    const start =
+      count <= DOT_WINDOW
+        ? 0
+        : Math.min(Math.max(index - (DOT_WINDOW >> 1), 0), count - DOT_WINDOW);
     const end = Math.min(start + DOT_WINDOW, count);
     return { start, end, count, at: Array.from({ length: end - start }, (_, i) => start + i) };
   });
@@ -286,13 +303,18 @@
   <div class="picture" aria-hidden="true">
     {#each layers as layer (layer.id)}
       {#if layer.url}
-        <img class="backdrop" class:lit={layer.id === lit} src={layer.url} alt="" draggable="false" />
+        <img
+          class="backdrop"
+          class:lit={layer.id === lit}
+          src={layer.url}
+          alt=""
+          draggable="false"
+        />
       {/if}
     {/each}
     {#if ambient}
       <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
            started. The still picture stays underneath until it does, and stays if it never does. -->
-      <!-- svelte-ignore a11y_media_has_caption -->
       <video
         class="ambient"
         class:playing
@@ -317,15 +339,29 @@
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
       <article class="slide" aria-roledescription="slide" aria-label={title.title}>
-        <a class="slide-link" href={titleHref(title)} aria-label={`Open details for ${title.title}`} tabindex={n === index ? 0 : -1} draggable="false"></a>
+        <a
+          class="slide-link"
+          href={titleHref(title)}
+          aria-label={`Open details for ${title.title}`}
+          tabindex={n === index ? 0 : -1}
+          draggable="false"
+        ></a>
         <div class="told">
           <div class="text">
-            <h2><a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}>{title.title}</a><span class="mobile-title">{title.title}</span></h2>
+            <h2>
+              <a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}
+                >{title.title}</a
+              ><span class="mobile-title">{title.title}</span>
+            </h2>
             <p class="facts">{facts(title)}</p>
             <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
               {#if onplay}
-                <button class="primary" tabindex={n === index ? 0 : -1} onclick={() => onplay(title)}>
+                <button
+                  class="primary"
+                  tabindex={n === index ? 0 : -1}
+                  onclick={() => onplay(title)}
+                >
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                     <path d="M8.8 5.6 19 12 8.8 18.4V5.6Z" />
                   </svg>
@@ -346,7 +382,8 @@
       <div class="dots" role="group" aria-label="Slide {index + 1} of {shown.length}">
         {#each window9.at as n (n)}
           {@const edge =
-            (n === window9.start && window9.start > 0) || (n === window9.end - 1 && window9.end < window9.count)}
+            (n === window9.start && window9.start > 0) ||
+            (n === window9.end - 1 && window9.end < window9.count)}
           <button
             class="dot"
             class:on={n === index}
@@ -369,17 +406,24 @@
   .billboard {
     position: relative;
     width: 100vw;
+
     /* Lets the picture, which is not inside the scroller, be animated by the scroller's own progress. */
     timeline-scope: --rail;
+
     /* Use the large viewport initially, then preserve the measured size through touch-browser
        toolbar changes. Width changes and desktop window resizing refresh the measurement. */
     min-height: var(--stable-hero-height, clamp(420px, 76vh, 860px));
-    min-height: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
     overflow: hidden;
     background: var(--bg);
+  }
+
+  @supports (height: 1lvh) {
+    .billboard {
+      min-height: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
+    }
   }
 
   /* One picture for the whole billboard, behind everything: it dissolves between titles instead of sliding, so
@@ -439,7 +483,12 @@
   .scrim {
     position: absolute;
     inset: 0;
-    background: linear-gradient(to bottom, rgb(0 0 0 / 0.55), rgb(0 0 0 / 0.15) 30%, transparent 55%);
+    background: linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 0.55),
+      rgb(0 0 0 / 0.15) 30%,
+      transparent 55%
+    );
     pointer-events: none;
   }
 
@@ -472,9 +521,9 @@
     display: flex;
     height: 100%;
     min-height: inherit;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow: auto hidden;
     scroll-snap-type: x mandatory;
+
     /* A swipe that runs off the end shouldn't drag the page along behind it. */
     overscroll-behavior-x: contain;
     scrollbar-width: none;
@@ -495,14 +544,9 @@
     scroll-snap-stop: always;
   }
 
-  .slide-link, .mobile-title { display: none; }
-
-  @media (max-width: 759px) {
-    .slide-link { display: block; position: absolute; inset: 0; z-index: 1; }
-    .slide-link:focus-visible { outline: 2px solid var(--fg); outline-offset: -4px; }
-    .mobile-title { display: inline; }
-    .title-link, .slide .actions { display: none; }
-    .slide .text { min-height: 0; }
+  .slide-link,
+  .mobile-title {
+    display: none;
   }
 
   /* The words sit in the page's own column, so they line up with the rows below rather than with the screen.
@@ -524,10 +568,11 @@
 
   /* Shadow the rendered text after line clamping so overflow doesn't cut a hard edge through it.
      Keep it tight: the backdrop fade supplies the broader contrast. */
-  h2, .facts, .overview {
+  h2,
+  .facts,
+  .overview {
     filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
   }
-
 
   h2 {
     margin: 0;
@@ -544,14 +589,6 @@
   h2 a {
     color: var(--fg);
     text-decoration: none;
-  }
-
-  @media (min-width: 360px) and (max-width: 759px) {
-    h2 {
-      block-size: 1.05em;
-      -webkit-line-clamp: 1;
-      line-clamp: 1;
-    }
   }
 
   /* Nearly white, not the app's secondary grey. That grey is chosen for the page's dark ground; over a
@@ -665,7 +702,10 @@
     border-radius: 999px;
     background: rgb(255 255 255 / 0.35);
     content: '';
-    transition: width 0.2s ease, height 0.2s ease, background-color 0.2s ease;
+    transition:
+      width 0.2s ease,
+      height 0.2s ease,
+      background-color 0.2s ease;
   }
 
   /* The bullet at either end of the window is drawn smaller where the set carries on past it — the pager says
@@ -687,5 +727,40 @@
   h2 a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+
+  @media (width <= 759px) {
+    .slide-link {
+      display: block;
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+    }
+
+    .slide-link:focus-visible {
+      outline: 2px solid var(--fg);
+      outline-offset: -4px;
+    }
+
+    .mobile-title {
+      display: inline;
+    }
+
+    .title-link,
+    .actions {
+      display: none;
+    }
+
+    .text {
+      min-height: 0;
+    }
+  }
+
+  @media (width >= 360px) and (width <= 759px) {
+    h2 {
+      block-size: 1.05em;
+      -webkit-line-clamp: 1;
+      line-clamp: 1;
+    }
   }
 </style>

@@ -58,7 +58,7 @@ jobs:
       - run: npm ci --ignore-scripts
       # A known high or critical advisory in any web dependency fails the build, as it would ship in the image.
       - run: npm audit --audit-level=high
-      - run: npm run check
+      - run: npm run lint
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: node test/sync-policy-browser.mjs

@@ -9,7 +9,10 @@ const movie = {
   overview: 'A linguist is recruited.',
   tagline: 'Why are they here?',
   runtime: 116,
-  genres: [{ id: 18, name: 'Drama' }, { id: 878, name: 'Science Fiction' }],
+  genres: [
+    { id: 18, name: 'Drama' },
+    { id: 878, name: 'Science Fiction' },
+  ],
   credits: {
     cast: [
       { id: 1, name: 'Amy Adams', character: 'Louise', profile_path: '/p.jpg' },
@@ -18,7 +21,9 @@ const movie = {
       { name: 'No id' },
     ],
   },
-  recommendations: { results: [{ id: 27205, title: 'Inception', release_date: '2010-07-15' }, { id: 3 }] },
+  recommendations: {
+    results: [{ id: 27205, title: 'Inception', release_date: '2010-07-15' }, { id: 3 }],
+  },
 };
 
 const series = {
@@ -48,14 +53,18 @@ describe('title pages', () => {
       { id: 1, name: 'Amy Adams', role: 'Louise', profilePath: '/p.jpg' },
       { id: 2, name: 'Jeremy Renner', role: 'Ian', profilePath: undefined },
     ]);
-    expect(detail.more.map((t) => [t.type, t.id, t.title])).toEqual([['movie', 27205, 'Inception']]);
+    expect(detail.more.map((t) => [t.type, t.id, t.title])).toEqual([
+      ['movie', 27205, 'Inception'],
+    ]);
     expect(detail.seasons).toEqual([]);
   });
 
   it('reads a series: seasons in order with Specials last, a role from each season, the usual episode length', () => {
     const detail = parseDetail({ type: 'tv', id: 95396 }, series)!;
     expect(detail.seasons.map((s) => s.number)).toEqual([1, 2, 0]);
-    expect(detail.cast).toEqual([{ id: 5, name: 'Adam Scott', role: 'Mark S.', profilePath: undefined }]);
+    expect(detail.cast).toEqual([
+      { id: 5, name: 'Adam Scott', role: 'Mark S.', profilePath: undefined },
+    ]);
     expect(detail.runtime).toBe(55);
   });
 
@@ -64,10 +73,20 @@ describe('title pages', () => {
   });
 
   it('takes a YouTube trailer before a teaser, an official one before the rest, and nothing else', () => {
-    const videos = (...results: object[]) => parseDetail({ type: 'movie', id: 1 }, { ...movie, videos: { results } })!.trailer;
-    const yt = (key: string, type: string, official = false) => ({ site: 'YouTube', key, type, official });
-    expect(videos(yt('teaser', 'Teaser', true), yt('fan', 'Trailer'), yt('real', 'Trailer', true))).toBe('real');
-    expect(videos(yt('teaser', 'Teaser'), { site: 'Vimeo', key: 'v', type: 'Trailer' })).toBe('teaser');
+    const videos = (...results: object[]) =>
+      parseDetail({ type: 'movie', id: 1 }, { ...movie, videos: { results } })!.trailer;
+    const yt = (key: string, type: string, official = false) => ({
+      site: 'YouTube',
+      key,
+      type,
+      official,
+    });
+    expect(
+      videos(yt('teaser', 'Teaser', true), yt('fan', 'Trailer'), yt('real', 'Trailer', true)),
+    ).toBe('real');
+    expect(videos(yt('teaser', 'Teaser'), { site: 'Vimeo', key: 'v', type: 'Trailer' })).toBe(
+      'teaser',
+    );
     expect(videos(yt('clip', 'Clip', true))).toBeUndefined();
     expect(parseDetail({ type: 'movie', id: 1 }, movie)!.trailer).toBeUndefined();
   });
@@ -93,19 +112,42 @@ describe('seasons and people', () => {
   it("reads a season's episodes", () => {
     const episodes = parseSeason({
       episodes: [
-        { episode_number: 1, name: 'Good News About Hell', still_path: '/s.jpg', air_date: '2022-02-18' },
+        {
+          episode_number: 1,
+          name: 'Good News About Hell',
+          still_path: '/s.jpg',
+          air_date: '2022-02-18',
+        },
         { episode_number: 2, name: '' },
         { name: 'No number' },
       ],
     });
     expect(episodes).toEqual([
-      { number: 1, name: 'Good News About Hell', overview: undefined, stillPath: '/s.jpg', airDate: '2022-02-18' },
-      { number: 2, name: 'Episode 2', overview: undefined, stillPath: undefined, airDate: undefined },
+      {
+        number: 1,
+        name: 'Good News About Hell',
+        overview: undefined,
+        stillPath: '/s.jpg',
+        airDate: '2022-02-18',
+      },
+      {
+        number: 2,
+        name: 'Episode 2',
+        overview: undefined,
+        stillPath: undefined,
+        airDate: undefined,
+      },
     ]);
   });
 
   it('reads a person, and nobody without a name', () => {
-    expect(parsePerson(287, { name: 'Brad Pitt', known_for_department: 'Acting', biography: 'An actor.' })).toEqual({
+    expect(
+      parsePerson(287, {
+        name: 'Brad Pitt',
+        known_for_department: 'Acting',
+        biography: 'An actor.',
+      }),
+    ).toEqual({
       id: 287,
       name: 'Brad Pitt',
       profilePath: undefined,

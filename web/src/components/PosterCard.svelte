@@ -11,7 +11,9 @@
     progress,
     onselect,
   }: { title: Title; caption?: string; progress?: number; onselect?: () => void } = $props();
-  const poster = $derived(title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined);
+  const poster = $derived(
+    title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined,
+  );
   const faded = $derived(availability.unavailable(title));
   $effect(() => availability.want(title));
 </script>
@@ -24,7 +26,9 @@
       <span class="placeholder">{title.title}</span>
     {/if}
     {#if title.rating}
-      <span class="rating" aria-label="Rated {title.rating.toFixed(1)}">★ {title.rating.toFixed(1)}</span>
+      <span class="rating" aria-label="Rated {title.rating.toFixed(1)}"
+        >★ {title.rating.toFixed(1)}</span
+      >
     {/if}
     {#if progress !== undefined && progress > 0}
       <span class="progress" style:--p={progress}></span>
@@ -67,11 +71,6 @@
     cursor: pointer;
   }
 
-  .pick:focus-visible .art {
-    outline: 3px solid var(--accent);
-    outline-offset: 3px;
-  }
-
   .art {
     position: relative;
     display: block;
@@ -80,6 +79,11 @@
     overflow: hidden;
     border-radius: 12px;
     background: var(--card);
+  }
+
+  .pick:focus-visible .art {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
   }
 
   img {
@@ -117,7 +121,11 @@
     left: 8px;
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(to right, var(--fg) calc(var(--p) * 100%), rgb(255 255 255 / 0.3) 0);
+    background: linear-gradient(
+      to right,
+      var(--fg) calc(var(--p) * 100%),
+      rgb(255 255 255 / 0.3) 0
+    );
   }
 
   .meta {

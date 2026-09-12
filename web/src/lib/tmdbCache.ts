@@ -23,7 +23,11 @@ export interface Store {
 
 /** How long an answer stays fresh — the TV's `tmdbCacheTTL`: a title's own details barely change; lists do. */
 export function freshFor(path: string): number {
-  if (/\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) || path.includes('/season/')) return 30 * DAY;
+  if (
+    /\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) ||
+    path.includes('/season/')
+  )
+    return 30 * DAY;
   if (/^\/3\/(movie|tv|person)\/\d+$/.test(path)) return 30 * DAY;
   return DAY / 4;
 }
@@ -49,7 +53,8 @@ export function cachingFetch(
   let pruned = false;
   return async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (!store || !href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET') return network(input, init);
+    if (!store || !href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET')
+      return network(input, init);
     if (!pruned) {
       pruned = true;
       void store.prune(now() - RETENTION).catch(() => undefined);
@@ -84,11 +89,15 @@ function indexedStore(): Store | null {
   const open = () =>
     (db ??= new Promise((resolve, reject) => {
       const req = factory.open('den-tmdb', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt');
+      req.onupgradeneeded = () =>
+        req.result.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt');
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     }));
-  const run = <T>(mode: IDBTransactionMode, work: (answers: IDBObjectStore) => IDBRequest<T> | void) =>
+  const run = <T>(
+    mode: IDBTransactionMode,
+    work: (answers: IDBObjectStore) => IDBRequest<T> | void,
+  ) =>
     open().then(
       (database) =>
         new Promise<T | undefined>((resolve, reject) => {

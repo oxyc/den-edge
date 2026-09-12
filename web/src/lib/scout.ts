@@ -25,7 +25,9 @@ function place(url: string, routes: Routes, want: { name: string; path: string }
   if (!url.endsWith(MANIFEST)) return null;
   const install = url.slice(0, -MANIFEST.length);
   const config = within(install, routes[want.name]);
-  return config !== null && /^(\/[\w.~%-]+)?$/.test(config) ? { install, base: want.path + config } : null;
+  return config !== null && /^(\/[\w.~%-]+)?$/.test(config)
+    ? { install, base: want.path + config }
+    : null;
 }
 
 async function manifestIs(manifest: string, id: string, fetchImpl: typeof fetch): Promise<boolean> {
@@ -52,7 +54,11 @@ export async function findAddon(
 }
 
 /** atlas: a plugin, or — where this origin serves one — the box's own, which the library need not list. */
-export async function findAtlas(plugins: string[], routes: Routes, fetchImpl: typeof fetch = fetch): Promise<Addon | null> {
+export async function findAtlas(
+  plugins: string[],
+  routes: Routes,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Addon | null> {
   const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl);
   if (plugin) return plugin;
   const here = await manifestIs(`${ATLAS.path}${MANIFEST}`, ATLAS.id, fetchImpl);
@@ -80,7 +86,14 @@ function catalogTitles(body: unknown, type: MediaType): Title[] {
   return (metas as Record<string, unknown>[]).flatMap((meta) => {
     const year = Number.parseInt(String(meta.releaseInfo ?? ''), 10);
     if (typeof meta.moviedb_id !== 'number' || typeof meta.name !== 'string') return [];
-    return [{ type, id: meta.moviedb_id, title: meta.name, year: Number.isFinite(year) ? year : undefined }];
+    return [
+      {
+        type,
+        id: meta.moviedb_id,
+        title: meta.name,
+        year: Number.isFinite(year) ? year : undefined,
+      },
+    ];
   });
 }
 
@@ -104,7 +117,10 @@ export async function trendingEverywhere(
     }
   };
   const [movies, series] = await Promise.all([load('movie'), load('series')]);
-  return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [movies[i], series[i]])
+  return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [
+    movies[i],
+    series[i],
+  ])
     .flat()
     .filter((title): title is Title => title !== undefined);
 }
@@ -126,7 +142,10 @@ interface CatalogEntry {
  * Picks, when the TV has synced some, narrow it further and name the country outright, since the same provider
  * in two countries is two different catalogs.
  */
-function arrivalCatalogs(manifest: unknown, picks: { id: number; country: string }[]): { path: string; type: MediaType }[] {
+function arrivalCatalogs(
+  manifest: unknown,
+  picks: { id: number; country: string }[],
+): { path: string; type: MediaType }[] {
   const catalogs = (manifest as { catalogs?: unknown } | null)?.catalogs;
   if (!Array.isArray(catalogs)) return [];
   const wanted: { path: string; type: MediaType }[] = [];
@@ -138,9 +157,13 @@ function arrivalCatalogs(manifest: unknown, picks: { id: number; country: string
       wanted.push({ path: `/catalog/${raw.type}/${raw.id}.json`, type });
       continue;
     }
-    const providers = raw.denProviderIds ?? (raw.denProviderId === undefined ? [] : [raw.denProviderId]);
+    const providers =
+      raw.denProviderIds ?? (raw.denProviderId === undefined ? [] : [raw.denProviderId]);
     for (const pick of picks.filter((p) => providers.includes(p.id))) {
-      wanted.push({ path: `/catalog/${raw.type}/${raw.id}/country=${encodeURIComponent(pick.country)}.json`, type });
+      wanted.push({
+        path: `/catalog/${raw.type}/${raw.id}/country=${encodeURIComponent(pick.country)}.json`,
+        type,
+      });
     }
   }
   return wanted;

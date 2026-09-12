@@ -4,11 +4,12 @@
   import FixturePage from './FixturePage.svelte';
   import { parseRoute } from '../src/lib/route';
   import '../src/app.css';
-  let route=$state(parseRoute(location.hash));
+  let route = $state(parseRoute(location.hash));
 </script>
-<NavigationBar {route} paired={true}/>
+
+<NavigationBar {route} paired={true} />
 <main style="padding:var(--bar-space) var(--gutter)">
-  <Router onchange={next=>route=next}>
-    {#snippet children(route,active)}<FixturePage {route} {active}/>{/snippet}
+  <Router onchange={(next) => (route = next)}>
+    {#snippet children(route, active)}<FixturePage {route} {active} />{/snippet}
   </Router>
 </main>

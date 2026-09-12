@@ -16,10 +16,18 @@ export function ensureSyncPolicy(idle = false): Promise<void> {
     const start = () => {
       cancel?.();
       startPending = undefined;
-      void Promise.resolve().then(() => initialize()).then(() => { ready = true; resolve(); }, (error) => {
-        pending = undefined;
-        reject(error);
-      });
+      void Promise.resolve()
+        .then(() => initialize())
+        .then(
+          () => {
+            ready = true;
+            resolve();
+          },
+          (error) => {
+            pending = undefined;
+            reject(error);
+          },
+        );
     };
     startPending = start;
     if (!idle) start();

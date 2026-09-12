@@ -10,7 +10,12 @@ const session = () => ({ displays: [] as Title[], shapes: new Map<string, Shape>
 it('shares in-flight naming across retained pages and skips already named titles', async () => {
   const state = session();
   let finish!: (value: Details) => void;
-  const lookup = vi.fn(() => new Promise<Details>(resolve => { finish = resolve; }));
+  const lookup = vi.fn(
+    () =>
+      new Promise<Details>((resolve) => {
+        finish = resolve;
+      }),
+  );
   const first = nameLibraryTitles(state, [ref], 'key', lookup);
   const second = nameLibraryTitles(state, [ref], 'key', lookup);
   await Promise.resolve();
@@ -35,7 +40,15 @@ it('does not duplicate a title remembered while its naming request was pending',
 it('ignores stale API-key results and permits retry after a failed request', async () => {
   const state = session();
   let finish!: (value: Details) => void;
-  const old = nameLibraryTitles(state, [ref], 'old', () => new Promise(resolve => { finish = resolve; }));
+  const old = nameLibraryTitles(
+    state,
+    [ref],
+    'old',
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
   await Promise.resolve();
   await nameLibraryTitles(state, [ref], 'new', async () => null);
   finish({ title: { ...title, title: 'Stale' } });

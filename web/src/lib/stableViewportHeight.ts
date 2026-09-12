@@ -17,9 +17,11 @@ export function stableViewportHeight(node: HTMLElement) {
   };
   measure();
   window.addEventListener('resize', resized);
-  return { destroy() {
-    window.removeEventListener('resize', resized);
-    if (previous) node.style.setProperty('--stable-hero-height', previous);
-    else node.style.removeProperty('--stable-hero-height');
-  } };
+  return {
+    destroy() {
+      window.removeEventListener('resize', resized);
+      if (previous) node.style.setProperty('--stable-hero-height', previous);
+      else node.style.removeProperty('--stable-hero-height');
+    },
+  };
 }

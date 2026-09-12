@@ -88,10 +88,18 @@ class Links {
     return this.list[0];
   }
 
-  add(inboxKey: string, details: { name?: string; libraryKey: string; linkKey: string }, now = Date.now()): void {
+  add(
+    inboxKey: string,
+    details: { name?: string; libraryKey: string; linkKey: string },
+    now = Date.now(),
+  ): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
-    const name = details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
-    this.list = [...this.list, { inboxKey, name, linkedAt: now, libraryKey: details.libraryKey, linkKey: details.linkKey }];
+    const name =
+      details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
+    this.list = [
+      ...this.list,
+      { inboxKey, name, linkedAt: now, libraryKey: details.libraryKey, linkKey: details.linkKey },
+    ];
     this.moved = null;
     writeLinks(this.list);
   }

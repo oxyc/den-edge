@@ -103,10 +103,16 @@ export function applyLog(library: Library, rows: Row[]): Library {
     if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {
-      const episode = { type: row.title.type, id: row.title.id, season: row.season, episode: row.episode };
+      const episode = {
+        type: row.title.type,
+        id: row.title.id,
+        season: row.season,
+        episode: row.episode,
+      };
       if (row.progress.value > 0) {
         // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
-        const series = marks.get(markKey(episode)) ?? [...marks.values()].find((m) => titleKey(m) === key);
+        const series =
+          marks.get(markKey(episode)) ?? [...marks.values()].find((m) => titleKey(m) === key);
         marks.set(markKey(episode), {
           ...episode,
           fraction: row.progress.value,
@@ -129,7 +135,8 @@ export function applyLog(library: Library, rows: Row[]): Library {
       addedAt: row.addedAt,
       deleted: row.deleted.value,
     });
-    if (row.dismissed.value) dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
+    if (row.dismissed.value)
+      dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
   }
   // A whole series un-watched: every episode progress from before it goes.
   for (const [key, mark] of marks) {
@@ -158,7 +165,8 @@ export function untitled(library: Library): { type: MediaType; id: number }[] {
     }
   }
   for (const m of library.marks) {
-    if (m.title === '' && (m.type === 'movie' || m.type === 'tv')) refs.set(titleKey(m), { type: m.type, id: m.id });
+    if (m.title === '' && (m.type === 'movie' || m.type === 'tv'))
+      refs.set(titleKey(m), { type: m.type, id: m.id });
   }
   return [...refs.values()];
 }
@@ -185,24 +193,36 @@ export function watchlist(library: Library): Title[] {
 
 /** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
 export function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
-  const seasons = [...shape.counts.entries()].sort(([a], [b]) => (a === 0 ? Infinity : a) - (b === 0 ? Infinity : b));
+  const seasons = [...shape.counts.entries()].sort(
+    ([a], [b]) => (a === 0 ? Infinity : a) - (b === 0 ? Infinity : b),
+  );
   const index = seasons.findIndex(([season]) => season === at.season);
   if (index < 0) return undefined;
-  if (at.episode < (seasons[index]?.[1] ?? 0)) return { season: at.season, episode: at.episode + 1 };
+  if (at.episode < (seasons[index]?.[1] ?? 0))
+    return { season: at.season, episode: at.episode + 1 };
   const next = seasons.slice(index + 1).find(([, count]) => count > 0);
   return next ? { season: next[0], episode: 1 } : undefined;
 }
 
-export function isAired(at: { season: number; episode: number }, lastAired: Shape['lastAired']): boolean {
+export function isAired(
+  at: { season: number; episode: number },
+  lastAired: Shape['lastAired'],
+): boolean {
   if (!lastAired || lastAired.season <= 0) return true;
-  return at.season < lastAired.season || (at.season === lastAired.season && at.episode <= lastAired.episode);
+  return (
+    at.season < lastAired.season ||
+    (at.season === lastAired.season && at.episode <= lastAired.episode)
+  );
 }
 
 /** Started series (the episode to resume or start next), then in-progress movies, newest first. */
 export function continueWatching(library: Library): ContinueEntry[] {
-  const dismissedSince = (key: string, activity: number) => (library.dismissed.get(key) ?? -Infinity) >= activity;
+  const dismissedSince = (key: string, activity: number) =>
+    (library.dismissed.get(key) ?? -Infinity) >= activity;
   const watchedTitles = new Set(
-    library.records.filter((r) => !r.deleted && r.status === 'watched').map((r) => titleKey(r.title)),
+    library.records
+      .filter((r) => !r.deleted && r.status === 'watched')
+      .map((r) => titleKey(r.title)),
   );
   const seen = new Set<string>();
   const entries: ContinueEntry[] = [];
@@ -239,7 +259,10 @@ export function continueWatching(library: Library): ContinueEntry[] {
   }
 
   const movies = library.records
-    .filter((r) => !r.deleted && r.status === 'inProgress' && r.title.type === 'movie' && r.title.title !== '')
+    .filter(
+      (r) =>
+        !r.deleted && r.status === 'inProgress' && r.title.type === 'movie' && r.title.title !== '',
+    )
     .sort((a, b) => b.progressAt - a.progressAt);
   for (const record of movies) {
     const key = titleKey(record.title);
