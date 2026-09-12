@@ -23,7 +23,7 @@
     updateProgress,
     WATCHED,
   } from './lib/actions';
-  import { pickBillboard, tasteOf } from './lib/billboard';
+  import { pickBillboard, tasteOf, type Candidate } from './lib/billboard';
   import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
@@ -49,7 +49,7 @@
   import { findRemux } from './lib/remux';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { arrivals, findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
-  import { fetchDetails } from './lib/tmdb';
+  import { fetchDetails, fetchTitle } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
   let { link, route }: { link: Link; route: Route } = $props();
@@ -408,23 +408,56 @@
       // What just landed on the services this household actually has — new to watch, whatever year it is from.
       here ? arrivals(here, prefs.services) : Promise.resolve([] as Title[][]),
     ])
-      .then(([everywhere, hotMovies, hotSeries, fresh, soon, popular, landed]) => {
+      .then(async ([everywhere, hotMovies, hotSeries, fresh, soon, popular, landed]) => {
         const ranked = (list: Title[]) => list.map((title, rank) => ({ title, rank, of: list.length }));
-        const pool = [
+        const pool: Candidate[] = [
           ...landed.flatMap((list) => list.map((title, rank) => ({ title, arrival: { rank, of: list.length } }))),
           ...ranked(everywhere),
           ...ranked(hotMovies),
           ...ranked(hotSeries),
           ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
         ];
+        const named = await nameCandidates(pool);
         // Never a title this library already holds: the billboard is for what hasn't been found yet.
-        const picked = pickBillboard(pool, {
+        const picked = pickBillboard(named, {
           taste,
           keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
         });
         if (run === billboardRun) featured = picked;
       })
       .catch(() => undefined);
+  }
+
+  /**
+   * Ask TMDB about the candidates that arrived knowing nothing about themselves.
+   *
+   * atlas names a title by id, name and year and nothing else, so everything from a "new on <service>" catalog
+   * reached the picker with no genres to match a taste against, no rating and no popularity — which left the
+   * billboard deciding on "what is new on your services" alone, and this library's own leanings unable to touch
+   * it. The strongest few by their place in those lists are named properly first. Bounded, and `tmdbFetch`
+   * caches, so a hundred arrivals don't become a hundred requests.
+   */
+  async function nameCandidates(pool: Candidate[], most = 24): Promise<Candidate[]> {
+    const key = tmdbKey;
+    const standing = (c: Candidate) => (c.arrival && c.arrival.of > 0 ? 1 - c.arrival.rank / c.arrival.of : 0);
+    const bare = pool
+      .filter((c) => c.arrival && !c.title.genreIds)
+      .sort((a, b) => standing(b) - standing(a))
+      .slice(0, most);
+    if (!key || bare.length === 0) return pool;
+    const queue = [...bare];
+    const found = new Map<string, Title>();
+    const lookup = async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const title = await fetchTitle({ type: next.title.type, id: next.title.id }, key).catch(() => null);
+        if (title) found.set(titleKey(title), title);
+      }
+    };
+    await Promise.all(Array.from({ length: LOOKUPS }, lookup));
+    return pool.map((c) => {
+      const better = found.get(titleKey(c.title));
+      return better ? { ...c, title: { ...c.title, ...better } } : c;
+    });
   }
 
   function caption(entry: ContinueEntry): string | undefined {
