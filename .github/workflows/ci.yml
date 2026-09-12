@@ -62,6 +62,7 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: node test/sync-policy-browser.mjs
+      - run: npm run test:e2e
       - run: npm run build
 
   # The image is what ships, and it builds differently from `cargo build` (musl, scratch). Caught on the PR

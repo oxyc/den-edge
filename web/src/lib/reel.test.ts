@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { trailerURL } from './reel';
+import { trailerURL, trailerURLs } from './reel';
 import type { Routes } from './routes';
 
 const ROUTES: Routes = {
@@ -45,5 +45,19 @@ describe('trailerURL', () => {
     expect(await ask(ROUTES, answering(meta, 503))).toBeNull();
     const sealed: Routes = { reel: [{ url: 'https://d-reel.oxy.fi', access: true }] };
     expect(await ask(sealed, answering(meta))).toBeNull();
+  });
+});
+
+
+describe('trailer candidates', () => {
+  it('keeps valid fallback videos after malformed entries, deduplicates and preserves signatures across mounts', async () => {
+    const body = { meta: { links: [
+      { trailers: 'invalid' }, { trailers: 'javascript:alert(1)' },
+      { trailers: 'https://old.example/reel/play/first.mp4?s=one' },
+      { trailers: 'https://old.example/reel/play/first.mp4?s=one' },
+      { trailers: 'http://lan/play/second.mp4?s=two' },
+    ] } };
+    expect(await trailerURLs('/reel/cfg', 'movie', 'tt0111161', ROUTES, { fetchImpl: answering(body), secure: true }))
+      .toEqual(['https://pve.example:8443/reel/play/first.mp4?s=one', 'https://pve.example:8443/reel/play/second.mp4?s=two']);
   });
 });

@@ -1,6 +1,10 @@
 <!-- A title's page, as the TV's Detail: the backdrop, what it is, the library controls, its seasons with the
      episodes you've seen, the cast, and more like it. -->
 <script lang="ts">
+  import DetailMedia from './DetailMedia.svelte';
+  import { stableViewportHeight } from '../lib/stableViewportHeight';
+  import type { Routes } from '../lib/routes';
+  import Loading from './Loading.svelte';
   import { fetchDetail, fetchSeason, type Episode, type TitleDetail } from '../lib/detail';
   import type { MediaType, Title } from '../lib/library';
   import { compareStamps, type EpisodeRow, type TitleRow } from '../lib/wire';
@@ -8,12 +12,14 @@
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
   import TitleActions from './TitleActions.svelte';
-  import Trailer from './Trailer.svelte';
 
   type Reaction = TitleRow['reaction']['value'];
 
   let {
     ref,
+    active = true,
+    reel = null,
+    routes = {},
     tmdbKey,
     row,
     episodes,
@@ -30,6 +36,9 @@
     shown = () => true,
   }: {
     ref: { type: MediaType; id: number };
+    active?: boolean;
+    reel?: string | null;
+    routes?: Routes;
     tmdbKey: string;
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -54,14 +63,11 @@
   let detail = $state<TitleDetail | null | undefined>(undefined);
   let season = $state<number | null>(null);
   let seasonEpisodes = $state<Episode[] | null | undefined>(undefined);
-  /** Its trailer is showing. */
-  let trailer = $state(false);
 
   $effect(() => {
     const [current, key] = [ref, tmdbKey];
     detail = undefined;
     season = null;
-    trailer = false;
     void fetchDetail(current, key).then((loaded) => {
       if (current !== ref) return;
       detail = loaded;
@@ -97,42 +103,64 @@
 </script>
 
 {#if detail === undefined}
-  <p class="note">Loading…</p>
+  <div aria-busy="true" aria-label="Loading title">
+    <Loading label="Loading title" page />
+    <header class="hero" aria-hidden="true" use:stableViewportHeight>
+      <div class="visual"></div>
+      <div class="hero-content">
+        <div class="head">
+          <span class="poster placeholder"></span>
+          <div class="loading-copy">
+            <span class="placeholder loading-title"></span>
+            <span class="placeholder loading-facts"></span>
+          </div>
+        </div>
+        <div class="hero-actions"><div class="loading-actions placeholder" aria-hidden="true"></div></div>
+      </div>
+    </header>
+    <div class="loading-overview placeholder" aria-hidden="true"></div>
+  </div>
 {:else if detail === null}
   <p class="note">Couldn’t load this title from TMDB. Try again in a moment.</p>
 {:else}
   {@const d = detail}
-  <header class="hero">
-    {#if d.backdropPath}
-      <img class="backdrop" src="https://image.tmdb.org/t/p/w1280{d.backdropPath}" alt="" />
-    {/if}
-    <div class="head">
-      {#if d.title.posterPath}
-        <img class="poster" src="https://image.tmdb.org/t/p/w342{d.title.posterPath}" alt="" />
-      {/if}
-      <div>
-        <h1>{d.title.title}</h1>
-        <p class="facts">{facts(d)}</p>
-        {#if d.tagline}<p class="tagline">{d.tagline}</p>{/if}
+  <header class="hero" use:stableViewportHeight>
+    <div class="visual">
+      <DetailMedia type={ref.type} imdbId={d.imdbId} {active} {reel} {routes}
+        backdrop={d.backdropPath ? `https://image.tmdb.org/t/p/w1280${d.backdropPath}` : undefined}
+        poster={d.title.posterPath ? `https://image.tmdb.org/t/p/w780${d.title.posterPath}` : undefined} />
+    </div>
+    <div class="hero-content">
+      <div class="head">
+        {#if d.title.posterPath}
+          <img class="poster" src="https://image.tmdb.org/t/p/w342{d.title.posterPath}" alt="" width="342" height="513" />
+        {:else}
+          <span class="poster placeholder" aria-hidden="true"></span>
+        {/if}
+        <div>
+          <h1>{d.title.title}</h1>
+          <p class="facts">{facts(d)}</p>
+          {#if d.tagline}<p class="tagline">{d.tagline}</p>{/if}
+        </div>
+      </div>
+      <div class="hero-actions">
+        <TitleActions
+          {row}
+          {busy}
+          {failure}
+          {notice}
+          onwatchlist={(on) => onwatchlist(d.title, on)}
+          onseen={(on) => onseen(d.title, on)}
+          onreact={(reaction) => onreact(d.title, reaction)}
+          onplay={() => onplay(d.title)}
+          onplayhere={onplayhere ? () => onplayhere(d.title) : undefined}
+          trailerHref={d.trailer
+            ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
+            : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
+        />
       </div>
     </div>
   </header>
-
-  <TitleActions
-    {row}
-    {busy}
-    {failure}
-    {notice}
-    onwatchlist={(on) => onwatchlist(d.title, on)}
-    onseen={(on) => onseen(d.title, on)}
-    onreact={(reaction) => onreact(d.title, reaction)}
-    onplay={() => onplay(d.title)}
-    onplayhere={onplayhere ? () => onplayhere(d.title) : undefined}
-    ontrailer={d.trailer ? () => (trailer = true) : undefined}
-  />
-  {#if trailer && d.trailer}
-    <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailer = false)} />
-  {/if}
   {#if d.overview}<p class="overview">{d.overview}</p>{/if}
 
   {#if d.seasons.length}
@@ -145,7 +173,7 @@
         {/each}
       </div>
       {#if seasonEpisodes === undefined}
-        <p class="note">Loading episodes…</p>
+        <Loading label="Loading episodes" />
       {:else if seasonEpisodes === null}
         <p class="note">Couldn’t load this season from TMDB.</p>
       {:else}
@@ -204,30 +232,49 @@
 
 <style>
   .hero {
-    position: relative;
-    margin: -28px calc(-1 * var(--gutter)) 24px;
-    padding: clamp(120px, 28vw, 320px) var(--gutter) 0;
+    position:relative;
+    isolation:isolate;
+    display:grid;
+    align-items:end;
+    width:100vw;
+    min-height:var(--stable-hero-height,clamp(520px,84lvh,900px));
+    margin-inline:calc(50% - 50vw);
+    margin-top:calc(-1 * var(--bar-space));
+    margin-bottom:24px;
   }
-
-  .backdrop {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    mask-image: linear-gradient(to bottom, #000 40%, transparent);
-    opacity: 0.55;
+  .visual { position:absolute; inset:0; background:var(--bg); }
+  .hero-content { position:relative; width:100%; max-width:1400px; margin:0 auto; padding:calc(var(--bar-space) + 32px) var(--gutter) 24px; }
+  .hero-actions { min-height:80px; margin-top:24px; }
+  @media(max-width:759px) {
+    .hero { display:block; min-height:0; margin-top:0; }
+    .visual { position:relative; inset:auto; width:100%; aspect-ratio:16/9; }
+    .hero-content { padding:24px var(--gutter) 0; }
+    .hero-actions { min-height:122px; }
   }
 
   .head {
     display: flex;
     gap: 20px;
     align-items: end;
+    min-height: clamp(144px, 33vw, 270px);
   }
 
+  .head > div { min-width: 0; }
+  .placeholder { background: var(--card, #1c1c22); border-radius: 8px; }
+  .loading-copy { flex: 1; padding-bottom: 8px; }
+  .loading-title { display: block; width: min(100%, 360px); height: 2.2em; margin-bottom: 12px; }
+  .loading-facts { display: block; width: min(85%, 240px); height: 2.8em; }
+  .loading-actions { height:48px; max-width:680px; }
+  .loading-overview { height: 100px; max-width: 70ch; }
+
   .poster {
+    display: block;
+    flex: 0 0 clamp(96px, 22vw, 180px);
     width: clamp(96px, 22vw, 180px);
+    height: auto;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    background: var(--card);
     border-radius: 12px;
     box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
   }

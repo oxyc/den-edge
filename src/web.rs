@@ -6,7 +6,7 @@
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
 use axum::body::Body;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use std::path::{Component, Path, PathBuf};
 
@@ -24,21 +24,99 @@ fn csp(remux: &[String]) -> String {
     )
 }
 
-pub async fn serve(dir: &Path, path: &str, remux: &[String]) -> Response {
+pub async fn serve(dir: &Path, path: &str, remux: &[String], headers: &HeaderMap) -> Response {
     let Some(relative) = relative(path) else { return not_found() };
     let file = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
     match tokio::fs::read(&file).await {
-        Ok(bytes) => respond(bytes, &file, path.starts_with("/assets/"), remux),
+        Ok(bytes) => encoded(bytes, &file, path.starts_with("/assets/"), remux, headers).await,
         // A route in the app, not a file: the app's shell renders it.
         Err(_) if !path.rsplit('/').next().unwrap_or("").contains('.') => {
             let index = dir.join("index.html");
             match tokio::fs::read(&index).await {
-                Ok(bytes) => respond(bytes, &index, false, remux),
+                Ok(bytes) => encoded(bytes, &index, false, remux, headers).await,
                 Err(_) => not_found(),
             }
         }
         Err(_) => not_found(),
     }
+}
+
+/// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
+/// Missing/empty headers conservatively get identity; malformed weights are never permission to encode.
+fn encodings(headers: &HeaderMap) -> (u16, u16) {
+    let (mut gzip, mut identity, mut wildcard): (Option<u16>, Option<u16>, Option<u16>) = (None, None, None);
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for coding in value.split(',') {
+            let mut parts = coding.trim().split(';');
+            let name = parts.next().unwrap_or("").trim();
+            let weight = parts.next().map_or(1000, |p| {
+                let Some((key, value)) = p.trim().split_once('=') else { return 0 };
+                let value = value.trim();
+                if !key.trim().eq_ignore_ascii_case("q") || parts.next().is_some() {
+                    return 0;
+                }
+                let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+                if !matches!(whole, "0" | "1")
+                    || fraction.len() > 3
+                    || !fraction.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return 0;
+                }
+                if whole == "1" {
+                    return if fraction.bytes().all(|b| b == b'0') { 1000 } else { 0 };
+                }
+                fraction.parse::<u16>().unwrap_or(0) * 10_u16.pow(3 - fraction.len() as u32)
+            });
+            let slot = if name.eq_ignore_ascii_case("gzip") {
+                &mut gzip
+            } else if name.eq_ignore_ascii_case("identity") {
+                &mut identity
+            } else if name == "*" {
+                &mut wildcard
+            } else {
+                continue;
+            };
+            *slot = Some(slot.map_or(weight, |prior| prior.min(weight)));
+        }
+    }
+    (gzip.or(wildcard).unwrap_or(0), identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 }))
+}
+
+async fn encoded(
+    bytes: Vec<u8>,
+    file: &Path,
+    immutable: bool,
+    remux: &[String],
+    headers: &HeaderMap,
+) -> Response {
+    let (gzip, identity) = encodings(headers);
+    if gzip > 0 && gzip >= identity {
+        let mut sidecar = file.as_os_str().to_os_string();
+        sidecar.push(".gz");
+        // A hand-updated WEB_DIR must never serve a stale sidecar after its original changed.
+        let fresh = match (tokio::fs::metadata(file).await, tokio::fs::metadata(&sidecar).await) {
+            (Ok(original), Ok(compressed)) => match (original.modified(), compressed.modified()) {
+                (Ok(original), Ok(compressed)) => compressed >= original,
+                _ => false,
+            },
+            _ => false,
+        };
+        if fresh {
+            if let Ok(compressed) = tokio::fs::read(sidecar).await {
+                let mut response = respond(compressed, file, immutable, remux);
+                response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                return response;
+            }
+        }
+    }
+    if identity == 0 {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
+        response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+        return response;
+    }
+    respond(bytes, file, immutable, remux)
 }
 
 /// The request path as a path under the web directory, or `None` if it would step outside it.
@@ -63,8 +141,11 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
+    let length = bytes.len();
     let mut resp = Response::new(Body::from(bytes));
     let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
@@ -98,6 +179,69 @@ mod tests {
         let policy = super::csp(&[]);
         assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
         assert!(!policy.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn encoding_negotiation_respects_weights_refusals_and_multiple_fields() {
+        for (value, expected) in [
+            ("", (0, 1000)),
+            ("gzip, br", (1000, 1000)),
+            ("GZip; Q=0.8", (800, 1000)),
+            ("*", (1000, 1000)),
+            ("gzip;q=0, *", (0, 1000)),
+            ("*;q=0", (0, 0)),
+            ("gzip, *;q=0", (1000, 0)),
+            ("identity;q=0.5, gzip;q=0.9", (900, 500)),
+            ("identity, *;q=0", (0, 1000)),
+            ("gzip;q=garbage", (0, 1000)),
+            ("gzip;q=1.001", (0, 1000)),
+            ("gzip;q=0.0001", (0, 1000)),
+            ("gzip;q=0.001", (1, 1000)),
+            ("gzip;q=1.000", (1000, 1000)),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, value.parse().unwrap());
+            assert_eq!(super::encodings(&headers), expected, "{value}");
+        }
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        headers.append(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        assert_eq!(super::encodings(&headers), (0, 1000));
+    }
+
+    #[tokio::test]
+    async fn precompressed_assets_keep_mime_cache_and_head_semantics() {
+        let h = with_app();
+        // gzip("console.log(1)"); the build also verifies every generated sidecar by decompression.
+        let gzip: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 75, 206, 207, 43, 206, 207, 73, 213, 203, 201, 79, 215, 48,
+            212, 4, 0, 104, 254, 1, 67, 14, 0, 0, 0,
+        ];
+        std::fs::write(h.dir.join("web/assets/index-abc123.js.gz"), gzip).unwrap();
+        let response = h.send("GET", "/assets/index-abc123.js", None, &[("accept-encoding", "gzip")]).await;
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(response.headers()[header::VARY], "accept-encoding");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], gzip.len().to_string());
+        assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), gzip);
+        let head = h.send("HEAD", "/assets/index-abc123.js", None, &[("accept-encoding", "gzip")]).await;
+        assert_eq!(head.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], gzip.len().to_string());
+        assert!(body_text(head).await.is_empty());
+        let plain = h.send("GET", "/assets/index-abc123.js", None, &[("accept-encoding", "gzip;q=0")]).await;
+        assert!(!plain.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(plain.headers()[header::VARY], "accept-encoding");
+        assert_eq!(body_text(plain).await, "console.log(1)");
+        assert_eq!(
+            h.send("GET", "/", None, &[("accept-encoding", "identity;q=0")]).await.status(),
+            StatusCode::NOT_ACCEPTABLE
+        );
+        let api = h.send("GET", "/health", None, &[("accept-encoding", "gzip")]).await;
+        assert!(!api.headers().contains_key(header::CONTENT_ENCODING));
+        let original = std::fs::File::open(h.dir.join("web/assets/index-abc123.js")).unwrap();
+        original.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10)).unwrap();
+        let stale = h.send("GET", "/assets/index-abc123.js", None, &[("accept-encoding", "gzip")]).await;
+        assert!(!stale.headers().contains_key(header::CONTENT_ENCODING));
     }
 
     fn with_app() -> Harness {

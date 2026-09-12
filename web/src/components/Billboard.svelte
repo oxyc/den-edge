@@ -11,6 +11,7 @@
      Motion, Data Saver, or the billboard scrolled off the screen leave the still picture in its place. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import { trailerURL } from '../lib/reel';
@@ -19,6 +20,7 @@
 
   let {
     titles,
+    active = true,
     tmdbKey,
     onplay,
     reel,
@@ -26,6 +28,7 @@
   }: {
     /** The billboard's titles, best first. */
     titles: Title[];
+    active?: boolean;
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
     onplay?: (title: Title) => void;
@@ -57,10 +60,16 @@
   // Details arrive per slide and are kept, so coming back to one shows it at once.
   let known = $state(new Map<string, TitleDetail>());
 
+  const learning = new Set<string>();
+
   async function learn(title: Title | undefined): Promise<void> {
-    if (!title || !tmdbKey || known.has(keyOf(title))) return;
-    const found = await fetchDetail({ type: title.type, id: title.id }, tmdbKey).catch(() => null);
-    if (found) known = new Map(known).set(keyOf(title), found);
+    if (!title || !tmdbKey || known.has(keyOf(title)) || learning.has(keyOf(title))) return;
+    const key = keyOf(title);
+    learning.add(key);
+    try {
+      const found = await fetchDetail({ type: title.type, id: title.id }, tmdbKey).catch(() => null);
+      if (found) known = new Map(known).set(key, found);
+    } finally { learning.delete(key); }
   }
 
   const detail = $derived(current ? known.get(keyOf(current)) : undefined);
@@ -139,7 +148,7 @@
     const table = routes;
     ambient = null;
     playing = false;
-    if (!title || !imdbId || !base || !onScreen || still() || saving()) return;
+    if (!active || !title || !imdbId || !base || !onScreen || still() || saving()) return;
     let live = true;
     const timer = setTimeout(() => {
       void trailerURL(base, title.type, imdbId, table ?? {}).then((url) => {
@@ -179,9 +188,12 @@
     const slides = Array.from(box.children) as HTMLElement[];
     const watch = new IntersectionObserver(
       (entries) => {
+        if (!active || box.clientWidth === 0) return;
+        const visible = Math.round(box.scrollLeft / box.clientWidth);
         for (const entry of entries) {
           const at = slides.indexOf(entry.target as HTMLElement);
-          if (entry.isIntersecting && at >= 0 && at !== index) index = at;
+          // Discard queued intersections from before a retained rail's scroll position was restored.
+          if (entry.isIntersecting && at === visible && at >= 0 && at !== index) index = at;
         }
       },
       { root: box, threshold: 0.6 },
@@ -200,7 +212,7 @@
    */
   function scrolled() {
     const box = rail;
-    if (!box || box.clientWidth === 0) return;
+    if (!active || !box || box.clientWidth === 0) return;
     const at = Math.round(box.scrollLeft / box.clientWidth);
     if (at !== index && at >= 0 && at < shown.length) index = at;
     // A scroll of its own making is still rotation; a scroll of the viewer's ends it. Smooth scrolling keeps
@@ -234,7 +246,7 @@
   // It cycles on its own until you move it, and holds while you are reading it — pointer over it, or a control
   // in it focused. Nothing moves for a viewer who asked for less movement.
   $effect(() => {
-    if (paging || held || shown.length < 2 || still()) return;
+    if (!active || !onScreen || paging || held || shown.length < 2 || still()) return;
     const timer = setInterval(() => {
       const next = (index + 1) % shown.length;
       // The wrap is a jump rather than a scroll back through forty slides.
@@ -261,6 +273,7 @@
      arrived, so the page doesn't jump when they do. -->
 <section
   class="billboard"
+  use:stableViewportHeight
   aria-roledescription="carousel"
   aria-label="Featured"
   bind:this={frame}
@@ -306,8 +319,8 @@
         <div class="told">
           <div class="text">
             <h2><a href={titleHref(title)} tabindex={n === index ? 0 : -1}>{title.title}</a></h2>
-            {#if facts(title)}<p class="facts">{facts(title)}</p>{/if}
-            {#if found?.overview}<p class="overview">{found.overview}</p>{/if}
+            <p class="facts">{facts(title)}</p>
+            <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
               {#if onplay}
                 <button class="primary" tabindex={n === index ? 0 : -1} onclick={() => onplay(title)}>
@@ -356,11 +369,10 @@
     width: 100vw;
     /* Lets the picture, which is not inside the scroller, be animated by the scroller's own progress. */
     timeline-scope: --rail;
-    /* The large viewport, not the dynamic one: `vh` grows as a phone's address bar rolls away, which would
-       resize the hero mid-scroll and drag the whole page with it. `lvh` is the height with the bar gone, so the
-       billboard is the same size before and after. The `vh` line is what a browser without `lvh` reads. */
-    min-height: clamp(420px, 76vh, 860px);
-    min-height: clamp(420px, 76lvh, 860px);
+    /* Use the large viewport initially, then preserve the measured size through touch-browser
+       toolbar changes. Width changes and desktop window resizing refresh the measurement. */
+    min-height: var(--stable-hero-height, clamp(420px, 76vh, 860px));
+    min-height: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
@@ -513,6 +525,12 @@
     margin: 0;
     font-size: clamp(26px, 6vw, 48px);
     line-height: 1.05;
+    block-size: 2.1em;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   h2 a {
@@ -527,6 +545,13 @@
     margin: 0;
     color: rgb(255 255 255 / 0.92);
     font-size: 14px;
+    line-height: 1.4;
+    block-size: 2.8em;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   /* Three lines: a billboard says what it is, the title's own page says the rest. */
@@ -539,6 +564,8 @@
     line-clamp: 3;
     color: rgb(255 255 255 / 0.88);
     font-size: 15px;
+    line-height: 1.4;
+    block-size: 4.2em;
   }
 
   .actions {

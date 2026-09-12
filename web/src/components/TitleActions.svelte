@@ -18,7 +18,7 @@
     onreact,
     onplay,
     onplayhere,
-    ontrailer,
+    trailerHref,
     notice = null,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
@@ -32,11 +32,12 @@
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
-    /** Show its trailer; no button without one. */
-    ontrailer?: () => void;
+    /** A YouTube watch link, or a trailer search when no exact video is known. */
+    trailerHref?: string;
     /** What the last action did, when that's worth saying. */
     notice?: string | null;
   } = $props();
+  let viewportWidth = $state(window.innerWidth);
 
   const active = $derived(row !== undefined && !row.deleted.value);
   const listed = $derived(active && row?.status.value === 'watchlist');
@@ -50,6 +51,8 @@
   const rated = $derived(reactions.find(([value]) => value === reaction)?.[1] ?? 'Rate');
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} />
+
 <div class="actions" aria-busy={busy}>
   {#if onplayhere}
     <button class="primary" disabled={busy} onclick={onplayhere}>{@render play()}<span>Play</span></button>
@@ -58,11 +61,14 @@
   {/if}
 
   <div class="pills">
+    {#if trailerHref}
+      <!-- A normal link lets iOS hand off to YouTube, with the website as its fallback.
+           Avoid a new mobile tab that can be left blank after the app handoff. -->
+      <a class="pill trailer" href={trailerHref} target={viewportWidth < 760 ? undefined : '_blank'} rel="noopener noreferrer"
+        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a>
+    {/if}
     {#if onplayhere && onplay}
       <button class="pill" disabled={busy} onclick={onplay}>{@render tv()}<span class="label">Play on TV</span></button>
-    {/if}
-    {#if ontrailer}
-      <button class="pill" onclick={ontrailer}>{@render clapper()}<span class="label">Trailer</span></button>
     {/if}
     <button class="pill" class:on={listed} aria-pressed={listed} disabled={busy} onclick={() => onwatchlist(!listed)}>
       {@render bookmark()}<span class="label">Watchlist</span>
@@ -178,6 +184,7 @@
     color: var(--fg);
     font: inherit;
     cursor: pointer;
+    text-decoration: none;
   }
 
   /* The one thing this page is for: the page's width on a phone. */
@@ -200,6 +207,8 @@
   .pick {
     position: relative;
   }
+
+  .trailer { flex:0 0 auto; }
 
   .on {
     border-color: var(--fg);
@@ -243,6 +252,12 @@
 
   .value {
     display: none;
+  }
+
+  @media (max-width: 359px) {
+    .pills { gap:6px; }
+    .pill, .pick { min-width:44px; padding:0 6px; }
+    .trailer { gap:6px; font-size:14px; }
   }
 
   @media (min-width: 760px) {

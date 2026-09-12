@@ -19,42 +19,41 @@ function reachable(entries: Entry[], secure = globalThis.location?.protocol !== 
   return null;
 }
 
-/** What reel answers with: its best trailer first, each as a direct MP4. */
-function firstTrailer(body: unknown): string | null {
-  const links = (body as { meta?: { links?: unknown } } | null)?.meta?.links;
-  if (!Array.isArray(links)) return null;
-  for (const link of links as { trailers?: unknown }[]) {
-    if (typeof link?.trailers === 'string' && link.trailers) return link.trailers;
-  }
-  return null;
+/** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
+export async function trailerURLs(
+  base: string, type: MediaType, imdbId: string, routes: Routes,
+  { fetchImpl = fetch, secure = globalThis.location?.protocol !== 'http:', signal }: {
+    fetchImpl?: typeof fetch; secure?: boolean; signal?: AbortSignal;
+  } = {},
+): Promise<string[]> {
+  const origin = reachable(routes.reel ?? [], secure);
+  if (!origin) return [];
+  try {
+    const res = await fetchImpl(`${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`, { signal, cache: 'no-cache' });
+    if (!res.ok) return [];
+    const body = await res.json();
+    if (!Array.isArray(body?.meta?.links)) return [];
+    const urls: string[] = [];
+    for (const candidate of body.meta.links) {
+      if (typeof candidate?.trailers !== 'string') continue;
+      try {
+        const link = new URL(candidate.trailers);
+        if (!['http:', 'https:'].includes(link.protocol)) continue;
+        // A PUBLIC_BASE_URL may already include a /reel mount. Only the signed play path travels.
+        const play = link.pathname.match(/\/play\/[^/]+$/)?.[0];
+        if (!play) continue;
+        const url = `${origin}${play}${link.search}`;
+        if (!urls.includes(url)) urls.push(url);
+      } catch { /* One malformed link does not discard the remaining candidates. */ }
+    }
+    return urls;
+  } catch { return []; }
 }
 
-/**
- * The MP4 of `imdbId`'s trailer, ready to play, or null when reel has none or none of its addresses can be
- * reached from here. `base` is where this page asks reel (`/reel/<config>`, from `findAddon`).
- */
+/** Browse billboards use the first candidate; detail playback can advance through the full list. */
 export async function trailerURL(
-  base: string,
-  type: MediaType,
-  imdbId: string,
-  routes: Routes,
-  {
-    fetchImpl = fetch,
-    secure = globalThis.location?.protocol !== 'http:',
-  }: { fetchImpl?: typeof fetch; secure?: boolean } = {},
+  base: string, type: MediaType, imdbId: string, routes: Routes,
+  options: { fetchImpl?: typeof fetch; secure?: boolean; signal?: AbortSignal } = {},
 ): Promise<string | null> {
-  const origin = reachable(routes.reel ?? [], secure);
-  if (!origin) return null;
-  const stremio = type === 'tv' ? 'series' : 'movie';
-  try {
-    const res = await fetchImpl(`${base}/meta/${stremio}/${encodeURIComponent(imdbId)}.json`);
-    if (!res.ok) return null;
-    const found = firstTrailer(await res.json());
-    if (!found) return null;
-    const link = new URL(found);
-    return `${origin}${link.pathname}${link.search}`;
-  } catch {
-    // Out of reach, or an answer that isn't reel's: the slide keeps its still picture.
-    return null;
-  }
+  return (await trailerURLs(base, type, imdbId, routes, options))[0] ?? null;
 }

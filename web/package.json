@@ -6,9 +6,10 @@
   "description": "The Den web app: the Apple TV app's screens in a browser, served by den-edge.",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/precompress.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",

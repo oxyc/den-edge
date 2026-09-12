@@ -1,10 +1,11 @@
 <!-- Settings, as on the TV: the user's own API keys and addons — kept in the library's settings (`set:keys`,
      `set:plugins`), sealed, so the TV and this browser share them and den-edge can't read them — and the linked TV. -->
 <script lang="ts">
+  import Loading from './components/Loading.svelte';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
-  import { LibraryLog } from './lib/log';
+  import type { LibrarySession } from './lib/librarySession.svelte';
   import { acceptsAddonURL, readApiKey, readPlugins } from './lib/prefs';
   import { formatCode, host, type HostError } from './lib/pair';
   import { fetchRoutes, type Routes } from './lib/routes';
@@ -12,7 +13,7 @@
   import { clearTmdbCache } from './lib/tmdbCache';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
-  let { link }: { link: Link } = $props();
+  let { link, session }: { link: Link; session: LibrarySession } = $props();
 
   const services = [
     { name: 'tmdb', label: 'TMDB', hint: 'Search, and every title’s poster and details.' },
@@ -21,9 +22,9 @@
   ];
 
   /** undefined while it opens; null when this browser can't reach the library. */
-  let log = $state<LibraryLog | null | undefined>(undefined);
+  const log = $derived(session.log);
   /** Bumped after a write: the log isn't reactive. */
-  let version = $state(0);
+  const version = $derived(session.revision);
   let drafts = $state<Record<string, string>>(Object.fromEntries(services.map((s) => [s.name, ''])));
   let saving = $state(false);
   let failure = $state<string | null>(null);
@@ -33,11 +34,8 @@
   void fetchRoutes().then((fetched) => (routes = fetched));
 
   $effect(() => {
-    void LibraryLog.open(link.libraryKey).then((opened) => {
-      if (opened?.moved) return links.forgetMoved(link);
-      if (opened) clock.see(opened.newestStamp());
-      log = opened;
-    });
+    const opened = log;
+    if (opened) clock.see(opened.newestStamp());
   });
 
   const keys = $derived.by(() => {
@@ -69,7 +67,7 @@
       failure = 'Couldn’t save that. Check that this device is on your network.';
       return false;
     }
-    version++;
+    session.changed(true);
     return true;
   }
 
@@ -180,7 +178,7 @@
   <h2>Your keys</h2>
   <p class="sub">Your own API keys, shared with your Apple TV through your library. They’re sealed: den-edge can’t read them.</p>
   {#if log === undefined}
-    <p class="sub">Loading…</p>
+    <Loading label="Loading settings" page />
   {:else if log === null}
     <p class="sub">Your keys live in your library, which this browser can’t reach right now.</p>
   {:else}

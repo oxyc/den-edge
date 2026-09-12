@@ -1,5 +1,6 @@
 <!-- A person's page, as the TV's: who they are, and what they're known for, most notable first. -->
 <script lang="ts">
+  import Loading from './Loading.svelte';
   import { fetchPerson, type PersonDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import { searchSources } from '../lib/searchSources';
@@ -39,7 +40,7 @@
 </script>
 
 {#if person === undefined}
-  <p class="note">Loading…</p>
+  <Loading label="Loading person" page />
 {:else if person === null}
   <p class="note">Couldn’t load this person from TMDB. Try again in a moment.</p>
 {:else}

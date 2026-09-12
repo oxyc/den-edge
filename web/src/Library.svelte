@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loading from './components/Loading.svelte';
   import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
@@ -38,22 +39,24 @@
     watchlist,
     withDisplay,
     type ContinueEntry,
-    type Shape,
     type Title,
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
-  import { LibraryLog } from './lib/log';
+  import type { LibraryLog } from './lib/log';
+  import type { LibrarySession } from './lib/librarySession.svelte';
+  import { navigate } from './lib/navigation';
+  import { nameLibraryTitles } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
-  import { findRemux } from './lib/remux';
+  import { discoverServices } from './lib/discoverServices';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { arrivals, findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
+  import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
-  let { link, route }: { link: Link; route: Route } = $props();
+  let { link, route, active, session }: { link: Link; route: Route; active: boolean; session: LibrarySession } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
@@ -63,13 +66,9 @@
   let tmdbKey = $state('');
   const clock = browserClock();
   /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
-  let log = $state<LibraryLog | null | undefined>(undefined);
-  /** TMDB display for titles the log names without it, and for titles acted on here. */
-  let displays = $state<Title[]>([]);
-  /** Season layouts of the series in the library, from TMDB. */
-  let shapes = $state(new Map<string, Shape>());
+  const log = $derived(session.log);
   /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
-  let version = $state(0);
+  const version = $derived(session.revision);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -90,50 +89,47 @@
   let playing = $state<Target | null>(null);
 
   $effect(() => {
-    void LibraryLog.open(link.libraryKey).then((opened) => {
-      if (opened?.moved) return links.forgetMoved(link);
-      log = opened;
-      if (!opened) return;
-      clock.see(opened.newestStamp());
+    const opened = log;
+    if (opened) clock.see(opened.newestStamp());
+  });
+
+  $effect(() => {
+    void session.settingsRevision;
+    const opened = log;
+    if (!opened) return;
+    let disposed = false;
+    let stopDiscovery: (() => void) | undefined;
+    // Only the shared settings revision and opened log trigger reconfiguration.
+    // Service state below is an output, not a dependency of this effect.
+    untrack(() => {
       tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
       if (tmdbKey) void name(opened, tmdbKey);
       plugins = readPlugins(opened.settings('plugins'));
       const [key, installed] = [tmdbKey, plugins];
       void (async () => {
-        routes = await fetchRoutes();
-        const [foundScout, foundAtlas, foundReel, foundRemux] = await Promise.all([
-          findAddon(installed, routes, SCOUT),
-          findAtlas(installed, routes),
-          findAddon(installed, routes, REEL),
-          findRemux(routes.remux ?? []),
-        ]);
-        scout = foundScout;
-        atlas = foundAtlas?.base ?? null;
-        reel = foundReel?.base ?? null;
-        remux = foundRemux;
-        availability.connect(foundScout, key);
+        const foundRoutes = await fetchRoutes();
+        if (disposed) return;
+        routes = foundRoutes;
+        stopDiscovery = discoverServices(installed, foundRoutes, {
+          scout: (found) => { scout = found; availability.connect(found, key); },
+          atlas: (found) => { atlas = found?.base ?? null; },
+          reel: (found) => { reel = found?.base ?? null; },
+          remux: (found) => { remux = found; },
+        });
       })();
     });
+    return () => { disposed = true; stopDiscovery?.(); };
   });
 
-  /** Every title the rows show, named from TMDB a few at a time, painted as each arrives. */
-  async function name(opened: LibraryLog, key: string) {
-    const queue = untitled(applyLog(emptyLibrary(), opened.rows()));
-    const lookup = async () => {
-      for (let ref = queue.shift(); ref; ref = queue.shift()) {
-        const found = await fetchDetails(ref, key);
-        if (!found) continue;
-        displays = [...displays, found.title];
-        if (found.shape) shapes = new Map(shapes).set(titleKey(ref), found.shape);
-      }
-    };
-    await Promise.all(Array.from({ length: LOOKUPS }, lookup));
+  /** Naming belongs to the shared session, including lookups still in flight on another page. */
+  function name(opened: LibraryLog, key: string) {
+    return nameLibraryTitles(session, untitled(applyLog(emptyLibrary(), opened.rows())), key);
   }
 
   const library = $derived.by(() => {
     void version;
     if (!log) return null;
-    return { ...withDisplay(applyLog(emptyLibrary(), log.rows()), displays), shapes };
+    return { ...withDisplay(applyLog(emptyLibrary(), log.rows()), session.displays), shapes: session.shapes };
   });
 
   /** The title whose page is open, if one is. */
@@ -154,38 +150,16 @@
     return rows;
   });
 
-  // A new page starts clean, and at its top.
+  // Transient messages and playback belong to the active page.
   $effect(() => {
     failure = null;
     notice = null;
-    if (route.page !== 'library') scrollTo(0, 0);
+    if (!active) playing = null;
   });
 
   function remember(title: Title) {
-    if (!displays.some((d) => d.type === title.type && d.id === title.id)) displays = [...displays, title];
+    if (!session.displays.some((d) => d.type === title.type && d.id === title.id)) session.displays = [...session.displays, title];
   }
-
-  $effect(() => {
-    const current = log;
-    if (!current) return;
-    let refreshing = false;
-    const refresh = async () => {
-      if (document.hidden || refreshing || busy) return;
-      refreshing = true;
-      try {
-        if (await current.refresh()) version++;
-        if (current.moved) links.forgetMoved(link);
-      } finally { refreshing = false; }
-    };
-    const timer = setInterval(() => void refresh(), 30_000);
-    window.addEventListener('online', refresh);
-    document.addEventListener('visibilitychange', refresh);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('online', refresh);
-      document.removeEventListener('visibilitychange', refresh);
-    };
-  });
 
   /** Write one row and re-derive what shows it. */
   async function save(row: Row, journal = false) {
@@ -197,7 +171,7 @@
       if (log.moved) return links.forgetMoved(link);
       if (!saved) failure = SAVE_FAILED;
       else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-      version++;
+      session.changed();
       return saved !== null;
     } catch {
       failure = SAVE_FAILED;
@@ -241,7 +215,7 @@
     if (!log) return;
     try {
       if (title.type === 'tv') {
-        const shape = shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
+        const shape = session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
         if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
         const journals: SettingsRow[] = [];
         clock.see(log.newestStamp());
@@ -264,7 +238,7 @@
         try {
           if (!await log.writeActions(journals)) failure = SAVE_FAILED;
           else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
-          version++;
+          session.changed();
         } catch { failure = SAVE_FAILED; }
         finally { busy = false; }
         return;
@@ -312,7 +286,7 @@
     if (!target || target.season === undefined || target.episode === undefined) return;
     const at = { season: target.season, episode: target.episode };
     void (async () => {
-      const shape = shapes.get(titleKey(target.title)) ?? (await fetchDetails(target.title, tmdbKey))?.shape;
+      const shape = session.shapes.get(titleKey(target.title)) ?? (await fetchDetails(target.title, tmdbKey))?.shape;
       const next = shape && episodeAfter(at, shape);
       if (playing === target && next && isAired(next, shape.lastAired)) following = { title: target.title, ...next };
     })();
@@ -348,7 +322,7 @@
   }
 
   const open = (title: Title) => {
-    location.hash = titleHref(title);
+    navigate(titleHref(title));
   };
   const select = $derived(log ? open : undefined);
   // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
@@ -477,7 +451,7 @@
     // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
     // read without being watched. Those tick over continuously while the library is named, and watching them
     // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
-    void route.page;
+    if (route.page === 'title' || route.page === 'person') return;
     const here = atlas;
     if (!tmdbKey) return;
     untrack(() => buildBillboard(here));
@@ -584,7 +558,7 @@
 </script>
 
 {#if log === undefined}
-  <p class="note">Loading your library…</p>
+  <Loading label="Loading your library" page />
 {:else if log === null || !library}
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its library key, unlink in
@@ -594,6 +568,9 @@
   <p class="note">This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
 {:else if page}
   <Detail
+    {reel}
+    {routes}
+    {active}
     ref={page}
     {tmdbKey}
     row={pageRow}
@@ -621,6 +598,7 @@
        rows below don't jump down when the titles arrive. -->
   {#if !hits && (tmdbKey || log === undefined)}
     <Billboard
+      {active}
       titles={featured.filter(featuredShown)}
       {tmdbKey}
       {reel}

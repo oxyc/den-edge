@@ -42,7 +42,7 @@ export interface TitleDetail {
   cast: Credit[];
   /** TMDB's recommendations for it. */
   more: Title[];
-  /** Its trailer's YouTube id, from TMDB's videos: what the web plays, embedded. */
+  /** Its trailer's YouTube id, from TMDB's videos: what the Trailer link opens. */
   trailer?: string;
   /** Its IMDb id: what den-reel names a title by, so the billboard can ask it for a trailer to play. */
   imdbId?: string;
