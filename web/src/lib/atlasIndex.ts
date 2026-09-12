@@ -1,28 +1,25 @@
-// atlas's index queries: the two POST routes that can answer for a whole pool at once.
+// What atlas knows about titles, as the billboard reads it: their labels, and what it would offer as more like them.
 //
 // The catalogs name a title by id and year and nothing else, so nearly everything the billboard pools arrives
 // unjudged, and the picker could only rank what TMDB had separately been asked about — sixty candidates out of
-// nine hundred, chosen by attention before taste was ever consulted. These label the lot in two requests, and
-// say which of them a "more like this" row would already have put in front of the viewer.
+// nine hundred, chosen by attention before taste was ever consulted. atlas's labels judge the lot.
 //
-// They are POSTs only because the body is large; nothing is written, and nothing about the household is stored.
+// Both are plain GETs a browser keeps. The labels are the dataset's own labels file — every title atlas holds, under
+// a URL stamped with the dataset version — so a browser downloads it once per dataset (about 530 KB gzipped) and
+// every visit after reads it from its cache without asking. More Like This is one GET per seed, cached like atlas's
+// other index answers.
 
 import type { MediaType } from './library';
 
 /**
  * What atlas calls a series.
  *
- * Its own media types are `movie` and `series`; Den's are `movie` and `tv`. Sending Den's scores a silent zero
- * rather than an error — `{"type":"tv","id":1399}` answers 200 with `null` where `series` answers with the
- * labels — so every series would quietly look like a title atlas had never heard of.
+ * Its own media types are `movie` and `series`; Den's are `movie` and `tv`. Asking about `tv` finds nothing rather
+ * than failing, so every series would quietly look like a title atlas had never heard of.
  */
 const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
 
-const denType = (type: string): MediaType => (type === 'series' ? 'tv' : 'movie');
-
-/** Titles per request: atlas caps a POST body at 64 KiB, and five hundred ids is about fifteen. */
-const BATCH = 500;
-/** Seeds atlas takes at once. */
+/** Seeds asked about at once. */
 const SEEDS = 8;
 
 /** What atlas has labelled a title with. Confidences run 0…1. */
@@ -40,22 +37,80 @@ export interface Ref {
 
 const keyOf = (ref: Ref) => `${ref.type}:${ref.id}`;
 
-async function ask<T>(
-  base: string,
-  route: string,
-  body: unknown,
-  fetchImpl: typeof fetch,
-): Promise<T | null> {
+async function getJson<T>(url: string, fetchImpl: typeof fetch): Promise<T | null> {
   try {
-    const res = await fetchImpl(`${base}/index/${route}.json`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res = await fetchImpl(url);
     return res.ok ? ((await res.json()) as T) : null;
   } catch {
     return null; // atlas out of reach: the billboard falls back on what TMDB said
   }
+}
+
+interface LabelsFile {
+  records?: {
+    tmdbId?: unknown;
+    mediaType?: unknown;
+    primaryGenre?: unknown;
+    animated?: unknown;
+    subgenres?: unknown;
+    moods?: unknown;
+  }[];
+}
+
+/** The labels file's `{label, confidence}` list as `[label, confidence]` pairs, as atlas's own answers give them. */
+function pairs(list: unknown): [string, number][] {
+  return Array.isArray(list)
+    ? list.flatMap((entry: { label?: unknown; confidence?: unknown } | null) =>
+        typeof entry?.label === 'string' && typeof entry.confidence === 'number'
+          ? [[entry.label, entry.confidence] as [string, number]]
+          : [],
+      )
+    : [];
+}
+
+/** One load per atlas for the page's life; a failed one is dropped, so the next caller asks again. */
+const loads = new Map<string, Promise<Map<string, Labels> | null>>();
+
+/** Every title's labels in the dataset atlas serves at `base`; null when atlas can't be reached. */
+function allLabels(base: string, fetchImpl: typeof fetch): Promise<Map<string, Labels> | null> {
+  const loading = loads.get(base);
+  if (loading) return loading;
+  const load = (async () => {
+    const descriptor = await getJson<{ labels?: { url?: unknown } }>(
+      `${base}/dataset.json`,
+      fetchImpl,
+    );
+    const url = descriptor?.labels?.url;
+    if (typeof url !== 'string') return null;
+    // The descriptor names atlas's own address; this page asks atlas under its own origin, at `base`.
+    const blob = new URL(url, 'https://atlas.invalid');
+    const file = await getJson<LabelsFile>(`${base}${blob.pathname}${blob.search}`, fetchImpl);
+    if (!Array.isArray(file?.records)) return null;
+    const all = new Map<string, Labels>();
+    for (const record of file.records) {
+      const type =
+        record.mediaType === 'movie'
+          ? 'movie'
+          : record.mediaType === 'tv' || record.mediaType === 'series'
+            ? 'tv'
+            : null;
+      if (!type || typeof record.tmdbId !== 'number') continue;
+      const key = keyOf({ type, id: record.tmdbId });
+      if (all.has(key)) continue; // as atlas reads the file: the first row wins a duplicate
+      all.set(key, {
+        primaryGenre: typeof record.primaryGenre === 'string' ? record.primaryGenre : undefined,
+        animated: record.animated === true,
+        subgenres: pairs(record.subgenres),
+        moods: pairs(record.moods),
+      });
+    }
+    return all;
+  })();
+  loads.set(base, load);
+  void load.then((all) => {
+    if (!all) loads.delete(base);
+  });
+  return load;
 }
 
 /**
@@ -71,21 +126,11 @@ export async function labelsFor(
   refs: Ref[],
   fetchImpl: typeof fetch = fetch,
 ): Promise<Map<string, Labels>> {
+  const all = await allLabels(base, fetchImpl);
   const found = new Map<string, Labels>();
-  const unique = [...new Map(refs.map((ref) => [keyOf(ref), ref])).values()];
-  for (let at = 0; at < unique.length; at += BATCH) {
-    const batch = unique.slice(at, at + BATCH);
-    const answer = await ask<{ labels: (Labels | null)[] }>(
-      base,
-      'labels',
-      { titles: batch.map((ref) => ({ type: atlasType(ref.type), id: ref.id })) },
-      fetchImpl,
-    );
-    // Positional: the nth label answers the nth title, and null means atlas has never seen it.
-    (answer?.labels ?? []).forEach((label, at2) => {
-      const ref = batch[at2];
-      if (label && ref) found.set(keyOf(ref), label);
-    });
+  for (const ref of refs) {
+    const labels = all?.get(keyOf(ref));
+    if (labels) found.set(keyOf(ref), labels);
   }
   return found;
 }
@@ -112,25 +157,28 @@ export async function neighbourhood(
   fetchImpl: typeof fetch = fetch,
 ): Promise<Neighbourhood> {
   const use = [...new Map(seeds.map((ref) => [keyOf(ref), ref])).values()].slice(0, SEEDS);
-  if (use.length === 0) return { seeds: 0, hits: new Map() };
-  const answer = await ask<{ perSeed: { seed: { type: string; id: number }; ids: number[] }[] }>(
-    base,
-    'suggest',
-    { seeds: use.map((ref) => ({ type: atlasType(ref.type), id: ref.id })) },
-    fetchImpl,
+  const answers = await Promise.all(
+    use.map((seed) =>
+      getJson<{ ids?: unknown }>(
+        `${base}/index/similar/${atlasType(seed.type)}/${seed.id}.json`,
+        fetchImpl,
+      ),
+    ),
   );
-  if (!answer) return { seeds: 0, hits: new Map() };
+  const own = new Set(use.map(keyOf));
   const hits = new Map<string, number>();
-  for (const per of answer.perSeed ?? []) {
-    // The ids come back bare, in the media type of the seed they answer.
-    const type = denType(per.seed?.type ?? 'movie');
-    for (const id of per.ids ?? []) {
-      const key = keyOf({ type, id });
-      hits.set(key, (hits.get(key) ?? 0) + 1);
-    }
-  }
-  // Only seeds atlas could actually answer for count: it holds few series, and dividing by seeds that returned
-  // nothing would read every title as less redundant than it is.
-  const answered = (answer.perSeed ?? []).filter((per) => (per.ids ?? []).length > 0).length;
+  let answered = 0;
+  answers.forEach((answer, at) => {
+    const seed = use[at]!;
+    // The ids come back bare, in the seed's own media type; the other seeds are not their neighbours to count.
+    const keys = (Array.isArray(answer?.ids) ? answer.ids : [])
+      .filter((id): id is number => typeof id === 'number')
+      .map((id) => keyOf({ type: seed.type, id }))
+      .filter((key) => !own.has(key));
+    // Only seeds atlas could actually answer for count: it holds few series, and dividing by seeds that returned
+    // nothing would read every title as less redundant than it is.
+    if (keys.length) answered++;
+    for (const key of keys) hits.set(key, (hits.get(key) ?? 0) + 1);
+  });
   return { seeds: answered, hits };
 }

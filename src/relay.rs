@@ -46,7 +46,7 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
-    let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE]
+    let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
@@ -55,7 +55,8 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     };
     // Nothing of the browser's goes along but what the addon reads: not its cookies, which carry its Access
     // session, nor anything Cloudflare added. Its validators do, so a revalidation is the addon's 304 rather
-    // than the whole answer again.
+    // than the whole answer again, and the encodings it takes, so a large file (atlas's labels) arrives gzipped
+    // and within `MAX_ANSWER_BYTES`.
     let mut out =
         axum::http::Request::builder().method(method).uri(&target).header(header::ACCEPT, "application/json");
     if let Some(content_type) = content_type {
@@ -83,6 +84,7 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     *resp.status_mut() = parts.status;
     for name in [
         header::CONTENT_TYPE,
+        header::CONTENT_ENCODING,
         header::CACHE_CONTROL,
         header::ETAG,
         header::LAST_MODIFIED,

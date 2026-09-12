@@ -546,6 +546,7 @@ pub mod tests {
                 "cookie": parts.headers.contains_key(header::COOKIE),
                 "access": parts.headers.contains_key("cf-access-client-id"),
                 "if_modified_since": text(header::IF_MODIFIED_SINCE),
+                "accept_encoding": text(header::ACCEPT_ENCODING),
                 "body": String::from_utf8_lossy(&body),
             });
             let revalidated = text(header::IF_NONE_MATCH).as_deref() == Some("\"v1\"");
@@ -558,6 +559,7 @@ pub mod tests {
             resp.headers_mut()
                 .insert(header::LAST_MODIFIED, HeaderValue::from_static("Sat, 12 Sep 2026 12:00:00 GMT"));
             resp.headers_mut().insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+            resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("identity"));
             resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             resp.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("tracking=1"));
             resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -603,6 +605,7 @@ pub mod tests {
         assert_eq!(resp.headers()[header::ETAG], "\"v1\"");
         assert_eq!(resp.headers()[header::LAST_MODIFIED], "Sat, 12 Sep 2026 12:00:00 GMT");
         assert_eq!(resp.headers()[header::VARY], "Accept-Encoding");
+        assert_eq!(resp.headers()[header::CONTENT_ENCODING], "identity");
         assert_eq!(
             body_json(resp).await,
             json!({
@@ -611,6 +614,7 @@ pub mod tests {
                 "cookie": false,
                 "access": false,
                 "if_modified_since": null,
+                "accept_encoding": null,
                 "body": r#"{"ids":["tt1"]}"#,
             }),
             "the path and body go along; the browser's session and Cloudflare's headers don't"
@@ -621,10 +625,16 @@ pub mod tests {
                 "GET",
                 "/scout/cfg/manifest.json",
                 None,
-                &[("host", "d.oxy.fi"), ("if-modified-since", "Sat, 12 Sep 2026 12:00:00 GMT")],
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("if-modified-since", "Sat, 12 Sep 2026 12:00:00 GMT"),
+                    ("accept-encoding", "gzip"),
+                ],
             )
             .await;
-        assert_eq!(body_json(since).await["if_modified_since"], "Sat, 12 Sep 2026 12:00:00 GMT");
+        let since = body_json(since).await;
+        assert_eq!(since["if_modified_since"], "Sat, 12 Sep 2026 12:00:00 GMT");
+        assert_eq!(since["accept_encoding"], "gzip");
         let unchanged = h
             .send(
                 "GET",

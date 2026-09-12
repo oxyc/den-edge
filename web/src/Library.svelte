@@ -150,7 +150,9 @@
             session,
             untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
             key,
-          );
+          ).then(() => {
+            if (!disposed) libraryNamed = true;
+          });
         });
       } else shelvesReady = true;
       plugins = readPlugins(opened.settings('plugins'));
@@ -494,7 +496,11 @@
    * said outright, so it counts for more than either, and a dislike counts against. Titles TMDB hasn't named yet
    * carry no genres, so they simply don't vote.
    */
-  const libraryEntries = $derived.by(() => {
+  /**
+   * Every title the library holds with how much it says about taste, straight from the log: ids and weights need
+   * no names, so nothing here waits for TMDB.
+   */
+  const weighted = $derived.by(() => {
     void version;
     // Reactions live on the log's rows; the records carry only status. A title is read by both.
     const reactions = new Map(
@@ -509,46 +515,53 @@
         status === 'watched' || status === 'inProgress' ? 1 : status === 'watchlist' ? 0.6 : 0;
       return seen + (reaction === 'love' ? 1 : reaction === 'like' ? 0.5 : 0);
     };
-    return (library?.records ?? []).flatMap((r) => {
-      if (r.deleted || r.title.title === '') return [];
+    return (applied?.records ?? []).flatMap((r) => {
+      if (r.deleted) return [];
       const weight = weightOf(r.status, reactions.get(titleKey(r.title)));
       return weight === 0
         ? []
-        : [{ title: r.title, weight, at: Math.max(r.progressAt, r.addedAt) }];
+        : [
+            {
+              ref: { type: r.title.type, id: r.title.id },
+              weight,
+              at: Math.max(r.progressAt, r.addedAt),
+            },
+          ];
+    });
+  });
+  /** The same titles once TMDB has named them: TMDB's genres, countries and people are what `taste` reads. */
+  const libraryEntries = $derived.by(() => {
+    const named = new Map((library?.records ?? []).map((r) => [titleKey(r.title), r.title]));
+    return weighted.flatMap(({ ref, weight, at }) => {
+      const title = named.get(titleKey(ref));
+      return title?.title ? [{ title, weight, at }] : [];
     });
   });
   const taste = $derived(tasteOf(libraryEntries));
+  /** Whether TMDB has named the whole library, watched history included: `taste` is only complete after that. */
+  let libraryNamed = $state(false);
   /**
    * atlas's labels for the library's own titles.
    *
    * TMDB's nineteen genres cannot tell Nordic noir from a slasher — both are Crime. atlas labels from a
-   * taxonomy of fifty-nine subgenres and sixteen moods, and will label a whole library in a request or two,
-   * which is what lets the pool be judged before it is named.
+   * taxonomy of fifty-nine subgenres and sixteen moods, from a labels file the browser keeps, which is what lets
+   * the pool be judged before it is named.
    */
   let libraryLabels = $state<Map<string, Labels>>(new Map());
-  /** The titles worth labelling, heaviest first: atlas takes five hundred at a time. */
-  const heaviest = $derived(
-    [...libraryEntries]
-      .sort((a, b) => b.weight - a.weight || b.at - a.at)
-      .slice(0, 500)
-      .map((entry) => ({ type: entry.title.type, id: entry.title.id })),
-  );
+  /** Which titles the library holds, by id: labelled again only when that changes, not on every log refresh. */
+  const heldKey = $derived(weighted.map(({ ref }) => titleKey(ref)).join());
   $effect(() => {
     const here = atlas;
-    const want = heaviest;
+    void heldKey;
+    const want = untrack(() => weighted.map(({ ref }) => ref));
     if (!here || want.length === 0) return;
     let dropped = false;
-    // Waiting for the list to settle. Naming the library rewrites its records one title at a time, so this
-    // changes dozens of times on a first load; asking immediately meant every request was cancelled by the next
-    // change and the profile never arrived at all.
-    const timer = setTimeout(() => {
-      void labelsFor(here, want).then((found) => {
-        if (!dropped) libraryLabels = found;
-      });
-    }, 1200);
+    // By id, as soon as the log is open: labels need no names, so this doesn't wait for TMDB to name the library.
+    void labelsFor(here, want).then((found) => {
+      if (!dropped) libraryLabels = found;
+    });
     return () => {
       dropped = true;
-      clearTimeout(timer);
     };
   });
   /**
@@ -561,8 +574,10 @@
    */
   let profileReady = $state(false);
   $effect(() => {
-    // Whichever comes first: atlas's labels for the library, or long enough that they plainly aren't coming.
-    if (libraryLabels.size > 0) {
+    // Whichever comes first: atlas's labels for the library and TMDB's names for all of it — labels arrive before
+    // the names now, and a pick made then would read `taste` from a library barely named — or long enough that
+    // they plainly aren't coming.
+    if (libraryLabels.size > 0 && libraryNamed) {
       profileReady = true;
       return;
     }
@@ -574,8 +589,8 @@
   });
   const labelProfile = $derived(
     labelProfileOf(
-      libraryEntries.map((entry) => ({
-        labels: libraryLabels.get(titleKey(entry.title)),
+      weighted.map((entry) => ({
+        labels: libraryLabels.get(titleKey(entry.ref)),
         weight: entry.weight,
       })),
     ),
@@ -585,7 +600,7 @@
    * worn out. What it watched and meant it, heaviest first.
    */
   const wornSeeds = $derived(
-    [...libraryEntries]
+    [...weighted]
       .filter((entry) => entry.weight >= 1)
       // Whatever atlas actually holds, first: it answers for nothing it has never indexed, and there are only
       // eight seeds to spend. This used to guess "films before series", on the grounds that it holds far fewer
@@ -594,13 +609,12 @@
       // titles it knows, so nothing needs guessing.
       .sort(
         (a, b) =>
-          Number(libraryLabels.has(titleKey(b.title))) -
-            Number(libraryLabels.has(titleKey(a.title))) ||
+          Number(libraryLabels.has(titleKey(b.ref))) - Number(libraryLabels.has(titleKey(a.ref))) ||
           b.weight - a.weight ||
           b.at - a.at,
       )
       .slice(0, 8)
-      .map((entry) => ({ type: entry.title.type, id: entry.title.id })),
+      .map((entry) => entry.ref),
   );
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
