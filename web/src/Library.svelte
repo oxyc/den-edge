@@ -43,6 +43,7 @@
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
   import { LibraryLog } from './lib/log';
+  import { recordTrackerEvent } from './lib/trackerEvents';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
@@ -50,7 +51,7 @@
   import { fetchRoutes, type Routes } from './lib/routes';
   import { arrivals, findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
-  import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
+  import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
   let { link, route }: { link: Link; route: Route } = $props();
 
@@ -164,30 +165,100 @@
     if (!displays.some((d) => d.type === title.type && d.id === title.id)) displays = [...displays, title];
   }
 
+  $effect(() => {
+    const current = log;
+    if (!current) return;
+    let refreshing = false;
+    const refresh = async () => {
+      if (document.hidden || refreshing || busy) return;
+      refreshing = true;
+      try {
+        if (await current.refresh()) version++;
+        if (current.moved) links.forgetMoved(link);
+      } finally { refreshing = false; }
+    };
+    const timer = setInterval(() => void refresh(), 30_000);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  });
+
   /** Write one row and re-derive what shows it. */
-  async function save(row: Row) {
+  async function save(row: Row, journal = false) {
     if (!log) return;
     busy = true;
     failure = null;
-    const saved = await log.write(row);
-    busy = false;
-    if (log.moved) return links.forgetMoved(link);
-    if (!saved) failure = SAVE_FAILED;
-    version++;
+    try {
+      const saved = journal && row.kind === 'set' ? await log.writeAction(row) : await log.write(row);
+      if (log.moved) return links.forgetMoved(link);
+      if (!saved) failure = SAVE_FAILED;
+      else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+      version++;
+      return saved !== null;
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
+    } finally { busy = false; }
   }
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
     if (!log) return;
     remember(title);
-    await save(change(log.title(title) ?? blankTitle(title, Date.now()), clock.issue()));
+    const before = log.title(title) ?? blankTitle(title, Date.now());
+    clock.see(log.newestStamp());
+    const at = clock.issue();
+    const event = recordTrackerEvent(before, change(before, at), at);
+    return event ? await save(event, true) : true;
   }
 
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
     if (!log) return;
     remember(title);
     const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-    await save(markEpisode(row, seen, clock.issue()));
+    clock.see(log.newestStamp());
+    const at = clock.issue();
+    const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
+    return event ? await save(event, true) : true;
+  }
+
+  /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
+  async function setSeen(title: Title, seen: boolean) {
+    if (!log) return;
+    if (title.type === 'tv') {
+      const shape = shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
+      if (!shape) { failure = 'Couldn’t load the episodes. Nothing was marked Seen.'; return; }
+      const journals: SettingsRow[] = [];
+      clock.see(log.newestStamp());
+      for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
+        if (season <= 0) continue;
+        for (let episode = 1; episode <= count; episode++) {
+          if (!isAired({ season, episode }, shape.lastAired)) continue;
+          const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+          const at = clock.issue();
+          const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
+          if (event) journals.push(event);
+        }
+      }
+      const before = log.title(title) ?? blankTitle(title, Date.now());
+      const at = clock.issue();
+      const event = recordTrackerEvent(before, (seen ? markWatched : unwatch)(before, at), at);
+      if (event) journals.push(event);
+      busy = true;
+      failure = null;
+      try {
+        if (!await log.writeActions(journals)) failure = SAVE_FAILED;
+        else if (log.pendingActions > 0) notice = 'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+        version++;
+      } catch { failure = SAVE_FAILED; }
+      finally { busy = false; }
+      return;
+    }
+    await act(title, seen ? markWatched : unwatch);
   }
 
   /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
@@ -511,7 +582,7 @@
     {failure}
     {notice}
     onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
-    onseen={(title, on) => act(title, on ? markWatched : unwatch)}
+    onseen={setSeen}
     onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
     onplay={play}
     onplayhere={playHere}

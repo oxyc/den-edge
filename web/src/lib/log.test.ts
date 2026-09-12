@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { addToWatchlist, blankTitle, react } from './actions';
 import { applyLog, continueWatching, untitled, watchlist, withDisplay, type Library } from './library';
 import { LibraryLog } from './log';
+import { recordTrackerEvent } from './trackerEvents';
 import { fetchDetails } from './tmdb';
 import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
 
@@ -63,6 +64,164 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
 }
 
 describe('LibraryLog', () => {
+  it('republishes acknowledged actions after the relay is restored empty', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: (k) => { data.delete(k); }, clear: () => data.clear(),
+    };
+    let server = await edge();
+    let generation = 'original';
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method !== 'POST' && server.stored.size === 0) return new Response(JSON.stringify({ generation }), { status: 404 });
+      const res = await server.fetchImpl(url, init);
+      return new Response(JSON.stringify({ ...await res.json(), generation }), { status: res.status });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const before = blankTitle({ type: 'movie', id: 10 }, 0);
+    await log.writeAction(recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'accepted')!);
+    expect(log.pendingActions).toBe(0);
+    server = await edge();
+    generation = 'restored';
+    expect(await log.refresh()).toBe(true);
+    expect(log.pendingActions).toBe(0);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(reopened.title(before.title)?.status.value).toBe('watchlist');
+    expect(reopened.settings('tracker-event:accepted')).toBeDefined();
+  });
+
+  it('persists a complete bulk action before delivery and retries it in bounded batches', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: (k) => { data.delete(k); }, clear: () => data.clear(),
+    };
+    const server = await edge();
+    let offline = false;
+    const sizes: number[] = [];
+    const connection: typeof fetch = (url, init) => {
+      if (offline) return Promise.reject(new TypeError('offline'));
+      if (init?.method === 'POST') sizes.push(JSON.parse(String(init.body)).writes.length);
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const journals = Array.from({ length: 65 }, (_, i) => {
+      const before = blankTitle({ type: 'movie', id: i + 1 }, 0);
+      return recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'bulk-' + i)!;
+    });
+    offline = true;
+    expect(await log.writeActions(journals)).toBe(true);
+    expect(data.size).toBe(1);
+    expect(log.title({ type: 'movie', id: 65 })?.status.value).toBe('watchlist');
+    offline = false;
+    const restored = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(restored.pendingActions).toBe(0);
+    expect(restored.title({ type: 'movie', id: 65 })?.status.value).toBe('watchlist');
+    expect(sizes).toEqual([32, 32, 1, 32, 32, 1]);
+  });
+
+  it('retries the first offline action when an empty relay still answers 404', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: (k) => { data.delete(k); }, clear: () => data.clear(),
+    };
+    const server = await edge();
+    let offline = false;
+    const connection: typeof fetch = (url, init) => {
+      if (offline) return Promise.reject(new TypeError('offline'));
+      if (init?.method !== 'POST' && server.stored.size === 0) return Promise.resolve(new Response('{}', { status: 404 }));
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    offline = true;
+    await log.writeAction(recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!);
+    offline = false;
+    expect(await log.refresh()).toBe(true);
+    expect(log.pendingActions).toBe(0);
+    expect((await LibraryLog.open(LIBRARY_KEY, connection))!.title(blank.title)?.status.value).toBe('watchlist');
+  });
+
+  it('skips an unreadable incremental row and still reaches later changes', async () => {
+    const server = await edge();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    server.stored.set('bad', { k: 'ab'.repeat(32), seq: 1, v: 'AAAA' });
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const good = await seal(keys, row(11));
+    server.stored.set(good.k, { ...good, seq: 2 });
+    expect(await log.refresh()).toBe(true);
+    expect(log.title({ type: 'movie', id: 11 })?.status.value).toBe('watchlist');
+  });
+
+  it('a failed pending cleanup does not reject an accepted action', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: () => { throw new Error('storage denied'); }, clear: () => data.clear(),
+    };
+    const server = await edge();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage))!;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    expect(await log.writeAction(recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'cleanup')!)).not.toBeNull();
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
+    expect(log.pendingActions).toBe(1);
+  });
+
+  it('serializes concurrent same-row saves without losing either field', async () => {
+    const { fetchImpl } = await edge();
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    await Promise.all([
+      log.write(addToWatchlist(blank, at(1000, 'web'))),
+      log.write(react(blank, 'love', at(2000, 'web'))),
+    ]);
+    const restored = (await LibraryLog.open(LIBRARY_KEY, fetchImpl))!.title(blank.title)!;
+    expect(restored.status.value).toBe('watchlist');
+    expect(restored.reaction.value).toBe('love');
+  });
+
+  it('reconstructs state from an accepted journal if the following projection write fails', async () => {
+    const server = await edge();
+    let writes = 0;
+    const flaky: typeof fetch = (url, init) => {
+      if (init?.method === 'POST' && ++writes === 2) return Promise.resolve(new Response('{}', { status: 503 }));
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, flaky))!;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const event = recordTrackerEvent(blank, addToWatchlist(blank, at(1000, 'web')), at(1000, 'web'), 'crash')!;
+    expect(await log.writeAction(event)).not.toBeNull();
+    const restored = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    expect(restored.title(blank.title)?.status.value).toBe('watchlist');
+  });
+
+  it('persists encrypted offline actions, then retries them after reopening', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() { return data.size; }, key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); },
+      removeItem: (k) => { data.delete(k); }, clear: () => data.clear(),
+    };
+    const server = await edge();
+    let offline = false;
+    const connection: typeof fetch = (url, init) => offline ? Promise.reject(new TypeError('offline')) : server.fetchImpl(url, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const event = recordTrackerEvent(blank, addToWatchlist(blank, at(1000, 'web')), at(1000, 'web'), 'offline')!;
+    offline = true;
+    expect(await log.writeAction(event)).not.toBeNull();
+    expect(log.pendingActions).toBe(1);
+    expect([...data.values()].join('')).not.toContain('watchlist');
+    offline = false;
+    const restored = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(restored.pendingActions).toBe(0);
+    expect(restored.title(blank.title)?.status.value).toBe('watchlist');
+  });
   it('reads every page and opens each row, skipping one that does not open', async () => {
     const rows = [row(1), row(2), row(3)];
     const { fetchImpl } = await edge(rows, [{ k: 'ab'.repeat(32), v: 'AAAA' }]);
