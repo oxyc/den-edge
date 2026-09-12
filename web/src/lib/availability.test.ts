@@ -79,6 +79,16 @@ describe('Availability', () => {
     });
   });
 
+  it('asks TMDB nothing about a movie that already knows its IMDb id', async () => {
+    const { calls, fetchImpl } = fake(() => ({ tt7654321: 'unavailable' }));
+    const availability = new Availability(fetchImpl, undefined);
+    availability.connect(SCOUT, 'key');
+    availability.want({ type: 'movie', id: 9, imdbId: 'tt7654321' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls.map((c) => c.url)).toEqual(['/scout/sealed-cfg/availability']);
+    expect(availability.unavailable({ type: 'movie', id: 9 })).toBe(true);
+  });
+
   it('asks nothing until there is a scout to ask', async () => {
     const { calls, fetchImpl } = fake(() => ({}));
     const availability = new Availability(fetchImpl);

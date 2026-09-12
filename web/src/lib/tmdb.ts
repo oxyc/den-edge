@@ -20,8 +20,10 @@ export async function fetchDetails(
     // Credits ride along with the display: naming a title is the one fetch made for everything in the library,
     // and who made it is wanted by the billboard's taste. Only the head of the billing is read, so a series takes
     // its latest season's credits: every season's (`aggregate_credits`, which the detail page shows) runs to every
-    // guest actor, about 13 KB a series compressed.
-    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=credits`;
+    // guest actor, about 13 KB a series compressed. A film's details carry its IMDb id already; a series' come in
+    // `external_ids`, asked for here so a poster's availability needs no lookup of its own.
+    const append = ref.type === 'tv' ? 'credits,external_ids' : 'credits';
+    const url = `https://api.themoviedb.org/3/${ref.type}/${ref.id}?api_key=${encodeURIComponent(key)}&append_to_response=${append}`;
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     details = (await res.json()) as Record<string, unknown>;
@@ -124,10 +126,13 @@ export function toTitle(
     : Array.isArray(details.origin_country)
       ? details.origin_country.filter((c): c is string => typeof c === 'string')
       : [];
+  const externalIds = details.external_ids as { imdb_id?: unknown } | null | undefined;
+  const imdb = typeof details.imdb_id === 'string' ? details.imdb_id : externalIds?.imdb_id;
   return {
     type: ref.type,
     id: ref.id,
     title: name,
+    imdbId: typeof imdb === 'string' && /^tt\d+$/.test(imdb) ? imdb : undefined,
     collectionId: typeof collection?.id === 'number' ? collection.id : undefined,
     posterPath: text('poster_path'),
     backdropPath: text('backdrop_path'),

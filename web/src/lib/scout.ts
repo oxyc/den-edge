@@ -92,6 +92,11 @@ function catalogTitles(body: unknown, type: MediaType): Title[] {
         id: meta.moviedb_id,
         title: meta.name,
         year: Number.isFinite(year) ? year : undefined,
+        // JustWatch names both ids, so a poster from here needs no TMDB lookup for scout.
+        imdbId:
+          typeof meta.imdb_id === 'string' && /^tt\d+$/.test(meta.imdb_id)
+            ? meta.imdb_id
+            : undefined,
       },
     ];
   });

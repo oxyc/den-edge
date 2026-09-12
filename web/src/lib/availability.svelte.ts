@@ -88,8 +88,10 @@ export class Availability {
   }
 
   /** A poster is showing: its movie is asked about along with the others showing now. */
-  want(title: Pick<Title, 'type' | 'id'>): void {
+  want(title: Pick<Title, 'type' | 'id' | 'imdbId'>): void {
     if (title.type !== 'movie' || this.settled.has(title.id) || this.wanted.has(title.id)) return;
+    // A title named by TMDB's details or an atlas catalog already knows its IMDb id: no lookup for it.
+    if (title.imdbId) this.imdbIds.set(title.id, title.imdbId);
     this.wanted.add(title.id);
     this.gather();
   }

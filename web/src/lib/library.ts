@@ -34,6 +34,8 @@ export interface Title {
   genreIds?: number[];
   originalLanguage?: string;
   adult?: boolean;
+  /** Its IMDb id where whatever named it said so — scout keys availability by it, so no lookup is needed. */
+  imdbId?: string;
 }
 
 type Status = 'none' | 'watchlist' | 'inProgress' | 'watched';
