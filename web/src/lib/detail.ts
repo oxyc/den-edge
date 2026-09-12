@@ -37,6 +37,19 @@ export interface TitleDetail {
   /** Minutes: a movie's runtime, or a series' usual episode. */
   runtime?: number;
   genres: string[];
+  status?: string;
+  lastAirDate?: string;
+  lastAired?: { season: number; episode: number };
+  certification?: string;
+  providers: { id: number; name: string; logoPath?: string }[];
+  watchLink?: string;
+  languages: string[];
+  countries: string[];
+  studios: string[];
+  budget?: number;
+  revenue?: number;
+  collection?: { id: number; name: string };
+  directors: Credit[];
   /** In order, Specials last; a season without episodes is left out. */
   seasons: Season[];
   cast: Credit[];
@@ -54,6 +67,7 @@ export interface Episode {
   overview?: string;
   stillPath?: string;
   airDate?: string;
+  runtime?: number;
 }
 
 export interface PersonDetail {
@@ -67,7 +81,7 @@ export interface PersonDetail {
 /** The top of the bill: a row, not the whole call sheet. */
 const CAST_LIMIT = 20;
 
-export function parseDetail(ref: { type: MediaType; id: number }, body: Json): TitleDetail | null {
+export function parseDetail(ref: { type: MediaType; id: number }, body: Json, region = 'US'): TitleDetail | null {
   const title = toTitle(ref, body);
   if (!title) return null;
   // A series lists its cast across every season; a person with two roles in a movie is listed twice.
@@ -79,12 +93,25 @@ export function parseDetail(ref: { type: MediaType; id: number }, body: Json): T
     seen.add(id);
     return [{ id, name, role: text(c.character) ?? text(list(c.roles)[0]?.character), profilePath: text(c.profile_path) }];
   });
+  const directors = list(obj(body.credits ?? body.aggregate_credits).crew).flatMap((c): Credit[] => {
+    const id = num(c.id), name = text(c.name);
+    if (id === undefined || !name || (c.job !== 'Director' && !list(c.jobs).some((j) => j.job === 'Director'))) return [];
+    return [{ id, name, role: 'Director', profilePath: text(c.profile_path) }];
+  }).filter((c, i, all) => all.findIndex((other) => other.id === c.id) === i);
+  const providers = obj(obj(obj(body['watch/providers']).results)[region]);
+  const certs = ref.type === 'tv'
+    ? list(obj(body.content_ratings).results).filter((r) => r.iso_3166_1 === region).map((r) => text(r.rating))
+    : list(obj(body.release_dates).results).filter((r) => r.iso_3166_1 === region)
+      .flatMap((r) => list(r.release_dates).sort((a, b) => Number(b.type === 3) - Number(a.type === 3)).map((r) => text(r.certification)));
+  const last = obj(body.last_episode_to_air);
+  const collection = obj(body.belongs_to_collection);
   const seasons = list(body.seasons)
     .flatMap((s): Season[] => {
       const number = num(s.season_number);
       const episodeCount = num(s.episode_count) ?? 0;
-      return number === undefined || episodeCount === 0 ? [] : [{ number, name: text(s.name) ?? `Season ${number}`, episodeCount }];
+      return number === undefined || !Number.isInteger(number) || number < 0 || !Number.isInteger(episodeCount) || episodeCount <= 0 ? [] : [{ number, name: text(s.name) ?? `Season ${number}`, episodeCount }];
     })
+    .filter((s, i, all) => all.findIndex((other) => other.number === s.number) === i)
     .sort((a, b) => (a.number === 0 ? Infinity : a.number) - (b.number === 0 ? Infinity : b.number));
   const more = list(obj(body.recommendations).results).flatMap((r) => {
     const id = num(r.id);
@@ -99,10 +126,26 @@ export function parseDetail(ref: { type: MediaType; id: number }, body: Json): T
     tagline: text(body.tagline),
     backdropPath: text(body.backdrop_path),
     runtime,
+    status: text(body.status),
+    lastAirDate: text(body.last_air_date),
+    lastAired: num(last.season_number) !== undefined && num(last.episode_number) !== undefined
+      ? { season: Number(last.season_number), episode: Number(last.episode_number) } : undefined,
+    certification: certs.find(Boolean),
+    providers: list(providers.flatrate).flatMap((p) => num(p.provider_id) !== undefined && text(p.provider_name)
+      ? [{ id: Number(p.provider_id), name: String(p.provider_name), logoPath: text(p.logo_path) }] : [])
+      .filter((p, i, all) => all.findIndex((other) => other.id === p.id) === i),
+    watchLink: text(providers.link)?.startsWith('https://') ? String(providers.link) : undefined,
+    languages: list(body.spoken_languages).flatMap((l) => text(l.english_name) ?? text(l.name) ?? []),
+    countries: list(body.production_countries).flatMap((c) => text(c.name)?.replace('United States of America', 'United States') ?? []),
+    studios: list(ref.type === 'tv' ? body.networks : body.production_companies).flatMap((c) => text(c.name) ?? []),
+    budget: num(body.budget), revenue: num(body.revenue),
+    collection: num(collection.id) !== undefined && text(collection.name)
+      ? { id: Number(collection.id), name: String(collection.name) } : undefined,
+    directors,
     genres: list(body.genres).flatMap((g) => text(g.name) ?? []),
     seasons,
     cast: cast.slice(0, CAST_LIMIT),
-    more,
+    more: more.filter((t, i, all) => all.findIndex((other) => other.type === t.type && other.id === t.id) === i),
     trailer: trailerOf(body),
     // A movie carries it at the top level, a series only under external_ids.
     imdbId: text(body.imdb_id) ?? text(obj(body.external_ids).imdb_id),
@@ -117,15 +160,18 @@ function trailerOf(body: Json): string | undefined {
 }
 
 export function parseSeason(body: Json): Episode[] {
+  const seen = new Set<number>();
   return list(body.episodes).flatMap((e): Episode[] => {
     const number = num(e.episode_number);
-    if (number === undefined) return [];
+    if (number === undefined || !Number.isInteger(number) || number < 1 || seen.has(number)) return [];
+    seen.add(number);
     return [{
       number,
       name: text(e.name) ?? `Episode ${number}`,
       overview: text(e.overview),
       stillPath: text(e.still_path),
       airDate: text(e.air_date),
+      ...(num(e.runtime) && Number(e.runtime) > 0 ? { runtime: Number(e.runtime) } : {}),
     }];
   });
 }
@@ -158,13 +204,14 @@ export async function fetchDetail(
   ref: { type: MediaType; id: number },
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
+  region = 'US',
 ): Promise<TitleDetail | null> {
   const append =
     ref.type === 'tv'
-      ? 'aggregate_credits,recommendations,videos,external_ids'
-      : 'credits,recommendations,videos,external_ids';
+      ? 'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers'
+      : 'credits,recommendations,videos,external_ids,release_dates,watch/providers';
   const body = await tmdb(`/${ref.type}/${ref.id}`, key, { append_to_response: append }, fetchImpl);
-  return body && parseDetail(ref, body);
+  return body && parseDetail(ref, body, region);
 }
 
 /** A season's episodes; null when TMDB couldn't say. */
@@ -181,4 +228,48 @@ export async function fetchSeason(
 export async function fetchPerson(id: number, key: string, fetchImpl: typeof fetch = tmdbFetch): Promise<PersonDetail | null> {
   const body = await tmdb(`/person/${id}`, key, {}, fetchImpl);
   return body && parsePerson(id, body);
+}
+
+export interface FilmCredit { title: Title; department: string; role?: string }
+
+/** Full credits, unlike search's deliberately short notable-films expansion. */
+export function parseFilmography(body: Json): FilmCredit[] {
+  return [...list(body.cast).map((c): Json => ({ ...c, department: 'Acting' })), ...list(body.crew)].flatMap((c): FilmCredit[] => {
+    const id = num(c.id);
+    if (id === undefined || (c.media_type !== 'movie' && c.media_type !== 'tv')) return [];
+    const title = toTitle({ type: c.media_type, id }, c);
+    return title ? [{ title, department: text(c.department) ?? 'Crew', role: text(c.character) ?? text(c.job) }] : [];
+  });
+}
+
+export function groupFilmography(credits: FilmCredit[]): { department: string; films: FilmCredit[] }[] {
+  const priority = ['Acting', 'Directing', 'Production', 'Writing'];
+  const departments = [...new Set(credits.map((c) => c.department))];
+  departments.sort((a, b) => {
+    const rank = (d: string) => priority.includes(d) ? priority.indexOf(d) : priority.length;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
+  return departments.map((department) => {
+    const seen = new Set<string>();
+    return { department, films: credits.filter((c) => c.department === department)
+      .sort((a, b) => (b.title.year ?? 0) - (a.title.year ?? 0))
+      .filter((c) => {
+        const id = `${c.title.type}:${c.title.id}`;
+        if (seen.has(id)) return false;
+        seen.add(id); return true;
+      }) };
+  });
+}
+
+export async function fetchFilmography(id: number, key: string, fetchImpl: typeof fetch = tmdbFetch): Promise<FilmCredit[] | null> {
+  const body = await tmdb(`/person/${id}/combined_credits`, key, {}, fetchImpl);
+  return body && parseFilmography(body);
+}
+
+export async function fetchCollection(id: number, key: string, fetchImpl: typeof fetch = tmdbFetch): Promise<Title[]> {
+  const body = await tmdb(`/collection/${id}`, key, {}, fetchImpl);
+  return list(body?.parts).flatMap((r) => {
+    const title = num(r.id) === undefined ? null : toTitle({ type: 'movie', id: Number(r.id) }, r);
+    return title ? [title] : [];
+  }).filter((t, i, all) => all.findIndex((other) => other.id === t.id) === i).sort((a, b) => (a.year ?? Infinity) - (b.year ?? Infinity));
 }

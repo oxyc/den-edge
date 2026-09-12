@@ -21,7 +21,12 @@
       } else {
         void tick().then(() => {
           if (!active || activation !== ticket) return;
-          focused?.focus({ preventScroll: true });
+          // A persistent shell control (such as navbar search) may have opened this page.
+          // Restoring the page's old focus must not take focus or the keyboard away from it.
+          const currentFocus = document.activeElement;
+          if (!currentFocus || currentFocus === document.body || root.contains(currentFocus)) {
+            focused?.focus({ preventScroll: true });
+          }
           const restore = () => {
             if (!active || activation !== ticket) return;
             for (const { element, x, y } of scrolls) element.scrollTo({ left: x, top: y, behavior: 'instant' });

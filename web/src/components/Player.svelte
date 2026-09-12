@@ -26,6 +26,7 @@
     title,
     season,
     episode,
+    filename,
     tmdbKey,
     scout,
     remux,
@@ -39,6 +40,7 @@
     title: Title;
     season?: number;
     episode?: number;
+    filename?: string;
     tmdbKey: string;
     scout: Addon;
     /** Where den-remux answers (`findRemux`): '' for this origin, else the tailnet's address. */
@@ -105,7 +107,7 @@
   })();
 
   /** Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. */
-  async function begin(pick?: { audioTrack?: number; filename: string }) {
+  async function begin(pick: { audioTrack?: number; filename: string } | undefined = filename ? { filename } : undefined) {
     clearTimeout(retry);
     failure = null;
     if (!imdb) {

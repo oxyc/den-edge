@@ -29,14 +29,14 @@ for (const scenario of [
     await page.waitForSelector('[data-loading-snapshot]',{state:'detached'});
     if (scenario.scrolled) {
       releaseFilms();
-      await expect(page.locator('[data-active="true"] h2')).toHaveText('Known for');
+      await expect(page.locator('[data-active="true"] h2')).toHaveText('Filmography');
       await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
       expect(await page.evaluate(()=>scrollY)).toBeGreaterThan(800);
     }
     await page.goBack();
     await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
     releaseFilms();
-    await expect(page.locator('[data-active="false"] h2')).toHaveText('Known for');
+    await expect(page.locator('[data-active="false"] h2')).toHaveText('Filmography');
     await page.setViewportSize({width:scenario.width,height:scenario.height});
     await page.waitForTimeout(300);
     await page.evaluate(()=>{
@@ -58,7 +58,7 @@ for (const scenario of [
       }
     });
     await page.waitForFunction(()=>typeof window.releaseLanding==='function');
-    await expect(page.locator('[data-swipe-preview] h2')).toContainText(['Known for']);
+    await expect(page.locator('[data-swipe-preview] h2')).toContainText(['Filmography']);
     const frozen=await page.screenshot({path:test.info().outputPath('frozen.png')});
     await page.locator('[data-swipe-preview]').evaluate(el=>el.style.visibility='hidden');
     const live=await page.screenshot({path:test.info().outputPath('live.png')});

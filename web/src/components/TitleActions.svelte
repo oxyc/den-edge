@@ -20,6 +20,8 @@
     onplayhere,
     trailerHref,
     notice = null,
+    detailPage = false,
+    playLabel = 'Play',
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -36,6 +38,8 @@
     trailerHref?: string;
     /** What the last action did, when that's worth saying. */
     notice?: string | null;
+    detailPage?: boolean;
+    playLabel?: string;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
 
@@ -53,11 +57,11 @@
 
 <svelte:window bind:innerWidth={viewportWidth} />
 
-<div class="actions" aria-busy={busy}>
+<div class="actions" class:detail-page={detailPage} aria-busy={busy}>
   {#if onplayhere}
-    <button class="primary" disabled={busy} onclick={onplayhere}>{@render play()}<span>Play</span></button>
+    <button class="primary" disabled={busy} onclick={onplayhere}>{@render play()}<span>{playLabel}</span></button>
   {:else if onplay}
-    <button class="primary" disabled={busy} onclick={onplay}>{@render tv()}<span>Play on TV</span></button>
+    <button class="primary" disabled={busy} onclick={onplay}>{@render tv()}<span>{playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}</span></button>
   {/if}
 
   <div class="pills">
@@ -153,6 +157,16 @@
 {/snippet}
 
 <style>
+  .detail-page .primary { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  .detail-page .pill, .detail-page .pick { background:rgb(255 255 255 / .09); border-color:rgb(255 255 255 / .13); }
+  .detail-page .pill.on, .detail-page .pick.on { background:var(--fg); color:var(--bg); }
+  @media(min-width:760px) {
+    .detail-page { gap:16px; }
+    .detail-page .pills { gap:16px; }
+    .detail-page .pick { display:none; }
+    .detail-page .primary, .detail-page .pill { padding-inline:20px; border-radius:12px; }
+  }
+
   .actions {
     display: grid;
     gap: 10px;

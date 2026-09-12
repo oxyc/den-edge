@@ -82,7 +82,7 @@ describe('title pages', () => {
     const url = new URL(asked[0]!);
     expect([url.pathname, url.searchParams.get('append_to_response')]).toEqual([
       '/3/tv/95396',
-      'aggregate_credits,recommendations,videos,external_ids',
+      'aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers',
     ]);
     const down = (async () => new Response('{}', { status: 401 })) as typeof fetch;
     expect(await fetchDetail({ type: 'movie', id: 1 }, 'k', down)).toBeNull();

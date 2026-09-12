@@ -52,6 +52,7 @@
   let paging = $state(false);
   let held = $state(false);
   const current = $derived(shown[Math.min(index, shown.length - 1)]);
+  const firstTitleKey = $derived(shown[0] ? `${shown[0].type}:${shown[0].id}` : '');
 
   const keyOf = (title: Title) => `${title.type}:${title.id}`;
   const backdropURL = (path: string) => `https://image.tmdb.org/t/p/w1280${path}`;
@@ -223,7 +224,7 @@
   // A different set of titles is a different billboard: start it at the beginning rather than leaving the rail
   // parked where the last set had scrolled to, which would show slide seven of a list that just changed.
   $effect(() => {
-    const first = shown[0] && keyOf(shown[0]);
+    const first = firstTitleKey;
     if (!first) return;
     untrack(() => {
       index = 0;
@@ -316,9 +317,10 @@
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
       <article class="slide" aria-roledescription="slide" aria-label={title.title}>
+        <a class="slide-link" href={titleHref(title)} aria-label={`Open details for ${title.title}`} tabindex={n === index ? 0 : -1} draggable="false"></a>
         <div class="told">
           <div class="text">
-            <h2><a href={titleHref(title)} tabindex={n === index ? 0 : -1}>{title.title}</a></h2>
+            <h2><a class="title-link" href={titleHref(title)} tabindex={n === index ? 0 : -1}>{title.title}</a><span class="mobile-title">{title.title}</span></h2>
             <p class="facts">{facts(title)}</p>
             <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
@@ -484,12 +486,23 @@
   }
 
   .slide {
+    position: relative;
     display: grid;
     flex: 0 0 100%;
     align-items: end;
     min-height: inherit;
     scroll-snap-align: center;
     scroll-snap-stop: always;
+  }
+
+  .slide-link, .mobile-title { display: none; }
+
+  @media (max-width: 759px) {
+    .slide-link { display: block; position: absolute; inset: 0; z-index: 1; }
+    .slide-link:focus-visible { outline: 2px solid var(--fg); outline-offset: -4px; }
+    .mobile-title { display: inline; }
+    .title-link, .slide .actions { display: none; }
+    .slide .text { min-height: 0; }
   }
 
   /* The words sit in the page's own column, so they line up with the rows below rather than with the screen.
@@ -501,23 +514,18 @@
     padding: var(--bar-space) var(--gutter) 76px;
   }
 
-  /* The fade under the words does the work where it reaches them. On a narrow screen it doesn't: the hero is
-     tall, the words sit further up the picture, and a bright frame swallows them. So they carry a shadow of
-     their own — a whisper on a wide screen, where the fade is already most of the answer, and enough of one to
-     read against a white wall on a phone. The buttons are drawn on their own ground and want none of it. */
   .text {
     display: grid;
     gap: 8px;
     max-width: 720px;
     min-height: 190px;
     align-content: end;
-    text-shadow: 0 1px 3px rgb(0 0 0 / 0.65), 0 0 18px rgb(0 0 0 / 0.4);
   }
 
-  @media (max-width: 759px) {
-    .text {
-      text-shadow: 0 1px 4px rgb(0 0 0 / 0.85), 0 0 22px rgb(0 0 0 / 0.55);
-    }
+  /* Shadow the rendered text after line clamping so overflow doesn't cut a hard edge through it.
+     Keep it tight: the backdrop fade supplies the broader contrast. */
+  h2, .facts, .overview {
+    filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
   }
 
 
@@ -536,6 +544,14 @@
   h2 a {
     color: var(--fg);
     text-decoration: none;
+  }
+
+  @media (min-width: 360px) and (max-width: 759px) {
+    h2 {
+      block-size: 1.05em;
+      -webkit-line-clamp: 1;
+      line-clamp: 1;
+    }
   }
 
   /* Nearly white, not the app's secondary grey. That grey is chosen for the page's dark ground; over a
@@ -573,8 +589,6 @@
     flex-wrap: wrap;
     gap: 10px;
     margin-top: 4px;
-    /* Drawn on their own ground, so they want none of the shadow the words carry. */
-    text-shadow: none;
   }
 
   .primary,
@@ -615,6 +629,7 @@
   /* Held over the rail, in the page's own column, so it stays put while the slides pass under it. */
   .pager {
     position: absolute;
+    z-index: 2;
     right: 0;
     bottom: 32px;
     left: 0;

@@ -32,7 +32,7 @@ describe('retained routes', () => {
 describe('link interception', () => {
   const base = 'https://den.test/?preview=1#library';
   it('accepts only app routes on the same document', () => {
-    for (const hash of ['#library', '#movies', '#series', '#settings', '#title/movie/42', '#person/287']) {
+    for (const hash of ['#library', '#movies', '#series', '#settings', '#search', '#title/movie/42', '#person/287']) {
       expect(appHash(hash, base)).toBe(hash);
     }
     for (const href of ['https://other.test/#library', '/api#library', '/?preview=2#library', '#pair=secret', '#section', '#title/tv/0']) {
@@ -42,6 +42,18 @@ describe('link interception', () => {
 });
 
 describe('history entry ownership', () => {
+  it('keeps search separate from Home and restores both through detail visits', () => {
+    const nav = new Navigation('#library');
+    const home = nav.current;
+    nav.save(0, 950);
+    const search = nav.visit('#search');
+    nav.save(0, 520);
+    nav.visit('#title/movie/42', 'result');
+    expect(nav.visit('#search')).toBe(search);
+    expect(nav.current.y).toBe(520);
+    expect(nav.visit('#library')).toBe(home);
+    expect(nav.current.y).toBe(950);
+  });
   it('keeps independent state for separate visits to the same detail URL', () => {
     const nav = new Navigation('#library');
     const first = nav.visit('#title/movie/42', 'entry-1');

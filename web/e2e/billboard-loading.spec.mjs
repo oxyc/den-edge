@@ -1,7 +1,7 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
 
-for(const width of [390,844,1280]) test(`billboard reserves text and artwork before loading at ${width}px`,async()=>{
+for(const width of [320,393,844,1280]) test(`billboard reserves text and artwork before loading at ${width}px`,async()=>{
   const browser=await chromium.launch({executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH});
   try {
     const page=await browser.newPage({viewport:{width,height:800},reducedMotion:'reduce'});
@@ -27,6 +27,9 @@ for(const width of [390,844,1280]) test(`billboard reserves text and artwork bef
       return ['.billboard','.slide h2','.slide .facts','.slide .overview','.slide .actions','[data-following-content]'].map(s=>measure(document.querySelector(s)));
     });
     const before=await geometry();
+    const lineHeight=await page.locator('.slide h2').first().evaluate(el=>parseFloat(getComputedStyle(el).lineHeight));
+    const lines=width>=360 && width<760 ? 1 : 2;
+    expect(Math.abs(before[1].height-lineHeight*lines)).toBeLessThan(.1);
     expect(before[0].height).toBe(empty.height);
     releaseMetadata();
     await expect(page.locator('.overview').first()).toContainText('substantial movie overview');
@@ -38,6 +41,8 @@ for(const width of [390,844,1280]) test(`billboard reserves text and artwork bef
     await page.locator('.dot').nth(1).click();
     await expect(page.locator('.dot').nth(1)).toHaveAttribute('aria-current','true');
     expect((await hero.boundingBox()).height).toBe(empty.height);
+    expect(Math.abs((await page.locator('.slide h2').nth(1).boundingBox()).height-lineHeight*lines)).toBeLessThan(.1);
+    await page.screenshot({path:test.info().outputPath(`billboard-${width}.png`)});
     expect(requests,'concurrent metadata learning should be deduplicated').toBe(2);
   } finally {await browser.close();}
 });

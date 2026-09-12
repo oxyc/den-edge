@@ -22,6 +22,10 @@ Billboard viewport tests keep the hero and following content fixed during height
 
 Billboard loading tests delay metadata and artwork independently, check title/metadata/overview/action rectangles, and compare short/long-title slides. Desktop navbar coverage checks scoped Back, keyboard activation, direct-link fallback, the existing Den icon, and 320px/390px layouts.
 
-Detail trailer tests play a generated, silent WebM through mocked byte-range responses. They check the ten-second intro skip, muted single playback, mobile media above the details, desktop overlay layout, unchanged geometry after playback starts, pause/resume offscreen, missing/broken trailers, blocked autoplay, reduced motion changes, late resolution after leaving a route, and frozen video pixels in independently displayed swipe snapshots.
+Detail trailer tests play a generated, silent WebM through mocked byte-range responses. They check detail playback starting at zero seconds, muted single playback, mobile media above the details, desktop overlay layout, unchanged geometry after playback starts, pause/resume offscreen, missing/broken trailers, blocked autoplay, reduced motion changes, late resolution after leaving a route, and frozen video pixels in independently displayed swipe snapshots.
 
 Mobile trailer regressions suppress compositor callbacks while real video plays and compare screenshot pixels for opaque letterboxing, both live and in a swipe snapshot. YouTube link tests cover the visible Trailer label, exact videos and search fallback, mobile handoff links, desktop new tabs, and the full action row at 320px.
+
+Navbar search has its own retained SPA route. Tests cover mobile expansion and Cancel, direct-link fallback, immediate cancellation during a transition, keyboard focus, stale-query responses, and Home/result scroll restoration. Settings remains a text label at every width.
+
+Mobile billboards open details by tapping the slide, with native horizontal swipe and independent pagination dots. Action buttons remain on desktop. Normal phone widths use one heading line; widths below 360px keep two. Delayed discovery must preserve the visible billboard and its selected slide.

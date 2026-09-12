@@ -16,14 +16,17 @@
   });
 
   let route = $state(parseRoute(location.hash));
+  let query = $state('');
+  const searchLibrary = $derived(links.current?.libraryKey);
+  $effect(() => { void searchLibrary; query = ''; });
 </script>
 
-<NavigationBar {route} paired={!!links.current} />
+<NavigationBar {route} paired={!!links.current} bind:query />
 
 <main>
   {#if links.current}
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
-      <RoutedLibrary link={links.current} onchange={(next) => (route = next)} />
+      <RoutedLibrary link={links.current} {query} onchange={(next) => (route = next)} />
     {/key}
   {:else}
     <LinkTV />

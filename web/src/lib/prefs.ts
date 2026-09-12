@@ -124,3 +124,23 @@ export function isHidden(title: Title, prefs: Prefs, { ignoringYearFloor = false
   if (title.originalLanguage && prefs.excludedLanguages.has(title.originalLanguage)) return true;
   return prefs.hideAnime && genres.includes(ANIMATION) && title.originalLanguage === 'ja';
 }
+
+
+/** Detail-only TV preferences, separate from discovery's hide rules. */
+export function readDetailPrefs(row: SettingsRow | undefined, locale = globalThis.navigator?.language ?? 'en-US') {
+  const get = (key: string) => row?.values[key]?.value;
+  const enabled = get('den.enabledRatingSources');
+  const country = get('den.watchRegion');
+  const autoplay = get('den.autoplayTrailers');
+  const warnings = get('den.shownWarningCategories');
+  let fallback = 'US';
+  try { fallback = new Intl.Locale(locale).region ?? fallback; } catch { /* malformed browser locale */ }
+  const region = country && 'string' in country && /^[a-z]{2}$/i.test(country.string) ? country.string.toUpperCase() : fallback;
+  return {
+    region,
+    ratingSources: enabled && 'strings' in enabled ? enabled.strings.filter((s) => ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'].includes(s))
+      : ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+    warningCategories: warnings && 'strings' in warnings ? warnings.strings : [],
+    autoplay: !(autoplay && 'bool' in autoplay && !autoplay.bool),
+  };
+}

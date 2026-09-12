@@ -8,9 +8,7 @@
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
   import Player from './components/Player.svelte';
-  import SearchResults from './components/SearchResults.svelte';
-  import { searchStream, type Hit } from './lib/search';
-  import { searchSources } from './lib/searchSources';
+  import Search from './components/Search.svelte';
   import {
     addToWatchlist,
     blankEpisode,
@@ -45,11 +43,11 @@
   import type { LibraryLog } from './lib/log';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { navigate } from './lib/navigation';
-  import { ensureSyncPolicy } from './lib/syncLoader';
   import { nameLibraryTitles } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
+  import { ensureSyncPolicy } from './lib/syncLoader';
   import { availability } from './lib/availability.svelte';
-  import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
+  import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
   import { discoverServices } from './lib/discoverServices';
   import { fetchRoutes, type Routes } from './lib/routes';
@@ -57,7 +55,7 @@
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
-  let { link, route, active, session }: { link: Link; route: Route; active: boolean; session: LibrarySession } = $props();
+  let { link, route, active, session, query = '' }: { link: Link; route: Route; active: boolean; session: LibrarySession; query?: string } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
@@ -85,7 +83,7 @@
   /** Where den-remux answers for this page (`findRemux`), so a title can play here; null where no route reaches it. */
   let remux = $state<string | null>(null);
 
-  type Target = { title: Title; season?: number; episode?: number };
+  type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
 
@@ -255,11 +253,11 @@
   }
 
   /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
-  async function play(title: Title) {
+  async function play(title: Title, season?: number, episode?: number) {
     busy = true;
     failure = null;
     notice = null;
-    const sent = await sendToTV(link, { type: 'play', tmdbId: title.id, mediaType: title.type, title: title.title });
+    const sent = await sendToTV(link, { type: 'play', tmdbId: title.id, mediaType: title.type, title: title.title, season, episode });
     busy = false;
     if (sent) notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
     else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
@@ -271,12 +269,12 @@
    */
   const playHere = $derived(
     scout && tmdbKey && remux !== null
-      ? (title: Title, season?: number, episode?: number) => {
+      ? (title: Title, season?: number, episode?: number, filename?: string) => {
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up = library && continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode;
             playing = { title, ...(up ?? { season: 1, episode: 1 }) };
           } else {
-            playing = { title, season, episode };
+            playing = { title, season, episode, filename };
           }
         }
       : undefined,
@@ -330,14 +328,14 @@
     navigate(titleHref(title));
   };
   const select = $derived(log ? open : undefined);
-  // Search, as the TV's Search tab runs it: a pause after typing, then results that improve as sources answer;
-  // a newer query supersedes an older one mid-flight.
-  const sources = $derived(tmdbKey ? searchSources(tmdbKey, undefined, atlas) : null);
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;
     return readPrefs(log?.settings('prefs'));
   });
+  const detailPrefs = $derived.by(() => { void session.settingsRevision; return readDetailPrefs(log?.settings('prefs')); });
+  const warningKey = $derived.by(() => { void session.settingsRevision; return readApiKey(log?.settings('keys'), 'doesthedogdie') ?? ''; });
+  const omdbKey = $derived.by(() => { void session.settingsRevision; return readApiKey(log?.settings('keys'), 'omdb') ?? ''; });
   const shown = (title: Title) => !isHidden(title, prefs);
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
@@ -405,44 +403,6 @@
   });
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
-  let query = $state('');
-  let hits = $state<Hit[] | null>(null);
-  let searchFailed = $state(false);
-  let generation = 0;
-  let pause: ReturnType<typeof setTimeout> | undefined;
-
-  function queryChanged() {
-    clearTimeout(pause);
-    generation++;
-    const text = query.trim();
-    if (text.length < 2 || !sources) {
-      hits = null;
-      return;
-    }
-    pause = setTimeout(() => void runSearch(text, generation), 300);
-  }
-
-  async function runSearch(text: string, ticket: number) {
-    if (!sources) return;
-    searchFailed = false;
-    let painted = false;
-    try {
-      for await (const batch of searchStream(text, sources)) {
-        if (ticket !== generation) return;
-        // The TV's search filter: its hide rules, but not the year floor or Hide Watched — a title typed by name
-        // must be findable.
-        hits = batch.filter((h) => h.kind === 'person' || !isHidden(h.title, prefs, { ignoringYearFloor: true }));
-        painted = true;
-      }
-      if (!painted && ticket === generation) hits = [];
-    } catch {
-      if (ticket === generation) {
-        searchFailed = true;
-        hits = [];
-      }
-    }
-  }
-
   /**
    * What the billboard cycles. Not a row: a pool of its own, ranked by `pickBillboard` — what is being watched
    * now, what is new or still to come, and what has just landed on this household's own services, weighted
@@ -456,7 +416,7 @@
     // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
     // read without being watched. Those tick over continuously while the library is named, and watching them
     // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
-    if (route.page === 'title' || route.page === 'person') return;
+    if (route.page === 'title' || route.page === 'person' || route.page === 'search') return;
     const here = atlas;
     if (!tmdbKey) return;
     untrack(() => buildBillboard(here));
@@ -469,7 +429,7 @@
     // fetches came back meant the answer was always judged stale and thrown away, and the billboard stayed
     // empty. A build is stale only when a later build has started.
     const run = ++billboardRun;
-    featured = [];
+    // A late discovery service can improve the pool. Keep the current slides while it loads.
     if (!table.length) return;
     const row = (id: string) => table.find((r) => r.id === id)?.load(1).catch(() => []) ?? Promise.resolve([]);
     // The billboard gets a pool of its own rather than whatever row happens to lead the page. A "Because you
@@ -514,7 +474,7 @@
           taste,
           keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
         });
-        if (run === billboardRun) featured = picked;
+        if (run === billboardRun && (picked.length || !featured.length)) featured = picked;
       })
       .catch(() => undefined);
   }
@@ -578,6 +538,13 @@
     {active}
     ref={page}
     {tmdbKey}
+    {omdbKey}
+    {warningKey}
+    warningCategories={detailPrefs.warningCategories}
+    region={detailPrefs.region}
+    ratingSources={detailPrefs.ratingSources}
+    autoplay={detailPrefs.autoplay}
+    {scout}
     row={pageRow}
     episodes={pageEpisodes}
     {busy}
@@ -593,15 +560,16 @@
     {shown}
   />
 {:else if route.page === 'person'}
-  <Person id={route.id} {tmdbKey} onselect={open} {shown} />
+  <Person id={route.id} {tmdbKey} {active} onselect={open} />
+{:else if route.page === 'search'}
+  <Search {query} {tmdbKey} {atlas} {prefs} onselect={select} />
 {:else}
   {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
   {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
-  <!-- The billboard leads the page, as it does on the TV: it reaches the top of the window and runs up behind
-       the bar, so search follows it rather than pushing it down the screen. -->
+  <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   <!-- Kept in the page while the library is still opening, so its space is held from the first paint and the
        rows below don't jump down when the titles arrive. -->
-  {#if !hits && (tmdbKey || log === undefined)}
+  {#if tmdbKey || log === undefined}
     <Billboard
       {active}
       titles={featured.filter(featuredShown)}
@@ -611,26 +579,7 @@
       onplay={playHere && ((title) => playHere(title))}
     />
   {/if}
-  {#if sources && !facet}
-    <input
-      class="search glass"
-      type="search"
-      placeholder="Search movies, series and people"
-      aria-label="Search movies, series and people"
-      autocomplete="off"
-      bind:value={query}
-      oninput={queryChanged}
-    />
-  {:else if !sources}
-    <p class="note">Search needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.</p>
-  {/if}
-  {#if hits}
-    {#if hits.length}
-      <SearchResults {hits} onselect={select} />
-    {:else}
-      <p class="note">{searchFailed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}</p>
-    {/if}
-  {:else if resume.length}
+  {#if resume.length}
     <PosterRow heading="Continue Watching">
       {#each resume as entry (`${entry.title.type}:${entry.title.id}`)}
         <PosterCard
@@ -642,7 +591,7 @@
       {/each}
     </PosterRow>
   {/if}
-  {#if !hits && saved.length}
+  {#if saved.length}
     <PosterRow heading="Watchlist">
       {#each saved as title (`${title.type}:${title.id}`)}
         <PosterCard
@@ -653,9 +602,7 @@
       {/each}
     </PosterRow>
   {/if}
-  {#if !hits}
-    <Browse {rows} shown={browseShown} onselect={open} />
-  {/if}
+  <Browse {rows} shown={browseShown} onselect={open} />
 {/if}
 
 {#if playing && scout && remux !== null}
@@ -666,6 +613,7 @@
       title={target.title}
       season={target.season}
       episode={target.episode}
+      filename={target.filename}
       {tmdbKey}
       {scout}
       {remux}
@@ -680,18 +628,6 @@
 {/if}
 
 <style>
-  .search {
-    width: 100%;
-    margin-bottom: 28px;
-    padding: 12px 20px;
-    border-radius: 999px;
-    color: var(--fg);
-    outline: none;
-  }
-
-  .search:focus-visible {
-    border-color: var(--accent);
-  }
   .note {
     color: var(--muted);
   }
