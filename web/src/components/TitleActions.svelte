@@ -162,10 +162,13 @@
     gap: 10px;
   }
 
+  /* One height for all of them: a row of capsules at 52, 48 and 44 reads as a mistake rather than a hierarchy,
+     which the fill and the width already carry. A finger's worth, either way. */
   .primary,
   .pill,
   .pick {
     display: flex;
+    min-height: 48px;
     gap: 8px;
     align-items: center;
     justify-content: center;
@@ -179,7 +182,6 @@
 
   /* The one thing this page is for: the page's width on a phone. */
   .primary {
-    min-height: 52px;
     padding: 0 24px;
     border-color: var(--accent);
     background: var(--accent);
@@ -187,10 +189,11 @@
     font-weight: 600;
   }
 
-  /* A finger's worth, and no wider than its glyph until there is room for the word: 12 + 20 + 12 = 44. */
+  /* Under a full-width Play, glyphs of five different widths look like what was left over; they divide the row
+     instead, and take their own width once their words are drawn. */
   .pill,
   .pick {
-    min-height: 44px;
+    flex: 1 1 0;
     padding: 0 12px;
   }
 
@@ -249,8 +252,13 @@
       align-items: center;
     }
 
-    .primary {
-      min-height: 48px;
+    .pill,
+    .pick {
+      flex: 0 0 auto;
+    }
+
+    .chevron {
+      display: block;
     }
 
     .label {
@@ -270,7 +278,9 @@
     height: 20px;
   }
 
+  /* Drawn beside the word it opens; beside a bare glyph it only makes one control wider than its neighbours. */
   .chevron {
+    display: none;
     width: 14px;
     height: 14px;
     opacity: 0.6;
