@@ -13,6 +13,16 @@ for (const scenario of [
     try {
       const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
       await guardNetwork(page);
+      await page.addInitScript(() => {
+        const start = document.startViewTransition?.bind(document);
+        window.fixtureTransition = Promise.resolve();
+        if (start)
+          document.startViewTransition = (...args) => {
+            const transition = start(...args);
+            window.fixtureTransition = transition.finished.catch(() => {});
+            return transition;
+          };
+      });
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('https://image.tmdb.org/**', (r) =>
         r.fulfill({
@@ -65,16 +75,24 @@ for (const scenario of [
       await page.locator('[data-active="true"] a').filter({ hasText: 'An Actor' }).click();
       await expect(page.locator('[data-active="true"] h1')).toHaveText('An Actor');
       await page.waitForSelector('[data-loading-snapshot]', { state: 'detached' });
+      // A visible heading does not mean the View Transition has released its frozen rendering.
+      await page.evaluate(() => window.fixtureTransition);
       if (scenario.scrolled) {
         releaseFilms();
-        await expect(page.locator('[data-active="true"] h2')).toHaveText('Filmography');
+        // The heading exists during loading. Wait for cards, then let the sentinel load the final page.
+        await expect(page.locator('[data-active="true"] .films .card')).toHaveCount(20);
+        await page.locator('[data-active="true"] .load-more').scrollIntoViewIfNeeded();
+        await expect(page.locator('[data-active="true"] .films .card')).toHaveCount(24);
         await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
         expect(await page.evaluate(() => scrollY)).toBeGreaterThan(800);
       }
       await page.goBack();
       await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
       releaseFilms();
-      await expect(page.locator('[data-active="false"] h2')).toHaveText('Filmography');
+      await expect(page.locator('[data-active="false"] .films .card')).toHaveCount(
+        scenario.scrolled ? 24 : 20,
+      );
+      await page.evaluate(() => window.fixtureTransition);
       await page.setViewportSize({ width: scenario.width, height: scenario.height });
       await page.waitForTimeout(300);
       await page.evaluate(() => {
@@ -108,6 +126,26 @@ for (const scenario of [
         });
         await page.waitForFunction(() => typeof window.releaseLanding === 'function');
         await expect(page.locator('[data-swipe-preview] h2')).toContainText(['Filmography']);
+        const geometry = await page.evaluate(() => {
+          const read = (root) =>
+            [root, ...root.querySelectorAll('img, .person, .filmography, .card')].map((el) => {
+              const rect = el.getBoundingClientRect();
+              return {
+                tag: el.tagName,
+                top: rect.top,
+                height: rect.height,
+                width: rect.width,
+                complete: el.complete,
+                naturalWidth: el.naturalWidth,
+              };
+            });
+          return {
+            scrollY,
+            max: document.documentElement.scrollHeight - innerHeight,
+            frozen: read(document.querySelector('[data-swipe-preview] > div > div')),
+            live: read(document.querySelector('[data-active="true"]')),
+          };
+        });
         const frozen = await page.screenshot({ path: test.info().outputPath('frozen.png') });
         await page
           .locator('[data-swipe-preview]')
@@ -115,6 +153,7 @@ for (const scenario of [
         const live = await page.screenshot({ path: test.info().outputPath('live.png') });
         await test.info().attach('actor-frozen', { body: frozen, contentType: 'image/png' });
         await test.info().attach('actor-live', { body: live, contentType: 'image/png' });
+        if (!frozen.equals(live)) console.log('snapshot mismatch', JSON.stringify(geometry));
         expect(
           frozen.equals(live),
           'actor Forward snapshot must match live content after background loading and rotation',
@@ -124,7 +163,7 @@ for (const scenario of [
         if (cycle === 0) {
           await page.goBack();
           await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
-          await page.waitForTimeout(300);
+          await page.evaluate(() => window.fixtureTransition);
         }
       }
     } finally {
