@@ -524,10 +524,12 @@ pub mod tests {
         let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
         let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
         assert!(csp.contains("media-src 'self' blob: https://pve.example:8443;"), "{csp}");
+        // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows.
         assert!(
-            csp.contains("connect-src 'self' https://api.themoviedb.org https://pve.example:8443;"),
+            csp.contains("connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com"),
             "{csp}"
         );
+        assert!(csp.contains("https://www.omdbapi.com https://pve.example:8443;"), "{csp}");
         assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");
     }
 
