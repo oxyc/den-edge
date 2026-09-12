@@ -1,9 +1,10 @@
 <!-- Home's billboard: full-bleed, running up behind the bar, cycling every fifteen seconds.
 
-     It is a scroller, not a stack of cross-fades. The slides sit in a row and the browser snaps between them,
-     so a swipe follows the finger with its own momentum and rubber-banding, a trackpad works, and the whole
-     hand-rolled business of measuring a drag and guessing whether it meant "page" or "scroll the page" is gone
-     — that guessing is what turned a swipe that sagged a little into a scroll.
+     The words are a scroller and the picture is not. Sliding whole slides — picture and all — drags a hard
+     vertical join across the screen, two photographs butted edge to edge; snapping between them is a lovely
+     gesture and an ugly transition. So the rail carries only the words, where sliding is exactly right, and
+     behind it one continuous picture dissolves from title to title, which is what a billboard changing its mind
+     should look like. The swipe is still the browser's own: momentum, rubber-banding, trackpads, all free.
 
      The slide's trailer plays quietly behind it once it has settled, as the TV's hero does — muted, no chrome,
      nothing to press. It is decoration, so it gives way whenever it would cost more than it gives: Reduce
@@ -53,8 +54,7 @@
   const backdropURL = (path: string) => `https://image.tmdb.org/t/p/w1280${path}`;
   const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // Details arrive per slide and are kept, so coming back to one shows it at once. Held as state because the
-  // slides read it while it fills in.
+  // Details arrive per slide and are kept, so coming back to one shows it at once.
   let known = $state(new Map<string, TitleDetail>());
 
   async function learn(title: Title | undefined): Promise<void> {
@@ -63,22 +63,32 @@
     if (found) known = new Map(known).set(keyOf(title), found);
   }
 
-  /** The slide and its neighbours: what is on screen now, and what a swipe would bring next. */
-  const near = (n: number) => Math.abs(n - index) <= 1;
   const detail = $derived(current ? known.get(keyOf(current)) : undefined);
 
   $effect(() => {
     for (const step of [0, 1, -1]) void learn(shown[index + step]);
   });
 
-  // A different set of titles is a different billboard: start it at the beginning rather than leaving the rail
-  // parked where the last set had scrolled to, which would show slide seven of a list that just changed.
+  // --- The picture ---
+
+  /**
+   * Two layers that take turns. The one coming in fades up over the one going out, which is a dissolve without
+   * asking the framework for a transition — a plain CSS opacity change the compositor can run on its own.
+   */
+  let layers = $state([
+    { id: 0, url: '' },
+    { id: 1, url: '' },
+  ]);
+  let lit = $state(0);
+
   $effect(() => {
-    const first = shown[0] && keyOf(shown[0]);
-    if (!first) return;
+    const url = detail?.backdropPath ? backdropURL(detail.backdropPath) : '';
+    if (!url) return;
     untrack(() => {
-      index = 0;
-      goTo(0, false);
+      if (layers[lit]?.url === url) return;
+      const next = lit === 0 ? 1 : 0;
+      layers[next] = { id: next, url };
+      lit = next;
     });
   });
 
@@ -135,44 +145,13 @@
   }
 
   /**
-   * How far each slide is from the middle, written onto it as `--p` (-1 a slide to the left, 0 dead centre,
-   * 1 to the right) and `--fade`. The picture is then drawn at a fraction of that offset, so it travels slower
-   * than the slide carrying it and the billboard has some depth instead of sliding like a filmstrip. It tracks
-   * the finger rather than playing a fixed animation, so a half-finished swipe is half-way through the effect.
+   * Which slide the rail has come to rest on, and whether the viewer put it there.
+   *
+   * This is everything that runs while a finger is on the screen — a division and a comparison, and a write only
+   * when the slide actually changes. Driving the parallax from here instead, a style property per slide per
+   * frame, is what made the scroll stutter: a custom property cannot be composited, so every frame went back
+   * through style and paint on the main thread. The drift belongs to CSS, below, where it costs nothing.
    */
-  function paint() {
-    const box = rail;
-    if (!box) return;
-    const width = box.clientWidth || 1;
-    const flat = still();
-    for (const slide of Array.from(box.children) as HTMLElement[]) {
-      const p = flat ? 0 : Math.max(-1.5, Math.min(1.5, (slide.offsetLeft - box.scrollLeft) / width));
-      slide.style.setProperty('--p', p.toFixed(3));
-      slide.style.setProperty('--fade', Math.max(0, 1 - Math.abs(p) * 1.6).toFixed(3));
-    }
-  }
-
-  /** One paint per frame however many scroll events arrive: the browser fires them faster than it draws. */
-  let painting = 0;
-  function onScroll() {
-    scrolled();
-    if (painting) return;
-    painting = requestAnimationFrame(() => {
-      painting = 0;
-      paint();
-    });
-  }
-
-  // The slides start where the rail left them, and a resize moves every one of them.
-  $effect(() => {
-    if (!rail || shown.length === 0) return;
-    paint();
-    const again = () => paint();
-    addEventListener('resize', again);
-    return () => removeEventListener('resize', again);
-  });
-
-  /** Which slide the rail has come to rest on, and whether the viewer put it there. */
   function scrolled() {
     const box = rail;
     if (!box || box.clientWidth === 0) return;
@@ -182,6 +161,17 @@
     // firing for a while after it is asked for, so a moment's grace before the next one counts as theirs.
     if (Date.now() - driving > 1200) paging = true;
   }
+
+  // A different set of titles is a different billboard: start it at the beginning rather than leaving the rail
+  // parked where the last set had scrolled to, which would show slide seven of a list that just changed.
+  $effect(() => {
+    const first = shown[0] && keyOf(shown[0]);
+    if (!first) return;
+    untrack(() => {
+      index = 0;
+      goTo(0, false);
+    });
+  });
 
   function show(n: number) {
     paging = true;
@@ -233,36 +223,38 @@
   onfocusin={() => (held = true)}
   onfocusout={() => (held = false)}
 >
-  <div class="rail" bind:this={rail} onscroll={onScroll}>
+  <div class="picture" aria-hidden="true">
+    {#each layers as layer (layer.id)}
+      {#if layer.url}
+        <img class="backdrop" class:lit={layer.id === lit} src={layer.url} alt="" draggable="false" />
+      {/if}
+    {/each}
+    {#if ambient}
+      <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
+           started. The still picture stays underneath until it does, and stays if it never does. -->
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video
+        class="ambient"
+        class:playing
+        src={ambient}
+        autoplay
+        muted
+        loop
+        playsinline
+        preload="auto"
+        tabindex="-1"
+        onplaying={() => (playing = true)}
+        onloadstart={(event) => (event.currentTarget.muted = true)}
+      ></video>
+    {/if}
+    <div class="scrim"></div>
+    <div class="fade"></div>
+  </div>
+
+  <div class="rail" bind:this={rail} onscroll={scrolled}>
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
       <article class="slide" aria-roledescription="slide" aria-label={title.title}>
-        <!-- Only the slide in view and the ones a swipe away carry a picture; forty backdrops at once is a
-             phone's whole data allowance for a page nobody has scrolled yet. -->
-        {#if found?.backdropPath && near(n)}
-          <img class="backdrop" src={backdropURL(found.backdropPath)} alt="" draggable="false" />
-        {/if}
-        {#if ambient && n === index}
-          <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it
-               has started. The still picture stays underneath until it does, and stays if it never does. -->
-          <!-- svelte-ignore a11y_media_has_caption -->
-          <video
-            class="ambient"
-            class:playing
-            src={ambient}
-            autoplay
-            muted
-            loop
-            playsinline
-            preload="auto"
-            tabindex="-1"
-            aria-hidden="true"
-            onplaying={() => (playing = true)}
-            onloadstart={(event) => (event.currentTarget.muted = true)}
-          ></video>
-        {/if}
-        <div class="scrim"></div>
-        <div class="fade"></div>
         <div class="told">
           <div class="text">
             <h2><a href={titleHref(title)} tabindex={n === index ? 0 : -1}>{title.title}</a></h2>
@@ -284,6 +276,7 @@
       </article>
     {/each}
   </div>
+
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
   {#if shown.length > 1}
     <div class="pager">
@@ -313,6 +306,8 @@
   .billboard {
     position: relative;
     width: 100vw;
+    /* Lets the picture, which is not inside the scroller, be animated by the scroller's own progress. */
+    timeline-scope: --rail;
     /* The large viewport, not the dynamic one: `vh` grows as a phone's address bar rolls away, which would
        resize the hero mid-scroll and drag the whole page with it. `lvh` is the height with the bar gone, so the
        billboard is the same size before and after. The `vh` line is what a browser without `lvh` reads. */
@@ -321,56 +316,43 @@
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 28px;
+    overflow: hidden;
     background: var(--bg);
   }
 
-  /* The scroller itself. `mandatory` so it always comes to rest on a slide, and the scrollbar hidden because
-     this is a billboard, not a document. */
-  .rail {
-    display: flex;
-    height: 100%;
-    min-height: inherit;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scroll-snap-type: x mandatory;
-    /* A swipe that runs off the end shouldn't drag the page along behind it. */
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-  }
-
-  .rail::-webkit-scrollbar {
-    display: none;
-  }
-
-  .slide {
-    position: relative;
-    display: grid;
-    flex: 0 0 100%;
-    align-items: end;
-    min-height: inherit;
-    scroll-snap-align: center;
-    scroll-snap-stop: always;
-  }
-
-  /* Drawn wider than the slide and shifted by a fraction of the slide's own travel (`--p`, set as the rail
-     scrolls): the picture falls behind the words instead of moving in lockstep with them. The extra scale is
-     what keeps its edges outside the frame while it lags. */
-  .backdrop,
-  .ambient {
-    transform: translate3d(calc(var(--p, 0) * -11%), 0, 0) scale(1.26);
-    will-change: transform;
-  }
-
-  .backdrop {
+  /* One picture for the whole billboard, behind everything: it dissolves between titles instead of sliding, so
+     no seam ever crosses the screen. It drifts by a fraction of the rail's travel (`--p`) to keep some depth,
+     and is drawn wider than the frame so that drift never shows an edge. */
+  .picture {
     position: absolute;
     inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    -webkit-user-drag: none;
+    transform: scale(1.14);
   }
 
-  /* Cropped to cover, the way the backdrop is, so there are never bars around it. It fades up over the still. */
+  /* The drift, handed to the compositor: tied to the rail's own scroll progress rather than recomputed in
+     JavaScript each frame, so it costs the scroll nothing. Browsers without scroll-driven animations simply
+     get a still picture, which is the same billboard with less depth. */
+  @supports (animation-timeline: --rail) {
+    @media not (prefers-reduced-motion: reduce) {
+      .picture {
+        animation: drift linear both;
+        animation-timeline: --rail;
+        will-change: transform;
+      }
+    }
+  }
+
+  @keyframes drift {
+    from {
+      transform: translate3d(2.5%, 0, 0) scale(1.14);
+    }
+
+    to {
+      transform: translate3d(-2.5%, 0, 0) scale(1.14);
+    }
+  }
+
+  .backdrop,
   .ambient {
     position: absolute;
     inset: 0;
@@ -378,12 +360,17 @@
     height: 100%;
     object-fit: cover;
     opacity: 0;
-    transition: opacity 0.8s ease;
-    pointer-events: none;
+    transition: opacity 0.55s ease;
+    -webkit-user-drag: none;
   }
 
+  .backdrop.lit,
   .ambient.playing {
     opacity: 1;
+  }
+
+  .ambient {
+    pointer-events: none;
   }
 
   /* Enough dark at the top for the bar to stay legible over a bright frame. */
@@ -416,26 +403,63 @@
     pointer-events: none;
   }
 
+  /* The scroller: only the words are in it, so it is transparent and sits over the picture. `mandatory` so it
+     always comes to rest on a slide, and the scrollbar hidden because this is a billboard, not a document. */
+  .rail {
+    position: relative;
+    display: flex;
+    height: 100%;
+    min-height: inherit;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    /* A swipe that runs off the end shouldn't drag the page along behind it. */
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-timeline: --rail x;
+  }
+
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
+
+  .slide {
+    display: grid;
+    flex: 0 0 100%;
+    align-items: end;
+    min-height: inherit;
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+  }
+
   /* The words sit in the page's own column, so they line up with the rows below rather than with the screen.
      The room at the bottom is the pager's, which sits over every slide rather than in one. */
   .told {
-    position: relative;
     width: 100%;
     max-width: 1400px;
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) 76px;
   }
 
-  /* The words go with their own slide, but fade out as it leaves, so two slides' text never reads as one
-     jumble mid-swipe. */
+  /* The fade under the words does the work where it reaches them. On a narrow screen it doesn't: the hero is
+     tall, the words sit further up the picture, and a bright frame swallows them. So they carry a shadow of
+     their own — a whisper on a wide screen, where the fade is already most of the answer, and enough of one to
+     read against a white wall on a phone. The buttons are drawn on their own ground and want none of it. */
   .text {
     display: grid;
     gap: 8px;
     max-width: 720px;
     min-height: 190px;
     align-content: end;
-    opacity: var(--fade, 1);
+    text-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
   }
+
+  @media (max-width: 759px) {
+    .text {
+      text-shadow: 0 1px 4px rgb(0 0 0 / 0.8), 0 0 20px rgb(0 0 0 / 0.5);
+    }
+  }
+
 
   h2 {
     margin: 0;
@@ -471,6 +495,8 @@
     flex-wrap: wrap;
     gap: 10px;
     margin-top: 4px;
+    /* Drawn on their own ground, so they want none of the shadow the words carry. */
+    text-shadow: none;
   }
 
   .primary,
