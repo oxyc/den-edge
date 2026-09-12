@@ -65,8 +65,10 @@
 
   const detail = $derived(current ? known.get(keyOf(current)) : undefined);
 
+  // Two either way rather than one: a slide whose details haven't arrived has no picture to show, so the reach
+  // of this is how often the billboard goes dark for a moment when someone swipes briskly.
   $effect(() => {
-    for (const step of [0, 1, -1]) void learn(shown[index + step]);
+    for (const step of [0, 1, -1, 2, -2]) void learn(shown[index + step]);
   });
 
   // --- The picture ---
@@ -83,9 +85,15 @@
 
   $effect(() => {
     const url = detail?.backdropPath ? backdropURL(detail.backdropPath) : '';
-    if (!url) return;
     untrack(() => {
-      if (layers[lit]?.url === url) return;
+      if (lit >= 0 && layers[lit]?.url === url) return;
+      if (!url) {
+        // This slide's artwork isn't known yet. Leaving the last one lit shows one title's picture behind
+        // another title's name — the same backdrop appearing twice, once against the wrong words. Better to
+        // show none: it dissolves out and the scrim carries the words until the right picture arrives.
+        lit = -1;
+        return;
+      }
       const next = lit === 0 ? 1 : 0;
       layers[next] = { id: next, url };
       lit = next;
@@ -143,6 +151,30 @@
     driving = Date.now();
     box.scrollTo({ left: n * box.clientWidth, behavior: smooth && !still() ? 'smooth' : 'auto' });
   }
+
+  /**
+   * Which slide is in front of the viewer, watched rather than worked out from scroll events. Those arrive on
+   * the browser's own frame schedule and are coalesced — or, in a background tab, not sent at all — so during a
+   * brisk swipe `index` fell a slide behind the rail. Everything hanging off it went with it: the dots, and the
+   * picture, which is how one title's backdrop ended up behind another title's name.
+   */
+  $effect(() => {
+    const box = rail;
+    void shown.length;
+    if (!box || typeof IntersectionObserver === 'undefined') return;
+    const slides = Array.from(box.children) as HTMLElement[];
+    const watch = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const at = slides.indexOf(entry.target as HTMLElement);
+          if (entry.isIntersecting && at >= 0 && at !== index) index = at;
+        }
+      },
+      { root: box, threshold: 0.6 },
+    );
+    for (const slide of slides) watch.observe(slide);
+    return () => watch.disconnect();
+  });
 
   /**
    * Which slide the rail has come to rest on, and whether the viewer put it there.
@@ -251,7 +283,9 @@
     <div class="fade"></div>
   </div>
 
-  <div class="rail" bind:this={rail} onscroll={scrolled}>
+  <!-- Three ways to notice, because one is not reliable: the observer above settles it, `scroll` catches it
+       early where the browser sends those, and `scrollend` fires once when a swipe finally comes to rest. -->
+  <div class="rail" bind:this={rail} onscroll={scrolled} onscrollend={scrolled}>
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
       <article class="slide" aria-roledescription="slide" aria-label={title.title}>
