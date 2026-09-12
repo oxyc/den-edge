@@ -1,13 +1,15 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   describeRelease,
   endSession,
   findRemux,
+  forgetBrowserTokens,
   forgetSubtitles,
   listReleases,
   login,
   releaseParts,
   reportFailure,
+  REMUX_PROBE_TIMEOUT_MS,
   startSession,
   type Want,
 } from './remux';
@@ -28,6 +30,8 @@ const session = {
   audioTracks: [{ language: 'eng', name: null, channels: 6, commentary: false }],
 };
 const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+
+beforeEach(forgetBrowserTokens);
 
 describe('startSession', () => {
   beforeEach(forgetSubtitles);
@@ -116,6 +120,36 @@ describe('findRemux', () => {
     expect(asked).toBe(`${tailnet}/session`);
     expect(result).toMatchObject({ playlist: 'https://pve.example:8443/remux/s/sid/sig/master.m3u8' });
   });
+
+  it('abandons a stalled route and tries the next, even when fetch ignores abort', async () => {
+    vi.useFakeTimers();
+    try {
+      let firstSignal: AbortSignal | undefined;
+      const resolving = findRemux([{ url: tailnet }, { url: 'https://other.example/remux' }], async (url, init) => {
+        if (String(url).startsWith(tailnet)) {
+          firstSignal = init?.signal ?? undefined;
+          return new Promise<Response>(() => {});
+        }
+        return answer(200, { status: 'ok' });
+      });
+      await vi.advanceTimersByTimeAsync(REMUX_PROBE_TIMEOUT_MS);
+      expect(await resolving).toBe('https://other.example/remux');
+      expect(firstSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('applies the deadline to an unfinished JSON body too', async () => {
+    vi.useFakeTimers();
+    let close: (() => void) | undefined;
+    try {
+      const body = new ReadableStream({ start(controller) { close = () => controller.close(); } });
+      const resolving = findRemux([{ url: tailnet }], async () => new Response(body));
+      await vi.advanceTimersByTimeAsync(REMUX_PROBE_TIMEOUT_MS);
+      expect(await resolving).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { close?.(); vi.useRealTimers(); }
+  });
 });
 
 describe('login', () => {
@@ -123,6 +157,40 @@ describe('login', () => {
     expect(await login('k', async () => new Response(null, { status: 204 }))).toBe(true);
     expect(await login('k', async () => answer(401, { error: 'bad_key' }))).toBe(false);
     expect(await login('k', async () => Promise.reject(new TypeError('offline')))).toBeNull();
+  });
+
+  it('uses the returned browser token for this remux only, without third-party cookies', async () => {
+    const base = 'https://pve.example:8443/remux';
+    let loginHeaders: Headers | undefined;
+    expect(await login('browser-key', async (_url, init) => {
+      loginHeaders = new Headers(init?.headers);
+      expect(JSON.parse(String(init?.body))).toEqual({ key: 'browser-key' });
+      return new Response(null, { status: 204, headers: { 'x-den-browser-token': 'signed-browser-token' } });
+    }, base)).toBe(true);
+    expect(loginHeaders?.has('authorization')).toBe(false);
+    const capture: { url: string; authorization: string | null }[] = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      capture.push({ url: String(url), authorization: new Headers(init?.headers).get('authorization') });
+      expect(init?.credentials).not.toBe('include');
+      expect(String(init?.body)).not.toContain('browser-key');
+      return String(url).endsWith('/session') ? answer(201, session) : answer(200, { releases: [] });
+    };
+    await startSession({ ...want, subtitleLanguages: [] }, fetchImpl, base);
+    await listReleases(want, fetchImpl, base);
+    await startSession({ ...want, subtitleLanguages: [] }, fetchImpl, 'https://elsewhere.example/remux');
+    expect(capture.map((r) => r.authorization)).toEqual(['Bearer signed-browser-token', 'Bearer signed-browser-token', null]);
+  });
+
+  it('forgets a rejected token so the next login or legacy cookie can authorize again', async () => {
+    await login('k', async () => new Response(null, { status: 204, headers: { 'x-den-browser-token': 'expired' } }));
+    const seen: (string | null)[] = [];
+    const refused: typeof fetch = async (_url, init) => {
+      seen.push(new Headers(init?.headers).get('authorization'));
+      return answer(401, { error: 'not_logged_in' });
+    };
+    await startSession({ ...want, subtitleLanguages: [] }, refused);
+    await startSession({ ...want, subtitleLanguages: [] }, refused);
+    expect(seen).toEqual(['Bearer expired', null]);
   });
 });
 

@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 const NS: &str = "lib";
 const EXT: &str = "log";
@@ -55,6 +56,43 @@ const COMPACT_SLACK: usize = if cfg!(test) { 8 } else { 1000 };
 const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
 /// A library nobody has touched for this long leaves memory; its log reloads it on the next request.
 const IDLE_MS: u64 = 60 * 60 * 1000;
+const LIBRARY_OVERHEAD: usize = 512;
+const ROW_OVERHEAD: usize = 192;
+// A JSON string may expand each byte to a six-byte escape on disk.
+const MAX_LOG_LINE: usize = 6 * (MAX_VALUE + 128) + 128;
+const MAX_CACHED_LIBRARIES: usize = 128;
+const PAGE_BYTES: usize = 512 * 1024;
+
+/// Sized for the shipped 64 MiB container, leaving room for requests, serialization and compaction.
+/// The charge includes twice the string lengths plus map/row overhead, rather than claiming to
+/// measure allocator RSS exactly. The disk quota is a separate limit.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub library_bytes: usize,
+    pub cache_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { library_bytes: 8 * 1024 * 1024, cache_bytes: 16 * 1024 * 1024 }
+    }
+}
+
+fn row_bytes(k: &str, v: &str) -> usize {
+    2 * (k.len() + v.len()) + ROW_OVERHEAD
+}
+
+fn full() -> io::Error {
+    io::Error::new(io::ErrorKind::FileTooLarge, "library exceeds its memory budget")
+}
+
+fn read_error(e: io::Error) -> Response {
+    if e.kind() == io::ErrorKind::FileTooLarge {
+        json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"))
+    } else {
+        internal("library read", e)
+    }
+}
 
 /// Who may start a library (env `NEW_LIBRARIES`). `Members`: only a device that proves it holds another library here
 /// (`MEMBER_HEADER`), which is what a TV moving its library to a new key does, so a stranger reaching the public
@@ -91,6 +129,7 @@ pub struct Library {
     lines: usize,
     /// When a request last used it, for dropping idle libraries from memory.
     last_used: u64,
+    bytes: usize,
 }
 
 struct Row {
@@ -150,13 +189,25 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 /// quietly starting the library over (den #12, S5).
 async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     let mut libs = state.libraries.lock().await;
-    if let Err(e) = load(state, &mut libs, id).await {
-        return internal("library read", e);
-    }
-    let Some(lib) = libs.get(id) else {
-        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    // An oversized legacy log can still be deleted by its owner without replaying it.
+    let stored_token = if let Some(lib) = libs.get(id) {
+        lib.token_hash
+    } else {
+        let file = match state.store.open_file(NS, id, EXT).await {
+            Ok(Some(file)) => file,
+            Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+            Err(e) => return read_error(e),
+        };
+        let line = match log_read(&mut BufReader::new(file)).await {
+            Ok(line) => line,
+            Err(e) => return read_error(e),
+        };
+        match log_header(&line) {
+            Ok(hash) => hash,
+            Err(e) => return read_error(e),
+        }
     };
-    if !constant_time_eq(&lib.token_hash, &token_hash) {
+    if !constant_time_eq(&stored_token, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
     if let Err(e) = state.store.replace_file(NS, id, MOVED, b"").await {
@@ -189,7 +240,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     };
     let mut libs = state.libraries.lock().await;
     if let Err(e) = load(state, &mut libs, id).await {
-        return internal("library read", e);
+        return read_error(e);
     }
     let now = state.now();
     touch(&mut libs, id, now);
@@ -197,17 +248,24 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         match retired(state, id).await {
             Ok(true) => return moved(),
             Ok(false) => {}
-            Err(e) => return internal("library read", e),
+            Err(e) => return read_error(e),
         }
         if state.new_libraries == NewLibraries::Members {
             match holds_another(state, &mut libs, id, member.as_deref()).await {
                 Ok(true) => {}
                 Ok(false) => return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed")),
-                Err(e) => return internal("library read", e),
+                Err(e) => return read_error(e),
             }
         }
     }
-    let fresh = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: now };
+    let fresh = Library {
+        token_hash,
+        head: 0,
+        rows: HashMap::new(),
+        lines: 0,
+        last_used: now,
+        bytes: LIBRARY_OVERHEAD,
+    };
     let existing = libs.get(id);
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
@@ -220,6 +278,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
 
     // Decide every write against the state before this batch (keys are unique within it), write the
     // applied ones to disk, and only then change what is in memory — a failed write changes nothing.
+    let mut next_bytes = lib.bytes;
     let mut head = lib.head;
     let mut out = if existing.is_none() { header_line(&token_hash) } else { String::new() };
     let mut applied = Vec::new();
@@ -231,9 +290,16 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             conflicts.push(json!({ "k": w.k, "seq": current_seq, "v": current.map(|r| r.v.clone()) }));
             continue;
         }
+        next_bytes = next_bytes - current.map_or(0, |r| row_bytes(&w.k, &r.v)) + row_bytes(&w.k, &w.v);
         head += 1;
         out.push_str(&log_line(head, &w.k, &w.v));
         applied.push((w.k, head, w.v));
+    }
+    if next_bytes > state.library_limits.library_bytes {
+        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+    }
+    if let Err(e) = reserve_cache(&mut libs, id, next_bytes, state.library_limits) {
+        return read_error(e);
     }
     if !out.is_empty() {
         if let Err(e) = state.store.append_file(NS, id, EXT, out.as_bytes()).await {
@@ -251,6 +317,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         })
         .collect();
     lib.head = head;
+    lib.bytes = next_bytes;
     if lib.lines > 2 * lib.rows.len() + COMPACT_SLACK {
         // The log already holds every write; a failed rewrite only leaves it longer than it needs to be.
         if let Err(e) = compact(state, id, lib).await {
@@ -267,7 +334,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
 async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, limit: usize) -> Response {
     let mut libs = state.libraries.lock().await;
     if let Err(e) = load(state, &mut libs, id).await {
-        return internal("library read", e);
+        return read_error(e);
     }
     touch(&mut libs, id, state.now());
     let Some(lib) = libs.get(id) else {
@@ -286,9 +353,23 @@ async fn changes(state: &AppState, id: &str, token_hash: [u8; 32], since: u64, l
     }
     let mut rows: Vec<(&String, &Row)> = lib.rows.iter().filter(|(_, r)| r.seq > since).collect();
     rows.sort_by_key(|(_, r)| r.seq);
-    let more = rows.len() > limit;
+    // Page by bytes as well as rows: 1,000 maximum-sized values do not fit the container.
+    let mut page_bytes = 0;
+    let count = rows
+        .iter()
+        .take(limit)
+        .take_while(|(k, r)| {
+            let cost = 6 * (k.len() + r.v.len()) + 128;
+            if page_bytes > 0 && page_bytes + cost > PAGE_BYTES {
+                return false;
+            }
+            page_bytes += cost;
+            true
+        })
+        .count();
+    let more = rows.len() > count;
     let entries: Vec<Value> =
-        rows.iter().take(limit).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
+        rows.iter().take(count).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
     json_reply(
         StatusCode::OK,
         &json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() }),
@@ -323,37 +404,107 @@ fn touch(libs: &mut HashMap<String, Library>, id: &str, now: u64) {
     }
 }
 
-/// Bring a library into memory from its log, if it has one and isn't already there.
+/// Make room before loading or growing a library. Eviction drops only a memory copy; disk is authoritative.
+fn reserve_cache(
+    libs: &mut HashMap<String, Library>,
+    id: &str,
+    needed: usize,
+    limits: Limits,
+) -> io::Result<()> {
+    if needed > limits.library_bytes || needed > limits.cache_bytes {
+        return Err(full());
+    }
+    loop {
+        let other_bytes: usize =
+            libs.iter().filter(|(key, _)| key.as_str() != id).map(|(_, lib)| lib.bytes).sum();
+        let count = libs.len() + usize::from(!libs.contains_key(id));
+        if other_bytes + needed <= limits.cache_bytes && count <= MAX_CACHED_LIBRARIES {
+            return Ok(());
+        }
+        let oldest = libs
+            .iter()
+            .filter(|(key, _)| key.as_str() != id)
+            .min_by_key(|(_, lib)| lib.last_used)
+            .map(|(key, _)| key.clone())
+            .ok_or_else(full)?;
+        libs.remove(&oldest);
+    }
+}
+
+/// Read one bounded log line. Even a corrupt/no-newline log cannot allocate its whole file.
+async fn log_read(reader: &mut BufReader<tokio::fs::File>) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    (&mut *reader).take((MAX_LOG_LINE + 1) as u64).read_until(b'\n', &mut line).await?;
+    if line.len() > MAX_LOG_LINE {
+        return Err(full());
+    }
+    Ok(line)
+}
+
+fn log_header(line: &[u8]) -> io::Result<[u8; 32]> {
+    let header: Value = serde_json::from_slice(line).map_err(io::Error::other)?;
+    header
+        .get("token")
+        .and_then(Value::as_str)
+        .and_then(from_hex32)
+        .ok_or_else(|| io::Error::other("unreadable library log header"))
+}
+
+/// Replay incrementally under the same byte limit as writes. Historical versions are discarded
+/// as they are replaced, and other cached libraries leave room before replay begins.
 async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -> io::Result<()> {
+    touch(libs, id, state.now());
     if libs.contains_key(id) {
         return Ok(());
     }
-    let Some(bytes) = state.store.get_file(NS, id, EXT).await? else { return Ok(()) };
-    // An unreadable header is an error, not an absent library: treating it as absent would let the next
-    // writer claim the library with a token of their own.
-    let mut lib = replay(&bytes).ok_or_else(|| io::Error::other("unreadable library log header"))?;
-    // A crash mid-append can leave a last line without its newline. Appending after it would fuse the next
-    // write onto it, so the log is rewritten clean before anything is added.
-    if !bytes.ends_with(b"\n") {
+    let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(()) };
+    reserve_cache(libs, id, state.library_limits.library_bytes, state.library_limits)?;
+    let mut reader = BufReader::new(file);
+    let first = log_read(&mut reader).await?;
+    let token_hash = log_header(&first)?;
+    let mut lib = Library {
+        token_hash,
+        head: 0,
+        rows: HashMap::new(),
+        lines: 0,
+        last_used: state.now(),
+        bytes: LIBRARY_OVERHEAD,
+    };
+    let mut repair = !first.ends_with(b"\n");
+    loop {
+        let bytes = log_read(&mut reader).await?;
+        if bytes.is_empty() {
+            break;
+        }
+        let line = match serde_json::from_slice::<Line>(&bytes) {
+            Ok(line) => line,
+            Err(_) if !bytes.ends_with(b"\n") => {
+                repair = true;
+                break;
+            }
+            Err(e) => return Err(io::Error::other(e)),
+        };
+        if !valid_hex_id(&line.k) || line.v.len() > MAX_VALUE {
+            return Err(full());
+        }
+        let previous = lib.rows.get(&line.k).map_or(0, |r| row_bytes(&line.k, &r.v));
+        let needed = lib.bytes - previous + row_bytes(&line.k, &line.v);
+        if needed > state.library_limits.library_bytes
+            || (!lib.rows.contains_key(&line.k) && lib.rows.len() >= MAX_ROWS)
+        {
+            return Err(full());
+        }
+        lib.bytes = needed;
+        lib.head = lib.head.max(line.s);
+        lib.rows.insert(line.k, Row { seq: line.s, v: line.v });
+        lib.lines += 1;
+        repair |= !bytes.ends_with(b"\n");
+    }
+    if repair {
         compact(state, id, &mut lib).await?;
     }
     libs.insert(id.to_owned(), lib);
     Ok(())
-}
-
-fn replay(bytes: &[u8]) -> Option<Library> {
-    let mut lines = bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty());
-    let header: Value = serde_json::from_slice(lines.next()?).ok()?;
-    let token_hash = from_hex32(header.get("token")?.as_str()?)?;
-    let mut lib = Library { token_hash, head: 0, rows: HashMap::new(), lines: 0, last_used: 0 };
-    for line in lines {
-        // Only the last line can be cut short, and everything before it was synced.
-        let Ok(line) = serde_json::from_slice::<Line>(line) else { break };
-        lib.head = lib.head.max(line.s);
-        lib.rows.insert(line.k, Row { seq: line.s, v: line.v });
-        lib.lines += 1;
-    }
-    Some(lib)
 }
 
 /// Rewrite the log as its header and the live rows, in sequence order.
@@ -702,5 +853,103 @@ mod tests {
             all["entries"],
             json!([{ "k": K1, "seq": 1, "v": "whole" }, { "k": K2, "seq": 2, "v": "after" }])
         );
+    }
+
+    fn bounded(h: &Harness, library_bytes: usize, cache_bytes: usize) -> Harness {
+        Harness::in_dir_with(h.dir.clone(), |state| {
+            state.library_limits = super::Limits { library_bytes, cache_bytes };
+        })
+    }
+
+    #[tokio::test]
+    async fn byte_limit_refuses_growth_atomically_but_allows_shrinking_and_reload() {
+        let root = Harness::new();
+        let h = bounded(&root, 1600, 3200);
+        let two = json!([{ "k": K1, "base": 0, "v": "x".repeat(100) },
+            { "k": K2, "base": 0, "v": "y".repeat(100) }]);
+        assert_eq!(batch(&h, TOKEN, two).await.0, StatusCode::OK);
+        let third = "cccccccccccccccc";
+        let denied = batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(100) }])).await;
+        assert_eq!(denied, (StatusCode::PAYLOAD_TOO_LARGE, json!({"error":"library_full"})));
+        assert_eq!(changes(&h, TOKEN, "").await.1["head"], 2);
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "" }])).await.0, StatusCode::OK);
+        assert_eq!(
+            batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(50) }])).await.0,
+            StatusCode::OK
+        );
+        let reopened = bounded(&root, 1600, 3200);
+        assert_eq!(changes(&reopened, TOKEN, "").await.1["head"], 4);
+    }
+
+    #[tokio::test]
+    async fn cached_libraries_are_evicted_by_bytes_and_reload_with_their_auth_intact() {
+        let root = Harness::new();
+        let h = bounded(&root, 1024, 1800);
+        for n in 0..4 {
+            let id = format!("{n:016x}");
+            let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "x".repeat(100) }] });
+            assert_eq!(
+                h.send(
+                    "POST",
+                    &format!("/lib/{id}/batch"),
+                    Some(body.to_string()),
+                    &[("x-den-library-token", TOKEN)]
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert!(h.state.libraries.lock().await.values().map(|l| l.bytes).sum::<usize>() <= 1800);
+        }
+        assert!(h.state.libraries.lock().await.len() < 4);
+        let path = "/lib/0000000000000000/changes";
+        assert_eq!(
+            h.send("GET", path, None, &[("x-den-library-token", "wrong")]).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            body_json(h.send("GET", path, None, &[("x-den-library-token", TOKEN)]).await).await["entries"][0]
+                ["v"],
+            "x".repeat(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_legacy_logs_are_not_loaded_or_modified_and_the_owner_can_delete_them() {
+        let root = Harness::new();
+        assert_eq!(
+            batch(&root, TOKEN, json!([{ "k": K1, "base": 0, "v": "x".repeat(1024) }])).await.0,
+            StatusCode::OK
+        );
+        let original = root.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap();
+        let h = bounded(&root, 1024, 2048);
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(h.state.libraries.lock().await.is_empty());
+        assert_eq!(h.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap(), original);
+        assert_eq!(delete(&h, "wrong").await, StatusCode::FORBIDDEN);
+        assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn changes_page_by_bytes_without_skipping_rows() {
+        let h = Harness::new();
+        let writes: Vec<_> = (0..8)
+            .map(|i| json!({"k":format!("{i:016x}"),"base":0,"v":"x".repeat(super::MAX_VALUE)}))
+            .collect();
+        assert_eq!(batch(&h, TOKEN, json!(writes)).await.0, StatusCode::OK);
+        let mut since = 0;
+        let mut count = 0;
+        loop {
+            let (_, page) = changes(&h, TOKEN, &format!("?since={since}&limit=1000")).await;
+            let entries = page["entries"].as_array().unwrap();
+            assert!(entries.len() < 8);
+            assert!(!entries.is_empty());
+            count += entries.len();
+            since = entries.last().unwrap()["seq"].as_u64().unwrap();
+            if page["more"] == false {
+                break;
+            }
+        }
+        assert_eq!(count, 8);
     }
 }

@@ -46,9 +46,9 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs } from './lib/prefs';
   import { titleHref, type Route } from './lib/route';
-  import { findRemux } from './lib/remux';
+  import { discoverServices } from './lib/discoverServices';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { arrivals, findAddon, findAtlas, installsOf, REEL, SCOUT, trendingEverywhere, type Addon } from './lib/scout';
+  import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import type { EpisodeRow, Row, Stamp, TitleRow } from './lib/wire';
 
@@ -89,7 +89,10 @@
   let playing = $state<Target | null>(null);
 
   $effect(() => {
+    let disposed = false;
+    let stopDiscovery: (() => void) | undefined;
     void LibraryLog.open(link.libraryKey).then((opened) => {
+      if (disposed) return;
       if (opened?.moved) return links.forgetMoved(link);
       log = opened;
       if (!opened) return;
@@ -99,20 +102,18 @@
       plugins = readPlugins(opened.settings('plugins'));
       const [key, installed] = [tmdbKey, plugins];
       void (async () => {
-        routes = await fetchRoutes();
-        const [foundScout, foundAtlas, foundReel, foundRemux] = await Promise.all([
-          findAddon(installed, routes, SCOUT),
-          findAtlas(installed, routes),
-          findAddon(installed, routes, REEL),
-          findRemux(routes.remux ?? []),
-        ]);
-        scout = foundScout;
-        atlas = foundAtlas?.base ?? null;
-        reel = foundReel?.base ?? null;
-        remux = foundRemux;
-        availability.connect(foundScout, key);
+        const foundRoutes = await fetchRoutes();
+        if (disposed) return;
+        routes = foundRoutes;
+        stopDiscovery = discoverServices(installed, foundRoutes, {
+          scout: (found) => { scout = found; availability.connect(found, key); },
+          atlas: (found) => { atlas = found?.base ?? null; },
+          reel: (found) => { reel = found?.base ?? null; },
+          remux: (found) => { remux = found; },
+        });
       })();
     });
+    return () => { disposed = true; stopDiscovery?.(); };
   });
 
   /** Every title the rows show, named from TMDB a few at a time, painted as each arrives. */

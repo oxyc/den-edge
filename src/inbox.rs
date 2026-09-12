@@ -20,6 +20,21 @@ const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGES: usize = 50;
 const MAX_SEALED_CHARS: usize = 4096;
 
+/// Cleanup is independent of requests to an abandoned link. Run once before serving, then hourly.
+pub async fn sweep(state: &AppState) {
+    let _write = state.write_lock.lock().await;
+    if let Err(e) = state.store.sweep_inboxes(state.now()).await {
+        eprintln!("inbox expiry sweep: {e}");
+    }
+}
+
+pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        sweep(&state).await;
+    }
+}
+
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
@@ -192,5 +207,25 @@ mod tests {
             assert_eq!(a.await.unwrap(), StatusCode::OK);
         }
         assert_eq!(drain(&h).await.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_abandoned_queues_and_keeps_refreshed_queues() {
+        let h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |s| {
+            s.store = crate::store::Store::open(&crate::handler::tests::temp_dir(), 700).unwrap();
+        });
+        assert_eq!(append(&h, &"x".repeat(200)).await, StatusCode::OK);
+        h.advance(super::TTL_MS - 1000);
+        let other = "1234567890abcdef";
+        let payload = json!({"inboxKey":other,"sealed":"y".repeat(200)});
+        assert_eq!(h.call("POST", "/inbox/append", Some(payload.clone())).await.0, StatusCode::OK);
+        h.advance(2000);
+        super::sweep(&h.state).await;
+        assert!(h.state.store.get(super::NS, KEY).await.unwrap().is_none());
+        assert!(h.state.store.get(super::NS, other).await.unwrap().is_some());
+        // Reclaimed bytes are reflected in the shared quota, not just deleted from the filesystem.
+        assert_eq!(append(&h, &"z".repeat(200)).await, StatusCode::OK);
+        super::sweep(&h.state).await;
+        assert_eq!(drain(&h).await.len(), 1);
     }
 }
