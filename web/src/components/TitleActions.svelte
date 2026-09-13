@@ -19,6 +19,7 @@
     onplay,
     onplayhere,
     trailerHref,
+    share,
     notice = null,
     detailPage = false,
     playLabel = 'Play',
@@ -36,12 +37,36 @@
     onplayhere?: () => void;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
+    /** What to hand the share sheet, or copy: this title and the link that opens it. No button without it. */
+    share?: { title: string; url: string };
     /** What the last action did, when that's worth saying. */
     notice?: string | null;
     detailPage?: boolean;
     playLabel?: string;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
+  /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
+  let copied = $state(false);
+  let copiedFor: ReturnType<typeof setTimeout> | undefined;
+
+  async function shareTitle() {
+    if (!share) return;
+    // The system sheet wherever there is one — a phone hands off to Messages, Mail, whatever is installed —
+    // and the clipboard where there isn't, which is most desktop browsers.
+    if (navigator.share) {
+      // Dismissing the sheet rejects, and is a choice rather than a failure worth reporting.
+      await navigator.share({ title: share.title, url: share.url }).catch(() => {});
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(share.url);
+      copied = true;
+      clearTimeout(copiedFor);
+      copiedFor = setTimeout(() => (copied = false), 2000);
+    } catch {
+      /* Refused the clipboard: the link is in the address bar, which is where it came from. */
+    }
+  }
 
   const active = $derived(row !== undefined && !row.deleted.value);
   const listed = $derived(active && row?.status.value === 'watchlist');
@@ -104,6 +129,13 @@
     >
       {@render eye()}<span class="label">Seen</span>
     </button>
+    {#if share}
+      <button class="pill" disabled={busy} onclick={() => void shareTitle()}>
+        {@render send()}<span class="label" aria-live="polite"
+          >{copied ? 'Link copied' : 'Share'}</span
+        >
+      </button>
+    {/if}
 
     <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet on a
          phone — and a screen reader reads a pop-up button. -->
@@ -155,6 +187,14 @@
 {#snippet bookmark()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.7-6 3.7v-14a1 1 0 0 1 1-1Z" />
+  </svg>
+{/snippet}
+
+{#snippet send()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M12 3.6v11.2" />
+    <path d="m7.9 7.7 4.1-4.1 4.1 4.1" />
+    <path d="M5.6 12.8v5.6a2 2 0 0 0 2 2h8.8a2 2 0 0 0 2-2v-5.6" />
   </svg>
 {/snippet}
 

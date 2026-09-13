@@ -283,6 +283,10 @@
           trailerHref={d.trailer
             ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
+          share={{
+            title: d.title.title,
+            url: `${location.origin}${location.pathname}#title/${d.title.type}/${d.title.id}`,
+          }}
         />
       </div>
     </div>

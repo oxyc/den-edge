@@ -145,6 +145,8 @@
   /** A hidden tab is still "intersecting", so the observer below never fires when you switch away from it. */
   let foreground = $state(!document.hidden);
   let ambientPlayer = $state<HTMLVideoElement>();
+  /** A trailer den-reel cannot serve — YouTube refuses some of them to a server — is not asked for again. */
+  let ambientFailed = $state(false);
   /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
   const saving = () =>
     Boolean(
@@ -176,6 +178,7 @@
     void current;
     ambient = null;
     playing = false;
+    ambientFailed = false;
   });
 
   $effect(() => {
@@ -183,7 +186,8 @@
     const imdbId = detail?.imdbId;
     const base = reel;
     const table = routes;
-    if (!active || !title || !imdbId || !base || !onScreen || still() || saving()) return;
+    if (!active || !title || !imdbId || !base || !onScreen || still() || saving() || ambientFailed)
+      return;
     // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
     if (untrack(() => ambient)) return;
     let live = true;
@@ -367,6 +371,12 @@
         preload="auto"
         tabindex="-1"
         onplaying={() => (playing = true)}
+        onerror={() => {
+          // The still picture is the fallback, and asking again on every return only fills reel's log.
+          ambient = null;
+          ambientFailed = true;
+          playing = false;
+        }}
         onloadstart={(event) => (event.currentTarget.muted = true)}
       ></video>
     {/if}
