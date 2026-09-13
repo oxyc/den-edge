@@ -14,6 +14,11 @@
   --radius: 14px;
   --gutter: clamp(16px, 4vw, 48px);
 
+  /* The page column. A full-bleed hero paints past it, but anything READABLE inside one has to line
+     up with it — a hero column wider than this hangs its own gutter outside the page's clip, and the
+     first characters of a line go missing. */
+  --page-max: 1400px;
+
   /* What the floating bar takes off the top of a page: its own height, where it sits, and the air under it.
      Pages pad by it, and a full-bleed hero pulls back through it to reach the top of the window. */
   --bar-space: calc(max(12px, env(safe-area-inset-top)) + 46px + 16px);

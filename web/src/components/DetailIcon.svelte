@@ -3,7 +3,17 @@
     name,
     filled = false,
   }: {
-    name: 'play' | 'check' | 'eye' | 'more' | 'sources' | 'download' | 'like' | 'dislike' | 'love';
+    name:
+      | 'play'
+      | 'check'
+      | 'eye'
+      | 'more'
+      | 'sources'
+      | 'download'
+      | 'like'
+      | 'dislike'
+      | 'love'
+      | 'expand';
     filled?: boolean;
   } = $props();
 </script>
@@ -32,6 +42,7 @@
   {:else if name === 'love'}<path
       d="M12 20S3 14.5 3 8.5A4.5 4.5 0 0 1 12 8a4.5 4.5 0 0 1 9 .5C21 14.5 12 20 12 20Z"
     />
+  {:else if name === 'expand'}<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
   {:else}<g transform={name === 'dislike' ? 'rotate(180 12 12)' : undefined}
       ><path d="M8 20H4V10h4m0 10V10l4-7c2 0 3 1 2 4l-1 3h6c2 0 2 1 2 2l-2 7-1 1H8Z" /></g
     >{/if}

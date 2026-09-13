@@ -33,7 +33,7 @@
 <style>
   .reactions {
     display: flex;
-    gap: 16px;
+    gap: 4px;
     margin: 0 0 32px;
   }
 
@@ -41,7 +41,7 @@
     display: grid;
     justify-items: center;
     gap: 4px;
-    min-width: 76px;
+    min-width: 60px;
     border: 0;
     padding: 0;
     background: none;

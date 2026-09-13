@@ -982,10 +982,13 @@
 {:else if page && !DetailScreen.current}
   <Loading label="Loading" page />
 {:else if page}
+  <!-- The player opens over this page rather than as a route of its own, so the page stays mounted
+       and in front of the viewer as far as it knows: without `!playing` its trailer plays on under
+       the film. Same reason the billboard below takes it. -->
   <DetailScreen.current
     {reel}
     {routes}
-    {active}
+    active={active && !playing}
     ref={page}
     {tmdbKey}
     {omdbKey}
@@ -1021,7 +1024,7 @@
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
     <Billboard
-      {active}
+      active={active && !playing}
       titles={featured.filter(featuredShown)}
       {tmdbKey}
       {reel}

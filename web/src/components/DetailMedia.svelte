@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import DetailIcon from './DetailIcon.svelte';
   import { directSource, directTrailer, trailerURLs } from '../lib/reel';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -37,6 +38,41 @@
   let playing = $state(false);
   let ended = $state(false);
   let failed = $state(false);
+  /**
+   * Set when the viewer asks for the trailer full-screen, and the only thing that lets it make a
+   * sound. Autoplay with audio cannot be granted — every browser refuses it without a gesture, and
+   * hardware volume keys never reach the page — so the click that expands is the gesture.
+   */
+  let sound = $state(false);
+
+  /** Take over the screen, with the audio on. */
+  async function expand() {
+    const player = video;
+    if (!player) return;
+    sound = true;
+    player.muted = false;
+    // iOS ignores this (volume is read-only there); unmuting is what carries the sound.
+    player.volume = 1;
+    // Back to a quiet page on the way out: a trailer still talking after the viewer closed it is
+    // the thing they would then have to go and silence.
+    const leave = () => {
+      if (document.fullscreenElement) return;
+      sound = false;
+      player.muted = true;
+      document.removeEventListener('fullscreenchange', leave);
+    };
+    document.addEventListener('fullscreenchange', leave);
+    try {
+      if (player.requestFullscreen) await player.requestFullscreen();
+      else
+        (
+          player as HTMLVideoElement & { webkitEnterFullscreen?: () => void }
+        ).webkitEnterFullscreen?.();
+    } catch {
+      /* Refused (or unsupported): the sound is on and the trailer plays where it is. */
+    }
+    void player.play().catch(() => {});
+  }
   const saving = Boolean(
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData,
   );
@@ -101,9 +137,12 @@
     };
   });
 
+  // Reads `source`, not `url`, and that is the whole point: swapping `src` to the direct stream
+  // pauses the element, so an effect watching only `url` never runs again and the trailer sits there
+  // loaded and still. It has to re-run for whichever source is actually mounted.
   $effect(() => {
     const player = video;
-    const canPlay = allowed && !!url;
+    const canPlay = allowed && !!source;
     if (!player) return;
     if (!canPlay) {
       player.pause();
@@ -111,7 +150,7 @@
       return;
     }
     let live = true;
-    player.muted = true;
+    player.muted = !sound;
     void player
       .play()
       .then(() => {
@@ -191,10 +230,17 @@
     }}
     onerror={nextTrailer}
     onloadstart={(event) => {
-      event.currentTarget.muted = true;
+      event.currentTarget.muted = !sound;
     }}
   ></video>
   <div class="scrim" aria-hidden="true"></div>
+  <!-- Glass, because this is a control over media — the one place the look is for. Desktop only:
+       a phone already gets the video's own controls, and its full-screen is a tap on those. -->
+  {#if !mobile && !!source && !failed && !ended}
+    <button class="expand glass" onclick={expand} aria-label="Play trailer full screen with sound">
+      <DetailIcon name="expand" />
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -240,6 +286,42 @@
     background:
       linear-gradient(to top, var(--bg), rgb(0 0 0 / 0.15) 75%),
       linear-gradient(to right, rgb(0 0 0 / 0.45), transparent 80%);
+  }
+
+  .expand {
+    position: absolute;
+    top: calc(var(--bar-space) + 12px);
+    right: var(--gutter);
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--fg);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  /* Before the hover rule, which is the more specific of the two: a control reached by keyboard has
+     to show itself without waiting for a pointer that may never arrive. */
+  .expand:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  /* Otherwise it appears with the picture it belongs to. */
+  .media:hover .expand {
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .expand {
+      transition: none;
+    }
   }
 
   @media (width <= 759px) {

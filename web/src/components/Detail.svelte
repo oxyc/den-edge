@@ -436,7 +436,11 @@
   .hero-content {
     position: relative;
     width: 100%;
-    max-width: 1520px;
+
+    /* The page column, not a wider one of its own: this block holds the title, the facts and the
+       actions' notices, and at 1520 its gutter fell outside the page's clip and shaved the first
+       characters off every line. */
+    max-width: var(--page-max);
     margin: 0 auto;
     padding: calc(var(--bar-space) + 40px) var(--gutter) 40px;
   }
@@ -450,7 +454,9 @@
     display: flex;
     gap: 40px;
     align-items: start;
-    min-height: clamp(300px, 33vw, 420px);
+
+    /* The hero is bottom-aligned, so this block's height is what the trailer above it does not get. */
+    min-height: clamp(200px, 22vw, 300px);
   }
 
   .copy,
@@ -461,8 +467,8 @@
 
   .poster {
     display: block;
-    flex: 0 0 clamp(200px, 22vw, 280px);
-    width: clamp(200px, 22vw, 280px);
+    flex: 0 0 clamp(150px, 15vw, 210px);
+    width: clamp(150px, 15vw, 210px);
     height: auto;
     aspect-ratio: 2/3;
     object-fit: cover;
