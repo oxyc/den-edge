@@ -30,7 +30,16 @@
   const url = $derived(candidates[candidate] ?? null);
   /** YouTube's own URL for this candidate, when one exists that this browser can play. */
   let upgraded = $state<string | null>(null);
-  const source = $derived(upgraded ?? url);
+  /**
+   * Whether the direct lookup for the current candidate has settled. Nothing is mounted until it
+   * has.
+   *
+   * Starting reel's copy and swapping to YouTube's when the answer arrived reloaded the element a
+   * second or two in, so the trailer visibly restarted just as you began watching it. Waiting costs
+   * a round-trip `/meta` has usually already warmed; swapping costs a restart every time.
+   */
+  let resolved = $state(false);
+  const source = $derived(resolved ? (upgraded ?? url) : null);
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -127,10 +136,16 @@
   $effect(() => {
     const play = url;
     upgraded = null;
+    resolved = false;
     if (!play) return;
     let live = true;
-    void directTrailer(play).then((direct) => {
-      if (live) upgraded = directSource(direct, true);
+    // Capped, because nothing plays until this settles: a reel that hangs should cost a couple of
+    // seconds and then its own copy, rather than the trailer.
+    const signal = 'timeout' in AbortSignal ? AbortSignal.timeout(2500) : undefined;
+    void directTrailer(play, { signal }).then((direct) => {
+      if (!live) return;
+      upgraded = directSource(direct, true);
+      resolved = true;
     });
     return () => {
       live = false;
@@ -208,7 +223,7 @@
     bind:this={video}
     src={source ?? undefined}
     class:playing
-    class:present={!!url && !failed && !ended}
+    class:present={!!source && !failed && !ended}
     poster={backdrop ?? poster}
     muted
     playsinline
