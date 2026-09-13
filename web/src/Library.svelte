@@ -668,8 +668,13 @@
   let featured = $state<Title[]>([]);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
-  /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
-  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v1.${type ?? 'all'}`;
+  /**
+   * Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). This page's own ranking
+   * keeps its picks apart from atlas's, or `?billboard=device` would open on atlas's last billboard — lead slide
+   * included, since a rebuild never swaps out the slide on screen — and the two would look the same.
+   */
+  const keptBillboard = (type: 'movie' | 'tv' | null) =>
+    `billboard.v1.${RANK_ON_DEVICE ? 'device.' : ''}${type ?? 'all'}`;
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for the library's profile, and the page shouldn't.
   $effect(() => {
