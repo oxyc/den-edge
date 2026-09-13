@@ -225,16 +225,24 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
 
   // The first paint: the title index leads — it forgives typos — then TMDB's answer.
   const local = await index;
+  // atlas's embedding index holds no titles, cast or directors, so a query that names a title or a person gets only
+  // what merely sounds alike from it ("the matrix" → Marty Supreme). Its tail follows only a query nothing named.
+  const named = (hits: Hit[]) =>
+    hits.some((hit) => isExact(hit, text)) || hits[0]?.kind === 'person';
   let first: Hit[];
   try {
     first = dedupe([...local, ...(await tmdb)]);
   } catch (error) {
     // Search matters most when TMDB is down: the title index and the semantic tail still answer if they can.
-    const tail = dedupe([...local, ...(await semantic)]);
+    const tail = dedupe([...local, ...(named(local) ? [] : await semantic)]);
     if (tail.length === 0) throw error;
     yield promoteExact(tail, text);
     return;
   }
   yield promoteExact(first, text);
-  yield await anchorExact(dedupe([...first, ...(await semantic)]), text, sources);
+  yield await anchorExact(
+    dedupe([...first, ...(named(first) ? [] : await semantic)]),
+    text,
+    sources,
+  );
 }

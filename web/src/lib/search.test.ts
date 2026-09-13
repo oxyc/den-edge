@@ -113,6 +113,14 @@ describe('searchStream, as the TV fuses it', () => {
     expect(batches[1]).toEqual(['movie-603', 'movie-604', 'movie-157336']);
   });
 
+  it('leaves the semantic tail off a query that names a title or a person', async () => {
+    // The embedding index holds no titles or names: for these it could only add what sounds alike.
+    const s = sources({ semantic: async () => [{ type: 'movie', id: 157336 }] });
+    expect(await final('the matrix', s)).not.toContain('movie-157336');
+    expect(await final('brad pitt', s)).not.toContain('movie-157336');
+    expect(await final('mind-bending space travel', s)).toContain('movie-157336');
+  });
+
   it('leads with the exact title, then the titles most like it', async () => {
     const s = sources({
       multi: async () => [reloaded, matrix].map((title) => ({ kind: 'title' as const, title })),
