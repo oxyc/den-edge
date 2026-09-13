@@ -104,6 +104,7 @@ export function searchSources(
               : undefined,
             originalLanguage:
               typeof h.originalLanguage === 'string' ? h.originalLanguage : undefined,
+            imdbId: typeof h.imdbId === 'string' ? h.imdbId : undefined,
           },
         ];
       });

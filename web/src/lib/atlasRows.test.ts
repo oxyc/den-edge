@@ -16,6 +16,7 @@ describe('atlasRows', () => {
               year: 1995,
               genreIds: [18],
               originalLanguage: 'ko',
+              imdbId: 'tt0000002',
             },
             { type: 'person', id: 9, title: 'Nobody' },
           ],
@@ -38,6 +39,7 @@ describe('atlasRows', () => {
         year: 1995,
         genreIds: [18],
         originalLanguage: 'ko',
+        imdbId: 'tt0000002',
       },
     ]);
     expect(asked).toEqual([

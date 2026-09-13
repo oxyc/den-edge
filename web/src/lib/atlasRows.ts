@@ -149,6 +149,7 @@ function titlesOf(body: unknown): Title[] {
           ? t.genreIds.filter((g): g is number => typeof g === 'number')
           : undefined,
         originalLanguage: typeof t.originalLanguage === 'string' ? t.originalLanguage : undefined,
+        imdbId: typeof t.imdbId === 'string' ? t.imdbId : undefined,
       },
     ];
   });
