@@ -34,7 +34,7 @@
     type Candidate,
     type LabelProfile,
   } from './lib/billboard';
-  import { browseRows, homeRows, personalRows, tmdbPages } from './lib/catalog';
+  import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import {
@@ -65,7 +65,7 @@
   import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody } from './lib/recommend';
-  import { plotRows } from './lib/plotRows';
+  import { atlasRows } from './lib/atlasRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
   let {
@@ -654,13 +654,14 @@
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
       const browse = browseRows(type, pages, { minYear, hiddenGenres: prefs.excludedGenres });
-      // After Popular and the three genre rows: the plot rows cut across genre, so they read as the next step.
-      const plot = atlas ? plotRows(atlas, type) : [];
-      return [...browse.slice(0, 4), ...plot, ...browse.slice(4)];
+      // After Popular and the three genre rows, atlas's rows take turns with TMDB's categories and lead each
+      // round, as the TV's index rows do: they say something a genre or a decade doesn't.
+      const own = atlas ? atlasRows(atlas, type) : [];
+      return [...browse.slice(0, 4), ...interleave([own, browse.slice(4)])];
     }
-    // Home's spine and recipe rows (seven), then the three strongest plot rows before the categories.
+    // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
     const home = homeRows(pages, { minYear });
-    const plot = atlas ? plotRows(atlas, 'movie').slice(0, 3) : [];
+    const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
     return [...personalRows(pages, seeds), ...home.slice(0, 7), ...plot, ...home.slice(7)];
   });
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
