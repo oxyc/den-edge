@@ -764,10 +764,12 @@
         // is for the day TMDB can't be reached at all: better an unjudged billboard than an empty one.
         const judged = named.filter((c) => c.title.genreIds?.length);
         const pickable = judged.length >= 20 ? judged : named;
-        // Never a title this library already holds: the billboard is for what hasn't been found yet.
+        // Never a title this library already holds: the billboard is for what hasn't been found yet. On Movies and
+        // Series, only that type: the pool always carries TMDB's series trending and arrivals of both types.
         const picked = pickBillboard(pickable, {
           taste,
-          keep: (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)),
+          keep: (t) =>
+            featuredShown(t) && !seeds.owned.has(titleKey(t)) && (!type || t.type === type),
         });
         if (run === billboardRun && (picked.length || !featured.length)) {
           const lead = featured[0];
