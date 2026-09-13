@@ -108,6 +108,7 @@ describe('searchStream over atlas’s /index/query', () => {
       query: async () => ({
         people: [],
         titles: [{ ...matrix, posterPath: '/m.jpg' }, movie(157336, 'Interstellar')],
+        named: true,
       }),
       title: async (ref) => {
         named.push(`${ref.type}-${ref.id}`);
@@ -124,6 +125,7 @@ describe('searchStream over atlas’s /index/query', () => {
       query: async () => ({
         people: [{ id: 287, name: 'Brad Pitt' }],
         titles: [{ ...catalog['movie-550']!, posterPath: '/f.jpg' }],
+        named: true,
       }),
       person: async (id) => ({ id, name: 'Brad Pitt', profilePath: '/bp.jpg' }),
       multi: async () => {
@@ -147,11 +149,31 @@ describe('searchStream over atlas’s /index/query', () => {
       query: async () => ({
         people: [{ id: 287, name: 'Brad Pitt' }],
         titles: [{ ...matrix, posterPath: '/m.jpg' }],
+        named: true,
       }),
       person: down,
       multi: down,
     });
     expect(await final('the matrix', s)).toEqual(['person-287', 'movie-603']);
+  });
+
+  it('asks TMDB’s search for a title or person by name only when atlas named nothing, and leads with what it finds', async () => {
+    const pernille: Title = { type: 'tv', id: 123403, title: 'Pernille', posterPath: '/p.jpg' };
+    const s = sources({
+      query: async () => ({
+        people: [],
+        titles: [{ ...matrix, posterPath: '/m.jpg' }],
+        named: false,
+      }),
+      multi: async () =>
+        [pernille, movie(9, 'Pernille and the Wolf')].map((title) => ({
+          kind: 'title' as const,
+          title,
+        })),
+    });
+    const batches: string[][] = [];
+    for await (const batch of searchStream('pernille', s)) batches.push(batch.map(hitKey));
+    expect(batches).toEqual([['movie-603'], ['tv-123403', 'movie-603']]);
   });
 });
 
@@ -351,6 +373,7 @@ describe('searchSources', () => {
           originalLanguage: 'es',
         },
       ],
+      named: true,
     });
     await expect(searchSources('k', answer({ error: 'not_found' })).query('x')).rejects.toThrow();
   });

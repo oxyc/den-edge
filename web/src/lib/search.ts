@@ -40,6 +40,8 @@ export interface QueryAnswer {
   people: Person[];
   /** Titles, facets, labels, plot facets, those people's titles and the plot vectors, ranked together. */
   titles: Title[];
+  /** Whether atlas matched the query to a title or a person by name, rather than only by theme. */
+  named: boolean;
 }
 
 export interface SearchSources {
@@ -244,8 +246,11 @@ async function faces(people: Person[], sources: SearchSources): Promise<Hit[]> {
 
 /**
  * Results as they improve. atlas answers the query in one request — the people it names first, then its ranking,
- * their titles among it — and TMDB only draws what atlas has no picture of. An atlas without `/index/query` leaves
- * search to the lanes it replaced (`lanesStream`). Rejects only when nothing answered.
+ * their titles among it — and TMDB draws what atlas has no picture of. atlas knows its own titles by every name
+ * but the rest only by TMDB's original title ("Pernille" is "Pørni" there), and only the people its titles credit:
+ * when it names nothing, TMDB's search is asked whether the query is a title or a person by name, and one it finds
+ * leads. An atlas without `/index/query` leaves search to the lanes it replaced (`lanesStream`). Rejects only when
+ * nothing answered.
  */
 export async function* searchStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
   const { text } = normalizeQuery(query);
@@ -259,7 +264,20 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
     faces(found.people, sources),
     drawable(found.titles, sources),
   ]);
-  yield dedupe([...people, ...titles]);
+  const answer = dedupe([...people, ...titles]);
+  yield answer;
+  if (found.named) return;
+  const byName = await sources
+    .multi(text)
+    .then((hits) =>
+      hits.filter((hit) =>
+        hit.kind === 'person'
+          ? foldedTitle(hit.person.name) === foldedTitle(text)
+          : isExact(hit, text),
+      ),
+    )
+    .catch((): Hit[] => []);
+  if (byName.length) yield dedupe([...(await expandTopPerson(byName, sources)), ...answer]);
 }
 
 /** The lanes `/index/query` replaced, fused as the TV fuses them: a first paint, then the final list. */

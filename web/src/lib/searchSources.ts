@@ -85,6 +85,10 @@ export function searchSources(
       const people = records(body.people).flatMap((p): Person[] =>
         typeof p.id === 'number' && typeof p.name === 'string' ? [{ id: p.id, name: p.name }] : [],
       );
+      const byName = records(body.hits).some((h) => {
+        const features = h.f && typeof h.f === 'object' ? (h.f as Json) : {};
+        return typeof features.t === 'number' && features.t > 0;
+      });
       const titles = records(body.hits).flatMap((h): Title[] => {
         const type = h.type === 'series' ? 'tv' : h.type === 'movie' ? 'movie' : undefined;
         if (!type || typeof h.id !== 'number' || typeof h.title !== 'string') return [];
@@ -103,7 +107,7 @@ export function searchSources(
           },
         ];
       });
-      return { people, titles };
+      return { people, titles, named: people.length > 0 || byName };
     },
 
     async person(id) {
