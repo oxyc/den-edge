@@ -695,6 +695,8 @@
     // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
     // is open.
     if (here && atlasRanks) {
+      // And once more when TMDB has named the whole library, which is what atlas reads a title it has never seen by.
+      void libraryNamed;
       if (libraryOpen) untrack(() => buildRecommended(here));
       return;
     }
@@ -740,24 +742,49 @@
           { titles: hotSeries, ranked: true },
           { titles: [...fresh, ...soon, ...popular], ranked: false },
         ];
-        const slides = await recommend(
-          here,
-          recommendBody({ facet: type, prefs, library: weighted, owned: seeds.owned, lists }),
+        const named = new Map(
+          (library?.records ?? [])
+            .filter((r) => r.title.title)
+            .map((r) => [titleKey(r.title), r.title] as const),
         );
+        const ask = (offered: typeof lists) =>
+          recommend(
+            here,
+            recommendBody({
+              facet: type,
+              prefs,
+              library: weighted,
+              named,
+              owned: seeds.owned,
+              lists: offered,
+            }),
+          );
+        const first = await ask(lists);
         if (run !== billboardRun) return;
-        if (!slides) {
+        if (!first) {
           atlasRanks = false;
           return;
         }
+        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A local lookup for this build; nothing renders from it.
         const known = new Map(
           lists.flatMap(({ titles }) => titles.map((t) => [titleKey(t), t] as const)),
         );
-        const picked = await nameSlides(slides, known, (ref) => fetchTitle(ref, key), LOOKUPS);
-        if (run === billboardRun && (picked.length || !featured.length)) {
+        const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+        const show = async (slides: typeof first.slides) => {
+          const picked = await nameSlides(slides, known, lookup, LOOKUPS);
+          if (run !== billboardRun || (!picked.length && featured.length)) return;
           const lead = featured[0];
           featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
           if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
-        }
+        };
+        await show(first.slides);
+        // What atlas has never seen it can't judge, and drops, however new it is: the likeliest of those are named
+        // from TMDB (which this browser caches) and offered again, described.
+        const described = await nameSlides(first.unjudged, known, lookup, LOOKUPS);
+        if (!described.length || run !== billboardRun) return;
+        for (const title of described) known.set(titleKey(title), title);
+        const again = await ask([...lists, { titles: described, ranked: false }]);
+        if (again && run === billboardRun) await show(again.slides);
       })
       .catch(() => undefined);
   }

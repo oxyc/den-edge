@@ -23,7 +23,16 @@ describe('recommendBody', () => {
     const body = recommendBody({
       facet: 'tv',
       prefs,
-      library: [{ ref: { type: 'tv', id: 1438 }, weight: 1.5, at: 7 }],
+      library: [
+        { ref: { type: 'tv', id: 1438 }, weight: 1.5, at: 7 },
+        { ref: { type: 'movie', id: 603 }, weight: 1, at: 6 },
+      ],
+      named: new Map([
+        [
+          'movie:603',
+          film(603, { genreIds: [28, 878], countries: ['US'], releaseDate: '1999-03-31' }),
+        ],
+      ]),
       owned: new Set(['tv:1438', 'movie:603', 'nonsense']),
       lists: [
         {
@@ -36,7 +45,12 @@ describe('recommendBody', () => {
     });
     expect(body.surface).toBe('series');
     expect(body.now).toBe('2026-09-12T00:00:00.000Z');
-    expect(body.library).toEqual([{ type: 'series', id: 1438, weight: 1.5, at: 7 }]);
+    expect(body.library[0]).toEqual({ type: 'series', id: 1438, weight: 1.5, at: 7 });
+    expect(body.library[1]).toMatchObject({
+      type: 'movie',
+      id: 603,
+      hint: { genreIds: [28, 878], countries: ['US'], releaseDate: '1999-03-31' },
+    });
     expect(body.owned).toEqual([
       { type: 'series', id: 1438 },
       { type: 'movie', id: 603 },
@@ -79,11 +93,15 @@ describe('recommend', () => {
         { type: 'movie', id: 603, imdbId: 'nope' },
         { type: 'person', id: 1 },
       ],
+      unjudged: [{ type: 'movie', id: 9 }],
     });
-    expect(await recommend('/atlas/auto_nfx', body, fetchImpl)).toEqual([
-      { type: 'tv', id: 1438, imdbId: 'tt0306414' },
-      { type: 'movie', id: 603, imdbId: undefined },
-    ]);
+    expect(await recommend('/atlas/auto_nfx', body, fetchImpl)).toEqual({
+      slides: [
+        { type: 'tv', id: 1438, imdbId: 'tt0306414' },
+        { type: 'movie', id: 603, imdbId: undefined },
+      ],
+      unjudged: [{ type: 'movie', id: 9, imdbId: undefined }],
+    });
     expect(asked[0]!.url).toBe('/atlas/auto_nfx/recommend');
     expect(asked[0]!.init?.method).toBe('POST');
   });

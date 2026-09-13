@@ -29,12 +29,13 @@ export interface Slide {
 /** What atlas calls a series. */
 const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
 
-/** What a TMDB list said about a title. atlas reads it only where it knows nothing itself. */
+/** What TMDB said about a title. atlas reads it only where it knows nothing itself. */
 function hintOf(title: Title) {
   return {
     releaseDate: title.releaseDate,
     genreIds: title.genreIds,
     originalLanguage: title.originalLanguage,
+    countries: title.countries,
     popularity: title.popularity,
     rating: title.rating,
     votes: title.votes,
@@ -43,11 +44,16 @@ function hintOf(title: Title) {
   };
 }
 
-/** The request for a billboard on the page showing `facet` (Home: null). */
+/**
+ * The request for a billboard on the page showing `facet` (Home: null). A library title TMDB has named goes with what
+ * TMDB said about it: atlas holds a subset of titles, and until its facts cover what a household watches, a library
+ * title it has never seen says nothing about taste without one.
+ */
 export function recommendBody({
   facet,
   prefs,
   library,
+  named = new Map(),
   owned,
   lists,
   now = new Date(),
@@ -55,6 +61,8 @@ export function recommendBody({
   facet: MediaType | null;
   prefs: Prefs;
   library: Weighted[];
+  /** The library's titles TMDB has named, by `type:id`. */
+  named?: Map<string, Title>;
   /** Every title the library holds, by `type:id`. */
   owned: Set<string>;
   lists: OfferedList[];
@@ -65,12 +73,16 @@ export function recommendBody({
     surface: facet === 'movie' ? 'movies' : facet === 'tv' ? 'series' : 'home',
     now: now.toISOString(),
     services: prefs.services,
-    library: library.map(({ ref, weight, at }) => ({
-      type: atlasType(ref.type),
-      id: ref.id,
-      weight,
-      at,
-    })),
+    library: library.map(({ ref, weight, at }) => {
+      const title = named.get(`${ref.type}:${ref.id}`);
+      return {
+        type: atlasType(ref.type),
+        id: ref.id,
+        weight,
+        at,
+        ...(title ? { hint: hintOf(title) } : {}),
+      };
+    }),
     owned: [...owned].flatMap((key) => {
       const [type, id] = key.split(':');
       const numeric = Number(id);
@@ -95,12 +107,32 @@ export function recommendBody({
   };
 }
 
-/** atlas's slides for `body`, best first; null where atlas can't rank (no route, out of reach, a malformed answer). */
+/** Titles as atlas names them, in Den's names; anything else dropped. */
+function slidesOf(value: unknown): Slide[] {
+  return (Array.isArray(value) ? (value as Record<string, unknown>[]) : []).flatMap(
+    (slide): Slide[] => {
+      const type = slide?.type === 'series' ? 'tv' : slide?.type === 'movie' ? 'movie' : null;
+      if (!type || typeof slide.id !== 'number') return [];
+      const imdbId =
+        typeof slide.imdbId === 'string' && /^tt\d+$/.test(slide.imdbId) ? slide.imdbId : undefined;
+      return [{ type, id: slide.id, imdbId }];
+    },
+  );
+}
+
+export interface Recommended {
+  /** The slides, best first. */
+  slides: Slide[];
+  /** Titles atlas knew nothing about, most worth describing first: described, they can be ranked. */
+  unjudged: Slide[];
+}
+
+/** atlas's answer for `body`; null where atlas can't rank (no route, out of reach, a malformed answer). */
 export async function recommend(
   base: string,
   body: ReturnType<typeof recommendBody>,
   fetchImpl: typeof fetch = fetch,
-): Promise<Slide[] | null> {
+): Promise<Recommended | null> {
   try {
     const res = await fetchImpl(`${base}/recommend`, {
       method: 'POST',
@@ -108,15 +140,9 @@ export async function recommend(
       body: JSON.stringify(body),
     });
     if (!res.ok) return null;
-    const slides = ((await res.json()) as { slides?: unknown }).slides;
-    if (!Array.isArray(slides)) return null;
-    return (slides as Record<string, unknown>[]).flatMap((slide): Slide[] => {
-      const type = slide.type === 'series' ? 'tv' : slide.type === 'movie' ? 'movie' : null;
-      if (!type || typeof slide.id !== 'number') return [];
-      const imdbId =
-        typeof slide.imdbId === 'string' && /^tt\d+$/.test(slide.imdbId) ? slide.imdbId : undefined;
-      return [{ type, id: slide.id, imdbId }];
-    });
+    const answer = (await res.json()) as { slides?: unknown; unjudged?: unknown };
+    if (!Array.isArray(answer.slides)) return null;
+    return { slides: slidesOf(answer.slides), unjudged: slidesOf(answer.unjudged) };
   } catch {
     return null;
   }
