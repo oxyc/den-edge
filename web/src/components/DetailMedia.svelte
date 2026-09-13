@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import { directSource, directTrailer, trailerURLs } from '../lib/reel';
+  import { directSource, directTrailer, nativeHls, trailerURLs } from '../lib/reel';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
   let {
@@ -121,7 +121,12 @@
     playing = ended = failed = false;
     if (!autoplay || !active || reduced || saving || !id || !base) return;
     const controller = new AbortController();
-    void trailerURLs(base, mediaType, id, table, { signal: controller.signal }).then((found) => {
+    // Where HLS plays natively this hero uses YouTube's own URL, so reel need not spend a download
+    // on it. Everywhere else `/play` is the only source that carries sound, and it must be warm.
+    void trailerURLs(base, mediaType, id, table, {
+      signal: controller.signal,
+      prewarm: nativeHls() ? 'direct' : 'full',
+    }).then((found) => {
       if (!controller.signal.aborted) candidates = found;
     });
     return () => controller.abort();

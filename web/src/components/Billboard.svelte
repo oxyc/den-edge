@@ -195,17 +195,21 @@
     if (untrack(() => ambient)) return;
     let live = true;
     const timer = setTimeout(() => {
-      void trailerURL(base, title.type, imdbId, table ?? {}).then(async (url) => {
-        if (!live || !url) return;
-        // Straight from YouTube where we can. Asking reel for the URL costs a lookup; asking it for
-        // the file costs a download, an ffmpeg re-mux, a slot on the cache volume and the trailer
-        // crossing the house twice — which is the whole wait before a cold slide shows anything.
-        // Nothing here can want sound (muted, unpressable), so a silent stream is welcome.
-        const direct = await directTrailer(url);
-        if (!live) return;
-        proxied = url;
-        ambient = directSource(direct, false) ?? url;
-      });
+      // Only the resolve: this plays YouTube's own stream on every browser, so reel downloading the
+      // file as well would be work nothing here will ever read.
+      void trailerURL(base, title.type, imdbId, table ?? {}, { prewarm: 'direct' }).then(
+        async (url) => {
+          if (!live || !url) return;
+          // Straight from YouTube where we can. Asking reel for the URL costs a lookup; asking it for
+          // the file costs a download, an ffmpeg re-mux, a slot on the cache volume and the trailer
+          // crossing the house twice — which is the whole wait before a cold slide shows anything.
+          // Nothing here can want sound (muted, unpressable), so a silent stream is welcome.
+          const direct = await directTrailer(url);
+          if (!live) return;
+          proxied = url;
+          ambient = directSource(direct, false) ?? url;
+        },
+      );
     }, SETTLE_MS);
     return () => {
       live = false;

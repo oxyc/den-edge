@@ -32,17 +32,26 @@ export async function trailerURLs(
     fetchImpl = fetch,
     secure = globalThis.location?.protocol !== 'http:',
     signal,
+    prewarm = 'full',
   }: {
     fetchImpl?: typeof fetch;
     secure?: boolean;
     signal?: AbortSignal;
+    /**
+     * What reel should get ready. `direct` asks it to resolve YouTube's URLs and skip downloading
+     * the file — right for a surface that will play those URLs, and wrong for one that falls back
+     * to `/play`, which would then be cold exactly when it is needed.
+     */
+    prewarm?: 'full' | 'direct';
   } = {},
 ): Promise<string[]> {
   const origin = reachable(routes.reel ?? [], secure);
   if (!origin) return [];
   try {
     const res = await fetchImpl(
-      `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json`,
+      `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json${
+        prewarm === 'direct' ? '?prewarm=direct' : ''
+      }`,
       { signal, cache: 'no-cache' },
     );
     if (!res.ok) return [];
@@ -180,7 +189,12 @@ export async function trailerURL(
   type: MediaType,
   imdbId: string,
   routes: Routes,
-  options: { fetchImpl?: typeof fetch; secure?: boolean; signal?: AbortSignal } = {},
+  options: {
+    fetchImpl?: typeof fetch;
+    secure?: boolean;
+    signal?: AbortSignal;
+    prewarm?: 'full' | 'direct';
+  } = {},
 ): Promise<string | null> {
   return (await trailerURLs(base, type, imdbId, routes, options))[0] ?? null;
 }
