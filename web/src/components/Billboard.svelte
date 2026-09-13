@@ -142,6 +142,9 @@
   let playing = $state(false);
   let frame = $state<HTMLElement>();
   let onScreen = $state(true);
+  /** A hidden tab is still "intersecting", so the observer below never fires when you switch away from it. */
+  let foreground = $state(!document.hidden);
+  let ambientPlayer = $state<HTMLVideoElement>();
   /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
   const saving = () =>
     Boolean(
@@ -160,14 +163,29 @@
     return () => watch.disconnect();
   });
 
+  // Switching tabs moves nothing on the page, so the observer above stays silent while the video plays on to
+  // an empty room. Nothing is heard — it is muted — but the decoding and the data are spent all the same.
+  $effect(() => {
+    const seen = () => (foreground = !document.hidden);
+    document.addEventListener('visibilitychange', seen);
+    return () => document.removeEventListener('visibilitychange', seen);
+  });
+
+  /** The trailer belongs to the slide, and is dropped when the slide changes — not when it goes out of view. */
+  $effect(() => {
+    void current;
+    ambient = null;
+    playing = false;
+  });
+
   $effect(() => {
     const title = current;
     const imdbId = detail?.imdbId;
     const base = reel;
     const table = routes;
-    ambient = null;
-    playing = false;
     if (!active || !title || !imdbId || !base || !onScreen || still() || saving()) return;
+    // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
+    if (untrack(() => ambient)) return;
     let live = true;
     const timer = setTimeout(() => {
       void trailerURL(base, title.type, imdbId, table ?? {}).then((url) => {
@@ -178,6 +196,15 @@
       live = false;
       clearTimeout(timer);
     };
+  });
+
+  // Scrolled out of view, or left in a tab nobody is looking at: stop. Back in view: carry on from where it
+  // stopped, which is what the still picture underneath has been standing in for.
+  $effect(() => {
+    const video = ambientPlayer;
+    if (!video || !ambient) return;
+    if (active && onScreen && foreground) void video.play().catch(() => {});
+    else video.pause();
   });
 
   // --- The rail ---
@@ -329,6 +356,7 @@
       <!-- den-reel's own MP4: no player chrome to hide, nothing to press, and it says for itself when it has
            started. The still picture stays underneath until it does, and stays if it never does. -->
       <video
+        bind:this={ambientPlayer}
         class="ambient"
         class:playing
         src={ambient}
