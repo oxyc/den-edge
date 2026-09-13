@@ -41,6 +41,7 @@ function sources(overrides: Partial<SearchSources> = {}): SearchSources {
     },
     // An atlas without `/index/query`: the lanes answer, as before.
     query: () => Promise.reject(new Error('no /index/query')),
+    person: async () => null,
     titles: async () => [],
     byYear: async () => [],
     notableFilms: async (id) => (id === 287 ? [catalog['movie-550']!, catalog['movie-807']!] : []),
@@ -101,16 +102,13 @@ describe('the title index', () => {
 });
 
 describe('searchStream over atlas’s /index/query', () => {
-  const found = (title: Title, titleMatch = true) => ({ title, titleMatch });
-
   it('draws atlas’s ranking as it is, naming from TMDB only what has no poster', async () => {
     const named: string[] = [];
     const s = sources({
-      query: async () => [
-        found({ ...matrix, posterPath: '/m.jpg' }),
-        found(movie(157336, 'Interstellar'), false),
-      ],
-      multi: async () => [matrix].map((title) => ({ kind: 'title' as const, title })),
+      query: async () => ({
+        people: [],
+        titles: [{ ...matrix, posterPath: '/m.jpg' }, movie(157336, 'Interstellar')],
+      }),
       title: async (ref) => {
         named.push(`${ref.type}-${ref.id}`);
         return { ...catalog[`${ref.type}-${ref.id}`]!, posterPath: '/i.jpg' };
@@ -120,27 +118,40 @@ describe('searchStream over atlas’s /index/query', () => {
     expect(named).toEqual(['movie-157336']);
   });
 
-  it('leads with a person TMDB names, then only the titles atlas matched by name', async () => {
+  it('leads with the people atlas names, their photos from TMDB, and never asks TMDB’s search', async () => {
+    let searched = false;
     const s = sources({
-      query: async () => [
-        found({ ...matrix, posterPath: '/m.jpg' }),
-        found({ ...movie(157336, 'Interstellar'), posterPath: '/i.jpg' }, false),
-      ],
+      query: async () => ({
+        people: [{ id: 287, name: 'Brad Pitt' }],
+        titles: [{ ...catalog['movie-550']!, posterPath: '/f.jpg' }],
+      }),
+      person: async (id) => ({ id, name: 'Brad Pitt', profilePath: '/bp.jpg' }),
+      multi: async () => {
+        searched = true;
+        return [];
+      },
     });
-    expect(await final('brad pitt', s)).toEqual([
-      'person-287',
-      'movie-550',
-      'movie-807',
-      'movie-603',
-    ]);
+    const batches: Hit[][] = [];
+    for await (const batch of searchStream('brad pitt', s)) batches.push(batch);
+    expect(batches.at(-1)!.map(hitKey)).toEqual(['person-287', 'movie-550']);
+    expect(batches.at(-1)![0]).toEqual({
+      kind: 'person',
+      person: { id: 287, name: 'Brad Pitt', profilePath: '/bp.jpg' },
+    });
+    expect(searched).toBe(false);
   });
 
   it('answers without TMDB at all', async () => {
+    const down = () => Promise.reject(new Error('TMDB down'));
     const s = sources({
-      query: async () => [found({ ...matrix, posterPath: '/m.jpg' })],
-      multi: () => Promise.reject(new Error('TMDB down')),
+      query: async () => ({
+        people: [{ id: 287, name: 'Brad Pitt' }],
+        titles: [{ ...matrix, posterPath: '/m.jpg' }],
+      }),
+      person: down,
+      multi: down,
     });
-    expect(await final('the matrix', s)).toEqual(['movie-603']);
+    expect(await final('the matrix', s)).toEqual(['person-287', 'movie-603']);
   });
 });
 
@@ -304,10 +315,14 @@ describe('searchSources', () => {
     expect(films.map((t) => t.id)).toEqual([550, 807]);
   });
 
-  it('reads atlas’s query hits as titles, and rejects an answer that has none', async () => {
+  it('reads atlas’s people and hits, leaving out a person with no TMDB id, and rejects an answer with no hits', async () => {
     const s = searchSources(
       'k',
       answer({
+        people: [
+          { qid: 'Q1', id: 31, name: 'Tom Hanks', credits: 40 },
+          { qid: 'Q2', id: null, name: 'Nobody Known', credits: 1 },
+        ],
         hits: [
           {
             type: 'series',
@@ -319,14 +334,14 @@ describe('searchSources', () => {
             originalLanguage: 'es',
             f: { t: 0.8, sem: 0 },
           },
-          { type: 'movie', id: 2, title: 'Money Heist', f: { t: 0, sem: 0.4 } },
           { type: 'person', id: 9, title: 'Nobody' },
         ],
       }),
     );
-    expect(await s.query('casa de papel')).toEqual([
-      {
-        title: {
+    expect(await s.query('casa de papel')).toEqual({
+      people: [{ id: 31, name: 'Tom Hanks' }],
+      titles: [
+        {
           type: 'tv',
           id: 1,
           title: 'La casa de papel',
@@ -335,10 +350,8 @@ describe('searchSources', () => {
           genreIds: [80],
           originalLanguage: 'es',
         },
-        titleMatch: true,
-      },
-      { title: { type: 'movie', id: 2, title: 'Money Heist' }, titleMatch: false },
-    ]);
+      ],
+    });
     await expect(searchSources('k', answer({ error: 'not_found' })).query('x')).rejects.toThrow();
   });
 

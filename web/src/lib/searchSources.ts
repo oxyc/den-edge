@@ -2,7 +2,7 @@
 // title, facet and embedding indexes, served over the tailnet at /atlas (tailscale serve strips the prefix).
 
 import type { MediaType, Title } from './library';
-import type { FacetAnswer, Hit, QueryHit, Ref, SearchSources } from './search';
+import type { FacetAnswer, Hit, Person, Ref, SearchSources } from './search';
 import { fetchTitle, toTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 
@@ -81,28 +81,36 @@ export function searchSources(
     async query(query) {
       const body = await fromAtlas(`/index/query.json?q=${encodeURIComponent(query)}&limit=40`);
       if (!Array.isArray(body.hits)) throw new Error('atlas answered no hits');
-      return records(body.hits).flatMap((h): QueryHit[] => {
+      // A person without a TMDB id has no page to open, so Den can't draw them.
+      const people = records(body.people).flatMap((p): Person[] =>
+        typeof p.id === 'number' && typeof p.name === 'string' ? [{ id: p.id, name: p.name }] : [],
+      );
+      const titles = records(body.hits).flatMap((h): Title[] => {
         const type = h.type === 'series' ? 'tv' : h.type === 'movie' ? 'movie' : undefined;
         if (!type || typeof h.id !== 'number' || typeof h.title !== 'string') return [];
-        const features = h.f && typeof h.f === 'object' ? (h.f as Json) : {};
         return [
           {
-            title: {
-              type,
-              id: h.id,
-              title: h.title,
-              posterPath: typeof h.posterPath === 'string' ? h.posterPath : undefined,
-              year: typeof h.year === 'number' ? h.year : undefined,
-              genreIds: Array.isArray(h.genreIds)
-                ? h.genreIds.filter((g): g is number => typeof g === 'number')
-                : undefined,
-              originalLanguage:
-                typeof h.originalLanguage === 'string' ? h.originalLanguage : undefined,
-            },
-            titleMatch: typeof features.t === 'number' && features.t > 0,
+            type,
+            id: h.id,
+            title: h.title,
+            posterPath: typeof h.posterPath === 'string' ? h.posterPath : undefined,
+            year: typeof h.year === 'number' ? h.year : undefined,
+            genreIds: Array.isArray(h.genreIds)
+              ? h.genreIds.filter((g): g is number => typeof g === 'number')
+              : undefined,
+            originalLanguage:
+              typeof h.originalLanguage === 'string' ? h.originalLanguage : undefined,
           },
         ];
       });
+      return { people, titles };
+    },
+
+    async person(id) {
+      const body = await tmdb(`/person/${id}`);
+      if (typeof body.id !== 'number' || typeof body.name !== 'string') return null;
+      const profilePath = typeof body.profile_path === 'string' ? body.profile_path : undefined;
+      return { id: body.id, name: body.name, profilePath };
     },
 
     // One catalog per type, each ranked; interleaved, so neither type buries the other. The exact title still

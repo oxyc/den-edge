@@ -1,6 +1,7 @@
-// Den's text search. atlas ranks a query in one request (`/index/query`), and TMDB only names a person at the top.
-// An atlas without that route leaves search to the lanes below, ported from the TV's TMDBDiscovery.searchStream so
-// the web answers a query the way the TV does. A strong facet ("spanish series", "80s korean horror") browses the facet lane. Otherwise the first paint is
+// Den's text search. atlas answers a query in one request (`/index/query`): the people it names, then titles, facets,
+// labels and plot ranked together; TMDB only draws what atlas has no picture of. An atlas without that route leaves
+// search to the lanes below, ported from the TV's TMDBDiscovery.searchStream so the web answers a query the way the
+// TV does. A strong facet ("spanish series", "80s korean horror") browses the facet lane. Otherwise the first paint is
 // TMDB — a trailing "(1999)" routed to a year-scoped search, the singular/plural variant appended, a top person hit
 // expanded into their films — with the exact title promoted; then semantic hits fold in, and the exact title leads
 // the titles similar to it. The TV's on-device indexes are atlas here: its fuzzy title index leads the first paint,
@@ -34,18 +35,18 @@ export interface FacetAnswer {
   titles: Ref[];
 }
 
-export interface QueryHit {
-  title: Title;
-  /** Its name matched the query, not just its themes or facets. */
-  titleMatch: boolean;
+export interface QueryAnswer {
+  /** The people the query names, most credited first. */
+  people: Person[];
+  /** Titles, facets, labels, plot facets, those people's titles and the plot vectors, ranked together. */
+  titles: Title[];
 }
 
 export interface SearchSources {
-  /**
-   * atlas's search in one request (`/index/query`): titles, facets, labels, plot facets and its plot vectors ranked
-   * together, best first, drawn from what atlas holds. Rejects when this atlas can't answer it.
-   */
-  query(query: string): Promise<QueryHit[]>;
+  /** atlas's search in one request (`/index/query`), drawn from what atlas holds. Rejects when it can't answer. */
+  query(query: string): Promise<QueryAnswer>;
+  /** A person as TMDB draws them, with their photo. */
+  person(id: number): Promise<Person | null>;
   /** atlas's fuzzy title index — the TV's on-device one: typo-tolerant, popularity-ranked, movies and series. */
   titles(query: string): Promise<Ref[]>;
   /** TMDB /search/multi in TMDB's order; rejects when TMDB can't answer. */
@@ -226,30 +227,38 @@ async function drawable(titles: Title[], sources: SearchSources): Promise<Hit[]>
   return named.map(titleHit);
 }
 
+/** People atlas named, with the photo TMDB has of each; one TMDB can't draw keeps atlas's name. */
+async function faces(people: Person[], sources: SearchSources): Promise<Hit[]> {
+  const drawn = await Promise.all(
+    people.map((person) =>
+      person.profilePath
+        ? person
+        : sources
+            .person(person.id)
+            .then((full) => (full ? { ...person, profilePath: full.profilePath } : person))
+            .catch(() => person),
+    ),
+  );
+  return drawn.map((person) => ({ kind: 'person', person }));
+}
+
 /**
- * Results as they improve. atlas ranks the query in one request; TMDB is asked only whether the query names a person,
- * whose films then lead — atlas holds no people yet, so for a name its themes could only add what sounds alike, and
- * only its title matches follow. An atlas without `/index/query` leaves search to the lanes it replaced
- * (`lanesStream`). Rejects only when nothing answered.
+ * Results as they improve. atlas answers the query in one request — the people it names first, then its ranking,
+ * their titles among it — and TMDB only draws what atlas has no picture of. An atlas without `/index/query` leaves
+ * search to the lanes it replaced (`lanesStream`). Rejects only when nothing answered.
  */
 export async function* searchStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
   const { text } = normalizeQuery(query);
   if (text.length < 2) return;
-  const person = sources
-    .multi(text)
-    .then((hits) => (hits[0]?.kind === 'person' ? expandTopPerson([hits[0]], sources) : []))
-    .catch((): Hit[] => []);
   const found = await sources.query(text).catch(() => null);
   if (found === null) {
     yield* lanesStream(query, sources);
     return;
   }
-  const people = await person;
-  const kept = people.length ? found.filter((hit) => hit.titleMatch) : found;
-  const titles = await drawable(
-    kept.map((hit) => hit.title),
-    sources,
-  );
+  const [people, titles] = await Promise.all([
+    faces(found.people, sources),
+    drawable(found.titles, sources),
+  ]);
   yield dedupe([...people, ...titles]);
 }
 
