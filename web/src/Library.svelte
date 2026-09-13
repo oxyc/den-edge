@@ -25,15 +25,6 @@
     updateProgress,
     WATCHED,
   } from './lib/actions';
-  import {
-    labelFit,
-    labelProfileOf,
-    pickBillboard,
-    tasteOf,
-    worth,
-    type Candidate,
-    type LabelProfile,
-  } from './lib/billboard';
   import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
@@ -61,8 +52,7 @@
   import { titleHref, type Route } from './lib/route';
   import { discoverServices } from './lib/discoverServices';
   import type { Routes } from './lib/routes';
-  import { labelsFor, neighbourhood, type Labels } from './lib/atlasIndex';
-  import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
+  import { installsOf, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
@@ -84,11 +74,6 @@
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
-  /**
-   * `?billboard=device` ranks the billboard in this page even where atlas can, so the two can be compared on the same
-   * library.
-   */
-  const RANK_ON_DEVICE = new URLSearchParams(location.search).get('billboard') === 'device';
   /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
   const SERVICES = 'services.v1';
   type Services = {
@@ -118,8 +103,6 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
-  /** Whether atlas ranks the billboard (`POST /recommend`); false once it has answered that it can't. */
-  let atlasRanks = $state(!RANK_ON_DEVICE);
   /** Where this page reaches reel, the billboard's trailers; null where it can't. */
   let reel = $state<string | null>(null);
   /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
@@ -500,14 +483,10 @@
     !isHidden(title, prefs, { requirePoster: false }) &&
     !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
-   * What this library says it likes, for the billboard's taste term. Watched and part-watched titles are a
-   * verdict and count full; a watchlisted one is an intention and counts for less; a reaction is the one thing
-   * said outright, so it counts for more than either, and a dislike counts against. Titles TMDB hasn't named yet
-   * carry no genres, so they simply don't vote.
-   */
-  /**
-   * Every title the library holds with how much it says about taste, straight from the log: ids and weights need
-   * no names, so nothing here waits for TMDB.
+   * Every title the library holds with how much it says about taste, straight from the log: what atlas ranks the
+   * billboard against (`recommendBody`). Watched and part-watched titles are a verdict and count full; a watchlisted
+   * one is an intention and counts for less; a reaction is the one thing said outright, so it counts for more than
+   * either, and a dislike counts against. Ids and weights need no names, so nothing here waits for TMDB.
    */
   const weighted = $derived.by(() => {
     void version;
@@ -538,94 +517,11 @@
           ];
     });
   });
-  /** The same titles once TMDB has named them: TMDB's genres, countries and people are what `taste` reads. */
-  const libraryEntries = $derived.by(() => {
-    const named = new Map((library?.records ?? []).map((r) => [titleKey(r.title), r.title]));
-    return weighted.flatMap(({ ref, weight, at }) => {
-      const title = named.get(titleKey(ref));
-      return title?.title ? [{ title, weight, at }] : [];
-    });
-  });
-  const taste = $derived(tasteOf(libraryEntries));
-  /** Whether TMDB has named the whole library, watched history included: `taste` is only complete after that. */
+  /**
+   * Whether TMDB has named the whole library, watched history included: atlas is asked again once it has, since
+   * it reads a title it doesn't hold by the name TMDB gives it.
+   */
   let libraryNamed = $state(false);
-  /**
-   * atlas's labels for the library's own titles.
-   *
-   * TMDB's nineteen genres cannot tell Nordic noir from a slasher — both are Crime. atlas labels from a
-   * taxonomy of fifty-nine subgenres and sixteen moods, from a labels file the browser keeps, which is what lets
-   * the pool be judged before it is named.
-   */
-  let libraryLabels = $state<Map<string, Labels>>(new Map());
-  /** Which titles the library holds, by id: labelled again only when that changes, not on every log refresh. */
-  const heldKey = $derived(weighted.map(({ ref }) => titleKey(ref)).join());
-  $effect(() => {
-    const here = atlas;
-    void heldKey;
-    const want = untrack(() => weighted.map(({ ref }) => ref));
-    // Only this page's own ranking reads them: where atlas ranks, the labels file is never fetched.
-    if (!here || want.length === 0 || atlasRanks) return;
-    let dropped = false;
-    // By id, as soon as the log is open: labels need no names, so this doesn't wait for TMDB to name the library.
-    void labelsFor(here, want).then((found) => {
-      if (!dropped) libraryLabels = found;
-    });
-    return () => {
-      dropped = true;
-    };
-  });
-  /**
-   * Whether the library has been read well enough to judge a pool against it.
-   *
-   * The billboard is built once, when this turns true. Built any earlier it picks its field against an empty
-   * profile and asks atlas "more like this" about a library that has barely been named — which is exactly what
-   * it did: seven of eight seeds were still unnamed, so one answered. Rebuilding on every change instead is the
-   * other failure, and costs hundreds of requests for one page load.
-   */
-  let profileReady = $state(false);
-  $effect(() => {
-    // Whichever comes first: atlas's labels for the library and TMDB's names for all of it — labels arrive before
-    // the names now, and a pick made then would read `taste` from a library barely named — or long enough that
-    // they plainly aren't coming.
-    if (libraryLabels.size > 0 && libraryNamed) {
-      profileReady = true;
-      return;
-    }
-    // Long enough for labels that are on their way, but barely at all until an atlas has been found: with none
-    // there is nothing to wait for, and a billboard that holds itself back for eight seconds on a page whose
-    // addons are still being discovered is just a billboard that isn't there.
-    const timer = setTimeout(() => (profileReady = true), atlas ? 8000 : 1200);
-    return () => clearTimeout(timer);
-  });
-  const labelProfile = $derived(
-    labelProfileOf(
-      weighted.map((entry) => ({
-        labels: libraryLabels.get(titleKey(entry.ref)),
-        weight: entry.weight,
-      })),
-    ),
-  );
-  /**
-   * The titles atlas is asked "more like this" about, so the billboard can tell what this household has already
-   * worn out. What it watched and meant it, heaviest first.
-   */
-  const wornSeeds = $derived(
-    [...weighted]
-      .filter((entry) => entry.weight >= 1)
-      // Whatever atlas actually holds, first: it answers for nothing it has never indexed, and there are only
-      // eight seeds to spend. This used to guess "films before series", on the grounds that it holds far fewer
-      // of the latter — a guess already wrong here, where the one series among these seeds is among the three
-      // that answer, and one that would go on being wrong as the dataset grows. Its own labels say which
-      // titles it knows, so nothing needs guessing.
-      .sort(
-        (a, b) =>
-          Number(libraryLabels.has(titleKey(b.ref))) - Number(libraryLabels.has(titleKey(a.ref))) ||
-          b.weight - a.weight ||
-          b.at - a.at,
-      )
-      .slice(0, 8)
-      .map((entry) => entry.ref),
-  );
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -667,20 +563,15 @@
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
-   * What the billboard cycles. Not a row: a pool of its own, ranked by `pickBillboard` — what is being watched
-   * now, what is new or still to come, and what has just landed on this household's own services, weighted
+   * What the billboard cycles. Not a row: a pool of its own, ranked by atlas (`POST /recommend`) — what is being
+   * watched now, what is new or still to come, and what has just landed on this household's own services, weighted
    * towards the library's taste and away from anything it already holds.
    */
   let featured = $state<Title[]>([]);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
-  /**
-   * Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). This page's own ranking
-   * keeps its picks apart from atlas's, or `?billboard=device` would open on atlas's last billboard — lead slide
-   * included, since a rebuild never swaps out the slide on screen — and the two would look the same.
-   */
-  const keptBillboard = (type: 'movie' | 'tv' | null) =>
-    `billboard.v1.${RANK_ON_DEVICE ? 'device.' : ''}${type ?? 'all'}`;
+  /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
+  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v1.${type ?? 'all'}`;
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for the library's profile, and the page shouldn't.
   $effect(() => {
@@ -704,15 +595,11 @@
     const here = atlas;
     if (!tmdbKey) return;
     // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
-    // is open.
-    if (here && atlasRanks) {
-      // And once more when TMDB has named the whole library, which is what atlas reads a title it has never seen by.
-      void libraryNamed;
-      if (libraryOpen) untrack(() => buildRecommended(here));
-      return;
-    }
-    if (!profileReady) return;
-    untrack(() => buildBillboard(here));
+    // is open — and once more when TMDB has named the whole library, which is what atlas reads a title it has never
+    // seen by.
+    if (!here) return;
+    void libraryNamed;
+    if (libraryOpen) untrack(() => buildRecommended(here));
   });
 
   /** Whether the log's rows have been read: once, rather than every time they change. */
@@ -720,9 +607,8 @@
 
   /**
    * The billboard as atlas ranks it (`lib/recommend.ts`). The TMDB lists go along as candidates — the rows below
-   * fetch them anyway — in the order `buildBillboard` pools them, and what atlas answers with is drawn: named from
-   * those lists where they hold it, and from TMDB where only atlas's own lists did. An atlas that can't rank turns this
-   * page's own ranking back on.
+   * fetch them anyway — and what atlas answers with is drawn: named from those lists where they hold it, and from
+   * TMDB where only atlas's own lists did. An atlas that can't rank leaves the billboard this browser kept.
    */
   function buildRecommended(here: string) {
     const table = rows;
@@ -771,11 +657,7 @@
             }),
           );
         const first = await ask(lists);
-        if (run !== billboardRun) return;
-        if (!first) {
-          atlasRanks = false;
-          return;
-        }
+        if (run !== billboardRun || !first) return;
         // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A local lookup for this build; nothing renders from it.
         const known = new Map(
           lists.flatMap(({ titles }) => titles.map((t) => [titleKey(t), t] as const)),
@@ -800,100 +682,6 @@
       .catch(() => undefined);
   }
 
-  function buildBillboard(here: string | null) {
-    const table = rows;
-    const type = facet;
-    // Not the rows' identity: that array is rebuilt every time a title is named, so comparing it when the
-    // fetches came back meant the answer was always judged stale and thrown away, and the billboard stayed
-    // empty. A build is stale only when a later build has started.
-    const run = ++billboardRun;
-    const kept = keptBillboard(type);
-    // A late discovery service can improve the pool. Keep the current slides while it loads.
-    if (!table.length) return;
-    const row = (id: string) =>
-      table
-        .find((r) => r.id === id)
-        ?.load(1)
-        .catch(() => []) ?? Promise.resolve([]);
-    // The billboard gets a pool of its own rather than whatever row happens to lead the page. A "Because you
-    // watched" row is the nearest neighbours of something already seen, which at the top of the page reads as
-    // a shelf of old, half-familiar titles — so what goes in is what is being watched now (atlas's "Trending
-    // Everywhere", the catalog the TV's browse billboards lead with) and what is new or not yet out.
-    // TMDB's trending as well as atlas's: atlas names a title by id and year, so its titles arrive with no
-    // genres and no rating and can only score on their ranking, while TMDB's arrive complete. The two lists
-    // overlap heavily and the picker merges what they share, which is how a trending title ends up scored on
-    // everything rather than on its place in one list.
-    const feed = pages;
-    const trendingTv = feed
-      ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => [])
-      : Promise.resolve([]);
-    void Promise.all([
-      here ? trendingEverywhere(here, fetch, type ?? undefined) : Promise.resolve([] as Title[]),
-      row('trending'),
-      trendingTv,
-      row('new-releases'),
-      row('upcoming'),
-      row('popular'),
-      // What just landed on the services this household actually has — new to watch, whatever year it is from.
-      here ? arrivals(here, prefs.services) : Promise.resolve([] as Title[][]),
-    ])
-      .then(async ([everywhere, hotMovies, hotSeries, fresh, soon, popular, landed]) => {
-        const ranked = (list: Title[]) =>
-          list.map((title, rank) => ({ title, rank, of: list.length }));
-        const pool: Candidate[] = [
-          ...landed.flatMap((list) =>
-            list.map((title, rank) => ({ title, arrival: { rank, of: list.length } })),
-          ),
-          ...ranked(everywhere),
-          ...ranked(hotMovies),
-          ...ranked(hotSeries),
-          ...[...fresh, ...soon, ...popular].map((title) => ({ title })),
-        ];
-        // What atlas knows about the whole pool, and which of it the library has already worn out — two
-        // requests between them, against nine hundred candidates.
-        const [labels, near] = await Promise.all([
-          here
-            ? labelsFor(
-                here,
-                pool.map((c) => ({ type: c.title.type, id: c.title.id })),
-              )
-            : Promise.resolve(new Map<string, Labels>()),
-          here ? neighbourhood(here, wornSeeds) : Promise.resolve({ seeds: 0, hits: new Map() }),
-        ]);
-        const described = pool.map((c) => {
-          const key = titleKey(c.title);
-          return {
-            ...c,
-            labels: labels.get(key),
-            // Against at least three seeds however few answered: atlas can leave a library with one answering
-            // seed, and dividing by that one would call every neighbour of a single film wholly redundant.
-            redundancy: (near.hits.get(key) ?? 0) / Math.max(near.seeds, 3),
-          };
-        });
-        const named = await nameCandidates(described, labelProfile);
-        // Only titles we actually know something about. atlas hands over hundreds named by id alone, and an
-        // unjudged title cannot be matched against this library's taste or dropped for missing it — so it
-        // competes on attention and freshness only, and wins slides against titles that were judged. Since the
-        // ones asked of TMDB are the best of the pool to begin with, dropping the rest costs nothing. The guard
-        // is for the day TMDB can't be reached at all: better an unjudged billboard than an empty one.
-        const judged = named.filter((c) => c.title.genreIds?.length);
-        const pickable = judged.length >= 20 ? judged : named;
-        // Never a title this library already holds: the billboard is for what hasn't been found yet. On Movies and
-        // Series, only that type: the pool always carries TMDB's series trending and arrivals of both types.
-        const picked = pickBillboard(pickable, {
-          taste,
-          keep: (t) =>
-            featuredShown(t) && !seeds.owned.has(titleKey(t)) && (!type || t.type === type),
-        });
-        if (run === billboardRun && (picked.length || !featured.length)) {
-          const lead = featured[0];
-          featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
-          if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
-        }
-      })
-      .catch(() => undefined);
-  }
-
   /**
    * `picked`, with the title the billboard already shows kept in front, whether or not this pick chose it: a
    * rebuild — or this visit's pick replacing the last one's — must not swap the picture out from under someone
@@ -902,63 +690,6 @@
   function keepLead(picked: Title[], lead: Title | undefined): Title[] {
     if (!lead || !picked.length) return picked;
     return [lead, ...picked.filter((t) => titleKey(t) !== titleKey(lead))];
-  }
-
-  /**
-   * Ask TMDB about the candidates that arrived knowing nothing about themselves.
-   *
-   * atlas names a title by id, name and year and nothing else, so everything from a "new on <service>" catalog
-   * reached the picker with no genres to match a taste against, no rating and no popularity — which left the
-   * billboard deciding on "what is new on your services" alone, and this library's own leanings unable to touch
-   * it. The strongest few by their place in those lists are named properly first. Bounded, and `tmdbFetch`
-   * caches, so a hundred arrivals don't become a hundred requests.
-   */
-  async function nameCandidates(
-    pool: Candidate[],
-    profile: LabelProfile,
-    most = 60,
-  ): Promise<Candidate[]> {
-    const key = tmdbKey;
-    // By what a title is worth AND how much it looks like this library, not by which list it arrived in. Nine
-    // candidates in ten reach here knowing only their own id, and only the named ones can be judged — so
-    // whatever this cut lets through is what taste will get to choose between, and a cut made on attention
-    // alone hands the billboard to whatever is loudest before taste is ever consulted. atlas's labels cost two
-    // requests for the whole pool where naming it costs nine hundred, so they are what ranks the queue.
-    const busiest = pool.reduce((most_, { title }) => Math.max(most_, title.popularity ?? 0), 0);
-    const now = new Date();
-    const unnamed = pool.filter((c) => !c.title.genreIds);
-    // Where a fit stands among the rest of this pool, not the fit itself. Read raw it is skewed hard low: the
-    // library's labels are concentrated, so most of a trending pool shares none of them and scores near zero,
-    // while a title atlas has never indexed takes the neutral half — which handed nearly every hydration slot
-    // to the titles nothing was known about. As a standing, a half is the middle of this pool, which is exactly
-    // what an unknown deserves.
-    const fits = unnamed.flatMap((c) =>
-      c.labels ? [{ key: titleKey(c.title), fit: labelFit(c.labels, profile) }] : [],
-    );
-    fits.sort((a, b) => a.fit - b.fit);
-    const standing = new Map(
-      fits.map((entry, at) => [entry.key, fits.length > 1 ? at / (fits.length - 1) : 0.5]),
-    );
-    const promise = (c: Candidate) =>
-      worth(c, now, busiest) * (standing.get(titleKey(c.title)) ?? 0.5);
-    const bare = [...unnamed].sort((a, b) => promise(b) - promise(a)).slice(0, most);
-    if (!key || bare.length === 0) return pool;
-    const queue = [...bare];
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local lookup accumulator; publish the completed pool after all workers finish.
-    const found = new Map<string, Title>();
-    const lookup = async () => {
-      for (let next = queue.shift(); next; next = queue.shift()) {
-        const title = await fetchTitle({ type: next.title.type, id: next.title.id }, key).catch(
-          () => null,
-        );
-        if (title) found.set(titleKey(title), title);
-      }
-    };
-    await Promise.all(Array.from({ length: LOOKUPS }, lookup));
-    return pool.map((c) => {
-      const better = found.get(titleKey(c.title));
-      return better ? { ...c, title: { ...c.title, ...better } } : c;
-    });
   }
 
   function caption(entry: ContinueEntry): string | undefined {

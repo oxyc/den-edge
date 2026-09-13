@@ -4,7 +4,6 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
-import type { MediaType, Title } from './library';
 import { within, type Routes } from './routes';
 
 export interface Addon {
@@ -77,131 +76,6 @@ const DEN_ADDONS = [
 export function denAddonOf(url: string, routes: Routes): { label: string; role: string } | null {
   const install = url.endsWith(MANIFEST) ? url.slice(0, -MANIFEST.length) : url;
   return DEN_ADDONS.find((addon) => within(install, routes[addon.name]) !== null) ?? null;
-}
-
-/** The titles in one of atlas's catalogs, by TMDB id — the rest (backdrop, plot, genres) comes from TMDB. */
-function catalogTitles(body: unknown, type: MediaType): Title[] {
-  const metas = (body as { metas?: unknown } | null)?.metas;
-  if (!Array.isArray(metas)) return [];
-  return (metas as Record<string, unknown>[]).flatMap((meta) => {
-    const year = Number.parseInt(String(meta.releaseInfo ?? ''), 10);
-    if (typeof meta.moviedb_id !== 'number' || typeof meta.name !== 'string') return [];
-    return [
-      {
-        type,
-        id: meta.moviedb_id,
-        title: meta.name,
-        year: Number.isFinite(year) ? year : undefined,
-        // JustWatch names both ids, so a poster from here needs no TMDB lookup for scout.
-        imdbId:
-          typeof meta.imdb_id === 'string' && /^tt\d+$/.test(meta.imdb_id)
-            ? meta.imdb_id
-            : undefined,
-      },
-    ];
-  });
-}
-
-/**
- * atlas's "Trending Everywhere" (`jw-trending`) — the catalog the TV's Movies and Series billboards lead with.
- * Both types, interleaved so neither buries the other. Empty when atlas is out of reach, which leaves the caller
- * to fall back rather than showing nothing.
- */
-export async function trendingEverywhere(
-  base: string,
-  fetchImpl: typeof fetch = fetch,
-  only?: MediaType,
-): Promise<Title[]> {
-  const load = async (type: 'movie' | 'series'): Promise<Title[]> => {
-    if (only && only !== (type === 'series' ? 'tv' : 'movie')) return [];
-    try {
-      const res = await fetchImpl(`${base}/catalog/${type}/jw-trending.json`);
-      return res.ok ? catalogTitles(await res.json(), type === 'series' ? 'tv' : 'movie') : [];
-    } catch {
-      return [];
-    }
-  };
-  const [movies, series] = await Promise.all([load('movie'), load('series')]);
-  return Array.from({ length: Math.max(movies.length, series.length) }, (_, i) => [
-    movies[i],
-    series[i],
-  ])
-    .flat()
-    .filter((title): title is Title => title !== undefined);
-}
-
-/** One of atlas's catalogs, as its manifest lists them. */
-interface CatalogEntry {
-  type: string;
-  id: string;
-  denProviderId?: number;
-  denProviderIds?: number[];
-}
-
-/**
- * The catalogs of newly-added titles worth asking for.
- *
- * An install's own manifest already lists only the services that install was configured with — this household's
- * atlas offers Netflix, Disney+ and Apple TV+ where the bare addon offers fourteen — so with no picks to go on,
- * every "new on" catalog it advertises is one of theirs, and the install's own region answers for the country.
- * Picks, when the TV has synced some, narrow it further and name the country outright, since the same provider
- * in two countries is two different catalogs.
- */
-function arrivalCatalogs(
-  manifest: unknown,
-  picks: { id: number; country: string }[],
-): { path: string; type: MediaType }[] {
-  const catalogs = (manifest as { catalogs?: unknown } | null)?.catalogs;
-  if (!Array.isArray(catalogs)) return [];
-  const wanted: { path: string; type: MediaType }[] = [];
-  for (const raw of catalogs as CatalogEntry[]) {
-    // "New on <service>", not "Popular on <service>": what changed is the point, not what is always there.
-    if (typeof raw?.id !== 'string' || !raw.id.endsWith('-new')) continue;
-    const type: MediaType = raw.type === 'series' ? 'tv' : 'movie';
-    if (picks.length === 0) {
-      wanted.push({ path: `/catalog/${raw.type}/${raw.id}.json`, type });
-      continue;
-    }
-    const providers =
-      raw.denProviderIds ?? (raw.denProviderId === undefined ? [] : [raw.denProviderId]);
-    for (const pick of picks.filter((p) => providers.includes(p.id))) {
-      wanted.push({
-        path: `/catalog/${raw.type}/${raw.id}/country=${encodeURIComponent(pick.country)}.json`,
-        type,
-      });
-    }
-  }
-  return wanted;
-}
-
-/**
- * What has newly arrived on the services this library has, from atlas's JustWatch catalogs — a 1997 film that
- * landed on Netflix yesterday is new to watch however old it is, which is a different thing from a new release
- * and the one a billboard most wants to say. Empty when no service is picked, or atlas can't be reached.
- */
-export async function arrivals(
-  base: string,
-  picks: { id: number; country: string }[] = [],
-  fetchImpl: typeof fetch = fetch,
-  most = 8,
-): Promise<Title[][]> {
-  try {
-    const res = await fetchImpl(`${base}${MANIFEST}`);
-    if (!res.ok) return [];
-    const lists = arrivalCatalogs(await res.json(), picks).slice(0, most);
-    return await Promise.all(
-      lists.map(async ({ path, type }) => {
-        try {
-          const answer = await fetchImpl(`${base}${path}`);
-          return answer.ok ? catalogTitles(await answer.json(), type) : [];
-        } catch {
-          return [];
-        }
-      }),
-    );
-  } catch {
-    return [];
-  }
 }
 
 /** The library's installs of the service `name` (den-subtitles, for den-remux), without their manifest file. */

@@ -1,14 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import {
-  arrivals,
-  denAddonOf,
-  findAddon,
-  findAtlas,
-  installsOf,
-  SCOUT,
-  trendingEverywhere,
-} from './scout';
+import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT } from './scout';
 
 const ROUTES: Routes = {
   scout: [
@@ -61,91 +53,6 @@ describe('findAddon', () => {
   it('is null when no plugin is scout, or the table has none', async () => {
     expect(await findAddon([THEIRS], ROUTES, SCOUT, addons({}).fetchImpl)).toBeNull();
     expect(await findAddon([SCOUT_LAN], {}, SCOUT, addons({}).fetchImpl)).toBeNull();
-  });
-});
-
-describe('arrivals', () => {
-  const meta = (id: number, name: string) => ({ moviedb_id: id, name, releaseInfo: '2026' });
-  const manifest = {
-    catalogs: [
-      { type: 'movie', id: 'jw-trending' },
-      { type: 'movie', id: 'jw-nfx', denProviderId: 8, denProviderIds: [8] },
-      { type: 'movie', id: 'jw-nfx-new', denProviderId: 8, denProviderIds: [8] },
-      { type: 'series', id: 'jw-nfx-new', denProviderId: 8, denProviderIds: [8] },
-      { type: 'movie', id: 'jw-mxx-new', denProviderId: 1899, denProviderIds: [1899] },
-    ],
-  };
-  const atlas: typeof fetch = async (input) => {
-    const url = String(input);
-    if (url === '/atlas/manifest.json') return new Response(JSON.stringify(manifest));
-    if (url === '/atlas/catalog/movie/jw-nfx-new/country=FI.json') {
-      return new Response(JSON.stringify({ metas: [meta(1, 'New film on Netflix FI')] }));
-    }
-    if (url === '/atlas/catalog/series/jw-nfx-new/country=FI.json') {
-      return new Response(JSON.stringify({ metas: [meta(2, 'New series on Netflix FI')] }));
-    }
-    return new Response('{}', { status: 404 });
-  };
-
-  it('asks only the "new on" catalogs of the services picked, in the countries picked', async () => {
-    const lists = await arrivals('/atlas', [{ id: 8, country: 'FI' }], atlas);
-    expect(lists.map((l) => l.map((t) => t.id))).toEqual([[1], [2]]);
-    expect(lists.flat().map((t) => t.type)).toEqual(['movie', 'tv']);
-  });
-
-  it('falls back to every catalog the install advertises, which is already only its own services', async () => {
-    // No picks synced: an install's manifest lists the services it was configured with, so all of them count.
-    const asked: string[] = [];
-    const watching: typeof fetch = async (input) => {
-      asked.push(String(input));
-      return atlas(input);
-    };
-    await arrivals('/atlas', [], watching);
-    expect(asked).toEqual([
-      '/atlas/manifest.json',
-      '/atlas/catalog/movie/jw-nfx-new.json',
-      '/atlas/catalog/series/jw-nfx-new.json',
-      '/atlas/catalog/movie/jw-mxx-new.json',
-    ]);
-  });
-
-  it('survives a service whose catalog is missing', async () => {
-    const mixed = await arrivals('/atlas', [{ id: 1899, country: 'FI' }], atlas);
-    expect(mixed.flat()).toEqual([]);
-  });
-});
-
-describe('trendingEverywhere', () => {
-  const meta = (id: number, name: string) => ({ moviedb_id: id, name, releaseInfo: '2026' });
-  const catalogs: typeof fetch = async (input) => {
-    const url = String(input);
-    if (url === '/atlas/catalog/movie/jw-trending.json') {
-      return new Response(
-        JSON.stringify({
-          metas: [meta(1, 'A movie'), meta(2, 'Another movie'), { name: 'No id' }],
-        }),
-      );
-    }
-    if (url === '/atlas/catalog/series/jw-trending.json') {
-      return new Response(JSON.stringify({ metas: [meta(3, 'A series')] }));
-    }
-    return new Response('{}', { status: 404 });
-  };
-
-  it('reads both types by TMDB id and interleaves them', async () => {
-    expect(await trendingEverywhere('/atlas', catalogs)).toEqual([
-      { type: 'movie', id: 1, title: 'A movie', year: 2026 },
-      { type: 'tv', id: 3, title: 'A series', year: 2026 },
-      { type: 'movie', id: 2, title: 'Another movie', year: 2026 },
-    ]);
-  });
-
-  it('is empty when atlas is out of reach, so the caller can fall back', async () => {
-    const dead: typeof fetch = async () => {
-      throw new Error('offline');
-    };
-    expect(await trendingEverywhere('/atlas', dead)).toEqual([]);
-    expect(await trendingEverywhere('/nope', catalogs)).toEqual([]);
   });
 });
 
