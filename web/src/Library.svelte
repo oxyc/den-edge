@@ -65,6 +65,7 @@
   import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody } from './lib/recommend';
+  import { plotRows } from './lib/plotRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
   let {
@@ -651,12 +652,16 @@
     if (!pages) return [];
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
-      return browseRows(route.page === 'movies' ? 'movie' : 'tv', pages, {
-        minYear,
-        hiddenGenres: prefs.excludedGenres,
-      });
+      const type = route.page === 'movies' ? 'movie' : 'tv';
+      const browse = browseRows(type, pages, { minYear, hiddenGenres: prefs.excludedGenres });
+      // After Popular and the three genre rows: the plot rows cut across genre, so they read as the next step.
+      const plot = atlas ? plotRows(atlas, type) : [];
+      return [...browse.slice(0, 4), ...plot, ...browse.slice(4)];
     }
-    return [...personalRows(pages, seeds), ...homeRows(pages, { minYear })];
+    // Home's spine and recipe rows (seven), then the three strongest plot rows before the categories.
+    const home = homeRows(pages, { minYear });
+    const plot = atlas ? plotRows(atlas, 'movie').slice(0, 3) : [];
+    return [...personalRows(pages, seeds), ...home.slice(0, 7), ...plot, ...home.slice(7)];
   });
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
