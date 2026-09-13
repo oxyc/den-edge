@@ -101,10 +101,15 @@ describe('the title index', () => {
 });
 
 describe('searchStream over atlas’s /index/query', () => {
+  const found = (title: Title, titleMatch = true) => ({ title, titleMatch });
+
   it('draws atlas’s ranking as it is, naming from TMDB only what has no poster', async () => {
     const named: string[] = [];
     const s = sources({
-      query: async () => [{ ...matrix, posterPath: '/m.jpg' }, movie(157336, 'Interstellar')],
+      query: async () => [
+        found({ ...matrix, posterPath: '/m.jpg' }),
+        found(movie(157336, 'Interstellar'), false),
+      ],
       multi: async () => [matrix].map((title) => ({ kind: 'title' as const, title })),
       title: async (ref) => {
         named.push(`${ref.type}-${ref.id}`);
@@ -115,8 +120,13 @@ describe('searchStream over atlas’s /index/query', () => {
     expect(named).toEqual(['movie-157336']);
   });
 
-  it('leads with a person TMDB names, then atlas’s titles', async () => {
-    const s = sources({ query: async () => [{ ...matrix, posterPath: '/m.jpg' }] });
+  it('leads with a person TMDB names, then only the titles atlas matched by name', async () => {
+    const s = sources({
+      query: async () => [
+        found({ ...matrix, posterPath: '/m.jpg' }),
+        found({ ...movie(157336, 'Interstellar'), posterPath: '/i.jpg' }, false),
+      ],
+    });
     expect(await final('brad pitt', s)).toEqual([
       'person-287',
       'movie-550',
@@ -127,7 +137,7 @@ describe('searchStream over atlas’s /index/query', () => {
 
   it('answers without TMDB at all', async () => {
     const s = sources({
-      query: async () => [{ ...matrix, posterPath: '/m.jpg' }],
+      query: async () => [found({ ...matrix, posterPath: '/m.jpg' })],
       multi: () => Promise.reject(new Error('TMDB down')),
     });
     expect(await final('the matrix', s)).toEqual(['movie-603']);
@@ -307,21 +317,27 @@ describe('searchSources', () => {
             year: 2017,
             genreIds: [80],
             originalLanguage: 'es',
+            f: { t: 0.8, sem: 0 },
           },
+          { type: 'movie', id: 2, title: 'Money Heist', f: { t: 0, sem: 0.4 } },
           { type: 'person', id: 9, title: 'Nobody' },
         ],
       }),
     );
     expect(await s.query('casa de papel')).toEqual([
       {
-        type: 'tv',
-        id: 1,
-        title: 'La casa de papel',
-        posterPath: '/p.jpg',
-        year: 2017,
-        genreIds: [80],
-        originalLanguage: 'es',
+        title: {
+          type: 'tv',
+          id: 1,
+          title: 'La casa de papel',
+          posterPath: '/p.jpg',
+          year: 2017,
+          genreIds: [80],
+          originalLanguage: 'es',
+        },
+        titleMatch: true,
       },
+      { title: { type: 'movie', id: 2, title: 'Money Heist' }, titleMatch: false },
     ]);
     await expect(searchSources('k', answer({ error: 'not_found' })).query('x')).rejects.toThrow();
   });

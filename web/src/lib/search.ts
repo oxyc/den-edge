@@ -34,12 +34,18 @@ export interface FacetAnswer {
   titles: Ref[];
 }
 
+export interface QueryHit {
+  title: Title;
+  /** Its name matched the query, not just its themes or facets. */
+  titleMatch: boolean;
+}
+
 export interface SearchSources {
   /**
    * atlas's search in one request (`/index/query`): titles, facets, labels, plot facets and its plot vectors ranked
    * together, best first, drawn from what atlas holds. Rejects when this atlas can't answer it.
    */
-  query(query: string): Promise<Title[]>;
+  query(query: string): Promise<QueryHit[]>;
   /** atlas's fuzzy title index — the TV's on-device one: typo-tolerant, popularity-ranked, movies and series. */
   titles(query: string): Promise<Ref[]>;
   /** TMDB /search/multi in TMDB's order; rejects when TMDB can't answer. */
@@ -222,8 +228,9 @@ async function drawable(titles: Title[], sources: SearchSources): Promise<Hit[]>
 
 /**
  * Results as they improve. atlas ranks the query in one request; TMDB is asked only whether the query names a person,
- * whose films then lead — atlas holds no people yet. An atlas without `/index/query` leaves search to the lanes it
- * replaced (`lanesStream`). Rejects only when nothing answered.
+ * whose films then lead — atlas holds no people yet, so for a name its themes could only add what sounds alike, and
+ * only its title matches follow. An atlas without `/index/query` leaves search to the lanes it replaced
+ * (`lanesStream`). Rejects only when nothing answered.
  */
 export async function* searchStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
   const { text } = normalizeQuery(query);
@@ -237,7 +244,12 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
     yield* lanesStream(query, sources);
     return;
   }
-  const [titles, people] = await Promise.all([drawable(found, sources), person]);
+  const people = await person;
+  const kept = people.length ? found.filter((hit) => hit.titleMatch) : found;
+  const titles = await drawable(
+    kept.map((hit) => hit.title),
+    sources,
+  );
   yield dedupe([...people, ...titles]);
 }
 
