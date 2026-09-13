@@ -64,6 +64,7 @@
   import { labelsFor, neighbourhood, type Labels } from './lib/atlasIndex';
   import { arrivals, installsOf, trendingEverywhere, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
+  import { nameSlides, recommend, recommendBody } from './lib/recommend';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
   let {
@@ -82,6 +83,11 @@
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
+  /**
+   * `?billboard=device` ranks the billboard in this page even where atlas can, so the two can be compared on the same
+   * library.
+   */
+  const RANK_ON_DEVICE = new URLSearchParams(location.search).get('billboard') === 'device';
   /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
   const SERVICES = 'services.v1';
   type Services = {
@@ -111,6 +117,8 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
+  /** Whether atlas ranks the billboard (`POST /recommend`); false once it has answered that it can't. */
+  let atlasRanks = $state(!RANK_ON_DEVICE);
   /** Where this page reaches reel, the billboard's trailers; null where it can't. */
   let reel = $state<string | null>(null);
   /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
@@ -554,7 +562,8 @@
     const here = atlas;
     void heldKey;
     const want = untrack(() => weighted.map(({ ref }) => ref));
-    if (!here || want.length === 0) return;
+    // Only this page's own ranking reads them: where atlas ranks, the labels file is never fetched.
+    if (!here || want.length === 0 || atlasRanks) return;
     let dropped = false;
     // By id, as soon as the log is open: labels need no names, so this doesn't wait for TMDB to name the library.
     void labelsFor(here, want).then((found) => {
@@ -682,9 +691,76 @@
     // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
     if (route.page === 'title' || route.page === 'person' || route.page === 'search') return;
     const here = atlas;
-    if (!tmdbKey || !profileReady) return;
+    if (!tmdbKey) return;
+    // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
+    // is open.
+    if (here && atlasRanks) {
+      if (libraryOpen) untrack(() => buildRecommended(here));
+      return;
+    }
+    if (!profileReady) return;
     untrack(() => buildBillboard(here));
   });
+
+  /** Whether the log's rows have been read: once, rather than every time they change. */
+  const libraryOpen = $derived(applied !== null);
+
+  /**
+   * The billboard as atlas ranks it (`lib/recommend.ts`). The TMDB lists go along as candidates — the rows below
+   * fetch them anyway — in the order `buildBillboard` pools them, and what atlas answers with is drawn: named from
+   * those lists where they hold it, and from TMDB where only atlas's own lists did. An atlas that can't rank turns this
+   * page's own ranking back on.
+   */
+  function buildRecommended(here: string) {
+    const table = rows;
+    const type = facet;
+    const key = tmdbKey;
+    const run = ++billboardRun;
+    const kept = keptBillboard(type);
+    if (!table.length) return;
+    const row = (id: string) =>
+      table
+        .find((r) => r.id === id)
+        ?.load(1)
+        .catch(() => []) ?? Promise.resolve([]);
+    const feed = pages;
+    const trendingTv = feed
+      ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => [])
+      : Promise.resolve([]);
+    void Promise.all([
+      row('trending'),
+      trendingTv,
+      row('new-releases'),
+      row('upcoming'),
+      row('popular'),
+    ])
+      .then(async ([hotMovies, hotSeries, fresh, soon, popular]) => {
+        const lists = [
+          { titles: hotMovies, ranked: true },
+          { titles: hotSeries, ranked: true },
+          { titles: [...fresh, ...soon, ...popular], ranked: false },
+        ];
+        const slides = await recommend(
+          here,
+          recommendBody({ facet: type, prefs, library: weighted, owned: seeds.owned, lists }),
+        );
+        if (run !== billboardRun) return;
+        if (!slides) {
+          atlasRanks = false;
+          return;
+        }
+        const known = new Map(
+          lists.flatMap(({ titles }) => titles.map((t) => [titleKey(t), t] as const)),
+        );
+        const picked = await nameSlides(slides, known, (ref) => fetchTitle(ref, key), LOOKUPS);
+        if (run === billboardRun && (picked.length || !featured.length)) {
+          const lead = featured[0];
+          featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
+          if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
+        }
+      })
+      .catch(() => undefined);
+  }
 
   function buildBillboard(here: string | null) {
     const table = rows;
