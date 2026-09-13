@@ -69,6 +69,111 @@ export async function trailerURLs(
   }
 }
 
+/** What `/direct` answers with: YouTube's own URLs, so a trailer plays without reel fetching it first. */
+export type DirectTrailer = {
+  /** Video-only whenever YouTube answers adaptively, which is now always. Silent on its own. */
+  video: string;
+  /** The separate audio track. A `<video>` element cannot combine it with the stream above. */
+  audio: string | null;
+  /** The HLS master: video, audio and subtitles in one URL, and the only one that carries sound. */
+  hls: string | null;
+  width: number | null;
+  height: number | null;
+};
+
+/**
+ * The `/direct/<id>.json` sibling of a `/play/<id>.mp4` URL, query and all.
+ *
+ * Derived from the play URL rather than asked for separately, because the signature reel demands is
+ * over the video and the install — not the path — so the tag `/meta` already handed us is the tag
+ * `/direct` wants. That also keeps the whole thing to one `/meta` round-trip.
+ */
+export function directURL(playURL: string): string | null {
+  try {
+    const url = new URL(playURL);
+    const id = url.pathname.match(/\/play\/([A-Za-z0-9_-]{11})\.mp4$/)?.[1];
+    if (!id) return null;
+    url.pathname = url.pathname.replace(/\/play\/[^/]+$/, `/direct/${id}.json`);
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does this browser play HLS from a bare `<video>`? WebKit does, which is every browser on iOS.
+ *
+ * Everywhere else it would take hls.js, and that cannot work here however willing it is: googlevideo
+ * answers with no `Access-Control-Allow-Origin`, so MSE — which fetches its segments through XHR —
+ * is refused. A plain media load is not subject to that, which is the whole reason this split exists.
+ */
+export function nativeHls(
+  probe = () => document.createElement('video').canPlayType('application/vnd.apple.mpegurl'),
+): boolean {
+  try {
+    return probe() !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fastest source this browser can play, or null to stay on reel's own `/play`.
+ *
+ * `wantsSound` is what decides the silent stream's fate. Behind a billboard, where the video is muted
+ * and unpressable, video-only is exactly right and costs reel nothing. Anywhere a viewer can turn the
+ * sound up it would be a trap — it plays perfectly and is simply silent, with nothing to say so.
+ */
+export function directSource(
+  direct: DirectTrailer | null,
+  wantsSound: boolean,
+  hlsOk = nativeHls(),
+): string | null {
+  if (!direct) return null;
+  if (direct.hls && hlsOk) return direct.hls;
+  return wantsSound ? null : direct.video;
+}
+
+/**
+ * Ask reel for the trailer's own URLs.
+ *
+ * Null on anything unexpected — an older reel with no such route, a refusal, a malformed answer —
+ * and every caller still holds the `/play` URL it was going to use.
+ */
+export async function directTrailer(
+  playURL: string,
+  { fetchImpl = fetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<DirectTrailer | null> {
+  const ask = directURL(playURL);
+  if (!ask) return null;
+  try {
+    const res = await fetchImpl(ask, { signal });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (typeof body?.video !== 'string') return null;
+    // https only: the page is served over it, so anything else is blocked as mixed content anyway.
+    const https = (v: unknown) => {
+      if (typeof v !== 'string') return null;
+      try {
+        return new URL(v).protocol === 'https:' ? v : null;
+      } catch {
+        return null;
+      }
+    };
+    if (!https(body.video)) return null;
+    const size = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return {
+      video: body.video,
+      audio: https(body.audio),
+      hls: https(body.hls),
+      width: size(body.width),
+      height: size(body.height),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Browse billboards use the first candidate; detail playback can advance through the full list. */
 export async function trailerURL(
   base: string,

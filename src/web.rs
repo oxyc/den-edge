@@ -13,9 +13,10 @@ use std::path::{Component, Path, PathBuf};
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
 /// `tailscale serve` on the tailnet) — TMDB's images and API, OMDb's ratings (both BYOK, straight from the
-/// browser), YouTube's embed for trailers, and den-remux's video: `blob:` for hls.js, which hands the video
-/// element a MediaSource, and `remux`, den-remux's https origins from the routes table (already checked to be
-/// bare origins).
+/// browser), YouTube's embed for trailers, YouTube's own media hosts — den-reel's `/direct` hands the page a
+/// googlevideo URL so the trailer streams from there instead of crossing the homelab twice — and den-remux's
+/// video: `blob:` for hls.js, which hands the video element a MediaSource, and `remux`, den-remux's https
+/// origins from the routes table (already checked to be bare origins).
 ///
 /// OMDb is what the IMDb, Rotten Tomatoes and Metacritic figures on a title come from. It was missing here, so
 /// the browser refused the call before it was made and the detail page quietly showed TMDB's rating alone —
@@ -24,7 +25,8 @@ fn csp(remux: &[String]) -> String {
     let remux: String = remux.iter().map(|o| format!(" {o}")).collect();
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: https://image.tmdb.org; media-src 'self' blob:{remux}; \
+         img-src 'self' data: https://image.tmdb.org; \
+         media-src 'self' blob: https://*.googlevideo.com{remux}; \
          connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{remux}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"

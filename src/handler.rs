@@ -523,7 +523,12 @@ pub mod tests {
         // The player may reach den-remux there, and a trailer plays in YouTube's embed.
         let page = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
         let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
-        assert!(csp.contains("media-src 'self' blob: https://pve.example:8443;"), "{csp}");
+        // And YouTube's own media hosts, which a trailer resolved through den-reel's /direct streams
+        // from — without them the browser refuses the video and the page silently falls back to /play.
+        assert!(
+            csp.contains("media-src 'self' blob: https://*.googlevideo.com https://pve.example:8443;"),
+            "{csp}"
+        );
         // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows.
         assert!(
             csp.contains("connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com"),

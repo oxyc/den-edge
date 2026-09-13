@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { trailerURLs } from '../lib/reel';
+  import { directSource, directTrailer, trailerURLs } from '../lib/reel';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
   let {
@@ -27,6 +27,9 @@
   let candidates = $state<string[]>([]);
   let candidate = $state(0);
   const url = $derived(candidates[candidate] ?? null);
+  /** YouTube's own URL for this candidate, when one exists that this browser can play. */
+  let upgraded = $state<string | null>(null);
+  const source = $derived(upgraded ?? url);
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -79,6 +82,25 @@
     return () => controller.abort();
   });
 
+  // Straight from YouTube where that is possible, which skips the download, the re-mux and the bytes
+  // back out through the house — the whole of the wait before a cold trailer shows anything.
+  //
+  // This hero carries controls on mobile, so a viewer can turn the sound up: only a source that has
+  // sound will do. That is the HLS master where the browser plays it natively, and reel's own MP4
+  // everywhere else — never the silent video-only stream, which would play perfectly and say nothing.
+  $effect(() => {
+    const play = url;
+    upgraded = null;
+    if (!play) return;
+    let live = true;
+    void directTrailer(play).then((direct) => {
+      if (live) upgraded = directSource(direct, true);
+    });
+    return () => {
+      live = false;
+    };
+  });
+
   $effect(() => {
     const player = video;
     const canPlay = allowed && !!url;
@@ -113,6 +135,12 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
+    // A direct stream that expired or was withdrawn says nothing about the trailer: reel still holds
+    // this one. Drop back to its copy before writing the candidate off and moving to the next.
+    if (upgraded) {
+      upgraded = null;
+      return;
+    }
     if (candidate + 1 < candidates.length) candidate += 1;
     else failed = true;
   }
@@ -139,7 +167,7 @@
   <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout. -->
   <video
     bind:this={video}
-    src={url ?? undefined}
+    src={source ?? undefined}
     class:playing
     class:present={!!url && !failed && !ended}
     poster={backdrop ?? poster}
