@@ -78,6 +78,29 @@ export function searchSources(
   }
 
   return {
+    async query(query) {
+      const body = await fromAtlas(`/index/query.json?q=${encodeURIComponent(query)}&limit=40`);
+      if (!Array.isArray(body.hits)) throw new Error('atlas answered no hits');
+      return records(body.hits).flatMap((h): Title[] => {
+        const type = h.type === 'series' ? 'tv' : h.type === 'movie' ? 'movie' : undefined;
+        if (!type || typeof h.id !== 'number' || typeof h.title !== 'string') return [];
+        return [
+          {
+            type,
+            id: h.id,
+            title: h.title,
+            posterPath: typeof h.posterPath === 'string' ? h.posterPath : undefined,
+            year: typeof h.year === 'number' ? h.year : undefined,
+            genreIds: Array.isArray(h.genreIds)
+              ? h.genreIds.filter((g): g is number => typeof g === 'number')
+              : undefined,
+            originalLanguage:
+              typeof h.originalLanguage === 'string' ? h.originalLanguage : undefined,
+          },
+        ];
+      });
+    },
+
     // One catalog per type, each ranked; interleaved, so neither type buries the other. The exact title still
     // leads later (`promoteExact`).
     async titles(query) {

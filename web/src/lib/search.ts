@@ -1,5 +1,6 @@
-// Den's text search, ported from the TV's TMDBDiscovery.searchStream so the web answers a query the way the TV
-// does. A strong facet ("spanish series", "80s korean horror") browses the facet lane. Otherwise the first paint is
+// Den's text search. atlas ranks a query in one request (`/index/query`), and TMDB only names a person at the top.
+// An atlas without that route leaves search to the lanes below, ported from the TV's TMDBDiscovery.searchStream so
+// the web answers a query the way the TV does. A strong facet ("spanish series", "80s korean horror") browses the facet lane. Otherwise the first paint is
 // TMDB — a trailing "(1999)" routed to a year-scoped search, the singular/plural variant appended, a top person hit
 // expanded into their films — with the exact title promoted; then semantic hits fold in, and the exact title leads
 // the titles similar to it. The TV's on-device indexes are atlas here: its fuzzy title index leads the first paint,
@@ -34,6 +35,11 @@ export interface FacetAnswer {
 }
 
 export interface SearchSources {
+  /**
+   * atlas's search in one request (`/index/query`): titles, facets, labels, plot facets and its plot vectors ranked
+   * together, best first, drawn from what atlas holds. Rejects when this atlas can't answer it.
+   */
+  query(query: string): Promise<Title[]>;
   /** atlas's fuzzy title index — the TV's on-device one: typo-tolerant, popularity-ranked, movies and series. */
   titles(query: string): Promise<Ref[]>;
   /** TMDB /search/multi in TMDB's order; rejects when TMDB can't answer. */
@@ -199,10 +205,45 @@ async function facetLane(answer: FacetAnswer, sources: SearchSources): Promise<H
   return dedupe((await person) ?? matches);
 }
 
-/** Results as they improve: a first paint, then the fused final list. Rejects only when nothing answered. */
+/** Titles atlas found, those it has no poster for named from TMDB, so a card isn't drawn blank. */
+async function drawable(titles: Title[], sources: SearchSources): Promise<Hit[]> {
+  const named = await Promise.all(
+    titles.map((title, at) =>
+      title.posterPath || at >= TITLE_LIMIT
+        ? title
+        : sources
+            .title(title)
+            .then((full) => full ?? title)
+            .catch(() => title),
+    ),
+  );
+  return named.map(titleHit);
+}
+
+/**
+ * Results as they improve. atlas ranks the query in one request; TMDB is asked only whether the query names a person,
+ * whose films then lead — atlas holds no people yet. An atlas without `/index/query` leaves search to the lanes it
+ * replaced (`lanesStream`). Rejects only when nothing answered.
+ */
 export async function* searchStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
-  const { text, year } = normalizeQuery(query);
+  const { text } = normalizeQuery(query);
   if (text.length < 2) return;
+  const person = sources
+    .multi(text)
+    .then((hits) => (hits[0]?.kind === 'person' ? expandTopPerson([hits[0]], sources) : []))
+    .catch((): Hit[] => []);
+  const found = await sources.query(text).catch(() => null);
+  if (found === null) {
+    yield* lanesStream(query, sources);
+    return;
+  }
+  const [titles, people] = await Promise.all([drawable(found, sources), person]);
+  yield dedupe([...people, ...titles]);
+}
+
+/** The lanes `/index/query` replaced, fused as the TV fuses them: a first paint, then the final list. */
+async function* lanesStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
+  const { text, year } = normalizeQuery(query);
   // Every source starts at once; the slow ones only stop blocking the first paint.
   const facets = sources.facets(query).catch((): FacetAnswer => ({ facet: null, titles: [] }));
   const index = titleIndexHits(text, sources);

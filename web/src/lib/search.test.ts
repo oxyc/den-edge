@@ -39,6 +39,8 @@ function sources(overrides: Partial<SearchSources> = {}): SearchSources {
       if (query.toLowerCase().includes('pitt')) return [pitt];
       return [matrix, reloaded].map((title) => ({ kind: 'title' as const, title }));
     },
+    // An atlas without `/index/query`: the lanes answer, as before.
+    query: () => Promise.reject(new Error('no /index/query')),
     titles: async () => [],
     byYear: async () => [],
     notableFilms: async (id) => (id === 287 ? [catalog['movie-550']!, catalog['movie-807']!] : []),
@@ -95,6 +97,40 @@ describe('the title index', () => {
       { type: 'tv', id: 84553 },
       { type: 'movie', id: 335984 },
     ]);
+  });
+});
+
+describe('searchStream over atlas’s /index/query', () => {
+  it('draws atlas’s ranking as it is, naming from TMDB only what has no poster', async () => {
+    const named: string[] = [];
+    const s = sources({
+      query: async () => [{ ...matrix, posterPath: '/m.jpg' }, movie(157336, 'Interstellar')],
+      multi: async () => [matrix].map((title) => ({ kind: 'title' as const, title })),
+      title: async (ref) => {
+        named.push(`${ref.type}-${ref.id}`);
+        return { ...catalog[`${ref.type}-${ref.id}`]!, posterPath: '/i.jpg' };
+      },
+    });
+    expect(await final('the matrix', s)).toEqual(['movie-603', 'movie-157336']);
+    expect(named).toEqual(['movie-157336']);
+  });
+
+  it('leads with a person TMDB names, then atlas’s titles', async () => {
+    const s = sources({ query: async () => [{ ...matrix, posterPath: '/m.jpg' }] });
+    expect(await final('brad pitt', s)).toEqual([
+      'person-287',
+      'movie-550',
+      'movie-807',
+      'movie-603',
+    ]);
+  });
+
+  it('answers without TMDB at all', async () => {
+    const s = sources({
+      query: async () => [{ ...matrix, posterPath: '/m.jpg' }],
+      multi: () => Promise.reject(new Error('TMDB down')),
+    });
+    expect(await final('the matrix', s)).toEqual(['movie-603']);
   });
 });
 
@@ -256,6 +292,38 @@ describe('searchSources', () => {
     };
     const films = await searchSources('k', answer(credits)).notableFilms(287);
     expect(films.map((t) => t.id)).toEqual([550, 807]);
+  });
+
+  it('reads atlas’s query hits as titles, and rejects an answer that has none', async () => {
+    const s = searchSources(
+      'k',
+      answer({
+        hits: [
+          {
+            type: 'series',
+            id: 1,
+            title: 'La casa de papel',
+            posterPath: '/p.jpg',
+            year: 2017,
+            genreIds: [80],
+            originalLanguage: 'es',
+          },
+          { type: 'person', id: 9, title: 'Nobody' },
+        ],
+      }),
+    );
+    expect(await s.query('casa de papel')).toEqual([
+      {
+        type: 'tv',
+        id: 1,
+        title: 'La casa de papel',
+        posterPath: '/p.jpg',
+        year: 2017,
+        genreIds: [80],
+        originalLanguage: 'es',
+      },
+    ]);
+    await expect(searchSources('k', answer({ error: 'not_found' })).query('x')).rejects.toThrow();
   });
 
   it('reads atlas’s semantic and facet answers, series named the Den way', async () => {
