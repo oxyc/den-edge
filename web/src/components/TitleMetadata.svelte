@@ -18,6 +18,12 @@
   );
   const primary = $derived(imdb ?? tmdb);
   const votes = $derived(imdb !== undefined ? ratings?.votes : d.title.votes);
+  // Where a score can be read in full. Only these two can be pointed at: OMDb answers for Rotten Tomatoes and
+  // Metacritic with a number and nothing else — no id, no slug — and a guessed URL is worse than none.
+  // An IMDb score exists only because OMDb was asked for it by that id, so the link is there whenever it is.
+  const imdbHref = $derived(d.imdbId ? `https://www.imdb.com/title/${d.imdbId}/` : undefined);
+  const tmdbHref = $derived(`https://www.themoviedb.org/${d.title.type}/${d.title.id}`);
+  const primaryHref = $derived(imdb !== undefined ? imdbHref : tmdbHref);
   const compact = (n: number) =>
     new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 </script>
@@ -25,14 +31,23 @@
 {#if primary !== undefined || pending || (ratings && enabled.length)}
   <div class="ratings" class:expanded={pending} aria-label="Ratings">
     {#if primary !== undefined}
-      <span class="primary"
+      <a
+        class="primary"
+        href={primaryHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={`${imdb !== undefined ? 'IMDb' : 'TMDB'} rating ${primary.toFixed(1)}`}
         ><span class="star" aria-hidden="true">★</span><b>{primary.toFixed(1)}</b><span
           class="source">{imdb !== undefined ? 'IMDb' : 'TMDB'}</span
-        >{#if votes}<span class="votes">({compact(votes)})</span>{/if}</span
+        >{#if votes}<span class="votes">({compact(votes)})</span>{/if}</a
       >
     {/if}
-    {#if imdb !== undefined && tmdb !== undefined}<span
-        ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></span
+    {#if imdb !== undefined && tmdb !== undefined}<a
+        href={tmdbHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={`TMDB rating ${tmdb.toFixed(1)}`}
+        ><b>{tmdb.toFixed(1)}</b><span class="source">TMDB</span></a
       >{/if}
     {#if enabled.includes('rottenTomatoes') && ratings?.rottenTomatoes !== undefined}<span
         aria-label={`Rotten Tomatoes ${ratings.rottenTomatoes}%`}
@@ -83,10 +98,21 @@
     scrollbar-width: none;
   }
 
-  .ratings > span {
+  .ratings > span,
+  .ratings > a {
     display: inline-flex;
     align-items: baseline;
     gap: 5px;
+  }
+
+  .ratings > a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .ratings > a:hover,
+  .ratings > a:focus-visible {
+    text-decoration: underline;
   }
 
   .ratings b {
