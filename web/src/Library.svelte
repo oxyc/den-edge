@@ -49,6 +49,7 @@
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
+  import { nativeHls, trailerURLs } from './lib/reel';
   import { titleHref, type Route } from './lib/route';
   import { discoverServices } from './lib/discoverServices';
   import type { Routes } from './lib/routes';
@@ -446,7 +447,26 @@
     }
   }
 
+  /**
+   * Start reel resolving this title's trailer before the page that wants it exists.
+   *
+   * The resolve is a couple of seconds of yt-dlp and it used to begin only once the detail hero
+   * asked — after the page had mounted and TMDB had answered — so the wait was serial and entirely
+   * visible. Atlas gives rows an IMDb id of their own, so nothing has to be looked up first: the tap
+   * is enough to start it, and it runs while the page is still being built.
+   *
+   * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerURLs` reports a
+   * failure as an empty list rather than throwing.
+   */
+  function warmTrailer(title: Title) {
+    if (!reel || !title.imdbId) return;
+    void trailerURLs(reel, title.type, title.imdbId, routes, {
+      prewarm: nativeHls() ? 'direct' : 'full',
+    });
+  }
+
   const open = (title: Title) => {
+    warmTrailer(title);
     navigate(titleHref(title));
   };
   const select = $derived(log ? open : undefined);
