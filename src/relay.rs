@@ -13,6 +13,7 @@ use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Plain HTTP: every target is a LAN address.
@@ -26,6 +27,16 @@ pub fn client() -> RelayClient {
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// An addon's JSON answer — a catalog page, an index slice — is far under this.
 const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
+/// Relayed fetches per address per minute. A member — a device proving it holds a library here — is browsing with
+/// a household behind it, and one page of the billboard fans out into many addon calls, so it needs real room. A
+/// visitor gets enough to read pages and not enough to mine the addons through this origin.
+const MEMBER_PER_WINDOW: u32 = 240;
+const GUEST_PER_WINDOW: u32 = 30;
+/// Relayed fetches in flight at once, across everyone. The addons are one small box: without this a handful of
+/// visitors on a public name can hold every upstream socket and starve the TVs that actually live here.
+pub(crate) const MAX_IN_FLIGHT: usize = 16;
+/// How long a request waits for one of those slots before giving up, so a queue can't grow without bound.
+const SLOT_WAIT: Duration = Duration::from_secs(5);
 
 /// Where `path_and_query` goes when it is under one of `relays`: that addon's LAN origin with the rest of it.
 pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<String> {
@@ -45,6 +56,26 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
+    // The visitor's budget is spent first, and only an address past it is asked whether it is a member and has
+    // the larger one. That order is deliberate: checking membership first would let a forged member header make
+    // every relayed request do a library lookup, which is the work this limit exists to protect.
+    let ip = crate::handler::client_ip(state, &req);
+    if crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
+        let member =
+            req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        if !crate::library::is_member(state, member.as_deref()).await {
+            return json(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        }
+        if crate::link::throttled_at(state, &format!("relay-member:{ip}"), MEMBER_PER_WINDOW) {
+            return json(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        }
+    }
+    // Held until this answer is done with, so the cap counts what is actually in flight upstream.
+    let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
+    let _slot = match slot {
+        Ok(Ok(permit)) => permit,
+        _ => return json(StatusCode::SERVICE_UNAVAILABLE, "relay_busy"),
+    };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
@@ -101,4 +132,58 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
 
 fn json(status: StatusCode, code: &str) -> Response {
     raw_json(status, Body::from(error(code).to_string()), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handler::tests::Harness;
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    const LIB: &str = "0123456789abcdef0123456789abcdef";
+    const TOKEN: &str = "the-write-token";
+
+    /// Relaying `/scout` at a port nothing listens on: whatever gets past the limit fails at the fetch, which is
+    /// all these need to tell an allowed request from a refused one.
+    fn harness() -> Harness {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays("/scout=http://127.0.0.1:9");
+        h
+    }
+
+    async fn ask(h: &Harness, headers: &[(&str, &str)]) -> StatusCode {
+        h.send("GET", "/scout/manifest.json", None, headers).await.status()
+    }
+
+    /// A public name is an unmetered proxy to the addons without this — including atlas's half-megabyte labels.
+    #[tokio::test]
+    async fn a_visitor_gets_a_visitors_allowance() {
+        let h = harness();
+        for i in 0..super::GUEST_PER_WINDOW {
+            assert_eq!(ask(&h, &[]).await, StatusCode::BAD_GATEWAY, "{i}");
+        }
+        assert_eq!(ask(&h, &[]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// One page of the billboard fans out into many addon calls, so a household that has paired a TV must not be
+    /// held to a stranger's budget.
+    #[tokio::test]
+    async fn a_member_browses_past_the_visitors_allowance() {
+        let h = harness();
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started = h
+            .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)])
+            .await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+
+        let member = format!("{LIB}:{TOKEN}");
+        for i in 0..super::GUEST_PER_WINDOW + 10 {
+            let status = ask(&h, &[("x-den-library-member", &member)]).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{i}");
+        }
+        // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
+        let forged = format!("{LIB}:not-the-token");
+        assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
 }

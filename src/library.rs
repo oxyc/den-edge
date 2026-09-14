@@ -42,7 +42,7 @@ const EXT: &str = "log";
 const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
 /// `<id>:<token>` of a library the caller already holds, when it starts another (`NewLibraries::Members`).
-const MEMBER_HEADER: &str = "x-den-library-member";
+pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
 /// A sealed record is under a kilobyte; this is room for any, not a target.
@@ -421,6 +421,25 @@ fn gzipped(page: &Value) -> Option<Response> {
 
 /// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
 /// started proves nothing.
+/// Whether `member` (`<id>:<token>`, the `MEMBER_HEADER` a device sends) names a library here and holds its
+/// token. What the relay's budget is tiered on: a household that has paired a TV is a known caller and gets
+/// room to browse, where an anonymous visitor gets a visitor's allowance. It proves possession of a token
+/// den-edge only ever stored the hash of, so it can't be forged from anything readable here.
+pub async fn is_member(state: &AppState, member: Option<&str>) -> bool {
+    let Some((id, token)) = member.and_then(|m| m.split_once(':')) else {
+        return false;
+    };
+    if !valid_hex_id(id) || token.is_empty() || token.len() > 256 {
+        return false;
+    }
+    let mut libs = state.libraries.lock().await;
+    if load(state, &mut libs, id).await.is_err() {
+        return false;
+    }
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    libs.get(id).is_some_and(|lib| constant_time_eq(&lib.token_hash, &hash))
+}
+
 async fn holds_another(
     state: &AppState,
     libs: &mut HashMap<String, Library>,

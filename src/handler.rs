@@ -149,7 +149,17 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
-        "/routes" => bare_json(StatusCode::OK, &crate::routes::to_json(&state.routes)),
+        // The web app's public name gets the public table when the deployment built one: a visitor there has no
+        // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
+        // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
+        // unchanged, which is what the TVs and a phone on the tailnet read.
+        "/routes" => {
+            let table = match (face, &state.routes_public) {
+                (Face::Web, Some(public)) => public,
+                _ => &state.routes,
+            };
+            bare_json(StatusCode::OK, &crate::routes::to_json(table))
+        }
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
             resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -510,6 +520,23 @@ pub mod tests {
         );
         s.remux_origins = crate::routes::remux_origins(&s.routes);
         h
+    }
+
+    /// With a public table built for it, the web app's public name serves that and nothing else: the LAN
+    /// addresses and the tailnet name are the homelab's shape, and a browser out there couldn't use them anyway.
+    #[tokio::test]
+    async fn the_public_name_serves_only_the_public_table() {
+        let mut h = split_harness();
+        Arc::get_mut(&mut h.state).unwrap().routes_public =
+            Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
+        let public = body_json(h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await).await;
+        assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi");
+        assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published there");
+        // The TVs and a phone on the tailnet still read every address, which is what they match installs against.
+        for host in ["192.168.86.193:8094", "d-api.oxy.fi"] {
+            let full = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
+            assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080", "{host}");
+        }
     }
 
     #[tokio::test]

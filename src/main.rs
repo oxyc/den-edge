@@ -63,8 +63,15 @@ pub struct AppState {
     /// asks on its own origin and den-edge fetches from the addon (`relay.rs`).
     pub relays: Vec<(String, String)>,
     pub relay_client: relay::RelayClient,
+    /// Relayed fetches allowed in flight at once (`relay::MAX_IN_FLIGHT`), so the addons behind this origin can't
+    /// be swamped through it.
+    pub relay_slots: Arc<tokio::sync::Semaphore>,
     /// Every address for each service, in order (env `ROUTES`, den-spec routes-v1): served as `GET /routes`.
     pub routes: routes::Routes,
+    /// The table served on the web app's public name instead of `routes` (env `ROUTES_PUBLIC`). The full table
+    /// names the LAN addresses and the tailnet, which a public visitor has no use for and shouldn't be handed;
+    /// `None` serves the full table everywhere, as before.
+    pub routes_public: Option<routes::Routes>,
     /// den-remux's https origins from `routes`: what the web app's CSP lets its player fetch video from.
     pub remux_origins: Vec<String>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
@@ -92,7 +99,9 @@ impl AppState {
             api_hosts: Vec::new(),
             relays: Vec::new(),
             relay_client: relay::client(),
+            relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
             routes: Vec::new(),
+            routes_public: None,
             remux_origins: Vec::new(),
             new_libraries: library::NewLibraries::Open,
         }
@@ -146,6 +155,7 @@ async fn main() {
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
+    state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
     state.remux_origins = routes::remux_origins(&state.routes);
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
@@ -168,7 +178,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} new_libraries={}",
+         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -178,6 +188,10 @@ async fn main() {
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
         state.relays.iter().map(|(prefix, _)| prefix.as_str()).collect::<Vec<_>>().join(","),
         state.routes.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
+        state.routes_public.as_ref().map_or_else(
+            || "full".to_owned(),
+            |t| t.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
+        ),
         state.new_libraries.as_str(),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;

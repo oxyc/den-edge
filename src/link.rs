@@ -43,19 +43,28 @@ async fn forget(state: &AppState, key: String) -> Response {
     json_reply(StatusCode::OK, &json!({ "forgotten": true }))
 }
 
-/// Counts a guess from `ip`; true once it is over the limit. A blocked attempt doesn't extend the window, an
-/// allowed one does — so a steady stream of guesses stays blocked and the window clears once they stop.
+/// Counts a guess from `ip`; true once it is over the pairing limit.
 pub(crate) fn throttled(state: &AppState, ip: &str) -> bool {
+    throttled_at(state, ip, CLAIMS_PER_WINDOW)
+}
+
+/// Counts one act against `bucket`'s own budget; true once it is over `limit`. A blocked attempt doesn't extend
+/// the window, an allowed one does — so a steady stream stays blocked and the window clears once it stops.
+///
+/// `bucket` is the whole key, so a caller prefixes what it is limiting (`relay:<ip>`, `inbox:<ip>`) and each
+/// budget counts on its own: browsing the relay hard must not spend the pairing allowance, and the other way
+/// about. All of them share the one map, and so the one sweep that keeps it bounded.
+pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> bool {
     let now = state.now();
     let mut claims = lock(&state.claims);
     if claims.len() > 1024 {
         claims.retain(|_, t| t.until > now);
     }
-    let t = claims.entry(ip.to_owned()).or_insert(Throttle { count: 0, until: 0 });
+    let t = claims.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 });
     if t.until <= now {
         t.count = 0;
     }
-    if t.count >= CLAIMS_PER_WINDOW {
+    if t.count >= limit {
         return true;
     }
     t.count += 1;

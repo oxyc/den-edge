@@ -14,6 +14,12 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 const NS: &str = "inbox";
+/// Appends per address per minute. A key is the only credential here — den-edge never learns the link keys, which
+/// pairing derives without it — so the limit is what stands between a public name and anyone's queue.
+const APPENDS_PER_WINDOW: u32 = 60;
+/// Queues STARTED per address per minute, priced far lower than appending to one: an append to a live queue is
+/// bounded by `MAX_MESSAGES`, while a new queue is new storage, and filling the store is the cheap attack.
+const NEW_QUEUES_PER_WINDOW: u32 = 5;
 /// A queue an unopened TV never drains goes after a week.
 const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The newest fifty are kept; older ones fall off the front.
@@ -45,6 +51,11 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
+    // Counted before the body is read: the point is to not do work for a flood.
+    let ip = crate::handler::client_ip(state, &req);
+    if crate::link::throttled_at(state, &format!("inbox:{ip}"), APPENDS_PER_WINDOW) {
+        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    }
     let from_header = header_key(&req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
@@ -59,10 +70,16 @@ async fn append(state: &AppState, req: Request) -> Response {
     };
     let _write = state.write_lock.lock().await;
     let now = state.now();
-    let mut queue = match load(state, key, now).await {
-        Ok(queue) => queue.unwrap_or_default(),
+    let existing = match load(state, key, now).await {
+        Ok(queue) => queue,
         Err(e) => return internal("inbox read", e),
     };
+    if existing.is_none()
+        && crate::link::throttled_at(state, &format!("inbox-new:{ip}"), NEW_QUEUES_PER_WINDOW)
+    {
+        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    }
+    let mut queue = existing.unwrap_or_default();
     queue.push(message);
     if queue.len() > MAX_MESSAGES {
         queue.drain(..queue.len() - MAX_MESSAGES);
@@ -190,6 +207,34 @@ mod tests {
         append(&h, "old").await;
         h.advance(super::TTL_MS);
         assert!(drain(&h).await.is_empty(), "an expired queue is not delivered");
+    }
+
+    /// A key is the only credential on this route — den-edge never learns one — so on a public name the limit is
+    /// what stands between a stranger and every queue.
+    #[tokio::test]
+    async fn appends_are_limited_per_address() {
+        let h = Harness::new();
+        for i in 0..super::APPENDS_PER_WINDOW {
+            assert_eq!(append(&h, &format!("k{i}")).await, StatusCode::OK, "{i}");
+        }
+        assert_eq!(append(&h, "over").await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Starting queues is priced far below appending to one: an append is bounded by `MAX_MESSAGES`, while a new
+    /// queue is new storage, and filling the store is the cheap attack.
+    #[tokio::test]
+    async fn starting_queues_runs_out_long_before_the_append_budget() {
+        let h = Harness::new();
+        let key = |n: u64| format!("{n:016x}");
+        for n in 1..=super::NEW_QUEUES_PER_WINDOW as u64 {
+            let body = json!({ "inboxKey": key(n), "sealed": "AAEC" });
+            assert_eq!(h.call("POST", "/inbox/append", Some(body)).await.0, StatusCode::OK, "{n}");
+        }
+        let another = json!({ "inboxKey": key(999), "sealed": "AAEC" });
+        assert_eq!(h.call("POST", "/inbox/append", Some(another)).await.0, StatusCode::TOO_MANY_REQUESTS);
+        // A queue already started still takes messages: the tighter budget prices storage, not delivery.
+        let existing = json!({ "inboxKey": key(1), "sealed": "BBBB" });
+        assert_eq!(h.call("POST", "/inbox/append", Some(existing)).await.0, StatusCode::OK);
     }
 
     /// Workers KV read the queue, appended and wrote it back, so two appends at once kept one. Here the
