@@ -172,9 +172,13 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
         // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
         // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
         // unchanged, which is what the TVs and a phone on the tailnet read.
+        // Both public names, not just the browser's: a device API reachable from the internet publishes the
+        // household's shape to anyone who asks it, and an away device has no more use for a LAN address than a
+        // stranger does. The LAN and tailnet names still serve everything, unauthenticated — that is what the
+        // TVs read, and their `/routes` fetch carries no credential to prove anything with.
         "/routes" => {
             let table = match (face, &state.routes_public) {
-                (Face::Web, Some(public)) => public,
+                (Face::Web | Face::Api, Some(public)) => public,
                 _ => &state.routes,
             };
             bare_json(StatusCode::OK, &crate::routes::to_json(table))
@@ -613,14 +617,18 @@ pub mod tests {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().routes_public =
             Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
-        let public = body_json(h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await).await;
-        assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi");
-        assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published there");
-        // The TVs and a phone on the tailnet still read every address, which is what they match installs against.
-        for host in ["192.168.86.193:8094", "d-api.oxy.fi"] {
-            let full = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
-            assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080", "{host}");
+        // Both public names, for the same reason: an away device can no more use a LAN address than a
+        // stranger can, and a device API reachable from the internet publishes the household's shape to
+        // whoever asks it.
+        for host in ["d.oxy.fi", "d-api.oxy.fi"] {
+            let public = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
+            assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi", "{host}");
+            assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published on {host}");
         }
+        // The LAN name still serves every address, unauthenticated: that is what the TVs read, and their
+        // `/routes` fetch carries no credential to prove anything with.
+        let full = body_json(h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await).await;
+        assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080");
     }
 
     #[tokio::test]
