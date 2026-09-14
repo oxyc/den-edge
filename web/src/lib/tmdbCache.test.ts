@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cachingFetch, freshFor, RETENTION, type Entry, type Store } from './tmdbCache';
+import {
+  cachingFetch,
+  freshFor,
+  RETENTION,
+  TMDB_PROXY_KEY,
+  type Entry,
+  type Store,
+} from './tmdbCache';
 
 const HOUR = 3_600_000;
 
@@ -28,6 +35,33 @@ function network() {
 
 const detail = 'https://api.themoviedb.org/3/movie/603?api_key=secret&append_to_response=credits';
 const discover = 'https://api.themoviedb.org/3/discover/movie?page=1&api_key=secret';
+
+describe('a device with no key of its own', () => {
+  it('asks this origin instead, and keeps the answer under the same question', async () => {
+    vi.stubGlobal('location', { origin: 'https://den.example' });
+    const { entries, store } = memory();
+    const net = network();
+    const cached = cachingFetch(store, net.fetchImpl, () => 0);
+    await cached(
+      `https://api.themoviedb.org/3/movie/603?api_key=${TMDB_PROXY_KEY}&append_to_response=credits`,
+    );
+    // den-edge substitutes the household's key; the sentinel never leaves the browser.
+    expect(net.asked).toEqual(['https://den.example/tmdb/3/movie/603?append_to_response=credits']);
+    // Kept under the question, not under who asked it: the day this browser is given a key of its own, it
+    // reads what it already has rather than asking TMDB again.
+    expect([...entries.keys()]).toEqual([
+      'https://api.themoviedb.org/3/movie/603?append_to_response=credits',
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves a browser that has its own key asking TMDB directly', async () => {
+    const { store } = memory();
+    const net = network();
+    await cachingFetch(store, net.fetchImpl, () => 0)(detail);
+    expect(net.asked).toEqual([detail]);
+  });
+});
 
 describe('cachingFetch', () => {
   it('answers from the store while fresh, and never keeps the key', async () => {

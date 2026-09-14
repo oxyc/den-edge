@@ -14,6 +14,7 @@ mod relay;
 mod routes;
 mod store;
 mod sync;
+mod tmdb;
 mod web;
 
 use std::collections::HashMap;
@@ -76,6 +77,18 @@ pub struct AppState {
     pub remux_origins: Vec<String>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
     pub new_libraries: library::NewLibraries,
+    /// The household's TMDB key (env `TMDB_KEY`), lent to devices that have none of their own (`tmdb.rs`).
+    /// `None` turns `/tmdb/` off entirely.
+    pub tmdb_key: Option<String>,
+    /// Built only when there is a key: it is the one client here that speaks TLS.
+    pub tmdb_client: Option<tmdb::TmdbClient>,
+    /// Where proxied answers are kept (`<DATA_DIR>/tmdb`). On disk and keyed by the question alone, so one
+    /// answer serves every device that asks it and a restart doesn't throw six months of them away.
+    pub tmdb_cache_dir: Option<std::path::PathBuf>,
+    /// Questions that may actually reach TMDB in a day (env `TMDB_DAILY_MAX`); `None` is no ceiling.
+    pub tmdb_daily_max: Option<u32>,
+    /// Today (as a day number) and what has been spent of it.
+    pub tmdb_spent: Mutex<(u64, u32)>,
 }
 
 impl AppState {
@@ -104,6 +117,11 @@ impl AppState {
             routes_public: None,
             remux_origins: Vec::new(),
             new_libraries: library::NewLibraries::Open,
+            tmdb_key: None,
+            tmdb_client: None,
+            tmdb_cache_dir: None,
+            tmdb_daily_max: None,
+            tmdb_spent: Mutex::new((0, 0)),
         }
     }
 
@@ -163,9 +181,18 @@ async fn main() {
             std::process::exit(1);
         })
     });
+    // Lent to a device with no key of its own. The client and the cache directory exist only when there is a
+    // key to lend, so a deployment without one carries no TLS stack and no directory it never writes to.
+    state.tmdb_key = env_opt("TMDB_KEY");
+    state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
+    if state.tmdb_key.is_some() {
+        state.tmdb_client = Some(tmdb::client());
+        state.tmdb_cache_dir = Some(std::path::Path::new(&dir).join("tmdb"));
+    }
     let state = Arc::new(state);
     inbox::sweep(&state).await;
     tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(tmdb::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
@@ -178,7 +205,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={}",
+         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -193,6 +220,11 @@ async fn main() {
             |t| t.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
         ),
         state.new_libraries.as_str(),
+        match (&state.tmdb_key, state.tmdb_daily_max) {
+            (None, _) => "off".to_owned(),
+            (Some(_), None) => "on".to_owned(),
+            (Some(_), Some(max)) => format!("on(max {max}/day)"),
+        },
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());

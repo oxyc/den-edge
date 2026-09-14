@@ -2,7 +2,22 @@
 // the library shares (`set:keys`).
 
 import type { MediaType, Shape, Title } from './library';
-import { tmdbFetch } from './tmdbCache';
+import { readApiKey } from './prefs';
+import { TMDB_PROXY_KEY, tmdbFetch } from './tmdbCache';
+import type { SettingsRow } from './wire';
+
+export { TMDB_PROXY_KEY } from './tmdbCache';
+
+/**
+ * The key this device reads TMDB with: the library's own, or the sentinel that borrows den-edge's.
+ *
+ * One helper so nobody spells the sentinel twice, and so a browser with no library at all — a visitor on the
+ * public name — still names titles instead of showing an empty page. What Settings reports as set or not set
+ * is the library's own key, read directly: borrowing one is not the same as having one.
+ */
+export function tmdbKeyOf(keys: SettingsRow | undefined): string {
+  return readApiKey(keys, 'tmdb') ?? TMDB_PROXY_KEY;
+}
 
 /** A title's display, and a series' season layout. */
 export interface Details {

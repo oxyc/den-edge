@@ -5,6 +5,25 @@
 // rather than not at all, and nothing is kept past TMDB's six-month limit on cached content.
 
 const TMDB = 'https://api.themoviedb.org/3/';
+
+/**
+ * The key a device uses when it has none of its own: den-edge lends the household's.
+ *
+ * It is a sentinel, not a key. Every TMDB URL in the app is built as `api_key=<key>`, so a browser with no
+ * library — a visitor on the public name — would otherwise build a call it cannot make and show an empty page.
+ * A request carrying this goes to `/tmdb/…` on this origin instead, where den-edge throws it away, substitutes
+ * the real key and answers from a cache shared with every other device that asked the same question.
+ */
+export const TMDB_PROXY_KEY = 'den-proxy';
+
+/** The same question asked of this origin instead of TMDB's, with the sentinel dropped on the way. */
+function proxied(url: URL): string {
+  if (url.searchParams.get('api_key') !== TMDB_PROXY_KEY) return url.toString();
+  const asked = new URL(url);
+  asked.searchParams.delete('api_key');
+  const origin = globalThis.location?.origin ?? '';
+  return `${origin}/tmdb${asked.pathname}${asked.search}`;
+}
 const DAY = 86_400_000;
 /** TMDB's terms cap how long its content may be cached. */
 export const RETENTION = 180 * DAY;
@@ -65,6 +84,9 @@ export function cachingFetch(
     }
     const url = new URL(href);
     const key = keyOf(url);
+    // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
+    // already has rather than asking again.
+    const asked = proxied(url);
     const kept = await store.get(key).catch(() => undefined);
     const fresh = freshFor(url.pathname);
     const age = kept ? now() - kept.fetchedAt : Infinity;
@@ -73,7 +95,7 @@ export function cachingFetch(
       if (!refreshing.has(key)) {
         refreshing.add(key);
         // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
-        void network(href, { ...init, signal: undefined })
+        void network(asked, { ...init, signal: undefined })
           .then(async (res) => {
             if (res.ok) await store.put(key, { body: await res.text(), fetchedAt: now() });
           })
@@ -83,7 +105,7 @@ export function cachingFetch(
       return answer(kept.body);
     }
     try {
-      const res = await network(input, init);
+      const res = await network(asked, init);
       if (!res.ok) return kept && res.status >= 500 ? answer(kept.body) : res;
       const body = await res.text();
       void store.put(key, { body, fetchedAt: now() }).catch(() => undefined);

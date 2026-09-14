@@ -133,6 +133,9 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
         return crate::relay::relay(state, req, target, rid).await;
     }
+    if path.starts_with("/tmdb/") {
+        return crate::tmdb::handle(state, req, rid).await;
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -243,9 +246,13 @@ impl Face {
             || matches!(path, "/config" | "/metrics");
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
+        // TMDB through this origin answers on every name: a browser asks it on the public one, and a TV asks
+        // it on the LAN or the device API. It lends a key and reads nothing of this box, so neither half owns it.
+        let tmdb = path.starts_with("/tmdb/");
         match (self, path) {
             (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes") | (Face::Both, _) => true,
+            _ if tmdb => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,
         }
@@ -271,6 +278,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
+        p if p.starts_with("/tmdb/") => "/tmdb",
         _ => "other",
     }
 }
@@ -281,7 +289,9 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const POST: &[Method] = &[Method::POST];
     const DELETE: &[Method] = &[Method::DELETE];
     match route {
-        "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" => Some(GET),
+        "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" | "/tmdb" => {
+            Some(GET)
+        }
         "/pair/:sid/:slot" => Some(GET_PUT),
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
         "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" => Some(DELETE),

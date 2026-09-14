@@ -5,7 +5,9 @@ import { previewBuild } from './scripts/previewBuild.ts';
 // In production den-edge serves the app and its API from one origin. The dev server proxies the API to a
 // den-edge — the homelab's by default, DEN_EDGE for another.
 const edge = process.env.DEN_EDGE ?? 'http://192.168.86.193:8094';
-const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout'];
+// `/tmdb` is den-edge lending its TMDB key to a browser that has none, so it has to be proxied too — without
+// it this server answers the app's own index.html to a request for a title and nothing is ever named here.
+const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout', '/tmdb'];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 // reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
