@@ -61,6 +61,38 @@ describe('findAddon', () => {
   });
 });
 
+describe('a table that names no address for the service', () => {
+  /** What a public name serves: the household's LAN addresses and tailnet name are nobody else's. */
+  const PUBLIC_ONLY: Routes = { edge: [{ url: 'https://d-api.oxy.fi' }] };
+
+  it('reads the config segment off the install itself, whichever shape it is', async () => {
+    const TAILNET = 'https://pve.example:8443/scout/sealed-cfg/manifest.json';
+    for (const install of [SCOUT_LAN, TAILNET]) {
+      const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
+      expect(await findAddon([install], PUBLIC_ONLY, SCOUT, fetchImpl)).toEqual({
+        install: install.replace('/manifest.json', ''),
+        base: '/scout/sealed-cfg',
+      });
+      // The mount is stripped as a whole segment, so both shapes land on the same place to ask.
+      expect(asked, install).toEqual(['/scout/sealed-cfg/manifest.json']);
+    }
+  });
+
+  /** Guessing a place is not believing it: the manifest id is still what decides. */
+  it('still refuses a stranger’s addon, for one request', async () => {
+    const { asked, fetchImpl } = addons({});
+    expect(await findAddon([THEIRS], PUBLIC_ONLY, SCOUT, fetchImpl)).toBeNull();
+    expect(asked).toEqual(['/scout/debrid-token/manifest.json']);
+  });
+
+  /** And while the table CAN disqualify it, a stranger's URL is never touched at all. */
+  it('leaves other addons alone while the table names addresses', async () => {
+    const { asked, fetchImpl } = addons({});
+    expect(await findAddon([THEIRS], ROUTES, SCOUT, fetchImpl)).toBeNull();
+    expect(asked).toEqual([]);
+  });
+});
+
 describe('findAtlas', () => {
   it('is a plugin, else this origin’s own, else none', async () => {
     const plugin = addons({ '/atlas/manifest.json': 'com.den.atlas' });

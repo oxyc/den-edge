@@ -24,10 +24,39 @@ const MANIFEST = '/manifest.json';
 function place(url: string, routes: Routes, want: { name: string; path: string }): Addon | null {
   if (!url.endsWith(MANIFEST)) return null;
   const install = url.slice(0, -MANIFEST.length);
-  const config = within(install, routes[want.name]);
+  const listed = routes[want.name];
+  // The URL's own segment only where the table names no address for this service at all — which is
+  // what a public name serves. While it does name them, an install that matches none of them is
+  // somebody else's addon, and guessing a place for it would probe a stranger's URL for nothing.
+  const config = within(install, listed) ?? (listed?.length ? null : configOf(install, want.path));
   return config !== null && /^(\/[\w.~%-]+)?$/.test(config)
     ? { install, base: want.path + config }
     : null;
+}
+
+/**
+ * The install's config segment read from the URL itself, for a table that no longer names it.
+ *
+ * A public name is going to serve public entries only — a household's LAN addresses and tailnet name
+ * are nobody else's business, and no browser out there can use them — so `within` will have nothing
+ * to match a LAN install against. The segment is still there in the URL: a LAN install is
+ * `http://host:8080/<config>` and a tailnet one carries the mount as well, `…:8443/reel/<config>`.
+ *
+ * This only guesses WHERE to ask. `findAddon` still confirms what answered is the service it wanted,
+ * by its manifest id, so a stranger's plugin placed here is refused a moment later at the cost of one
+ * request. That is also why this belongs to `place` alone: `denAddonOf` and `installsOf` believe the
+ * table without probing, and handing them the same guess would label anyone's addon as Den's.
+ */
+function configOf(install: string, mount: string): string | null {
+  let path: string;
+  try {
+    path = new URL(install).pathname.replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+  // The mount as a whole segment, never a string prefix: `/reelish-cfg` is a config, not this mount.
+  if (path === mount || path.startsWith(`${mount}/`)) path = path.slice(mount.length);
+  return path === '' || /^\/[\w.~%-]+$/.test(path) ? path : null;
 }
 
 async function manifestIs(manifest: string, id: string, fetchImpl: typeof fetch): Promise<boolean> {
