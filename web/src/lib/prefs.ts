@@ -2,6 +2,7 @@
 // TV's hide rules (UserPreferences.isHidden) applied to what the web shows.
 
 import type { Title } from './library';
+import { RATING_SOURCES } from '../settings/catalogs';
 import type { ConfigValue, SettingsRow } from './wire';
 
 /** A streaming service the viewer has, in one country: the same provider in two countries is two picks. */
@@ -47,15 +48,20 @@ export function readPrefs(row: SettingsRow | undefined): Prefs {
     hideAnime: bool('den.hideAnime'),
     hideWatched: bool('den.hideWatched'),
     minReleaseYear: year && 'int' in year ? year.int : undefined,
-    services: strings('den.myServicePicks').flatMap((pick): ServicePick[] => {
-      const [id, country] = pick.split('@');
-      const numeric = Number(id);
-      const code = (country ?? '').toUpperCase();
-      return Number.isInteger(numeric) && numeric > 0 && /^[A-Z]{2}$/.test(code)
-        ? [{ id: numeric, country: code }]
-        : [];
-    }),
+    services: parseServicePicks(strings('den.myServicePicks')),
   };
+}
+
+/** `den.myServicePicks` (`"<id>@<CC>"`), uppercased; anything else is dropped rather than guessed at. */
+export function parseServicePicks(picks: readonly string[]): ServicePick[] {
+  return picks.flatMap((pick): ServicePick[] => {
+    const [id, country] = pick.split('@');
+    const numeric = Number(id);
+    const code = (country ?? '').toUpperCase();
+    return Number.isInteger(numeric) && numeric > 0 && /^[A-Z]{2}$/.test(code)
+      ? [{ id: numeric, country: code }]
+      : [];
+  });
 }
 
 /** One of the user's own API keys (`tmdb`, `omdb`, `doesthedogdie`), as the TV shares it. */
@@ -167,10 +173,8 @@ export function readDetailPrefs(
     region,
     ratingSources:
       enabled && 'strings' in enabled
-        ? enabled.strings.filter((s) =>
-            ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'].includes(s),
-          )
-        : ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+        ? enabled.strings.filter((s) => RATING_SOURCES.some((known) => known.id === s))
+        : RATING_SOURCES.map((s) => s.id),
     warningCategories: warnings && 'strings' in warnings ? warnings.strings : [],
     autoplay: !(autoplay && 'bool' in autoplay && !autoplay.bool),
   };

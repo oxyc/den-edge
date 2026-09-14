@@ -8,6 +8,8 @@ const DEVICE_KEY = 'den.deviceID';
 const LAST_KEY = 'den.clock';
 
 export interface BrowserClock {
+  /** This browser's stamp device id, which is also what it lists itself under in `set:devices`. */
+  readonly device: string;
   issue(now?: number): Stamp;
   see(stamp: Stamp): void;
 }
@@ -49,6 +51,7 @@ export function browserClock(storage: Storage | undefined = globalThis.localStor
   }
   const clock = new Clock(device, last);
   return {
+    device,
     issue(now = Date.now()) {
       const stamp = clock.issue(now);
       write(LAST_KEY, JSON.stringify(stamp));
