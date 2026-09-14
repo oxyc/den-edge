@@ -5,12 +5,17 @@ import {
   endSession,
   findRemux,
   forgetBrowserTokens,
+  forgetLinks,
   forgetSubtitles,
+  linkLimit,
+  LINK_TTL_MS,
   listReleases,
   login,
+  onLan,
   releaseParts,
   reportFailure,
   REMUX_PROBE_TIMEOUT_MS,
+  SPEED_PROBE_BYTES,
   startSession,
   wantedLanguages,
   type Want,
@@ -111,13 +116,25 @@ describe('startSession', () => {
   it('asks for another track of the same release, from the second it was at', async () => {
     let sent: Record<string, unknown> = {};
     await startSession(
-      { ...want, subtitleLanguages: [], audioTrack: 1, filename: 'f.mkv', startAt: 1234.5 },
+      {
+        ...want,
+        subtitleLanguages: [],
+        audioTrack: 1,
+        filename: 'f.mkv',
+        startAt: 1234.5,
+        maxBitrate: 7_000_000,
+      },
       async (_input, init) => {
         sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return answer(201, session);
       },
     );
-    expect(sent).toMatchObject({ audioTrack: 1, filename: 'f.mkv', startAt: 1234.5 });
+    expect(sent).toMatchObject({
+      audioTrack: 1,
+      filename: 'f.mkv',
+      startAt: 1234.5,
+      maxBitrate: 7_000_000,
+    });
   });
 
   it('says why a session could not start', async () => {
@@ -236,6 +253,94 @@ describe('findRemux', () => {
       close?.();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('linkLimit', () => {
+  const tailnet = 'https://pve.example.ts.net:8443/remux';
+  beforeEach(forgetLinks);
+
+  /**
+   * den-remux's `/speed` as a link delivers it: each chunk arriving at its time on `clock`. A chunk is made only when
+   * it is read (no queue ahead of the reader), and the body is handed over as it is rather than through a `Response`,
+   * which reads ahead — either would move the clock before the chunk it belongs to is read.
+   */
+  const link = (arrivals: [ms: number, bytes: number][]) => {
+    const clock = { now: 0 };
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      let next = 0;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const arrival = arrivals[next++];
+            if (!arrival) return controller.close();
+            clock.now = arrival[0];
+            controller.enqueue(new Uint8Array(arrival[1]));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return { ok: true, status: 200, body } as Response;
+    };
+    return { clock, asked, fetchImpl, now: () => clock.now };
+  };
+
+  it('asks for 70% of the link, timed past the first 150 ms after the first byte', async () => {
+    // 100 KB inside the skipped start, then 1.25 MB over the next second: 10 Mbit/s.
+    const measured = link([
+      [1_000, 50_000],
+      [1_100, 50_000],
+      ...Array.from({ length: 10 }, (_, i): [number, number] => [1_200 + i * 100, 125_000]),
+    ]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(7_000_000);
+    expect(measured.asked).toEqual([`${tailnet}/speed?bytes=${SPEED_PROBE_BYTES}`]);
+  });
+
+  it('measures once, and again once the link is ten minutes old', async () => {
+    const measured = link([
+      [0, 1],
+      [1_000, 125_000],
+    ]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(700_000);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(700_000);
+    expect(measured.asked).toHaveLength(1);
+    measured.clock.now += LINK_TTL_MS;
+    await linkLimit(tailnet, measured.fetchImpl, measured.now);
+    expect(measured.asked).toHaveLength(2);
+  });
+
+  it('measures a link faster than the skipped start over the whole transfer', async () => {
+    const measured = link([
+      [0, 1_000_000],
+      [100, 1_000_000],
+    ]);
+    // 2 MB in 100 ms: 160 Mbit/s.
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(112_000_000);
+  });
+
+  it('asks for nothing at home, or where the link can’t be timed', async () => {
+    const measured = link([[0, 1]]);
+    expect(await linkLimit('http://192.168.86.193:8095/remux', measured.fetchImpl)).toBeUndefined();
+    expect(measured.asked, 'no probe on the LAN').toEqual([]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now), 'one chunk').toBeUndefined();
+    forgetLinks();
+    const offline: typeof fetch = async () => Promise.reject(new TypeError('offline'));
+    expect(await linkLimit(tailnet, offline)).toBeUndefined();
+    forgetLinks();
+    expect(await linkLimit(tailnet, async () => answer(429, {}))).toBeUndefined();
+  });
+
+  it('tells the home network from the tailnet and the internet', () => {
+    expect(onLan('http://192.168.86.193:8095/remux')).toBe(true);
+    expect(onLan('http://10.0.0.5:8095/remux')).toBe(true);
+    expect(onLan('http://172.20.1.1/remux')).toBe(true);
+    expect(onLan('http://172.32.0.1/remux')).toBe(false);
+    expect(onLan('http://100.101.1.2:8095/remux'), 'a tailnet address').toBe(false);
+    expect(onLan(tailnet)).toBe(false);
+    expect(onLan('/remux', 'http://192.168.86.193:8094/'), 'its own origin, at home').toBe(true);
+    expect(onLan('/remux', 'https://d.example/')).toBe(false);
   });
 });
 

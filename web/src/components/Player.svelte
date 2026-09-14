@@ -11,6 +11,7 @@
   import {
     downmixed,
     endSession,
+    linkLimit,
     listReleases,
     login,
     releaseParts,
@@ -151,6 +152,8 @@
       navigator.languages,
     );
     const can = (decodes ??= await playable());
+    // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
+    const maxBitrate = await linkLimit(remux);
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -170,6 +173,7 @@
         videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
         playable: can,
         startAt: at,
+        maxBitrate,
         ...pick,
       },
       undefined,

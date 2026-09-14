@@ -55,6 +55,8 @@ export interface Want {
   filename?: string;
   /** The second playback starts at, which den-remux names in the playlist (`EXT-X-START`) for a native player. */
   startAt?: number;
+  /** Bits a second a session may need, away from home (`linkLimit`): den-remux picks a release, or a transcode, that fits. */
+  maxBitrate?: number;
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
@@ -125,6 +127,119 @@ export async function findRemux(
     }
   }
   return null;
+}
+
+/** The bytes a link is timed over: past a connection's slow start, and a moment of the home upload. */
+export const SPEED_PROBE_BYTES = 2 * 1024 * 1024;
+/** The first of the transfer, after its first byte, that isn't counted: slow start, not the link. */
+const SPEED_SKIP_MS = 150;
+/** Time enough to measure a slow link by what arrived, rather than wait out all of it before playing. */
+const SPEED_READ_MS = 4_000;
+/** A probe that hasn't finished by then is given up on: playback goes ahead unmeasured. */
+export const SPEED_DEADLINE_MS = 10_000;
+/** How long a measured link is trusted before a session measures it again. */
+export const LINK_TTL_MS = 10 * 60_000;
+/** The share of the measured rate a session may need: room for the link to dip, and for what else uses it. */
+const LINK_HEADROOM = 0.7;
+
+/** Each den-remux's link, timed once and kept for LINK_TTL_MS: when it was asked, and the rate (null: not measured). */
+const links = new Map<string, { at: number; rate: Promise<number | null> }>();
+
+/** Forget the measured links (tests). */
+export function forgetLinks(): void {
+  links.clear();
+}
+
+/**
+ * Whether den-remux at `base` is on the home network — a private IPv4 address or this machine, as the routes table's
+ * LAN entry is — where there is no upload link between it and this browser to measure.
+ */
+export function onLan(
+  base: string,
+  page = globalThis.location?.href ?? 'https://den.invalid/',
+): boolean {
+  const host = new URL(base, page).hostname;
+  return (
+    host === 'localhost' ||
+    /^(10|127)\.\d+\.\d+\.\d+$/.test(host) ||
+    /^192\.168\.\d+\.\d+$/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(host)
+  );
+}
+
+/**
+ * The bits a second den-remux at `base` gets to this browser: its `/speed` timed from the first byte, less the first
+ * SPEED_SKIP_MS, until the end or SPEED_READ_MS. Asked once per LINK_TTL_MS, sessions in between sharing the answer;
+ * null when it couldn't be timed.
+ */
+export function measureLink(
+  base: string,
+  fetchImpl: typeof fetch = fetch,
+  now: () => number = () => performance.now(),
+): Promise<number | null> {
+  const kept = links.get(base);
+  if (kept && now() - kept.at < LINK_TTL_MS) return kept.rate;
+  const rate = timeTransfer(base, fetchImpl, now);
+  links.set(base, { at: now(), rate });
+  return rate;
+}
+
+async function timeTransfer(
+  base: string,
+  fetchImpl: typeof fetch,
+  now: () => number,
+): Promise<number | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SPEED_DEADLINE_MS);
+  let first: number | undefined;
+  let mark: number | undefined;
+  let last: number | undefined;
+  let total = 0;
+  let counted = 0;
+  try {
+    const res = await fetchImpl(`${base}/speed?bytes=${SPEED_PROBE_BYTES}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) return null;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const at = now();
+      first ??= at;
+      last = at;
+      total += value.byteLength;
+      if (at - first <= SPEED_SKIP_MS) mark = at;
+      else counted += value.byteLength;
+      if (at - first >= SPEED_READ_MS) {
+        void reader.cancel();
+        break;
+      }
+    }
+  } catch {
+    // Given up on, or cut off: what arrived before still says something.
+  } finally {
+    clearTimeout(timer);
+  }
+  if (first === undefined || last === undefined) return null;
+  // Past the skipped start where the transfer lasted that long; over the whole of it where it was faster than that.
+  if (counted > 0 && mark !== undefined) return (counted * 8000) / (last - mark);
+  return last > first ? (total * 8000) / (last - first) : null;
+}
+
+/**
+ * The `maxBitrate` a session at `base` asks for: LINK_HEADROOM of the measured link, away from home; undefined at home,
+ * and wherever the link couldn't be measured — den-remux then picks as it always has.
+ */
+export async function linkLimit(
+  base: string,
+  fetchImpl: typeof fetch = fetch,
+  now?: () => number,
+): Promise<number | undefined> {
+  if (onLan(base)) return undefined;
+  const rate = await measureLink(base, fetchImpl, now);
+  return rate ? Math.round(rate * LINK_HEADROOM) : undefined;
 }
 
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */
