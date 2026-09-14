@@ -77,9 +77,14 @@
    * viewer reaches for this trailer is the one moment we are allowed to give them its audio.
    */
   function tap() {
-    touched = true;
     const player = video;
     if (!player) return;
+    // Once, and only once. After the first tap the native controls are showing, and they sit INSIDE the
+    // element — so a tap on their pause button is also a click on the video, and calling play() here
+    // again fought the viewer for it: the trailer stopped for a moment and started itself back up. The
+    // first tap is the gesture that earns sound; from then on the element is theirs to drive.
+    if (touched) return;
+    touched = true;
     sound = true;
     player.muted = false;
     void player.play().catch(() => {});
