@@ -80,9 +80,12 @@
     text-transform: uppercase;
   }
 
+  /* Cells sit at the top of their row at their own height: a label that wraps ("Action & Adventure") makes only its
+     own cell taller, and the one-line options beside it keep their text where every other row has it. */
   .grid {
     display: grid;
     clear: both;
+    align-items: start;
     grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
     gap: 2px 8px;
   }
@@ -100,12 +103,10 @@
     grid-template-columns: 1fr;
   }
 
-  /* Top-aligned: a label that wraps ("Action & Adventure") makes its grid row taller, and centred text beside it would
-     sit lower than the rest of the row. */
   .check {
     position: relative;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 8px;
     min-height: 44px;
     padding: 6px 10px;
@@ -128,10 +129,8 @@
     outline: 2px solid var(--accent);
   }
 
-  /* On the first line's middle: 15px text at the page's 1.4 line height is 21px tall. */
   .mark {
     flex-shrink: 0;
-    margin-top: 1.5px;
     visibility: hidden;
     fill: none;
     stroke: currentcolor;
