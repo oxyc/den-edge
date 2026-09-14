@@ -52,7 +52,7 @@
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
-  import { nativeHls, trailerURLs } from './lib/reel';
+  import { hlsURL, nativeHls, trailerURLs } from './lib/reel';
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
@@ -527,8 +527,18 @@
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
     void trailerURLs(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
-      prewarm: nativeHls() ? 'direct' : 'full',
+      prewarm: 'direct',
+    }).then((found) => {
+      // The master too, not just the resolve. reel answers it `private, max-age=300`, so this lands
+      // in the browser's own cache and the page that is about to mount reads it from there — one
+      // round trip and a googlevideo fetch taken off the critical path, spent during the ~150ms
+      // between the press and the click.
+      const master = found[0] && hlsURL(found[0]);
+      if (master) void fetch(master).catch(() => undefined);
     });
+    // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it
+    // before it can play anything. Started here, it is usually resident by then.
+    if (!nativeHls()) void import('hls.js').catch(() => undefined);
   }
 
   // Every link to a title warms its trailer as the pointer goes down, before the click has even landed — one

@@ -16,7 +16,7 @@
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
-  import { directTrailer, nativeHls, trailerSource, trailerURL } from '../lib/reel';
+  import { directTrailer, hlsURL, nativeHls, trailerSource, trailerURL } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -243,9 +243,16 @@
         // the file costs a download, an ffmpeg re-mux, a slot on the cache volume and the trailer
         // crossing the house twice — which is the whole wait before a cold slide shows anything.
         // Nothing here can want sound (muted, unpressable), so a silent stream is welcome.
+        proxied = url;
+        // Where the browser needs MSE the source follows from the play URL alone, so the slide can
+        // start on it: `/direct` would be a round trip and a resolve spent learning what `/hls`
+        // resolves for itself.
+        if (!playsHls) {
+          ambient = hlsURL(url) ?? url;
+          return;
+        }
         const direct = await directTrailer(url);
         if (!live) return;
-        proxied = url;
         ambient = trailerSource(url, direct, playsHls) ?? url;
       });
     }, SETTLE_MS);

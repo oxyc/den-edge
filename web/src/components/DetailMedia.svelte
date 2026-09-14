@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
-  import { directTrailer, nativeHls, trailerSource, trailerURLs } from '../lib/reel';
+  import { directTrailer, hlsURL, nativeHls, trailerSource, trailerURLs } from '../lib/reel';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
   let {
@@ -191,6 +191,16 @@
     sound = false;
     touched = false;
     if (!play) return;
+    // Where the browser needs MSE, the source is known from the play URL alone — reel resolves
+    // behind `/hls`. Asking `/direct` first, only to learn whether a master exists, put a round trip
+    // and a yt-dlp resolve in front of every trailer with the element held empty for both. The one
+    // case it ruled out — a trailer with no master — is a 404 the error path already reads as "fall
+    // back to reel's own file".
+    if (!playsHls) {
+      upgraded = hlsURL(play);
+      resolved = true;
+      return;
+    }
     let live = true;
     // Capped, because nothing plays until this settles: a reel that hangs should cost a couple of
     // seconds and then its own copy, rather than the trailer.
