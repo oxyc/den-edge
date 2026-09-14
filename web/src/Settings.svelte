@@ -12,6 +12,7 @@
   import { fetchRoutes, type Routes } from './lib/routes';
   import { denAddonOf } from './lib/scout';
   import { clearTmdbCache } from './lib/tmdbCache';
+  import tmdbLogo from './assets/tmdb-logo.svg';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
   let { link, session }: { link: Link; session: LibrarySession } = $props();
@@ -394,11 +395,29 @@
   <!-- TMDB's terms require the credit wherever its data is shown, so it sits outside everything above: it holds
        whether or not this browser can open a library, since every page here is named by TMDB either way. -->
   <h2>Credits</h2>
+  <a
+    class="tmdb"
+    href="https://www.themoviedb.org"
+    target="_blank"
+    rel="noreferrer noopener"
+    aria-label="The Movie Database (TMDB)"
+  >
+    <img src={tmdbLogo} alt="" width="170" height="14" />
+  </a>
   <p class="sub">
     This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved
     by TMDB.
     <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer noopener">themoviedb.org</a
     >
+  </p>
+  <!-- Movie of the Night's terms (TERMS.md §4) ask for this statement and link wherever its data reaches users:
+       den-atlas leads each service's Top 10 and New rows, and ranks the billboard, with it. -->
+  <p class="sub">
+    Streaming availability information is provided by
+    <a href="https://www.movieofthenight.com/about/api" target="_blank" rel="noreferrer noopener"
+      >Streaming Availability API by Movie of the Night</a
+    >
+    and by JustWatch.
   </p>
 </section>
 
@@ -416,6 +435,18 @@
   h2 {
     margin: 32px 0 6px;
     font-size: 18px;
+  }
+
+  /* TMDB's logo, as its terms ask for beside the credit, at the height the TV app draws it relative to its text. */
+  .tmdb {
+    display: inline-block;
+    margin: 6px 0 10px;
+  }
+
+  .tmdb img {
+    display: block;
+    block-size: 14px;
+    inline-size: auto;
   }
 
   .sub {
