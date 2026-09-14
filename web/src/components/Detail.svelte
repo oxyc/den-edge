@@ -76,7 +76,8 @@
     onwatchlist: (title: Title, on: boolean) => void;
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
-    onplay: (title: Title, season?: number, episode?: number) => void;
+    /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
+    onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     onselect: (title: Title) => void;
@@ -175,7 +176,8 @@
   function playEpisode(number: number) {
     const d = untrack(() => detail),
       picked = untrack(() => displayedSeason);
-    if (d && picked !== null) (onplayhere ?? onplay)(d.title, picked, number);
+    // A guest has neither, so there is nothing to start and the episode row simply does not act.
+    if (d && picked !== null) (onplayhere ?? onplay)?.(d.title, picked, number);
   }
 </script>
 
@@ -252,7 +254,7 @@
       {#if continuing}
         <button
           class="continue"
-          onclick={() => (onplayhere ?? onplay)(d.title, target?.season, target?.episode)}
+          onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
         >
           <DetailIcon name="play" filled /><span
             ><strong>{continueLabel}</strong>
@@ -276,7 +278,7 @@
           onwatchlist={(on) => onwatchlist(d.title, on)}
           onseen={(on) => onseen(d.title, on)}
           onreact={(reaction) => onreact(d.title, reaction)}
-          onplay={() => onplay(d.title, target?.season, target?.episode)}
+          onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
           onplayhere={onplayhere
             ? () => onplayhere(d.title, target?.season, target?.episode)
             : undefined}
@@ -310,7 +312,9 @@
       onplay={onplayhere
         ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
         : undefined}
-      onplaytv={() => onplay(d.title, sourceCoord?.season, sourceCoord?.episode)}
+      onplaytv={onplay
+        ? () => onplay(d.title, sourceCoord?.season, sourceCoord?.episode)
+        : undefined}
     />
   </div>
   <DetailReactions

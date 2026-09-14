@@ -25,6 +25,7 @@ export interface Shared {
 
 const STORAGE_KEY = 'den.links';
 const SHARED_KEY = 'den.shared';
+const BROWSING_KEY = 'den.browsing';
 
 function isShared(value: unknown): value is Shared {
   const v = value as Partial<Shared> | null;
@@ -79,10 +80,32 @@ function writeShared(list: Shared[], storage: Storage | undefined = globalThis.l
   }
 }
 
+/** Whether this browser has chosen to look around without pairing. */
+export function readBrowsing(storage: Storage | undefined = globalThis.localStorage): boolean {
+  try {
+    return storage?.getItem(BROWSING_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeBrowsing(storage: Storage | undefined = globalThis.localStorage): void {
+  try {
+    storage?.setItem(BROWSING_KEY, '1');
+  } catch {
+    // Nothing persists in this browser, so the invitation returns next visit. The visit itself is unaffected.
+  }
+}
+
 class Links {
   list = $state<Link[]>(readLinks());
   /** The devices this browser gave its library to. */
   shared = $state<Shared[]>(readShared());
+  /**
+   * Set once the visitor dismisses the invitation to pair, and remembered: the invitation belongs to a first
+   * visit, not to every load. Pairing stays reachable from Settings afterwards, so dismissing costs nothing.
+   */
+  browsing = $state<boolean>(readBrowsing());
   /** The TV a link was forgotten for because it reset its library key, until this browser links again. */
   moved = $state<string | null>(null);
 
@@ -104,6 +127,12 @@ class Links {
     ];
     this.moved = null;
     writeLinks(this.list);
+  }
+
+  /** Look around without pairing. */
+  browse(): void {
+    this.browsing = true;
+    writeBrowsing();
   }
 
   /** Remember a device this browser paired and handed the library to. */

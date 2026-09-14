@@ -23,7 +23,8 @@
     episode?: number;
     active: boolean;
     onplay?: (filename: string) => void;
-    onplaytv: () => void;
+    /** Send it to the linked TV; absent for a guest, who has no TV to send to. */
+    onplaytv?: () => void;
   } = $props();
   let sources = $state<TitleSource[] | null | undefined>();
   let open = $state(false),
@@ -98,7 +99,7 @@
 {#if open}
   <div id={panelId} bind:this={panel} class="source-panel">
     {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
-    <button class="text-button" onclick={onplaytv}>Play on TV</button>
+    {#if onplaytv}<button class="text-button" onclick={onplaytv}>Play on TV</button>{/if}
     {#if !scout}<p class="note">
         Add Den Scout in <a href="#settings">Settings</a> to browse sources.
       </p>

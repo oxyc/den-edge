@@ -14,7 +14,12 @@ export class LibrarySession {
   private refreshing?: Promise<void>;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
   private early?: Promise<Routes> = fetchRoutes();
-  constructor(private readonly key: string) {
+  /**
+   * A session with no key never opens a library: `log` is null from the outset and stays there. That is the
+   * guest — someone browsing without having paired — and it is the whole of the difference, because
+   * `routes()` is keyless and still answers, which is what service discovery needs.
+   */
+  constructor(private readonly key: string | null) {
     this.opened = this.refresh().then(() => this.log ?? null);
   }
 
@@ -30,6 +35,11 @@ export class LibrarySession {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
       try {
+        // No key, no library — and nothing to retry, unlike an open that failed.
+        if (this.key === null) {
+          this.log = null;
+          return;
+        }
         if (!this.log) {
           this.log = await LibraryLog.open(this.key);
           if (this.log) this.changed(true);
@@ -51,6 +61,8 @@ export class LibrarySession {
   }
 
   start(onMoved: () => void): () => void {
+    // Nothing to poll for, and no library that could move out from under this browser.
+    if (this.key === null) return () => undefined;
     let disposed = false;
     const refresh = async () => {
       if (document.hidden || disposed) return;

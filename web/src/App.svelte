@@ -8,8 +8,9 @@
 
   $effect(() => {
     if (links.current) preloadSyncPolicy();
-    // Pairing, and the curve it runs on, load only for a browser that isn't paired yet.
-    else void LinkScreen.load();
+    // Pairing, and the curve it runs on, load only for a browser that isn't paired yet and hasn't already
+    // chosen to look around without it.
+    else if (!links.browsing) void LinkScreen.load();
   });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
@@ -41,6 +42,10 @@
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
       <RoutedLibrary link={links.current} {query} onchange={(next) => (route = next)} />
     {/key}
+  {:else if links.browsing}
+    <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
+         absent case the components already model. -->
+    <RoutedLibrary link={null} {query} onchange={(next) => (route = next)} />
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {/if}

@@ -6,24 +6,40 @@
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
   import type { Route } from './lib/route';
-  import { SettingsScreen } from './lib/screens.svelte';
-  let { link, query, onchange }: { link: Link; query: string; onchange: (route: Route) => void } =
-    $props();
-  const session = untrack(() => new LibrarySession(link.libraryKey));
-  onMount(() => session.start(() => links.forgetMoved(link)));
+  import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
+  let {
+    link,
+    query,
+    onchange,
+  }: { link: Link | null; query: string; onchange: (route: Route) => void } = $props();
+  const session = untrack(() => new LibrarySession(link?.libraryKey ?? null));
+  onMount(() =>
+    session.start(() => {
+      if (link) links.forgetMoved(link);
+    }),
+  );
 </script>
 
 <Router
   onchange={(route) => {
-    if (route.page === 'settings') void SettingsScreen.load();
+    // With no library there are no keys or plugins to show, so Settings is where pairing lives.
+    if (route.page === 'settings') void (link ? SettingsScreen.load() : LinkScreen.load());
     onchange(route);
   }}
 >
   {#snippet children(route, active)}
-    {#if route.page === 'settings' && !SettingsScreen.current}
-      <Loading label="Loading" page />
-    {:else if route.page === 'settings'}
-      <SettingsScreen.current {link} {session} />
+    {#if route.page === 'settings'}
+      {#if link}
+        {#if SettingsScreen.current}
+          <SettingsScreen.current {link} {session} />
+        {:else}
+          <Loading label="Loading" page />
+        {/if}
+      {:else if LinkScreen.current}
+        <LinkScreen.current />
+      {:else}
+        <Loading label="Loading" page />
+      {/if}
     {:else}
       <Library {link} {session} {route} {active} {query} />
     {/if}

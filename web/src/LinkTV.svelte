@@ -120,6 +120,9 @@
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>
   {/if}
+  <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
+       remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
+  <button type="button" class="quiet" onclick={() => links.browse()}>Look around instead</button>
 </section>
 
 <style>
@@ -234,5 +237,20 @@
 
   .error {
     color: var(--danger);
+  }
+
+  .quiet {
+    margin-top: 20px;
+    padding: 10px 16px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .quiet:hover {
+    color: var(--fg);
   }
 </style>

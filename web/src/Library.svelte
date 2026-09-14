@@ -66,7 +66,8 @@
     session,
     query = '',
   }: {
-    link: Link;
+    /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
+    link: Link | null;
     route: Route;
     active: boolean;
     session: LibrarySession;
@@ -123,14 +124,17 @@
   $effect(() => {
     void session.settingsRevision;
     const opened = log;
-    if (!opened) return;
+    // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
+    // the discovery below: atlas gives them rows and reel gives them trailers, both on this origin.
+    if (opened === undefined) return;
     let disposed = false;
     let stopDiscovery: (() => void) | undefined;
     // Only the shared settings revision and opened log trigger reconfiguration.
     // Service state below is an output, not a dependency of this effect.
     untrack(() => {
-      tmdbKey = readApiKey(opened.settings('keys'), 'tmdb') ?? '';
-      if (tmdbKey) {
+      tmdbKey = opened ? (readApiKey(opened.settings('keys'), 'tmdb') ?? '') : '';
+      // A key only ever comes from a library, so this is the paired case; naming needs the log itself.
+      if (tmdbKey && opened) {
         const key = tmdbKey;
         const raw = applyLog(emptyLibrary(), opened.rows());
         const priority = shelfTitleRefs(raw, opened.rows());
@@ -148,33 +152,42 @@
           });
         });
       } else shelvesReady = true;
-      plugins = readPlugins(opened.settings('plugins'));
+      plugins = opened ? readPlugins(opened.settings('plugins')) : [];
       const [key, installed] = [tmdbKey, plugins];
-      // Where the last visit found the addons, used until this visit's discovery answers.
+      // Where the last visit found the addons, used until this visit's discovery answers. A guest keeps
+      // nothing between visits — what is kept lives in the library — so there is nothing to restore.
       let live = false;
-      void opened.kept<Services>(SERVICES).then((saved) => {
-        if (disposed || live || !saved) return;
-        ({ routes, scout, atlas, reel, remux } = saved);
-        availability.connect(saved.scout, key);
-      });
+      if (opened)
+        void opened.kept<Services>(SERVICES).then((saved) => {
+          if (disposed || live || !saved) return;
+          ({ routes, scout, atlas, reel, remux } = saved);
+          availability.connect(saved.scout, key);
+        });
       void (async () => {
         const foundRoutes = await session.routes();
         if (disposed) return;
         live = true;
         routes = foundRoutes;
         stopDiscovery = discoverServices(installed, foundRoutes, {
-          scout: (found) => {
-            scout = found;
-            availability.connect(found, key);
-          },
+          // A guest is handed neither publisher, so those probes are never issued and the playback
+          // services cannot be discovered at all. Structural, rather than a callback someone has to
+          // remember to leave out.
+          ...(opened
+            ? {
+                scout: (found: Addon | null) => {
+                  scout = found;
+                  availability.connect(found, key);
+                },
+                remux: (found: string | null) => {
+                  remux = found;
+                },
+              }
+            : {}),
           atlas: (found) => {
             atlas = found?.base ?? null;
           },
           reel: (found) => {
             reel = found?.base ?? null;
-          },
-          remux: (found) => {
-            remux = found;
           },
         });
       })();
@@ -252,7 +265,10 @@
     try {
       const saved =
         journal && row.kind === 'set' ? await log.writeAction(row) : await log.write(row);
-      if (log.moved) return links.forgetMoved(link);
+      if (log.moved) {
+        if (link) links.forgetMoved(link);
+        return;
+      }
       if (!saved) failure = SAVE_FAILED;
       else if (log.pendingActions > 0)
         notice =
@@ -351,24 +367,34 @@
     }
   }
 
-  /** Start the title on the linked TV, as the TV's own Play would — it picks the source. */
-  async function play(title: Title, season?: number, episode?: number) {
-    busy = true;
-    failure = null;
-    notice = null;
-    const sent = await sendToTV(link, {
-      type: 'play',
-      tmdbId: title.id,
-      mediaType: title.type,
-      title: title.title,
-      season,
-      episode,
-    });
-    busy = false;
-    if (sent)
-      notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
-    else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
-  }
+  /**
+   * Start the title on the linked TV, as the TV's own Play would — it picks the source.
+   *
+   * Undefined for a guest, and that is the enforcement: `sendToTV` needs the link's own keys, so with no
+   * link there is nothing to pass and this cannot be constructed at all. A missing callback, which the
+   * type checker insists on, rather than a callback that declines at runtime.
+   */
+  const play = $derived(
+    link
+      ? async (title: Title, season?: number, episode?: number) => {
+          busy = true;
+          failure = null;
+          notice = null;
+          const sent = await sendToTV(link, {
+            type: 'play',
+            tmdbId: title.id,
+            mediaType: title.type,
+            title: title.title,
+            season,
+            episode,
+          });
+          busy = false;
+          if (sent)
+            notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
+          else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
+        }
+      : undefined,
+  );
 
   /**
    * Play in this browser, through den-remux: needs scout, for the release, and TMDB, for its IMDb id. A series with
@@ -469,7 +495,8 @@
     warmTrailer(title);
     navigate(titleHref(title));
   };
-  const select = $derived(log ? open : undefined);
+  /** Opening a title is browsing, not a library action — a guest does it as much as anyone. */
+  const select = open;
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;
@@ -747,9 +774,9 @@
   }
 </script>
 
-{#if log === undefined}
+{#if link && log === undefined}
   <Loading label="Loading your library" page />
-{:else if log === null || !library}
+{:else if link && (log === null || !library)}
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its
     library key, unlink in
@@ -757,7 +784,13 @@
   </p>
 {:else if route.page !== 'library' && !tmdbKey}
   <p class="note">
-    This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a>.
+    {#if link}
+      This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a
+      >.
+    {:else}
+      Title pages need a TMDB key, which arrives with a paired Apple TV.
+      <a href="#settings">Pair one</a> to see them.
+    {/if}
   </p>
 {:else if page && !DetailScreen.current}
   <Loading label="Loading" page />
@@ -799,8 +832,10 @@
 {:else if route.page === 'search'}
   <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} onselect={select} />
 {:else}
-  {@const resume = continueWatching(library).filter((e) => !facet || e.title.type === facet)}
-  {@const saved = watchlist(library).filter((t) => !facet || t.type === facet)}
+  {@const resume = library
+    ? continueWatching(library).filter((e) => !facet || e.title.type === facet)
+    : []}
+  {@const saved = library ? watchlist(library).filter((t) => !facet || t.type === facet) : []}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
     <Billboard
