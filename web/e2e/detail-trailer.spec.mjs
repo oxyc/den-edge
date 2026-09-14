@@ -355,7 +355,7 @@ test('wide mobile trailer and its swipe snapshot have opaque letterboxing', asyn
 
 for (const width of [320, 1280])
   for (const exact of [true, false])
-    test(`Trailer opens YouTube at ${width}px: ${exact ? 'exact video' : 'search fallback'}`, async () => {
+    test(`Trailer at ${width}px: ${exact ? 'plays the known video here' : 'searches YouTube'}`, async () => {
       const browser = await chromium.launch({
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
       });
@@ -379,22 +379,42 @@ for (const width of [320, 1280])
               },
             }),
           );
+        // Both hosts: the link goes to youtube.com, and the embed's own frame loads from
+        // youtube-nocookie.com. This fixture lets nothing unmocked reach the network.
         await page
           .context()
-          .route('https://www.youtube.com/**', (r) =>
+          .route(/^https:\/\/www\.youtube(-nocookie)?\.com\//, (r) =>
             r.fulfill({ contentType: 'text/html', body: '<title>YouTube fixture</title>' }),
           );
         await page.goto('http://127.0.0.1:5198/test/detail-trailer.html?browser-play');
-        const trailer = page.getByRole('link', { name: 'Trailer on YouTube' });
+        // Named for what pressing it does: with a video id known, it plays here rather than leaving.
+        const trailer = page.getByRole('link', { name: exact ? 'Trailer' : 'Trailer on YouTube' });
         await expect(trailer).toBeVisible();
         expect((await trailer.locator('span').boundingBox()).width).toBeGreaterThan(30);
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
         const url = exact
           ? 'https://www.youtube.com/watch?v=fixture-key'
           : 'https://www.youtube.com/results?search_query=The%20Movie%20official%20trailer';
+        // The link itself is unchanged either way, so a middle-click or a long press still opens it.
         await expect(trailer).toHaveAttribute('href', url);
         await expect(page.locator('iframe')).toHaveCount(0);
-        if (width < 760) {
+        if (exact) {
+          // YouTube's embed, in place. This is what a trailer this page cannot play itself — refused
+          // by the guest cap, no HLS master, a browser that plays neither — falls back to.
+          await trailer.click();
+          const embed = page.locator('iframe');
+          await expect(embed).toHaveCount(1);
+          await expect(embed).toHaveAttribute(
+            'src',
+            /^https:\/\/www\.youtube-nocookie\.com\/embed\/fixture-key\?/,
+          );
+          await expect(page).toHaveURL(/detail-trailer\.html\?browser-play$/);
+          // And the way out of an embed that refuses to play is offered inside it.
+          await expect(page.getByRole('link', { name: 'YouTube, in a new tab' })).toHaveAttribute(
+            'href',
+            url,
+          );
+        } else if (width < 760) {
           await expect(trailer).not.toHaveAttribute('target');
           await trailer.click();
           await expect(page).toHaveURL(url);
