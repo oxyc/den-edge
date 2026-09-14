@@ -15,8 +15,21 @@ use std::time::Instant;
 /// with room to spare.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
 
-/// The TV's kill-switch and update gate, unchanged from the Worker.
-const CONFIG: &str = r#"{"minSupportedVersion":"0.1.0","recommendedVersion":"0.1.0","features":{"addonModule":true,"aiReco":false}}"#;
+/// The TV's kill-switch and update gate, and the public client configuration a browser needs to offer what it
+/// can offer. Nothing in it is a secret: it is what any client of this box may know about itself.
+fn config(state: &AppState) -> String {
+    let mut config = json!({
+        "minSupportedVersion": "0.1.0",
+        "recommendedVersion": "0.1.0",
+        "features": { "addonModule": true, "aiReco": false },
+    });
+    // SIMKL's PIN flow runs in the browser and needs only the app's public client id. Left out when unset, so
+    // the web app hides a sign-in it could not complete rather than offering one that fails.
+    if let Some(id) = &state.simkl_client_id {
+        config["simklClientId"] = Value::String(id.clone());
+    }
+    config.to_string()
+}
 
 pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let started = Instant::now();
@@ -154,7 +167,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "/config" => raw_json(StatusCode::OK, Body::from(CONFIG), false),
+        "/config" => raw_json(StatusCode::OK, Body::from(config(state)), false),
         // The web app's public name gets the public table when the deployment built one: a visitor there has no
         // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
         // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
@@ -238,13 +251,16 @@ impl Face {
         }
     }
 
-    /// `/health` and `/version` answer on every name; the device routes, `/config` and `/metrics` only where
-    /// devices call; the web app's files only where browsers load it. The web app is a device too: the routes it
-    /// calls on its own origin — pairing, the library log, sending to the TV — answer on its name as well, where
-    /// they sit behind Access. What only a TV does (draining its inbox, unlinking, `/config`) stays off it.
+    /// `/health`, `/version`, `/routes` and `/config` answer on every name; the device routes and `/metrics`
+    /// only where devices call; the web app's files only where browsers load it. The web app is a device too:
+    /// the routes it calls on its own origin — pairing, the library log, sending to the TV — answer on its name
+    /// as well, where they sit behind Access. What only a TV does (draining its inbox, unlinking) stays off it.
+    ///
+    /// `/config` was a TV's alone until the web app needed the same public client configuration — the SIMKL
+    /// client id it must have to offer a sign-in. It carries no secret and never has.
     fn serves(self, path: &str) -> bool {
         let device = ["/link", "/inbox", "/pair/", "/sync/", "/lib/"].iter().any(|p| path.starts_with(p))
-            || matches!(path, "/config" | "/metrics");
+            || path == "/metrics";
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
         // TMDB through this origin answers on every name: a browser asks it on the public one, and a TV asks
@@ -252,7 +268,7 @@ impl Face {
         let tmdb = path.starts_with("/tmdb/");
         match (self, path) {
             (Face::Invalid, _) => false,
-            (_, "/health" | "/version" | "/routes") | (Face::Both, _) => true,
+            (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
             _ if tmdb => true,
             (Face::Api, _) => device,
             (Face::Web, _) => !device || web_app_calls,
@@ -737,9 +753,12 @@ pub mod tests {
         };
         // The web app's name: the app and the routes it calls, and nothing only a TV does.
         assert_eq!(status("d.oxy.fi", "GET", "/").await, StatusCode::OK);
-        for path in ["/config", "/inbox/drain", "/metrics"] {
+        for path in ["/inbox/drain", "/metrics"] {
             assert_eq!(status("d.oxy.fi", "GET", path).await, StatusCode::NOT_FOUND, "{path} on d");
         }
+        // The public client configuration, which the web app needs as much as a TV does and which carries no
+        // secret: without it here, a browser on this name could not tell what this box lets it offer.
+        assert_eq!(status("d.oxy.fi", "GET", "/config").await, StatusCode::OK);
         assert_eq!(status("d.oxy.fi", "DELETE", "/link").await, StatusCode::NOT_FOUND);
         assert_ne!(
             status("d.oxy.fi", "POST", "/pair/open").await,
@@ -763,6 +782,24 @@ pub mod tests {
         assert_eq!(status("192.168.86.193:8094", "GET", "/").await, StatusCode::OK);
         // A name with a port was refused when parsed, so it does not name the API half.
         assert_eq!(status("bad:8443", "GET", "/").await, StatusCode::OK);
+    }
+
+    /// The browser needs the same public client configuration a TV does. SIMKL's PIN flow runs in the browser
+    /// and needs only the app's client id, which is not a secret; unset, it is absent rather than empty, so the
+    /// app hides a sign-in it could not complete instead of offering one that fails.
+    #[tokio::test]
+    async fn config_carries_public_client_configuration() {
+        let mut h = split_harness();
+        Arc::get_mut(&mut h.state).unwrap().simkl_client_id = Some("simkl-public-id".to_owned());
+        let answer = h.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let config = body_json(answer).await;
+        assert_eq!(config["simklClientId"], "simkl-public-id");
+        assert_eq!(config["minSupportedVersion"], "0.1.0", "the kill-switch is untouched");
+
+        let plain = split_harness();
+        let without = body_json(plain.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await).await;
+        assert!(without.get("simklClientId").is_none(), "unset is absent, not empty");
     }
 
     /// Addresses come from `/routes` alone now (den #16): `/config` is the kill-switch and the update gate.
@@ -916,7 +953,8 @@ pub mod tests {
             assert_eq!(h.send("GET", "/", None, &[("host", host)]).await.status(), StatusCode::OK);
             assert_eq!(
                 h.send("GET", "/config", None, &[("host", host)]).await.status(),
-                StatusCode::NOT_FOUND
+                StatusCode::OK,
+                "public client configuration answers on the web app's name too"
             );
         }
         for host in ["d-api.oxy.fi:bad", "d-api.oxy.fi:999999", "user@d-api.oxy.fi"] {

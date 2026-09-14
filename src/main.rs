@@ -90,6 +90,9 @@ pub struct AppState {
     pub tmdb_daily_max: Option<u32>,
     /// Today (as a day number) and what has been spent of it.
     pub tmdb_spent: Mutex<(u64, u32)>,
+    /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
+    /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
+    pub simkl_client_id: Option<String>,
 }
 
 impl AppState {
@@ -123,6 +126,7 @@ impl AppState {
             tmdb_cache_dir: None,
             tmdb_daily_max: None,
             tmdb_spent: Mutex::new((0, 0)),
+            simkl_client_id: None,
         }
     }
 
@@ -184,6 +188,7 @@ async fn main() {
     });
     // Lent to a device with no key of its own. The client and the cache directory exist only when there is a
     // key to lend, so a deployment without one carries no TLS stack and no directory it never writes to.
+    state.simkl_client_id = env_opt("SIMKL_CLIENT_ID");
     state.tmdb_key = env_opt("TMDB_KEY");
     state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
     if state.tmdb_key.is_some() {
