@@ -19,14 +19,19 @@ describe('playable', () => {
     );
     expect(await playable(android)).toEqual({
       h264: 0x33,
+      h264High10: 0x33,
       hevcMain: 153,
       hevcMain10: 153,
       hevcHighTier: 153,
       hdr: true,
+      eac3: true,
+      dolbyVision: { p5: true, p8: true },
     });
     expect(asked.map((v) => v.contentType)).toEqual([
       'video/mp4; codecs="hvc1.2.4.H153.B0"',
       'video/mp4; codecs="hvc1.2.4.L153.B0"',
+      'video/mp4; codecs="dvh1.05.06"',
+      'video/mp4; codecs="dvh1.08.06"',
     ]);
     expect(asked[1]).toMatchObject({ transferFunction: 'pq', width: 3840 });
   });
@@ -57,11 +62,58 @@ describe('playable', () => {
     );
     expect(await playable(firefox)).toEqual({
       h264: 0x33,
+      h264High10: 0x33,
       hevcMain: 0,
       hevcMain10: 0,
       hevcHighTier: 0,
       hdr: false,
+      eac3: false,
+      dolbyVision: { p5: false, p8: false },
     });
+  });
+
+  it('finds H.264 High 10, E-AC-3 and Dolby Vision as Safari, Chrome and Firefox answer', async () => {
+    const safari: Probe = {
+      ...browser(
+        (codec) => !codec.startsWith('avc1.6E'),
+        async () => true,
+      ),
+      apple: true,
+    };
+    expect(await playable(safari)).toMatchObject({
+      h264: 0x33,
+      h264High10: 0,
+      eac3: true,
+      dolbyVision: { p5: true, p8: true },
+    });
+    const chrome = browser(
+      (codec) => codec.startsWith('avc1') || codec.startsWith('hvc1'),
+      async () => true,
+    );
+    expect(await playable(chrome)).toMatchObject({
+      h264High10: 0x33,
+      hevcMain10: 153,
+      eac3: false,
+      dolbyVision: { p5: false, p8: false },
+    });
+    const firefox = browser(
+      (codec) => codec.startsWith('avc1.64') || codec === 'mp4a.40.2',
+      async () => true,
+    );
+    expect(await playable(firefox)).toMatchObject({
+      h264: 0x33,
+      h264High10: 0,
+      eac3: false,
+      dolbyVision: { p5: false, p8: false },
+    });
+  });
+
+  it('believes Media Capabilities over a Dolby Vision type check, profile by profile', async () => {
+    const hopeful = browser(
+      () => true,
+      async (video) => !video.contentType.includes('dvh1.05'),
+    );
+    expect((await playable(hopeful)).dolbyVision).toEqual({ p5: false, p8: true });
   });
 
   it('stops at the level the decoder tops out at', async () => {

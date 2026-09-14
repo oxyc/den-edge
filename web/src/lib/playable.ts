@@ -1,10 +1,12 @@
 // What this browser can decode, sent with every session so den-remux can tell whether a release plays here as it is
-// or needs converting (oxyc/den-remux `playable`): the highest level it takes of H.264, 8-bit and 10-bit HEVC, and
-// whether it decodes HDR (PQ).
+// or needs converting (oxyc/den-remux `playable`): the highest level it takes of H.264 (8-bit and High 10), 8-bit and
+// 10-bit HEVC, whether it decodes HDR (PQ) and Dolby Vision, and whether it plays E-AC-3 audio as it is.
 
 export interface Playable {
   /** H.264's highest `level_idc` (0x33 is 5.1); 0 for none. */
   h264: number;
+  /** H.264 High 10's highest `level_idc`, the 10-bit profile some anime encodes use; 0 for none. */
+  h264High10: number;
   /** 8-bit HEVC's highest `general_level_idc` (level × 30: 153 is 5.1); 0 for none. */
   hevcMain: number;
   /** 10-bit HEVC's, which every HDR release is. */
@@ -12,6 +14,13 @@ export interface Playable {
   /** HEVC's High tier, which a UHD Blu-ray remux often is. */
   hevcHighTier: number;
   hdr: boolean;
+  /** Whether Dolby Digital Plus (E-AC-3) plays here. */
+  eac3: boolean;
+  /**
+   * Dolby Vision profiles: 5 has no HDR10 base layer, so a player without it shows wrong colours; 8 falls back to
+   * HDR10 where it isn't decoded.
+   */
+  dolbyVision: { p5: boolean; p8: boolean };
 }
 
 /** Levels 3.1, 4.0, 4.1, 5.0 and 5.1: 720p up to 4K. */
@@ -21,7 +30,7 @@ const HEVC_LEVELS = [93, 120, 123, 150, 153];
 const HEVC_HIGH_LEVELS = [120, 123, 150, 153];
 
 export interface Probe {
-  /** Whether a `video/mp4; codecs=…` type plays here. */
+  /** Whether a `video/mp4; codecs=…` or `audio/mp4; codecs=…` type plays here. */
   supports: (type: string) => boolean;
   /** Media Capabilities' answer for a video configuration; absent where the browser has none. */
   decodes?: (video: VideoConfiguration) => Promise<boolean>;
@@ -60,21 +69,36 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
   const highTier = probe.apple ? 0 : highest(HEVC_HIGH_LEVELS, (level) => `hvc1.2.4.H${level}.B0`);
   const uhd = { width: 3840, height: 2160, bitrate: 40_000_000, framerate: 24 };
   const tierCodec = `video/mp4; codecs="hvc1.2.4.H${highTier}.B0"`;
+  const hevcHighTier =
+    highTier > 0 && (await decodes(probe, { contentType: tierCodec, ...uhd })) ? highTier : 0;
+  const hdr =
+    hevcMain10 > 0 &&
+    (await decodes(probe, {
+      contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0"',
+      ...uhd,
+      transferFunction: 'pq',
+      colorGamut: 'rec2020',
+      hdrMetadataType: 'smpteSt2086',
+    }));
+  // Dolby Vision rides on 10-bit HEVC. Chrome says no to the type outright; where a browser says yes, Media
+  // Capabilities is asked too, as it is for the High tier. Level 06 is 4K at 24 frames.
+  const dolby = async (profile: string) => {
+    const contentType = `video/mp4; codecs="dvh1.${profile}.06"`;
+    return (
+      hevcMain10 > 0 &&
+      probe.supports(contentType) &&
+      (await decodes(probe, { contentType, ...uhd }))
+    );
+  };
   return {
     h264: highest(H264_LEVELS, (level) => `avc1.6400${level.toString(16)}`),
+    h264High10: highest(H264_LEVELS, (level) => `avc1.6E00${level.toString(16)}`),
     hevcMain: highest(HEVC_LEVELS, (level) => `hvc1.1.6.L${level}.B0`),
     hevcMain10,
-    hevcHighTier:
-      highTier > 0 && (await decodes(probe, { contentType: tierCodec, ...uhd })) ? highTier : 0,
-    hdr:
-      hevcMain10 > 0 &&
-      (await decodes(probe, {
-        contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0"',
-        ...uhd,
-        transferFunction: 'pq',
-        colorGamut: 'rec2020',
-        hdrMetadataType: 'smpteSt2086',
-      })),
+    hevcHighTier,
+    hdr,
+    eac3: probe.supports('audio/mp4; codecs="ec-3"'),
+    dolbyVision: { p5: await dolby('05'), p8: await dolby('08') },
   };
 }
 
