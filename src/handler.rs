@@ -435,10 +435,34 @@ pub fn client_ip(state: &AppState, req: &Request) -> String {
             .or_else(|| header_value(req, "x-forwarded-for").and_then(|v| v.rsplit(',').next()))
             .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
         if let Some(visitor) = reported {
-            return visitor.to_string();
+            return rate_limit_key(visitor);
         }
     }
-    peer.to_string()
+    rate_limit_key(peer)
+}
+
+/// The address as a RATE-LIMIT bucket: an IPv4 host, or an IPv6 /64.
+///
+/// Every per-IP limit in this service — pair minting, pair opening, the inbox, the relay, the TMDB proxy —
+/// is only as good as what it counts. A residential IPv6 customer is handed a /64 as a matter of course,
+/// which is 18 quintillion addresses: one visitor can spend a fresh source address on every request and
+/// never meet a limit keyed on the full address. Anything narrower than /64 is not a person, and anything
+/// wider would put unrelated households in one bucket.
+///
+/// IPv4 is left whole: a /24 there is a genuinely different set of people.
+pub fn rate_limit_key(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => {
+            let o = v6.octets();
+            // The routing prefix, zeroed below /64, written back as an address so the key stays readable
+            // in a log: 2001:db8:1:2::/64.
+            let prefix = std::net::Ipv6Addr::from([
+                o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+            format!("{prefix}/64")
+        }
+    }
 }
 
 fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
@@ -454,6 +478,23 @@ pub fn valid_inbox_key(key: &str) -> bool {
 pub mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A residential IPv6 customer gets a /64 — 18 quintillion addresses — so a limit keyed on the full
+    /// address counts nothing at all: one visitor spends a fresh source address per request and never meets
+    /// it. Every per-IP limit here (pair mint, pair open, inbox, relay, TMDB) depends on this bucketing.
+    #[test]
+    fn an_ipv6_visitor_cannot_walk_out_of_its_own_rate_limit() {
+        let key = |s: &str| rate_limit_key(s.parse().unwrap());
+        let first = key("2001:db8:1:2:3:4:5:6");
+        assert_eq!(first, key("2001:db8:1:2:ffff:ffff:ffff:ffff"), "same /64, same bucket");
+        assert_eq!(first, key("2001:db8:1:2::1"));
+        assert_ne!(first, key("2001:db8:1:3::1"), "a different /64 is a different customer");
+        assert_eq!(first, "2001:db8:1:2::/64");
+
+        // IPv4 stays whole: a /24 there is a genuinely different set of people.
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_ne!(key("203.0.113.7"), key("203.0.113.8"));
+    }
 
     pub fn temp_dir() -> std::path::PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
