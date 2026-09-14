@@ -554,9 +554,15 @@
    * TMDB is asked. Everything on screen has been named through `session.displays`, so the row or
    * billboard the viewer just pressed is holding exactly this.
    */
-  const pageSeed = $derived(
-    page ? session.displays.find((t) => t.type === page.type && t.id === page.id) : undefined,
-  );
+  const pageSeed = $derived.by(() => {
+    const opening = page;
+    if (!opening) return undefined;
+    const here = (t: Title) => t.type === opening.type && t.id === opening.id;
+    // The billboard, then anything named through the library. A browse row's titles are loaded
+    // inside the row itself and are not reachable from here, so a press on one of those still opens
+    // on the placeholder — worth doing, but not worth threading a callback through every card for.
+    return featured.find(here) ?? session.displays.find(here);
+  });
 
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
