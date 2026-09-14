@@ -95,6 +95,28 @@ pub struct AppState {
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
+    /// Guest trailer streams that may be in flight at once (`relay::GUEST_MEDIA_STREAMS`).
+    ///
+    /// The per-address budgets bound requests per minute, which is not the thing the household feels: what
+    /// hurts is several 1080p streams running at the same moment, saturating the upload the TVs also live on.
+    /// A permit is held for the life of a streamed response, so this counts what is actually flowing rather
+    /// than how often it was asked for. Members never take one.
+    pub guest_media_slots: Arc<tokio::sync::Semaphore>,
+    /// Bytes of trailer a guest may be served in a day (env `MEDIA_DAILY_MAX_BYTES`); `None` is no ceiling.
+    /// The kill switch the concurrency cap cannot be: three streams running all day is still three streams.
+    pub media_daily_max: Option<u64>,
+    /// Today (as a day number) and the guest bytes served in it.
+    ///
+    /// Behind an `Arc` because a streamed body outlives the request that started it: the counter has to
+    /// travel with the stream and be added to as the frames go out, not once when the headers do.
+    pub media_spent: Arc<Mutex<(u64, u64)>>,
+    /// Trailer sessions admitted through the media relay, by rate-limit bucket and video.
+    ///
+    /// A session is admitted once, at its master playlist (or at a first `/play` for a video nothing has
+    /// opened yet), and every request that follows belongs to that admission — segments are never refused,
+    /// because a refusal mid-playback is a stall rather than a clean fall back to the embed. A guest's
+    /// lease holds one of `guest_media_slots`, which comes back when the lease expires.
+    pub media_leases: Mutex<HashMap<String, relay::Lease>>,
 }
 
 impl AppState {
@@ -129,6 +151,10 @@ impl AppState {
             tmdb_daily_max: None,
             tmdb_spent: Mutex::new((0, 0)),
             simkl_client_id: None,
+            guest_media_slots: Arc::new(tokio::sync::Semaphore::new(relay::GUEST_MEDIA_STREAMS)),
+            media_daily_max: None,
+            media_spent: Arc::new(Mutex::new((0, 0))),
+            media_leases: Mutex::new(HashMap::new()),
         }
     }
 
@@ -193,6 +219,7 @@ async fn main() {
     state.simkl_client_id = env_opt("SIMKL_CLIENT_ID");
     state.tmdb_key = env_opt("TMDB_KEY");
     state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
+    state.media_daily_max = env_opt("MEDIA_DAILY_MAX_BYTES").and_then(|v| v.parse().ok());
     if state.tmdb_key.is_some() {
         state.tmdb_client = Some(tmdb::client());
         state.tmdb_cache_dir = Some(std::path::Path::new(&dir).join("tmdb"));

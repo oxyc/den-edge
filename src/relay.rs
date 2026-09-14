@@ -65,6 +65,133 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
     })
 }
 
+/// Guest trailer streams that may run at once. Small on purpose: the household's upload is what a
+/// stranger's stream spends, and the TVs in the house are on the other side of it.
+pub(crate) const GUEST_MEDIA_STREAMS: usize = 3;
+/// How long an admitted session stands with no request before its slot comes back. Long enough to
+/// cover the gap between segments — a player fetches one every few seconds and pauses between them —
+/// and short enough that a closed tab does not hold a slot for long.
+const LEASE_IDLE_MS: u64 = 30_000;
+/// What a refused guest is told to wait. A slot frees when someone stops watching, not on a timer, so
+/// this is a polite interval rather than a promise.
+const MEDIA_BUSY_RETRY_MS: u64 = 30_000;
+
+/// One admitted trailer session.
+///
+/// Admission is decided once — at the master playlist, or at a first `/play` for a video with nothing
+/// open — and everything that follows rides on it. A guest's lease owns one of `guest_media_slots`;
+/// dropping the lease is what returns it.
+pub struct Lease {
+    member: bool,
+    until: u64,
+    _slot: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// What admission decided.
+enum Admitted {
+    /// Play on. `guest` says whether these bytes count against the guest ceiling.
+    Yes { guest: bool },
+    /// Every guest slot is taken.
+    Busy,
+    /// Today's guest allowance is gone.
+    Spent,
+}
+
+/// The membership this request claims, if any: `<id>:<token>` as the app sends it.
+fn member_claim(req: &Request) -> Option<String> {
+    req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
+}
+
+/// The video a request is for, when it names one.
+///
+/// A master (`/hls/<id>.m3u8`) and a file (`/play/<id>.mp4`) do; a segment does not — its own URL is
+/// carried in the query, and the id never appears. So a segment is matched against whatever that
+/// address already has open, which is exactly what it belongs to.
+fn media_video(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/reel/")?;
+    let (kind, file) = rest.rsplit_once('/')?;
+    if !kind.ends_with("hls") && !kind.ends_with("play") {
+        return None;
+    }
+    file.rsplit_once('.').map(|(id, _)| id).filter(|id| !id.is_empty())
+}
+
+/// Let this request in, or say why not.
+///
+/// The first request for a video is the one that is judged: a household member is admitted free, a
+/// guest takes a slot and has to be inside the day's allowance. Everything after it — every segment,
+/// every range — belongs to that lease and is never refused, because a stall mid-trailer is worse
+/// than a clean refusal at the start, which the page turns into YouTube's embed.
+async fn admit(state: &AppState, claim: Option<&str>, bucket: &str, video: Option<&str>) -> Admitted {
+    let now = (state.clock)();
+    let key = video.map(|id| format!("{bucket}|{id}"));
+    {
+        let mut leases = crate::lock(&state.media_leases);
+        leases.retain(|_, lease| lease.until > now);
+        // A segment names no video, so it rides on anything this address has open — which is what it
+        // is a segment of. Refreshing them all keeps a playing trailer's lease alive.
+        let mut found = false;
+        for (at, lease) in leases.iter_mut() {
+            let mine = key.as_deref() == Some(at.as_str()) || (video.is_none() && at.starts_with(bucket));
+            if mine {
+                lease.until = now + LEASE_IDLE_MS;
+                found = true;
+                if key.is_some() {
+                    return Admitted::Yes { guest: !lease.member };
+                }
+            }
+        }
+        if found {
+            return Admitted::Yes { guest: true };
+        }
+    }
+    // Nothing open for this address: this is a session starting, and the only place membership is
+    // asked. Once per session, never per segment — the lease remembers the answer.
+    let member = crate::library::is_member(state, claim).await;
+    let slot = if member {
+        None
+    } else {
+        if !media_allowance_left(state) {
+            return Admitted::Spent;
+        }
+        match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
+            Ok(slot) => Some(slot),
+            Err(_) => return Admitted::Busy,
+        }
+    };
+    let mut leases = crate::lock(&state.media_leases);
+    leases.insert(
+        key.unwrap_or_else(|| format!("{bucket}|seg")),
+        Lease { member, until: now + LEASE_IDLE_MS, _slot: slot },
+    );
+    Admitted::Yes { guest: !member }
+}
+
+/// Is there anything left of today's guest allowance (env `MEDIA_DAILY_MAX_BYTES`)?
+///
+/// Read at admission only. A stream that has started is never cut off part-way: the ceiling decides
+/// whether a new trailer may begin, not whether one already playing may finish.
+fn media_allowance_left(state: &AppState) -> bool {
+    let Some(max) = state.media_daily_max else { return true };
+    let day = (state.clock)() / 86_400_000;
+    let mut spent = crate::lock(&state.media_spent);
+    if spent.0 != day {
+        *spent = (day, 0);
+    }
+    if spent.1 >= max {
+        // Once for the day, not once per refusal: a ceiling that announced itself only as a 503 to
+        // whoever asked next is a drain nobody sees until someone complains.
+        if spent.1 == max {
+            spent.1 = max + 1;
+            eprintln!(
+                "media: guest trailer allowance of {max} bytes spent — guests fall back to YouTube's embed until UTC midnight. Members are unaffected."
+            );
+        }
+        return false;
+    }
+    true
+}
+
 pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) -> Response {
     let method = req.method().clone();
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
@@ -81,7 +208,25 @@ pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) ->
         if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW) {
             return limited(wait);
         }
-        return stream(state, req, target, rid).await;
+        let video = media_video(req.uri().path()).map(str::to_owned);
+        // Read here rather than inside `admit`: an async fn holding a `&Request` is not `Send`, and
+        // this one is awaited inside the handler.
+        let claim = member_claim(&req);
+        return match admit(state, claim.as_deref(), &ip, video.as_deref()).await {
+            Admitted::Yes { guest } => stream(state, req, target, rid, guest).await,
+            // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
+            // part-way through one: that would be a stall, and a player would simply keep asking.
+            Admitted::Busy => crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("media_busy"),
+                MEDIA_BUSY_RETRY_MS,
+            ),
+            Admitted::Spent => crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("media_daily_spent"),
+                MEDIA_BUSY_RETRY_MS,
+            ),
+        };
     }
     if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
         let member =
@@ -187,7 +332,7 @@ fn media(path: &str) -> bool {
 ///
 /// It takes no in-flight slot. Those bound what is happening at once against a box of one addon, and a
 /// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
-async fn stream(state: &AppState, req: Request, target: String, rid: &str) -> Response {
+async fn stream(state: &AppState, req: Request, target: String, rid: &str, guest: bool) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [header::RANGE, header::IF_RANGE, header::IF_NONE_MATCH, header::ACCEPT_ENCODING]
         .into_iter()
@@ -211,7 +356,26 @@ async fn stream(state: &AppState, req: Request, target: String, rid: &str) -> Re
         Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
     };
     let (parts, body) = answer.into_parts();
-    let mut resp = Response::new(Body::new(body));
+    // A guest's bytes are counted as they leave, not estimated from a header: a range request, a
+    // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
+    // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling.
+    let body = if guest {
+        let spent = Arc::clone(&state.media_spent);
+        let day = (state.clock)() / 86_400_000;
+        Body::new(body.map_frame(move |frame| {
+            if let Some(data) = frame.data_ref() {
+                let mut spent = crate::lock(&spent);
+                if spent.0 != day {
+                    *spent = (day, 0);
+                }
+                spent.1 = spent.1.saturating_add(data.len() as u64);
+            }
+            frame
+        }))
+    } else {
+        Body::new(body)
+    };
+    let mut resp = Response::new(body);
     *resp.status_mut() = parts.status;
     for name in [
         header::CONTENT_TYPE,
@@ -296,6 +460,82 @@ mod tests {
         // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
         let forged = format!("{LIB}:not-the-token");
         assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Relaying `/reel` at a port nothing listens on: an admitted request reaches the fetch and fails
+    /// there (502), a refused one never gets that far (503). That is the whole distinction these need.
+    fn reel() -> Harness {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays("/reel=http://127.0.0.1:9");
+        h
+    }
+
+    /// The cap is on trailers playing at once, because that is what spends the household's upload —
+    /// not on requests, which a rate limit already bounds.
+    #[tokio::test]
+    async fn a_guest_trailer_holds_a_slot_and_the_next_guest_is_turned_away() {
+        let mut h = reel();
+        Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let first = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
+        assert_eq!(first.status(), StatusCode::BAD_GATEWAY, "admitted, and the addon is not there");
+
+        let second = h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[]).await;
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE, "the only slot is taken");
+        // Refused at the start of a trailer, where the page turns it into YouTube's embed, and told
+        // when to come back rather than left to guess.
+        assert!(second.headers().contains_key("retry-after"));
+
+        // A segment names no video, so it rides on what this address already has open. Refusing one
+        // would stall a trailer that is already playing instead of falling back cleanly.
+        let segment = h.send("GET", "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx", None, &[]).await;
+        assert_eq!(segment.status(), StatusCode::BAD_GATEWAY, "belongs to the admitted session");
+    }
+
+    /// The household is not a guest on its own box: every browser in it goes through this relay, so a
+    /// cap that counted them would cap the people who own the thing.
+    #[tokio::test]
+    async fn a_member_takes_no_guest_slot() {
+        let mut h = reel();
+        Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(0));
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+
+        let member = format!("{LIB}:{TOKEN}");
+        let mine =
+            h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(mine.status(), StatusCode::BAD_GATEWAY, "admitted with no slot to take");
+
+        let guest = h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[]).await;
+        assert_eq!(guest.status(), StatusCode::SERVICE_UNAVAILABLE, "a guest still needs one");
+    }
+
+    /// The ceiling the concurrency cap cannot be: three streams running all day is still three streams.
+    #[tokio::test]
+    async fn a_spent_daily_allowance_turns_a_guest_away_but_not_a_member() {
+        let mut h = reel();
+        Arc::get_mut(&mut h.state).unwrap().media_daily_max = Some(0);
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+
+        let guest = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
+        assert_eq!(guest.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let member = format!("{LIB}:{TOKEN}");
+        let mine =
+            h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(mine.status(), StatusCode::BAD_GATEWAY, "a guest ceiling is not the household's");
+    }
+
+    /// A master and a file name their video; a segment carries its own URL in the query and names none.
+    #[test]
+    fn a_media_path_names_its_video_where_it_has_one() {
+        assert_eq!(super::media_video("/reel/hls/dQw4w9WgXcQ.m3u8"), Some("dQw4w9WgXcQ"));
+        assert_eq!(super::media_video("/reel/cfg/play/dQw4w9WgXcQ.mp4"), Some("dQw4w9WgXcQ"));
+        assert_eq!(super::media_video("/reel/hls/seg"), None);
+        assert_eq!(super::media_video("/reel/cfg/meta/movie/tmdb:550.json"), None);
     }
 
     /// A trailer's bytes are streamed and a lookup is not, and nothing outside reel is streamed at all —
