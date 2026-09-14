@@ -659,7 +659,12 @@ pub mod tests {
             csp.contains("connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com"),
             "{csp}"
         );
-        assert!(csp.contains("https://www.omdbapi.com https://pve.example:8443;"), "{csp}");
+        // And doesthedogdie, which the content warnings come from: without it the browser refused
+        // both the warnings and Settings' check of the key, and a refused check reads as a bad key.
+        assert!(
+            csp.contains("https://www.omdbapi.com https://www.doesthedogdie.com https://pve.example:8443;"),
+            "{csp}"
+        );
         assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");
     }
 

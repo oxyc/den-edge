@@ -26,13 +26,20 @@ use std::path::{Component, Path, PathBuf};
 /// OMDb is what the IMDb, Rotten Tomatoes and Metacritic figures on a title come from. It was missing here, so
 /// the browser refused the call before it was made and the detail page quietly showed TMDB's rating alone —
 /// `fetchRatings` cannot tell a blocked request from a title nobody has rated.
+///
+/// doesthedogdie is the content warnings, missing for the same reason and with a worse ending: the browser
+/// refused every warnings call AND the Settings check of the key, so the feature was dead in the web app while
+/// the key it needs reported itself as not accepted — the one reading that sends someone to replace a key that
+/// was fine. The key travels in a header, from the browser to them, as the TV sends it. It is the user's own
+/// key and theirs to spend, so nothing here proxies it and no request for it crosses the homelab.
 fn csp(media: &[String]) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
          media-src 'self' blob: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
-         connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{media}; \
+         connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com \
+         https://www.doesthedogdie.com{media}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
