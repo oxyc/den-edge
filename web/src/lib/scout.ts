@@ -4,6 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
+import { isLanURL } from './prefs';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
 
@@ -26,9 +27,10 @@ function place(url: string, routes: Routes, want: { name: string; path: string }
   const install = url.slice(0, -MANIFEST.length);
   const listed = routes[want.name];
   // The URL's own segment only where the table names no address for this service at all — which is
-  // what a public name serves. While it does name them, an install that matches none of them is
-  // somebody else's addon, and guessing a place for it would probe a stranger's URL for nothing.
-  const config = within(install, listed) ?? (listed?.length ? null : configOf(install, want.path));
+  // what a public name serves — and only for an install on this household's own network. While the
+  // table does name addresses, an install matching none of them is somebody else's addon.
+  const guess = !listed?.length && household(install, routes) ? configOf(install, want.path) : null;
+  const config = within(install, listed) ?? guess;
   return config !== null && /^(\/[\w.~%-]+)?$/.test(config)
     ? { install, base: want.path + config }
     : null;
@@ -47,6 +49,38 @@ function place(url: string, routes: Routes, want: { name: string; path: string }
  * request. That is also why this belongs to `place` alone: `denAddonOf` and `installsOf` believe the
  * table without probing, and handing them the same guess would label anyone's addon as Den's.
  */
+/**
+ * Is this install on the household's own network, or one of this deployment's own names?
+ *
+ * The guard on guessing. A guess is a request to `<this origin>/<service>/<the install's config>`,
+ * and on a public name that request terminates at the edge and is written to its logs. A Den config
+ * is sealed and says nothing; a third-party one is often plaintext and carries the owner's debrid
+ * key, so guessing a place for a stranger's addon would copy someone's credential into a log kept by
+ * a company neither of us is a customer of. A LAN or tailnet address cannot belong to a stranger.
+ */
+function household(install: string, routes: Routes): boolean {
+  let host: string;
+  try {
+    host = new URL(install).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === globalThis.location?.hostname?.toLowerCase()) return true;
+  // Tailscale's own names: a machine on this tailnet, which nobody outside it can even resolve.
+  if (host.endsWith('.ts.net')) return true;
+  if (isLanURL(install)) return true;
+  // And whatever names this deployment gives for itself, which is what the table is.
+  return Object.values(routes).some((entries) =>
+    entries?.some((entry) => {
+      try {
+        return new URL(entry.url).hostname.toLowerCase() === host;
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
 function configOf(install: string, mount: string): string | null {
   let path: string;
   try {

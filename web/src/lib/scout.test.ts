@@ -66,7 +66,7 @@ describe('a table that names no address for the service', () => {
   const PUBLIC_ONLY: Routes = { edge: [{ url: 'https://d-api.oxy.fi' }] };
 
   it('reads the config segment off the install itself, whichever shape it is', async () => {
-    const TAILNET = 'https://pve.example:8443/scout/sealed-cfg/manifest.json';
+    const TAILNET = 'https://pve.tailce93d3.ts.net:8443/scout/sealed-cfg/manifest.json';
     for (const install of [SCOUT_LAN, TAILNET]) {
       const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
       expect(await findAddon([install], PUBLIC_ONLY, SCOUT, fetchImpl)).toEqual({
@@ -78,11 +78,16 @@ describe('a table that names no address for the service', () => {
     }
   });
 
-  /** Guessing a place is not believing it: the manifest id is still what decides. */
-  it('still refuses a stranger’s addon, for one request', async () => {
+  /**
+   * Never a host outside the household, and never even a request. A guess is asked of this origin,
+   * which on a public name means the edge logs the path — and a third-party config is often
+   * plaintext, carrying its owner's debrid key. Den's own configs are sealed; other people's are
+   * not ours to copy into somebody's request log.
+   */
+  it('never probes an addon on a host outside the household', async () => {
     const { asked, fetchImpl } = addons({});
     expect(await findAddon([THEIRS], PUBLIC_ONLY, SCOUT, fetchImpl)).toBeNull();
-    expect(asked).toEqual(['/scout/debrid-token/manifest.json']);
+    expect(asked, 'a stranger’s config segment is never put in a URL').toEqual([]);
   });
 
   /** And while the table CAN disqualify it, a stranger's URL is never touched at all. */
