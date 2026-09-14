@@ -20,7 +20,16 @@ for (const width of [393, 1280]) {
         return route.fulfill({
           json: {
             id: Number(id),
-            ...(type === 'movie' ? { title: `Movie ${id}` } : { name: `Series ${id}` }),
+            ...(type === 'movie'
+              ? { title: `Movie ${id}` }
+              : {
+                  name: `Series ${id}`,
+                  seasons: [
+                    { season_number: 1, episode_count: 8 },
+                    { season_number: 2, episode_count: 10 },
+                  ],
+                  last_episode_to_air: { season_number: 2, episode_number: 6 },
+                }),
             poster_path: '/poster.jpg',
             release_date: '2026-01-01',
             first_air_date: '2026-01-01',
@@ -56,12 +65,36 @@ for (const width of [393, 1280]) {
         'Movie 1004',
         'Movie 1003',
       ]);
-      await expect(watched.locator('.caption').first()).toContainText('S2 · E4');
+      // A series counts its seen episodes against those aired so far (8 + 6 of season 2's 10).
+      await expect(watched.locator('.caption').first()).toContainText('1 of 14 episodes');
       // A watched title isn't also on the watchlist grid, and nothing on the page scrolls sideways.
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await expect(
         resume.getByRole('button', { name: 'Remove from Continue Watching Movie 1001' }),
       ).toBeAttached();
+      await expect(
+        page.getByRole('button', { name: 'Mark watched Series 2001', exact: true }),
+      ).toBeAttached();
+      await expect(
+        watched.getByRole('button', { name: 'Mark unwatched Movie 1003', exact: true }),
+      ).toBeAttached();
+
+      // Unmarking a series asks first, on the same button.
+      const unmark = watched.getByRole('button', { name: 'Mark unwatched Series 2002' });
+      await unmark.click();
+      await expect(
+        watched.getByRole('button', { name: 'Unmark all episodes? Series 2002' }),
+      ).toBeVisible();
+      await watched.getByRole('heading', { name: /Watched/ }).click();
+      await expect(unmark).toBeAttached();
+
+      const filter = watched.getByRole('group', { name: 'Show in Watched' });
+      await filter.getByRole('button', { name: 'Series' }).click();
+      await expect(watched.locator('.name')).toHaveText(['Series 2002']);
+      await filter.getByRole('button', { name: 'Movies' }).click();
+      await expect(watched.locator('.name')).toHaveText(['Movie 1005', 'Movie 1004', 'Movie 1003']);
+      await filter.getByRole('button', { name: 'All' }).click();
+      await expect(watched.locator('.name')).toHaveCount(4);
       await page.screenshot({
         path: test.info().outputPath(`watchlist-${width}.png`),
         fullPage: true,

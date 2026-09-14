@@ -8,7 +8,7 @@ import {
   unwatch,
   updateEpisodeProgress,
 } from './actions';
-import { watchedHistory } from './history';
+import { airedEpisodes, seenEpisodeCounts, watchedHistory } from './history';
 import type { Title } from './library';
 import type { Row, Stamp } from './wire';
 
@@ -65,6 +65,29 @@ describe('watched history', () => {
     expect(watchedHistory(rows, named(show(10), movie(2)))).toEqual([]);
     // Seen again after the reset, it's back.
     expect(watchedHistory([...rows, seen(10, 1, 2, 4000)], named(show(10))).length).toBe(1);
+  });
+
+  it('counts seen episodes per series, and aired episodes up to the last one to air, Specials aside', () => {
+    const counts = seenEpisodeCounts([
+      seen(10, 1, 1, 1000),
+      seen(10, 1, 2, 2000),
+      seen(11, 3, 1, 1000),
+    ]);
+    expect([...counts]).toEqual([
+      ['tv:10', 2],
+      ['tv:11', 1],
+    ]);
+    const shape = {
+      counts: new Map([
+        [0, 4],
+        [1, 8],
+        [2, 10],
+        [3, 10],
+      ]),
+      lastAired: { season: 2, episode: 6 },
+    };
+    expect(airedEpisodes(shape)).toBe(14);
+    expect(airedEpisodes({ counts: shape.counts })).toBe(28);
   });
 
   it('falls back to when the status changed for a watched title without a watched date', () => {

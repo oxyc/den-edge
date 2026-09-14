@@ -3,7 +3,7 @@
 // Watching, and drops off that once caught up. Here a series counts from its first seen episode.
 
 import { WATCHED } from './actions';
-import { titleKey, type Title } from './library';
+import { isAired, titleKey, type Shape, type Title } from './library';
 import type { Row, TitleRow } from './wire';
 
 export interface WatchedEntry {
@@ -16,20 +16,22 @@ export interface WatchedEntry {
   episodes: number;
 }
 
-/**
- * The watched titles in `rows`, newest first. A title TMDB hasn't named yet (`names`, by `type:id`) waits, as the
- * library's other lists make it wait. An episode from before a series was un-seen (`episodesReset`) no longer counts,
- * and a title removed from the library after it was last watched is left out; watching it again brings it back.
- */
-export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): WatchedEntry[] {
+interface SeenSeries {
+  latest: { season: number; episode: number; at: number };
+  count: number;
+}
+
+function titleRows(rows: Row[]): Map<string, TitleRow> {
   const titles = new Map<string, TitleRow>();
   for (const row of rows) {
     if (row.kind === 'rec') titles.set(titleKey(row.title), row);
   }
-  const series = new Map<
-    string,
-    { latest: { season: number; episode: number; at: number }; count: number }
-  >();
+  return titles;
+}
+
+/** Each series' seen episodes: how many, and the latest. One from before the series was un-seen no longer counts. */
+function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, SeenSeries> {
+  const series = new Map<string, SeenSeries>();
   for (const row of rows) {
     if (row.kind !== 'ep' || row.progress.value < WATCHED) continue;
     const key = titleKey(row.title);
@@ -44,7 +46,35 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
       if (at > seen.latest.at) seen.latest = episode;
     }
   }
+  return series;
+}
 
+/** How many episodes of each series have been seen, by `type:id`. */
+export function seenEpisodeCounts(rows: Row[]): Map<string, number> {
+  return new Map(
+    [...seenSeries(rows, titleRows(rows))].map(([key, seen]) => [key, seen.count] as const),
+  );
+}
+
+/** How many regular-season episodes have aired — what "4 of 10 episodes" counts to (SeriesProgress.airedEpisodes). */
+export function airedEpisodes(shape: Shape): number {
+  let aired = 0;
+  for (const [season, count] of shape.counts) {
+    if (season <= 0) continue;
+    if (isAired({ season, episode: count }, shape.lastAired)) aired += count;
+    else if (shape.lastAired?.season === season) aired += Math.min(count, shape.lastAired.episode);
+  }
+  return aired;
+}
+
+/**
+ * The watched titles in `rows`, newest first. A title TMDB hasn't named yet (`names`, by `type:id`) waits, as the
+ * library's other lists make it wait. An episode from before a series was un-seen (`episodesReset`) no longer counts,
+ * and a title removed from the library after it was last watched is left out; watching it again brings it back.
+ */
+export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): WatchedEntry[] {
+  const titles = titleRows(rows);
+  const series = seenSeries(rows, titles);
   const entries: WatchedEntry[] = [];
   for (const key of new Set([...titles.keys(), ...series.keys()])) {
     const title = names.get(key);

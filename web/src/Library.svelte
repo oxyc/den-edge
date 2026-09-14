@@ -6,7 +6,7 @@
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
   import WatchlistPage from './components/WatchlistPage.svelte';
-  import { watchedHistory } from './lib/history';
+  import { seenEpisodeCounts, watchedHistory } from './lib/history';
   import {
     DetailScreen,
     PersonScreen,
@@ -811,6 +811,12 @@
     if (route.page !== 'watchlist' || !log) return [];
     return watchedHistory(log.rows(), new Map(session.displays.map((t) => [titleKey(t), t])));
   });
+  const seenEpisodes = $derived.by(() => {
+    void version;
+    return route.page === 'watchlist' && log
+      ? seenEpisodeCounts(log.rows())
+      : new Map<string, number>();
+  });
 
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
@@ -887,10 +893,13 @@
       resume={continueWatching(library)}
       saved={watchlist(library)}
       {history}
+      shapes={session.shapes}
+      seen={seenEpisodes}
       {failure}
       onselect={select}
       ondismiss={(title) => void dismiss(title)}
       onremove={(title) => void act(title, removeFromLibrary)}
+      onseen={(title, seen) => void setSeen(title, seen)}
     />
   {/if}
 {:else}
