@@ -45,17 +45,22 @@
   }
 
   summary {
+    position: relative;
     display: inline-flex;
     gap: 4px;
     align-items: center;
-
-    /* Room to be a target in its own right, which the certificate beside it does not need: that one is
-       only ever read, never pressed. */
-    min-height: 24px;
-    padding-inline: 6px;
     color: var(--muted);
     cursor: pointer;
     list-style: none;
+  }
+
+  /* The mark is the same size as the certificate beside it, so the press area grows outwards rather than
+     making the box taller: an invisible reach past the border, which is room for a finger without a chip
+     that stands out from the row it sits in. */
+  summary::before {
+    content: '';
+    position: absolute;
+    inset: -6px;
   }
 
   summary::-webkit-details-marker {
@@ -73,9 +78,10 @@
     color: var(--fg);
   }
 
+  /* Sized to the 12px text it stands beside, so neither one sets the chip's height. */
   summary :global(svg) {
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
   }
 
   .warnings {
