@@ -32,7 +32,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
         {
             preflight()
         }
-        _ => dispatch(&state, req, route).await,
+        _ => dispatch(&state, req, route, &rid).await,
     };
     if method == Method::HEAD {
         *resp.body_mut() = Body::empty();
@@ -108,7 +108,10 @@ fn preflight() -> Response {
     resp
 }
 
-async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Response {
+/// `rid` is this request's id, the one the log line and the answer both carry. It travels on to an addon the
+/// relay asks, so a line here and a line there can be put side by side — without it the two halves of one
+/// request were two unrelated entries in two journals.
+async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str) -> Response {
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A preflight or a HEAD probe never reaches a handler that changes anything.
@@ -128,7 +131,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str) -> Respon
     }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
-        return crate::relay::relay(state, req, target).await;
+        return crate::relay::relay(state, req, target, rid).await;
     }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
@@ -325,6 +328,19 @@ pub fn json_reply(status: StatusCode, body: &Value) -> Response {
 /// Router answers must not pin health, a credential refusal, or an error in an intermediary cache.
 fn bare_json(status: StatusCode, body: &Value) -> Response {
     raw_json(status, Body::from(body.to_string()), true)
+}
+
+/// A refusal that says when to come back: the same JSON, plus `Retry-After` in seconds.
+///
+/// Rounded UP and never below one, because `Retry-After: 0` invites an immediate retry — which is the very
+/// thing being refused — and a sub-second wait rounded down to zero says exactly that.
+pub fn retry_after(status: StatusCode, body: &Value, after_ms: u64) -> Response {
+    let mut resp = json_reply(status, body);
+    let secs = after_ms.div_ceil(1000).max(1);
+    if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    resp
 }
 
 pub fn raw_json(status: StatusCode, body: Body, no_store: bool) -> Response {

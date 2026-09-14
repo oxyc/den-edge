@@ -18,6 +18,10 @@ const SLOTS: [&str; 4] = ["a", "b", "c", "d"];
 const MAX_MESSAGE_CHARS: usize = 2731;
 /// Live sessions at most. Each holds four small messages for ten minutes, and `new` is limited per address.
 const MAX_SESSIONS: usize = 10_000;
+/// What to tell a caller turned away because the table is full, or because every nameplate it drew was taken.
+/// Sessions live ten minutes, so a minute is long enough not to be a busy-wait and short enough that someone
+/// standing at their TV is not left holding a code that has since expired.
+const BUSY_RETRY_MS: u64 = 60_000;
 
 pub struct Session {
     nameplate: String,
@@ -46,8 +50,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 
 /// The host opens a session under a `sid` it generated, and gets the nameplate to show.
 async fn create(state: &AppState, req: Request) -> Response {
-    if throttled(state, &format!("mint:{}", client_ip(state, &req))) {
-        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    if let Some(wait) = throttled(state, &format!("mint:{}", client_ip(state, &req))) {
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
@@ -64,7 +68,7 @@ async fn create(state: &AppState, req: Request) -> Response {
         return json_reply(StatusCode::CONFLICT, &error("sid_taken"));
     }
     if pairs.len() >= MAX_SESSIONS {
-        return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("busy"));
+        return crate::handler::retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("busy"), BUSY_RETRY_MS);
     }
     let taken = |nameplate: &str| pairs.values().any(|session| session.nameplate == nameplate);
     let mut nameplate = (state.gen_nameplate)();
@@ -75,7 +79,11 @@ async fn create(state: &AppState, req: Request) -> Response {
         nameplate = (state.gen_nameplate)();
     }
     if taken(&nameplate) {
-        return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("nameplate_unavailable"));
+        return crate::handler::retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &error("nameplate_unavailable"),
+            BUSY_RETRY_MS,
+        );
     }
     let expires_at = now + TTL_MS;
     let session =
@@ -87,8 +95,8 @@ async fn create(state: &AppState, req: Request) -> Response {
 /// The joiner trades the nameplate for the `sid`, once: a second opener is refused, so a stranger who
 /// guessed the nameplate ends the pairing visibly instead of joining it quietly. Limited per address.
 async fn open(state: &AppState, req: Request) -> Response {
-    if throttled(state, &client_ip(state, &req)) {
-        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    if let Some(wait) = throttled(state, &client_ip(state, &req)) {
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
@@ -301,8 +309,10 @@ mod tests {
             let open = h.call("POST", "/pair/open", Some(json!({ "nameplate": "GUES" }))).await;
             assert_eq!(open.0, StatusCode::GONE);
         }
-        let open = h.call("POST", "/pair/open", Some(json!({ "nameplate": "GUES" }))).await;
-        assert_eq!(open.0, StatusCode::TOO_MANY_REQUESTS);
+        let body = json!({ "nameplate": "GUES" }).to_string();
+        let refused = h.send("POST", "/pair/open", Some(body), &[]).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.headers().contains_key("retry-after"), "the refusal never said when to return");
     }
 
     #[test]

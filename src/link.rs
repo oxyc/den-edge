@@ -43,8 +43,8 @@ async fn forget(state: &AppState, key: String) -> Response {
     json_reply(StatusCode::OK, &json!({ "forgotten": true }))
 }
 
-/// Counts a guess from `ip`; true once it is over the pairing limit.
-pub(crate) fn throttled(state: &AppState, ip: &str) -> bool {
+/// Counts a guess from `ip`; `Some(ms)` once it is over the pairing limit.
+pub(crate) fn throttled(state: &AppState, ip: &str) -> Option<u64> {
     throttled_at(state, ip, CLAIMS_PER_WINDOW)
 }
 
@@ -54,7 +54,13 @@ pub(crate) fn throttled(state: &AppState, ip: &str) -> bool {
 /// `bucket` is the whole key, so a caller prefixes what it is limiting (`relay:<ip>`, `inbox:<ip>`) and each
 /// budget counts on its own: browsing the relay hard must not spend the pairing allowance, and the other way
 /// about. All of them share the one map, and so the one sweep that keeps it bounded.
-pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> bool {
+/// `None` while the caller is within its budget; `Some(ms)` once it is over, carrying how long until the
+/// window clears.
+///
+/// The time is the whole point. A limit that says only "no" leaves the caller to guess when to come back, and
+/// every client here guessed the same way — a fixed few seconds, forever — which turns one refusal into a
+/// steady knock against a door that was going to open on its own.
+pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
     if claims.len() > 1024 {
@@ -65,11 +71,11 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> bool {
         t.count = 0;
     }
     if t.count >= limit {
-        return true;
+        return Some(t.until.saturating_sub(now));
     }
     t.count += 1;
     t.until = now + CLAIM_WINDOW_MS;
-    false
+    None
 }
 
 #[cfg(test)]

@@ -51,7 +51,7 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
     })
 }
 
-pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
+pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) -> Response {
     let method = req.method().clone();
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
@@ -60,21 +60,29 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     // the larger one. That order is deliberate: checking membership first would let a forged member header make
     // every relayed request do a library lookup, which is the work this limit exists to protect.
     let ip = crate::handler::client_ip(state, &req);
-    if crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
+    if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
         let member =
             req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         if !crate::library::is_member(state, member.as_deref()).await {
-            return json(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+            return limited(visitor_wait);
         }
-        if crate::link::throttled_at(state, &format!("relay-member:{ip}"), MEMBER_PER_WINDOW) {
-            return json(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-member:{ip}"), MEMBER_PER_WINDOW)
+        {
+            return limited(wait);
         }
     }
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let _slot = match slot {
         Ok(Ok(permit)) => permit,
-        _ => return json(StatusCode::SERVICE_UNAVAILABLE, "relay_busy"),
+        // Every slot is taken: the wait it just spent is also how long the next caller should give it.
+        _ => {
+            return crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("relay_busy"),
+                SLOT_WAIT.as_millis() as u64,
+            )
+        }
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
@@ -88,8 +96,13 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
     // session, nor anything Cloudflare added. Its validators do, so a revalidation is the addon's 304 rather
     // than the whole answer again, and the encodings it takes, so a large file (atlas's labels) arrives gzipped
     // and within `MAX_ANSWER_BYTES`.
-    let mut out =
-        axum::http::Request::builder().method(method).uri(&target).header(header::ACCEPT, "application/json");
+    // This request's id goes with it. The addon logs one line per request and so does this server; without a
+    // shared id the two are impossible to put side by side afterwards, which is exactly when you want to.
+    let mut out = axum::http::Request::builder()
+        .method(method)
+        .uri(&target)
+        .header(header::ACCEPT, "application/json")
+        .header("x-request-id", rid);
     if let Some(content_type) = content_type {
         out = out.header(header::CONTENT_TYPE, content_type);
     }
@@ -120,6 +133,9 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
         header::ETAG,
         header::LAST_MODIFIED,
         header::VARY,
+        // An addon's own rate limit, which the browser can only honour if it is allowed to hear it. Without
+        // this the page met a bare 429 and did what every client here does with one: came straight back.
+        header::RETRY_AFTER,
         header::HeaderName::from_static("server-timing"),
         header::HeaderName::from_static("x-den-degraded"),
     ] {
@@ -132,6 +148,11 @@ pub async fn relay(state: &AppState, req: Request, target: String) -> Response {
 
 fn json(status: StatusCode, code: &str) -> Response {
     raw_json(status, Body::from(error(code).to_string()), true)
+}
+
+/// A refusal that says when the window clears, rather than leaving the caller to guess and come straight back.
+fn limited(after_ms: u64) -> Response {
+    crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), after_ms)
 }
 
 #[cfg(test)]
@@ -163,7 +184,11 @@ mod tests {
         for i in 0..super::GUEST_PER_WINDOW {
             assert_eq!(ask(&h, &[]).await, StatusCode::BAD_GATEWAY, "{i}");
         }
-        assert_eq!(ask(&h, &[]).await, StatusCode::TOO_MANY_REQUESTS);
+        let refused = h.send("GET", "/scout/manifest.json", None, &[]).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        // A refusal that does not say when the window clears is one the caller simply repeats — which is
+        // what every client here did with a bare 429, on a fixed few seconds, indefinitely.
+        assert!(refused.headers().contains_key("retry-after"), "the refusal never said when to return");
     }
 
     /// One page of the billboard fans out into many addon calls, so a household that has paired a TV must not be

@@ -53,8 +53,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 async fn append(state: &AppState, req: Request) -> Response {
     // Counted before the body is read: the point is to not do work for a flood.
     let ip = crate::handler::client_ip(state, &req);
-    if crate::link::throttled_at(state, &format!("inbox:{ip}"), APPENDS_PER_WINDOW) {
-        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    if let Some(wait) = crate::link::throttled_at(state, &format!("inbox:{ip}"), APPENDS_PER_WINDOW) {
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     let from_header = header_key(&req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
@@ -74,10 +74,11 @@ async fn append(state: &AppState, req: Request) -> Response {
         Ok(queue) => queue,
         Err(e) => return internal("inbox read", e),
     };
-    if existing.is_none()
-        && crate::link::throttled_at(state, &format!("inbox-new:{ip}"), NEW_QUEUES_PER_WINDOW)
-    {
-        return json_reply(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"));
+    if existing.is_none() {
+        let started = crate::link::throttled_at(state, &format!("inbox-new:{ip}"), NEW_QUEUES_PER_WINDOW);
+        if let Some(wait) = started {
+            return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+        }
     }
     let mut queue = existing.unwrap_or_default();
     queue.push(message);
