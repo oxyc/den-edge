@@ -18,6 +18,11 @@ export async function guardNetwork(page) {
     const probe = url.pathname === '/atlas/manifest.json' || url.pathname === '/reel/manifest.json';
     if (url.origin === 'http://127.0.0.1:5198' && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });
+    // Every detail page asks den-edge for the title's ratings and content warnings, key or not. Unless a spec says
+    // otherwise, den-edge keeps nothing for a fixture title and nobody here may look one up.
+    const kept = /^\/(?:ratings|warnings)\/imdb\//.test(url.pathname);
+    if (url.origin === 'http://127.0.0.1:5198' && kept)
+      return route.fulfill({ status: 404, json: { error: 'not_cached' } });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);
