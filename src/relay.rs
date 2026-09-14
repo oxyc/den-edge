@@ -226,7 +226,7 @@ pub async fn relay(
     // A trailer's bytes come through here or not at all. On the public name a browser cannot reach reel
     // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
     // the video has to be served from this origin. Streamed rather than collected, and on its own budget.
-    if media(req.uri().path()) {
+    if media(req.uri().path()) && !native_master(req.uri().path(), req.uri().query()) {
         if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW) {
             return limited(wait);
         }
@@ -343,6 +343,22 @@ pub async fn relay(
 fn media(path: &str) -> bool {
     path.strip_prefix("/reel/")
         .is_some_and(|rest| rest.split('/').any(|segment| matches!(segment, "play" | "hls" | "seg")))
+}
+
+/// A master a bare `<video>` plays by itself (`?native=1`), which is not a stream through here.
+///
+/// reel answers it with YouTube's own segment URLs left in place, so the element fetches every byte
+/// from Google and this box carries the playlist alone: four kilobytes, once per trailer.
+///
+/// Gating it as media was wrong in exactly the place it mattered. A media element cannot send the
+/// membership header the way hls.js does through `xhrSetup`, so every phone in the household arrived
+/// here as a guest, three trailers filled the cap, and the next one was refused — on the household's
+/// own box. The ceiling still binds what is actually carried: `/hls/seg` finds no lease open and
+/// takes a slot of its own, so asking for a native master buys nothing but the playlist.
+fn native_master(path: &str, query: Option<&str>) -> bool {
+    media_video(path).is_some()
+        && path.ends_with(".m3u8")
+        && query.is_some_and(|q| q.split('&').any(|p| p == "native=1"))
 }
 
 /// Media, passed through as it arrives.
@@ -581,6 +597,37 @@ mod tests {
         let mine =
             h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[("x-den-library-member", &member)]).await;
         assert_eq!(mine.status(), StatusCode::BAD_GATEWAY, "a guest ceiling is not the household's");
+    }
+
+    /// The playlist a bare element plays by itself carries no stream through here: the segments in it
+    /// are Google's own URLs, and the element fetches them direct. Gating it capped the household's
+    /// own phones, because a media element cannot send the membership header that hls.js sends.
+    #[tokio::test]
+    async fn a_native_master_takes_no_guest_slot() {
+        let mut h = reel();
+        Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(0));
+
+        let native = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8?native=1", None, &[]).await;
+        assert_eq!(native.status(), StatusCode::BAD_GATEWAY, "relayed with no slot to take");
+
+        // The proxied master still opens a session, because its segments do come through here.
+        let proxied = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
+        assert_eq!(proxied.status(), StatusCode::SERVICE_UNAVAILABLE, "that one is a stream");
+
+        // And the flag buys nothing on the bytes: a segment with no lease open takes a slot itself.
+        let segment =
+            h.send("GET", "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx&native=1", None, &[]).await;
+        assert_eq!(segment.status(), StatusCode::SERVICE_UNAVAILABLE, "a segment is still carried");
+    }
+
+    #[test]
+    fn only_a_playlist_asked_for_natively_is_exempt() {
+        assert!(super::native_master("/reel/hls/dQw4w9WgXcQ.m3u8", Some("s=tag&native=1")));
+        assert!(!super::native_master("/reel/hls/dQw4w9WgXcQ.m3u8", Some("s=tag")));
+        assert!(!super::native_master("/reel/hls/dQw4w9WgXcQ.m3u8", None));
+        // The file and the segments are what this box carries, whatever they ask for.
+        assert!(!super::native_master("/reel/play/dQw4w9WgXcQ.mp4", Some("native=1")));
+        assert!(!super::native_master("/reel/hls/seg", Some("u=x&native=1")));
     }
 
     /// A master and a file name their video; a segment carries its own URL in the query and names none.
