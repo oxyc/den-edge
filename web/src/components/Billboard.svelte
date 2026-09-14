@@ -515,6 +515,25 @@
     }
   }
 
+  /* On a wide screen a height capped in pixels turns the billboard into a letterbox slot — 3:1 and wider —
+     while what it frames is 16:9. Past this width it therefore never falls below nine sixteenths of the
+     width, bounded by the window so the rows beneath it still show.
+
+     Gated by WIDTH on purpose. Below it the measured viewport height is the whole point — a phone's
+     toolbar sliding away must not resize the hero — and a short landscape window (844x600, say) is wider
+     than 16:9 without being a big screen, so an ungated floor would override the measurement there. */
+  @media (width >= 1000px) {
+    .billboard {
+      min-height: max(var(--stable-hero-height, clamp(420px, 76vh, 860px)), min(56.25vw, 94vh));
+    }
+
+    @supports (height: 1lvh) {
+      .billboard {
+        min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+      }
+    }
+  }
+
   /* One picture for the whole billboard, behind everything: it dissolves between titles instead of sliding, so
      no seam ever crosses the screen. It drifts by a fraction of the rail's travel (`--p`) to keep some depth,
      and is drawn wider than the frame so that drift never shows an edge. */
