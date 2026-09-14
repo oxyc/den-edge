@@ -172,13 +172,17 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
         // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
         // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
         // unchanged, which is what the TVs and a phone on the tailnet read.
-        // Both public names, not just the browser's: a device API reachable from the internet publishes the
-        // household's shape to anyone who asks it, and an away device has no more use for a LAN address than a
-        // stranger does. The LAN and tailnet names still serve everything, unauthenticated — that is what the
-        // TVs read, and their `/routes` fetch carries no credential to prove anything with.
+        // The browser's name only. The device API is every bit as public, and gating it too looked like the
+        // same argument — but a TV does not merely READ this table, it matches its own URLs against it and
+        // rewrites them to the address that works from wherever it is standing. Its den-edge origin is the
+        // compiled LAN IP, and away from home it is the LAN `edge` entry, and nothing else, that sends library
+        // sync, pairing, the inbox and the update gate to d-api at all; a LAN subtitles install reaches d-subs
+        // the same way. A public-only answer names neither — and the away fetch OVERWRITES the stored table,
+        // so the TV would discard the one entry keeping it reachable, by its own hand. At home none of this
+        // would show, because an unrewritten LAN URL is just the LAN URL, which works.
         "/routes" => {
             let table = match (face, &state.routes_public) {
-                (Face::Web | Face::Api, Some(public)) => public,
+                (Face::Web, Some(public)) => public,
                 _ => &state.routes,
             };
             bare_json(StatusCode::OK, &crate::routes::to_json(table))
@@ -617,18 +621,17 @@ pub mod tests {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().routes_public =
             Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
-        // Both public names, for the same reason: an away device can no more use a LAN address than a
-        // stranger can, and a device API reachable from the internet publishes the household's shape to
-        // whoever asks it.
-        for host in ["d.oxy.fi", "d-api.oxy.fi"] {
-            let public = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
-            assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi", "{host}");
-            assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published on {host}");
+        let public = body_json(h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await).await;
+        assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi");
+        assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published");
+        // The device API is just as public and still serves everything, which is not an oversight: a TV away
+        // from home matches its own LAN URLs against this table to learn where to send them, and overwrites
+        // its stored copy with whatever it reads. Gated here, it would discard the `edge` entry that is the
+        // only reason its sync and pairing reach d-api at all.
+        for host in ["d-api.oxy.fi", "192.168.86.193:8094"] {
+            let full = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
+            assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080", "{host}");
         }
-        // The LAN name still serves every address, unauthenticated: that is what the TVs read, and their
-        // `/routes` fetch carries no credential to prove anything with.
-        let full = body_json(h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await).await;
-        assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080");
     }
 
     #[tokio::test]
