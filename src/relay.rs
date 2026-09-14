@@ -78,8 +78,7 @@ pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) ->
     // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
     // the video has to be served from this origin. Streamed rather than collected, and on its own budget.
     if media(req.uri().path()) {
-        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW)
-        {
+        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW) {
             return limited(wait);
         }
         return stream(state, req, target, rid).await;
@@ -303,8 +302,7 @@ mod tests {
     /// otherwise any addon could be proxied without a ceiling by naming a path `/play/`.
     #[test]
     fn only_reels_own_media_paths_stream() {
-        for path in ["/reel/play/abc.mp4", "/reel/cfg/play/abc.mp4", "/reel/hls/abc.m3u8", "/reel/seg/1.ts"]
-        {
+        for path in ["/reel/play/abc.mp4", "/reel/cfg/play/abc.mp4", "/reel/hls/abc.m3u8", "/reel/seg/1.ts"] {
             assert!(super::media(path), "{path}");
         }
         for path in [
