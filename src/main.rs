@@ -74,8 +74,10 @@ pub struct AppState {
     /// names the LAN addresses and the tailnet, which a public visitor has no use for and shouldn't be handed;
     /// `None` serves the full table everywhere, as before.
     pub routes_public: Option<routes::Routes>,
-    /// den-remux's https origins from `routes`: what the web app's CSP lets its player fetch video from.
-    pub remux_origins: Vec<String>,
+    /// The https origins the web app's CSP lets it fetch video from: den-remux's, for a title playing here,
+    /// and den-reel's, for a trailer. Reel's were missing, so the policy refused every trailer on the public
+    /// and tailnet names.
+    pub media_origins: Vec<String>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
     pub new_libraries: library::NewLibraries,
     /// The household's TMDB key (env `TMDB_KEY`), lent to devices that have none of their own (`tmdb.rs`).
@@ -119,7 +121,7 @@ impl AppState {
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
             routes: Vec::new(),
             routes_public: None,
-            remux_origins: Vec::new(),
+            media_origins: Vec::new(),
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,
             tmdb_client: None,
@@ -179,7 +181,8 @@ async fn main() {
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
-    state.remux_origins = routes::remux_origins(&state.routes);
+    state.media_origins =
+        [routes::remux_origins(&state.routes), routes::reel_origins(&state.routes)].concat();
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
             eprintln!("NEW_LIBRARIES is {v:?}: expected open or members");

@@ -110,10 +110,10 @@ pub fn to_json(routes: &Routes) -> Value {
     json!({ "v": 1, "addons": services })
 }
 
-/// Where the web app's player may fetch video: the origins of den-remux's https entries, none of them on the LAN.
-pub fn remux_origins(routes: &Routes) -> Vec<String> {
+/// One service's https origins, none of them on the LAN: what a browser may be told it can fetch from.
+fn https_origins(routes: &Routes, service: &str) -> Vec<String> {
     let mut origins: Vec<String> = Vec::new();
-    for entry in routes.iter().filter(|(name, _)| name == "remux").flat_map(|(_, entries)| entries) {
+    for entry in routes.iter().filter(|(name, _)| name == service).flat_map(|(_, entries)| entries) {
         let Some(rest) = entry.url.strip_prefix("https://") else { continue };
         let origin = format!("https://{}", rest.split('/').next().unwrap_or(""));
         if !private(&entry.url) && !origins.contains(&origin) {
@@ -121,6 +121,18 @@ pub fn remux_origins(routes: &Routes) -> Vec<String> {
         }
     }
     origins
+}
+
+/// Where the web app's player may fetch remuxed video.
+pub fn remux_origins(routes: &Routes) -> Vec<String> {
+    https_origins(routes, "remux")
+}
+
+/// Where a page may fetch a trailer: den-reel's own MP4, and the playlist and segments it proxies. Missing
+/// here, the policy refused reel outright on the public and tailnet names — a trailer that never played, and
+/// nothing in the page to say why, because a blocked media load reports only that it failed.
+pub fn reel_origins(routes: &Routes) -> Vec<String> {
+    https_origins(routes, "reel")
 }
 
 #[cfg(test)]
@@ -177,5 +189,14 @@ mod tests {
     #[test]
     fn the_player_may_fetch_from_den_remuxs_https_origins() {
         assert_eq!(remux_origins(&parse(TABLE)), ["https://pve.example:8443", "https://d-remux.oxy.fi"]);
+    }
+
+    /// A trailer is fetched from reel itself, so the policy has to name it the same way.
+    #[test]
+    fn a_page_may_fetch_a_trailer_from_den_reels_https_origins() {
+        let table =
+            "reel=http://192.168.86.193:8092 https://pve.example:8443/reel access:https://d-reel.oxy.fi";
+        assert_eq!(reel_origins(&parse(table)), ["https://pve.example:8443", "https://d-reel.oxy.fi"]);
+        assert!(reel_origins(&parse(TABLE)).is_empty(), "a table with no reel names none");
     }
 }

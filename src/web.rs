@@ -17,19 +17,22 @@ use std::path::{Component, Path, PathBuf};
 /// googlevideo URL so the trailer streams from there instead of crossing the homelab twice — Apple's preview
 /// host, whose trailers are streamed from their CDN rather than kept here, which is what their terms ask —
 /// and den-remux's
-/// video: `blob:` for hls.js, which hands the video element a MediaSource, and `remux`, den-remux's https
-/// origins from the routes table (already checked to be bare origins).
+/// video: `blob:` for hls.js, which hands the video element a MediaSource.
+///
+/// `media` is den-remux's and den-reel's https origins from the routes table (already checked to be bare
+/// origins). Reel's were missing, and a trailer is fetched from reel itself — so on the public and tailnet
+/// names the policy refused every one of them, which a page reports only as a media load that failed.
 ///
 /// OMDb is what the IMDb, Rotten Tomatoes and Metacritic figures on a title come from. It was missing here, so
 /// the browser refused the call before it was made and the detail page quietly showed TMDB's rating alone —
 /// `fetchRatings` cannot tell a blocked request from a title nobody has rated.
-fn csp(remux: &[String]) -> String {
-    let remux: String = remux.iter().map(|o| format!(" {o}")).collect();
+fn csp(media: &[String]) -> String {
+    let media: String = media.iter().map(|o| format!(" {o}")).collect();
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
-         media-src 'self' blob: https://*.googlevideo.com https://video-ssl.itunes.apple.com{remux}; \
-         connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{remux}; \
+         media-src 'self' blob: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
+         connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{media}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -42,7 +45,7 @@ pub async fn serve(
     headers: &HeaderMap,
 ) -> Response {
     let Some(dir) = state.web_dir.as_deref() else { return not_found() };
-    let remux = &state.remux_origins;
+    let media = &state.media_origins;
     let Some(relative) = relative(path) else { return not_found() };
     let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
     let (bytes, file, immutable) = match tokio::fs::read(&asked).await {
@@ -63,10 +66,10 @@ pub async fn serve(
     // gzip — which is everything.
     if file.file_name().is_some_and(|name| name == "index.html") {
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
-            return revalidate(respond(html.into_bytes(), &file, false, remux), headers);
+            return revalidate(respond(html.into_bytes(), &file, false, media), headers);
         }
     }
-    encoded(bytes, &file, immutable, remux, headers).await
+    encoded(bytes, &file, immutable, media, headers).await
 }
 
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
@@ -115,7 +118,7 @@ async fn encoded(
     bytes: Vec<u8>,
     file: &Path,
     immutable: bool,
-    remux: &[String],
+    media: &[String],
     headers: &HeaderMap,
 ) -> Response {
     let (gzip, identity) = encodings(headers);
@@ -132,7 +135,7 @@ async fn encoded(
         };
         if fresh {
             if let Ok(compressed) = tokio::fs::read(sidecar).await {
-                let mut response = respond(compressed, file, immutable, remux);
+                let mut response = respond(compressed, file, immutable, media);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                 return revalidate(response, headers);
             }
@@ -145,7 +148,7 @@ async fn encoded(
         response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
         return response;
     }
-    revalidate(respond(bytes, file, immutable, remux), headers)
+    revalidate(respond(bytes, file, immutable, media), headers)
 }
 
 /// Validators name the selected representation, so a gzip response cannot validate identity bytes.
@@ -174,7 +177,7 @@ fn relative(path: &str) -> Option<PathBuf> {
     relative.components().all(|c| matches!(c, Component::Normal(_))).then_some(relative)
 }
 
-fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Response {
+fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, media: &[String]) -> Response {
     let content_type = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -203,7 +206,7 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
     );
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
-        let policy = HeaderValue::from_str(&csp(remux))
+        let policy = HeaderValue::from_str(&csp(media))
             .or_else(|_| HeaderValue::from_str(&csp(&[])))
             .expect("the policy is ASCII");
         headers.insert(header::CONTENT_SECURITY_POLICY, policy);
