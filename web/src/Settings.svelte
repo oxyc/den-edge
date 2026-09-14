@@ -422,8 +422,18 @@
     gap: 8px;
   }
 
-  .settings :global(a) {
-    color: var(--accent);
+  /* A link inside a sentence reads as the sentence does, marked by its underline; the TV draws no blue text, and the
+     accent stays for controls. Only prose links: the section rail's links have their own look. */
+  .settings :global(p a) {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: rgb(255 255 255 / 0.35);
+    text-underline-offset: 0.15em;
+  }
+
+  .settings :global(p a:hover) {
+    color: var(--fg);
+    text-decoration-color: currentcolor;
   }
 
   @media (width < 760px) {
