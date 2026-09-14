@@ -474,10 +474,19 @@
   }
 
   /* Past this width a height capped in pixels would letterbox the picture, exactly as it would on the
-     billboard, so the hero keeps the same 16:9 floor and the two surfaces stay the same size. */
+     billboard, so the hero keeps the same 16:9 floor and the two surfaces stay the same size.
+
+     The last term is what a desktop window actually gets: the trailer takes the whole of it, and the
+     title block sits low enough that the fold runs through the actions. Half a play button showing is
+     the cue that there is a page below — where the row sat comfortably above the fold, that screenful
+     was spent on the space around it rather than on the picture. */
   @media (width >= 1000px) {
     .hero {
-      min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+      min-height: max(
+        var(--stable-hero-height, clamp(420px, 76lvh, 860px)),
+        min(56.25vw, 94lvh),
+        calc(100lvh + 96px)
+      );
     }
   }
 
