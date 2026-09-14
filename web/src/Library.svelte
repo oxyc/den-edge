@@ -695,7 +695,9 @@
           if (run !== billboardRun || (!picked.length && featured.length)) return;
           const lead = featured[0];
           featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
-          if (picked.length) void log?.keep(kept, $state.snapshot(featured)).catch(warnKeep);
+          // What is kept is this pick in its own order. Keeping `featured` kept the lead too, so a title that led
+          // once led every later visit, whatever atlas picked since.
+          if (picked.length) void log?.keep(kept, picked).catch(warnKeep);
         };
         await show(first.slides);
         // What atlas has never seen it can't judge, and drops, however new it is: the likeliest of those are named
