@@ -100,10 +100,12 @@
     grid-template-columns: 1fr;
   }
 
+  /* Top-aligned: a label that wraps ("Action & Adventure") makes its grid row taller, and centred text beside it would
+     sit lower than the rest of the row. */
   .check {
     position: relative;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     min-height: 44px;
     padding: 6px 10px;
@@ -126,8 +128,10 @@
     outline: 2px solid var(--accent);
   }
 
+  /* On the first line's middle: 15px text at the page's 1.4 line height is 21px tall. */
   .mark {
     flex-shrink: 0;
+    margin-top: 1.5px;
     visibility: hidden;
     fill: none;
     stroke: currentcolor;
