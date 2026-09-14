@@ -275,7 +275,15 @@
       }
       // The membership claim travels on hls.js's own requests too, or a paired household counts as a
       // guest against the relay's guest budget — on its own box, from its own sofa.
-      engine = new Hls({ enableWorker: false, xhrSetup: memberXhrSetup });
+      // Open near the top of the ladder instead of climbing to it, as the detail hero does: hls.js
+      // assumes 500 kbps until it has measured a fragment, and `testBandwidth` makes it start lower
+      // still to take that measurement. A slide is fifteen seconds, so the climb is the whole of it.
+      engine = new Hls({
+        enableWorker: false,
+        xhrSetup: memberXhrSetup,
+        abrEwmaDefaultEstimate: 5_000_000,
+        testBandwidth: false,
+      });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
       });

@@ -233,7 +233,17 @@
       }
       // The membership claim travels on hls.js's own requests too, or a paired household counts as a
       // guest against the relay's guest budget — on its own box, from its own sofa.
-      engine = new Hls({ enableWorker: false, xhrSetup: memberXhrSetup });
+      // Open near the top of the ladder instead of climbing to it. hls.js assumes 500 kbps until it has
+      // measured a fragment, and `testBandwidth` makes it start lower still to take that measurement —
+      // which on a ninety-second trailer spends the part anyone actually watches at the bottom of a
+      // ladder that reaches 1080p. The estimate is the home connection these are served over; ABR still
+      // measures every fragment and drops if the line cannot hold it.
+      engine = new Hls({
+        enableWorker: false,
+        xhrSetup: memberXhrSetup,
+        abrEwmaDefaultEstimate: 5_000_000,
+        testBandwidth: false,
+      });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) upgraded = null;
       });
@@ -288,14 +298,21 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
-    // A direct stream that expired or was withdrawn says nothing about the trailer: reel still holds
-    // this one. Drop back to its copy before writing the candidate off and moving to the next.
+    // The next candidate's master before this one's file. A master refused because YouTube has removed
+    // the video is refused for reel's copy too — and asking costs a whole yt-dlp round trip to be told
+    // the same thing: two seconds for the master, nearly two more for the file, before a trailer that
+    // does exist is even started. So walk the candidates first.
+    if (candidate + 1 < candidates.length) {
+      candidate += 1;
+      return;
+    }
+    // Every master refused. reel's own file is what is left, and it is worth one ask: a video with no
+    // HLS master at all still plays from it. Once, not once per candidate.
     if (upgraded) {
       upgraded = null;
       return;
     }
-    if (candidate + 1 < candidates.length) candidate += 1;
-    else failed = true;
+    failed = true;
   }
   function firstFrame() {
     const player = video;
