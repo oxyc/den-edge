@@ -390,6 +390,16 @@
       Forgetting one only stops listing it here — it keeps the copy of your library it was given.
     </p>
   {/if}
+
+  <!-- TMDB's terms require the credit wherever its data is shown, so it sits outside everything above: it holds
+       whether or not this browser can open a library, since every page here is named by TMDB either way. -->
+  <h2>Credits</h2>
+  <p class="sub">
+    This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved
+    by TMDB.
+    <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer noopener">themoviedb.org</a
+    >
+  </p>
 </section>
 
 <style>
