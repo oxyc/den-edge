@@ -116,6 +116,8 @@
   let routes = $state<Routes>({});
   /** Where den-remux answers for this page (`findRemux`), so a title can play here; null where no route reaches it. */
   let remux = $state<string | null>(null);
+  /** This visit's discovery answered, and no route reaches den-remux from here: away from home and off the tailnet. */
+  let remuxAway = $state(false);
 
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
@@ -188,6 +190,7 @@
                 },
                 remux: (found: string | null) => {
                   remux = found;
+                  remuxAway = found === null;
                 },
               }
             : {}),
@@ -920,6 +923,7 @@
     onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
     onplay={play}
     onplayhere={playHere}
+    away={remuxAway && !!scout && !!tmdbKey}
     onepisode={markEpisodeSeen}
     {shown}
   />

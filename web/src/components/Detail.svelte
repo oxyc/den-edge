@@ -56,6 +56,7 @@
     onreact,
     onplay,
     onplayhere,
+    away = false,
     onepisode,
     shown = () => true,
     seed,
@@ -83,6 +84,8 @@
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
+    /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
+    away?: boolean;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     shown?: (title: Title) => boolean;
     /**
@@ -359,6 +362,7 @@
           onplayhere={onplayhere
             ? () => onplayhere(d.title, target?.season, target?.episode)
             : undefined}
+          {away}
           trailerHref={d.trailer
             ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}

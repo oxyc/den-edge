@@ -18,6 +18,7 @@
     onreact,
     onplay,
     onplayhere,
+    away = false,
     trailerHref,
     ontrailer,
     share,
@@ -36,6 +37,11 @@
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
     onplayhere?: () => void;
+    /**
+     * This device reaches no route to Den's player — away from home, without Tailscale — so there is no Play here: said
+     * plainly under the actions, rather than leaving the button's absence to explain itself.
+     */
+    away?: boolean;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
     /**
@@ -184,6 +190,8 @@
     role="status"
   >
     {notice}
+  </p>{:else if away && !onplayhere}<p class="notice">
+    Playback works on your home network or with Tailscale on this device.
   </p>{/if}
 
 {#snippet tv()}
