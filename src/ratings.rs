@@ -8,7 +8,11 @@
 //!
 //! OMDb licenses its data CC BY-NC 4.0, which the credit in About covers, and a free key gets 1,000 questions a day.
 //! So the household key has a daily ceiling of its own (env `OMDB_DAILY_MAX`), and rests for the rest of the UTC day
-//! when OMDb says its limit is reached. Ratings move, so a kept title is served for a week and then asked again.
+//! when OMDb says its limit is reached.
+//!
+//! Ratings move, but slowly, so a kept title is fresh for 30 days. After that it is served as it is, at once, and
+//! the first caller who may ask has it fetched again in the background — nobody waits on OMDb for a title that is
+//! already kept, and nobody is shown nothing because a refresh failed.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
 use crate::warnings::{callers_key, spendable, valid_imdb, Key};
@@ -19,6 +23,8 @@ use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 const API: &str = "https://www.omdbapi.com/";
@@ -28,8 +34,13 @@ const MAX_ANSWER_BYTES: usize = 256 * 1024;
 /// Questions per address per minute, kept or not. A detail page asks one.
 const PER_WINDOW: u32 = 60;
 const DAY_MS: u64 = 86_400_000;
-/// How long a kept title's ratings are served before the next caller who may ask has them fetched again.
-const FRESH: Duration = Duration::from_secs(7 * 86_400);
+/// How long a kept title's ratings are served as they are, with nothing asked.
+const FRESH: Duration = Duration::from_secs(30 * 86_400);
+/// How long a kept title is still served while its refresh waits for a caller who may ask for one. The sweep
+/// deletes what is older.
+const RETENTION: Duration = Duration::from_secs(180 * 86_400);
+/// How long a browser keeps an answer served stale: a refresh is under way.
+const STALE_MAX_AGE: Duration = Duration::from_secs(60);
 /// How long "OMDb has no such title" is believed.
 const ABSENT_TTL: Duration = Duration::from_secs(7 * 86_400);
 /// A kept "no such title". No answer of theirs has this shape.
@@ -39,7 +50,7 @@ const PROBE: &str = "tt0111161";
 /// What is kept of OMDb's answer: the fields the TV and the web app read, in OMDb's own shape, and nothing else.
 const KEPT_FIELDS: [&str; 5] = ["Response", "imdbRating", "imdbVotes", "Awards", "Ratings"];
 
-pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
+pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
@@ -80,6 +91,15 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         if !absent && age < FRESH {
             return answer(body, FRESH.saturating_sub(age), "hit");
         }
+        if !absent && age < RETENTION {
+            // Served as it is, now. A caller who may ask starts the refresh; the next one sees its answer.
+            if let (Some(key), Some(file)) =
+                (spendable(state, member.as_deref(), own, state.ratings_key.as_ref()).await, file)
+            {
+                refresh_behind(state, imdb, key, file);
+            }
+            return answer(body, STALE_MAX_AGE, "stale");
+        }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked.
     let Some(key) = spendable(state, member.as_deref(), own, state.ratings_key.as_ref()).await else {
@@ -100,6 +120,24 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         }
         Err(refused) => *refused,
     }
+}
+
+/// Fetch a stale title again without holding up the request that found it stale. One refresh per title at a time:
+/// every page open of a popular title in the minute a refresh takes would otherwise start another.
+fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) {
+    if !crate::lock(&state.ratings_refreshing).insert(imdb.clone()) {
+        return;
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        match lookup(&state, &imdb, &key, "refresh").await {
+            Ok(Some(body)) => crate::tmdb::write(&file, &body).await,
+            Ok(None) => crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await,
+            // Refused, rested or unreachable, and already said so: what is kept stays, and is asked again later.
+            Err(_) => {}
+        }
+        crate::lock(&state.ratings_refreshing).remove(&imdb);
+    });
 }
 
 /// One title's ratings as they are kept: `Some` body, or `None` when OMDb has no title with this IMDb id. Every
@@ -215,7 +253,7 @@ fn until_tomorrow(state: &AppState) -> u64 {
     DAY_MS - state.now() % DAY_MS
 }
 
-/// `remaining` is what is left of the week; a browser keeps it for a day at most.
+/// `remaining` is what is left of the 30 days, or a minute for a stale answer; a browser keeps it a day at most.
 fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
     let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
     let headers = resp.headers_mut();
@@ -227,12 +265,12 @@ fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
     resp
 }
 
-/// Delete what is past its week, so the directory holds only what may still be served.
-pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
+/// Delete what is past `RETENTION`, so the directory holds only what may still be served.
+pub async fn sweep_forever(state: Arc<AppState>) {
     let Some(dir) = state.ratings_cache_dir.clone() else { return };
     loop {
         tokio::time::sleep(Duration::from_millis(DAY_MS)).await;
-        crate::tmdb::sweep_older_than(&dir, FRESH).await;
+        crate::tmdb::sweep_older_than(&dir, RETENTION).await;
     }
 }
 
@@ -300,6 +338,20 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["x-den-ratings"], "hit");
         assert_eq!(body_json(resp).await, kept);
+
+        // Past its 30 days a visitor is still served it at once, and starts no refresh: it has no key to spend.
+        let file = cache.join("tt0137523.json");
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - FRESH - Duration::from_secs(86_400))
+            .unwrap();
+        let resp = get().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-den-ratings"], "stale");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        assert!(crate::lock(&h.state.ratings_refreshing).is_empty(), "a visitor starts no refresh");
 
         assert_eq!(h.send("GET", "/ratings/check", None, &[]).await.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(h.send("GET", "/ratings/imdb/nm1", None, &[]).await.status(), StatusCode::NOT_FOUND);

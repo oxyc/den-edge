@@ -111,6 +111,8 @@ pub struct AppState {
     pub ratings_daily_max: Option<u32>,
     /// Today (as a day number) and what the household key has spent of it.
     pub ratings_spent: Mutex<(u64, u32)>,
+    /// Titles whose stale ratings are being fetched again right now (`ratings::refresh_behind`).
+    pub ratings_refreshing: Mutex<std::collections::HashSet<String>>,
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
@@ -176,6 +178,7 @@ impl AppState {
             ratings_cache_dir: None,
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),
+            ratings_refreshing: Mutex::new(std::collections::HashSet::new()),
             simkl_client_id: None,
             guest_media_slots: Arc::new(tokio::sync::Semaphore::new(relay::GUEST_MEDIA_STREAMS)),
             media_daily_max: None,

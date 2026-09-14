@@ -124,7 +124,7 @@ fn preflight() -> Response {
 /// `rid` is this request's id, the one the log line and the answer both carry. It travels on to an addon the
 /// relay asks, so a line here and a line there can be put side by side — without it the two halves of one
 /// request were two unrelated entries in two journals.
-async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str) -> Response {
+async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid: &str) -> Response {
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
         // A preflight or a HEAD probe never reaches a handler that changes anything.
