@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Availability, KEPT_MS, RETRY_MS } from './availability.svelte';
+import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 
 const SCOUT = { install: 'http://192.168.86.193:8080/sealed-cfg', base: '/scout/sealed-cfg' };
 
@@ -30,7 +31,7 @@ describe('Availability', () => {
       tt0000003: 'available',
     }));
     const availability = new Availability(fetchImpl);
-    availability.connect(SCOUT, 'key');
+    availability.connect(SCOUT, 'key', fetchImpl);
     for (const id of [1, 2, 3, 404]) availability.want({ type: 'movie', id });
     availability.want({ type: 'tv', id: 5 });
     await vi.advanceTimersByTimeAsync(100);
@@ -67,7 +68,7 @@ describe('Availability', () => {
     expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
     expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(false);
 
-    availability.connect(SCOUT, 'key');
+    availability.connect(SCOUT, 'key', fetchImpl);
     availability.want({ type: 'movie', id: 1 });
     availability.want({ type: 'movie', id: 2 });
     await vi.advanceTimersByTimeAsync(100);
@@ -82,7 +83,7 @@ describe('Availability', () => {
   it('asks TMDB nothing about a movie that already knows its IMDb id', async () => {
     const { calls, fetchImpl } = fake(() => ({ tt7654321: 'unavailable' }));
     const availability = new Availability(fetchImpl, undefined);
-    availability.connect(SCOUT, 'key');
+    availability.connect(SCOUT, 'key', fetchImpl);
     availability.want({ type: 'movie', id: 9, imdbId: 'tt7654321' });
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.map((c) => c.url)).toEqual(['/scout/sealed-cfg/availability']);
@@ -93,11 +94,43 @@ describe('Availability', () => {
     const { calls, fetchImpl } = fake(() => ({}));
     const availability = new Availability(fetchImpl);
     availability.want({ type: 'movie', id: 1 });
-    availability.connect(null, 'key');
+    availability.connect(null, 'key', fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toEqual([]);
-    availability.connect(SCOUT, 'key');
+    availability.connect(SCOUT, 'key', fetchImpl);
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.some((c) => c.url === '/scout/sealed-cfg/availability')).toBe(true);
+  });
+
+  /**
+   * The fetch this class is CONSTRUCTED with is TMDB's. Scout is asked under this origin, where
+   * den-edge relays it, and the relay wants the household's membership — so the default has to be
+   * `relayFetch`, and the tests above pass their own only to watch what was asked.
+   *
+   * It was the constructor's fetch, and so every availability request a paired browser made on the
+   * public name arrived unclaimed and met the `/scout/` gate: 404, instantly, in silence. Asserted
+   * through the DEFAULT on purpose. A test that hands in its own fetch cannot see this at all, which
+   * is exactly why the four above did not.
+   */
+  it('asks scout with the household’s membership, not with TMDB’s fetch', async () => {
+    const sent: (string | null)[] = [];
+    // A page to be on. Without one `relayFetch` cannot tell this origin from anyone else's, so it
+    // claims nothing — correctly — and these tests otherwise run with no location at all.
+    vi.stubGlobal('location', { href: 'https://d.oxy.fi/', origin: 'https://d.oxy.fi' });
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push(new Headers(init?.headers).get('x-den-library-member'));
+      return new Response(JSON.stringify({ availability: { tt7654321: 'unavailable' } }));
+    });
+    useLibraryCredential({ id: 'lib', token: 'tok' });
+    try {
+      const availability = new Availability(fake(() => ({})).fetchImpl, undefined);
+      availability.connect(SCOUT, 'key');
+      availability.want({ type: 'movie', id: 9, imdbId: 'tt7654321' });
+      await vi.advanceTimersByTimeAsync(100);
+    } finally {
+      forgetLibraryCredential();
+      vi.unstubAllGlobals();
+    }
+    expect(sent).toEqual(['lib:tok']);
   });
 });

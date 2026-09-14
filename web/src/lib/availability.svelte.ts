@@ -10,6 +10,7 @@ import { SvelteMap } from 'svelte/reactivity';
 import type { Title } from './library';
 import type { Addon } from './scout';
 import { fetchImdbId } from './tmdb';
+import { relayFetch } from './relayFetch';
 import { tmdbFetch } from './tmdbCache';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
@@ -73,10 +74,14 @@ export class Availability {
   }
 
   /**
-   * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none — through `fetchImpl`, which
-   * carries the Access token where scout's public name needs it.
+   * Ask this scout from now on — the library's (`findAddon`), or nobody when it has none.
+   *
+   * Through `relayFetch`, not this instance's fetch: that one is TMDB's, and scout is asked under this
+   * origin, where den-edge relays it. The difference is the membership claim. Without it a paired
+   * household is a visitor to the relay, and on the public name the `/scout/` gate answers 404 — which
+   * is what it did, silently, to every availability request a browser made there.
    */
-  connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = this.fetchImpl): void {
+  connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = relayFetch): void {
     const previous = this.scout?.base;
     this.scout = scout && tmdbKey ? { base: scout.base, tmdbKey, fetch: fetchImpl } : null;
     if (this.scout && previous !== undefined && this.scout.base !== previous) {
