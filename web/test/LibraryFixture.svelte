@@ -92,6 +92,14 @@
       session.changed();
       return true;
     },
+    /** One action, as `act` writes it (Remove, Mark watched on a movie): its journal's row, as `writeActions` keeps them. */
+    writeAction: async (journal: SettingsRow) => {
+      const event = trackerEvent(journal);
+      const row = event ? event.after : journal;
+      put(row);
+      session.changed();
+      return row;
+    },
   };
 
   const session = $state({

@@ -97,6 +97,47 @@ for (const width of [393, 1280]) {
       await expect(watched.locator('.name')).toHaveText(['Movie 1005', 'Movie 1004', 'Movie 1003']);
       await filter.getByRole('button', { name: 'All' }).click();
       await expect(watched.locator('.name')).toHaveCount(4);
+
+      // What the cards do is written to the library and drawn back from it. A card's buttons take clicks once the
+      // card is pointed at.
+      const press = async (region, title, name) => {
+        await region
+          .getByRole('link', { name: new RegExp(title) })
+          .first()
+          .hover();
+        await region.getByRole('button', { name, exact: true }).click();
+      };
+
+      // Off Continue Watching, and off the watchlist.
+      await press(resume, 'Movie 1001', 'Remove from Continue Watching Movie 1001');
+      await expect(resume.getByText('Movie 1001')).toHaveCount(0);
+      // Taken off, and nothing said about it failing.
+      await expect(page.getByRole('alert')).toHaveCount(0);
+      const watchlistMovies = page.getByRole('region', { name: 'Watchlist movies' });
+      await press(watchlistMovies, 'Movie 1002', 'Remove from Watchlist Movie 1002');
+      await expect(watchlistMovies).toHaveCount(0);
+
+      // A series marked watched takes every aired episode with it: off the watchlist, into Watched in full.
+      const watchlistSeries = page.getByRole('region', { name: 'Watchlist series' });
+      await press(watchlistSeries, 'Series 2001', 'Mark watched Series 2001');
+      await expect(watchlistSeries).toHaveCount(0);
+      await expect(watched.getByRole('link', { name: /Series 2001/ })).toContainText(
+        '14 of 14 episodes',
+      );
+
+      // A movie comes off Watched at once; a series only after the question is answered.
+      await press(watched, 'Movie 1003', 'Mark unwatched Movie 1003');
+      await expect(watched.getByText('Movie 1003')).toHaveCount(0);
+      await press(watched, 'Series 2002', 'Mark unwatched Series 2002');
+      await watched
+        .getByRole('button', { name: 'Unmark all episodes? Series 2002', exact: true })
+        .click();
+      await expect(watched.getByText('Series 2002')).toHaveCount(0);
+      await expect(watched.locator('.name')).toHaveText([
+        'Series 2001',
+        'Movie 1005',
+        'Movie 1004',
+      ]);
       await page.screenshot({
         path: test.info().outputPath(`watchlist-${width}.png`),
         fullPage: true,

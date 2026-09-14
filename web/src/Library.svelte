@@ -315,6 +315,8 @@
   async function dismiss(title: Title) {
     if (!log) return;
     try {
+      // Stamping runs through the sync policy, as for every other action: without it loaded the dismissal throws.
+      await ensureSyncPolicy();
       remember(title);
       const before = log.title(title) ?? blankTitle(title, Date.now());
       clock.see(log.newestStamp());
@@ -325,7 +327,8 @@
         return false;
       }
       return true;
-    } catch {
+    } catch (error) {
+      console.warn('den: removing from Continue Watching failed', error);
       failure = SAVE_FAILED;
       return false;
     }
