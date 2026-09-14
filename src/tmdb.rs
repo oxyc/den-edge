@@ -443,6 +443,11 @@ pub(crate) async fn write(file: &Path, body: &Bytes) {
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path) {
+    sweep_older_than(dir, RETENTION).await;
+}
+
+/// The same sweep for another cache with its own ceiling (`warnings.rs`).
+pub(crate) async fn sweep_older_than(dir: &Path, max_age: Duration) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let expired = entry
@@ -451,7 +456,7 @@ pub async fn sweep(dir: &Path) {
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .is_some_and(|age| age > RETENTION);
+            .is_some_and(|age| age > max_age);
         if expired {
             let _ = tokio::fs::remove_file(entry.path()).await;
         }

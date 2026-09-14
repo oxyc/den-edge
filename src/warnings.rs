@@ -10,9 +10,9 @@
 //! `DOESTHEDOGDIE_KEY`). Anyone else is answered from what is kept, or not at all, so a visitor never spends one.
 //!
 //! Their API terms (doesthedogdie.com/api/terms) set the rest. The key is never handed out, and only the warnings a
-//! page shows are (§3). A kept title is refreshed after 30 days by the next caller who may ask, and served as it
-//! was for up to six months when nobody who may ask has opened it since. Every page that shows the warnings says
-//! "Powered by DoesTheDogDie.com" (§6). The free tier allows 30 questions a minute and 5,000 a month, so questions
+//! page shows are (§3). Nothing kept is served or held past the 30 days they allow before cached data must be
+//! refreshed (§3): the next caller who may ask looks it up again, and until then nobody is shown it. Every page that
+//! shows the warnings says "Powered by DoesTheDogDie.com" (§6). The free tier allows 30 questions a minute and 5,000 a month, so questions
 //! leaving here stay under the first, and the household key is rested when their answer says the second is nearly
 //! spent.
 
@@ -38,10 +38,8 @@ const PER_WINDOW: u32 = 60;
 /// Questions that may leave the box in a minute, whoever's key they carry: under the free tier's 30.
 const UPSTREAM_PER_MINUTE: u32 = 25;
 const DAY: Duration = Duration::from_secs(86_400);
-/// How long a kept title is believed before a caller who may ask refreshes it: the 30 days their terms allow.
+/// How long anything kept is served: the 30 days their terms allow before cached data must be refreshed.
 const FRESH: Duration = Duration::from_secs(30 * 86_400);
-/// How long a kept title is still served while nobody who may ask has opened it.
-const RETENTION: Duration = Duration::from_secs(180 * 86_400);
 /// How long "doesthedogdie has no such title" is believed. A week: titles are added to it all the time.
 const ABSENT_TTL: Duration = Duration::from_secs(7 * 86_400);
 /// A kept "no such title". No answer of theirs has this shape.
@@ -58,18 +56,14 @@ enum Kept {
     /// A remembered "no such title", still believed.
     Absent,
     Fresh,
-    /// Past its 30 days: refreshed by a caller who may ask, served as it is to anyone else.
-    Stale,
-    /// Nothing usable.
+    /// Nothing usable, including a title past its 30 days.
     Cold,
 }
 
 fn verdict(absent: bool, age: Duration) -> Kept {
     match (absent, age) {
         (true, age) if age < ABSENT_TTL => Kept::Absent,
-        (true, _) => Kept::Cold,
         (false, age) if age < FRESH => Kept::Fresh,
-        (false, age) if age < RETENTION => Kept::Stale,
         _ => Kept::Cold,
     }
 }
@@ -110,28 +104,15 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    let (worth, kept) = match kept {
-        Some((body, age)) => (verdict(body.as_ref() == ABSENT, age), Some(body)),
-        None => (Kept::Cold, None),
-    };
-    match (&worth, kept) {
-        (Kept::Absent, _) => return json(StatusCode::NOT_FOUND, "not_found"),
-        (Kept::Fresh, Some(body)) => return answer(body, "hit"),
-        (Kept::Stale, Some(body)) => {
-            let Some(key) = spendable(state, member.as_deref(), own).await else {
-                return answer(body, "stale");
-            };
-            return match lookup(state, &imdb, &key, rid).await {
-                Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss").await,
-                // Gone from doesthedogdie since: say so from now on.
-                Ok(None) => forget(file.as_deref()).await,
-                // Refused, rested or unreachable: what was kept is still a better page than nothing.
-                Err(_) => answer(body, "stale"),
-            };
+    if let Some((body, age)) = kept {
+        match verdict(body.as_ref() == ABSENT, age) {
+            Kept::Absent => return json(StatusCode::NOT_FOUND, "not_found"),
+            Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit"),
+            Kept::Cold => {}
         }
-        _ => {}
     }
-    // Nothing kept. Only a caller who may spend a question gets one asked; anyone else is told there is nothing.
+    // Nothing kept that may be served. Only a caller who may spend a question gets one asked; anyone else is told
+    // there is nothing.
     let Some(key) = spendable(state, member.as_deref(), own).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
@@ -196,29 +177,20 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    if let Some((body, age)) = &kept {
-        if *age < FRESH {
-            if let Ok(table) = serde_json::from_slice(body) {
+    if let Some((body, age)) = kept {
+        if age < FRESH {
+            if let Ok(table) = serde_json::from_slice(&body) {
                 return Ok(table);
             }
         }
     }
-    let fetched = async {
-        let topics = ask(state, "/topics", key, rid).await?;
-        let categories = ask(state, "/topiccategories", key, rid).await?;
-        Ok::<_, Box<Response>>(topic_table(&topics, &categories))
+    let topics = ask(state, "/topics", key, rid).await?;
+    let categories = ask(state, "/topiccategories", key, rid).await?;
+    let table = topic_table(&topics, &categories);
+    if let Some(file) = &file {
+        crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
     }
-    .await;
-    match fetched {
-        Ok(table) => {
-            if let Some(file) = &file {
-                crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
-            }
-            Ok(table)
-        }
-        // An old table names topics as well as a new one would, near enough.
-        Err(refused) => kept.and_then(|(body, _)| serde_json::from_slice(&body).ok()).ok_or(refused),
-    }
+    Ok(table)
 }
 
 fn topic_table(topics: &Value, categories: &Value) -> Value {
@@ -365,7 +337,7 @@ async fn keep(file: Option<&Path>, body: Bytes, how: &'static str) -> Response {
     if let Some(file) = file {
         crate::tmdb::write(file, &body).await;
     }
-    answer(body, how)
+    answer(body, FRESH, how)
 }
 
 async fn forget(file: Option<&Path>) -> Response {
@@ -375,21 +347,23 @@ async fn forget(file: Option<&Path>) -> Response {
     json(StatusCode::NOT_FOUND, "not_found")
 }
 
-fn answer(body: Bytes, how: &'static str) -> Response {
+/// `remaining` is what is left of the 30 days; a browser keeps it for a day at most, and never past them.
+fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
     let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
     let headers = resp.headers_mut();
-    // The same for every browser, and it moves slowly: a day spares the box the same page asking twice.
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={}", remaining.min(DAY).as_secs())) {
+        headers.insert(header::CACHE_CONTROL, value);
+    }
     headers.insert("x-den-warnings", HeaderValue::from_static(how));
     resp
 }
 
-/// Drop what is past six months, like `tmdb::sweep`'s own directory.
+/// Delete what is past the 30 days: their terms allow keeping cached data no longer than that without a refresh.
 pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     let Some(dir) = state.warnings_cache_dir.clone() else { return };
     loop {
         tokio::time::sleep(DAY).await;
-        crate::tmdb::sweep(&dir).await;
+        crate::tmdb::sweep_older_than(&dir, FRESH).await;
     }
 }
 
@@ -417,10 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_title_is_fresh_for_30_days_and_served_for_six_months() {
+    fn a_kept_title_is_served_for_30_days_and_no_longer() {
         assert_eq!(verdict(false, DAY), Kept::Fresh);
-        assert_eq!(verdict(false, FRESH + DAY), Kept::Stale);
-        assert_eq!(verdict(false, RETENTION + DAY), Kept::Cold);
+        assert_eq!(verdict(false, FRESH + DAY), Kept::Cold);
         assert_eq!(verdict(true, DAY), Kept::Absent);
         assert_eq!(verdict(true, ABSENT_TTL + DAY), Kept::Cold, "an old 'no such title' is asked again");
     }
@@ -492,14 +465,8 @@ mod tests {
 
         aged(&file, FRESH + DAY);
         let resp = get().await;
-        assert_eq!(
-            resp.headers()["x-den-warnings"],
-            "stale",
-            "a visitor cannot refresh it, and is served it as it is"
-        );
-
-        aged(&file, RETENTION + DAY);
-        assert_eq!(get().await.status(), StatusCode::NOT_FOUND, "nothing is served past six months");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing is served past 30 days");
+        assert_eq!(body_json(resp).await, json!({ "error": "not_cached" }));
 
         crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await;
         let resp = get().await;

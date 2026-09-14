@@ -275,9 +275,10 @@ impl Face {
             || path == "/metrics";
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
-        // TMDB through this origin answers on every name: a browser asks it on the public one, and a TV asks
-        // it on the LAN or the device API. It lends a key and reads nothing of this box, so neither half owns it.
-        let tmdb = path.starts_with("/tmdb/");
+        // TMDB and the content warnings through this origin answer on every name: a browser asks them on the public
+        // one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so neither half
+        // owns them.
+        let tmdb = path.starts_with("/tmdb/") || path.starts_with("/warnings/");
         match (self, path) {
             (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
