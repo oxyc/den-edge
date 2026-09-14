@@ -175,6 +175,8 @@
         playable: can,
         startAt: at,
         maxBitrate,
+        // For den-remux's log only, so a session can be told apart by the player that played it.
+        player: nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
         ...pick,
       },
       undefined,

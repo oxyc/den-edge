@@ -57,6 +57,8 @@ export interface Want {
   startAt?: number;
   /** Bits a second a session may need, away from home (`linkLimit`): den-remux picks a release, or a transcode, that fits. */
   maxBitrate?: number;
+  /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
+  player?: 'native' | 'hls.js';
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
