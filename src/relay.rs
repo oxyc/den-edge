@@ -105,8 +105,8 @@ fn member_claim(req: &Request) -> Option<String> {
 /// The video a request is for, when it names one.
 ///
 /// A master (`/hls/<id>.m3u8`) and a file (`/play/<id>.mp4`) do; a segment does not — its own URL is
-/// carried in the query, and the id never appears. So a segment is matched against whatever that
-/// address already has open, which is exactly what it belongs to.
+/// carried in the query, and the id never appears. Only `native_master` asks any more: a lease is
+/// kept by address now, so nothing else needs to know which trailer a request belongs to.
 fn media_video(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/reel/")?;
     let (kind, file) = rest.rsplit_once('/')?;
@@ -118,31 +118,31 @@ fn media_video(path: &str) -> Option<&str> {
 
 /// Let this request in, or say why not.
 ///
-/// The first request for a video is the one that is judged: a household member is admitted free, a
-/// guest takes a slot and has to be inside the day's allowance. Everything after it — every segment,
-/// every range — belongs to that lease and is never refused, because a stall mid-trailer is worse
-/// than a clean refusal at the start, which the page turns into YouTube's embed.
-async fn admit(state: &AppState, claim: Option<&str>, bucket: &str, video: Option<&str>) -> Admitted {
+/// A lease belongs to an ADDRESS, not to a video. A household member is admitted free; a guest takes
+/// one slot and must be inside the day's allowance, and everything that address asks for afterwards
+/// — the next slide's trailer, every segment, every range — takes that lease over rather than
+/// opening a second. It is never refused once open, because a stall mid-trailer is worse than a
+/// clean refusal at the start, which the page turns into YouTube's embed.
+///
+/// Keyed per video, as it first was, one viewer on Home held two slots at once: the slide playing
+/// now and the one before it, still idling out with no bytes flowing — Home changes slide every
+/// fifteen seconds against a thirty-second idle lease. Three of those refused a third viewer while
+/// the box was carrying barely one stream. The cap is meant to bound concurrent viewers, and a
+/// billboard is one viewer however many trailers it opens.
+///
+/// Members and guests are held apart, so a visitor on the household's own network cannot ride the
+/// lease a member opened. Which one to look for is read from whether a claim is present at all; what
+/// is stored is decided by whether that claim proved out, so a forged one lands on the guest lease
+/// and spends a guest slot.
+async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted {
     let now = (state.clock)();
-    let key = video.map(|id| format!("{bucket}|{id}"));
+    let side = |member: bool| format!("{bucket}|{}", if member { "member" } else { "guest" });
     {
         let mut leases = crate::lock(&state.media_leases);
         leases.retain(|_, lease| lease.until > now);
-        // A segment names no video, so it rides on anything this address has open — which is what it
-        // is a segment of. Refreshing them all keeps a playing trailer's lease alive.
-        let mut found = false;
-        for (at, lease) in leases.iter_mut() {
-            let mine = key.as_deref() == Some(at.as_str()) || (video.is_none() && at.starts_with(bucket));
-            if mine {
-                lease.until = now + LEASE_IDLE_MS;
-                found = true;
-                if key.is_some() {
-                    return Admitted::Yes { guest: !lease.member };
-                }
-            }
-        }
-        if found {
-            return Admitted::Yes { guest: true };
+        if let Some(lease) = leases.get_mut(&side(claim.is_some())) {
+            lease.until = now + LEASE_IDLE_MS;
+            return Admitted::Yes { guest: !lease.member };
         }
     }
     // Nothing open for this address: this is a session starting, and the only place membership is
@@ -159,11 +159,8 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str, video: Optio
             Err(_) => return Admitted::Busy,
         }
     };
-    let mut leases = crate::lock(&state.media_leases);
-    leases.insert(
-        key.unwrap_or_else(|| format!("{bucket}|seg")),
-        Lease { member, until: now + LEASE_IDLE_MS, _slot: slot },
-    );
+    crate::lock(&state.media_leases)
+        .insert(side(member), Lease { member, until: now + LEASE_IDLE_MS, _slot: slot });
     Admitted::Yes { guest: !member }
 }
 
@@ -230,11 +227,10 @@ pub async fn relay(
         if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW) {
             return limited(wait);
         }
-        let video = media_video(req.uri().path()).map(str::to_owned);
         // Read here rather than inside `admit`: an async fn holding a `&Request` is not `Send`, and
         // this one is awaited inside the handler.
         let claim = member_claim(&req);
-        return match admit(state, claim.as_deref(), &ip, video.as_deref()).await {
+        return match admit(state, claim.as_deref(), &ip).await {
             Admitted::Yes { guest } => stream(state, req, target, rid, guest).await,
             // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
             // part-way through one: that would be a stall, and a player would simply keep asking.
@@ -540,24 +536,24 @@ mod tests {
         h
     }
 
-    /// The cap is on trailers playing at once, because that is what spends the household's upload —
-    /// not on requests, which a rate limit already bounds.
+    /// The cap is on viewers at once, because that is what spends the household's upload — not on
+    /// trailers, and not on requests, which a rate limit already bounds.
     #[tokio::test]
-    async fn a_guest_trailer_holds_a_slot_and_the_next_guest_is_turned_away() {
+    async fn a_guest_holds_one_slot_however_many_trailers_it_opens() {
         let mut h = reel();
         Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
 
         let first = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
         assert_eq!(first.status(), StatusCode::BAD_GATEWAY, "admitted, and the addon is not there");
 
+        // The next slide takes that lease over instead of opening a second. Keyed per video this was
+        // a 503: Home changes slide every fifteen seconds against a thirty-second idle lease, so one
+        // viewer held the trailer playing now and the one before it, idling out with nothing flowing.
         let second = h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[]).await;
-        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE, "the only slot is taken");
-        // Refused at the start of a trailer, where the page turns it into YouTube's embed, and told
-        // when to come back rather than left to guess.
-        assert!(second.headers().contains_key("retry-after"));
+        assert_eq!(second.status(), StatusCode::BAD_GATEWAY, "the same viewer, not a second one");
 
-        // A segment names no video, so it rides on what this address already has open. Refusing one
-        // would stall a trailer that is already playing instead of falling back cleanly.
+        // A segment rides it too. Refusing one would stall a trailer that is already playing instead
+        // of falling back cleanly.
         let segment = h.send("GET", "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx", None, &[]).await;
         assert_eq!(segment.status(), StatusCode::BAD_GATEWAY, "belongs to the admitted session");
     }
@@ -613,6 +609,9 @@ mod tests {
         // The proxied master still opens a session, because its segments do come through here.
         let proxied = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
         assert_eq!(proxied.status(), StatusCode::SERVICE_UNAVAILABLE, "that one is a stream");
+        // Refused at the start, where the page turns it into YouTube's embed, and told when to come
+        // back rather than left to guess.
+        assert!(proxied.headers().contains_key("retry-after"));
 
         // And the flag buys nothing on the bytes: a segment with no lease open takes a slot itself.
         let segment =
