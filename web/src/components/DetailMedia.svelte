@@ -162,11 +162,12 @@
     playing = ended = failed = false;
     if (!autoplay || !active || reduced || saving || (!ids.tmdb && !ids.imdb) || !base) return;
     const controller = new AbortController();
-    // Where HLS plays natively this hero uses YouTube's own URL, so reel need not spend a download
-    // on it. Everywhere else `/play` is the only source that carries sound, and it must be warm.
+    // Resolve only. YouTube's adaptive stream carries sound and plays in every browser now — its
+    // master directly where HLS is native, reel's proxy of it everywhere else — so a download and
+    // remux would only warm a fallback that is not normally reached.
     void trailerURLs(base, mediaType, ids, table, {
       signal: controller.signal,
-      prewarm: nativeHls() ? 'direct' : 'full',
+      prewarm: 'direct',
     }).then((found) => {
       if (!controller.signal.aborted) candidates = found;
     });

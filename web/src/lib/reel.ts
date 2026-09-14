@@ -202,22 +202,6 @@ export function nativeHls(
 }
 
 /**
- * The fastest source this browser can play, or null to stay on reel's own `/play`.
- *
- * `wantsSound` is what decides the silent stream's fate. Behind a billboard, where the video is muted
- * and unpressable, video-only is exactly right and costs reel nothing. Anywhere a viewer can turn the
- * sound up it would be a trap — it plays perfectly and is simply silent, with nothing to say so.
- */
-export function directSource(direct: DirectTrailer | null, hlsOk = nativeHls()): string | null {
-  if (!direct) return null;
-  // HLS or nothing at all. The silent video-only stream looked like the cheap option and is the
-  // opposite: one open-ended range is throttled hard, so it drags a 32 MB 1080p file to a first
-  // frame in about 5.4s, where HLS opens on a low variant and climbs — 1.7s on the same trailer,
-  // same device. It also fails outright in some browsers. Reel's own copy beats it everywhere.
-  return direct.hls && hlsOk ? direct.hls : null;
-}
-
-/**
  * The best source for one candidate where the page can drive an HLS player itself, or null to stay
  * on reel's own `/play`.
  *
@@ -227,6 +211,12 @@ export function directSource(direct: DirectTrailer | null, hlsOk = nativeHls()):
  * URL and the homelab carries nothing at all, and everything else takes reel's proxy of that master,
  * because googlevideo answers MSE's segment fetches with no CORS header and hls.js cannot read a
  * byte of them otherwise.
+ *
+ * Never the progressive `video` stream, which looked like the cheap option and is the opposite: one
+ * open-ended range is throttled hard, dragging a 32 MB 1080p file to a first frame in about 5.4s
+ * where HLS reaches one in 1.7s on the same trailer and device. It is also silent — YouTube answers
+ * adaptively, so the audio is a separate track a `<video>` cannot combine — and fails outright in
+ * some browsers.
  *
  * Null when the resolve found no master, which is the one case `/play` is still the answer to.
  */

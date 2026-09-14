@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  directSource,
   directTrailer,
   directURL,
   hlsURL,
@@ -139,31 +138,6 @@ describe('nativeHls', () => {
         throw new Error('no video element here');
       }),
     ).toBe(false);
-  });
-});
-
-describe('directSource', () => {
-  const both: DirectTrailer = {
-    video: 'https://g/v',
-    audio: 'https://g/a',
-    hls: 'https://g/m.m3u8',
-    width: 1920,
-    height: 1080,
-  };
-
-  it('takes HLS where the browser plays it', () => {
-    expect(directSource(both, true)).toBe('https://g/m.m3u8');
-  });
-
-  it('never offers the silent stream, which loses to reel’s own copy even where it plays', () => {
-    // Measured on one trailer and one device: 5.4s to a first frame against HLS's 1.7s, because a
-    // single open-ended range is throttled while HLS opens on a low variant and climbs.
-    expect(directSource(both, false)).toBeNull();
-    expect(directSource({ ...both, hls: null }, true)).toBeNull();
-  });
-
-  it('has nothing to offer without an answer', () => {
-    expect(directSource(null, true)).toBeNull();
   });
 });
 

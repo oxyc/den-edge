@@ -15,7 +15,8 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import { directSource, directTrailer, nativeHls, trailerURL } from '../lib/reel';
+  import type Hls from 'hls.js';
+  import { directTrailer, nativeHls, trailerSource, trailerURL } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -159,6 +160,27 @@
   let ambientFailed = $state(false);
   /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
   let proxied = $state<string | null>(null);
+  /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
+  const playsHls = nativeHls();
+  /**
+   * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
+   * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.
+   */
+  const managed = $derived(ambient && !playsHls && ambient.endsWith('.m3u8') ? ambient : null);
+
+  /** This source will not play: reel's own copy, and then the still picture, are what is left. */
+  function ambientFailedOver() {
+    playing = false;
+    // YouTube's own URL can expire or be withdrawn under us; reel's copy is what to try before
+    // giving up on the slide altogether.
+    if (proxied && ambient !== proxied) {
+      ambient = proxied;
+      return;
+    }
+    // The still picture is the fallback, and asking again on every return only fills reel's log.
+    ambient = null;
+    ambientFailed = true;
+  }
   /** Someone paying by the megabyte hasn't asked for a video they didn't press. */
   const saving = () =>
     Boolean(
@@ -210,8 +232,11 @@
     const timer = setTimeout(() => {
       // Only where YouTube's own stream can actually be played here. Everywhere else reel's copy is
       // what runs, and it has to be warm.
+      // Resolve only. Every browser now plays YouTube's own adaptive stream — its master directly
+      // where HLS is native, reel's proxy of it everywhere else — so asking reel to download and
+      // remux the whole file buys a fallback nothing normally reaches, at a minute of its CPU.
       void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
-        prewarm: nativeHls() ? 'direct' : 'full',
+        prewarm: 'direct',
       }).then(async (url) => {
         if (!live || !url) return;
         // Straight from YouTube where we can. Asking reel for the URL costs a lookup; asking it for
@@ -221,12 +246,44 @@
         const direct = await directTrailer(url);
         if (!live) return;
         proxied = url;
-        ambient = directSource(direct) ?? url;
+        ambient = trailerSource(url, direct, playsHls) ?? url;
       });
     }, SETTLE_MS);
     return () => {
       live = false;
       clearTimeout(timer);
+    };
+  });
+
+  // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
+  // `src`, and is torn down with the source it was given, so a slide change cannot leave two engines
+  // feeding one element.
+  $effect(() => {
+    const player = ambientPlayer;
+    const master = managed;
+    if (!player || !master) return;
+    let live = true;
+    let engine: Hls | undefined;
+    void import('hls.js').then(({ default: Hls }) => {
+      if (!live) return;
+      if (!Hls.isSupported()) {
+        ambientFailedOver();
+        return;
+      }
+      engine = new Hls({ enableWorker: false });
+      engine.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) ambientFailedOver();
+      });
+      // The element is mounted with no `src`, so nothing has tried to start it yet.
+      engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (active && onScreen && foreground) void player.play().catch(() => {});
+      });
+      engine.loadSource(master);
+      engine.attachMedia(player);
+    });
+    return () => {
+      live = false;
+      engine?.destroy();
     };
   });
 
@@ -448,7 +505,7 @@
         bind:this={ambientPlayer}
         class="ambient"
         class:playing
-        src={ambient}
+        src={managed ? undefined : (ambient ?? undefined)}
         autoplay
         muted
         loop
@@ -456,18 +513,7 @@
         preload="auto"
         tabindex="-1"
         onplaying={() => (playing = true)}
-        onerror={() => {
-          playing = false;
-          // YouTube's own URL can expire or be withdrawn under us; reel's copy is what to try before
-          // giving up on the slide altogether.
-          if (proxied && ambient !== proxied) {
-            ambient = proxied;
-            return;
-          }
-          // The still picture is the fallback, and asking again on every return only fills reel's log.
-          ambient = null;
-          ambientFailed = true;
-        }}
+        onerror={ambientFailedOver}
         onloadstart={(event) => (event.currentTarget.muted = true)}
       ></video>
     {/if}
