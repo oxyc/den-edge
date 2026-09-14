@@ -479,6 +479,15 @@
     background: var(--bg);
   }
 
+  /* The full-screen button belongs to the video, but the whole hero should offer it. It lives inside the
+     media, whose own `:hover` only fires with the pointer over the picture — and the title, facts and
+     actions sit in a SIBLING that paints on top of it, so reaching for the words hid the button instead of
+     revealing it. Hover applies to what is under the pointer and its ancestors, never to what is merely
+     underneath, so the hero has to say this itself. */
+  .hero:hover :global(.expand) {
+    opacity: 1;
+  }
+
   .hero-content {
     position: relative;
     width: 100%;
