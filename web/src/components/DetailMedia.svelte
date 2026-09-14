@@ -108,8 +108,12 @@
     const visibility = () => {
       foreground = !document.hidden;
     };
-    const observer = new IntersectionObserver(([entry]) => {
-      visible = entry?.isIntersecting ?? false;
+    // The LAST entry, not the first. Leaving this page and coming back queues several, and taking
+    // `entries[0]` took the oldest of them — a stale `false` from while the page was hidden — after
+    // which nothing fires again, because the real intersection state never changes a second time.
+    // That is the trailer that comes back from a swipe and sits there paused for good.
+    const observer = new IntersectionObserver((entries) => {
+      visible = entries[entries.length - 1]?.isIntersecting ?? false;
     });
     observer.observe(frame);
     motion.addEventListener('change', preferences);

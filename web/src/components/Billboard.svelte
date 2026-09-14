@@ -159,8 +159,10 @@
   $effect(() => {
     const box = frame;
     if (!box || typeof IntersectionObserver === 'undefined') return;
+    // The last entry, not the first: leaving Home and returning queues several, and the oldest is a
+    // stale `false` that would leave the billboard's trailer stopped with nothing left to restart it.
     const watch = new IntersectionObserver(
-      ([entry]) => (onScreen = entry?.isIntersecting ?? true),
+      (entries) => (onScreen = entries[entries.length - 1]?.isIntersecting ?? true),
       { threshold: 0 },
     );
     watch.observe(box);

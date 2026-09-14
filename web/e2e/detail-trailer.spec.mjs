@@ -77,7 +77,10 @@ for (const width of [390, 1280])
       expect(await video.evaluate((v) => v.muted)).toBe(true);
       expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(3);
       expect(await video.evaluate((v) => v.loop)).toBe(false);
-      expect(await video.evaluate((v) => v.controls)).toBe(width < 760);
+      // Controls wait to be asked for, at every width. Chrome nobody wanted over a hero is a play
+      // button and a scrubber lying across the artwork — and on a paused element iOS draws that play
+      // button right through the middle of the picture, which reads as broken rather than decorative.
+      expect(await video.evaluate((v) => v.controls)).toBe(false);
       expect(await geometry()).toEqual(before);
       expect(
         await page.evaluate(() => window.originalVideo === document.querySelector('video')),
@@ -134,6 +137,12 @@ for (const width of [390, 1280])
       );
       await expect(video).toHaveClass(/\bplaying\b/);
       expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(3);
+      // And they arrive the moment they are asked for, on the phone where the controls are how a
+      // viewer reaches the sound at all. Only there: the desktop hero is not pointer-interactive.
+      if (width < 760) {
+        await video.click();
+        expect(await video.evaluate((v) => v.controls)).toBe(true);
+      }
       expect(errors).toEqual([]);
     } finally {
       await browser.close();

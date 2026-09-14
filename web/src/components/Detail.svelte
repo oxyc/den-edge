@@ -421,7 +421,12 @@
     display: grid;
     align-items: end;
     width: 100vw;
-    min-height: var(--stable-hero-height, clamp(640px, 92lvh, 1100px));
+
+    /* Deliberately a little taller than the window: the actions then sit just below the fold, the
+       trailer gets the whole screen, and the buttons are one short scroll away. It has to be a
+       calc around the variable — `stableViewportHeight` sets that at runtime, so a plain clamp
+       here would simply be overridden wherever the action runs. */
+    min-height: calc(var(--stable-hero-height, clamp(640px, 92lvh, 1100px)) + 96px);
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 32px;
@@ -467,8 +472,8 @@
 
   .poster {
     display: block;
-    flex: 0 0 clamp(150px, 15vw, 210px);
-    width: clamp(150px, 15vw, 210px);
+    flex: 0 0 clamp(110px, 11vw, 160px);
+    width: clamp(110px, 11vw, 160px);
     height: auto;
     aspect-ratio: 2/3;
     object-fit: cover;
