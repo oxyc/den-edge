@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   describeRelease,
+  downmixed,
   endSession,
   findRemux,
   forgetBrowserTokens,
@@ -343,6 +344,17 @@ describe('describeRelease', () => {
       video: { codec: 'h264', transcoded: true, height: 1080, tonemapped: true },
     };
     expect(releaseParts(converted)).toEqual({ converted: '1080p H.264 SDR', release: '1080p' });
+  });
+});
+
+describe('downmixed', () => {
+  it('is true only where the session carries fewer channels than the track it plays', () => {
+    expect(downmixed({ ...session, audioChannels: 2 }), '5.1 played as stereo').toBe(true);
+    expect(downmixed({ ...session, audioChannels: 6 })).toBe(false);
+    expect(downmixed(session), 'a den-remux that doesn’t say').toBe(false);
+    const mono = { ...session, audioTracks: [{ ...session.audioTracks[0]!, channels: 1 }] };
+    expect(downmixed({ ...mono, audioChannels: 2 })).toBe(false);
+    expect(downmixed({ ...session, audioTrack: 3, audioChannels: 2 }), 'no such track').toBe(false);
   });
 });
 

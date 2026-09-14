@@ -23,6 +23,8 @@ export interface Session {
   };
   /** The audio track playing, by index into `audioTracks`: one per session, re-encoded to AAC. */
   audioTrack: number;
+  /** The channels the session's audio carries; absent from a den-remux before it said so. */
+  audioChannels?: number;
   audioTracks: AudioTrack[];
 }
 
@@ -247,6 +249,15 @@ export function releaseParts(session: Session): { converted?: string; release: s
   if (!video?.transcoded) return { release };
   const size = video.height ? `${video.height}p ` : '';
   return { converted: `${size}H.264${video.tonemapped ? ' SDR' : ''}`, release };
+}
+
+/**
+ * Whether the playing track has more channels than the session carries — a 5.1 track den-remux converted to stereo,
+ * for a browser that doesn't play 5.1 AAC — so the player can say so rather than leave it to pass for a fault.
+ */
+export function downmixed(session: Session): boolean {
+  const track = session.audioTracks[session.audioTrack];
+  return !!track && session.audioChannels !== undefined && session.audioChannels < track.channels;
 }
 
 /** A release den-remux could play, as it lists them: never a URL. */

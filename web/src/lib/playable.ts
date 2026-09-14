@@ -1,7 +1,7 @@
 // What this browser can decode, sent with every session so den-remux can tell whether a release plays here as it is
 // or needs converting (oxyc/den-remux `playable`): the highest level it takes of H.264 (8-bit and High 10), 8-bit and
-// 10-bit HEVC and 8-bit and 10-bit AV1, whether it decodes HDR (PQ) in HEVC and in AV1 and Dolby Vision, and whether
-// it plays E-AC-3 audio as it is.
+// 10-bit HEVC and 8-bit and 10-bit AV1, whether it decodes HDR (PQ) in HEVC and in AV1 and Dolby Vision, whether it
+// plays E-AC-3 audio as it is, and whether it plays 5.1 AAC.
 
 export interface Playable {
   /** H.264's highest `level_idc` (0x33 is 5.1); 0 for none. */
@@ -17,6 +17,11 @@ export interface Playable {
   hdr: boolean;
   /** Whether Dolby Digital Plus (E-AC-3) plays here. */
   eac3: boolean;
+  /**
+   * Whether 6-channel AAC-LC plays here, so den-remux converts a 5.1 or 7.1 track to AAC 5.1 rather than to stereo.
+   * The browser downmixes it for stereo output, so saying yes costs a laptop's speakers nothing.
+   */
+  aacMultichannel: boolean;
   /**
    * Dolby Vision profiles: 5 has no HDR10 base layer, so a player without it shows wrong colours; 8 falls back to
    * HDR10 where it isn't decoded.
@@ -48,6 +53,8 @@ export interface Probe {
   supports: (type: string) => boolean;
   /** Media Capabilities' answer for a video configuration; absent where the browser has none. */
   decodes?: (video: VideoConfiguration) => Promise<boolean>;
+  /** Its answer for an audio configuration; absent where the browser has none. */
+  decodesAudio?: (audio: AudioConfiguration) => Promise<boolean>;
   /**
    * Apple's media stack: Safari, and every browser on an iPhone or iPad, which all run on WebKit and say so in
    * `navigator.vendor`. Its decoders refuse HEVC's High tier however the questions above are answered (The Hobbit's
@@ -62,13 +69,15 @@ export function browserProbe(): Probe {
     globalThis.MediaSource ??
     (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
   const capabilities = globalThis.navigator?.mediaCapabilities;
+  const type = source ? 'media-source' : 'file';
   return {
     supports: (type) =>
       (source?.isTypeSupported(type) ?? false) || element.canPlayType(type) !== '',
     decodes: capabilities
-      ? async (video) =>
-          (await capabilities.decodingInfo({ type: source ? 'media-source' : 'file', video }))
-            .supported
+      ? async (video) => (await capabilities.decodingInfo({ type, video })).supported
+      : undefined,
+    decodesAudio: capabilities
+      ? async (audio) => (await capabilities.decodingInfo({ type, audio })).supported
       : undefined,
     apple: globalThis.navigator?.vendor?.startsWith('Apple') ?? false,
   };
@@ -131,6 +140,11 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
     hevcHighTier,
     hdr,
     eac3: probe.supports('audio/mp4; codecs="ec-3"'),
+    aacMultichannel: await decodesAudio(probe, {
+      contentType: 'audio/mp4; codecs="mp4a.40.2"',
+      channels: '6',
+      samplerate: 48000,
+    }),
     dolbyVision: { p5: await dolby('05'), p8: await dolby('08') },
     av1,
     av1Main10,
@@ -143,6 +157,19 @@ async function decodes(probe: Probe, video: VideoConfiguration): Promise<boolean
   if (!probe.decodes) return true;
   try {
     return await probe.decodes(video);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Media Capabilities' answer for audio. Unlike video there is no type check to fall back on — every browser says yes
+ * to `mp4a.40.2` whatever its channels — so a browser that can't be asked gets stereo.
+ */
+async function decodesAudio(probe: Probe, audio: AudioConfiguration): Promise<boolean> {
+  if (!probe.decodesAudio) return false;
+  try {
+    return await probe.decodesAudio(audio);
   } catch {
     return false;
   }

@@ -9,6 +9,7 @@
   import type { Title } from '../lib/library';
   import { playable, type Playable } from '../lib/playable';
   import {
+    downmixed,
     endSession,
     listReleases,
     login,
@@ -488,6 +489,7 @@
   {#if session}
     {@const parts = releaseParts(session)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
+    {@const stereo = downmixed(session)}
     <footer>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
@@ -520,13 +522,21 @@
         {#if session.audioTracks.length > 1 && playingTrack}
           <div class="pick">
             {@render globe()}
+            <!-- A surround track this browser gets in stereo says so beside its name, quietly: a known limit of
+                 the conversion, not a fault. -->
             <span class="value" aria-hidden="true"
-              >{trackLabel(playingTrack, session.audioTrack)}</span
+              >{trackLabel(playingTrack, session.audioTrack)}{#if stereo}<span class="downmix"
+                  >Stereo</span
+                >{/if}</span
             >
             {@render chevron()}
             <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
               {#each session.audioTracks as track, n (n)}
-                <option value={n}>{trackLabel(track, n)}</option>
+                <option value={n}
+                  >{trackLabel(track, n)}{stereo && n === session.audioTrack
+                    ? ' · Stereo'
+                    : ''}</option
+                >
               {/each}
             </select>
           </div>
@@ -764,6 +774,13 @@
     font-size: 15px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* What the track plays as, beside what it is: as quiet as the release's source. */
+  .downmix {
+    margin-left: 0.75ch;
+    color: rgb(255 255 255 / 0.5);
+    font-size: 13px;
   }
 
   .icon {

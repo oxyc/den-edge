@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { playable, type Probe } from './playable';
 
 /** A browser that plays the codec strings `yes` accepts. */
-const browser = (yes: (codec: string) => boolean, decodes?: Probe['decodes']): Probe => ({
+const browser = (
+  yes: (codec: string) => boolean,
+  decodes?: Probe['decodes'],
+  decodesAudio?: Probe['decodesAudio'],
+): Probe => ({
   supports: (type) => yes(/codecs="([^"]+)"/.exec(type)![1]!),
   decodes,
+  decodesAudio,
 });
 
 describe('playable', () => {
@@ -16,6 +21,7 @@ describe('playable', () => {
         asked.push(video);
         return true;
       },
+      async () => true,
     );
     expect(await playable(android)).toEqual({
       h264: 0x33,
@@ -25,6 +31,7 @@ describe('playable', () => {
       hevcHighTier: 153,
       hdr: true,
       eac3: true,
+      aacMultichannel: true,
       dolbyVision: { p5: true, p8: true },
       av1: 13,
       av1Main10: 13,
@@ -72,11 +79,41 @@ describe('playable', () => {
       hevcHighTier: 0,
       hdr: false,
       eac3: false,
+      aacMultichannel: false,
       dolbyVision: { p5: false, p8: false },
       av1: 0,
       av1Main10: 0,
       av1Hdr: false,
     });
+  });
+
+  it('asks Media Capabilities about 5.1 AAC, and takes stereo where it can’t ask or it fails', async () => {
+    const asked: AudioConfiguration[] = [];
+    const chrome = browser(
+      () => true,
+      async () => true,
+      async (audio) => {
+        asked.push(audio);
+        return true;
+      },
+    );
+    expect((await playable(chrome)).aacMultichannel).toBe(true);
+    expect(asked).toEqual([
+      { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: '6', samplerate: 48000 },
+    ]);
+    const stereoOnly = browser(
+      () => true,
+      async () => true,
+      async (audio) => audio.channels !== '6',
+    );
+    expect((await playable(stereoOnly)).aacMultichannel).toBe(false);
+    expect((await playable(browser(() => true))).aacMultichannel, 'nothing to ask').toBe(false);
+    const broken = browser(
+      () => true,
+      async () => true,
+      async () => Promise.reject(new TypeError('unsupported configuration')),
+    );
+    expect((await playable(broken)).aacMultichannel).toBe(false);
   });
 
   it('finds AV1 as Chrome, Firefox and Safari answer, and asks Media Capabilities about PQ', async () => {
