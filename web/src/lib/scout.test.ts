@@ -107,7 +107,10 @@ describe('a table that names no address for the service', () => {
 
   /** Naming that public address is the whole fix, and it costs no request to the address itself. */
   it('places that install as soon as the table names its public address', async () => {
-    const named: Routes = { ...PUBLIC_ONLY, scout: [{ url: 'https://d-scout.oxy.fi', access: true }] };
+    const named: Routes = {
+      ...PUBLIC_ONLY,
+      scout: [{ url: 'https://d-scout.oxy.fi', access: true }],
+    };
     const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
     expect(await findAddon([SCOUT_PUBLIC], named, SCOUT, fetchImpl)).toEqual({
       install: 'https://d-scout.oxy.fi/sealed-cfg',
