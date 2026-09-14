@@ -100,11 +100,14 @@
    * ready. Asking again here is what that delay was doing.
    *
    * Never against the viewer: `touched` means they have the controls, and a paused trailer they paused
-   * stays paused.
+   * stays paused. Never an ended one either — `play()` on an ended element starts it again from the
+   * beginning, and a trailer that has finished must stay finished. That one is a race, not a rarity: a
+   * `canplay` arriving as the media ends sees `paused` already true and `ended` not yet read, so the
+   * retry would resurrect the trailer a moment after it stopped.
    */
   function start() {
     const player = video;
-    if (!player || touched || !allowed || !player.paused) return;
+    if (!player || touched || !allowed || !player.paused || player.ended) return;
     void player.play().catch(() => {});
   }
 
