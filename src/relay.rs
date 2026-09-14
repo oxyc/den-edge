@@ -1,8 +1,10 @@
 //! The addons' JSON routes relayed from the web app's own origin (`ADDON_RELAY`, oxyc/den#15). On its public name
 //! the web app asks `/scout/…` and `/atlas/…` here, and den-edge fetches them at the addon's LAN address — as
 //! `tailscale serve` does on the tailnet. So the browser needs no Cloudflare Access service token (which stays on
-//! the TVs), no CORS preflight past Access, and a library's LAN install URLs work as they are. Only an addon's
-//! JSON goes through: den-remux's video never takes this path.
+//! the TVs), no CORS preflight past Access, and a library's LAN install URLs work as they are. Mostly JSON
+//! goes through; the exception is den-reel's trailer, which is streamed with its ranges intact because on a
+//! public name there is no address a browser can fetch it from directly. den-remux's video never takes this
+//! path — the player is given its own origin.
 
 use crate::handler::{error, raw_json, MAX_BODY_BYTES};
 use crate::AppState;
@@ -42,6 +44,11 @@ const GUEST_PER_WINDOW: u32 = 120;
 /// Relayed fetches in flight at once, across everyone. The addons are one small box: without this a handful of
 /// visitors on a public name can hold every upstream socket and starve the TVs that actually live here.
 pub(crate) const MAX_IN_FLIGHT: usize = 16;
+/// Media fetches per address per minute, counted apart from the JSON above.
+///
+/// One playback is many requests, not one: a video element opens a range, seeks, and opens another. Charging
+/// those against a page's allowance would spend it on a single trailer and refuse the page around it.
+const MEDIA_PER_WINDOW: u32 = 600;
 /// How long a request waits for one of those slots before giving up, so a queue can't grow without bound.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 
@@ -67,6 +74,16 @@ pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) ->
     // the larger one. That order is deliberate: checking membership first would let a forged member header make
     // every relayed request do a library lookup, which is the work this limit exists to protect.
     let ip = crate::handler::client_ip(state, &req);
+    // A trailer's bytes come through here or not at all. On the public name a browser cannot reach reel
+    // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
+    // the video has to be served from this origin. Streamed rather than collected, and on its own budget.
+    if media(req.uri().path()) {
+        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW)
+        {
+            return limited(wait);
+        }
+        return stream(state, req, target, rid).await;
+    }
     if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
         let member =
             req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -153,6 +170,70 @@ pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) ->
     resp
 }
 
+/// Is this relayed path a trailer's bytes rather than JSON? Reel's `/play/<id>.mp4`, and the playlist and
+/// segments that will join it. An install's config sits between the prefix and these, so the segment is looked
+/// for rather than positioned — but only under reel, so no other addon can be streamed through by naming a
+/// path after one of these.
+fn media(path: &str) -> bool {
+    path.strip_prefix("/reel/")
+        .is_some_and(|rest| rest.split('/').any(|segment| matches!(segment, "play" | "hls" | "seg")))
+}
+
+/// Media, passed through as it arrives.
+///
+/// Nothing here collects the body: a trailer is tens of megabytes and the JSON path's ceiling is eight, so
+/// collecting would refuse it — and holding it in memory to hand on would be the wrong shape anyway. The
+/// range headers travel in both directions, because a video element opens a range, seeks, and opens another,
+/// and a player denied `Accept-Ranges` cannot seek at all.
+///
+/// It takes no in-flight slot. Those bound what is happening at once against a box of one addon, and a
+/// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
+async fn stream(state: &AppState, req: Request, target: String, rid: &str) -> Response {
+    let method = req.method().clone();
+    let asked: Vec<_> = [header::RANGE, header::IF_RANGE, header::IF_NONE_MATCH, header::ACCEPT_ENCODING]
+        .into_iter()
+        .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
+        .collect();
+    let mut out = axum::http::Request::builder().method(method).uri(&target).header("x-request-id", rid);
+    for (name, value) in asked {
+        out = out.header(name, value);
+    }
+    let Ok(out) = out.body(Full::new(Bytes::new())) else {
+        return json(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    // The timeout covers reaching the addon and its answer's head, not the body: a trailer takes as long as
+    // it takes to send, and cutting it off mid-stream would be a truncated file rather than an error.
+    let answer = match tokio::time::timeout(TIMEOUT, state.relay_client.request(out)).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(e)) => {
+            eprintln!("relay media: {e}");
+            return json(StatusCode::BAD_GATEWAY, "addon_unreachable");
+        }
+        Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
+    };
+    let (parts, body) = answer.into_parts();
+    let mut resp = Response::new(Body::new(body));
+    *resp.status_mut() = parts.status;
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::ACCEPT_RANGES,
+        header::CONTENT_ENCODING,
+        header::CACHE_CONTROL,
+        header::ETAG,
+        header::LAST_MODIFIED,
+        header::VARY,
+        header::RETRY_AFTER,
+        header::HeaderName::from_static("server-timing"),
+    ] {
+        if let Some(value) = parts.headers.get(&name) {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    resp
+}
+
 fn json(status: StatusCode, code: &str) -> Response {
     raw_json(status, Body::from(error(code).to_string()), true)
 }
@@ -216,5 +297,24 @@ mod tests {
         // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
         let forged = format!("{LIB}:not-the-token");
         assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A trailer's bytes are streamed and a lookup is not, and nothing outside reel is streamed at all —
+    /// otherwise any addon could be proxied without a ceiling by naming a path `/play/`.
+    #[test]
+    fn only_reels_own_media_paths_stream() {
+        for path in ["/reel/play/abc.mp4", "/reel/cfg/play/abc.mp4", "/reel/hls/abc.m3u8", "/reel/seg/1.ts"]
+        {
+            assert!(super::media(path), "{path}");
+        }
+        for path in [
+            "/reel/cfg/meta/movie/tmdb:550.json",
+            "/reel/direct/abc.json",
+            "/scout/cfg/play/ticket",
+            "/atlas/recommend",
+            "/playlist",
+        ] {
+            assert!(!super::media(path), "{path}");
+        }
     }
 }

@@ -561,8 +561,7 @@ pub mod tests {
             "scout=http://192.168.86.193:8080 https://pve.example:8443/scout access:https://d-scout.oxy.fi;\
              remux=http://192.168.86.193:8095/remux https://pve.example:8443/remux",
         );
-        s.media_origins =
-            [crate::routes::remux_origins(&s.routes), crate::routes::reel_origins(&s.routes)].concat();
+        s.media_origins = crate::routes::media_origins(&s.routes);
         h
     }
 

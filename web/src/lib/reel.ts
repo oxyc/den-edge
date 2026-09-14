@@ -1,11 +1,14 @@
 // den-reel's trailers: the plain MP4 the TV plays behind its hero, rather than YouTube's embed with its own
 // furniture, its own autoplay rules and its own error card.
 //
-// The lookup is JSON, so it goes through this origin like the other addons' (den-edge relays `/reel` to the
-// addon's LAN address, as it does `/scout` and `/atlas`). The video does not: that relay carries JSON only. reel
-// names its own play URLs by whatever address it was asked at — the LAN one, through the relay — so the origin
-// is swapped for one of reel's addresses this page can actually reach. What the signature covers is the video
-// and the install that asked for it, not the host, so it survives the swap.
+// Both the lookup and the video go through this origin, which den-edge relays to reel's LAN address (as it
+// does `/scout` and `/atlas`). reel names its own play URLs by whatever address it was asked at — the LAN one,
+// behind the relay — so the origin is swapped for the relay's own mount. What the signature covers is the
+// video and the install that asked for it, not the host, so it survives the swap.
+//
+// Anywhere but this origin there is no address to swap in that a browser off the tailnet can resolve: reel's
+// public name is behind Cloudflare Access, which a page has no service token for. Hence the relay, and only
+// where the page is not served by den-edge does it fall back to reel's own addresses.
 
 import type { MediaType } from './library';
 import { relayFetch } from './relayFetch';
@@ -21,6 +24,22 @@ function reachable(
     return entry.url.replace(/\/$/, '');
   }
   return null;
+}
+
+/**
+ * Where this page loads a trailer's bytes from.
+ *
+ * The relay's own mount whenever reel was found on this origin — same-origin, so no CORS, no Access token
+ * and `media-src 'self'` covers it. `base` may carry an install's config (`/reel/<cfg>`); a play URL is
+ * signed rather than configured, so only the mount travels.
+ */
+function mediaBase(
+  base: string,
+  entries: Entry[],
+  secure = globalThis.location?.protocol !== 'http:',
+): string | null {
+  if (base.startsWith('/')) return `/${base.split('/')[1]}`;
+  return reachable(entries, secure);
 }
 
 /**
@@ -77,7 +96,7 @@ export async function trailerURLs(
     prewarm?: 'full' | 'direct';
   } = {},
 ): Promise<string[]> {
-  const origin = reachable(routes.reel ?? [], secure);
+  const origin = mediaBase(base, routes.reel ?? [], secure);
   if (!origin) return [];
   const asked = metaURL(base, type, ids, prewarm);
   if (!asked) return [];
@@ -128,11 +147,16 @@ export type DirectTrailer = {
  */
 export function directURL(playURL: string): string | null {
   try {
-    const url = new URL(playURL);
+    // Relative against this page, since a play URL through the relay is a path on this origin. The stand-in
+    // base is only there so a path still parses where there is no page (tests, a worker); a relative URL
+    // comes back relative, so it never leaves this function.
+    const url = new URL(playURL, globalThis.location?.href ?? 'http://relative.invalid');
     const id = url.pathname.match(/\/play\/([A-Za-z0-9_-]{11})\.mp4$/)?.[1];
     if (!id) return null;
     url.pathname = url.pathname.replace(/\/play\/[^/]+$/, `/direct/${id}.json`);
-    return url.toString();
+    // A path in stays a path out, so a relayed lookup is asked for on this origin rather than at
+    // whatever address the page happens to be served from.
+    return /^[a-z][a-z0-9+.-]*:/i.test(playURL) ? url.toString() : `${url.pathname}${url.search}`;
   } catch {
     return null;
   }
@@ -179,7 +203,7 @@ export function directSource(direct: DirectTrailer | null, hlsOk = nativeHls()):
  */
 export async function directTrailer(
   playURL: string,
-  { fetchImpl = fetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
+  { fetchImpl = relayFetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
 ): Promise<DirectTrailer | null> {
   const ask = directURL(playURL);
   if (!ask) return null;

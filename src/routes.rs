@@ -123,16 +123,19 @@ fn https_origins(routes: &Routes, service: &str) -> Vec<String> {
     origins
 }
 
-/// Where the web app's player may fetch remuxed video.
-pub fn remux_origins(routes: &Routes) -> Vec<String> {
-    https_origins(routes, "remux")
-}
-
-/// Where a page may fetch a trailer: den-reel's own MP4, and the playlist and segments it proxies. Missing
-/// here, the policy refused reel outright on the public and tailnet names — a trailer that never played, and
-/// nothing in the page to say why, because a blocked media load reports only that it failed.
-pub fn reel_origins(routes: &Routes) -> Vec<String> {
-    https_origins(routes, "reel")
+/// Every origin the web app may load video from: den-remux's remuxed releases and den-reel's trailers.
+///
+/// Missing reel, the policy refused it outright on the public and tailnet names — a trailer that never
+/// played, and nothing in the page to say why, because a blocked media load reports only that it failed.
+/// Deduplicated because the two share the tailnet name, and a policy that says it twice is only longer.
+pub fn media_origins(routes: &Routes) -> Vec<String> {
+    let mut origins = https_origins(routes, "remux");
+    for origin in https_origins(routes, "reel") {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
 }
 
 #[cfg(test)]
@@ -188,15 +191,19 @@ mod tests {
 
     #[test]
     fn the_player_may_fetch_from_den_remuxs_https_origins() {
-        assert_eq!(remux_origins(&parse(TABLE)), ["https://pve.example:8443", "https://d-remux.oxy.fi"]);
+        assert_eq!(media_origins(&parse(TABLE)), ["https://pve.example:8443", "https://d-remux.oxy.fi"]);
     }
 
-    /// A trailer is fetched from reel itself, so the policy has to name it the same way.
+    /// A trailer is fetched from reel itself, so the policy has to name it the same way — once, though both
+    /// services answer on the tailnet name.
     #[test]
     fn a_page_may_fetch_a_trailer_from_den_reels_https_origins() {
-        let table =
-            "reel=http://192.168.86.193:8092 https://pve.example:8443/reel access:https://d-reel.oxy.fi";
-        assert_eq!(reel_origins(&parse(table)), ["https://pve.example:8443", "https://d-reel.oxy.fi"]);
-        assert!(reel_origins(&parse(TABLE)).is_empty(), "a table with no reel names none");
+        let table = format!(
+            "{TABLE};reel=http://192.168.86.193:8092 https://pve.example:8443/reel access:https://d-reel.oxy.fi"
+        );
+        assert_eq!(
+            media_origins(&parse(&table)),
+            ["https://pve.example:8443", "https://d-remux.oxy.fi", "https://d-reel.oxy.fi"]
+        );
     }
 }

@@ -181,8 +181,7 @@ async fn main() {
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
-    state.media_origins =
-        [routes::remux_origins(&state.routes), routes::reel_origins(&state.routes)].concat();
+    state.media_origins = routes::media_origins(&state.routes);
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
             eprintln!("NEW_LIBRARIES is {v:?}: expected open or members");

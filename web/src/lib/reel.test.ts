@@ -19,9 +19,9 @@ const ROUTES: Routes = {
 };
 
 /** reel, answering through den-edge's relay: it names its play URLs by the LAN address it was asked at. */
-const answering = (body: unknown, status = 200): typeof fetch =>
+const answering = (body: unknown, status = 200, at = '/reel/cfg'): typeof fetch =>
   (async (input) => {
-    if (String(input) !== '/reel/cfg/meta/movie/tt0111161.json')
+    if (String(input) !== `${at}/meta/movie/tt0111161.json`)
       return new Response('{}', { status: 404 });
     return new Response(JSON.stringify(body), { status });
   }) as typeof fetch;
@@ -48,24 +48,33 @@ describe('trailerURL', () => {
   const ask = (routes: Routes, fetchImpl: typeof fetch, secure = true) =>
     trailerURL('/reel/cfg', 'movie', { imdb: 'tt0111161' }, routes, { fetchImpl, secure });
 
-  it('takes reel’s best trailer and points it at an address this page can reach, signature and all', async () => {
-    expect(await ask(ROUTES, answering(meta))).toBe(
+  it('takes reel’s best trailer and keeps it on this origin, signature and all', async () => {
+    // The relay's mount, not the install's config: a play URL is signed rather than configured. And not
+    // one of reel's own addresses — on a public name the tailnet one resolves for nobody and the public
+    // one is behind Access, which is a trailer that silently never plays.
+    expect(await ask(ROUTES, answering(meta))).toBe('/reel/play/abc123.mp4?s=tag&i=iid');
+  });
+
+  it('falls back to an address this page can reach where reel is not on this origin', async () => {
+    const elsewhere = (routes: Routes, secure = true) =>
+      trailerURL('https://reel.example/cfg', 'movie', { imdb: 'tt0111161' }, routes, {
+        fetchImpl: answering(meta, 200, 'https://reel.example/cfg'),
+        secure,
+      });
+    expect(await elsewhere(ROUTES)).toBe(
       'https://pve.example:8443/reel/play/abc123.mp4?s=tag&i=iid',
     );
-  });
-
-  it('stays on the LAN address when the page itself is plaintext', async () => {
     const onLan: Routes = { reel: [{ url: 'http://192.168.86.193:8092' }] };
-    expect(await ask(onLan, answering(meta), false)).toBe(
+    expect(await elsewhere(onLan, false)).toBe(
       'http://192.168.86.193:8092/play/abc123.mp4?s=tag&i=iid',
     );
+    const sealed: Routes = { reel: [{ url: 'https://d-reel.oxy.fi', access: true }] };
+    expect(await elsewhere(sealed), 'nothing but an Access address is nothing to play').toBeNull();
   });
 
-  it('is null when reel has no trailer, answers badly, or has no address but an Access one', async () => {
+  it('is null when reel has no trailer or answers badly', async () => {
     expect(await ask(ROUTES, answering({ meta: { links: [] } }))).toBeNull();
     expect(await ask(ROUTES, answering(meta, 503))).toBeNull();
-    const sealed: Routes = { reel: [{ url: 'https://d-reel.oxy.fi', access: true }] };
-    expect(await ask(sealed, answering(meta))).toBeNull();
   });
 });
 
@@ -76,6 +85,10 @@ describe('directURL', () => {
     );
     expect(directURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
     expect(directURL('not a url')).toBeNull();
+    // A relayed play URL is a path on this origin, and its lookup has to stay one.
+    expect(directURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
+      '/reel/direct/abc12345678.json?s=tag',
+    );
   });
 });
 
@@ -178,10 +191,7 @@ describe('trailer candidates', () => {
         fetchImpl: answering(body),
         secure: true,
       }),
-    ).toEqual([
-      'https://pve.example:8443/reel/play/first.mp4?s=one',
-      'https://pve.example:8443/reel/play/second.mp4?s=two',
-    ]);
+    ).toEqual(['/reel/play/first.mp4?s=one', '/reel/play/second.mp4?s=two']);
   });
 
   it('asks by the tmdb id, colon unencoded, and names the imdb id beside it', async () => {
