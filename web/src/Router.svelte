@@ -9,7 +9,7 @@
   import { swipeHistory } from './lib/swipeBack';
   import LoadingSnapshot from './components/LoadingSnapshot.svelte';
   import RoutePage from './components/RoutePage.svelte';
-  import { Navigation, appHash, routeKey } from './lib/navigation';
+  import { Navigation, appPath, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
 
   let {
@@ -17,7 +17,7 @@
     onchange,
   }: { children: Snippet<[Route, boolean]>; onchange: (route: Route) => void } = $props();
   // The parent keys this entire scope by the paired library, including all retained pages and data.
-  const navigation = new Navigation(location.hash);
+  const navigation = new Navigation(location.pathname + location.search);
   let current = $state.raw(navigation.current);
   let pages = $state.raw([...navigation.pages.values()]);
   let revision = 0;
@@ -99,9 +99,21 @@
       },
     });
     onchange(current.route);
-    async function follow(hash: string, push: boolean) {
-      if (push && appHash(hash, location.href) === null) return;
-      const key = routeKey(parseRoute(hash));
+    const address = () => location.pathname + location.search;
+    async function follow(path: string, push: boolean, replace = false) {
+      if (push && appPath(path, location.href) === null) return;
+      const key = routeKey(parseRoute(path));
+      // The same page at a new address: a search query that grew by a letter is not somewhere a person
+      // navigated to, and giving it a history entry would bury the page they came from under the spelling
+      // of what they typed. The entry is rewritten in place and the page keeps its scroll and its state.
+      if (replace) {
+        if (address() !== path) history.replaceState(history.state, '', path);
+        // Only the address and the route it names. The page itself is the one already on screen, so its
+        // scroll, its snapshot and its place in the ledger are left exactly as they are.
+        current.route = parseRoute(path);
+        onchange(current.route);
+        return;
+      }
       const previousPosition = position;
       if (!push) {
         const state = history.state?.denNavigation;
@@ -136,13 +148,13 @@
         if (captured) snapshots.set(current.key, captured);
       }
       restoring = true;
-      if (push && location.hash !== hash) {
+      if (push && address() !== path) {
         position++;
         for (const at of entries.keys()) if (at >= position) entries.delete(at);
         const pageKey =
           key.startsWith('title/') || key.startsWith('person/') ? crypto.randomUUID() : key;
         entries.set(position, { routeKey: key, pageKey });
-        history.pushState({ denNavigation: { scope, position } }, '', hash);
+        history.pushState({ denNavigation: { scope, position } }, '', path);
       }
       document.documentElement.dataset.denNavigation =
         !push && position < previousPosition ? 'back' : 'forward';
@@ -155,7 +167,7 @@
       transition?.skipTransition();
       const update = async () => {
         if (ticket !== revision) return;
-        current = navigation.visit(hash, visitKey);
+        current = navigation.visit(path, visitKey);
         // Selecting a detail is a new visit; history traversal restores the saved position.
         // Top-level tabs still retain their browsing position when selected explicitly.
         if (push && (current.route.page === 'title' || current.route.page === 'person')) {
@@ -201,10 +213,13 @@
     }
     const backRequested = () => {
       if (inScope() && position > 0) history.back();
-      else void follow('#library', true);
+      else void follow('/', true);
     };
-    const requested = (event: Event) => void follow((event as CustomEvent<string>).detail, true);
-    const traversed = () => void follow(location.hash, false);
+    const requested = (event: Event) => {
+      const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+      void follow(path, true, replace);
+    };
+    const traversed = () => void follow(address(), false);
     const clicked = (event: MouseEvent) => {
       if (
         event.defaultPrevented ||
@@ -222,16 +237,15 @@
         (anchor.target && anchor.target !== '_self')
       )
         return;
-      const hash = appHash(anchor.href, location.href);
-      if (hash === null) return;
+      const path = appPath(anchor.href, location.href);
+      if (path === null) return;
       event.preventDefault();
-      void follow(hash, true);
+      void follow(path, true);
     };
     document.addEventListener('click', clicked);
     document.addEventListener('den:navigate', requested);
     document.addEventListener('den:back', backRequested);
     window.addEventListener('popstate', traversed);
-    window.addEventListener('hashchange', traversed);
     return () => {
       transition?.skipTransition();
       delete document.documentElement.dataset.denNavigation;
@@ -244,7 +258,6 @@
       document.removeEventListener('den:navigate', requested);
       document.removeEventListener('den:back', backRequested);
       window.removeEventListener('popstate', traversed);
-      window.removeEventListener('hashchange', traversed);
     };
   });
 </script>

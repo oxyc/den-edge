@@ -1,4 +1,4 @@
-import { parseRoute, type Route } from './route';
+import { parseRoute, routePath, type Route } from './route';
 
 export const routeKey = (route: Route): string =>
   route.page === 'title'
@@ -17,16 +17,21 @@ export interface PageVisit {
 export class Navigation {
   readonly pages = new Map<string, PageVisit>();
   current: PageVisit;
-  constructor(hash: string) {
-    this.current = this.visit(hash);
+  constructor(path: string) {
+    this.current = this.visit(path);
   }
-  visit(hash: string, entryKey?: string): PageVisit {
-    const route = parseRoute(hash);
+  visit(path: string, entryKey?: string): PageVisit {
+    const route = parseRoute(path);
     const key = entryKey ?? routeKey(route);
     let page = this.pages.get(key);
     if (!page) {
       page = { key, route, x: 0, y: 0 };
       this.pages.set(key, page);
+    } else {
+      // Search keeps one surface across every query, so a revisit carries the new one in: the key says
+      // which page this is, the route says what it is currently showing, and for every other page the
+      // two are the same fact written twice.
+      page.route = route;
     }
     return (this.current = page);
   }
@@ -48,22 +53,41 @@ export class Navigation {
   }
 }
 
-/** Leave external links, downloads, new tabs and pairing fragments to the browser. */
-export function appHash(href: string, base: string): string | null {
-  const url = new URL(href, base);
-  const here = new URL(base);
-  if (url.origin !== here.origin || url.pathname !== here.pathname || url.search !== here.search)
+/**
+ * The app path a link leads to, or null to leave it to the browser: another origin, a download, a new tab —
+ * and any link that only moves the fragment, which is how the TV's pairing QR (`#pair=…`) arrives.
+ *
+ * A path is the app's when it names a page. Home is the exception it has to make room for: `/` is a page, but
+ * so is every path the app does not recognise, and those belong to den-edge. `/` with a query is one of those
+ * — the e2e fixtures address themselves that way — so only the bare path counts.
+ */
+export function appPath(href: string, base: string): string | null {
+  let url: URL;
+  let here: URL;
+  try {
+    url = new URL(href, base);
+    here = new URL(base);
+  } catch {
     return null;
-  return /^#(?:library|movies|series|watchlist|settings|search|title\/(?:movie|tv)\/[1-9]\d*|person\/[1-9]\d*)$/.test(
-    url.hash,
-  )
-    ? url.hash
-    : null;
+  }
+  if (url.origin !== here.origin) return null;
+  if (url.hash && url.pathname === here.pathname && url.search === here.search) return null;
+  const route = parseRoute(url.pathname + url.search);
+  const home = url.pathname === '/' && url.search === '';
+  return route.page !== 'library' || home ? url.pathname + url.search : null;
 }
 
-/** Used by button-based title selection as well as intercepted anchors. */
-export function navigate(hash: string) {
-  document.dispatchEvent(new CustomEvent('den:navigate', { detail: hash }));
+/** Where a route lives, for callers holding a route rather than a link. */
+export { routePath };
+
+/**
+ * Used by button-based title selection as well as intercepted anchors.
+ *
+ * `replace` rewrites the current entry instead of adding one — what typing in the search field wants, since a
+ * query that grew a letter at a time would otherwise leave a history entry behind for every keystroke.
+ */
+export function navigate(path: string, replace = false) {
+  document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path, replace } }));
 }
 
 /** Navbar and other explicit Back controls use the same scoped router as gestures. */

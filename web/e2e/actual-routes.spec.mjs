@@ -61,7 +61,10 @@ test('actual-routes regressions', async () => {
           return scroll(...args);
         };
       });
-      await page.goto('http://127.0.0.1:5198/test/actual-routes.html#title/movie/42');
+      // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
+      // document, and the title is the first history entry, exactly as opening its link would give.
+      await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+      await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
       await page.waitForSelector('[data-active="true"] .backdrop');
       // Offscreen lazy actor images need not load before capturing the visible page.
       await page.evaluate(async () => {

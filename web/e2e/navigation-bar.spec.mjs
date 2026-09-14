@@ -35,13 +35,18 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
     await page.keyboard.press('Enter');
     await expect(page.locator('[data-active="true"] h1')).toHaveText('library');
     await expect.poll(() => page.evaluate(() => scrollY)).toBe(900);
-    await page.goto('http://127.0.0.1:5198/test/navigation-bar.html#person/7');
+    // A history entry the router has no ledger for — what an address-bar arrival leaves behind. The fixture is
+    // a file on the dev server, so the path is taken directly rather than by loading the document again.
+    await page.evaluate(() => {
+      history.pushState(null, '', '/person/7');
+      dispatchEvent(new PopStateEvent('popstate'));
+    });
     await back.click();
     await expect(page.locator('[data-active="true"] h1')).toHaveText('library');
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 800 });
       await page.evaluate(() =>
-        document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#title/movie/9' })),
+        document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/9' } })),
       );
       await expect(back).toBeHidden();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);

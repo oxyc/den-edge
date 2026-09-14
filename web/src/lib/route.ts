@@ -1,5 +1,11 @@
-// Den Web's pages live in the URL's fragment, so Back works and a page can be linked. Not paths: a path is
-// den-edge's to answer.
+// Den Web's pages are real paths — `/movie/550-fight-club`, `/search?q=blade+runner` — not fragments. A path
+// is what a share preview can be built for, what a search result can be linked to, and what reads as a place
+// rather than an anchor. The fragment is left to the TV's pairing QR (`#pair=…`), which must never reach a
+// server, so nothing here ever looks at it.
+//
+// den-edge serves `index.html` for any path with no file behind it (`web.rs`), so these are the app's to read.
+// They must not collide with an API path — `/lib`, `/link`, `/pair`, `/inbox`, `/scout`, `/atlas`, `/reel`,
+// `/remux`, `/routes`, `/config`, `/health`, `/metrics`, `/p` — because the API answers first.
 
 import type { MediaType } from './library';
 
@@ -9,34 +15,110 @@ export type Route =
   | { page: 'series' }
   | { page: 'watchlist' }
   | { page: 'settings' }
-  | { page: 'search' }
+  | { page: 'search'; query: string }
   | { page: 'title'; type: MediaType; id: number }
   | { page: 'person'; id: number };
 
-const positive = (text: string | undefined) => {
-  const n = Number(text);
-  return Number.isInteger(n) && n > 0 ? n : undefined;
-};
+/** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
+const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
 
-export function parseRoute(hash: string): Route {
-  const [page, ...rest] = hash.replace(/^#/, '').split('/');
-  if (
-    page === 'settings' ||
-    page === 'movies' ||
-    page === 'series' ||
-    page === 'watchlist' ||
-    page === 'search'
-  )
-    return { page };
-  const type = rest[0];
-  const titleId = positive(rest[1]);
-  if (page === 'title' && (type === 'movie' || type === 'tv') && titleId)
-    return { page: 'title', type, id: titleId };
-  const personId = positive(rest[0]);
-  if (page === 'person' && personId) return { page: 'person', id: personId };
+/** Any origin will do: only the path and the query are ever read, and a relative input needs some base. */
+const BASE = 'https://den.invalid';
+
+/**
+ * A title's name as it appears in a link: lowercase words, hyphens between. Decoration only — the id ahead
+ * of it is what identifies the title — so anything unusual is simply dropped rather than escaped.
+ */
+export function slug(name: string | undefined): string {
+  if (!name) return '';
+  const words = name
+    .normalize('NFKD')
+    // Drop the combining marks NFKD just split off, so "Amélie" becomes "amelie" and not "am-lie".
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  // Long enough for any real title, short enough that the id stays visible in a chat's link preview.
+  return words.length > 60 ? words.slice(0, 60).replace(/-+[^-]*$/, '') : words;
+}
+
+/** `550` from `550-fight-club`; nothing for anything that is not a positive integer with an optional name. */
+function identifier(segment: string | undefined): number | undefined {
+  const digits = /^(\d+)(?:-[^/]*)?$/.exec(segment ?? '')?.[1];
+  const id = Number(digits);
+  return digits !== undefined && Number.isInteger(id) && id > 0 ? id : undefined;
+}
+
+/** The route at `url` — a path with an optional query, or a whole href. Anything unrecognised is Home. */
+export function parseRoute(url: string): Route {
+  let path: string;
+  let params: URLSearchParams;
+  try {
+    const parsed = new URL(url, BASE);
+    path = parsed.pathname;
+    params = parsed.searchParams;
+  } catch {
+    return { page: 'library' };
+  }
+  const [, first, second] = path.split('/');
+  if (first === 'search') return { page: 'search', query: params.get('q') ?? '' };
+  for (const tab of TABS) if (first === tab && !second) return { page: tab };
+  const id = identifier(second);
+  if ((first === 'movie' || first === 'tv') && id)
+    return { page: 'title', type: first === 'tv' ? 'tv' : 'movie', id };
+  if (first === 'person' && id) return { page: 'person', id };
   return { page: 'library' };
 }
 
-export const titleHref = (title: { type: MediaType; id: number }) =>
-  `#title/${title.type}/${title.id}`;
-export const personHref = (id: number) => `#person/${id}`;
+/** Where a route lives. The one place a path is built, so `parseRoute` is the only place one is read. */
+export function routePath(route: Route): string {
+  switch (route.page) {
+    case 'library':
+      return '/';
+    case 'search':
+      return searchHref(route.query);
+    case 'title':
+      return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
+    case 'person':
+      return `/person/${route.id}`;
+    default:
+      return `/${route.page}`;
+  }
+}
+
+/** A title's link, named where the name is known: `/movie/550-fight-club`. */
+export const titleHref = (title: { type: MediaType; id: number; title?: string }) => {
+  const name = slug(title.title);
+  return `/${title.type === 'tv' ? 'tv' : 'movie'}/${title.id}${name ? `-${name}` : ''}`;
+};
+
+export const personHref = (id: number, name?: string) => {
+  const slugged = slug(name);
+  return `/person/${id}${slugged ? `-${slugged}` : ''}`;
+};
+
+/** Search carries its query, so a result page can be linked, kept, or reloaded and still be the same search. */
+export const searchHref = (query: string) =>
+  query.trim() ? `/search?q=${encodeURIComponent(query)}` : '/search';
+
+/**
+ * The path an old `#…` link means, or null if it isn't one.
+ *
+ * Den Web addressed its pages by fragment until 0.67.0, so links shared before then — and any bookmark — still
+ * arrive that way. They are answered once, at startup, by rewriting the address; `#pair=…` is deliberately not
+ * a route and falls through to the pairing screen that reads it.
+ */
+export function legacyPath(hash: string): string | null {
+  const fragment = hash.replace(/^#/, '');
+  if (!fragment || fragment.includes('=')) return null;
+  const [page, ...rest] = fragment.split('/');
+  if (page === 'library') return '/';
+  if (page === 'search') return '/search';
+  for (const tab of TABS) if (page === tab && rest.length === 0) return `/${tab}`;
+  const id = identifier(rest[1]);
+  if (page === 'title' && (rest[0] === 'movie' || rest[0] === 'tv') && id)
+    return `/${rest[0]}/${id}`;
+  const person = identifier(rest[0]);
+  if (page === 'person' && person) return `/person/${person}`;
+  return null;
+}

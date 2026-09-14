@@ -16,6 +16,10 @@ const film = (id, title = `Film ${id}`) => ({
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
 const input = (page) => page.getByRole('searchbox', { name: 'Search movies, series and people' });
+// The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
+// returning Home returns to the address the document was opened at.
+const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
+const HOME = /\/test\/nav-search\.html$/;
 async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
   await guardNetwork(page);
   const queries = [];
@@ -81,7 +85,8 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
 async function openSearch(page, width) {
   if (width < 760) await page.getByRole('button', { name: 'Search', exact: true }).click();
   else await input(page).click();
-  await expect(page).toHaveURL(/#search$/);
+  // Reopening search returns to the search it was left on, so the query rides along in the address.
+  await expect(page).toHaveURL(/\/search(\?.*)?$/);
   await expect(input(page)).toBeFocused();
 }
 
@@ -103,7 +108,7 @@ for (const width of [320, 390, 1280])
         if (r.isNavigationRequest() && r.frame() === page.mainFrame()) documents++;
       });
       const queries = await setup(page);
-      await page.goto('http://127.0.0.1:5198/test/nav-search.html#library');
+      await page.goto(FIXTURE);
       await expect(active(page).locator('.billboard .slide').first()).toBeVisible();
       await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
@@ -140,7 +145,7 @@ for (const width of [320, 390, 1280])
       await expect.poll(() => page.evaluate(() => scrollY)).toBe(searchY);
       expect(queries.length).toBe(count);
       await page.goBack();
-      await expect(page).toHaveURL(/#library$/);
+      await expect(page).toHaveURL(HOME);
       await expect.poll(() => page.evaluate(() => scrollY)).toBe(homeY);
       expect(
         await page.evaluate(
@@ -156,13 +161,13 @@ for (const width of [320, 390, 1280])
         await expect(input(page)).toBeHidden();
         await openSearch(page, width);
         await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-        await expect(page).toHaveURL(/#library$/);
+        await expect(page).toHaveURL(HOME);
         await expect.poll(() => page.evaluate(() => scrollY)).toBe(homeY);
         await expect(input(page)).toBeHidden();
         await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeFocused();
       }
       await page.getByRole('link', { name: 'Settings', exact: true }).click();
-      await expect(page).toHaveURL(/#settings$/);
+      await expect(page).toHaveURL(/\/settings$/);
       await openSearch(page, width);
       await input(page).fill('empty');
       await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
@@ -191,7 +196,8 @@ test('a late search cannot replace a newer query', async () => {
     const queries = await setup(page, {
       searchGate: (q) => (q.startsWith('Slow') ? slow : Promise.resolve()),
     });
-    await page.goto('http://127.0.0.1:5198/test/nav-search.html#search');
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
     await input(page).fill('Slow');
     await expect.poll(() => queries.includes('Slow')).toBe(true);
     await input(page).fill('Neon');
@@ -202,7 +208,7 @@ test('a late search cannot replace a newer query', async () => {
     await expect(active(page).getByRole('button', { name: 'Slow result 2026' })).toHaveCount(0);
     await expect(active(page).getByRole('button', { name: 'Film 100 2026' })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page).toHaveURL(/#library$/);
+    await expect(page).toHaveURL(HOME);
   } finally {
     await browser.close();
   }
@@ -221,7 +227,7 @@ test('late discovery keeps the already visible billboard and selected slide', as
     const atlasGate = new Promise((r) => (releaseAtlas = r)),
       catalogueGate = new Promise((r) => (releaseCatalogue = r));
     await setup(page, { atlasGate, catalogueGate });
-    await page.goto('http://127.0.0.1:5198/test/nav-search.html#library');
+    await page.goto(FIXTURE);
     const hero = active(page).locator('.billboard');
     await expect(hero.locator('.slide').first()).toBeVisible();
     await hero.locator('.dot').nth(1).click();
@@ -262,13 +268,13 @@ test('immediate search cancellation returns Home during its opening animation', 
   try {
     const page = await browser.newPage({ viewport: { width: 393, height: 800 }, hasTouch: true });
     await setup(page);
-    await page.goto('http://127.0.0.1:5198/test/nav-search.html#library');
+    await page.goto(FIXTURE);
     await expect(active(page).locator('.billboard')).toBeVisible();
     await page.evaluate(() => {
       document.querySelector('.search-toggle').click();
       document.querySelector('.cancel').click();
     });
-    await expect(page).toHaveURL(/#library$/);
+    await expect(page).toHaveURL(HOME);
     await expect(active(page).locator('.billboard')).toBeVisible();
     await expect(input(page)).toBeHidden();
   } finally {
@@ -288,7 +294,7 @@ for (const width of [320, 393, 1280])
         reducedMotion: 'reduce',
       });
       await setup(page);
-      await page.goto('http://127.0.0.1:5198/test/nav-search.html#library');
+      await page.goto(FIXTURE);
       const hero = active(page).locator('.billboard');
       await expect(hero.locator('.slide').first()).toBeVisible();
       if (width >= 760) {
@@ -316,7 +322,7 @@ for (const width of [320, 393, 1280])
       }
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       await expect(hero.locator('.dot').first()).not.toHaveAttribute('aria-current', 'true');
-      await expect(page).toHaveURL(/#library$/);
+      await expect(page).toHaveURL(HOME);
       // Dots remain independent of the full-slide link and select a predictable destination.
       await hero.locator('.dot').nth(1).click();
       await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
@@ -327,7 +333,7 @@ for (const width of [320, 393, 1280])
       await expect(page).toHaveURL(new RegExp(href + '$'));
       await expect(active(page).locator('h1')).toBeVisible();
       await page.goBack();
-      await expect(page).toHaveURL(/#library$/);
+      await expect(page).toHaveURL(HOME);
       await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
     } finally {
       await browser.close();

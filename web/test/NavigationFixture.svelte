@@ -4,7 +4,7 @@
   import FixturePage from './FixturePage.svelte';
   import { parseRoute } from '../src/lib/route';
   import '../src/app.css';
-  let route = $state(parseRoute(location.hash));
+  let route = $state(parseRoute(location.pathname + location.search));
 </script>
 
 <NavigationBar {route} paired={true} />

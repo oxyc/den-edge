@@ -59,14 +59,14 @@ test('navigation regressions', async () => {
         await active.locator('.rail').evaluate((el) => (el.scrollLeft = 500));
         await page.evaluate(() => window.scrollTo(0, 950));
         await active.getByText('Details', { exact: true }).click();
-        await page.waitForFunction(() => location.hash === '#title/tv/1399' && scrollY === 0);
+        await page.waitForFunction(() => location.pathname === '/tv/1399' && scrollY === 0);
         await page.waitForTimeout(250);
         await page.evaluate(() => window.scrollTo(0, 1100));
         await active.getByText('Person', { exact: true }).click();
-        await page.waitForFunction(() => location.hash === '#person/287' && scrollY === 0);
+        await page.waitForFunction(() => location.pathname === '/person/287' && scrollY === 0);
         await page.waitForTimeout(250);
         await page.goBack();
-        await page.waitForFunction(() => location.hash === '#title/tv/1399' && scrollY > 800);
+        await page.waitForFunction(() => location.pathname === '/tv/1399' && scrollY > 800);
         await page.waitForTimeout(250);
         await page.goBack();
         await page.waitForFunction(
@@ -77,7 +77,7 @@ test('navigation regressions', async () => {
         assert.equal(await active.locator('[data-count]').innerText(), '12');
         assert.equal(await active.locator('.rail').evaluate((el) => el.scrollLeft), 500);
         await page.goForward();
-        await page.waitForFunction(() => location.hash === '#title/tv/1399');
+        await page.waitForFunction(() => location.pathname === '/tv/1399');
         await page.waitForTimeout(260);
         // Touch events exercise the fallback without depending on host browser gesture settings.
         await page.evaluate(() => {
@@ -147,7 +147,7 @@ test('navigation regressions', async () => {
           await page.waitForSelector('[data-swipe-preview]', { state: 'detached' });
           if (cancel) assert.equal(await active.locator('h1').innerText(), 'library');
         }
-        await page.waitForFunction(() => location.hash === '#title/tv/1399' && scrollY === 1100);
+        await page.waitForFunction(() => location.pathname === '/tv/1399' && scrollY === 1100);
         await page.goBack();
         await page.waitForFunction(
           () =>
@@ -155,7 +155,7 @@ test('navigation regressions', async () => {
         );
         await page.waitForTimeout(260);
         await page.getByText('Movies', { exact: true }).click();
-        await page.waitForFunction(() => location.hash === '#movies' && scrollY === 0);
+        await page.waitForFunction(() => location.pathname === '/movies' && scrollY === 0);
         const noForward = await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
           const touch = new Touch({ identifier: 3, target, clientX: innerWidth - 5, clientY: 300 });
@@ -171,7 +171,7 @@ test('navigation regressions', async () => {
         });
         assert.ok(noForward, 'new navigation must discard the old Forward destination');
         await page.getByText('Home', { exact: true }).click();
-        await page.waitForFunction(() => location.hash === '#library' && scrollY > 800);
+        await page.waitForFunction(() => location.pathname === '/' && scrollY > 800);
         await page.waitForTimeout(250);
         const transitions = await page.evaluate(() => window.transitionChecks);
 
@@ -213,8 +213,10 @@ test('navigation regressions', async () => {
         await page.locator('input').fill('retained');
         await page.evaluate(() => {
           scrollTo(0, 950);
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#title/tv/1399' }));
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#person/287' }));
+          document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/tv/1399' } }));
+          document.dispatchEvent(
+            new CustomEvent('den:navigate', { detail: { path: '/person/287' } }),
+          );
         });
         await page.waitForFunction(() =>
           document.querySelector('[data-active="true"] [data-page="person"]'),
@@ -249,10 +251,10 @@ test('navigation regressions', async () => {
         });
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
-        for (const hash of ['#title/tv/1399', '#person/287']) {
+        for (const path of ['/tv/1399', '/person/287']) {
           await page.evaluate(
-            (hash) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: hash })),
-            hash,
+            (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
+            path,
           );
           await page.waitForTimeout(300);
         }
@@ -316,7 +318,9 @@ test('navigation regressions', async () => {
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
         await page.evaluate(() =>
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#person/287' })),
+          document.dispatchEvent(
+            new CustomEvent('den:navigate', { detail: { path: '/person/287' } }),
+          ),
         );
         await page.waitForTimeout(300);
         for (const [from, to, selector, expected] of [
@@ -401,14 +405,14 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
-        const go = async (hash) => {
+        const go = async (path) => {
           await page.evaluate(
-            (hash) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: hash })),
-            hash,
+            (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
+            path,
           );
           await page.waitForTimeout(80);
         };
-        await go('#title/movie/1');
+        await go('/movie/1');
         // Returning Home can overlap a background refresh/loading cover. The cover is movie 1,
         // but the Home history entry must still own a Home snapshot when movie 2 is opened.
         await page.evaluate(() => {
@@ -417,9 +421,9 @@ test('navigation regressions', async () => {
           marker.dataset.routeLoading = '';
           home.append(marker);
         });
-        await go('#library');
+        await go('/');
         await page.waitForSelector('[data-loading-snapshot]');
-        await go('#title/movie/2');
+        await go('/movie/2');
         const heading = await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
           for (const [type, x] of [
@@ -457,12 +461,17 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
-        await page.evaluate(() => (location.hash = '#person/7'));
+        // An entry from an earlier mount, or one the address bar made: a history position the router holds
+        // no ledger entry for, which must start a fresh segment rather than inherit Home's.
+        await page.evaluate(() => {
+          history.pushState(null, '', '/person/7');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
         await page.waitForFunction(
           () => document.querySelector('[data-active="true"] h1')?.textContent === 'person',
         );
         await page.evaluate(() =>
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#title/movie/2' })),
+          document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/2' } })),
         );
         await page.waitForFunction(
           () => document.querySelector('[data-active="true"] h1')?.textContent === 'title',
@@ -486,7 +495,7 @@ test('navigation regressions', async () => {
           return document.querySelector('[data-swipe-preview]')?.children[0].querySelector('h1')
             ?.textContent;
         });
-        assert.equal(heading, 'person', 'unscoped hash entry must not inherit Home snapshot');
+        assert.equal(heading, 'person', 'unscoped history entry must not inherit Home snapshot');
         await page.evaluate(() => {
           const target = document.querySelector('[data-active="true"] section');
           const touch = new Touch({ identifier: 40, target, clientX: 150, clientY: 300 });
@@ -498,15 +507,13 @@ test('navigation regressions', async () => {
               changedTouches: [touch],
             }),
           );
-          document.dispatchEvent(new CustomEvent('den:navigate', { detail: '#movies' }));
+          document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movies' } }));
         });
         await page.waitForSelector('[data-swipe-preview]', { state: 'detached' });
         await page.waitForTimeout(200);
         assert.equal(await page.locator('[data-active="true"] h1').innerText(), 'movies');
         await context.close();
-        console.log(
-          'direct hash history adoption and competing-navigation gesture cancellation passed',
-        );
+        console.log('direct history adoption and competing-navigation gesture cancellation passed');
       }
       {
         const context = await browser.newContext({
@@ -517,15 +524,15 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
-        const go = async (hash) => {
+        const go = async (path) => {
           await page.evaluate(
-            (hash) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: hash })),
-            hash,
+            (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
+            path,
           );
           await page.waitForTimeout(80);
         };
         await page.evaluate(() => scrollTo(0, 950));
-        await go('#title/movie/9');
+        await go('/movie/9');
         assert.equal(
           await page.evaluate(() => scrollY),
           0,
@@ -538,7 +545,7 @@ test('navigation regressions', async () => {
         await page.waitForFunction(() => scrollY === 1100);
         await page.goBack();
         await page.waitForFunction(() => scrollY === 950);
-        await go('#title/movie/9');
+        await go('/movie/9');
         assert.equal(
           await page.evaluate(() => scrollY),
           0,
@@ -558,18 +565,18 @@ test('navigation regressions', async () => {
         await guardNetwork(page);
         await page.goto('http://127.0.0.1:5198/test/router.html');
         await page.waitForSelector('[data-active="true"]');
-        const go = async (hash) => {
+        const go = async (path) => {
           await page.evaluate(
-            (hash) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: hash })),
-            hash,
+            (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
+            path,
           );
           await page.waitForTimeout(80);
         };
-        await go('#title/movie/42');
+        await go('/movie/42');
         await page.locator('[data-active="true"] input').fill('first visit');
         await page.evaluate(() => scrollTo(0, 1100));
-        await go('#person/7');
-        await go('#title/movie/42');
+        await go('/person/7');
+        await go('/movie/42');
         await page.locator('[data-active="true"] input').fill('second visit');
         assert.equal(await page.evaluate(() => scrollY), 0);
         await page.goBack();
@@ -596,7 +603,7 @@ test('navigation regressions', async () => {
           await page.evaluate(
             (id) =>
               document.dispatchEvent(
-                new CustomEvent('den:navigate', { detail: '#title/movie/' + id }),
+                new CustomEvent('den:navigate', { detail: { path: '/movie/' + id } }),
               ),
             id,
           );

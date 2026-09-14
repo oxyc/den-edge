@@ -19,7 +19,7 @@
   </div>
   <p data-count>{count}</p>
   <div style="height:900px"></div>
-  <a href="#title/tv/1399">Details</a>
-  <button onclick={() => navigate('#person/287')}>Person</button>
+  <a href="/tv/1399">Details</a>
+  <button onclick={() => navigate('/person/287')}>Person</button>
   <div style="height:1500px"></div>
 </section>

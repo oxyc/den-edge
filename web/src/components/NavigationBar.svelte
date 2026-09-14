@@ -1,13 +1,15 @@
 <script lang="ts">
   import icon from '../assets/den-mark.png';
-  import { flushSync } from 'svelte';
+  import { flushSync, untrack } from 'svelte';
   import { navigate, navigateBack } from '../lib/navigation';
-  import type { Route } from '../lib/route';
-  let {
-    route,
-    paired,
-    query = $bindable(''),
-  }: { route: Route; paired: boolean; query?: string } = $props();
+  import { parseRoute, searchHref, type Route } from '../lib/route';
+  let { route, paired, query = '' }: { route: Route; paired: boolean; query?: string } = $props();
+  // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
+  // else — Back, a shared link, leaving search — and leads it only while someone is typing.
+  let text = $state(untrack(() => query));
+  $effect(() => {
+    if (query !== untrack(() => text)) text = query;
+  });
   // eslint-disable-next-line svelte/prefer-writable-derived -- Focus must expand synchronously within the iPhone tap; route changes reconcile it after navigation.
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
@@ -28,15 +30,23 @@
     });
     input?.blur();
     toggle?.focus({ preventScroll: true });
-    if (route.page === 'search' || location.hash === '#search') navigateBack();
+    // The address, not just the prop: opening and cancelling within one tick — which a fast tap does, and a
+    // test does reliably — leaves the route prop still showing the page search was opened from, and Cancel
+    // would do nothing at all.
+    if (searching()) navigateBack();
   }
+  const searching = () =>
+    route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
   function searchChanged() {
-    if (route.page === 'search') window.scrollTo({ top: 0, behavior: 'instant' });
-    else navigate('#search');
+    // Arriving at search is a navigation; every letter after that rewrites the same entry, or Back would walk
+    // the spelling of what was typed instead of returning to the page the search started from.
+    const searching = route.page === 'search';
+    navigate(searchHref(text), searching);
+    if (searching) window.scrollTo({ top: 0, behavior: 'instant' });
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
-    navigate('#search');
+    navigate(searchHref(text), route.page === 'search');
     input?.blur();
   }
   const tabs = [
@@ -50,7 +60,7 @@
 
 <header class="bar glass" class:searching={expanded}>
   <div class="leading">
-    <a class="brand" href="#library" aria-label="Den home"
+    <a class="brand" href="/" aria-label="Den home"
       ><img src={icon} width="54" height="32" alt="" /></a
     >
     {#if paired && (route.page === 'title' || route.page === 'person' || route.page === 'search')}
@@ -70,13 +80,13 @@
       <input
         name="search"
         bind:this={input}
-        bind:value={query}
+        bind:value={text}
         type="search"
         aria-label="Search movies, series and people"
         placeholder="Search movies, series and people"
         autocomplete="off"
         enterkeyhint="search"
-        onfocus={() => navigate('#search')}
+        onfocus={() => route.page !== 'search' && navigate(searchHref(text))}
         oninput={searchChanged}
         onkeydown={(event) => {
           if (event.key === 'Escape') {
@@ -89,7 +99,7 @@
     </form>
     <nav aria-label="Main navigation">
       {#each tabs as tab (tab.page)}
-        <a href="#{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}
+        <a href="/{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}
           >{tab.label}</a
         >
       {/each}
@@ -243,6 +253,7 @@
     color: var(--muted);
     font-weight: 600;
     text-decoration: none;
+    white-space: nowrap;
   }
 
   nav a[aria-current='page'] {
@@ -276,10 +287,21 @@
       padding: 0;
     }
 
+    /* Five tabs of text do not fit beside the mark and the search button at 320px — they overflowed the bar
+       and pushed the search button off its right edge. The strip shrinks and scrolls instead, so every tab is
+       still reachable and the bar's own controls stay inside it. */
     nav {
+      flex-shrink: 1;
+      min-width: 0;
       margin-left: auto;
+      overflow-x: auto;
       gap: clamp(8px, 2vw, 12px);
       font-size: 14px;
+      scrollbar-width: none;
+    }
+
+    nav::-webkit-scrollbar {
+      display: none;
     }
 
     .searching .leading,

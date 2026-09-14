@@ -1,6 +1,7 @@
 <script lang="ts">
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
+  import { untrack } from 'svelte';
   import { links } from './lib/links.svelte';
   import { parseRoute } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
@@ -19,12 +20,14 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
-  let route = $state(parseRoute(location.hash));
-  let query = $state('');
-  const searchLibrary = $derived(links.current?.libraryKey);
+  let route = $state(parseRoute(location.pathname + location.search));
+  // The address holds the search, so a result page can be linked, reloaded or shared and still be the same
+  // search. It is read from there rather than derived from the current page: opening a result and coming back
+  // would otherwise empty the query and fill it again, which re-runs the search and loses where it was
+  // scrolled to. The field keeps what was typed until another search replaces it.
+  let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
   $effect(() => {
-    void searchLibrary;
-    query = '';
+    if (route.page === 'search') query = route.query;
   });
 </script>
 
@@ -35,7 +38,7 @@
   {/if}
 </svelte:head>
 
-<NavigationBar {route} paired={!!links.current} bind:query />
+<NavigationBar {route} paired={!!links.current} {query} />
 
 <main>
   {#if links.current}

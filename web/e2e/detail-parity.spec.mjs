@@ -174,7 +174,10 @@ for (const width of [390, 834, 1280])
       let releaseRatings;
       const ratingsGate = new Promise((r) => (releaseRatings = r));
       await setup(page, { ratingsGate });
-      await page.goto('http://127.0.0.1:5198/test/detail-parity.html#title/tv/9');
+      // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
+      // document, and the title is the first history entry, exactly as opening its link would give.
+      await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+      await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
       const active = page.locator('[data-active="true"]');
       await expect(active.locator('h1')).toHaveText('The Series');
       const before = await active.locator('.hero').boundingBox();
@@ -226,7 +229,8 @@ test('season requests cannot overwrite a newer selection and retained detail and
     let releaseSeason;
     const seasonGate = new Promise((r) => (releaseSeason = r));
     const requests = await setup(page, { seasonGate });
-    await page.goto('http://127.0.0.1:5198/test/detail-parity.html#title/tv/9');
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+    await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
     const active = () => page.locator('[data-active="true"]');
     await expect(active().getByText('Season 1 premiere', { exact: true })).toBeVisible();
     await active().getByRole('tab', { name: 'Season 2', exact: true }).click();
@@ -284,7 +288,8 @@ test('episode Sources target the selected episode and downloads never requeue wh
       downloadRequests.push(new URL(r.request().url()).search);
       return r.fulfill({ status: 202, json: { progress: 0.3 } });
     });
-    await page.goto('http://127.0.0.1:5198/test/detail-parity.html#title/tv/9');
+    await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
+    await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
     const active = page.locator('[data-active="true"]');
     await active.getByRole('tab', { name: 'Season 2', exact: true }).click();
     const row = active.locator('.episode').first();

@@ -71,7 +71,10 @@ for (const scenario of [
           },
         });
       });
-      await page.goto('http://127.0.0.1:5198/test/actual-routes.html#title/movie/42');
+      // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
+      // document, and the title is the first history entry, exactly as opening its link would give.
+      await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
+      await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
       await page.locator('[data-active="true"] a').filter({ hasText: 'An Actor' }).click();
       await expect(page.locator('[data-active="true"] h1')).toHaveText('An Actor');
       await page.waitForSelector('[data-loading-snapshot]', { state: 'detached' });

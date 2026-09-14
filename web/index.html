@@ -8,6 +8,18 @@
       content="Your Den library: discover movies and series, keep track of what you watch, and pick up where you left off."
     />
     <meta name="theme-color" content="#0b0b0f" />
+    <!-- What a shared link shows. den-edge rewrites these per page (`src/meta.rs`): a title's link carries its
+         own name, year, overview and poster, because a link that unfurls as "Den" says nothing about where it
+         leads. These are the fallback, and what every other page gets. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Den" />
+    <meta property="og:title" content="Den" />
+    <meta
+      property="og:description"
+      content="Your Den library: discover movies and series, keep track of what you watch, and pick up where you left off."
+    />
+    <meta property="og:image" content="/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
     <!-- The Den mark, the same file the navigation bar shows; the build gives it a hashed, long-cached name. -->
     <link rel="icon" href="/src/assets/den-mark.png" type="image/png" />
     <title>Den</title>

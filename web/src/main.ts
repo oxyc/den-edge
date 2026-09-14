@@ -1,6 +1,13 @@
 import { mount } from 'svelte';
 import './app.css';
 import App from './App.svelte';
+import { legacyPath } from './lib/route';
+
+// Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
+// way. It is answered once, before anything renders, by rewriting the address to the path it meant — the app
+// itself then only ever reads paths. `#pair=…` is not a route and is left alone for the pairing screen to read.
+const legacy = legacyPath(location.hash);
+if (legacy) history.replaceState(history.state, '', legacy + location.search);
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

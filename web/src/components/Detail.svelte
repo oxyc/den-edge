@@ -28,6 +28,7 @@
   import ContentWarnings from './ContentWarnings.svelte';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
+  import { titleHref } from '../lib/route';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -317,7 +318,9 @@
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
           share={{
             title: d.title.title,
-            url: `${location.origin}${location.pathname}#title/${d.title.type}/${d.title.id}`,
+            // The title's own address, named: what the person sharing it means, and what a preview can
+            // describe. Built from the route rather than from wherever this page happens to be open.
+            url: `${location.origin}${titleHref(d.title)}`,
           }}
         />
       </div>
