@@ -47,17 +47,12 @@
 </main>
 
 <style>
+  /* The page's column. It does NOT clip: clipping here cut the billboard and the detail trailer off at this
+     column on any screen wider than it, and `overflow-clip-margin` did not save them — so the guard against
+     sideways scrolling lives on `body`, where the clip box is the window itself (`app.css`). */
   main {
     max-width: var(--page-max);
     margin: 0 auto;
-
-    /* Clip, not hidden: a full-bleed child is exactly as wide as the window, and a scrollbar would otherwise
-       make that an overflow. Clip leaves the page's own scrolling alone.
-       The margin is what lets a hero actually REACH the window: clipping at this box cut the billboard and
-       the detail trailer off at the column on any screen wider than it. Clip never scrolls, whatever the
-       margin, so the bleed costs nothing it was protecting against. */
-    overflow-x: clip;
-    overflow-clip-margin: 50vw;
     padding: var(--bar-space) var(--gutter) calc(32px + env(safe-area-inset-bottom));
   }
 </style>

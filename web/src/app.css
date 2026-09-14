@@ -41,6 +41,11 @@
 
 body {
   margin: 0;
+
+  /* A full-bleed hero is exactly as wide as the window, and `100vw` counts the scrollbar, so it can overhang
+     by those few pixels. Clipping HERE makes the clip box the window: the hero keeps its whole width and the
+     page still never scrolls sideways. On the page column instead, this is what cut the hero off at 1400px. */
+  overflow-x: clip;
   background: var(--bg);
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
