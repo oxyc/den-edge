@@ -12,7 +12,11 @@ export async function guardNetwork(page) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
   await page.context().route('**/*', (route) => {
     const url = new URL(route.request().url());
-    if (url.origin === 'http://127.0.0.1:5198' && url.pathname === '/atlas/manifest.json')
+    // The app asks this origin whether it serves atlas or reel itself, when the library lists neither as a
+    // plugin — a guest lists nothing at all, and both have a same-origin fallback (findAtlas, findReel).
+    // A 404 is what "not served here" looks like, which is what a fixture is.
+    const probe = url.pathname === '/atlas/manifest.json' || url.pathname === '/reel/manifest.json';
+    if (url.origin === 'http://127.0.0.1:5198' && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && source) return route.continue();

@@ -65,6 +65,23 @@ export async function findAtlas(
   return here ? { install: ATLAS.path, base: ATLAS.path } : null;
 }
 
+/**
+ * reel: a plugin, or — where this origin serves one — the box's own.
+ *
+ * The same fallback atlas has, and for the same reason: a guest has no library, so no list of plugins, and
+ * looking reel up in one found nothing. The billboard then had no trailer to play and said nothing about why.
+ */
+export async function findReel(
+  plugins: string[],
+  routes: Routes,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Addon | null> {
+  const plugin = await findAddon(plugins, routes, REEL, fetchImpl);
+  if (plugin) return plugin;
+  const here = await manifestIs(`${REEL.path}${MANIFEST}`, REEL.id, fetchImpl);
+  return here ? { install: REEL.path, base: REEL.path } : null;
+}
+
 /** Den's own addons, as Settings names them. */
 const DEN_ADDONS = [
   { name: 'scout', label: 'Den Scout', role: 'Streams' },

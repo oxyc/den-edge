@@ -44,7 +44,7 @@
   {/if}
 </svelte:head>
 
-<NavigationBar {route} paired={!!links.current} {query} />
+<NavigationBar {route} {query} />
 
 <main>
   {#if links.current}

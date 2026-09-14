@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Routes } from './routes';
-import { denAddonOf, findAddon, findAtlas, installsOf, SCOUT } from './scout';
+import { denAddonOf, findAddon, findAtlas, findReel, installsOf, SCOUT } from './scout';
 
 const ROUTES: Routes = {
   scout: [
@@ -17,6 +17,11 @@ const ROUTES: Routes = {
     { url: 'http://192.168.86.193:8081' },
     { url: 'https://pve.example:8443/atlas' },
     { url: 'https://d-atlas.oxy.fi', access: true },
+  ],
+  reel: [
+    { url: 'http://192.168.86.193:8092' },
+    { url: 'https://pve.example:8443/reel' },
+    { url: 'https://d-reel.oxy.fi', access: true },
   ],
 };
 const SCOUT_LAN = 'http://192.168.86.193:8080/sealed-cfg/manifest.json';
@@ -70,6 +75,21 @@ describe('findAtlas', () => {
       await findAtlas([], ROUTES, addons({}).fetchImpl),
       'nothing under /atlas here',
     ).toBeNull();
+  });
+});
+
+describe('findReel', () => {
+  it('is a plugin, else this origin’s own, else none', async () => {
+    const plugin = addons({ '/reel/manifest.json': 'com.den.reel' });
+    expect(
+      await findReel(['https://d-reel.oxy.fi/manifest.json'], ROUTES, plugin.fetchImpl),
+    ).toEqual({
+      install: 'https://d-reel.oxy.fi',
+      base: '/reel',
+    });
+    // A guest lists no plugins, because a guest has no library — and the billboard still wants its trailer.
+    expect((await findReel([], ROUTES, plugin.fetchImpl))?.base).toBe('/reel');
+    expect(await findReel([], ROUTES, addons({}).fetchImpl), 'nothing under /reel here').toBeNull();
   });
 });
 

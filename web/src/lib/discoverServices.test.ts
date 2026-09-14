@@ -1,11 +1,12 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { discoverServices } from './discoverServices';
-import { findAddon, findAtlas } from './scout';
+import { findAddon, findAtlas, findReel } from './scout';
 import { findRemux } from './remux';
 
 vi.mock('./scout', () => ({
   findAddon: vi.fn(),
   findAtlas: vi.fn(),
+  findReel: vi.fn(),
   SCOUT: { name: 'scout' },
   REEL: { name: 'reel' },
 }));
@@ -17,6 +18,8 @@ beforeEach(() => {
     install: `/${kind.name}`,
   }));
   vi.mocked(findAtlas).mockResolvedValue({ base: '/atlas', install: '/atlas' });
+  // reel is found the same way atlas is, so that a guest — who lists no plugins — still gets trailers.
+  vi.mocked(findReel).mockResolvedValue({ base: '/reel', install: '/reel' });
 });
 
 it('publishes discovery addons while the playback health request is still pending', async () => {

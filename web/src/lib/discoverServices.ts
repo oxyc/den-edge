@@ -1,4 +1,4 @@
-import { findAddon, findAtlas, REEL, SCOUT, type Addon } from './scout';
+import { findAddon, findAtlas, findReel, SCOUT, type Addon } from './scout';
 import { findRemux } from './remux';
 import type { Routes } from './routes';
 
@@ -30,7 +30,7 @@ export function discoverServices(
   };
   if (publish.scout) accept(findAddon(installed, routes, SCOUT), publish.scout);
   accept(findAtlas(installed, routes), publish.atlas);
-  accept(findAddon(installed, routes, REEL), publish.reel);
+  accept(findReel(installed, routes), publish.reel);
   if (publish.remux) accept(findRemux(routes.remux ?? []), publish.remux);
   return () => {
     current = false;

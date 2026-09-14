@@ -3,7 +3,7 @@
   import { flushSync, untrack } from 'svelte';
   import { navigate, navigateBack } from '../lib/navigation';
   import { parseRoute, searchHref, type Route } from '../lib/route';
-  let { route, paired, query = '' }: { route: Route; paired: boolean; query?: string } = $props();
+  let { route, query = '' }: { route: Route; query?: string } = $props();
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
   let text = $state(untrack(() => query));
@@ -63,7 +63,7 @@
     <a class="brand" href="/" aria-label="Den home"
       ><img src={icon} width="54" height="32" alt="" /></a
     >
-    {#if paired && (route.page === 'title' || route.page === 'person' || route.page === 'search')}
+    {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
       <button class="back" type="button" onclick={navigateBack} aria-label="Back">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
           ><path d="m14 5-7 7 7 7" /></svg
@@ -72,52 +72,53 @@
       </button>
     {/if}
   </div>
-  {#if paired}
-    <form class="search" role="search" id="nav-search" onsubmit={submitted}>
-      <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
-      >
-      <input
-        name="search"
-        bind:this={input}
-        bind:value={text}
-        type="search"
-        aria-label="Search movies, series and people"
-        placeholder="Search movies, series and people"
-        autocomplete="off"
-        enterkeyhint="search"
-        onfocus={() => route.page !== 'search' && navigate(searchHref(text))}
-        oninput={searchChanged}
-        onkeydown={(event) => {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            closeSearch();
-          }
-        }}
-      />
-      <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
-    </form>
-    <nav aria-label="Main navigation">
-      {#each tabs as tab (tab.page)}
-        <a href="/{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}
-          >{tab.label}</a
-        >
-      {/each}
-    </nav>
-    <button
-      class="search-toggle"
-      type="button"
-      aria-label="Search"
-      aria-expanded={expanded}
-      aria-controls="nav-search"
-      onclick={openSearch}
-      bind:this={toggle}
+  <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
+       left a guest on Home with no way to reach Movies, Series or Settings — which is also where pairing is —
+       and no way to search, though den-edge lends a keyless browser the key that search needs. -->
+  <form class="search" role="search" id="nav-search" onsubmit={submitted}>
+    <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+      ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
     >
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
-        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+    <input
+      name="search"
+      bind:this={input}
+      bind:value={text}
+      type="search"
+      aria-label="Search movies, series and people"
+      placeholder="Search movies, series and people"
+      autocomplete="off"
+      enterkeyhint="search"
+      onfocus={() => route.page !== 'search' && navigate(searchHref(text))}
+      oninput={searchChanged}
+      onkeydown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeSearch();
+        }
+      }}
+    />
+    <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
+  </form>
+  <nav aria-label="Main navigation">
+    {#each tabs as tab (tab.page)}
+      <a href="/{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}
+        >{tab.label}</a
       >
-    </button>
-  {/if}
+    {/each}
+  </nav>
+  <button
+    class="search-toggle"
+    type="button"
+    aria-label="Search"
+    aria-expanded={expanded}
+    aria-controls="nav-search"
+    onclick={openSearch}
+    bind:this={toggle}
+  >
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+      ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+    >
+  </button>
 </header>
 
 <style>
