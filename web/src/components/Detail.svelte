@@ -278,6 +278,13 @@
             enabled={ratingSources}
             pending={!!omdbKey && !!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
           />
+          {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
+          {#if productionFacts(d)}<p class="production desktop-overview">
+              {productionFacts(d)}
+            </p>{/if}
+          {#if omdbKey && d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
+              {ratings?.awards ? ratings.awards : ''}
+            </p>{/if}
         </div>
       </div>
       {#if continuing}
@@ -324,9 +331,7 @@
       </div>
     </div>
   </header>
-  <!-- Below the trailer at every width: in the hero these three paragraphs stood over the picture, and
-       what they cover is the one thing this page has that a poster grid does not. -->
-  <div class="overview-block">
+  <div class="mobile-overview">
     {#if d.overview}<p class="overview">{d.overview}</p>{/if}
     {#if productionFacts(d)}<p class="production">{productionFacts(d)}</p>{/if}
     {#if omdbKey && d.imdbId}<p class="awards" title={ratings?.awards}>
@@ -462,17 +467,32 @@
     /* The same height the home billboard takes, so a trailer is the same size wherever you meet it and the
        page below starts where the eye already expects it. It used to stand deliberately taller than the
        window — the actions sat just below the fold — which made the two surfaces disagree by a screenful. */
-    min-height: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
+    --hero-h: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
+
+    /* How far the words sit BELOW the trailer's own box.
+       The block is bottom-aligned, so a negative bottom margin is what moves it down while the
+       picture keeps every pixel of its height. Enough of one to put the actions across the fold —
+       40px of bottom padding plus half the 80px row — so half a play button shows and the rest is
+       the cue that there is a page under it. Never positive: on a window taller than the hero the
+       words would be pulled up onto the picture instead. */
+    --hero-drop: max(0px, calc(100lvh + 80px - var(--hero-h)));
+
+    min-height: var(--hero-h);
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
-    margin-bottom: 32px;
+
+    /* The block now hangs past the hero, so the page below starts clear of it rather than under it. */
+    margin-bottom: calc(32px + var(--hero-drop));
   }
 
   /* Past this width a height capped in pixels would letterbox the picture, exactly as it would on the
-     billboard, so the hero keeps the same 16:9 floor and the two surfaces stay the same size. */
+     billboard, so the hero keeps the same 16:9 floor and the two surfaces stay the same size.
+
+     The variable, not `min-height` directly: `--hero-drop` is measured against it, and a hero that
+     was 740 tall while the drop was computed from 598 pushed the words 142px too far. */
   @media (width >= 1000px) {
     .hero {
-      min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+      --hero-h: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
     }
   }
 
@@ -499,7 +519,7 @@
        actions' notices, and at 1520 its gutter fell outside the page's clip and shaved the first
        characters off every line. */
     max-width: var(--page-max);
-    margin: 0 auto;
+    margin: 0 auto calc(-1 * var(--hero-drop));
     padding: calc(var(--bar-space) + 40px) var(--gutter) 40px;
   }
 
@@ -513,10 +533,8 @@
     gap: 40px;
     align-items: start;
 
-    /* The hero is bottom-aligned, so this block's height is what the trailer above it does not get: the
-       floor is the poster's own height (its width × 3/2) and no more, so nothing here reserves picture
-       it isn't using. It is a floor at all only to keep the loading state the size of what follows it. */
-    min-height: clamp(165px, 16.5vw, 240px);
+    /* The hero is bottom-aligned, so this block's height is what the trailer above it does not get. */
+    min-height: clamp(200px, 22vw, 300px);
   }
 
   .copy,
@@ -565,8 +583,8 @@
     margin: 12px 0 0;
   }
 
-  .overview-block {
-    margin: 0 0 32px;
+  .mobile-overview {
+    display: none;
   }
 
   .continue {
@@ -710,6 +728,9 @@
 
   @media (width <= 759px) {
     .hero {
+      /* No drop on a phone: the picture is a 16:9 block with the words under it, covering nothing. */
+      --hero-drop: 0px;
+
       display: block;
       min-height: 0;
       margin-top: 0;
@@ -745,6 +766,15 @@
 
     h1 {
       font-size: clamp(24px, 4vw, 32px);
+    }
+
+    .desktop-overview {
+      display: none;
+    }
+
+    .mobile-overview {
+      display: block;
+      margin: 0 0 32px;
     }
 
     .overview {
