@@ -53,6 +53,12 @@
    * hardware volume keys never reach the page — so the click that expands is the gesture.
    */
   let sound = $state(false);
+  /**
+   * Whether the viewer has touched this trailer yet. The native controls are held back until they
+   * have: unasked-for chrome over a hero is a play button and a scrubber sitting on the artwork, and
+   * on a paused element iOS draws that play button across the middle of the picture.
+   */
+  let touched = $state(false);
 
   /** Take over the screen, with the audio on. */
   async function expand() {
@@ -78,7 +84,10 @@
           player as HTMLVideoElement & { webkitEnterFullscreen?: () => void }
         ).webkitEnterFullscreen?.();
     } catch {
-      /* Refused (or unsupported): the sound is on and the trailer plays where it is. */
+      // Refused, or unsupported: `leave` will never fire, so take it back off rather than leave a
+      // listener behind for every press. The sound stays on — the click that asked for it is gesture
+      // enough to play unmuted where it is — and the next trailer resets it.
+      document.removeEventListener('fullscreenchange', leave);
     }
     void player.play().catch(() => {});
   }
@@ -142,6 +151,12 @@
     const play = url;
     upgraded = null;
     resolved = false;
+    // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
+    // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
+    // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
+    // refused full-screen never fires `fullscreenchange` and iOS never fires it at all.
+    sound = false;
+    touched = false;
     if (!play) return;
     let live = true;
     // Capped, because nothing plays until this settles: a reel that hangs should cost a couple of
@@ -233,7 +248,8 @@
     muted
     playsinline
     preload={allowed ? 'auto' : 'metadata'}
-    controls={mobile && !!url && !failed}
+    controls={mobile && touched && !!source && !failed}
+    onclick={() => (touched = true)}
     aria-label="Trailer"
     aria-hidden={!mobile}
     onloadedmetadata={metadata}
