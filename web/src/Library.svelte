@@ -597,7 +597,10 @@
     // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
     // is open — and once more when TMDB has named the whole library, which is what atlas reads a title it has never
     // seen by.
-    if (!here) return;
+    if (!here) {
+      untrack(() => buildTrending(++billboardRun));
+      return;
+    }
     void libraryNamed;
     if (libraryOpen) untrack(() => buildRecommended(here));
   });
@@ -608,7 +611,7 @@
   /**
    * The billboard as atlas ranks it (`lib/recommend.ts`). The TMDB lists go along as candidates — the rows below
    * fetch them anyway — and what atlas answers with is drawn: named from those lists where they hold it, and from
-   * TMDB where only atlas's own lists did. An atlas that can't rank leaves the billboard this browser kept.
+   * TMDB where only atlas's own lists did. An atlas that can't rank leaves what is trending (`buildTrending`).
    */
   function buildRecommended(here: string) {
     const table = rows;
@@ -657,7 +660,11 @@
             }),
           );
         const first = await ask(lists);
-        if (run !== billboardRun || !first) return;
+        if (run !== billboardRun) return;
+        if (!first) {
+          buildTrending(run);
+          return;
+        }
         // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A local lookup for this build; nothing renders from it.
         const known = new Map(
           lists.flatMap(({ titles }) => titles.map((t) => [titleKey(t), t] as const)),
@@ -680,6 +687,26 @@
         if (again && run === billboardRun) await show(again.slides);
       })
       .catch(() => undefined);
+  }
+
+  /**
+   * The billboard without atlas's ranking — no atlas found yet, or one that can't rank: what is trending now (Home)
+   * or popular (Movies, Series) as TMDB orders it, less what the library holds and what the hide rules hide. Only
+   * where nothing is showing yet: a kept or ranked billboard stays.
+   */
+  function buildTrending(run: number) {
+    const type = facet;
+    const row = rows.find((r) => r.id === 'trending' || r.id === 'popular');
+    void (row?.load(1) ?? Promise.resolve([]))
+      .catch((): Title[] => [])
+      .then((titles) => {
+        if (run !== billboardRun || featured.length) return;
+        featured = titles
+          .filter(
+            (t) => featuredShown(t) && !seeds.owned.has(titleKey(t)) && (!type || t.type === type),
+          )
+          .slice(0, 20);
+      });
   }
 
   /**

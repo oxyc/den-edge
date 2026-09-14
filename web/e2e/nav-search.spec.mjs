@@ -34,7 +34,7 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
     await catalogueGate;
     return r.fulfill({ json: { version: 1, slides: [] } });
   });
-  // The billboard asks atlas what the pool is labelled with, and which of it the library has already worn out.
+  // Search and the browse rows ask atlas's indexes.
   await page.route('**/atlas/index/**', (r) =>
     r.fulfill({
       json: r.request().url().includes('suggest') ? { perSeed: [], pooled: [] } : { labels: [] },
