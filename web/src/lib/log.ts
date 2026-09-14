@@ -89,7 +89,12 @@ export class LibraryLog {
    */
   static async open(
     libraryKey: string,
-    fetchImpl: typeof fetch = fetch,
+    // Wrapped rather than passed bare. This is kept on the instance and later called as
+    // `this.fetchImpl(…)`, which makes it a METHOD call — and a browser's `fetch` throws "Illegal
+    // invocation" when its `this` is anything but the window. Every write and every refresh went through
+    // that, so saving failed before a request was made: nothing in the Network tab, nothing in the
+    // console, just "Couldn't save that". Only `open` escaped it, by calling the local binding instead.
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
     vault: Vault | null = libraryVault,
   ): Promise<LibraryLog | null> {

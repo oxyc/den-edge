@@ -89,6 +89,30 @@ function memoryVault() {
 }
 
 describe('LibraryLog', () => {
+  /**
+   * The default fetch is kept on the instance and later called as `this.fetchImpl(…)` — a METHOD call,
+   * and a browser's `fetch` refuses one whose `this` is anything but the window. So every write threw
+   * before making a request, and the catch turned it into "Couldn't save that" with nothing in the
+   * Network tab to explain it. Only `open` escaped, by calling its local binding.
+   *
+   * Every other test here injects a plain function, which has no such objection — which is exactly why
+   * none of them noticed. This one stubs a `fetch` as strict about `this` as a browser is.
+   */
+  it('survives its own default fetch being called as a method', async () => {
+    const server = await edge([row(1)]);
+    const strict = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+      return server.fetchImpl(input, init);
+    };
+    vi.stubGlobal('fetch', strict);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, undefined, undefined, null))!;
+      expect(await log.write(row(2))).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('starts a return visit from the kept copy and asks only for what changed since', async () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(1), row(2), row(3)]);

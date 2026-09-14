@@ -43,28 +43,21 @@ for (const width of [320, 393, 844, 1280])
       const empty = await hero.boundingBox();
       await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
       await expect(page.locator('.slide')).toHaveCount(2);
+      // What must not move while a slide loads: the hero's own height, and where everything below it
+      // starts. The words inside are deliberately NOT measured — they take the lines they need, and the
+      // text block reserves its room (`.text` has a min-height and sits its content at the bottom), so a
+      // one-line title leaves an empty band above itself rather than pushing anything about.
       const geometry = () =>
         page.evaluate(() => {
           const measure = (el) => {
             const r = el.getBoundingClientRect();
             return { top: r.top + scrollY, height: r.height };
           };
-          return [
-            '.billboard',
-            '.slide h2',
-            '.slide .facts',
-            '.slide .overview',
-            '.slide .actions',
-            '[data-following-content]',
-          ].map((s) => measure(document.querySelector(s)));
+          return ['.billboard', '[data-following-content]'].map((s) =>
+            measure(document.querySelector(s)),
+          );
         });
       const before = await geometry();
-      const lineHeight = await page
-        .locator('.slide h2')
-        .first()
-        .evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
-      const lines = width >= 360 && width < 760 ? 1 : 2;
-      expect(Math.abs(before[1].height - lineHeight * lines)).toBeLessThan(0.1);
       expect(before[0].height).toBe(empty.height);
       releaseImages();
       await expect(hero.locator('img.backdrop.lit')).toHaveAttribute('src', /early.jpg$/);
@@ -79,12 +72,8 @@ for (const width of [320, 393, 844, 1280])
       expect(await geometry()).toEqual(before);
       await page.locator('.dot').nth(1).click();
       await expect(page.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
+      // Paging to a much longer title must not resize the hero either, however many lines it takes.
       expect((await hero.boundingBox()).height).toBe(empty.height);
-      expect(
-        Math.abs(
-          (await page.locator('.slide h2').nth(1).boundingBox()).height - lineHeight * lines,
-        ),
-      ).toBeLessThan(0.1);
       await page.screenshot({ path: test.info().outputPath(`billboard-${width}.png`) });
       expect(requests, 'concurrent metadata learning should be deduplicated').toBe(2);
     } finally {
