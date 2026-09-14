@@ -647,9 +647,13 @@ pub mod tests {
         let csp = page.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
         // And YouTube's own media hosts, which a trailer resolved through den-reel's /direct streams
         // from — without them the browser refuses the video and the page silently falls back to /play.
+        //
+        // `data:` is hls.js's, not ours: YouTube's master carries subtitle renditions, so it opens a
+        // text track on `data:,WEBVTT` before any cue exists. Refused, that is a console error on
+        // every trailer with subtitles — the media itself is a string the page wrote.
         assert!(
             csp.contains(
-                "media-src 'self' blob: https://*.googlevideo.com \
+                "media-src 'self' blob: data: https://*.googlevideo.com \
                  https://video-ssl.itunes.apple.com https://pve.example:8443;"
             ),
             "{csp}"

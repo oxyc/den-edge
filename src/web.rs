@@ -37,7 +37,7 @@ fn csp(media: &[String]) -> String {
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
-         media-src 'self' blob: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
+         media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
          connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com \
          https://www.doesthedogdie.com{media}; \
          frame-src https://www.youtube-nocookie.com; \
