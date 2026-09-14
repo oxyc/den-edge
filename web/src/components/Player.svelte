@@ -9,7 +9,8 @@
   import type { Title } from '../lib/library';
   import { playable, type Playable } from '../lib/playable';
   import {
-    downmixed,
+    downmixLabel,
+    nativeHls,
     endSession,
     linkLimit,
     listReleases,
@@ -231,7 +232,7 @@
     }, STUCK_MS);
     const cleanup = () => clearTimeout(stuck);
     element.addEventListener('loadeddata', cleanup, { once: true });
-    if (element.canPlayType('application/vnd.apple.mpegurl')) {
+    if (nativeHls(element)) {
       element.src = current.playlist;
       return cleanup;
     }
@@ -493,7 +494,7 @@
   {#if session}
     {@const parts = releaseParts(session)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
-    {@const stereo = downmixed(session)}
+    {@const downmix = downmixLabel(session)}
     <footer>
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
@@ -517,7 +518,8 @@
             >
             {@render chevron()}
             <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
-              {#each releases as release (release.filename)}
+              <!-- Keyed by place: two releases can share a file name (the same encode under two infohashes). -->
+              {#each releases as release, n (n)}
                 <option value={release.filename}>{release.label}</option>
               {/each}
             </select>
@@ -526,19 +528,19 @@
         {#if session.audioTracks.length > 1 && playingTrack}
           <div class="pick">
             {@render globe()}
-            <!-- A surround track this browser gets in stereo says so beside its name, quietly: a known limit of
-                 the conversion, not a fault. -->
+            <!-- A track this browser gets with fewer channels says what it gets beside its name, quietly: a known
+                 limit of the conversion, not a fault. -->
             <span class="value" aria-hidden="true"
-              >{trackLabel(playingTrack, session.audioTrack)}{#if stereo}<span class="downmix"
-                  >Stereo</span
+              >{trackLabel(playingTrack, session.audioTrack)}{#if downmix}<span class="downmix"
+                  >{downmix}</span
                 >{/if}</span
             >
             {@render chevron()}
             <select aria-label="Audio track" value={session.audioTrack} onchange={switchAudio}>
               {#each session.audioTracks as track, n (n)}
                 <option value={n}
-                  >{trackLabel(track, n)}{stereo && n === session.audioTrack
-                    ? ' · Stereo'
+                  >{trackLabel(track, n)}{downmix && n === session.audioTrack
+                    ? ` · ${downmix}`
                     : ''}</option
                 >
               {/each}

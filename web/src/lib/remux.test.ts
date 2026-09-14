@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   describeRelease,
-  downmixed,
+  downmixLabel,
   endSession,
   findRemux,
   forgetBrowserTokens,
@@ -11,6 +11,7 @@ import {
   LINK_TTL_MS,
   listReleases,
   login,
+  nativeHls,
   onLan,
   releaseParts,
   reportFailure,
@@ -452,14 +453,37 @@ describe('describeRelease', () => {
   });
 });
 
-describe('downmixed', () => {
-  it('is true only where the session carries fewer channels than the track it plays', () => {
-    expect(downmixed({ ...session, audioChannels: 2 }), '5.1 played as stereo').toBe(true);
-    expect(downmixed({ ...session, audioChannels: 6 })).toBe(false);
-    expect(downmixed(session), 'a den-remux that doesn’t say').toBe(false);
-    const mono = { ...session, audioTracks: [{ ...session.audioTracks[0]!, channels: 1 }] };
-    expect(downmixed({ ...mono, audioChannels: 2 })).toBe(false);
-    expect(downmixed({ ...session, audioTrack: 3, audioChannels: 2 }), 'no such track').toBe(false);
+describe('downmixLabel', () => {
+  it('names what a session carries only where it has fewer channels than the track it plays', () => {
+    const track = session.audioTracks[0]!;
+    const surround = { ...session, audioTracks: [{ ...track, channels: 6 }] };
+    expect(downmixLabel({ ...surround, audioChannels: 2 }), '5.1 played as stereo').toBe('Stereo');
+    expect(downmixLabel({ ...surround, audioChannels: 6 })).toBeNull();
+    const eight = { ...session, audioTracks: [{ ...track, channels: 8 }] };
+    expect(downmixLabel({ ...eight, audioChannels: 6 }), '7.1 converted to 5.1 is not stereo').toBe(
+      '5.1',
+    );
+    expect(downmixLabel(surround), 'a den-remux that doesn’t say').toBeNull();
+    const mono = { ...session, audioTracks: [{ ...track, channels: 1 }] };
+    expect(downmixLabel({ ...mono, audioChannels: 2 })).toBeNull();
+    expect(
+      downmixLabel({ ...surround, audioTrack: 3, audioChannels: 2 }),
+      'no such track',
+    ).toBeNull();
+  });
+});
+
+describe('nativeHls', () => {
+  const says = (answer: string) => ({ canPlayType: () => answer as CanPlayTypeResult });
+  it('plays natively on Apple’s WebKit, where native HLS also brings AirPlay and picture-in-picture', () => {
+    expect(nativeHls(says('maybe'), { vendor: 'Apple Computer, Inc.', mse: true })).toBe(true);
+  });
+  it('hands a browser with Media Source Extensions to hls.js even when it claims HLS itself (Chrome 151)', () => {
+    expect(nativeHls(says('maybe'), { vendor: 'Google Inc.', mse: true })).toBe(false);
+  });
+  it('plays natively where there is no Media Source at all, and never where HLS is refused', () => {
+    expect(nativeHls(says('probably'), { vendor: '', mse: false })).toBe(true);
+    expect(nativeHls(says(''), { vendor: 'Apple Computer, Inc.', mse: false })).toBe(false);
   });
 });
 

@@ -367,12 +367,32 @@ export function releaseParts(session: Session): { converted?: string; release: s
 }
 
 /**
- * Whether the playing track has more channels than the session carries — a 5.1 track den-remux converted to stereo,
- * for a browser that doesn't play 5.1 AAC — so the player can say so rather than leave it to pass for a fault.
+ * What the session carries of a playing track with more channels than that — "Stereo" for surround converted to two
+ * channels, "5.1" for a 7.1 track folded to 5.1 — so the player can say so rather than leave it to pass for a fault.
+ * Null when the session carries the track's own layout, or den-remux doesn't say.
  */
-export function downmixed(session: Session): boolean {
+export function downmixLabel(session: Session): string | null {
   const track = session.audioTracks[session.audioTrack];
-  return !!track && session.audioChannels !== undefined && session.audioChannels < track.channels;
+  if (!track || session.audioChannels === undefined || session.audioChannels >= track.channels)
+    return null;
+  return session.audioChannels <= 2 ? 'Stereo' : '5.1';
+}
+
+/**
+ * Whether to hand a playlist to the `<video>` element itself rather than to hls.js. Apple's WebKit — Safari, and every
+ * browser on an iPhone — plays it natively, with AirPlay and picture-in-picture. Chrome answers `canPlayType` for HLS
+ * too now (151 says "maybe"), but its own player fetched den-remux's master and media playlists and never asked for a
+ * segment, so wherever Media Source Extensions exist outside WebKit, hls.js plays instead.
+ */
+export function nativeHls(
+  element: Pick<HTMLMediaElement, 'canPlayType'>,
+  env: { vendor?: string; mse?: boolean } = {
+    vendor: globalThis.navigator?.vendor,
+    mse: 'MediaSource' in globalThis || 'ManagedMediaSource' in globalThis,
+  },
+): boolean {
+  if (!element.canPlayType('application/vnd.apple.mpegurl')) return false;
+  return (env.vendor ?? '').startsWith('Apple') || !env.mse;
 }
 
 /** A release den-remux could play, as it lists them: never a URL. */
