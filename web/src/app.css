@@ -56,6 +56,15 @@ input {
   font: inherit;
 }
 
+/* A chip in a metadata row: the age certificate, and the count of content warnings beside it. Both
+   draw their border from `currentcolor`, so it follows whatever colour the row is set in. */
+.chip {
+  padding: 1px 5px;
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .glass {
   background: var(--glass-bg);
   -webkit-backdrop-filter: var(--glass-blur);

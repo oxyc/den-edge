@@ -25,7 +25,6 @@
   import DetailReactions from './DetailReactions.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
-  import ContentWarnings from './ContentWarnings.svelte';
   import Trailer from './Trailer.svelte';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
@@ -284,7 +283,6 @@
 {:else}
   {@const d = detail}
   <header class="hero" use:stableViewportHeight>
-    <ContentWarnings detail={d} apiKey={warningKey} categories={warningCategories} />
     <div class="visual">
       <DetailMedia
         {autoplay}
@@ -317,6 +315,8 @@
             {ratings}
             enabled={ratingSources}
             pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
+            {warningKey}
+            {warningCategories}
           />
           {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
           {#if productionFacts(d)}<p class="production desktop-overview">

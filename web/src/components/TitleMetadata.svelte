@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ContentWarnings from './ContentWarnings.svelte';
   import type { TitleDetail } from '../lib/detail';
   import { titleFacts, type Ratings } from '../lib/detailPresentation';
   let {
@@ -6,11 +7,15 @@
     ratings = null,
     enabled = ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
     pending = false,
+    warningKey = '',
+    warningCategories = [],
   }: {
     detail: TitleDetail;
     ratings?: Ratings | null;
     enabled?: string[];
     pending?: boolean;
+    warningKey?: string;
+    warningCategories?: string[];
   } = $props();
   const imdb = $derived(enabled.includes('imdb') ? ratings?.imdb : undefined);
   const tmdb = $derived(
@@ -62,7 +67,8 @@
 <div class="facts">
   {#each titleFacts(d) as fact, i (`${i}:${fact}`)}{#if i}<span aria-hidden="true">·</span
       >{/if}<span>{fact}</span>{/each}
-  {#if d.certification}<span class="certification">{d.certification}</span>{/if}
+  {#if d.certification}<span class="chip">{d.certification}</span>{/if}
+  <ContentWarnings detail={d} apiKey={warningKey} categories={warningCategories} />
   {#if d.providers.length}
     <a
       class="providers"
@@ -140,13 +146,6 @@
     gap: 6px 10px;
     margin: 12px 0 0;
     color: var(--muted);
-  }
-
-  .certification {
-    padding: 1px 5px;
-    border: 1px solid currentcolor;
-    border-radius: 4px;
-    font-size: 12px;
   }
 
   .genres {

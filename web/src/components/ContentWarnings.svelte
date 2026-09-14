@@ -20,10 +20,10 @@
 
 {#if content?.warnings.length}
   <details>
-    <!-- A mark and a number, not a labelled button. This sits over a title's artwork, where a pill with
-         a border reads as a control somebody is meant to press — and it is only a note about what the
-         film contains. The words stay for anyone who cannot see the mark. -->
-    <summary aria-label="Content warnings: {content.warnings.length}"
+    <!-- Beside the age certificate, carrying the same border and size: what a title contains belongs in
+         the row where what it is rated is already read. This one answers to hover and focus, which the
+         certificate never does, and the label carries the count for anyone who cannot see the mark. -->
+    <summary class="chip" aria-label="Content warnings: {content.warnings.length}"
       ><DetailIcon name="warning" />{content.warnings.length}</summary
     >
     <div class="warnings">
@@ -40,30 +40,21 @@
 
 <style>
   details {
-    position: absolute;
-    z-index: 3;
-    top: calc(var(--bar-space) + 12px);
-
-    /* Clear of the hero's expand control, which holds this corner at 44px wide and sits beneath this at
-       z-index 1 — so the pill that used to be here covered it outright. Level with it rather than four
-       pixels above, since they now read as two marks in a row. */
-    right: calc(var(--gutter) + 56px);
-    max-width: calc(100% - 32px);
-    color: var(--fg);
-    font-size: 13px;
+    position: relative;
+    display: inline-block;
   }
 
   summary {
-    display: flex;
+    display: inline-flex;
     gap: 4px;
     align-items: center;
-    width: max-content;
-    cursor: pointer;
 
-    /* No plate behind it, so the shadow is what keeps it legible over a bright frame — the same trick
-       the billboard's text uses. */
-    color: rgb(255 255 255 / 0.85);
-    filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.85));
+    /* Room to be a target in its own right, which the certificate beside it does not need: that one is
+       only ever read, never pressed. */
+    min-height: 24px;
+    padding-inline: 6px;
+    color: var(--muted);
+    cursor: pointer;
     list-style: none;
   }
 
@@ -71,22 +62,38 @@
     display: none;
   }
 
+  summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* The border is `currentcolor`, so brightening the text brightens the border with it. */
+  summary:hover,
+  details[open] summary {
+    color: var(--fg);
+  }
+
   summary :global(svg) {
-    width: 17px;
-    height: 17px;
+    width: 14px;
+    height: 14px;
   }
 
   .warnings {
     position: absolute;
-    top: 44px;
-    right: 0;
+    z-index: 5;
+    top: calc(100% + 8px);
+
+    /* Hung off its own left edge: this row begins beside the poster, so a panel anchored right would
+       open toward the middle of the page instead of under the mark it belongs to. */
+    left: 0;
     width: 300px;
-    max-width: calc(100vw - 32px);
-    background: #1b1b21;
+    max-width: min(300px, calc(100vw - 2 * var(--gutter)));
+    padding: 16px;
+    background: #222228;
     border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 16px;
-    box-shadow: 0 8px 30px #0008;
+    box-shadow: 0 12px 40px #0008;
+    font-size: 13px;
   }
 
   ul {
@@ -100,15 +107,5 @@
 
   a {
     color: var(--accent);
-  }
-
-  @media (width <= 759px) {
-    details {
-      top: 12px;
-
-      /* The corner is free here: a phone reaches full screen through the video's own controls, so there
-         is no expand control to stand clear of. */
-      right: var(--gutter);
-    }
   }
 </style>
