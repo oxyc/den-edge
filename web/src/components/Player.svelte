@@ -1,7 +1,8 @@
 <!-- Playback in this browser through den-remux: the title's release as HLS, played natively where the browser can
      (Safari, and so AirPlay) and through hls.js elsewhere. The browser's own controls do the transport; the bars
      around the video carry what Den adds — the audio language, the next episode, and waiting for a free slot. Starts
-     where the library says, and reports where it got to every minute, on pause and on close. -->
+     where the library says, and reports where it got to every minute, on pause, when the page is hidden and on close.
+     The lock screen and the system's media controls name the title and move it too. -->
 <script lang="ts">
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
@@ -72,6 +73,13 @@
   const RETRY_MS = 20_000;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
+  /**
+   * How close to the last report a hidden page's close may be and write nothing: hiding the page already wrote it, and
+   * closing a tab hides it just before `pagehide`.
+   */
+  const HIDDEN_SLACK_SECS = 5;
+  /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
+  const SKIP_SECS = 10;
   const messages: Record<'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback', string> = {
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
@@ -269,18 +277,19 @@
     if (at > 5 && at / total < 0.95) video.currentTime = at;
   }
 
-  function report() {
+  /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
+  function report(slack = 0) {
     const total = length();
     if (!video || !total || video.currentTime < 1) return;
     const second = Math.floor(video.currentTime);
-    if (second === reported) return;
+    if (reported >= 0 && Math.abs(second - reported) <= slack) return;
     reported = second;
     onprogress(video.currentTime / total, second);
   }
 
   function playing() {
     clearInterval(timer);
-    timer = setInterval(report, REPORT_MS);
+    timer = setInterval(() => report(), REPORT_MS);
   }
 
   function paused() {
@@ -350,7 +359,7 @@
     clearInterval(timer);
     clearInterval(countdown);
     clearTimeout(retry);
-    report();
+    report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
     hls?.destroy();
     if (session) endSession(session);
   }
@@ -359,6 +368,51 @@
     finish();
     onclose();
   }
+
+  // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
+  // the size the poster cards already loaded, and the detail page's — and the video's own transport.
+  $effect(() => {
+    const element = video;
+    if (!element || !('mediaSession' in navigator)) return;
+    const media = navigator.mediaSession;
+    const poster = title.posterPath;
+    media.metadata = new MediaMetadata({
+      ...(season !== undefined
+        ? { title: `S${season} · E${episode}`, artist: title.title, album: title.title }
+        : { title: title.title }),
+      artwork: poster
+        ? [342, 500].map((width) => ({
+            src: `https://image.tmdb.org/t/p/w${width}${poster}`,
+            sizes: `${width}x${width * 1.5}`,
+            type: 'image/jpeg',
+          }))
+        : [],
+    });
+    const seek = (to: number) => {
+      const total = length();
+      element.currentTime = Math.max(0, total ? Math.min(to, total) : to);
+    };
+    const handlers: Parameters<typeof media.setActionHandler>[] = [
+      ['play', () => void element.play()],
+      ['pause', () => element.pause()],
+      ['seekbackward', (d) => seek(element.currentTime - (d.seekOffset ?? SKIP_SECS))],
+      ['seekforward', (d) => seek(element.currentTime + (d.seekOffset ?? SKIP_SECS))],
+      ['seekto', (d) => d.seekTime !== undefined && seek(d.seekTime)],
+    ];
+    // A browser without a control for an action throws on it rather than ignoring it.
+    const set = (...args: Parameters<typeof media.setActionHandler>) => {
+      try {
+        media.setActionHandler(...args);
+      } catch {
+        // no such control here
+      }
+    };
+    for (const [action, handler] of handlers) set(action, handler);
+    return () => {
+      for (const [action] of handlers) set(action, null);
+      media.metadata = null;
+    };
+  });
 
   $effect(() => {
     untrack(() => void begin());
@@ -379,6 +433,8 @@
 <svelte:window
   onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && close()}
 />
+<!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
+<svelte:document onvisibilitychange={() => document.visibilityState === 'hidden' && report()} />
 
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
