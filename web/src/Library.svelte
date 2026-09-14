@@ -55,6 +55,7 @@
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
   import { hlsURL, nativeHls, trailerURLs } from './lib/reel';
+  import { relayFetch } from './lib/relayFetch';
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
@@ -582,7 +583,7 @@
       // round trip and a googlevideo fetch taken off the critical path, spent during the ~150ms
       // between the press and the click.
       const master = found[0] && hlsURL(found[0]);
-      if (master) void fetch(master).catch(() => undefined);
+      if (master) void relayFetch(master).catch(() => undefined);
     });
     // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it
     // before it can play anything. Started here, it is usually resident by then.

@@ -86,6 +86,16 @@ function keepable(body: string): boolean {
   }
 }
 
+/**
+ * When an answer was fetched from TMDB. For one lent through den-edge that is its `Last-Modified` — the day
+ * den-edge kept it, which may be months before it reached this browser, and TMDB's six months count from then.
+ * TMDB's own `Last-Modified` says nothing about that, so a direct answer counts from now.
+ */
+function fetchedAtOf(res: Response, lent: boolean, now: number): number {
+  const said = lent ? Date.parse(res.headers.get('last-modified') ?? '') : NaN;
+  return Number.isNaN(said) ? now : Math.min(said, now);
+}
+
 function answer(body: string): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
 }
@@ -111,9 +121,16 @@ export function cachingFetch(
     // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
     // already has rather than asking again.
     const asked = proxied(url);
+    const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
+    const entry = (res: Response, body: string): Entry | undefined => {
+      const fetchedAt = fetchedAtOf(res, lent, now());
+      return keepable(body) && now() - fetchedAt < RETENTION ? { body, fetchedAt } : undefined;
+    };
     const stored = await store.get(key).catch(() => undefined);
-    // Anything unusable is treated as absent, which also heals what an earlier version kept.
-    const kept = stored && keepable(stored.body) ? stored : undefined;
+    // Anything unusable is treated as absent, which also heals what an earlier version kept. So is anything
+    // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
+    const kept =
+      stored && keepable(stored.body) && now() - stored.fetchedAt < RETENTION ? stored : undefined;
     const fresh = freshFor(url.pathname);
     const age = kept ? now() - kept.fetchedAt : Infinity;
     if (kept && age < fresh) return answer(kept.body);
@@ -124,8 +141,8 @@ export function cachingFetch(
         void network(asked, { ...init, signal: undefined })
           .then(async (res) => {
             if (!res.ok) return;
-            const body = await res.text();
-            if (keepable(body)) await store.put(key, { body, fetchedAt: now() });
+            const refreshed = entry(res, await res.text());
+            if (refreshed) await store.put(key, refreshed);
           })
           .catch(() => undefined)
           .finally(() => refreshing.delete(key));
@@ -136,7 +153,8 @@ export function cachingFetch(
       const res = await network(asked, init);
       if (!res.ok) return kept && res.status >= 500 ? answer(kept.body) : res;
       const body = await res.text();
-      if (keepable(body)) void store.put(key, { body, fetchedAt: now() }).catch(() => undefined);
+      const fetched = entry(res, body);
+      if (fetched) void store.put(key, fetched).catch(() => undefined);
       return answer(body);
     } catch (error) {
       if (kept) return answer(kept.body);

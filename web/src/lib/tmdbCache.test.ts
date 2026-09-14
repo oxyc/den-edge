@@ -152,6 +152,56 @@ describe('cachingFetch', () => {
     expect(net.asked, 'what was kept was unusable, so it was asked again').toHaveLength(1);
   });
 
+  /**
+   * den-edge may hand over an answer it kept months ago. Counted from when it reached this browser, the copy
+   * here could outlive TMDB's six months by as much again.
+   */
+  it('counts a lent answer’s age from when den-edge kept it', async () => {
+    vi.stubGlobal('location', { origin: 'https://den.example' });
+    const { entries, store } = memory();
+    const clock = 400 * 24 * HOUR;
+    const keptAt = clock - 179 * 24 * HOUR;
+    const asked: string[] = [];
+    const lending: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response('{"id":603}', {
+        status: 200,
+        headers: { 'last-modified': new Date(keptAt).toUTCString() },
+      });
+    };
+    let now = clock;
+    const cached = cachingFetch(store, lending, () => now);
+    const lent = `https://api.themoviedb.org/3/movie/603?api_key=${TMDB_PROXY_KEY}`;
+    await cached(lent);
+    await new Promise((resolve) => setTimeout(resolve));
+    expect([...entries.values()][0]?.fetchedAt).toBe(keptAt);
+
+    // Two days on it is past six months since den-edge fetched it, so it is asked for again.
+    now += 2 * 24 * HOUR;
+    await cached(lent);
+    expect(asked).toHaveLength(2);
+    vi.unstubAllGlobals();
+
+    // TMDB's own Last-Modified is when the title changed, not when it was fetched.
+    const direct = memory();
+    await cachingFetch(direct.store, lending, () => clock)(detail);
+    await new Promise((resolve) => setTimeout(resolve));
+    expect([...direct.entries.values()][0]?.fetchedAt).toBe(clock);
+  });
+
+  it('never shows a copy past six months, not even when TMDB cannot be reached', async () => {
+    const { entries, store } = memory();
+    const net = network();
+    entries.set('https://api.themoviedb.org/3/movie/603?append_to_response=credits', {
+      body: '{"id":603}',
+      fetchedAt: 0,
+    });
+    net.fail();
+    await expect(
+      cachingFetch(store, net.fetchImpl, () => RETENTION + HOUR)(detail),
+    ).rejects.toThrow('offline');
+  });
+
   it('keeps details for as long as TMDB allows, and lists for hours', () => {
     // What a film is called, when it came out and who was in it does not change, so re-asking every month
     // bought nothing but a wait. den-edge keeps them the same length (`tmdb.rs`), and TMDB's terms set both.
