@@ -1,15 +1,16 @@
 <!-- One row of a settings plate, as the TV's Form rows read: a label on the left, a quiet value on the right. A row that
      opens a screen on the TV opens in place here instead (`children`), so nothing is a page of its own; a row with a
-     control of its own (a switch, a select) takes it as `control`. -->
+     control of its own (a switch, a select) takes it as `control`. Whether it's open is kept with every other row's
+     (`rows`), so its section's and the page's "Expand all" reach it. -->
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { getContext, type Snippet } from 'svelte';
+  import { rows, SECTION } from './rows.svelte';
 
   let {
     id,
     label,
     detail,
     value,
-    open = $bindable(false),
     control,
     children,
   }: {
@@ -20,12 +21,20 @@
     detail?: string;
     /** What's chosen, said the way the TV's row says it: "Original", "3", "Not set". */
     value?: string;
-    open?: boolean;
     /** A control that sits in the value's place, for a setting that needs no more room than that. */
     control?: Snippet;
     /** What the row opens to. */
     children?: Snippet;
   } = $props();
+
+  const section = getContext<string | undefined>(SECTION);
+  const open = $derived(rows.open.has(id));
+
+  $effect(() => {
+    if (!children) return;
+    rows.expandable.set(id, section ?? '');
+    return () => rows.expandable.delete(id);
+  });
 </script>
 
 <div class="item" {id}>
@@ -35,7 +44,7 @@
       class="row"
       aria-expanded={open}
       aria-controls="{id}-panel"
-      onclick={() => (open = !open)}
+      onclick={() => rows.toggle(id)}
     >
       <span class="label"
         >{label}{#if detail}<small>{detail}</small>{/if}</span
@@ -55,7 +64,7 @@
       hidden={!open}
       onkeydown={(event) => {
         if (event.key !== 'Escape' || event.defaultPrevented) return;
-        open = false;
+        rows.open.delete(id);
         document.querySelector<HTMLElement>(`#${CSS.escape(id)} > .row`)?.focus();
       }}
     >

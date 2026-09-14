@@ -4,6 +4,7 @@
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
   import CheckGrid from './CheckGrid.svelte';
+  import { rows } from './rows.svelte';
   import Confirm from './Confirm.svelte';
   import Segmented from './Segmented.svelte';
   import Select from './Select.svelte';
@@ -111,7 +112,7 @@
   }
 
   // My services: one country at a time, as the TV's country screens.
-  let servicesOpen = $state(false);
+  const servicesOpen = $derived(rows.open.has('my-services'));
   let servicesCountry = $state<string | null>(null);
   const shownCountry = $derived(servicesCountry ?? region);
   let serviceFilter = $state('');
@@ -293,12 +294,7 @@
     </p>
   </SettingRow>
 
-  <SettingRow
-    id="my-services"
-    label="My services"
-    value={count(prefs.services.length, '')}
-    bind:open={servicesOpen}
-  >
+  <SettingRow id="my-services" label="My services" value={count(prefs.services.length, '')}>
     <p class="summary">
       <span
         >{prefs.services.length

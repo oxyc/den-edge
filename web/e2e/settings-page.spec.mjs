@@ -101,6 +101,24 @@ for (const width of [393, 820, 1280]) {
       ).toBeVisible();
       await page.getByRole('button', { name: /Hidden languages/ }).click();
 
+      // A section's own toggle opens every row in it and closes them again; the page's, every row on the page.
+      await page.getByRole('button', { name: 'Expand all in Advanced' }).click();
+      await expect(page.getByRole('button', { name: /Diagnostics/ })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      );
+      await page.getByRole('button', { name: 'Collapse all in Advanced' }).click();
+      await expect(page.getByRole('button', { name: /Diagnostics/ })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      );
+      await page.getByRole('button', { name: 'Expand all in Settings' }).click();
+      await expect(page.getByRole('button', { name: /Terms of Use/ })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      );
+      await expect(page.getByRole('button', { name: 'Collapse all in Settings' })).toBeVisible();
+
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({
         path: test.info().outputPath(`settings-${width}.png`),

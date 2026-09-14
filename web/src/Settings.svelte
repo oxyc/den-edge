@@ -4,6 +4,7 @@
      can't read it. -->
 <script lang="ts">
   import AboutSection from './settings/AboutSection.svelte';
+  import ExpandAll from './settings/ExpandAll.svelte';
   import AdvancedSection from './settings/AdvancedSection.svelte';
   import ConnectionsSection from './settings/ConnectionsSection.svelte';
   import ContentSection from './settings/ContentSection.svelte';
@@ -155,7 +156,10 @@
 <div class="settings">
   <SettingsNav variant="rail" />
   <div class="page">
-    <h1>Settings</h1>
+    <div class="title">
+      <h1>Settings</h1>
+      <ExpandAll label="Settings" />
+    </div>
     <SettingsNav variant="bar" />
     {#if log === undefined}
       <p class="banner" role="status">Loading your settings…</p>
@@ -219,8 +223,16 @@
     min-width: 0;
   }
 
-  h1 {
+  .title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
     margin: 8px 0 20px;
+  }
+
+  h1 {
+    margin: 0;
     font-size: 28px;
   }
 
