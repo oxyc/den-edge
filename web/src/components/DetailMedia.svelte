@@ -90,6 +90,24 @@
     void player.play().catch(() => {});
   }
 
+  /**
+   * Try again once the element actually has data.
+   *
+   * WebKit refuses `play()` on an element it does not yet consider ready, and the effect that starts
+   * playback re-runs only when `allowed` or the source changes — so a refusal was final, and the
+   * trailer sat on its poster until someone tapped it. It used to get away with this by accident: the
+   * source arrived a second or two late, behind a `/direct` round trip, by which time the element was
+   * ready. Asking again here is what that delay was doing.
+   *
+   * Never against the viewer: `touched` means they have the controls, and a paused trailer they paused
+   * stays paused.
+   */
+  function start() {
+    const player = video;
+    if (!player || touched || !allowed || !player.paused) return;
+    void player.play().catch(() => {});
+  }
+
   /** Take over the screen, with the audio on. */
   async function expand() {
     const player = video;
@@ -311,6 +329,7 @@
     aria-label="Trailer"
     aria-hidden={!mobile}
     onloadedmetadata={metadata}
+    oncanplay={start}
     onloadeddata={firstFrame}
     onseeked={firstFrame}
     ontimeupdate={firstFrame}
