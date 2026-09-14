@@ -172,9 +172,8 @@ mod tests {
     async fn a_member_browses_past_the_visitors_allowance() {
         let h = harness();
         let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
-        let started = h
-            .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)])
-            .await;
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
         assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
 
         let member = format!("{LIB}:{TOKEN}");
