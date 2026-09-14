@@ -686,6 +686,7 @@
     margin: 0;
     font-size: clamp(26px, 6vw, 48px);
     line-height: 1.05;
+
     /* A ceiling, not a reservation: the text sits at the bottom of the hero, so a one-line title simply leaves
        the room above it empty rather than a gap under it. */
     max-block-size: 2.1em;
