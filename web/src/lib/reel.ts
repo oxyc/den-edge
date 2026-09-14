@@ -133,14 +133,13 @@ export function nativeHls(
  * and unpressable, video-only is exactly right and costs reel nothing. Anywhere a viewer can turn the
  * sound up it would be a trap — it plays perfectly and is simply silent, with nothing to say so.
  */
-export function directSource(
-  direct: DirectTrailer | null,
-  wantsSound: boolean,
-  hlsOk = nativeHls(),
-): string | null {
+export function directSource(direct: DirectTrailer | null, hlsOk = nativeHls()): string | null {
   if (!direct) return null;
-  if (direct.hls && hlsOk) return direct.hls;
-  return wantsSound ? null : direct.video;
+  // HLS or nothing at all. The silent video-only stream looked like the cheap option and is the
+  // opposite: one open-ended range is throttled hard, so it drags a 32 MB 1080p file to a first
+  // frame in about 5.4s, where HLS opens on a low variant and climbs — 1.7s on the same trailer,
+  // same device. It also fails outright in some browsers. Reel's own copy beats it everywhere.
+  return direct.hls && hlsOk ? direct.hls : null;
 }
 
 /**

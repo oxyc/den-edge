@@ -149,7 +149,7 @@
     const signal = 'timeout' in AbortSignal ? AbortSignal.timeout(2500) : undefined;
     void directTrailer(play, { signal }).then((direct) => {
       if (!live) return;
-      upgraded = directSource(direct, true);
+      upgraded = directSource(direct);
       resolved = true;
     });
     return () => {

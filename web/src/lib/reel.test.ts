@@ -100,19 +100,19 @@ describe('directSource', () => {
     height: 1080,
   };
 
-  it('takes HLS wherever it plays, because it is the only source carrying sound', () => {
-    expect(directSource(both, true, true)).toBe('https://g/m.m3u8');
-    expect(directSource(both, false, true)).toBe('https://g/m.m3u8');
+  it('takes HLS where the browser plays it', () => {
+    expect(directSource(both, true)).toBe('https://g/m.m3u8');
   });
 
-  it('falls to the silent stream only where no one can turn the sound up', () => {
-    expect(directSource(both, false, false)).toBe('https://g/v');
-    // A viewer with controls would get a video that plays perfectly and is silent, saying nothing.
-    expect(directSource(both, true, false)).toBeNull();
+  it('never offers the silent stream, which loses to reel’s own copy even where it plays', () => {
+    // Measured on one trailer and one device: 5.4s to a first frame against HLS's 1.7s, because a
+    // single open-ended range is throttled while HLS opens on a low variant and climbs.
+    expect(directSource(both, false)).toBeNull();
+    expect(directSource({ ...both, hls: null }, true)).toBeNull();
   });
 
   it('has nothing to offer without an answer', () => {
-    expect(directSource(null, false, true)).toBeNull();
+    expect(directSource(null, true)).toBeNull();
   });
 });
 
