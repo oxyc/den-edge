@@ -55,6 +55,14 @@ const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 const PER_WINDOW: u32 = 120;
 
 /// How long an answer to `path` stays fresh — the same split the app makes in `tmdbCache.ts`.
+/// A body this exact size and shape means "TMDB says there is no such thing". It is stored like any other
+/// answer so the existing read path finds it, and is distinguishable from a real answer because no TMDB
+/// response is this.
+const ABSENT: &[u8] = b"{\"den_absent\":true}";
+/// How long a 404 is believed. Short, because a title can be added to TMDB at any time — but long enough
+/// that repeating the same missing id costs nothing after the first ask.
+const ABSENT_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
 fn fresh_for(path: &str) -> Duration {
     if path.starts_with("/3/search/") {
         return SEARCH_TTL;
@@ -198,7 +206,13 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     // bound is what this origin asks TMDB, not what it already knows.
     if let Some(file) = &file {
         if let Some((body, age)) = read(file).await {
-            if age < fresh {
+            // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
+            // limited so it could not be drained as freely, but it shares the one daily budget.
+            if body == ABSENT {
+                if age < ABSENT_TTL {
+                    return *refused(StatusCode::NOT_FOUND, "not_found");
+                }
+            } else if age < fresh {
                 return answer(body, fresh.saturating_sub(age), "hit");
             }
             // Held while the refresh is attempted: if TMDB refuses or is unreachable, a slightly old answer is
@@ -224,7 +238,14 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
             }
             answer(body, fresh, "miss")
         }
-        Err(response) => *response,
+        Err(response) => {
+            if response.status() == StatusCode::NOT_FOUND {
+                if let Some(file) = &file {
+                    write(file, &Bytes::from_static(ABSENT)).await;
+                }
+            }
+            *response
+        }
     }
 }
 
@@ -239,16 +260,39 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
     if let Some(file) = &file {
         if let Some((body, age)) = read(file).await {
-            if age < fresh_for(path) {
+            // A remembered 404 answers as "no such thing" without spending anything.
+            if body == ABSENT {
+                if age < ABSENT_TTL {
+                    return None;
+                }
+            } else if age < fresh_for(path) {
                 return serde_json::from_slice(&body).ok();
             }
         }
     }
-    let body = fetch(state, path, query, key, "meta").await.ok()?;
-    if let Some(file) = &file {
-        write(file, &body).await;
+    // A MISSING TITLE MUST BE REMEMBERED TOO.
+    //
+    // `fetch` spends a budget unit before it asks, and a 404 comes back as Err, so nothing was written and
+    // the next identical request paid again. `/movie/999999999` is a valid route — meta accepts any u32 — so
+    // one URL, requested in a loop by anyone, drained TMDB_DAILY_MAX at one unit per request, unauthenticated
+    // and unthrottled, and that budget is shared with the /tmdb proxy the app browses through. Draining it
+    // took out browsing, not just link previews.
+    match fetch(state, path, query, key, "meta").await {
+        Ok(body) => {
+            if let Some(file) = &file {
+                write(file, &body).await;
+            }
+            serde_json::from_slice(&body).ok()
+        }
+        Err(answer) => {
+            if answer.status() == StatusCode::NOT_FOUND {
+                if let Some(file) = &file {
+                    write(file, &Bytes::from_static(ABSENT)).await;
+                }
+            }
+            None
+        }
     }
-    serde_json::from_slice(&body).ok()
 }
 
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
@@ -398,6 +442,31 @@ fn refused(status: StatusCode, code: &str) -> Box<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing title was never remembered, so asking for one cost a budget unit EVERY time.
+    ///
+    /// `fetch` spends before it asks and a 404 returns Err, so nothing reached the cache. `/movie/999999999`
+    /// is a valid route — meta accepts any u32 — which made one URL, requested in a loop, a way to drain
+    /// TMDB_DAILY_MAX unauthenticated and unthrottled. That budget is shared with the /tmdb proxy, so it
+    /// took out guest browsing too, not only link previews.
+    #[tokio::test]
+    async fn a_missing_title_is_remembered_so_it_is_asked_for_once() {
+        let dir = crate::handler::tests::temp_dir();
+        let file = cache_path(&dir, &cache_key("/3/movie/999999999", None));
+
+        // Nothing known yet.
+        assert!(read(&file).await.is_none());
+
+        // What the 404 path now writes.
+        write(&file, &Bytes::from_static(ABSENT)).await;
+        let (body, age) = read(&file).await.expect("remembered");
+        assert_eq!(body, ABSENT, "the sentinel round-trips");
+        assert!(age < ABSENT_TTL, "and is believed for a while");
+
+        // It must not be mistaken for an answer: every real body parses as an object with fields.
+        assert!(serde_json::from_slice::<serde_json::Value>(&body).is_ok(), "still valid JSON on disk");
+        assert_ne!(ABSENT, br#"{"id":550}"#, "and is not a shape TMDB returns");
+    }
 
     #[test]
     fn only_the_read_endpoints_the_app_asks_for() {
