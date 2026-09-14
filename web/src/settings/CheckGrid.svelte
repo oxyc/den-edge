@@ -8,6 +8,7 @@
     hide = false,
     disabled = false,
     wide = false,
+    stacked = false,
     onchange,
   }: {
     legend: string;
@@ -18,13 +19,15 @@
     disabled?: boolean;
     /** Longer labels, fewer columns: service names. */
     wide?: boolean;
+    /** One option under another: a short group set beside other groups rather than across the panel. */
+    stacked?: boolean;
     onchange: (value: T, on: boolean) => void;
   } = $props();
 </script>
 
-<fieldset>
+<fieldset class:stacked>
   <legend>{legend}</legend>
-  <div class="grid" class:wide>
+  <div class="grid" class:wide class:stacked>
     {#each options as option (option.value)}
       <label class="check" class:hide>
         <input
@@ -52,28 +55,47 @@
 </fieldset>
 
 <style>
+  /* Room above each group goes on the fieldset: a legend's own top margin is dropped at the top of a panel and of a
+     column. */
   fieldset {
     margin: 0;
-    padding: 0;
+    padding: 18px 0 0;
     border: 0;
   }
 
+  /* A group's name reads as a heading over its options, not as one more option. Floated, so it lays out as a block
+     the fieldset's padding sits above. */
   legend {
-    margin: 16px 0 6px;
-    padding: 0;
+    float: left;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 0 10px 6px;
+    border-bottom: 1px solid var(--line);
     color: var(--muted);
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
   .grid {
     display: grid;
+    clear: both;
     grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
     gap: 2px 8px;
   }
 
   .grid.wide {
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+
+  /* Kept whole where groups sit side by side in columns. */
+  fieldset.stacked {
+    break-inside: avoid;
+  }
+
+  .grid.stacked {
+    grid-template-columns: 1fr;
   }
 
   .check {
@@ -141,7 +163,8 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .grid.wide {
+    .grid.wide,
+    .grid.stacked {
       grid-template-columns: 1fr;
     }
   }

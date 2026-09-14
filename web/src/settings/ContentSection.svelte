@@ -410,15 +410,18 @@
         Add your doesthedogdie.com key under <a href="#doesthedogdie">Content warnings</a> first.
       </p>
     {/if}
-    {#each WARNING_GROUPS as group (group.name)}
-      <CheckGrid
-        legend={group.name}
-        options={group.categories.map((c) => ({ value: c, label: c }))}
-        checked={(c) => prefs.shownWarnings.includes(c)}
-        {disabled}
-        onchange={(c, on) => save(change.shownWarnings(toggled(prefs.shownWarnings, c, on)))}
-      />
-    {/each}
+    <div class="warning-groups">
+      {#each WARNING_GROUPS as group (group.name)}
+        <CheckGrid
+          legend={group.name}
+          options={group.categories.map((c) => ({ value: c, label: c }))}
+          checked={(c) => prefs.shownWarnings.includes(c)}
+          stacked
+          {disabled}
+          onchange={(c, on) => save(change.shownWarnings(toggled(prefs.shownWarnings, c, on)))}
+        />
+      {/each}
+    </div>
     <p class="foot">
       Which warnings show on detail pages. Leave everything off to show every confirmed warning;
       pick some to see only those.
@@ -573,5 +576,12 @@
   /* Four digits need no more room; `input` outweighs the page's shared field style. */
   input.short {
     flex: 0 1 200px;
+  }
+
+  /* Ten short groups as columns of lists, the way the TV lists each group under its heading. */
+  .warning-groups {
+    margin-top: 8px;
+    columns: 200px;
+    column-gap: 24px;
   }
 </style>

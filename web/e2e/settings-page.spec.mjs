@@ -94,6 +94,13 @@ for (const width of [393, 820, 1280]) {
       await expect(listed.filter({ hasText: /Browser · seen/ })).toContainText('Mac');
       await expect(listed.filter({ hasText: 'This browser' })).toHaveCount(1);
 
+      // The long lists, open for the screenshot: content warnings in their ten groups, and the languages.
+      await page.getByRole('button', { name: /Content warnings All/ }).click();
+      await expect(
+        page.getByRole('region', { name: 'Content warnings' }).getByRole('group', { name: 'Body' }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: /Hidden languages/ }).click();
+
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({
         path: test.info().outputPath(`settings-${width}.png`),
