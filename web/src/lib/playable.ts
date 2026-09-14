@@ -1,6 +1,7 @@
 // What this browser can decode, sent with every session so den-remux can tell whether a release plays here as it is
 // or needs converting (oxyc/den-remux `playable`): the highest level it takes of H.264 (8-bit and High 10), 8-bit and
-// 10-bit HEVC, whether it decodes HDR (PQ) and Dolby Vision, and whether it plays E-AC-3 audio as it is.
+// 10-bit HEVC and 8-bit and 10-bit AV1, whether it decodes HDR (PQ) in HEVC and in AV1 and Dolby Vision, and whether
+// it plays E-AC-3 audio as it is.
 
 export interface Playable {
   /** H.264's highest `level_idc` (0x33 is 5.1); 0 for none. */
@@ -21,6 +22,15 @@ export interface Playable {
    * HDR10 where it isn't decoded.
    */
   dolbyVision: { p5: boolean; p8: boolean };
+  /**
+   * 8-bit AV1's highest `seq_level_idx` at Main profile and tier (8 is level 4.0, 13 is 5.1); 0 for none. den-remux
+   * only ever copies AV1, so a release beyond this isn't tried at all.
+   */
+  av1: number;
+  /** 10-bit AV1's. */
+  av1Main10: number;
+  /** Whether 10-bit AV1 decodes in PQ. */
+  av1Hdr: boolean;
 }
 
 /** Levels 3.1, 4.0, 4.1, 5.0 and 5.1: 720p up to 4K. */
@@ -28,6 +38,10 @@ const H264_LEVELS = [0x1f, 0x28, 0x29, 0x32, 0x33];
 const HEVC_LEVELS = [93, 120, 123, 150, 153];
 /** The High tier starts at level 4. */
 const HEVC_HIGH_LEVELS = [120, 123, 150, 153];
+/** AV1's `seq_level_idx` for levels 4.0, 4.1, 5.0 and 5.1: 1080p up to 4K. */
+const AV1_LEVELS = [8, 9, 12, 13];
+/** From 5.0 (`seq_level_idx` 12) a level holds 4K. */
+const AV1_UHD_LEVEL = 12;
 
 export interface Probe {
   /** Whether a `video/mp4; codecs=…` or `audio/mp4; codecs=…` type plays here. */
@@ -80,6 +94,25 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
       colorGamut: 'rec2020',
       hdrMetadataType: 'smpteSt2086',
     }));
+  // AV1 comes from the type checks alone: a browser without a decoder for it (Safari on hardware that has none) says
+  // no there. PQ is asked of Media Capabilities, at the size the highest 10-bit level holds and under the codec
+  // string den-remux names an HDR10 release by.
+  const av1Level = (level: number) => level.toString().padStart(2, '0');
+  const av1 = highest(AV1_LEVELS, (level) => `av01.0.${av1Level(level)}M.08`);
+  const av1Main10 = highest(AV1_LEVELS, (level) => `av01.0.${av1Level(level)}M.10`);
+  const av1Size =
+    av1Main10 >= AV1_UHD_LEVEL
+      ? uhd
+      : { width: 1920, height: 1080, bitrate: 10_000_000, framerate: 24 };
+  const av1Hdr =
+    av1Main10 > 0 &&
+    (await decodes(probe, {
+      contentType: `video/mp4; codecs="av01.0.${av1Level(av1Main10)}M.10.0.110.09.16.09.0"`,
+      ...av1Size,
+      transferFunction: 'pq',
+      colorGamut: 'rec2020',
+      hdrMetadataType: 'smpteSt2086',
+    }));
   // Dolby Vision rides on 10-bit HEVC. Chrome says no to the type outright; where a browser says yes, Media
   // Capabilities is asked too, as it is for the High tier. Level 06 is 4K at 24 frames.
   const dolby = async (profile: string) => {
@@ -99,6 +132,9 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
     hdr,
     eac3: probe.supports('audio/mp4; codecs="ec-3"'),
     dolbyVision: { p5: await dolby('05'), p8: await dolby('08') },
+    av1,
+    av1Main10,
+    av1Hdr,
   };
 }
 
