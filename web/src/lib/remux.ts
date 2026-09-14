@@ -51,6 +51,8 @@ export interface Want {
   /** Another track of an earlier session's release: its index there, and that release's filename. */
   audioTrack?: number;
   filename?: string;
+  /** The second playback starts at, which den-remux names in the playlist (`EXT-X-START`) for a native player. */
+  startAt?: number;
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';

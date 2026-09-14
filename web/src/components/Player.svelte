@@ -59,6 +59,8 @@
   const REPORT_MS = 60_000;
   /** How long a video may go without a picture before it counts as one the browser can't play. */
   const STUCK_MS = 30_000;
+  /** How far from the asked-for second a native player may start and still count as there: it starts on a segment. */
+  const START_SLACK_SECS = 10;
   /** How long before asking again while every slot, or the GPU, is taken — unless den-remux names its own. */
   const RETRY_MS = 20_000;
   /** Seconds the next episode waits once this one has ended. */
@@ -92,7 +94,9 @@
   let reported = -1;
   let ended = false;
   /** Where the next session starts: a language switch picks up where the last one was. */
-  let startAt: number | null = null;
+  let startAt: { fraction: number; seconds?: number } | null = null;
+  /** The second den-remux was asked to start the playing session at; undefined when it was asked for none. */
+  let started: number | undefined;
   /** What this browser decodes, found once: den-remux converts only what won't play here. */
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
@@ -127,6 +131,13 @@
     }
     const languages = [...new Set(navigator.languages.map((l) => l.split('-')[0]!.toLowerCase()))];
     const can = (decodes ??= await playable());
+    // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
+    // video's length is known: it is sought to once the video has loaded, as before.
+    const from = startAt ?? resume;
+    const at =
+      from.seconds !== undefined && from.seconds > 5 && from.fraction < 0.95
+        ? from.seconds
+        : undefined;
     const result = await startSession(
       {
         imdb,
@@ -138,6 +149,7 @@
         audio: [...navigator.languages],
         videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
         playable: can,
+        startAt: at,
         ...pick,
       },
       undefined,
@@ -155,6 +167,7 @@
         retry = setTimeout(() => void begin(pick), result.retryMs ?? RETRY_MS);
       return;
     }
+    started = at;
     session = result;
     if (!releases.length) {
       void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then(
@@ -204,7 +217,8 @@
         failure = 'unsupported';
         return;
       }
-      hls = new Hls({ enableWorker: false });
+      // -1 is hls.js's own default: the playlist's start, or the beginning.
+      hls = new Hls({ enableWorker: false, startPosition: started ?? -1 });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) broke(0, `hls.js ${data.type} ${data.details}`);
       });
@@ -230,8 +244,17 @@
   function seekToStart() {
     const total = length();
     if (!video || !total) return;
-    const at = startAt ?? resume.seconds ?? resume.fraction * total;
+    const from = startAt ?? resume;
     startAt = null;
+    if (started !== undefined) {
+      // den-remux was asked to start there: hls.js was given it as its start position, and Safari's own player reads
+      // the playlist's EXT-X-START. A seek is only for a native player that didn't start near it — a den-remux that
+      // names no start — so the picture never jumps twice.
+      if (!hls && Math.abs(video.currentTime - started) > START_SLACK_SECS)
+        video.currentTime = started;
+      return;
+    }
+    const at = from.seconds ?? from.fraction * total;
     if (at > 5 && at / total < 0.95) video.currentTime = at;
   }
 
@@ -289,7 +312,9 @@
   function restart(pick: { audioTrack?: number; filename: string }) {
     if (!session) return;
     report();
-    startAt = video?.currentTime ?? startAt;
+    const total = length();
+    if (video && total)
+      startAt = { seconds: video.currentTime, fraction: video.currentTime / total };
     hls?.destroy();
     hls = undefined;
     endSession(session);

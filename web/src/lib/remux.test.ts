@@ -83,16 +83,16 @@ describe('startSession', () => {
     expect(sent.at(-1)).not.toHaveProperty('subtitleLanguages');
   });
 
-  it('asks for another track of the same release', async () => {
+  it('asks for another track of the same release, from the second it was at', async () => {
     let sent: Record<string, unknown> = {};
     await startSession(
-      { ...want, subtitleLanguages: [], audioTrack: 1, filename: 'f.mkv' },
+      { ...want, subtitleLanguages: [], audioTrack: 1, filename: 'f.mkv', startAt: 1234.5 },
       async (_input, init) => {
         sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return answer(201, session);
       },
     );
-    expect(sent).toMatchObject({ audioTrack: 1, filename: 'f.mkv' });
+    expect(sent).toMatchObject({ audioTrack: 1, filename: 'f.mkv', startAt: 1234.5 });
   });
 
   it('says why a session could not start', async () => {
