@@ -28,6 +28,7 @@
   import ContentWarnings from './ContentWarnings.svelte';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
+  import { named } from '../lib/pageTitle';
   import { titleHref } from '../lib/route';
 
   type Reaction = TitleRow['reaction']['value'];
@@ -178,6 +179,12 @@
       if (!controller.signal.aborted) ratings = loaded;
     });
     return () => controller.abort();
+  });
+
+  // The page names itself once TMDB has answered. Until then the tab reads "Den", which is all the address
+  // can say: a bookmark or a second tab full of titles is otherwise twenty pages with the same name.
+  $effect(() => {
+    if (detail?.title.title) document.title = named(detail.title.title, detail.title.year);
   });
 
   const series = $derived(detail ? seriesPresentation(detail, episodes, row) : null);

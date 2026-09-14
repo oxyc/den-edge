@@ -1,0 +1,14 @@
+{
+  "name": "Den",
+  "short_name": "Den",
+  "description": "Your Den library: discover movies and series, keep track of what you watch, and pick up where you left off.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0b0f",
+  "theme_color": "#0b0b0f",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

@@ -11,6 +11,7 @@
     type PersonDetail,
   } from '../lib/detail';
   import type { Title } from '../lib/library';
+  import { named } from '../lib/pageTitle';
 
   let {
     id,
@@ -24,6 +25,10 @@
   } = $props();
   const panel = $props.id();
   let person = $state<PersonDetail | null | undefined>();
+  // The page names itself once it knows whose it is; until then the address is all anything has to go on.
+  $effect(() => {
+    if (person?.name) document.title = named(person.name);
+  });
   let films = $state<FilmCredit[] | null | undefined>();
   let expanded = $state(false);
   let department = $state<string | null>(null);

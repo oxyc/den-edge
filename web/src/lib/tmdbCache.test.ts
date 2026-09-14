@@ -128,10 +128,12 @@ describe('cachingFetch', () => {
     expect(pruned).toEqual([5]);
   });
 
-  it('keeps details for weeks and lists for hours, as the TV does', () => {
-    expect(freshFor('/3/tv/1399')).toBe(30 * 24 * HOUR);
-    expect(freshFor('/3/tv/1399/season/2')).toBe(30 * 24 * HOUR);
-    expect(freshFor('/3/movie/603/external_ids')).toBe(30 * 24 * HOUR);
+  it('keeps details for as long as TMDB allows, and lists for hours', () => {
+    // What a film is called, when it came out and who was in it does not change, so re-asking every month
+    // bought nothing but a wait. den-edge keeps them the same length (`tmdb.rs`), and TMDB's terms set both.
+    expect(freshFor('/3/tv/1399')).toBe(RETENTION);
+    expect(freshFor('/3/tv/1399/season/2')).toBe(RETENTION);
+    expect(freshFor('/3/movie/603/external_ids')).toBe(RETENTION);
     expect(freshFor('/3/discover/movie')).toBe(6 * HOUR);
     expect(freshFor('/3/search/multi')).toBe(6 * HOUR);
   });

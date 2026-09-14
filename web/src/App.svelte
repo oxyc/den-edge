@@ -3,6 +3,7 @@
   import RoutedLibrary from './RoutedLibrary.svelte';
   import { untrack } from 'svelte';
   import { links } from './lib/links.svelte';
+  import { pageTitle } from './lib/pageTitle';
   import { parseRoute } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
@@ -28,6 +29,11 @@
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
   $effect(() => {
     if (route.page === 'search') query = route.query;
+  });
+  // A title's and a person's page name themselves once they know what they are showing, so this sets what can
+  // be known from the address and leaves those two to overwrite it.
+  $effect(() => {
+    document.title = pageTitle(route);
   });
 </script>
 

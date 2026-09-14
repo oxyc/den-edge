@@ -43,14 +43,20 @@ export interface Store {
   clear(): Promise<void>;
 }
 
-/** How long an answer stays fresh — the TV's `tmdbCacheTTL`: a title's own details barely change; lists do. */
+/**
+ * How long an answer stays fresh — the TV's `tmdbCacheTTL`: a title's own details barely change; lists do.
+ *
+ * A title's details are kept for as long as TMDB's terms allow, which is also how long den-edge keeps them
+ * (`tmdb.rs`): what a film is called, when it came out and who was in it does not change, and asking again
+ * every month bought nothing but a wait. Lists and search still move, and keep their hours.
+ */
 export function freshFor(path: string): number {
   if (
     /\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) ||
     path.includes('/season/')
   )
-    return 30 * DAY;
-  if (/^\/3\/(movie|tv|person)\/\d+$/.test(path)) return 30 * DAY;
+    return RETENTION;
+  if (/^\/3\/(movie|tv|person)\/\d+$/.test(path)) return RETENTION;
   return DAY / 4;
 }
 
