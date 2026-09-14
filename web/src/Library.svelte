@@ -50,6 +50,7 @@
   import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
+  import { ADDRESSES, ahead, healed, readPrivateAddresses } from './lib/privateAddresses';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
@@ -119,6 +120,39 @@
   /** This visit's discovery answered, and no route reaches den-remux from here: away from home and off the tailnet. */
   let remuxAway = $state(false);
 
+  /**
+   * Keep where a service actually answered, when the library doesn't already say so.
+   *
+   * den-edge's public name serves a table naming nothing private, so a viewer on Tailscale is told
+   * nothing about den-remux even though it is a hostname away. The library is sealed and can hold
+   * what the table won't publish — but only what a device has reached for itself, and only from a
+   * face that could see it.
+   *
+   * Quiet on purpose. Nobody asked for this write, and a household that cannot reach its own library
+   * has a larger problem than an address the next visit will discover again.
+   */
+  async function rememberAddress(service: string, reached: string | null) {
+    const opened = log;
+    if (!opened) return;
+    const change = healed(readPrivateAddresses(opened.settings(ADDRESSES)), service, reached);
+    if (!change) return;
+    try {
+      await ensureSyncPolicy();
+      const base = opened.settings(ADDRESSES) ?? {
+        kind: 'set' as const,
+        schema: 2,
+        name: ADDRESSES,
+        values: {},
+      };
+      const at = clock.issue();
+      const values = { ...base.values };
+      for (const [key, value] of Object.entries(change)) values[key] = { value, at };
+      if (await opened.write({ ...base, values })) session.changed(true);
+    } catch {
+      // Rediscovered next visit; not worth a word to someone who asked for none of it.
+    }
+  }
+
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
@@ -178,7 +212,11 @@
         if (disposed) return;
         live = true;
         routes = foundRoutes;
-        stopDiscovery = discoverServices(installed, foundRoutes, {
+        // The household's own tailnet address for den-remux, tried ahead of the table's entries: on
+        // the public name the table names none at all, and this is the only thing that reaches it.
+        const kept = readPrivateAddresses(opened?.settings(ADDRESSES));
+        const forDiscovery = { ...foundRoutes, remux: ahead(kept.remux, foundRoutes.remux) };
+        stopDiscovery = discoverServices(installed, forDiscovery, {
           // A guest is handed neither publisher, so those probes are never issued and the playback
           // services cannot be discovered at all. Structural, rather than a callback someone has to
           // remember to leave out.
@@ -191,6 +229,8 @@
                 remux: (found: string | null) => {
                   remux = found;
                   remuxAway = found === null;
+                  // Where it answered, kept for the visit that will be shown no private address.
+                  void rememberAddress('remux', found);
                 },
               }
             : {}),
