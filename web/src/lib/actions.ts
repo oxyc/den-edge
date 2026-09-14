@@ -92,6 +92,15 @@ export function unwatch(row: TitleRow, at: Stamp): TitleRow {
 }
 
 /**
+ * A series "Seen" off: its episodes are un-seen along with it (the TV's `EpisodeProgressStore.clear`). The reset
+ * covers every episode seen before it — a Special, one the series' layout didn't list yet — which un-marking the
+ * episodes one by one would miss.
+ */
+export function unwatchSeries(row: TitleRow, at: Stamp): TitleRow {
+  return { ...unwatch(row, at), episodesReset: at };
+}
+
+/**
  * Off Continue Watching (the TV's "Remove from Continue Watching"): hidden only until it is played again, since the
  * row compares this stamp with the title's latest progress. Nothing else about the title changes.
  */

@@ -3,8 +3,9 @@
      grouped by month and drawn a screenful at a time as you scroll. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { airedEpisodes, type WatchedEntry } from '../lib/history';
+  import { airedEpisodes, seenAired, type SeenEpisode, type WatchedEntry } from '../lib/history';
   import type { ContinueEntry, MediaType, Shape, Title } from '../lib/library';
+  import { titleHref } from '../lib/route';
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
 
@@ -15,7 +16,6 @@
     shapes,
     seen,
     failure = null,
-    onselect,
     ondismiss,
     onremove,
     onseen,
@@ -25,10 +25,9 @@
     history: WatchedEntry[];
     /** Each series' season layout, by `type:id`, for how many of its episodes have aired. */
     shapes: ReadonlyMap<string, Shape>;
-    /** How many of each series' episodes have been seen, by `type:id`. */
-    seen: ReadonlyMap<string, number>;
+    /** Each series' seen episodes, by `type:id`. */
+    seen: ReadonlyMap<string, readonly SeenEpisode[]>;
     failure?: string | null;
-    onselect: (title: Title) => void;
     /** Off Continue Watching until it's played again; absent where nothing can be written (a guest). */
     ondismiss?: (title: Title) => void;
     /** Out of the library, as the TV's Remove does. */
@@ -47,6 +46,8 @@
 
   /** History cards drawn at once, and added each time the end of the list nears the screen. */
   const STEP = 48;
+  /** How long a question waits for its second press before the button goes back to what it was. */
+  const ASK_FOR = 5000;
   let count = $state(STEP);
   let bottom = $state<HTMLElement>();
   const FILTERS: { value: MediaType | null; label: string }[] = [
@@ -55,11 +56,21 @@
     { value: 'tv', label: 'Series' },
   ];
   let kind = $state<MediaType | null>(null);
-  /** The control waiting for its second press, by control and title. */
-  let confirming = $state<string | null>(null);
+  /** The control waiting for its second press, by control and title, and the question it asks. */
+  let confirming = $state<{ id: string; question: string } | null>(null);
 
+  const key = (title: Title) => `${title.type}:${title.id}`;
+  // A series with an episode seen is under way: it's in Continue Watching or Watched, so the watchlist doesn't also
+  // offer to mark it watched.
+  const listed = $derived(saved.filter((t) => !seen.get(key(t))?.length));
+  const series = $derived(listed.filter((t) => t.type === 'tv'));
+  const movies = $derived(listed.filter((t) => t.type === 'movie'));
+  const shown = $derived(kind ? history.filter((e) => e.title.type === kind) : history);
+
+  // Observed again after each step: one step that doesn't reach past the screen — a very wide one — fires nothing
+  // more on its own, so the list would stop there.
   $effect(() => {
-    if (!bottom) return;
+    if (!bottom || count >= shown.length) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) count += STEP;
@@ -70,40 +81,39 @@
     return () => observer.disconnect();
   });
 
-  // A different filter starts the list from its top again.
   $effect(() => {
-    void kind;
-    count = STEP;
+    if (!confirming) return;
+    const timer = setTimeout(() => (confirming = null), ASK_FOR);
+    return () => clearTimeout(timer);
   });
-
-  const key = (title: Title) => `${title.type}:${title.id}`;
-  const series = $derived(saved.filter((t) => t.type === 'tv'));
-  const movies = $derived(saved.filter((t) => t.type === 'movie'));
-  const shown = $derived(kind ? history.filter((e) => e.title.type === kind) : history);
 
   const day = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
   const monthName = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' });
-  /** The drawn part of the history, by the month it was watched in. */
+  /** The drawn part of the history, by the month it was watched in; a watch with no time goes under Earlier. */
   const months = $derived.by(() => {
     const groups: { key: string; label: string; entries: WatchedEntry[] }[] = [];
     for (const entry of shown.slice(0, count)) {
       const date = new Date(entry.at);
-      const month = `${date.getFullYear()}-${date.getMonth()}`;
+      const [month, label] =
+        entry.at > 0
+          ? [`${date.getFullYear()}-${date.getMonth()}`, monthName.format(date)]
+          : ['earlier', 'Earlier'];
       const last = groups.at(-1);
       if (last?.key === month) last.entries.push(entry);
-      else groups.push({ key: month, label: monthName.format(date), entries: [entry] });
+      else groups.push({ key: month, label, entries: [entry] });
     }
     return groups;
   });
 
   /** A series' seen episodes against those aired — "4 of 10 episodes" — and how far that is; none before any is seen. */
   function progressOf(title: Title): { text: string; fraction?: number } | undefined {
-    const watched = title.type === 'tv' ? (seen.get(key(title)) ?? 0) : 0;
-    if (!watched) return undefined;
+    const episodes = title.type === 'tv' ? seen.get(key(title)) : undefined;
+    if (!episodes?.length) return undefined;
     const shape = shapes.get(key(title));
+    const counted = seenAired(episodes, shape);
     const aired = shape ? airedEpisodes(shape) : 0;
-    if (!aired) return { text: `${watched} episode${watched === 1 ? '' : 's'}` };
-    const counted = Math.min(watched, aired);
+    if (!aired)
+      return counted ? { text: `${counted} episode${counted === 1 ? '' : 's'}` } : undefined;
     return { text: `${counted} of ${aired} episodes`, fraction: counted / aired };
   }
 
@@ -112,21 +122,31 @@
     return entry.title.year ? String(entry.title.year) : undefined;
   }
 
-  function watchedCaption(entry: WatchedEntry): string {
-    const when = day.format(new Date(entry.at));
-    const progress = progressOf(entry.title);
-    if (progress) return `${progress.text} · ${when}`;
-    return entry.episode ? `S${entry.episode.season} · E${entry.episode.episode} · ${when}` : when;
+  function watchedCaption(entry: WatchedEntry): string | undefined {
+    const parts = [
+      progressOf(entry.title)?.text ??
+        (entry.episode ? `S${entry.episode.season} · E${entry.episode.episode}` : undefined),
+      entry.at > 0 ? day.format(new Date(entry.at)) : undefined,
+    ].filter(Boolean);
+    return parts.length ? parts.join(' · ') : undefined;
   }
 
   function press(control: Control, title: Title) {
     const id = `${control.icon}:${key(title)}`;
-    if (control.confirm && confirming !== id) {
-      confirming = id;
+    if (control.confirm && confirming?.id !== id) {
+      confirming = { id, question: `${control.confirm} ${title.title}` };
       return;
     }
     confirming = null;
     control.run(title);
+  }
+
+  /** A press anywhere but on the question, or Escape, takes the question back. */
+  function dismissQuestion(event: Event) {
+    if (!confirming) return;
+    if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
+    if (event.target instanceof Element && event.target.closest('[data-asking]')) return;
+    confirming = null;
   }
 
   const savedControls = $derived<Control[]>([
@@ -156,25 +176,25 @@
   }
 </script>
 
+<svelte:window onpointerdown={dismissQuestion} onkeydown={dismissQuestion} />
+
 {#snippet framed(title: Title, controls: Control[], card: Snippet)}
   <div class="framed">
     {@render card()}
     {#if controls.length}
       <div class="controls">
         {#each controls as control (control.icon)}
-          {@const asking = confirming === `${control.icon}:${key(title)}`}
+          {@const asking = confirming?.id === `${control.icon}:${key(title)}`}
           <button
             type="button"
             class="control"
             class:asking
+            data-asking={asking || undefined}
             aria-label={asking && control.confirm
               ? `${control.confirm} ${title.title}`
               : `${control.label} ${title.title}`}
             title={asking ? control.confirm : control.label}
             onclick={() => press(control, title)}
-            onblur={() => {
-              if (asking) confirming = null;
-            }}
           >
             {#if asking}
               <span class="ask">{control.confirm}</span>
@@ -200,13 +220,11 @@
 {#snippet grid(titles: Title[])}
   <div class="grid">
     {#each titles as title (key(title))}
-      {@const progress = progressOf(title)}
       {#snippet card()}
         <PosterCard
           {title}
-          caption={progress?.text ?? (title.year ? String(title.year) : undefined)}
-          progress={progress?.fraction}
-          onselect={() => onselect(title)}
+          caption={title.year ? String(title.year) : undefined}
+          href={titleHref(title)}
         />
       {/snippet}
       {@render framed(title, savedControls, card)}
@@ -216,6 +234,7 @@
 
 <h1>Watchlist</h1>
 {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
+<p class="visually-hidden" aria-live="polite">{confirming?.question ?? ''}</p>
 
 {#if !resume.length && !saved.length && !history.length}
   <p class="note">
@@ -232,7 +251,7 @@
           title={entry.title}
           caption={resumeCaption(entry)}
           progress={entry.fraction}
-          onselect={() => onselect(entry.title)}
+          href={titleHref(entry.title)}
         />
       {/snippet}
       {@render framed(entry.title, resumeControls, card)}
@@ -262,7 +281,11 @@
           <button
             type="button"
             aria-pressed={kind === filter.value}
-            onclick={() => (kind = filter.value)}>{filter.label}</button
+            onclick={() => {
+              kind = filter.value;
+              // A different filter starts the list from its top again.
+              count = STEP;
+            }}>{filter.label}</button
           >
         {/each}
       </div>
@@ -271,13 +294,12 @@
       <h3>{month.label}</h3>
       <div class="grid">
         {#each month.entries as entry (key(entry.title))}
-          {@const progress = progressOf(entry.title)}
           {#snippet card()}
             <PosterCard
               title={entry.title}
               caption={watchedCaption(entry)}
-              progress={progress?.fraction}
-              onselect={() => onselect(entry.title)}
+              progress={progressOf(entry.title)?.fraction}
+              href={titleHref(entry.title)}
             />
           {/snippet}
           {@render framed(entry.title, watchedControls(entry), card)}
@@ -322,6 +344,15 @@
 
   .failure {
     color: var(--danger);
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   section {
@@ -421,18 +452,22 @@
     stroke-linejoin: round;
   }
 
-  /* Out of the way until the card is pointed at, where there is a pointer to point with; always there on touch. */
+  /* Out of the way until the card is pointed at, where there is a pointer to point with; always there on touch. While
+     hidden they take no clicks, so a tap on a poster's corner can't remove what nobody could see. */
   @media (hover: hover) {
     .controls {
       opacity: 0;
+      pointer-events: none;
     }
 
     .controls:focus-within {
       opacity: 1;
+      pointer-events: auto;
     }
 
     .framed:hover .controls {
       opacity: 1;
+      pointer-events: auto;
     }
   }
 

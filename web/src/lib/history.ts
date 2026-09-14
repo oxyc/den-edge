@@ -8,7 +8,10 @@ import type { Row, TitleRow } from './wire';
 
 export interface WatchedEntry {
   title: Title;
-  /** When it was last watched (ms): the title seen as a whole, or its latest seen episode, whichever is later. */
+  /**
+   * When it was last watched (ms): the title seen as a whole, or its latest seen episode, whichever is later. 0 when
+   * the library only knows that it was, not when — a watch imported from a tracker is stamped at zero.
+   */
   at: number;
   /** A series' latest seen episode. */
   episode?: { season: number; episode: number };
@@ -16,9 +19,14 @@ export interface WatchedEntry {
   episodes: number;
 }
 
+export interface SeenEpisode {
+  season: number;
+  episode: number;
+}
+
 interface SeenSeries {
-  latest: { season: number; episode: number; at: number };
-  count: number;
+  latest: SeenEpisode & { at: number };
+  seen: SeenEpisode[];
 }
 
 function titleRows(rows: Row[]): Map<string, TitleRow> {
@@ -29,7 +37,7 @@ function titleRows(rows: Row[]): Map<string, TitleRow> {
   return titles;
 }
 
-/** Each series' seen episodes: how many, and the latest. One from before the series was un-seen no longer counts. */
+/** Each series' seen episodes, and the latest. One from before the series was un-seen no longer counts. */
 function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, SeenSeries> {
   const series = new Map<string, SeenSeries>();
   for (const row of rows) {
@@ -38,21 +46,21 @@ function seenSeries(rows: Row[], titles: Map<string, TitleRow>): Map<string, See
     const at = row.progress.at[0];
     const reset = titles.get(key)?.episodesReset;
     if (reset && at <= reset[0]) continue;
-    const seen = series.get(key);
-    const episode = { season: row.season, episode: row.episode, at };
-    if (!seen) series.set(key, { latest: episode, count: 1 });
+    const found = series.get(key);
+    const episode = { season: row.season, episode: row.episode };
+    if (!found) series.set(key, { latest: { ...episode, at }, seen: [episode] });
     else {
-      seen.count++;
-      if (at > seen.latest.at) seen.latest = episode;
+      found.seen.push(episode);
+      if (at > found.latest.at) found.latest = { ...episode, at };
     }
   }
   return series;
 }
 
-/** How many episodes of each series have been seen, by `type:id`. */
-export function seenEpisodeCounts(rows: Row[]): Map<string, number> {
+/** The episodes seen of each series, by `type:id`. */
+export function seenEpisodes(rows: Row[]): Map<string, SeenEpisode[]> {
   return new Map(
-    [...seenSeries(rows, titleRows(rows))].map(([key, seen]) => [key, seen.count] as const),
+    [...seenSeries(rows, titleRows(rows))].map(([key, found]) => [key, found.seen] as const),
   );
 }
 
@@ -68,9 +76,22 @@ export function airedEpisodes(shape: Shape): number {
 }
 
 /**
- * The watched titles in `rows`, newest first. A title TMDB hasn't named yet (`names`, by `type:id`) waits, as the
- * library's other lists make it wait. An episode from before a series was un-seen (`episodesReset`) no longer counts,
- * and a title removed from the library after it was last watched is left out; watching it again brings it back.
+ * The seen episodes that count towards `airedEpisodes`: regular seasons, aired, and in the layout — so a seen Special,
+ * or an episode the layout doesn't know yet, can't make "10 of 10" out of seven.
+ */
+export function seenAired(seen: readonly SeenEpisode[], shape: Shape | undefined): number {
+  return seen.filter(
+    (e) =>
+      e.season > 0 &&
+      (!shape || (e.episode <= (shape.counts.get(e.season) ?? 0) && isAired(e, shape.lastAired))),
+  ).length;
+}
+
+/**
+ * The watched titles in `rows`, newest first, then those watched at a time the library doesn't know. A title TMDB
+ * hasn't named yet (`names`, by `type:id`) waits, as the library's other lists make it wait. An episode from before a
+ * series was un-seen (`episodesReset`) no longer counts, and a title removed from the library after it was last
+ * watched is left out; watching it again brings it back.
  */
 export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): WatchedEntry[] {
   const titles = titleRows(rows);
@@ -80,22 +101,20 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
     const title = names.get(key);
     if (!title || title.title === '') continue;
     const row = titles.get(key);
-    // A watchedAt of none (or the -1 some imports carry) falls back to when the status last changed.
+    // `watchedAt` is the first watch, so a title seen again is dated by the status set since; an import that stamped
+    // its status at zero keeps the first watch. -1, which some imports carry, is no time at all.
     const seenAt =
-      row?.status.value === 'watched'
-        ? (row.watchedAt ?? 0) > 0
-          ? (row.watchedAt as number)
-          : row.status.at[0]
-        : -Infinity;
+      row?.status.value === 'watched' ? Math.max(row.watchedAt ?? 0, row.status.at[0], 0) : -1;
     const episodes = series.get(key);
-    const at = Math.max(seenAt, episodes?.latest.at ?? -Infinity);
-    if (at === -Infinity || (row?.deleted.value && row.deleted.at[0] >= at)) continue;
+    const at = Math.max(seenAt, episodes ? Math.max(episodes.latest.at, 0) : -1);
+    if (at < 0 || (row?.deleted.value && row.deleted.at[0] >= at)) continue;
     entries.push({
       title,
       at,
       episode: episodes && { season: episodes.latest.season, episode: episodes.latest.episode },
-      episodes: episodes?.count ?? 0,
+      episodes: episodes?.seen.length ?? 0,
     });
   }
+  // A watch with no time sorts after every dated one, as `at` 0 already does.
   return entries.sort((a, b) => b.at - a.at || titleKey(a.title).localeCompare(titleKey(b.title)));
 }

@@ -67,7 +67,7 @@ for (const width of [393, 1280]) {
       ]);
       // A series counts its seen episodes against those aired so far (8 + 6 of season 2's 10).
       await expect(watched.locator('.caption').first()).toContainText('1 of 14 episodes');
-      // A watched title isn't also on the watchlist grid, and nothing on the page scrolls sideways.
+      // Nothing on the page scrolls sideways.
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await expect(
         resume.getByRole('button', { name: 'Remove from Continue Watching Movie 1001' }),
@@ -79,8 +79,10 @@ for (const width of [393, 1280]) {
         watched.getByRole('button', { name: 'Mark unwatched Movie 1003', exact: true }),
       ).toBeAttached();
 
-      // Unmarking a series asks first, on the same button.
+      // Unmarking a series asks first, on the same button. Where there's a pointer, the buttons take clicks only once
+      // the card is pointed at.
       const unmark = watched.getByRole('button', { name: 'Mark unwatched Series 2002' });
+      await watched.getByRole('link', { name: /Series 2002/ }).hover();
       await unmark.click();
       await expect(
         watched.getByRole('button', { name: 'Unmark all episodes? Series 2002' }),

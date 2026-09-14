@@ -8,7 +8,7 @@ import {
   unwatch,
   updateEpisodeProgress,
 } from './actions';
-import { airedEpisodes, seenEpisodeCounts, watchedHistory } from './history';
+import { airedEpisodes, seenAired, seenEpisodes, watchedHistory } from './history';
 import type { Title } from './library';
 import type { Row, Stamp } from './wire';
 
@@ -67,14 +67,34 @@ describe('watched history', () => {
     expect(watchedHistory([...rows, seen(10, 1, 2, 4000)], named(show(10))).length).toBe(1);
   });
 
-  it('counts seen episodes per series, and aired episodes up to the last one to air, Specials aside', () => {
-    const counts = seenEpisodeCounts([
+  it('dates a title seen again by that watch, not its first', () => {
+    const first = markWatched(blankTitle({ type: 'movie', id: 1 }, 1), at(1000));
+    const again = markWatched(unwatch(first, at(2000)), at(9000));
+    expect(watchedHistory([{ ...again, watchedAt: 1000 }], named(movie(1)))[0]?.at).toBe(9000);
+  });
+
+  it('keeps a watch with no time, after every dated one', () => {
+    const imported = markEpisode(blankEpisode({ type: 'tv', id: 10 }, 1, 1), true, [0, 0, '']);
+    const history = watchedHistory(
+      [imported, markWatched(blankTitle({ type: 'movie', id: 1 }, 1), at(1000))],
+      named(show(10), movie(1)),
+    );
+    expect(history.map((e) => [e.title.id, e.at])).toEqual([
+      [1, 1000],
+      [10, 0],
+    ]);
+  });
+
+  it('counts seen episodes against aired ones, leaving out Specials and unaired ones', () => {
+    const episodes = seenEpisodes([
       seen(10, 1, 1, 1000),
       seen(10, 1, 2, 2000),
+      seen(10, 0, 1, 2500),
+      seen(10, 2, 9, 3000),
       seen(11, 3, 1, 1000),
     ]);
-    expect([...counts]).toEqual([
-      ['tv:10', 2],
+    expect([...episodes].map(([key, list]) => [key, list.length])).toEqual([
+      ['tv:10', 4],
       ['tv:11', 1],
     ]);
     const shape = {
@@ -88,6 +108,9 @@ describe('watched history', () => {
     };
     expect(airedEpisodes(shape)).toBe(14);
     expect(airedEpisodes({ counts: shape.counts })).toBe(28);
+    // S0E1 is a Special and S2E9 hasn't aired: two of the four count; without a layout, the three regular ones.
+    expect(seenAired(episodes.get('tv:10') ?? [], shape)).toBe(2);
+    expect(seenAired(episodes.get('tv:10') ?? [], undefined)).toBe(3);
   });
 
   it('falls back to when the status changed for a watched title without a watched date', () => {

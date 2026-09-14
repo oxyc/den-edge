@@ -9,6 +9,7 @@ import {
   react,
   removeFromLibrary,
   unwatch,
+  unwatchSeries,
   updateProgress,
 } from './actions';
 import { recordTrackerEvent } from './trackerEvents';
@@ -46,6 +47,17 @@ describe('actions, as the TV does them', () => {
     ]);
     const merged = mergeTitle(watched, unseen);
     expect([merged.status.value, merged.resume.value]).toEqual(['none', 0]);
+  });
+
+  it('un-sees a series with every episode seen before, and the reset reaches the log in the action', () => {
+    const series = markWatched(blankTitle({ type: 'tv', id: 95396 }, 1000), at(2000));
+    const unseen = unwatchSeries(series, at(3000));
+    expect([unseen.status.value, unseen.episodesReset]).toEqual(['none', at(3000)]);
+    const journal = recordTrackerEvent(series, unseen, at(3000), 'unsee');
+    const event = JSON.parse(
+      (journal?.values.event?.value as { string: string } | undefined)?.string ?? 'null',
+    ) as { after: { episodesReset: unknown } } | null;
+    expect(event?.after.episodesReset).toEqual(at(3000));
   });
 
   it('dismisses from Continue Watching until it is played again, without telling the trackers', () => {

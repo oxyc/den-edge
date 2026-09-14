@@ -6,7 +6,7 @@
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
   import WatchlistPage from './components/WatchlistPage.svelte';
-  import { seenEpisodeCounts, watchedHistory } from './lib/history';
+  import { seenEpisodes, watchedHistory } from './lib/history';
   import {
     DetailScreen,
     PersonScreen,
@@ -24,6 +24,7 @@
     react,
     removeFromLibrary,
     unwatch,
+    unwatchSeries,
     updateEpisodeProgress,
     updateProgress,
     WATCHED,
@@ -57,7 +58,7 @@
   import { discoverServices } from './lib/discoverServices';
   import type { Routes } from './lib/routes';
   import { installsOf, type Addon } from './lib/scout';
-  import { fetchDetails, fetchTitle } from './lib/tmdb';
+  import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
@@ -135,8 +136,11 @@
     // Only the shared settings revision and opened log trigger reconfiguration.
     // Service state below is an output, not a dependency of this effect.
     untrack(() => {
-      tmdbKey = opened ? (readApiKey(opened.settings('keys'), 'tmdb') ?? '') : '';
-      // A key only ever comes from a library, so this is the paired case; naming needs the log itself.
+      // A device with no key of its own borrows den-edge's (`tmdbKeyOf`), so a guest — and a household that
+      // never set one — sees titles rather than an empty page. What Settings reports as set stays the
+      // library's own key: borrowing one is not the same as having one.
+      tmdbKey = tmdbKeyOf(opened?.settings('keys'));
+      // Naming the library is still only the paired case: it reads the log itself.
       if (tmdbKey && opened) {
         const key = tmdbKey;
         const raw = applyLog(emptyLibrary(), opened.rows());
@@ -314,7 +318,13 @@
       remember(title);
       const before = log.title(title) ?? blankTitle(title, Date.now());
       clock.see(log.newestStamp());
-      return await save(dismissFromContinueWatching(before, clock.issue()));
+      if (!(await save(dismissFromContinueWatching(before, clock.issue())))) {
+        // Unlike the actions around it, a row write isn't kept on this device to sync later.
+        failure =
+          'Couldn’t remove that from Continue Watching. It needs a connection to your library.';
+        return false;
+      }
+      return true;
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -364,7 +374,11 @@
         }
         const before = log.title(title) ?? blankTitle(title, Date.now());
         const at = clock.issue();
-        const event = recordTrackerEvent(before, (seen ? markWatched : unwatch)(before, at), at);
+        const event = recordTrackerEvent(
+          before,
+          (seen ? markWatched : unwatchSeries)(before, at),
+          at,
+        );
         if (event) journals.push(event);
         busy = true;
         failure = null;
@@ -811,11 +825,9 @@
     if (route.page !== 'watchlist' || !log) return [];
     return watchedHistory(log.rows(), new Map(session.displays.map((t) => [titleKey(t), t])));
   });
-  const seenEpisodes = $derived.by(() => {
+  const seenOfSeries = $derived.by(() => {
     void version;
-    return route.page === 'watchlist' && log
-      ? seenEpisodeCounts(log.rows())
-      : new Map<string, number>();
+    return route.page === 'watchlist' && log ? seenEpisodes(log.rows()) : new Map();
   });
 
   function caption(entry: ContinueEntry): string | undefined {
@@ -894,9 +906,8 @@
       saved={watchlist(library)}
       {history}
       shapes={session.shapes}
-      seen={seenEpisodes}
+      seen={seenOfSeries}
       {failure}
-      onselect={select}
       ondismiss={(title) => void dismiss(title)}
       onremove={(title) => void act(title, removeFromLibrary)}
       onseen={(title, seen) => void setSeen(title, seen)}
