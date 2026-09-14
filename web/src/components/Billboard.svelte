@@ -686,7 +686,9 @@
     margin: 0;
     font-size: clamp(26px, 6vw, 48px);
     line-height: 1.05;
-    block-size: 2.1em;
+    /* A ceiling, not a reservation: the text sits at the bottom of the hero, so a one-line title simply leaves
+       the room above it empty rather than a gap under it. */
+    max-block-size: 2.1em;
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
@@ -707,7 +709,7 @@
     color: rgb(255 255 255 / 0.92);
     font-size: 14px;
     line-height: 1.4;
-    block-size: 2.8em;
+    max-block-size: 2.8em;
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
@@ -726,7 +728,7 @@
     color: rgb(255 255 255 / 0.88);
     font-size: 15px;
     line-height: 1.4;
-    block-size: 4.2em;
+    max-block-size: 4.2em;
   }
 
   .actions {
@@ -866,7 +868,7 @@
 
   @media (width >= 360px) and (width <= 759px) {
     h2 {
-      block-size: 1.05em;
+      max-block-size: 1.05em;
       -webkit-line-clamp: 1;
       line-clamp: 1;
     }
