@@ -57,6 +57,7 @@
     onplayhere,
     onepisode,
     shown = () => true,
+    seed,
   }: {
     ref: { type: MediaType; id: number };
     active?: boolean;
@@ -83,7 +84,24 @@
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     shown?: (title: Title) => boolean;
+    /**
+     * What the page that linked here already knew about this title.
+     *
+     * Only its artwork is wanted: TMDB is asked for the rest, and until it answers this hero had
+     * nothing to paint but a grey placeholder — so opening a title from Home went picture, blank,
+     * picture. The row or billboard that was just pressed is holding the poster and backdrop.
+     */
+    seed?: Title;
   } = $props();
+
+  /** The still to stand in with: the backdrop it will end up using, or the poster as a last resort. */
+  const seedStill = $derived(
+    seed?.backdropPath
+      ? `https://image.tmdb.org/t/p/w1280${seed.backdropPath}`
+      : seed?.posterPath
+        ? `https://image.tmdb.org/t/p/w780${seed.posterPath}`
+        : null,
+  );
   const panel = $props.id();
 
   /**
@@ -218,12 +236,26 @@
 
 {#if detail === undefined}
   <div aria-busy="true" aria-label="Loading title">
-    <Loading label="Loading title" page />
+    <!-- A spinner only where there is nothing to look at. Over the title's own picture it is just
+         furniture on the thing the viewer came for. -->
+    {#if !seedStill}<Loading label="Loading title" page />{/if}
     <header class="hero" aria-hidden="true" use:stableViewportHeight>
-      <div class="visual"></div>
+      <div class="visual">
+        {#if seedStill}
+          <img class="seed-still" class:portrait={!seed?.backdropPath} src={seedStill} alt="" />
+        {/if}
+      </div>
       <div class="hero-content">
         <div class="head">
-          <span class="poster placeholder"></span>
+          {#if seed?.posterPath}
+            <img
+              class="poster"
+              src="https://image.tmdb.org/t/p/w500{seed.posterPath}"
+              alt=""
+              width="280"
+              height="420"
+            />
+          {:else}<span class="poster placeholder"></span>{/if}
           <div class="loading-copy">
             <span class="placeholder loading-title"></span><span class="placeholder loading-facts"
             ></span>
@@ -500,6 +532,19 @@
     position: absolute;
     inset: 0;
     background: var(--bg);
+  }
+
+  /* The same framing `DetailMedia` gives the real backdrop, so the picture does not shift when the
+     one takes over from the other. A poster standing in for a missing backdrop is portrait, and is
+     held to the top rather than centre-cropped through the middle of a face. */
+  .seed-still {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .seed-still.portrait {
+    object-position: center top;
   }
 
   /* The full-screen button belongs to the video, but the whole hero should offer it. It lives inside the

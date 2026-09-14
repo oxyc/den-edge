@@ -545,6 +545,15 @@
   // listener at the document rather than a callback threaded through every row, card and screen, and it covers
   // links this file has never heard of.
   $effect(() => warmOnIntent(warmTrailer));
+  /**
+   * What is already known about the title being opened — its artwork, for the hero to paint while
+   * TMDB is asked. Everything on screen has been named through `session.displays`, so the row or
+   * billboard the viewer just pressed is holding exactly this.
+   */
+  const pageSeed = $derived(
+    page ? session.displays.find((t) => t.type === page.type && t.id === page.id) : undefined,
+  );
+
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;
@@ -886,6 +895,7 @@
     {scout}
     row={pageRow}
     episodes={pageEpisodes}
+    seed={pageSeed}
     {busy}
     {failure}
     {notice}
