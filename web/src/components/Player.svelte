@@ -14,6 +14,7 @@
     releaseParts,
     reportFailure,
     startSession,
+    wantedLanguages,
     type AudioTrack,
     type Failure,
     type Release,
@@ -31,6 +32,8 @@
     scout,
     remux,
     subtitles,
+    audioLanguage,
+    subtitleLanguage,
     resume,
     next,
     onprogress,
@@ -47,6 +50,10 @@
     remux: string;
     /** The library's other LAN addons: den-subtitles is among them. */
     subtitles: string[];
+    /** Settings › Playback's audio language (ISO 639-1); undefined is each title's original language. */
+    audioLanguage?: string;
+    /** Its subtitle language; undefined is off. */
+    subtitleLanguage?: string;
     /** Where the library says this was left. */
     resume: { fraction: number; seconds?: number };
     /** The episode after this one, as `S2 · E4`, when there is one. */
@@ -129,7 +136,11 @@
       }
       imdb = found;
     }
-    const languages = [...new Set(navigator.languages.map((l) => l.split('-')[0]!.toLowerCase()))];
+    const { audio, subtitleLanguages } = wantedLanguages(
+      { audio: audioLanguage, subtitle: subtitleLanguage },
+      title.originalLanguage,
+      navigator.languages,
+    );
     const can = (decodes ??= await playable());
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
@@ -145,8 +156,8 @@
         episode,
         scout: scout.install,
         subtitles,
-        subtitleLanguages: languages.slice(0, 2),
-        audio: [...navigator.languages],
+        subtitleLanguages,
+        audio,
         videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
         playable: can,
         startAt: at,

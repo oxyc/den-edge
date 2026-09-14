@@ -161,6 +161,24 @@ export function forgetSubtitles(): void {
   subtitleVerdicts.clear();
 }
 
+/**
+ * The languages a session asks for, most wanted first, as ISO 639-1: Settings › Playback's audio language — or, left
+ * on Original, the title's own — then this browser's; and the subtitle setting's language alone, or none where
+ * subtitles are off.
+ */
+export function wantedLanguages(
+  prefs: { audio?: string; subtitle?: string },
+  original: string | undefined,
+  browser: readonly string[],
+): Pick<Want, 'audio' | 'subtitleLanguages'> {
+  const base = (tag: string) => tag.split('-')[0]!.toLowerCase();
+  const first = prefs.audio ?? original;
+  return {
+    audio: [...new Set([...(first ? [first] : []), ...browser].map(base).filter(Boolean))],
+    subtitleLanguages: prefs.subtitle ? [base(prefs.subtitle)] : [],
+  };
+}
+
 /** A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. */
 export async function startSession(
   want: Want,

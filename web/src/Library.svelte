@@ -52,6 +52,7 @@
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
+  import { readSyncedPrefs } from './settings/values';
   import { hlsURL, nativeHls, trailerURLs } from './lib/reel';
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
@@ -573,6 +574,11 @@
     void session.settingsRevision;
     return readDetailPrefs(log?.settings('prefs'));
   });
+  /** Settings › Playback's languages, which the player here asks den-remux for. */
+  const playbackPrefs = $derived.by(() => {
+    void session.settingsRevision;
+    return readSyncedPrefs(log?.settings('prefs'));
+  });
   const warningKey = $derived.by(() => {
     void session.settingsRevision;
     return readApiKey(log?.settings('keys'), 'doesthedogdie') ?? '';
@@ -1004,6 +1010,8 @@
       {scout}
       {remux}
       subtitles={installsOf(plugins, routes, 'subs')}
+      audioLanguage={playbackPrefs.audioLanguage}
+      subtitleLanguage={playbackPrefs.subtitleLanguage}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
       onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}

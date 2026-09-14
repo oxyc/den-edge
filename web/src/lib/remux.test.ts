@@ -11,6 +11,7 @@ import {
   reportFailure,
   REMUX_PROBE_TIMEOUT_MS,
   startSession,
+  wantedLanguages,
   type Want,
 } from './remux';
 
@@ -32,6 +33,29 @@ const session = {
 const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 beforeEach(forgetBrowserTokens);
+
+describe('wantedLanguages', () => {
+  it('asks for the audio setting first, then the browser’s languages', () => {
+    expect(wantedLanguages({ audio: 'fi' }, 'en', ['sv-FI', 'en-US', 'fi'])).toEqual({
+      audio: ['fi', 'sv', 'en'],
+      subtitleLanguages: [],
+    });
+  });
+
+  it('asks for the title’s own language when the setting is Original', () => {
+    expect(wantedLanguages({ subtitle: 'en' }, 'ko', ['en-GB'])).toEqual({
+      audio: ['ko', 'en'],
+      subtitleLanguages: ['en'],
+    });
+  });
+
+  it('falls back to the browser’s languages when the title’s is unknown', () => {
+    expect(wantedLanguages({}, undefined, ['de-DE', 'de'])).toEqual({
+      audio: ['de'],
+      subtitleLanguages: [],
+    });
+  });
+});
 
 describe('startSession', () => {
   beforeEach(forgetSubtitles);
