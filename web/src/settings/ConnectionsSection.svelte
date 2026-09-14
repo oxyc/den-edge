@@ -13,7 +13,6 @@
   import { thisDevice } from '../lib/device.svelte';
   import { links, type Link } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
-  import { sendToTV } from '../lib/inbox';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
@@ -140,36 +139,14 @@
     const url = addonURL;
     if (!(await write('plugins', { [url]: { bool: true } }))) return;
     addonDraft = '';
-    // Added here is approved here: the TVs this browser is paired with install it without asking again.
-    await approve(url);
+    added = url;
   }
-
-  /** What each plugin's approval came to, as the row says it. */
-  let approvals = $state<Record<string, { text: string; bad: boolean }>>({});
 
   /**
-   * Approves a plugin on the TVs this browser is paired with, through each TV's inbox (den-spec inbox-v1
-   * `approveAddon`): the link is what shows the TV the approval comes from a device its user allowed.
+   * The plugin just added here, until a TV lists it as waiting. A TV installs a plugin only once its own user
+   * approves it there: an addon runs on the TV with the household's keys, so no other device can install one on it.
    */
-  async function approve(url: string) {
-    if (!links.list.length) {
-      approvals[url] = { text: 'Waiting for approval on your Apple TV.', bad: false };
-      return;
-    }
-    const sent = await Promise.all(
-      links.list.map((tv) => sendToTV(tv, { type: 'approveAddon', manifestUrl: url })),
-    );
-    const reached = sent.filter(Boolean).length;
-    approvals[url] = reached
-      ? {
-          text:
-            reached === links.list.length
-              ? 'Approved: your Apple TV installs it when it next checks in.'
-              : 'Approved on some of your Apple TVs; the others didn’t answer.',
-          bad: reached !== links.list.length,
-        }
-      : { text: 'Couldn’t reach your Apple TV. Try again in a moment.', bad: true };
-  }
+  let added = $state<string | null>(null);
   let pinning = $state<string | null>(null);
   let keyDraft = $state('');
   let keyInvalid = $state(false);
@@ -510,23 +487,19 @@
           {@const den = denAddonOf(url, routes)}
           {@const pinned = trust.get(url)}
           {@const waitingOn = devices.filter((d) => d.kind === 'tv' && d.pending.includes(url))}
-          {@const approval = approvals[url]}
           <li class="line">
             <span class="label"
               >{den?.label ?? hostOf(url)}<small
                 >{den ? `${den.role} · ${hostOf(url)}` : 'Plugin'}</small
               >{#if pinned}<small>Verified — Den checks this plugin’s signature</small
-                >{/if}{#if approval}<small class:bad={approval.bad}>{approval.text}</small
-                >{:else if waitingOn.length}<small
-                  >Waiting for approval on {waitingOn.map((d) => d.name).join(', ')}</small
+                >{/if}{#if waitingOn.length}<small
+                  >Waiting for approval on {waitingOn.map((d) => d.name).join(', ')}: approve it
+                  there under Settings › Plugins</small
+                >{:else if added === url}<small
+                  >Approve it on your Apple TV under Settings › Plugins</small
                 >{/if}</span
             >
             <span class="actions">
-              {#if waitingOn.length && links.list.length && !approval}
-                <button type="button" class="primary" {disabled} onclick={() => void approve(url)}
-                  >Install</button
-                >
-              {/if}
               {#if pinned}
                 <Confirm
                   label="Stop verifying"
