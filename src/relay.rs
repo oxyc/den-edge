@@ -27,11 +27,18 @@ pub fn client() -> RelayClient {
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// An addon's JSON answer — a catalog page, an index slice — is far under this.
 const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
-/// Relayed fetches per address per minute. A member — a device proving it holds a library here — is browsing with
-/// a household behind it, and one page of the billboard fans out into many addon calls, so it needs real room. A
-/// visitor gets enough to read pages and not enough to mine the addons through this origin.
-const MEMBER_PER_WINDOW: u32 = 240;
-const GUEST_PER_WINDOW: u32 = 30;
+/// Relayed fetches per address per minute.
+///
+/// Both were first set as though a page were a handful of requests. It is not: one home render is four
+/// recommend calls, the rows, reel's meta and direct for each slide it settles on, and an availability sweep —
+/// dozens before anyone has touched anything. At thirty a minute a paired household was refused mid-render and
+/// the trailers simply stopped, and a guest would have met the same wall.
+///
+/// What actually protects the addons from a flood is `MAX_IN_FLIGHT` below, which bounds what is happening at
+/// once. These two bound the sustained rate, so they can be generous: enough that ordinary browsing never
+/// notices them, and low enough that mining every title through this origin does.
+const MEMBER_PER_WINDOW: u32 = 600;
+const GUEST_PER_WINDOW: u32 = 120;
 /// Relayed fetches in flight at once, across everyone. The addons are one small box: without this a handful of
 /// visitors on a public name can hold every upstream socket and starve the TVs that actually live here.
 pub(crate) const MAX_IN_FLIGHT: usize = 16;
