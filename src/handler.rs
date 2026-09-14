@@ -177,8 +177,9 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
         }
         "/metrics" => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         p => match &state.web_dir {
-            Some(dir) if matches!(*req.method(), Method::GET | Method::HEAD) => {
-                crate::web::serve(dir, p, &state.remux_origins, req.headers()).await
+            Some(_) if matches!(*req.method(), Method::GET | Method::HEAD) => {
+                let query = req.uri().query().map(str::to_owned);
+                crate::web::serve(state, p, query.as_deref(), req.headers()).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },

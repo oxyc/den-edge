@@ -35,21 +35,38 @@ fn csp(remux: &[String]) -> String {
     )
 }
 
-pub async fn serve(dir: &Path, path: &str, remux: &[String], headers: &HeaderMap) -> Response {
+pub async fn serve(
+    state: &crate::AppState,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+) -> Response {
+    let Some(dir) = state.web_dir.as_deref() else { return not_found() };
+    let remux = &state.remux_origins;
     let Some(relative) = relative(path) else { return not_found() };
-    let file = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => encoded(bytes, &file, path.starts_with("/assets/"), remux, headers).await,
+    let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
+    let (bytes, file, immutable) = match tokio::fs::read(&asked).await {
+        Ok(bytes) => (bytes, asked, path.starts_with("/assets/")),
         // A route in the app, not a file: the app's shell renders it.
         Err(_) if !path.rsplit('/').next().unwrap_or("").contains('.') => {
             let index = dir.join("index.html");
             match tokio::fs::read(&index).await {
-                Ok(bytes) => encoded(bytes, &index, false, remux, headers).await,
-                Err(_) => not_found(),
+                Ok(bytes) => (bytes, index, false),
+                Err(_) => return not_found(),
             }
         }
-        Err(_) => not_found(),
+        Err(_) => return not_found(),
+    };
+    // The shell says which page this is before any of it has run, for whatever is about to build a link
+    // preview from it (`meta.rs`). Injected bytes are served as they are: the gzip sidecar on disk is of the
+    // file, not of this answer, and serving it would hand out the generic block to everything that asks for
+    // gzip — which is everything.
+    if file.file_name().is_some_and(|name| name == "index.html") {
+        if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
+            return revalidate(respond(html.into_bytes(), &file, false, remux), headers);
+        }
     }
+    encoded(bytes, &file, immutable, remux, headers).await
 }
 
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.

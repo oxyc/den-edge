@@ -8,6 +8,7 @@ mod handler;
 mod inbox;
 mod library;
 mod link;
+mod meta;
 mod metrics;
 mod pair;
 mod relay;

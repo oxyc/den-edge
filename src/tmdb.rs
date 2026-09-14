@@ -228,6 +228,29 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     }
 }
 
+/// A TMDB answer as JSON, for den-edge asking on its own behalf rather than relaying somebody's request
+/// (`meta.rs`). The same allow-list, the same daily ceiling and the same cache: a question already asked by a
+/// device costs a local file read here too, and one asked here warms it for them.
+pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Option<serde_json::Value> {
+    let key = state.tmdb_key.as_deref()?;
+    if !allowed(path) {
+        return None;
+    }
+    let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
+    if let Some(file) = &file {
+        if let Some((body, age)) = read(file).await {
+            if age < fresh_for(path) {
+                return serde_json::from_slice(&body).ok();
+            }
+        }
+    }
+    let body = fetch(state, path, query, key, "meta").await.ok()?;
+    if let Some(file) = &file {
+        write(file, &body).await;
+    }
+    serde_json::from_slice(&body).ok()
+}
+
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
 /// that instead. Boxed: a whole `Response` in the error variant would make every `Result` here as large as
 /// one, answers included.

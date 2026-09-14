@@ -3,14 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0b0f" />
+    <!-- What a shared link shows, and what the tab says before the app has run.
+         den-edge replaces everything between the two markers per page (src/meta.rs): a title's link carries
+         its own name, year, overview and artwork, because the things that build a link preview — Slack,
+         iMessage, a crawler — run no JavaScript, and would otherwise unfurl every page as "Den" with a
+         generic picture. What is written here is the fallback, and what every other page keeps. -->
+    <!--den:meta-->
+    <title>Den</title>
     <meta
       name="description"
       content="Your Den library: discover movies and series, keep track of what you watch, and pick up where you left off."
     />
-    <meta name="theme-color" content="#0b0b0f" />
-    <!-- What a shared link shows. den-edge rewrites these per page (`src/meta.rs`): a title's link carries its
-         own name, year, overview and poster, because a link that unfurls as "Den" says nothing about where it
-         leads. These are the fallback, and what every other page gets. -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Den" />
     <meta property="og:title" content="Den" />
@@ -20,6 +24,7 @@
     />
     <meta property="og:image" content="/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
+    <!--/den:meta-->
     <!-- The Den mark, the same file the navigation bar shows; the build gives it a hashed, long-cached name. -->
     <link rel="icon" href="/src/assets/den-mark.png" type="image/png" />
     <!-- Installable, so Den can be kept on a home screen or in a dock rather than as a tab. That also matters
@@ -27,7 +32,6 @@
          that would mean pairing again. -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
-    <title>Den</title>
   </head>
   <body>
     <div id="app"></div>
