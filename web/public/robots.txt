@@ -1,0 +1,86 @@
+# Den is one household's library, not a public catalogue. Nothing here is meant to be crawled,
+# indexed, archived or used as training data, and there is nothing to find: every page is drawn
+# from a library this visitor holds the key to. A crawler gets the empty shell and nothing else.
+#
+# den-edge sends `X-Robots-Tag: noindex, nofollow, noarchive, noimageindex` with the app's HTML
+# too. This file asks crawlers not to fetch; that header tells the ones that fetch anyway not to
+# keep what they got.
+
+User-agent: *
+Disallow: /
+
+# Link unfurlers are the exception, and deliberately so: sharing a title is a feature here, and
+# these fetch the page to build the card that a share link shows. They honour this file, so a
+# blanket refusal above would leave every link shared in a chat as a bare URL with no title and
+# no poster. They render previews; they do not publish a searchable index.
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: Slackbot-LinkExpanding
+Allow: /
+
+User-agent: Slackbot
+Allow: /
+
+User-agent: Discordbot
+Allow: /
+
+User-agent: WhatsApp
+Allow: /
+
+User-agent: TelegramBot
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+# Applebot is what draws the preview in Messages, which is the way a link is most likely to be
+# shared here. It also feeds Siri and Spotlight suggestions, so this is the one entry that trades
+# a little discoverability for previews that work on the devices this app is built around.
+User-agent: Applebot
+Allow: /
+
+# The AI crawlers are already refused by the `*` group above. They are named anyway, because a
+# rule that is written down is one nobody has to re-derive from a wildcard later.
+User-agent: GPTBot
+Disallow: /
+
+User-agent: OAI-SearchBot
+Disallow: /
+
+User-agent: ChatGPT-User
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Claude-Web
+Disallow: /
+
+User-agent: anthropic-ai
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: Applebot-Extended
+Disallow: /
+
+User-agent: PerplexityBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: Amazonbot
+Disallow: /
+
+User-agent: meta-externalagent
+Disallow: /

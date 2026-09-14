@@ -6,7 +6,7 @@
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
@@ -190,9 +190,16 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, remux: &[String]) -> Re
             .or_else(|_| HeaderValue::from_str(&csp(&[])))
             .expect("the policy is ASCII");
         headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+        // `robots.txt` asks crawlers not to fetch; this tells the ones that fetch anyway not to keep what
+        // they got. A household's library is nobody's search result. Link unfurlers are unaffected — they
+        // draw a card from the page they fetched and publish no index — so shared links still show a title
+        // and a poster.
+        headers.insert(ROBOTS, HeaderValue::from_static("noindex, nofollow, noarchive, noimageindex"));
     }
     resp
 }
+
+const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
 
 fn not_found() -> Response {
     let mut resp = Response::new(Body::from("not found"));
@@ -329,6 +336,7 @@ mod tests {
         let root = h.send("GET", "/", None, &[]).await;
         assert_eq!(root.status(), StatusCode::OK);
         assert!(root.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("image.tmdb.org"));
+        assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
         assert!(body_text(root).await.contains("<title>Den</title>"));
 
