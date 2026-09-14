@@ -26,6 +26,7 @@
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
   import ContentWarnings from './ContentWarnings.svelte';
+  import Trailer from './Trailer.svelte';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
   import { named } from '../lib/pageTitle';
@@ -131,6 +132,14 @@
     window.addEventListener('keydown', back);
     return () => window.removeEventListener('keydown', back);
   });
+  /**
+   * Whether the trailer is open in YouTube's embed.
+   *
+   * The way a viewer sees a trailer when this page cannot play one itself — no HLS master for it, the
+   * media refused, a browser that plays neither. Until now the button left the site for YouTube, so
+   * every such case read as "no trailer here".
+   */
+  let trailerOpen = $state(false);
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
@@ -353,6 +362,7 @@
           trailerHref={d.trailer
             ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
+          ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
           share={{
             title: d.title.title,
             // The title's own address, named: what the person sharing it means, and what a preview can
@@ -363,6 +373,9 @@
       </div>
     </div>
   </header>
+  {#if trailerOpen && d.trailer}
+    <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailerOpen = false)} />
+  {/if}
   <div class="mobile-overview">
     {#if d.overview}<p class="overview">{d.overview}</p>{/if}
     {#if productionFacts(d)}<p class="production">{productionFacts(d)}</p>{/if}

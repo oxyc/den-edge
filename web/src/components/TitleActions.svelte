@@ -19,6 +19,7 @@
     onplay,
     onplayhere,
     trailerHref,
+    ontrailer,
     share,
     notice = null,
     detailPage = false,
@@ -37,6 +38,14 @@
     onplayhere?: () => void;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
+    /**
+     * Play the trailer here, in YouTube's embed, instead of leaving the page for it.
+     *
+     * Absent — a title TMDB lists no trailer id for — the link below stands on its own and searches
+     * YouTube instead. The href stays either way, so a middle-click or a long press still opens the
+     * real thing in a tab.
+     */
+    ontrailer?: () => void;
     /** What to hand the share sheet, or copy: this title and the link that opens it. No button without it. */
     share?: { title: string; url: string };
     /** What the last action did, when that's worth saying. */
@@ -103,7 +112,22 @@
         href={trailerHref}
         target={viewportWidth < 760 ? undefined : '_blank'}
         rel="noopener noreferrer"
-        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a
+        aria-label={ontrailer ? 'Trailer' : 'Trailer on YouTube'}
+        onclick={(event) => {
+          // Modified clicks belong to the browser: a new tab, a window, a download are all still the
+          // link's own job. Only the plain one is taken over to play it here.
+          if (!ontrailer || event.defaultPrevented) return;
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          )
+            return;
+          event.preventDefault();
+          ontrailer();
+        }}>{@render clapper()}<span>Trailer</span></a
       >
     {/if}
     {#if onplayhere && onplay}
