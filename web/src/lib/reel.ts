@@ -146,6 +146,28 @@ export type DirectTrailer = {
  * `/direct` wants. That also keeps the whole thing to one `/meta` round-trip.
  */
 export function directURL(playURL: string): string | null {
+  return sibling(playURL, 'direct', 'json');
+}
+
+/**
+ * The `/hls/<id>.m3u8` sibling of a play URL: reel's proxy for YouTube's own HLS master.
+ *
+ * What a browser without native HLS needs, and the only way it can have it. googlevideo answers
+ * MSE's segment fetches with no CORS header, so hls.js cannot read Google's master directly however
+ * willing it is; reel fetches it and rewrites every URI in it to come back through reel.
+ */
+export function hlsURL(playURL: string): string | null {
+  return sibling(playURL, 'hls', 'm3u8');
+}
+
+/**
+ * One of a play URL's siblings, query and all: `/play/<id>.mp4` → `/<route>/<id>.<extension>`.
+ *
+ * Derived from the play URL rather than asked for separately, because the signature reel demands is
+ * over the video and the install — not the path — so the tag `/meta` already handed us is the tag
+ * these want. That also keeps the whole thing to one `/meta` round-trip.
+ */
+function sibling(playURL: string, route: string, extension: string): string | null {
   try {
     // Relative against this page, since a play URL through the relay is a path on this origin. The stand-in
     // base is only there so a path still parses where there is no page (tests, a worker); a relative URL
@@ -153,7 +175,7 @@ export function directURL(playURL: string): string | null {
     const url = new URL(playURL, globalThis.location?.href ?? 'http://relative.invalid');
     const id = url.pathname.match(/\/play\/([A-Za-z0-9_-]{11})\.mp4$/)?.[1];
     if (!id) return null;
-    url.pathname = url.pathname.replace(/\/play\/[^/]+$/, `/direct/${id}.json`);
+    url.pathname = url.pathname.replace(/\/play\/[^/]+$/, `/${route}/${id}.${extension}`);
     // A path in stays a path out, so a relayed lookup is asked for on this origin rather than at
     // whatever address the page happens to be served from.
     return /^[a-z][a-z0-9+.-]*:/i.test(playURL) ? url.toString() : `${url.pathname}${url.search}`;
@@ -193,6 +215,28 @@ export function directSource(direct: DirectTrailer | null, hlsOk = nativeHls()):
   // frame in about 5.4s, where HLS opens on a low variant and climbs — 1.7s on the same trailer,
   // same device. It also fails outright in some browsers. Reel's own copy beats it everywhere.
   return direct.hls && hlsOk ? direct.hls : null;
+}
+
+/**
+ * The best source for one candidate where the page can drive an HLS player itself, or null to stay
+ * on reel's own `/play`.
+ *
+ * Both branches play the SAME stream — YouTube's adaptive master, opening on a low variant and
+ * climbing — so a cold trailer shows a picture in a second or two instead of after a whole file is
+ * downloaded and remuxed. What differs is who fetches it: a browser with native HLS takes Google's
+ * URL and the homelab carries nothing at all, and everything else takes reel's proxy of that master,
+ * because googlevideo answers MSE's segment fetches with no CORS header and hls.js cannot read a
+ * byte of them otherwise.
+ *
+ * Null when the resolve found no master, which is the one case `/play` is still the answer to.
+ */
+export function trailerSource(
+  playURL: string,
+  direct: DirectTrailer | null,
+  hlsOk = nativeHls(),
+): string | null {
+  if (!direct?.hls) return null;
+  return hlsOk ? direct.hls : hlsURL(playURL);
 }
 
 /**

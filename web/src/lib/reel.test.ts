@@ -3,7 +3,9 @@ import {
   directSource,
   directTrailer,
   directURL,
+  hlsURL,
   nativeHls,
+  trailerSource,
   trailerURL,
   trailerURLs,
   type DirectTrailer,
@@ -89,6 +91,42 @@ describe('directURL', () => {
     expect(directURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
       '/reel/direct/abc12345678.json?s=tag',
     );
+  });
+});
+
+describe('hlsURL', () => {
+  it('is the play URL’s HLS sibling, signature and all', () => {
+    expect(hlsURL('/reel/play/abc12345678.mp4?s=tag')).toBe('/reel/hls/abc12345678.m3u8?s=tag');
+    expect(hlsURL('https://pve.example:8443/reel/play/abc12345678.mp4?s=tag&i=iid')).toBe(
+      'https://pve.example:8443/reel/hls/abc12345678.m3u8?s=tag&i=iid',
+    );
+    expect(hlsURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
+  });
+});
+
+describe('trailerSource', () => {
+  const play = '/reel/play/abc12345678.mp4?s=tag';
+  const direct: DirectTrailer = {
+    video: 'https://g/v',
+    audio: null,
+    hls: 'https://g/m.m3u8',
+    width: null,
+    height: null,
+  };
+
+  /** Nothing crosses the homelab at all where the browser can fetch Google's master itself. */
+  it('takes YouTube’s own master where the browser plays HLS natively', () => {
+    expect(trailerSource(play, direct, true)).toBe('https://g/m.m3u8');
+  });
+
+  /** googlevideo sends MSE no CORS header, so reel's copy of the master is the only fetchable one. */
+  it('takes reel’s proxy of that master everywhere else', () => {
+    expect(trailerSource(play, direct, false)).toBe('/reel/hls/abc12345678.m3u8?s=tag');
+  });
+
+  it('has nothing to offer when the resolve found no master', () => {
+    expect(trailerSource(play, { ...direct, hls: null }, false)).toBeNull();
+    expect(trailerSource(play, null, true)).toBeNull();
   });
 });
 

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import { directSource, directTrailer, nativeHls, trailerURLs } from '../lib/reel';
+  import type Hls from 'hls.js';
+  import { directTrailer, nativeHls, trailerSource, trailerURLs } from '../lib/reel';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
   let {
@@ -43,6 +44,15 @@
    */
   let resolved = $state(false);
   const source = $derived(resolved ? (upgraded ?? url) : null);
+  /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
+  const playsHls = nativeHls();
+  /**
+   * The source this page has to drive itself.
+   *
+   * A `<video>` given a master playlist it cannot parse simply errors, so where the browser has no
+   * native HLS the element is handed nothing and hls.js feeds it instead.
+   */
+  const managed = $derived(source && !playsHls && source.endsWith('.m3u8') ? source : null);
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -186,11 +196,45 @@
     const signal = 'timeout' in AbortSignal ? AbortSignal.timeout(2500) : undefined;
     void directTrailer(play, { signal }).then((direct) => {
       if (!live) return;
-      upgraded = directSource(direct);
+      upgraded = trailerSource(play, direct, playsHls);
       resolved = true;
     });
     return () => {
       live = false;
+    };
+  });
+
+  // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
+  // `src`, and is torn down with the source it was given — switching candidates must never leave two
+  // engines feeding one element. A master that will not play falls back to reel's own file, which is
+  // what `upgraded = null` selects.
+  $effect(() => {
+    const player = video;
+    const master = managed;
+    if (!player || !master) return;
+    let live = true;
+    let engine: Hls | undefined;
+    void import('hls.js').then(({ default: Hls }) => {
+      if (!live) return;
+      if (!Hls.isSupported()) {
+        upgraded = null;
+        return;
+      }
+      engine = new Hls({ enableWorker: false });
+      engine.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) upgraded = null;
+      });
+      // The element is mounted with no `src`, so the effect that starts playback has already run and
+      // found nothing to play. Autoplay begins here, once there is something to begin.
+      engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (allowed) void player.play().catch(() => {});
+      });
+      engine.loadSource(master);
+      engine.attachMedia(player);
+    });
+    return () => {
+      live = false;
+      engine?.destroy();
     };
   });
 
@@ -263,7 +307,7 @@
   <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout. -->
   <video
     bind:this={video}
-    src={source ?? undefined}
+    src={managed ? undefined : (source ?? undefined)}
     class:playing
     class:present={!!source && !failed && !ended}
     poster={backdrop ?? poster}
