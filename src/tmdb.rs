@@ -63,6 +63,35 @@ const ABSENT: &[u8] = b"{\"den_absent\":true}";
 /// that repeating the same missing id costs nothing after the first ask.
 const ABSENT_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// What a cached body is worth right now.
+#[derive(Debug, PartialEq, Eq)]
+enum Cached {
+    /// A remembered 404, still believed: answer "no such thing" without spending.
+    Absent,
+    /// A real answer, still fresh.
+    Fresh,
+    /// A real answer past its freshness: re-ask, and fall back to this body if TMDB refuses.
+    Refresh,
+    /// Nothing usable: take the per-IP bucket and ask.
+    Cold,
+}
+
+/// Kept apart from the handler so the one case that matters can be tested without a clock or a filesystem:
+/// an expired SENTINEL must be `Cold`, never `Refresh`, or the refresh arm serves it as an answer.
+fn verdict(is_absent: bool, age: Duration, fresh: Duration) -> Cached {
+    if is_absent {
+        if age < ABSENT_TTL {
+            Cached::Absent
+        } else {
+            Cached::Cold
+        }
+    } else if age < fresh {
+        Cached::Fresh
+    } else {
+        Cached::Refresh
+    }
+}
+
 fn fresh_for(path: &str) -> Duration {
     if path.starts_with("/3/search/") {
         return SEARCH_TTL;
@@ -208,23 +237,31 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         if let Some((body, age)) = read(file).await {
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
-            if body == ABSENT {
-                if age < ABSENT_TTL {
-                    return *refused(StatusCode::NOT_FOUND, "not_found");
+            //
+            // An EXPIRED sentinel must leave this block entirely rather than fall into the refresh below.
+            // The stale arm serves the cached body when TMDB refuses, which for a sentinel means returning
+            // `{"den_absent":true}` as a 200 — and it never rewrites the file, so the mtime stays old and
+            // every later request repeats it, spending a budget unit each time, for as long as RETENTION
+            // allows. It is also ahead of the per-IP bucket, so that is the unthrottled drain again.
+            // Falling through to the cold path gets the bucket, the fetch, and a rewritten sentinel.
+            match verdict(body == ABSENT, age, fresh) {
+                Cached::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+                Cached::Fresh => return answer(body, fresh.saturating_sub(age), "hit"),
+                Cached::Refresh => {
+                    // Held while the refresh is attempted: if TMDB refuses or is unreachable, a slightly old
+                    // answer is a better page than an empty one.
+                    return match fetch(state, &path, query.as_deref(), key, rid).await {
+                        Ok(body) => {
+                            write(file, &body).await;
+                            answer(body, fresh, "miss")
+                        }
+                        Err(_) if age < RETENTION => answer(body, Duration::from_secs(60), "stale"),
+                        Err(response) => *response,
+                    };
                 }
-            } else if age < fresh {
-                return answer(body, fresh.saturating_sub(age), "hit");
+                // Falls out to the cold path below: the per-IP bucket, a fetch, and a rewritten sentinel.
+                Cached::Cold => {}
             }
-            // Held while the refresh is attempted: if TMDB refuses or is unreachable, a slightly old answer is
-            // a better page than an empty one.
-            return match fetch(state, &path, query.as_deref(), key, rid).await {
-                Ok(body) => {
-                    write(file, &body).await;
-                    answer(body, fresh, "miss")
-                }
-                Err(_) if age < RETENTION => answer(body, Duration::from_secs(60), "stale"),
-                Err(response) => *response,
-            };
         }
     }
     let ip = crate::handler::client_ip(state, &req);
@@ -499,6 +536,25 @@ mod tests {
         // A new UTC day starts the budget over.
         harness.advance(86_400_000);
         assert!(spend(state), "tomorrow asks again");
+    }
+
+    /// What a cached body is worth, decided without a clock or a filesystem.
+    ///
+    /// An EXPIRED sentinel must reach `Cold`, not `Refresh`. The refresh arm serves the cached body when
+    /// TMDB refuses, which for a sentinel meant a 200 carrying `{"den_absent":true}`; it never rewrote the
+    /// file, so the mtime stayed old and every later request repeated it at one budget unit each for as long
+    /// as RETENTION allows — and it sits ahead of the per-IP bucket, so it reopened, on the proxy route, the
+    /// very drain the sentinel was added to close.
+    #[test]
+    fn an_expired_sentinel_is_cold_not_stale() {
+        let fresh = Duration::from_secs(600);
+        let hour = Duration::from_secs(3600);
+
+        assert_eq!(verdict(true, Duration::ZERO, fresh), Cached::Absent, "a fresh 404 answers as one");
+        assert_eq!(verdict(true, ABSENT_TTL + hour, fresh), Cached::Cold, "an expired one is asked again");
+
+        assert_eq!(verdict(false, Duration::ZERO, fresh), Cached::Fresh);
+        assert_eq!(verdict(false, fresh + hour, fresh), Cached::Refresh, "a real body may be served stale");
     }
 
     #[test]
