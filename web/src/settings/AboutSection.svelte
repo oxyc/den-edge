@@ -1,10 +1,23 @@
-<!-- Settings › About, as on the TV: the Terms of Use, the version, and the credits the data's terms ask for. -->
+<!-- Settings › About, as on the TV: the Terms of Use, the version, and the credits the data's terms ask for — Den's own
+     sources first, then each addon's, as its manifest names them (den-spec attribution-v1). -->
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
+  import { linkParts, type Credit } from './credits';
   import tmdbLogo from '../assets/tmdb-logo.svg';
 
-  let { edgeVersion }: { edgeVersion: string | null } = $props();
+  let {
+    edgeVersion,
+    credits,
+    hasOmdbKey,
+    hasWarningsKey,
+  }: {
+    edgeVersion: string | null;
+    /** What the installed addons credit, in their order. */
+    credits: readonly Credit[];
+    hasOmdbKey: boolean;
+    hasWarningsKey: boolean;
+  } = $props();
 
   /** `TermsView`, word for word. */
   const TERMS = [
@@ -25,6 +38,22 @@
       'Addons must not facilitate access to content you are not authorized to access. You are responsible for ensuring your use complies with applicable law and the rights of content owners.',
     ],
   ];
+
+  /** The sources Den calls itself, while it does: a key set here is a source it's using. */
+  const own = $derived<Credit[]>([
+    ...(hasOmdbKey
+      ? [{ text: 'Ratings by OMDb.', link: 'OMDb', url: 'https://www.omdbapi.com' }]
+      : []),
+    ...(hasWarningsKey
+      ? [
+          {
+            text: 'Content warnings by DoesTheDogDie.com.',
+            link: 'DoesTheDogDie.com',
+            url: 'https://www.doesthedogdie.com',
+          },
+        ]
+      : []),
+  ]);
 </script>
 
 <SettingsSection id="about" title="About">
@@ -37,9 +66,8 @@
   <SettingRow id="version" label="Version" value={edgeVersion ? `den-edge ${edgeVersion}` : ''} />
 </SettingsSection>
 
-<!-- TMDB's terms require the credit wherever its data is shown, and Movie of the Night's (TERMS.md §4) ask for its
-     statement and link wherever its data reaches users: den-atlas leads each service's rows, and ranks the billboard,
-     with it. -->
+<!-- TMDB's terms require its credit and logo wherever its data is shown; every other source's statement is as its
+     addon words it, shown as text. -->
 <div class="credits">
   <a
     class="tmdb"
@@ -56,20 +84,14 @@
       >themoviedb.org</a
     >
   </p>
-  <p>
-    Discovery data (subgenres, moods, and “more like this”) is derived from Wikipedia article text,
-    used under
-    <a
-      href="https://creativecommons.org/licenses/by-sa/4.0"
-      target="_blank"
-      rel="noreferrer noopener">CC BY-SA 4.0</a
-    >
-    and modified. Ratings by OMDb. Streaming availability information is provided by
-    <a href="https://www.movieofthenight.com/about/api" target="_blank" rel="noreferrer noopener"
-      >Streaming Availability API by Movie of the Night</a
-    >
-    and by JustWatch. Collaborative data by Trakt when connected.
-  </p>
+  {#each [...own, ...credits] as credit (credit.text)}
+    {@const parts = linkParts(credit)}
+    <p>
+      {#if parts}{parts.before}<a href={credit.url} target="_blank" rel="noreferrer noopener"
+          >{parts.link}</a
+        >{parts.after}{:else}{credit.text}{/if}
+    </p>
+  {/each}
 </div>
 
 <style>

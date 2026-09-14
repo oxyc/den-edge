@@ -21,7 +21,10 @@
   import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
+  import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { readApiKey, readPlugins } from './lib/prefs';
+  import { relayFetch } from './lib/relayFetch';
+  import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { tmdbKeyOf } from './lib/tmdb';
@@ -64,6 +67,34 @@
   const devicesRow = $derived(group('devices'));
   const devices = $derived(readDevices(devicesRow));
   const disabled = $derived(!log || saving);
+
+  // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
+  // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
+  // its rows and the billboard show that data regardless.
+  let addonCredits = $state<Credit[][]>([[...ATLAS_FALLBACK]]);
+  $effect(() => {
+    const installed = plugins;
+    const table = routes;
+    let gone = false;
+    const creditsOf = async (addon: Addon | null): Promise<Credit[] | null> => {
+      if (!addon) return null;
+      try {
+        const res = await relayFetch(`${addon.base}/manifest.json`);
+        return res.ok ? readAttribution(await res.json()) : null;
+      } catch {
+        return null;
+      }
+    };
+    void Promise.all([
+      findAtlas(installed, table).then(creditsOf),
+      findAddon(installed, table, REEL).then(creditsOf),
+    ]).then(([atlas, reel]) => {
+      if (!gone) addonCredits = [atlas?.length ? atlas : [...ATLAS_FALLBACK], reel ?? []];
+    });
+    return () => {
+      gone = true;
+    };
+  });
 
   /**
    * Set settings in one group, or clear one with null — stamped now, together, merged over what another device last
@@ -167,7 +198,12 @@
       {edgeVersion}
       {write}
     />
-    <AboutSection {edgeVersion} />
+    <AboutSection
+      {edgeVersion}
+      credits={mergeCredits(addonCredits)}
+      hasOmdbKey={!!readApiKey(keys, 'omdb')}
+      hasWarningsKey={!!readApiKey(keys, 'doesthedogdie')}
+    />
   </div>
 </div>
 
