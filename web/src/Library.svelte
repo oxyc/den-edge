@@ -5,6 +5,8 @@
   import Browse from './components/Browse.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
+  import WatchlistPage from './components/WatchlistPage.svelte';
+  import { watchedHistory } from './lib/history';
   import {
     DetailScreen,
     PersonScreen,
@@ -16,6 +18,7 @@
     addToWatchlist,
     blankEpisode,
     blankTitle,
+    dismissFromContinueWatching,
     markEpisode,
     markWatched,
     react,
@@ -294,6 +297,24 @@
       const at = clock.issue();
       const event = recordTrackerEvent(before, change(before, at), at);
       return event ? await save(event, true) : true;
+    } catch {
+      failure = SAVE_FAILED;
+      return false;
+    }
+  }
+
+  /**
+   * Off Continue Watching. Not an action the trackers hear about — nothing about what was watched changed, and the
+   * TV's own dismissal sends nothing either — so the row itself is written rather than a tracker event, which the
+   * sync policy doesn't capture for this change and `act` would then drop.
+   */
+  async function dismiss(title: Title) {
+    if (!log) return;
+    try {
+      remember(title);
+      const before = log.title(title) ?? blankTitle(title, Date.now());
+      clock.see(log.newestStamp());
+      return await save(dismissFromContinueWatching(before, clock.issue()));
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -648,7 +669,13 @@
     // asked at all. Everything else it reads — the rows, the library's shape, the hide rules, the taste — is
     // read without being watched. Those tick over continuously while the library is named, and watching them
     // had the whole pool rebuilt on every tick: hundreds of repeat requests to atlas for one page load.
-    if (route.page === 'title' || route.page === 'person' || route.page === 'search') return;
+    if (
+      route.page === 'title' ||
+      route.page === 'person' ||
+      route.page === 'search' ||
+      route.page === 'watchlist'
+    )
+      return;
     const here = atlas;
     if (!tmdbKey) return;
     // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
@@ -778,6 +805,13 @@
     return [lead, ...picked.filter((t) => titleKey(t) !== titleKey(lead))];
   }
 
+  /** Everything watched, for the Watchlist page: read from the log's rows, named as the library is. */
+  const history = $derived.by(() => {
+    void version;
+    if (route.page !== 'watchlist' || !log) return [];
+    return watchedHistory(log.rows(), new Map(session.displays.map((t) => [titleKey(t), t])));
+  });
+
   function caption(entry: ContinueEntry): string | undefined {
     if (entry.episode) return `S${entry.episode.season} · E${entry.episode.episode}`;
     return entry.title.year ? String(entry.title.year) : undefined;
@@ -841,6 +875,24 @@
   <PersonScreen.current id={route.id} {tmdbKey} {active} onselect={open} />
 {:else if route.page === 'search'}
   <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} onselect={select} />
+{:else if route.page === 'watchlist'}
+  {#if !link || !library}
+    <p class="note">
+      Your watchlist lives in your library. <a href="#settings">Pair a TV</a> to see it.
+    </p>
+  {:else if !shelvesReady}
+    <div data-route-loading><Loading label="Loading your watchlist" page /></div>
+  {:else}
+    <WatchlistPage
+      resume={continueWatching(library)}
+      saved={watchlist(library)}
+      {history}
+      {failure}
+      onselect={select}
+      ondismiss={(title) => void dismiss(title)}
+      onremove={(title) => void act(title, removeFromLibrary)}
+    />
+  {/if}
 {:else}
   {@const resume = library
     ? continueWatching(library).filter((e) => !facet || e.title.type === facet)

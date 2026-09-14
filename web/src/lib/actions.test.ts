@@ -3,12 +3,15 @@ import {
   addToWatchlist,
   blankEpisode,
   blankTitle,
+  dismissFromContinueWatching,
   markEpisode,
   markWatched,
   react,
   removeFromLibrary,
   unwatch,
+  updateProgress,
 } from './actions';
+import { recordTrackerEvent } from './trackerEvents';
 import { mergeEpisode, mergeTitle, type Stamp } from './wire';
 
 const at = (t: number, device = 'web1'): Stamp => [t, 0, device];
@@ -43,6 +46,16 @@ describe('actions, as the TV does them', () => {
     ]);
     const merged = mergeTitle(watched, unseen);
     expect([merged.status.value, merged.resume.value]).toEqual(['none', 0]);
+  });
+
+  it('dismisses from Continue Watching until it is played again, without telling the trackers', () => {
+    const playing = updateProgress(dune, 0.4, 3000, at(2000));
+    const dismissed = dismissFromContinueWatching(playing, at(3000));
+    expect(dismissed.dismissed).toEqual({ value: true, at: at(3000) });
+    expect([dismissed.status.value, dismissed.resume.value]).toEqual(['inProgress', 0.4]);
+    // Not a tracker event, as on the TV: nothing about what was watched changed. So it can't be written as an
+    // action (that path writes only the event) and goes to the log as the row itself.
+    expect(recordTrackerEvent(playing, dismissed, at(3000), 'dismiss')).toBeNull();
   });
 
   it('sets and clears the opinion', () => {

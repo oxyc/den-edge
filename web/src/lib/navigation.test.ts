@@ -36,6 +36,7 @@ describe('link interception', () => {
       '#library',
       '#movies',
       '#series',
+      '#watchlist',
       '#settings',
       '#search',
       '#title/movie/42',

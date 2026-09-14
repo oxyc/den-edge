@@ -7,6 +7,7 @@ export type Route =
   | { page: 'library' }
   | { page: 'movies' }
   | { page: 'series' }
+  | { page: 'watchlist' }
   | { page: 'settings' }
   | { page: 'search' }
   | { page: 'title'; type: MediaType; id: number }
@@ -19,7 +20,13 @@ const positive = (text: string | undefined) => {
 
 export function parseRoute(hash: string): Route {
   const [page, ...rest] = hash.replace(/^#/, '').split('/');
-  if (page === 'settings' || page === 'movies' || page === 'series' || page === 'search')
+  if (
+    page === 'settings' ||
+    page === 'movies' ||
+    page === 'series' ||
+    page === 'watchlist' ||
+    page === 'search'
+  )
     return { page };
   const type = rest[0];
   const titleId = positive(rest[1]);

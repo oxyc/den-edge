@@ -91,6 +91,14 @@ export function unwatch(row: TitleRow, at: Stamp): TitleRow {
   };
 }
 
+/**
+ * Off Continue Watching (the TV's "Remove from Continue Watching"): hidden only until it is played again, since the
+ * row compares this stamp with the title's latest progress. Nothing else about the title changes.
+ */
+export function dismissFromContinueWatching(row: TitleRow, at: Stamp): TitleRow {
+  return { ...row, dismissed: { value: true, at } };
+}
+
 export function react(row: TitleRow, reaction: Reaction | null, at: Stamp): TitleRow {
   return { ...row, reaction: { value: reaction, at } };
 }

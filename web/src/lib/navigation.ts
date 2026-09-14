@@ -54,7 +54,7 @@ export function appHash(href: string, base: string): string | null {
   const here = new URL(base);
   if (url.origin !== here.origin || url.pathname !== here.pathname || url.search !== here.search)
     return null;
-  return /^#(?:library|movies|series|settings|search|title\/(?:movie|tv)\/[1-9]\d*|person\/[1-9]\d*)$/.test(
+  return /^#(?:library|movies|series|watchlist|settings|search|title\/(?:movie|tv)\/[1-9]\d*|person\/[1-9]\d*)$/.test(
     url.hash,
   )
     ? url.hash

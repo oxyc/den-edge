@@ -43,6 +43,7 @@
     { page: 'library', label: 'Home' },
     { page: 'movies', label: 'Movies' },
     { page: 'series', label: 'Series' },
+    { page: 'watchlist', label: 'Watchlist' },
     { page: 'settings', label: 'Settings' },
   ] as const;
 </script>
