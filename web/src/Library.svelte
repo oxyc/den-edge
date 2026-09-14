@@ -891,9 +891,11 @@
 {:else if route.page === 'search'}
   <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} />
 {:else if route.page === 'watchlist'}
-  {#if !link || !library}
+  {#if !library}
     <p class="note">
-      Your watchlist lives in your library. <a href="#settings">Pair a TV</a> to see it.
+      Your watchlist lives in your library, which this browser can’t keep. <a href="/settings"
+        >Link a TV</a
+      > to keep it there.
     </p>
   {:else if !shelvesReady}
     <div data-route-loading><Loading label="Loading your watchlist" page /></div>

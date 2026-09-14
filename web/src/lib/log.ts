@@ -81,7 +81,95 @@ export class LibraryLog {
     private readonly fetchImpl: typeof fetch,
     private readonly storage?: Storage,
     private readonly local: { vault: Vault; key: CryptoKey } | null = null,
+    /** A library that lives only in this browser (`openLocal`): nothing is asked of den-edge, or sent to it. */
+    private readonly offline = false,
   ) {}
+
+  /**
+   * A library kept only in this browser, for someone using Den with no TV: the same rows, sealed and merged the same
+   * way, kept in IndexedDB rather than on den-edge. Null where this browser keeps nothing (a private window, blocked
+   * site data). Linking a TV later moves it into the TV's library (`moveTo`).
+   */
+  static async openLocal(
+    libraryKey: string,
+    vault: Vault | null = libraryVault,
+    // Kept for `moveTo`, which asks den-edge once the library is being handed to a TV's.
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+  ): Promise<LibraryLog | null> {
+    if (!vault) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const log = new LibraryLog(
+      await deriveKeys(raw),
+      fetchImpl,
+      undefined,
+      { vault, key: await localKey(raw) },
+      true,
+    );
+    await ensureSyncPolicy();
+    const saved = await log.kept<Snapshot>(SNAPSHOT);
+    for (const [name, seq, row] of saved?.entries ?? []) {
+      log.acknowledged.set(name, { seq, row });
+      log.entries.set(name, { seq, row });
+    }
+    return log;
+  }
+
+  /**
+   * Every row of this library written into the library `libraryKey` opens, merged with what is already there: the
+   * library this browser used on its own, handed to the TV it links to. The new log, or null when it couldn't be
+   * opened or written — in which case this one is left as it was.
+   */
+  async moveTo(libraryKey: string): Promise<LibraryLog | null> {
+    await this.saving;
+    const next = await LibraryLog.open(libraryKey, this.fetchImpl, this.storage);
+    if (!next || next.moved) return null;
+    return (await next.writeRows(this.rows())) ? next : null;
+  }
+
+  /** The rows, each merged over what the log already holds for it, written in batches. */
+  async writeRows(rows: Row[]): Promise<boolean> {
+    if (this.offline) {
+      for (const row of rows) this.keepLocally(row);
+      return true;
+    }
+    return this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [
+      rows.filter(trackerEvent),
+      rows.filter((row) => !trackerEvent(row)),
+    ]);
+  }
+
+  /**
+   * The library ended: a library kept only here is dropped from this browser, and one on den-edge is deleted there,
+   * which retires its id so a device still holding the key gets `410 library_moved`.
+   */
+  async forget(): Promise<boolean> {
+    await this.saving;
+    if (this.offline) {
+      await this.local?.vault.remove(`${this.keys.id}:`);
+      return true;
+    }
+    try {
+      const res = await this.fetchImpl(`/lib/${this.keys.id}`, {
+        method: 'DELETE',
+        headers: this.headers(),
+      });
+      return res.ok || res.status === 404;
+    } catch {
+      return false;
+    }
+  }
+
+  /** A library kept only here takes a write as done: merged in, and kept for the next visit. */
+  private keepLocally(row: Row): Row {
+    const name = rowName(row);
+    const current = this.entries.get(name);
+    const merged = current ? merge(current.row, row) : row;
+    this.entries.set(name, { seq: 0, row: merged });
+    this.acknowledged.set(name, { seq: 0, row: merged });
+    this.dirty = true;
+    this.persist();
+    return merged;
+  }
 
   /**
    * Every row in the log, or null when den-edge can't be reached. A row that doesn't open is skipped. A library
@@ -187,6 +275,8 @@ export class LibraryLog {
 
   /** Incremental foreground refresh. Uses the same serialization boundary as writes. */
   async refresh(): Promise<boolean> {
+    // Nothing else writes a library kept only here.
+    if (this.offline) return false;
     const run = this.writes.then(async () => {
       try {
         for (;;) {
@@ -351,6 +441,7 @@ export class LibraryLog {
   }
 
   private async writeSerial(local: Row): Promise<Row | null> {
+    if (this.offline) return this.keepLocally(local);
     const seen = this.entries.get(rowName(local))?.row;
     let target = seen ? merge(seen, local) : local;
     for (let round = 0; round < ROUNDS; round++) {
@@ -395,7 +486,15 @@ export class LibraryLog {
   /** Persist one bulk intent atomically in the browser before any request. Network chunks are resumable. */
   async writeActions(journals: SettingsRow[]): Promise<boolean> {
     if (!journals.length) return true;
-    if (!this.storage || journals.some((row) => !trackerEvent(row))) return false;
+    if (journals.some((row) => !trackerEvent(row))) return false;
+    if (this.offline) {
+      for (const row of journals) {
+        this.keepLocally(row);
+        this.keepLocally(trackerEvent(row)!.after);
+      }
+      return true;
+    }
+    if (!this.storage) return false;
     const key = this.pendingPrefix + 'bulk:' + crypto.randomUUID();
     try {
       const sealed = await Promise.all(journals.map((row) => seal(this.keys, row)));
@@ -475,6 +574,10 @@ export class LibraryLog {
   async writeAction(journal: SettingsRow): Promise<Row | null> {
     const event = trackerEvent(journal);
     if (!event) return null;
+    if (this.offline) {
+      this.keepLocally(journal);
+      return this.keepLocally(event.after);
+    }
     const storageKey = this.pendingPrefix + event.id;
     // Persist ciphertext before starting the network operation. Quota/privacy errors fail visibly.
     try {

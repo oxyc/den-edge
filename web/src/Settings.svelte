@@ -21,6 +21,7 @@
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
+  import { dropLocalLibrary } from './lib/localLibrary';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { readApiKey, readPlugins } from './lib/prefs';
@@ -31,7 +32,8 @@
   import { tmdbKeyOf } from './lib/tmdb';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
-  let { link, session }: { link: Link; session: LibrarySession } = $props();
+  /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
+  let { link, session }: { link: Link | null; session: LibrarySession } = $props();
 
   /** undefined while it opens; null when this browser can't reach the library. */
   const log = $derived(session.log);
@@ -119,7 +121,7 @@
       for (const [setting, value] of Object.entries(changes)) values[setting] = { value, at };
       const saved = await log.write({ ...base, values });
       if (log.moved) {
-        links.forgetMoved(link);
+        if (link) links.forgetMoved(link);
         return false;
       }
       if (!saved) {
@@ -137,6 +139,18 @@
   }
 
   const savePrefs = (changes: PrefChanges) => void write('prefs', changes);
+
+  /**
+   * Linking a TV from a browser using its own library: every row goes into the TV's library, merged with what the TV
+   * has, and only then is this browser's own library dropped.
+   */
+  async function moveOwnLibrary(libraryKey: string): Promise<boolean> {
+    const own = session.log;
+    if (!own || !(await own.moveTo(libraryKey))) return false;
+    await own.forget();
+    await dropLocalLibrary();
+    return true;
+  }
 
   // This browser lists itself among the devices with the library, as each device does when it opens it: again when its
   // name changes, and otherwise at most once a day.
@@ -173,6 +187,7 @@
 
     <ConnectionsSection
       {link}
+      onjoin={session.local ? moveOwnLibrary : undefined}
       {keys}
       {plugins}
       {routes}

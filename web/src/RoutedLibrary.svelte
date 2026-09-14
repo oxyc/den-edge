@@ -5,6 +5,7 @@
   import Loading from './components/Loading.svelte';
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
+  import { localLibraryKey } from './lib/localLibrary';
   import type { Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
   let {
@@ -12,7 +13,11 @@
     query,
     onchange,
   }: { link: Link | null; query: string; onchange: (route: Route) => void } = $props();
-  const session = untrack(() => new LibrarySession(link?.libraryKey ?? null));
+  // With no TV, the browser's own library: the whole app, kept here, until a TV is linked.
+  const ownKey = untrack(() => (link ? null : localLibraryKey()));
+  const session = untrack(
+    () => new LibrarySession(link?.libraryKey ?? ownKey, !link && ownKey !== null),
+  );
   onMount(() =>
     session.start(() => {
       if (link) links.forgetMoved(link);
@@ -22,14 +27,16 @@
 
 <Router
   onchange={(route) => {
-    // With no library there are no keys or plugins to show, so Settings is where pairing lives.
-    if (route.page === 'settings') void (link ? SettingsScreen.load() : LinkScreen.load());
+    // With no library at all — a browser that keeps nothing — there are no keys or plugins to show, so Settings is
+    // where pairing lives. A browser with its own library has every setting, pairing among them.
+    if (route.page === 'settings')
+      void (link || session.local ? SettingsScreen.load() : LinkScreen.load());
     onchange(route);
   }}
 >
   {#snippet children(route, active)}
     {#if route.page === 'settings'}
-      {#if link}
+      {#if link || session.local}
         {#if SettingsScreen.current}
           <SettingsScreen.current {link} {session} />
         {:else}

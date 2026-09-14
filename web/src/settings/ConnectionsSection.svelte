@@ -34,8 +34,10 @@
     selfId,
     disabled,
     write,
+    onjoin,
   }: {
-    link: Link;
+    /** Null for a browser using its own library, with no TV linked yet. */
+    link: Link | null;
     keys: SettingsRow | undefined;
     plugins: string[];
     routes: Routes;
@@ -46,6 +48,11 @@
     selfId: string;
     disabled: boolean;
     write: (group: string, changes: Changes) => Promise<boolean>;
+    /**
+     * For a browser using its own library: moves that library into the one `libraryKey` opens, before the browser
+     * links to it, so what was saved here goes along. False when it couldn't.
+     */
+    onjoin?: (libraryKey: string) => Promise<boolean>;
   } = $props();
 
   const hostOf = (url: string) => {
@@ -256,6 +263,8 @@
       'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
   async function linkDevice() {
+    // A browser's own library is kept only here, so another device given its key would find nothing on den-edge.
+    if (!link) return;
     pairing = true;
     pairNotice = null;
     const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
@@ -284,7 +293,7 @@
   function unlink(target: Link) {
     links.remove(target.inboxKey);
     // The library this page was reading is gone; the app goes back to linking.
-    if (target.inboxKey === link.inboxKey) navigate('/');
+    if (target.inboxKey === link?.inboxKey) navigate('/');
   }
 
   // Joining another TV's library: a browser has no library of its own to merge, so it links to that TV as it linked
@@ -315,9 +324,20 @@
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
     const { host: name, libraryKey, linkKey } = result.handover;
     const key = base64(libraryKey);
+    // What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
+    // fails leaves it where it was.
+    if (onjoin) {
+      joining = true;
+      const moved = await onjoin(key);
+      joining = false;
+      if (!moved) {
+        joinProblem = `Couldn’t move what you saved here into ${name}’s library. Check that this device is on your network, then get a new code on the TV and try again.`;
+        return;
+      }
+    }
     links.add(result.inboxKey, { name, libraryKey: key, linkKey: base64(linkKey) });
     joinCode = '';
-    if (key === link.libraryKey) {
+    if (key === link?.libraryKey) {
       joinProblem = `${name} already shares this library: it's linked to this browser too.`;
       return;
     }
@@ -683,34 +703,37 @@
       </p>
     {/if}
 
-    <h3>Link another device</h3>
-    <div class="pair">
-      {#if code}
-        <p>On your phone or computer, open Den and type this code:</p>
-        <b class="code">{formatCode(code).text}</b>
-        <p class="status" role="status">Waiting for your device…</p>
-      {:else if asking}
-        <p role="alert">
-          <b>Allow “{asking}”?</b> It will see your library, and can add to your watchlist, add plugins
-          and play on your TV.
-        </p>
-        <span class="actions">
-          <button type="button" class="primary" onclick={() => answer?.(true)}>Allow</button>
-          <button type="button" class="quiet" onclick={() => answer?.(false)}>Don’t Allow</button>
-        </span>
-      {:else}
-        {#if pairNotice}<p class="status" role="status">{pairNotice}</p>{/if}
-        <button type="button" class="primary" disabled={pairing} onclick={linkDevice}
-          >{pairing ? 'Waiting…' : 'Get a code'}</button
-        >
-      {/if}
-    </div>
-    <p class="foot">
-      Give your library to a phone, a laptop, or Den opened at another address, without going to the
-      TV.
-    </p>
+    <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
+    {#if link}
+      <h3>Link another device</h3>
+      <div class="pair">
+        {#if code}
+          <p>On your phone or computer, open Den and type this code:</p>
+          <b class="code">{formatCode(code).text}</b>
+          <p class="status" role="status">Waiting for your device…</p>
+        {:else if asking}
+          <p role="alert">
+            <b>Allow “{asking}”?</b> It will see your library, and can add to your watchlist, add plugins
+            and play on your TV.
+          </p>
+          <span class="actions">
+            <button type="button" class="primary" onclick={() => answer?.(true)}>Allow</button>
+            <button type="button" class="quiet" onclick={() => answer?.(false)}>Don’t Allow</button>
+          </span>
+        {:else}
+          {#if pairNotice}<p class="status" role="status">{pairNotice}</p>{/if}
+          <button type="button" class="primary" disabled={pairing} onclick={linkDevice}
+            >{pairing ? 'Waiting…' : 'Get a code'}</button
+          >
+        {/if}
+      </div>
+      <p class="foot">
+        Give your library to a phone, a laptop, or Den opened at another address, without going to
+        the TV.
+      </p>
+    {/if}
 
-    <h3 id="join-library-label">Join another TV’s library</h3>
+    <h3 id="join-library-label">{link ? 'Join another TV’s library' : 'Link your Apple TV'}</h3>
     <form
       class="form"
       onsubmit={(event) => {
@@ -729,22 +752,29 @@
         oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
       />
       <Confirm
-        label={joining ? 'Waiting…' : 'Join'}
-        question="Switch this browser to that TV’s library?"
-        detail="The TV you’re linked to now stays in your list until you unlink it."
-        confirmLabel="Join"
+        label={joining ? 'Waiting…' : link ? 'Join' : 'Link'}
+        question={link
+          ? 'Switch this browser to that TV’s library?'
+          : 'Link this browser to that TV?'}
+        detail={link
+          ? 'The TV you’re linked to now stays in your list until you unlink it.'
+          : 'What you’ve saved here moves into that TV’s library, and this browser uses that library from then on.'}
+        confirmLabel={link ? 'Join' : 'Link'}
         tone="primary"
         disabled={joining || !parseCode(joinCode)}
         onconfirm={() => void joinLibrary()}
       />
     </form>
-    {#if joining}<p class="status" role="status">
-        Waiting for the other TV to allow this browser…
-      </p>{/if}
+    {#if joining}<p class="status" role="status">Waiting for the TV to allow this browser…</p>{/if}
     {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
     <p class="foot">
-      On the other Apple TV, open Settings › Linked devices and get a code, then type it here.
-      Resetting the library key is on your Apple TV, under Settings › Linked devices.
+      {#if link}
+        On the other Apple TV, open Settings › Linked devices and get a code, then type it here.
+        Resetting the library key is on your Apple TV, under Settings › Linked devices.
+      {:else}
+        Everything here is saved in this browser. On your Apple TV, open Settings › Linked devices
+        and get a code, then type it here to keep it in your TV’s library instead.
+      {/if}
     </p>
   </SettingRow>
 </SettingsSection>

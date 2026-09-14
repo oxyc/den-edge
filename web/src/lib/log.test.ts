@@ -535,6 +535,44 @@ describe('LibraryLog', () => {
   });
 });
 
+describe('a library kept only in this browser', () => {
+  const LOCAL_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
+
+  it('keeps what someone does with no TV, and asks den-edge nothing', async () => {
+    const { vault } = memoryVault();
+    const asked: string[] = [];
+    const counting: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response('{}', { status: 500 });
+    };
+    const log = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
+    expect(await log.write(row(1))).not.toBeNull();
+    const before = log.title({ type: 'movie', id: 1 })!;
+    const journal = recordTrackerEvent(before, react(before, 'love', at(3000)), at(3000))!;
+    expect(await log.writeActions([journal])).toBe(true);
+    expect(await log.refresh()).toBe(false);
+    await vi.waitFor(async () => {
+      const again = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
+      expect(again.title({ type: 'movie', id: 1 })?.reaction.value).toBe('love');
+    });
+    expect(asked).toEqual([]);
+  });
+
+  it("moves into a TV's library, merged with what the TV has, and is then dropped", async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(2)]);
+    const local = (await LibraryLog.openLocal(LOCAL_KEY, vault, server.fetchImpl))!;
+    await local.write(row(1));
+    await local.write(row(2, { status: { value: 'watched', at: at(5000) } }));
+    expect(await local.moveTo(LIBRARY_KEY)).not.toBeNull();
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(tv.title({ type: 'movie', id: 1 })).toBeDefined();
+    expect(tv.title({ type: 'movie', id: 2 })?.status.value).toBe('watched');
+    expect(await local.forget()).toBe(true);
+    expect(data.size).toBe(0);
+  });
+});
+
 describe('applyLog', () => {
   const backup: Library = {
     records: [

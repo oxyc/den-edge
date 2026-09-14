@@ -20,7 +20,11 @@ export class LibrarySession {
    * guest — someone browsing without having paired — and it is the whole of the difference, because
    * `routes()` is keyless and still answers, which is what service discovery needs.
    */
-  constructor(private readonly key: string | null) {
+  constructor(
+    private readonly key: string | null,
+    /** `key` is this browser's own library (`LibraryLog.openLocal`), kept here with no TV behind it. */
+    readonly local = false,
+  ) {
     this.opened = this.refresh().then(() => this.log ?? null);
   }
 
@@ -41,6 +45,15 @@ export class LibrarySession {
           // A browser that just gave up its key is a visitor again, and must stop claiming a membership.
           forgetLibraryCredential();
           this.log = null;
+          return;
+        }
+        if (this.local) {
+          // Its own library is still a visitor's: it proves no membership of anything on den-edge.
+          forgetLibraryCredential();
+          if (!this.log) {
+            this.log = await LibraryLog.openLocal(this.key);
+            if (this.log) this.changed(true);
+          }
           return;
         }
         if (!this.log) {
@@ -65,7 +78,7 @@ export class LibrarySession {
 
   start(onMoved: () => void): () => void {
     // Nothing to poll for, and no library that could move out from under this browser.
-    if (this.key === null) return () => undefined;
+    if (this.key === null || this.local) return () => undefined;
     let disposed = false;
     const refresh = async () => {
       if (document.hidden || disposed) return;
