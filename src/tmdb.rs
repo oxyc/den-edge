@@ -360,6 +360,17 @@ fn spend(state: &AppState) -> bool {
         *spent = (day, 0);
     }
     if spent.1 >= max {
+        // SAY SO, ONCE. Running out is a real outage for guests — meta and the /tmdb proxy share this one
+        // budget, so browsing stops, not just link previews — and it announced itself only as a 503 to
+        // whoever asked next. A drain was therefore invisible unless someone happened to be watching a
+        // request fail. Counting one past `max` makes this the single line for the day rather than one per
+        // refused request.
+        if spent.1 == max {
+            spent.1 = max + 1;
+            eprintln!(
+                "tmdb: daily budget of {max} spent — guest browsing and link previews answer 503 until UTC                  midnight. A cached answer still serves; only new questions stop."
+            );
+        }
         return false;
     }
     spent.1 += 1;
@@ -466,6 +477,28 @@ mod tests {
         // It must not be mistaken for an answer: every real body parses as an object with fields.
         assert!(serde_json::from_slice::<serde_json::Value>(&body).is_ok(), "still valid JSON on disk");
         assert_ne!(ABSENT, br#"{"id":550}"#, "and is not a shape TMDB returns");
+    }
+
+    /// Running out is a real outage — meta and the /tmdb proxy share this budget, so guest BROWSING stops,
+    /// not just link previews — and it used to announce itself only as a 503 to whoever asked next.
+    #[test]
+    fn the_daily_budget_is_spent_exactly_once_and_resets_the_next_day() {
+        let dir = crate::handler::tests::temp_dir();
+        let harness =
+            crate::handler::tests::Harness::in_dir_with(dir, |state| state.tmdb_daily_max = Some(3));
+        let state = &harness.state;
+
+        assert!(spend(state) && spend(state) && spend(state), "three questions allowed");
+        assert!(!spend(state), "the fourth is refused");
+        assert!(!spend(state), "and stays refused");
+
+        // Counted one past the max so the log line fires once rather than per refused request; nothing else
+        // reads this counter, so the overshoot costs nothing.
+        assert_eq!(crate::lock(&state.tmdb_spent).1, 4);
+
+        // A new UTC day starts the budget over.
+        harness.advance(86_400_000);
+        assert!(spend(state), "tomorrow asks again");
     }
 
     #[test]
