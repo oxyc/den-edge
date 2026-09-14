@@ -20,12 +20,12 @@ use crate::handler::{client_ip, error, raw_json, retry_after};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use serde_json::{json, Map, Value};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const API: &str = "https://www.doesthedogdie.com/api/v3";
 /// The header their API takes a key in, and the only one that travels from the caller.
@@ -96,15 +96,16 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         return json(StatusCode::NOT_FOUND, "not_found");
     };
 
+    let asked = req.headers();
     let file = state.warnings_cache_dir.as_ref().map(|dir| dir.join(format!("{imdb}.json")));
     let kept = match &file {
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    if let Some((body, age)) = kept {
+    if let Some((body, age, modified)) = kept {
         match verdict(body.as_ref() == ABSENT, age) {
-            Kept::Absent => return json(StatusCode::NOT_FOUND, "not_found"),
-            Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit"),
+            Kept::Absent => return absent(),
+            Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit", modified, asked),
             Kept::Cold => {}
         }
     }
@@ -114,10 +115,18 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
     match lookup(state, &imdb, &key, rid).await {
-        Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss").await,
+        Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss", asked).await,
         Ok(None) => forget(file.as_deref()).await,
         Err(refused) => *refused,
     }
+}
+
+/// "There is no such title", which is believed here for days, so a browser may believe it for an hour. Shared with
+/// `ratings.rs`. Only this 404 is kept: `not_cached` is a visitor's answer and changes the moment a member asks.
+pub(crate) fn absent() -> Response {
+    let mut resp = raw_json(StatusCode::NOT_FOUND, Body::from(error("not_found").to_string()), false);
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
+    resp
 }
 
 /// The caller's own key (`x-api-key`), when it sent something that could be one.
@@ -191,7 +200,7 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    if let Some((body, age)) = kept {
+    if let Some((body, age, _)) = kept {
         if age < FRESH {
             if let Ok(table) = serde_json::from_slice(&body) {
                 return Ok(table);
@@ -347,29 +356,46 @@ fn rest(state: &AppState, until: u64, why: &str) {
     *rest_until = (*rest_until).max(until);
 }
 
-async fn keep(file: Option<&Path>, body: Bytes, how: &'static str) -> Response {
+async fn keep(file: Option<&Path>, body: Bytes, how: &'static str, asked: &HeaderMap) -> Response {
     if let Some(file) = file {
         crate::tmdb::write(file, &body).await;
     }
-    answer(body, FRESH, how)
+    answer(body, FRESH, how, SystemTime::now(), asked)
 }
 
 async fn forget(file: Option<&Path>) -> Response {
     if let Some(file) = file {
         crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
     }
-    json(StatusCode::NOT_FOUND, "not_found")
+    absent()
 }
 
-/// `remaining` is what is left of the 30 days; a browser keeps it for a day at most, and never past them.
-fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
-    let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
+/// `remaining` is what is left of the 30 days. A browser keeps it for a day at most and may show it for up to a day
+/// more while it asks again — the two together never past the 30 days.
+fn answer(
+    body: Bytes,
+    remaining: Duration,
+    how: &'static str,
+    modified: SystemTime,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
     let headers = resp.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={}", remaining.min(DAY).as_secs())) {
+    if let Ok(value) = HeaderValue::from_str(&policy(remaining)) {
         headers.insert(header::CACHE_CONTROL, value);
     }
     headers.insert("x-den-warnings", HeaderValue::from_static(how));
-    resp
+    crate::cache::validated(resp, &body, Some(modified), asked)
+}
+
+fn policy(remaining: Duration) -> String {
+    let max_age = remaining.min(DAY);
+    let stale = remaining.saturating_sub(max_age).min(DAY);
+    if stale.is_zero() {
+        format!("public, max-age={}", max_age.as_secs())
+    } else {
+        format!("public, max-age={}, stale-while-revalidate={}", max_age.as_secs(), stale.as_secs())
+    }
 }
 
 /// Delete what is past the 30 days: their terms allow keeping cached data no longer than that without a refresh.
@@ -410,6 +436,14 @@ mod tests {
         assert_eq!(verdict(false, FRESH + DAY), Kept::Cold);
         assert_eq!(verdict(true, DAY), Kept::Absent);
         assert_eq!(verdict(true, ABSENT_TTL + DAY), Kept::Cold, "an old 'no such title' is asked again");
+    }
+
+    /// A browser's copy, kept and then shown while it is asked again, never outlives the 30 days since the fetch.
+    #[test]
+    fn a_browser_keeps_warnings_no_longer_than_the_terms_allow() {
+        assert_eq!(policy(FRESH), "public, max-age=86400, stale-while-revalidate=86400");
+        assert_eq!(policy(DAY + DAY / 2), "public, max-age=86400, stale-while-revalidate=43200");
+        assert_eq!(policy(Duration::from_secs(3600)), "public, max-age=3600");
     }
 
     #[test]
@@ -475,15 +509,34 @@ mod tests {
         let resp = get().await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["x-den-warnings"], "hit");
+        assert_eq!(
+            resp.headers()[header::CACHE_CONTROL],
+            "public, max-age=86400, stale-while-revalidate=86400"
+        );
+        let etag = resp.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let modified = resp.headers()[header::LAST_MODIFIED].to_str().unwrap().to_owned();
         assert_eq!(body_json(resp).await, kept);
+
+        // A browser holding it is told it is unchanged, under the same policy.
+        for (name, value) in [("if-none-match", &etag), ("if-modified-since", &modified)] {
+            let resp = h.send("GET", "/warnings/imdb/tt0050798", None, &[(name, value)]).await;
+            assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "{name}");
+            assert_eq!(
+                resp.headers()[header::CACHE_CONTROL],
+                "public, max-age=86400, stale-while-revalidate=86400"
+            );
+            assert_eq!(resp.headers()[header::ETAG], etag.as_str());
+        }
 
         aged(&file, FRESH + DAY);
         let resp = get().await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing is served past 30 days");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "a member asking changes it at once");
         assert_eq!(body_json(resp).await, json!({ "error": "not_cached" }));
 
         crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await;
         let resp = get().await;
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=3600");
         assert_eq!(
             body_json(resp).await,
             json!({ "error": "not_found" }),

@@ -1,7 +1,8 @@
 //! The Den web app's built files (`WEB_DIR`; `/web` in the image), served at `/` beside the API — one origin
 //! for the app and its sync, so no CORS and one certificate. A path with no file behind it and no extension
 //! is one of the app's own routes and gets `index.html`. Vite's hashed files under `/assets/` are cached for
-//! a year; everything else revalidates, so a release shows up on the next load.
+//! a year; the shell and the service worker revalidate, so a release shows up on the next load; the rest of
+//! what is unhashed (icons, the share image) is kept a day.
 //!
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
@@ -71,7 +72,7 @@ pub async fn serve(
     // gzip — which is everything.
     if file.file_name().is_some_and(|name| name == "index.html") {
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
-            return revalidate(respond(html.into_bytes(), &file, false, media), headers);
+            return crate::cache::revalidate(respond(html.into_bytes(), &file, false, media), headers);
         }
     }
     encoded(bytes, &file, immutable, media, headers).await
@@ -142,7 +143,7 @@ async fn encoded(
             if let Ok(compressed) = tokio::fs::read(sidecar).await {
                 let mut response = respond(compressed, file, immutable, media);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                return revalidate(response, headers);
+                return crate::cache::revalidate(response, headers);
             }
         }
     }
@@ -153,26 +154,7 @@ async fn encoded(
         response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
         return response;
     }
-    revalidate(respond(bytes, file, immutable, media), headers)
-}
-
-/// Validators name the selected representation, so a gzip response cannot validate identity bytes.
-/// GET/HEAD use weak comparison, including a list of tags or `*` (RFC 9110 §13.1.2).
-fn revalidate(mut response: Response, request: &HeaderMap) -> Response {
-    let Some(etag) = response.headers().get(header::ETAG) else { return response };
-    let matched = request.get_all(header::IF_NONE_MATCH).iter().any(|line| {
-        line.to_str().is_ok_and(|line| {
-            line.split(',').any(|tag| {
-                let tag = tag.trim();
-                tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
-            })
-        })
-    });
-    if matched {
-        *response.status_mut() = StatusCode::NOT_MODIFIED;
-        *response.body_mut() = Body::empty();
-    }
-    response
+    crate::cache::revalidate(respond(bytes, file, immutable, media), headers)
 }
 
 /// The request path as a path under the web directory, or `None` if it would step outside it.
@@ -205,10 +187,17 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, media: &[String]) -> Re
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(if immutable { "public, max-age=31536000, immutable" } else { "no-cache" }),
-    );
+    // The shell and the service worker name every other file of a release, so they are asked again on every load.
+    // What else sits unhashed beside them — the icons, the share image, the manifest — changes perhaps once a year,
+    // and a day's wait for a new one is no loss.
+    let policy = if immutable {
+        "public, max-age=31536000, immutable"
+    } else if content_type.starts_with("text/html") || file.file_name().is_some_and(|name| name == "sw.js") {
+        "no-cache"
+    } else {
+        "public, max-age=86400, stale-while-revalidate=604800"
+    };
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
         let policy = HeaderValue::from_str(&csp(media))
@@ -368,6 +357,20 @@ mod tests {
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
         assert_eq!(asset.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
         assert_eq!(asset.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+
+        // Unhashed files beside the shell are kept a day; the service worker, like the shell, is asked every load.
+        std::fs::write(h.dir.join("web/og.png"), "png").unwrap();
+        std::fs::write(h.dir.join("web/sw.js"), "self.skipWaiting()").unwrap();
+        let og = h.send("GET", "/og.png", None, &[]).await;
+        assert_eq!(
+            og.headers()[header::CACHE_CONTROL],
+            "public, max-age=86400, stale-while-revalidate=604800"
+        );
+        assert_eq!(h.send("GET", "/sw.js", None, &[]).await.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(
+            h.send("GET", "/index.html", None, &[]).await.headers()[header::CACHE_CONTROL],
+            "no-cache"
+        );
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");

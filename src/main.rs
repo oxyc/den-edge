@@ -4,6 +4,7 @@
 //!
 //! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
+mod cache;
 mod handler;
 mod inbox;
 mod library;
@@ -94,6 +95,8 @@ pub struct AppState {
     pub tmdb_daily_max: Option<u32>,
     /// Today (as a day number) and what has been spent of it.
     pub tmdb_spent: Mutex<(u64, u32)>,
+    /// Stale lists and searches being asked of TMDB again right now, by cache key (`tmdb::refresh_behind`).
+    pub tmdb_refreshing: Mutex<std::collections::HashSet<String>>,
     /// The household's doesthedogdie key (env `DOESTHEDOGDIE_KEY`), spent looking up a title a library member opens
     /// that nobody has yet (`warnings.rs`). `None` leaves lookups to callers who bring their own key.
     pub warnings_key: Option<String>,
@@ -171,6 +174,7 @@ impl AppState {
             tmdb_cache_dir: None,
             tmdb_daily_max: None,
             tmdb_spent: Mutex::new((0, 0)),
+            tmdb_refreshing: Mutex::new(std::collections::HashSet::new()),
             warnings_key: None,
             warnings_cache_dir: None,
             warnings_rest_until: Mutex::new(0),

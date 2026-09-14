@@ -210,7 +210,8 @@ pub async fn relay(
     //
     // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
     // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
-    if face == crate::handler::Face::Web && req.uri().path().starts_with("/scout/") {
+    let member_only = face == crate::handler::Face::Web && req.uri().path().starts_with("/scout/");
+    if member_only {
         let claim = member_claim(&req);
         if !crate::library::is_member(state, claim.as_deref()).await {
             return json(StatusCode::NOT_FOUND, "not_found");
@@ -329,7 +330,28 @@ pub async fn relay(
             resp.headers_mut().insert(name, value.clone());
         }
     }
+    // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
+    // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
+    // The browser keeps its own copy for as long as scout said.
+    if member_only {
+        if let Some(policy) = resp.headers().get(header::CACHE_CONTROL).map(private) {
+            resp.headers_mut().insert(header::CACHE_CONTROL, policy);
+        }
+    }
     resp
+}
+
+/// A `Cache-Control` with `public` turned into `private`, everything else as it was. One that cannot be read is
+/// not kept anywhere.
+fn private(policy: &axum::http::HeaderValue) -> axum::http::HeaderValue {
+    let Ok(policy) = policy.to_str() else { return axum::http::HeaderValue::from_static("no-store") };
+    let directives: Vec<&str> = policy
+        .split(',')
+        .map(str::trim)
+        .map(|directive| if directive.eq_ignore_ascii_case("public") { "private" } else { directive })
+        .collect();
+    axum::http::HeaderValue::from_str(&directives.join(", "))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("no-store"))
 }
 
 /// Is this relayed path a trailer's bytes rather than JSON? Reel's `/play/<id>.mp4`, and the playlist and
@@ -368,10 +390,16 @@ fn native_master(path: &str, query: Option<&str>) -> bool {
 /// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
 async fn stream(state: &AppState, req: Request, target: String, rid: &str, guest: bool) -> Response {
     let method = req.method().clone();
-    let asked: Vec<_> = [header::RANGE, header::IF_RANGE, header::IF_NONE_MATCH, header::ACCEPT_ENCODING]
-        .into_iter()
-        .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
-        .collect();
+    let asked: Vec<_> = [
+        header::RANGE,
+        header::IF_RANGE,
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+        header::ACCEPT_ENCODING,
+    ]
+    .into_iter()
+    .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
+    .collect();
     let mut out = axum::http::Request::builder().method(method).uri(&target).header("x-request-id", rid);
     for (name, value) in asked {
         out = out.header(name, value);
@@ -617,6 +645,73 @@ mod tests {
         let segment =
             h.send("GET", "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx&native=1", None, &[]).await;
         assert_eq!(segment.status(), StatusCode::SERVICE_UNAVAILABLE, "a segment is still carried");
+    }
+
+    /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.
+    async fn public_addon() -> String {
+        use axum::http::{header, HeaderValue};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
+            let since = req.headers().get(header::IF_MODIFIED_SINCE).map(|v| v.to_str().unwrap().to_owned());
+            let mut resp =
+                axum::response::Response::new(axum::body::Body::from(json!({ "since": since }).to_string()));
+            resp.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60"),
+            );
+            resp
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Only a member is answered on the web name, so what scout says anyone may keep must not be kept by a shared
+    /// cache in front of it, to be handed to whoever asks next.
+    #[tokio::test]
+    async fn scout_on_the_web_name_is_never_shared_caching_material() {
+        let addon = public_addon().await;
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/scout={addon}, /atlas={addon}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        let member = format!("{LIB}:{TOKEN}");
+
+        let policy =
+            |resp: axum::response::Response| resp.headers()["cache-control"].to_str().unwrap().to_owned();
+        let web = h
+            .send(
+                "GET",
+                "/scout/cfg/manifest.json",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(policy(web), "private, max-age=300, stale-while-revalidate=60");
+        let lan = h.send("GET", "/scout/cfg/manifest.json", None, &[]).await;
+        assert_eq!(
+            policy(lan),
+            "public, max-age=300, stale-while-revalidate=60",
+            "anyone may ask on the LAN"
+        );
+        let atlas = h.send("GET", "/atlas/recommend", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(policy(atlas), "public, max-age=300, stale-while-revalidate=60", "atlas answers everyone");
+
+        assert_eq!(super::private(&"no-store".parse().unwrap()), "no-store");
+        assert_eq!(super::private(&"PUBLIC,max-age=5".parse().unwrap()), "private, max-age=5");
+    }
+
+    /// A trailer's revalidation is the addon's 304 too, whichever validator the player holds.
+    #[tokio::test]
+    async fn the_media_relay_passes_on_if_modified_since() {
+        let addon = public_addon().await;
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/reel={addon}"));
+        let since = "Sat, 12 Sep 2026 12:00:00 GMT";
+        let resp = h.send("GET", "/reel/play/abc.mp4", None, &[("if-modified-since", since)]).await;
+        assert_eq!(crate::handler::tests::body_json(resp).await, json!({ "since": since }));
     }
 
     #[test]

@@ -18,13 +18,14 @@ use crate::handler::{error, raw_json, retry_after};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub type TmdbClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -215,7 +216,7 @@ fn upstream(path: &str, query: Option<&str>, key: &str) -> String {
     format!("{HOST}{path}?{query}")
 }
 
-pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
+pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     let Some(key) = state.tmdb_key.as_deref() else {
         return json(StatusCode::NOT_FOUND, "tmdb_proxy_off");
     };
@@ -226,6 +227,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     if !allowed(&path) {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
+    let asked = req.headers();
     let query = req.uri().query().map(str::to_owned);
     let cached = cache_key(&path, query.as_deref());
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cached));
@@ -234,28 +236,40 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     // A hit never leaves the box, so it is not counted against anybody's budget: what the limits exist to
     // bound is what this origin asks TMDB, not what it already knows.
     if let Some(file) = &file {
-        if let Some((body, age)) = read(file).await {
+        if let Some((body, age, modified)) = read(file).await {
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
             //
             // An EXPIRED sentinel must leave this block entirely rather than fall into the refresh below.
-            // The stale arm serves the cached body when TMDB refuses, which for a sentinel means returning
-            // `{"den_absent":true}` as a 200 — and it never rewrites the file, so the mtime stays old and
-            // every later request repeats it, spending a budget unit each time, for as long as RETENTION
-            // allows. It is also ahead of the per-IP bucket, so that is the unthrottled drain again.
+            // The stale arm serves the cached body as it is, which for a sentinel means returning
+            // `{"den_absent":true}` as a 200 — and a refresh that fails never rewrites the file, so the mtime
+            // stays old and every later request repeats it, spending a budget unit each time, for as long as
+            // RETENTION allows. It is also ahead of the per-IP bucket, so that is the unthrottled drain again.
             // Falling through to the cold path gets the bucket, the fetch, and a rewritten sentinel.
             match verdict(body == ABSENT, age, fresh) {
                 Cached::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
-                Cached::Fresh => return answer(body, fresh.saturating_sub(age), "hit"),
+                Cached::Fresh => {
+                    return answer(
+                        body,
+                        &fresh_policy(fresh, fresh.saturating_sub(age)),
+                        "hit",
+                        modified,
+                        asked,
+                    )
+                }
+                // A list or a search moves, but the one kept is a better page than a wait on TMDB: served at
+                // once, and asked again behind it. A title's details are never here inside the six months.
+                Cached::Refresh if fresh != DETAILS_TTL && age < RETENTION => {
+                    let asking = Refresh { cached, path, query, key: key.to_owned(), file: file.clone() };
+                    refresh_behind(state, asking);
+                    return answer(body, "public, max-age=60", "stale", modified, asked);
+                }
                 Cached::Refresh => {
-                    // Held while the refresh is attempted: if TMDB refuses or is unreachable, a slightly old
-                    // answer is a better page than an empty one.
                     return match fetch(state, &path, query.as_deref(), key, rid).await {
                         Ok(body) => {
                             write(file, &body).await;
-                            answer(body, fresh, "miss")
+                            answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
-                        Err(_) if age < RETENTION => answer(body, Duration::from_secs(60), "stale"),
                         Err(response) => *response,
                     };
                 }
@@ -273,7 +287,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
             if let Some(file) = &file {
                 write(file, &body).await;
             }
-            answer(body, fresh, "miss")
+            answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
         }
         Err(response) => {
             if response.status() == StatusCode::NOT_FOUND {
@@ -296,7 +310,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
     if let Some(file) = &file {
-        if let Some((body, age)) = read(file).await {
+        if let Some((body, age, _)) = read(file).await {
             // A remembered 404 answers as "no such thing" without spending anything.
             if body == ABSENT {
                 if age < ABSENT_TTL {
@@ -414,17 +428,15 @@ fn spend(state: &AppState) -> bool {
     true
 }
 
-/// A kept answer and how old it is. The file's own timestamp is when it was fetched, so there is no header to
-/// write, parse or keep in step.
-pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration)> {
+/// A kept answer, how old it is, and when it was kept. The file's own timestamp is when it was fetched, so there
+/// is no header to write, parse or keep in step — and it is the `Last-Modified` a revalidation is checked against.
+pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
     let bytes = tokio::fs::read(file).await.ok()?;
-    let age = tokio::fs::metadata(file)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| SystemTime::now().duration_since(t).ok())
-        .unwrap_or(Duration::ZERO);
-    Some((Bytes::from(bytes), age))
+    let now = SystemTime::now();
+    let modified =
+        tokio::fs::metadata(file).await.ok().and_then(|m| m.modified().ok()).map_or(now, |t| t.min(now));
+    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+    Some((Bytes::from(bytes), age, modified))
 }
 
 /// Written beside and renamed over, so a reader never sees half an answer. A cache that cannot be written is
@@ -471,16 +483,54 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     }
 }
 
-fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
-    let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
+/// A stale list or search to ask TMDB again (`refresh_behind`).
+struct Refresh {
+    cached: String,
+    path: String,
+    query: Option<String>,
+    key: String,
+    file: PathBuf,
+}
+
+/// Ask again for a stale list or search without holding up the request that found it stale. One refresh per
+/// question at a time — every page open in the seconds a refresh takes would otherwise start another — and each
+/// still spends from the daily budget, which `fetch` takes.
+fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
+    if !crate::lock(&state.tmdb_refreshing).insert(asking.cached.clone()) {
+        return;
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
+        if let Ok(body) = fetch(&state, &asking.path, asking.query.as_deref(), &asking.key, "refresh").await {
+            write(&asking.file, &body).await;
+        }
+        crate::lock(&state.tmdb_refreshing).remove(&asking.cached);
+    });
+}
+
+/// How long a browser may keep a fresh answer. A title's details: exactly what is left of the six months, and not
+/// a moment past. A list or a search is fresh for hours, so it may also be shown for an hour past that while it is
+/// asked again, or a day when this box cannot be reached — still far inside the six months.
+fn fresh_policy(fresh: Duration, remaining: Duration) -> String {
+    if fresh == DETAILS_TTL {
+        format!("public, max-age={}", remaining.as_secs())
+    } else {
+        format!("public, max-age={}, stale-while-revalidate=3600, stale-if-error=86400", remaining.as_secs())
+    }
+}
+
+/// `modified` is when the answer was kept, which is what the browser counts TMDB's six months from.
+fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, asked: &HeaderMap) -> Response {
+    let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
     let headers = resp.headers_mut();
     // The browser keeps its own copy too (`tmdbCache.ts`), so this mostly spares the box a repeat question
     // from the same page.
-    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={}", remaining.as_secs())) {
+    if let Ok(value) = HeaderValue::from_str(policy) {
         headers.insert(header::CACHE_CONTROL, value);
     }
     headers.insert("x-den-tmdb", HeaderValue::from_static(how));
-    resp
+    crate::cache::validated(resp, &body, Some(modified), asked)
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
@@ -512,7 +562,7 @@ mod tests {
 
         // What the 404 path now writes.
         write(&file, &Bytes::from_static(ABSENT)).await;
-        let (body, age) = read(&file).await.expect("remembered");
+        let (body, age, _) = read(&file).await.expect("remembered");
         assert_eq!(body, ABSENT, "the sentinel round-trips");
         assert!(age < ABSENT_TTL, "and is believed for a while");
 
@@ -623,13 +673,96 @@ mod tests {
         assert!(url.contains("language=en-US"), "{url}");
     }
 
+    use crate::handler::tests::{body_text, temp_dir, Harness};
+
+    fn lending(cache: &Path, daily_max: Option<u32>) -> Harness {
+        let cache = cache.to_path_buf();
+        Harness::in_dir_with(temp_dir(), |state| {
+            state.tmdb_key = Some("household".into());
+            state.tmdb_cache_dir = Some(cache);
+            state.tmdb_daily_max = daily_max;
+        })
+    }
+
+    fn aged(file: &Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    /// A browser counts TMDB's six months from `Last-Modified`, so a title's details carry it and no allowance to
+    /// be shown past what is left of them. Holding the same bytes is a 304 under the same policy.
+    #[tokio::test]
+    async fn a_kept_answer_carries_its_validators_and_a_title_no_stale_allowance() {
+        let cache = temp_dir();
+        let h = lending(&cache, None);
+        write(&cache_path(&cache, &cache_key("/3/movie/550", None)), &Bytes::from_static(b"{\"id\":550}"))
+            .await;
+        let resp = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
+        assert!(policy.starts_with("public, max-age=1555") && !policy.contains("stale"), "{policy}");
+        let etag = resp.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let modified = resp.headers()[header::LAST_MODIFIED].to_str().unwrap().to_owned();
+        for (name, value) in [("if-none-match", &etag), ("if-modified-since", &modified)] {
+            let again = h.send("GET", "/tmdb/3/movie/550", None, &[(name, value)]).await;
+            assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{name}");
+            assert_eq!(again.headers()[header::CACHE_CONTROL], policy.as_str());
+            assert_eq!(again.headers()[header::ETAG], etag.as_str());
+            assert!(body_text(again).await.is_empty());
+        }
+
+        // A list is fresh for hours, so a browser may show it a while longer, still far inside the six months.
+        let list = cache_path(&cache, &cache_key("/3/trending/all/week", None));
+        write(&list, &Bytes::from_static(b"{\"page\":1}")).await;
+        let resp = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
+        assert!(policy.ends_with(", stale-while-revalidate=3600, stale-if-error=86400"), "{policy}");
+    }
+
+    /// A stale list used to hold the page while TMDB was asked. It is served at once now, and asked again behind
+    /// it — once per question at a time, and paid for from the day's budget like any other question.
+    #[tokio::test]
+    async fn a_stale_list_is_served_at_once_and_refreshed_behind_it() {
+        let cache = temp_dir();
+        let h = lending(&cache, Some(5));
+        let key = cache_key("/3/trending/all/week", None);
+        let file = cache_path(&cache, &key);
+        write(&file, &Bytes::from_static(b"{\"page\":1}")).await;
+        aged(&file, LIST_TTL + Duration::from_secs(60));
+
+        crate::lock(&h.state.tmdb_refreshing).insert(key.clone());
+        let resp = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        assert_eq!(resp.headers()["x-den-tmdb"], "stale");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        assert_eq!(body_text(resp).await, "{\"page\":1}");
+        assert_eq!(crate::lock(&h.state.tmdb_spent).1, 0, "a refresh already under way is not started twice");
+        crate::lock(&h.state.tmdb_refreshing).remove(&key);
+
+        let resp = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        assert_eq!(resp.headers()["x-den-tmdb"], "stale");
+        for _ in 0..200 {
+            if crate::lock(&h.state.tmdb_refreshing).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(crate::lock(&h.state.tmdb_refreshing).is_empty(), "the refresh finished");
+        assert_eq!(crate::lock(&h.state.tmdb_spent).1, 1, "and spent from the day's budget");
+        // There is no TMDB here to answer it, so what is kept stays.
+        assert_eq!(read(&file).await.unwrap().0.as_ref(), b"{\"page\":1}");
+    }
+
     #[tokio::test]
     async fn a_kept_answer_is_read_back_and_a_torn_write_is_never_seen() {
         let dir = crate::handler::tests::temp_dir();
         let file = cache_path(&dir, "/3/movie/550?");
         assert!(read(&file).await.is_none(), "nothing is kept yet");
         write(&file, &Bytes::from_static(b"{\"id\":550}")).await;
-        let (body, age) = read(&file).await.expect("the answer was kept");
+        let (body, age, _) = read(&file).await.expect("the answer was kept");
         assert_eq!(body.as_ref(), b"{\"id\":550}");
         assert!(age < Duration::from_secs(5));
         assert!(!file.with_extension("tmp").exists(), "the temporary file was left behind");

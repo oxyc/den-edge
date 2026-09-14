@@ -19,13 +19,13 @@ use crate::warnings::{callers_key, spendable, valid_imdb, Key};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const API: &str = "https://www.omdbapi.com/";
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -78,18 +78,19 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         return json(StatusCode::NOT_FOUND, "not_found");
     };
 
+    let asked = req.headers();
     let file = state.ratings_cache_dir.as_ref().map(|dir| dir.join(format!("{imdb}.json")));
     let kept = match &file {
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    if let Some((body, age)) = kept {
+    if let Some((body, age, modified)) = kept {
         let absent = body.as_ref() == ABSENT;
         if absent && age < ABSENT_TTL {
-            return json(StatusCode::NOT_FOUND, "not_found");
+            return crate::warnings::absent();
         }
         if !absent && age < FRESH {
-            return answer(body, FRESH.saturating_sub(age), "hit");
+            return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
         }
         if !absent && age < RETENTION {
             // Served as it is, now. A caller who may ask starts the refresh; the next one sees its answer.
@@ -98,7 +99,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             {
                 refresh_behind(state, imdb, key, file);
             }
-            return answer(body, STALE_MAX_AGE, "stale");
+            return answer(body, STALE_MAX_AGE, "stale", modified, asked);
         }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked.
@@ -110,13 +111,13 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             if let Some(file) = &file {
                 crate::tmdb::write(file, &body).await;
             }
-            answer(body, FRESH, "miss")
+            answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
             if let Some(file) = &file {
                 crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
             }
-            json(StatusCode::NOT_FOUND, "not_found")
+            crate::warnings::absent()
         }
         Err(refused) => *refused,
     }
@@ -254,15 +255,21 @@ fn until_tomorrow(state: &AppState) -> u64 {
 }
 
 /// `remaining` is what is left of the 30 days, or a minute for a stale answer; a browser keeps it a day at most.
-fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
-    let mut resp = raw_json(StatusCode::OK, Body::from(body), false);
+fn answer(
+    body: Bytes,
+    remaining: Duration,
+    how: &'static str,
+    modified: SystemTime,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
     let headers = resp.headers_mut();
     let max_age = remaining.min(Duration::from_millis(DAY_MS)).as_secs();
     if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
         headers.insert(header::CACHE_CONTROL, value);
     }
     headers.insert("x-den-ratings", HeaderValue::from_static(how));
-    resp
+    crate::cache::validated(resp, &body, Some(modified), asked)
 }
 
 /// Delete what is past `RETENTION`, so the directory holds only what may still be served.
@@ -352,6 +359,21 @@ mod tests {
         assert_eq!(resp.headers()["x-den-ratings"], "stale");
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=60");
         assert!(crate::lock(&h.state.ratings_refreshing).is_empty(), "a visitor starts no refresh");
+        // Stale or not, a browser holding these bytes is told so rather than sent them again.
+        let etag = resp.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let again = h.send("GET", "/ratings/imdb/tt0137523", None, &[("if-none-match", &etag)]).await;
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(again.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        assert!(again.headers().contains_key(header::LAST_MODIFIED));
+
+        crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await;
+        let resp = get().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()[header::CACHE_CONTROL],
+            "public, max-age=3600",
+            "a known absence may be kept"
+        );
 
         assert_eq!(h.send("GET", "/ratings/check", None, &[]).await.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(h.send("GET", "/ratings/imdb/nm1", None, &[]).await.status(), StatusCode::NOT_FOUND);

@@ -175,7 +175,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "/config" => raw_json(StatusCode::OK, Body::from(config(state)), false),
+        "/config" => revalidated(config(state), req.headers()),
         // The web app's public name gets the public table when the deployment built one: a visitor there has no
         // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
         // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
@@ -193,7 +193,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
                 (Face::Web, Some(public)) => public,
                 _ => &state.routes,
             };
-            bare_json(StatusCode::OK, &crate::routes::to_json(table))
+            revalidated(crate::routes::to_json(table).to_string(), req.headers())
         }
         "/metrics" if metrics_authorized(state, &req) => {
             let mut resp = Response::new(Body::from(state.metrics.render()));
@@ -370,6 +370,15 @@ pub fn error(msg: &str) -> Value {
 /// cached one replays stale state.
 pub fn json_reply(status: StatusCode, body: &Value) -> Response {
     raw_json(status, Body::from(body.to_string()), true)
+}
+
+/// `/config` and `/routes`: asked again every time, and a 304 while unchanged. A client reads both on every start,
+/// and a kill-switch or a moved address must reach it on the next one — but the answer is the same bytes nearly
+/// always, and a TV away from home is fetching them over the device API.
+fn revalidated(body: String, request: &HeaderMap) -> Response {
+    let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::cache::validated(resp, body.as_bytes(), None, request)
 }
 
 /// Router answers must not pin health, a credential refusal, or an error in an intermediary cache.
@@ -884,6 +893,31 @@ pub mod tests {
         let plain = split_harness();
         let without = body_json(plain.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await).await;
         assert!(without.get("simklClientId").is_none(), "unset is absent, not empty");
+    }
+
+    /// Both are read on every start. Always asked again, so a kill-switch or a moved address lands at once, and
+    /// unchanged is a 304 carrying the same policy and tag rather than the whole table again.
+    #[tokio::test]
+    async fn config_and_routes_are_revalidated_every_time() {
+        let h = split_harness();
+        for path in ["/config", "/routes"] {
+            let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
+            assert_eq!(first.status(), StatusCode::OK, "{path}");
+            assert_eq!(first.headers()[header::CACHE_CONTROL], "no-cache", "{path}");
+            let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+            let again = h.send("GET", path, None, &[("host", "d.oxy.fi"), ("if-none-match", &etag)]).await;
+            assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
+            assert_eq!(again.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(again.headers()[header::ETAG], etag.as_str());
+            assert!(body_text(again).await.is_empty());
+        }
+        // A different face is a different table, and its tag says so.
+        let mut h = split_harness();
+        Arc::get_mut(&mut h.state).unwrap().routes_public =
+            Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
+        let public = h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await;
+        let lan = h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await;
+        assert_ne!(public.headers()[header::ETAG], lan.headers()[header::ETAG]);
     }
 
     /// Addresses come from `/routes` alone now (den #16): `/config` is the kill-switch and the update gate.
