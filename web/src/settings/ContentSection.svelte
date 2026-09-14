@@ -21,7 +21,14 @@
     WARNING_GROUPS,
   } from './catalogs';
   import { fetchCountries, fetchServices, matches, type Country, type Service } from './services';
-  import { change, toggled, type PrefChanges, type SyncedPrefs } from './values';
+  import {
+    change,
+    hashPin,
+    pinMatches,
+    toggled,
+    type PrefChanges,
+    type SyncedPrefs,
+  } from './values';
 
   let {
     prefs,
@@ -205,14 +212,15 @@
   const limitLabel = $derived(
     prefs.maturityCeiling === 'pg13' ? 'PG-13' : prefs.maturityCeiling === 'r' ? 'R' : 'None',
   );
-  function unlock() {
-    pinWrong = pinEntry !== pin;
+  async function unlock() {
+    pinWrong = !(pin && (await pinMatches(pin, pinEntry)));
     if (!pinWrong) unlocked = true;
     pinEntry = '';
   }
   async function setPin() {
     if (!/^\d{4}$/.test(newPin)) return;
-    if (await savePin(newPin)) {
+    // Hashed before it's written: the library carries the PIN's digest, never the PIN.
+    if (await savePin(await hashPin(newPin))) {
       newPin = '';
       unlocked = true;
     }
@@ -566,7 +574,8 @@
         {/if}
       </form>
       <p class="foot">
-        A PIN protects the maturity ceiling. It reaches your Apple TVs through your library.
+        A PIN protects the maturity ceiling. It reaches your Apple TVs through your library, and a
+        looser ceiling set here waits on each Apple TV until someone enters the PIN there.
       </p>
     {/if}
   </SettingRow>

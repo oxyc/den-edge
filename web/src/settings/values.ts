@@ -169,6 +169,38 @@ export function readTrust(row: SettingsRow | undefined): Map<string, string> {
   return keys;
 }
 
+const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+
+/**
+ * The parental PIN as `set:keys` carries it (den-spec library-v2 §3): `sha256:<salt>:<digest>`, the digest of the salt
+ * bytes followed by the PIN, so the PIN itself never sits in the library. Four digits make it slow to read, not
+ * impossible to guess.
+ */
+export async function hashPin(
+  pin: string,
+  salt: Uint8Array = crypto.getRandomValues(new Uint8Array(16)),
+): Promise<string> {
+  const input = new Uint8Array([...salt, ...new TextEncoder().encode(pin)]);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', input));
+  return `sha256:${base64(salt)}:${base64(digest)}`;
+}
+
+/** Whether a typed PIN is the stored one: hashed with its salt, or a bare four digits from an older client. */
+export async function pinMatches(stored: string, pin: string): Promise<boolean> {
+  const [scheme, salt, digest] = stored.split(':');
+  if (scheme !== 'sha256' || !salt || !digest) return /^\d{4}$/.test(stored) && stored === pin;
+  try {
+    return (
+      (await hashPin(
+        pin,
+        Uint8Array.from(atob(salt), (c) => c.charCodeAt(0)),
+      )) === stored
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** An Ed25519 public key as the TV takes one pasted: 32 bytes of base64, with or without an `ed25519:` prefix. */
 export function parsePublicKey(text: string): string | null {
   const body = text.trim().replace(/^ed25519:/i, '');

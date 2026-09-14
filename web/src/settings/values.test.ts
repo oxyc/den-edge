@@ -3,7 +3,9 @@ import { genreEntries, MOVIE_GENRES, TV_GENRES } from './catalogs';
 import {
   change,
   forgetDevice,
+  hashPin,
   parsePublicKey,
+  pinMatches,
   readDevices,
   readServers,
   readSyncedPrefs,
@@ -153,6 +155,18 @@ describe('synced prefs', () => {
     expect(parsePublicKey(`ed25519:${key}`)).toBe(key);
     expect(parsePublicKey(btoa('too short'))).toBeNull();
     expect(parsePublicKey('not base64!')).toBeNull();
+  });
+
+  it('keeps the PIN as a salted digest, and still takes a bare one from an older client', async () => {
+    const stored = await hashPin('1234', new Uint8Array(16).fill(1));
+    expect(stored).toMatch(/^sha256:AQEBAQEBAQEBAQEBAQEBAQ==:[A-Za-z0-9+/]{43}=$/);
+    expect(stored).not.toContain('1234');
+    expect(await pinMatches(stored, '1234')).toBe(true);
+    expect(await pinMatches(stored, '4321')).toBe(false);
+    // A fresh salt each time, so the same PIN twice doesn't read the same.
+    expect(await hashPin('1234')).not.toBe(await hashPin('1234'));
+    expect(await pinMatches('1234', '1234')).toBe(true);
+    expect(await pinMatches('sha256:not base64!:x', '1234')).toBe(false);
   });
 
   it('lists genres A–Z with Anime beside Animation, in both lists', () => {

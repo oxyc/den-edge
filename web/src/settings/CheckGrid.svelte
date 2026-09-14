@@ -36,8 +36,12 @@
           disabled={disabled || option.disabled}
           onchange={(event) => onchange(option.value, event.currentTarget.checked)}
         />
-        <!-- Before the label, and holding its place when unmarked, so every label in a column starts at the same
-             edge: in a grid cell wider than its label, a mark at the far end reads as belonging to the next one. -->
+        <span class="name"
+          >{option.label}{#if option.note}
+            <small>{option.note}</small>{/if}</span
+        >
+        <!-- Right after the label rather than at the cell's far end, where in a grid cell wider than its label it
+             would read as belonging to the next one. -->
         <svg class="mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           {#if hide}
             <path
@@ -47,10 +51,6 @@
             <path d="m5 12.5 4.5 4.5L19 7.5" />
           {/if}
         </svg>
-        <span class="name"
-          >{option.label}{#if option.note}
-            <small>{option.note}</small>{/if}</span
-        >
       </label>
     {/each}
   </div>
