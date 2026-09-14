@@ -47,7 +47,6 @@
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
-  import { navigate } from './lib/navigation';
   import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
@@ -55,6 +54,7 @@
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { nativeHls, trailerURLs } from './lib/reel';
   import { titleHref, type Route } from './lib/route';
+  import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
   import type { Routes } from './lib/routes';
   import { installsOf, type Addon } from './lib/scout';
@@ -519,7 +519,7 @@
    * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerURLs` reports a
    * failure as an empty list rather than throwing.
    */
-  function warmTrailer(title: Title) {
+  function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
@@ -528,12 +528,10 @@
     });
   }
 
-  const open = (title: Title) => {
-    warmTrailer(title);
-    navigate(titleHref(title));
-  };
-  /** Opening a title is browsing, not a library action — a guest does it as much as anyone. */
-  const select = open;
+  // Every link to a title warms its trailer as the pointer goes down, before the click has even landed — one
+  // listener at the document rather than a callback threaded through every row, card and screen, and it covers
+  // links this file has never heard of.
+  $effect(() => warmOnIntent(warmTrailer));
   /** The TV's hide rules, from the log's `set:prefs`. */
   const prefs = $derived.by(() => {
     void version;
@@ -884,15 +882,14 @@
     onplay={play}
     onplayhere={playHere}
     onepisode={markEpisodeSeen}
-    onselect={open}
     {shown}
   />
 {:else if (route.page === 'person' && !PersonScreen.current) || (route.page === 'search' && !SearchScreen.current)}
   <Loading label="Loading" page />
 {:else if route.page === 'person'}
-  <PersonScreen.current id={route.id} {tmdbKey} {active} onselect={open} />
+  <PersonScreen.current id={route.id} {tmdbKey} {active} />
 {:else if route.page === 'search'}
-  <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} onselect={select} />
+  <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} />
 {:else if route.page === 'watchlist'}
   {#if !link || !library}
     <p class="note">
@@ -939,7 +936,7 @@
             title={entry.title}
             caption={caption(entry)}
             progress={entry.fraction}
-            onselect={select && (() => select(entry.title))}
+            href={titleHref(entry.title)}
           />
         {/each}
       </PosterRow>
@@ -950,12 +947,12 @@
           <PosterCard
             {title}
             caption={title.year ? String(title.year) : undefined}
-            onselect={select && (() => select(title))}
+            href={titleHref(title)}
           />
         {/each}
       </PosterRow>
     {/if}
-    <Browse {rows} shown={browseShown} onselect={open} />
+    <Browse {rows} shown={browseShown} />
   {/if}
 {/if}
 

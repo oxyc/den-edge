@@ -2,6 +2,7 @@
   import Loading from './Loading.svelte';
   import DetailTabs from './DetailTabs.svelte';
   import PosterCard from './PosterCard.svelte';
+  import { titleHref } from '../lib/route';
   import {
     fetchPerson,
     fetchFilmography,
@@ -15,12 +16,10 @@
     id,
     tmdbKey,
     active = true,
-    onselect,
   }: {
     id: number;
     tmdbKey: string;
     active?: boolean;
-    onselect: (title: Title) => void;
     shown?: (title: Title) => boolean;
   } = $props();
   const panel = $props.id();
@@ -147,7 +146,7 @@
             <PosterCard
               title={c.title}
               caption={c.title.year ? String(c.title.year) : undefined}
-              onselect={() => onselect(c.title)}
+              href={titleHref(c.title)}
             />
           {/each}
         </div>

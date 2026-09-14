@@ -5,13 +5,10 @@
   import type { RowDef } from '../lib/catalog';
   import type { Title } from '../lib/library';
   import PosterCard from './PosterCard.svelte';
+  import { titleHref } from '../lib/route';
   import PosterRow from './PosterRow.svelte';
 
-  let {
-    row,
-    shown,
-    onselect,
-  }: { row: RowDef; shown: (title: Title) => boolean; onselect: (title: Title) => void } = $props();
+  let { row, shown }: { row: RowDef; shown: (title: Title) => boolean } = $props();
 
   /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
   const FILL = 8;
@@ -72,7 +69,7 @@
       <PosterCard
         {title}
         caption={title.year ? String(title.year) : undefined}
-        onselect={() => onselect(title)}
+        href={titleHref(title)}
       />
     {:else}
       {#if !done}

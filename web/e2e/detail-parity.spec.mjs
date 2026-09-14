@@ -251,7 +251,7 @@ test('season requests cannot overwrite a newer selection and retained detail and
     expect(portrait.height / portrait.width).toBeCloseTo(1.5, 3);
     await active().getByRole('button', { name: 'More', exact: true }).click();
     await active().getByRole('tab', { name: 'Production', exact: true }).click();
-    const card = active().getByRole('button', { name: 'Production 8 2018' });
+    const card = active().getByRole('link', { name: 'Production 8 2018' });
     await card.scrollIntoViewIfNeeded();
     const scroll = await page.evaluate(() => scrollY);
     expect(scroll).toBeGreaterThan(300);

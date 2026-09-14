@@ -5,20 +5,17 @@
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import type { Title } from '../lib/library';
 
   let {
     query,
     tmdbKey,
     atlas,
     prefs,
-    onselect,
   }: {
     query: string;
     tmdbKey: string;
     atlas: string | null;
     prefs: Prefs;
-    onselect?: (title: Title) => void;
   } = $props();
   const sources = $derived(searchSources(tmdbKey, undefined, atlas));
   const rulesKey = $derived(
@@ -76,7 +73,7 @@
   {:else if pending}
     <Loading label="Searching" />
   {:else if hits?.length}
-    <SearchResults {hits} {onselect} />
+    <SearchResults {hits} />
   {:else}
     <p class="note" role="status">
       {failed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}

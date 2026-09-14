@@ -8,18 +8,17 @@
   import type { Title } from '../lib/library';
   import PosterRow from './PosterRow.svelte';
   import PosterCard from './PosterCard.svelte';
+  import { titleHref } from '../lib/route';
   let {
     detail,
     tmdbKey,
     active,
     shown,
-    onselect,
   }: {
     detail: TitleDetail;
     tmdbKey: string;
     active: boolean;
     shown: (t: Title) => boolean;
-    onselect: (t: Title) => void;
   } = $props();
   let reached = $state(false);
   let rows = $state<{ heading: string; titles: Title[] }[]>([]);
@@ -87,7 +86,7 @@
       {#each group.titles as title (`${title.type}:${title.id}`)}<PosterCard
           {title}
           caption={title.year ? String(title.year) : undefined}
-          onselect={() => onselect(title)}
+          href={titleHref(title)}
         />{/each}
     </PosterRow>
   {/each}

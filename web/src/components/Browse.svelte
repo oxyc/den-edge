@@ -5,12 +5,7 @@
   import type { Title } from '../lib/library';
   import BrowseRow from './BrowseRow.svelte';
 
-  let {
-    rows,
-    shown,
-    onselect,
-  }: { rows: RowDef[]; shown: (title: Title) => boolean; onselect: (title: Title) => void } =
-    $props();
+  let { rows, shown }: { rows: RowDef[]; shown: (title: Title) => boolean } = $props();
 
   const STEP = 6;
   let count = $state(STEP);
@@ -36,7 +31,7 @@
 </script>
 
 {#each rows.slice(0, count) as row (row.id)}
-  <BrowseRow {row} {shown} {onselect} />
+  <BrowseRow {row} {shown} />
 {/each}
 <div bind:this={bottom} class="bottom" aria-hidden="true"></div>
 

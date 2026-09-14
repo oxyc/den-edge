@@ -129,10 +129,10 @@ for (const width of [320, 390, 1280])
       expect(homeY).toBeGreaterThan(300);
       await openSearch(page, width);
       await input(page).fill('Neon');
-      await expect(active(page).getByRole('button', { name: 'Film 108 2026' })).toBeVisible();
+      await expect(active(page).getByRole('link', { name: 'Film 108 2026' })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: test.info().outputPath(`search-${width}.png`) });
-      const card = active(page).getByRole('button', { name: 'Film 108 2026' });
+      const card = active(page).getByRole('link', { name: 'Film 108 2026' });
       await card.scrollIntoViewIfNeeded();
       const searchY = await page.evaluate(() => scrollY);
       const count = queries.length;
@@ -141,7 +141,7 @@ for (const width of [320, 390, 1280])
       await expect.poll(() => page.evaluate(() => scrollY)).toBe(0);
       await page.goBack();
       await expect(input(page)).toHaveValue('Neon');
-      await expect(active(page).getByRole('button', { name: 'Film 108 2026' })).toBeVisible();
+      await expect(active(page).getByRole('link', { name: 'Film 108 2026' })).toBeVisible();
       await expect.poll(() => page.evaluate(() => scrollY)).toBe(searchY);
       expect(queries.length).toBe(count);
       await page.goBack();
@@ -201,12 +201,12 @@ test('a late search cannot replace a newer query', async () => {
     await input(page).fill('Slow');
     await expect.poll(() => queries.includes('Slow')).toBe(true);
     await input(page).fill('Neon');
-    await expect(active(page).getByRole('button', { name: 'Film 100 2026' })).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
     const response = page.waitForResponse((r) => r.url().includes('query=Slow'));
     release();
     await response;
-    await expect(active(page).getByRole('button', { name: 'Slow result 2026' })).toHaveCount(0);
-    await expect(active(page).getByRole('button', { name: 'Film 100 2026' })).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'Slow result 2026' })).toHaveCount(0);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page).toHaveURL(HOME);
   } finally {

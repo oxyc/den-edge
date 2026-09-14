@@ -55,7 +55,6 @@
     onplay,
     onplayhere,
     onepisode,
-    onselect,
     shown = () => true,
   }: {
     ref: { type: MediaType; id: number };
@@ -82,7 +81,6 @@
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
-    onselect: (title: Title) => void;
     shown?: (title: Title) => boolean;
   } = $props();
   const panel = $props.id();
@@ -444,7 +442,7 @@
         />{/each}
     </PosterRow>
   {/if}
-  <RelatedTitles detail={d} {tmdbKey} {active} {shown} {onselect} />
+  <RelatedTitles detail={d} {tmdbKey} {active} {shown} />
 {/if}
 
 <style>

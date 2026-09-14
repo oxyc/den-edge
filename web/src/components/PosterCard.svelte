@@ -1,8 +1,8 @@
 <!-- A poster with its title — the one card every row uses (the TV's PosterCard). Posters come straight from
-     TMDB's image CDN, which needs no key. With `href` the whole card is a link to the title, which is what lets
-     it be opened in a new tab, copied, or middle-clicked like any other link on the web; the router intercepts
-     the ordinary click. `onselect` is the older callback form, for a card that goes somewhere that is not a
-     page. A movie scout found nothing to play for is faded, as on the TV. -->
+     TMDB's image CDN, which needs no key. The whole card is a link to the title, which is what lets it be
+     opened in a new tab, copied, or middle-clicked like any other link on the web; the router intercepts the
+     ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
+     faded, as on the TV. -->
 <script lang="ts">
   import { availability } from '../lib/availability.svelte';
   import type { Title } from '../lib/library';
@@ -12,13 +12,12 @@
     caption,
     progress,
     href,
-    onselect,
   }: {
     title: Title;
     caption?: string;
     progress?: number;
+    /** Where the card leads. Without one it is not a link: a card that shows a title and opens nothing. */
     href?: string;
-    onselect?: () => void;
   } = $props();
   const poster = $derived(
     title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined,
@@ -51,8 +50,6 @@
 
 {#if href}
   <a class="card pick" class:faded {href}>{@render body()}</a>
-{:else if onselect}
-  <button type="button" class="card pick" class:faded onclick={onselect}>{@render body()}</button>
 {:else}
   <figure class="card" class:faded>{@render body()}</figure>
 {/if}

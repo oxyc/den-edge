@@ -18,6 +18,5 @@
     onreact={noop}
     onplay={noop}
     onepisode={noop}
-    onselect={noop}
   />
 </main>

@@ -33,7 +33,6 @@
       onplay={noop}
       onplayhere={browserPlay ? noop : undefined}
       onepisode={noop}
-      onselect={noop}
     />
   </div>
   <div style="height:1800px"></div>

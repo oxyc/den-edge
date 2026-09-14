@@ -2,8 +2,6 @@
   import Router from '../src/Router.svelte';
   import Detail from '../src/components/Detail.svelte';
   import Person from '../src/components/Person.svelte';
-  import { navigate } from '../src/lib/navigation';
-  import { titleHref } from '../src/lib/route';
   import type { EpisodeRow, TitleRow } from '../src/lib/wire';
   import type { Title } from '../src/lib/library';
   import '../src/app.css';
@@ -38,7 +36,6 @@
       ],
     ]),
   );
-  const select = (t: Title) => navigate(titleHref(t));
   function play(t: Title, s?: number, e?: number, filename?: string) {
     document.dispatchEvent(
       new CustomEvent('fixture:play', { detail: { id: t.id, season: s, episode: e, filename } }),
@@ -62,12 +59,7 @@
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
   <Router onchange={noop}>
     {#snippet children(route, active)}
-      {#if route.page === 'person'}<Person
-          id={route.id}
-          tmdbKey="fixture-key"
-          {active}
-          onselect={select}
-        />
+      {#if route.page === 'person'}<Person id={route.id} tmdbKey="fixture-key" {active} />
       {:else if route.page === 'title'}
         <Detail
           ref={{ type: route.type, id: route.id }}
@@ -88,7 +80,6 @@
           onplay={play}
           onplayhere={play}
           onepisode={seen}
-          onselect={select}
         />
       {/if}
     {/snippet}
