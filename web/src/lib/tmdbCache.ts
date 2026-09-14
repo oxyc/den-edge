@@ -68,6 +68,24 @@ function keyOf(url: URL): string {
   return kept.toString();
 }
 
+/**
+ * Is this body one of TMDB's answers, rather than something standing where one should be?
+ *
+ * An error envelope (`success: false`), a proxy's own refusal, a page of HTML from a dev server: all of them
+ * arrive as a 200 and none of them names a title. A title's details are kept for months, so without this one
+ * such answer stands for months — the page saying it cannot load a film that TMDB serves perfectly well, and
+ * no amount of reloading asking again.
+ */
+function keepable(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    return (parsed as { success?: unknown }).success !== false;
+  } catch {
+    return false;
+  }
+}
+
 function answer(body: string): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
 }
@@ -93,7 +111,9 @@ export function cachingFetch(
     // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
     // already has rather than asking again.
     const asked = proxied(url);
-    const kept = await store.get(key).catch(() => undefined);
+    const stored = await store.get(key).catch(() => undefined);
+    // Anything unusable is treated as absent, which also heals what an earlier version kept.
+    const kept = stored && keepable(stored.body) ? stored : undefined;
     const fresh = freshFor(url.pathname);
     const age = kept ? now() - kept.fetchedAt : Infinity;
     if (kept && age < fresh) return answer(kept.body);
@@ -103,7 +123,9 @@ export function cachingFetch(
         // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
         void network(asked, { ...init, signal: undefined })
           .then(async (res) => {
-            if (res.ok) await store.put(key, { body: await res.text(), fetchedAt: now() });
+            if (!res.ok) return;
+            const body = await res.text();
+            if (keepable(body)) await store.put(key, { body, fetchedAt: now() });
           })
           .catch(() => undefined)
           .finally(() => refreshing.delete(key));
@@ -114,7 +136,7 @@ export function cachingFetch(
       const res = await network(asked, init);
       if (!res.ok) return kept && res.status >= 500 ? answer(kept.body) : res;
       const body = await res.text();
-      void store.put(key, { body, fetchedAt: now() }).catch(() => undefined);
+      if (keepable(body)) void store.put(key, { body, fetchedAt: now() }).catch(() => undefined);
       return answer(body);
     } catch (error) {
       if (kept) return answer(kept.body);

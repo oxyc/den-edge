@@ -128,6 +128,30 @@ describe('cachingFetch', () => {
     expect(pruned).toEqual([5]);
   });
 
+  /**
+   * A title's details are kept for months, so an answer that names no title would stand for months —
+   * the page insisting it cannot load a film TMDB serves perfectly well, with reloading no help.
+   */
+  it('never keeps an answer that is not TMDB’s, and asks again for one already kept', async () => {
+    const { entries, store } = memory();
+    const refusals: typeof fetch = async () =>
+      new Response(JSON.stringify({ success: false, status_message: 'Invalid API key' }), {
+        status: 200,
+      });
+    await cachingFetch(store, refusals, () => 0)(detail);
+    expect(entries.size, 'an error envelope is not an answer').toBe(0);
+
+    const net = network();
+    entries.set('https://api.themoviedb.org/3/movie/603?append_to_response=credits', {
+      body: '<!doctype html>',
+      fetchedAt: 0,
+    });
+    expect(await (await cachingFetch(store, net.fetchImpl, () => 0)(detail)).json()).toEqual({
+      n: 1,
+    });
+    expect(net.asked, 'what was kept was unusable, so it was asked again').toHaveLength(1);
+  });
+
   it('keeps details for as long as TMDB allows, and lists for hours', () => {
     // What a film is called, when it came out and who was in it does not change, so re-asking every month
     // bought nothing but a wait. den-edge keeps them the same length (`tmdb.rs`), and TMDB's terms set both.
