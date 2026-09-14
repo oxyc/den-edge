@@ -43,8 +43,17 @@
   const ADVANCE_MS = 15_000;
   /** At most this many dots, sliding to keep the current one in view: forty bullets is a bar, not a pager. */
   const DOT_WINDOW = 9;
-  /** How long a slide stands still before its trailer starts: paging past five shouldn't start five videos. */
-  const SETTLE_MS = 2000;
+  /**
+   * How long a slide stands still before its trailer is even LOOKED UP: paging past five shouldn't
+   * resolve five of them.
+   *
+   * It used to be two seconds, and it gated the lookup and the playback together — so the slide sat
+   * doing nothing for two seconds and only then began a resolve that takes about a second itself,
+   * and a first frame that takes longer. Nothing needs the wait twice: the lookup is its own delay
+   * before anything can play, so this only has to be long enough to skip the slides being flicked
+   * past.
+   */
+  const SETTLE_MS = 500;
 
   const shown = $derived(titles.slice(0, SLIDES));
   let index = $state(0);

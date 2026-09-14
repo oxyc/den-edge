@@ -60,6 +60,21 @@
    */
   let touched = $state(false);
 
+  /**
+   * A tap brings up the controls and turns the sound on together.
+   *
+   * The tap is a gesture, and a gesture is the only thing that may unmute anything — so the moment a
+   * viewer reaches for this trailer is the one moment we are allowed to give them its audio.
+   */
+  function tap() {
+    touched = true;
+    const player = video;
+    if (!player) return;
+    sound = true;
+    player.muted = false;
+    void player.play().catch(() => {});
+  }
+
   /** Take over the screen, with the audio on. */
   async function expand() {
     const player = video;
@@ -253,7 +268,7 @@
     playsinline
     preload={allowed ? 'auto' : 'metadata'}
     controls={mobile && touched && !!source && !failed}
-    onclick={() => (touched = true)}
+    onclick={tap}
     aria-label="Trailer"
     aria-hidden={!mobile}
     onloadedmetadata={metadata}
