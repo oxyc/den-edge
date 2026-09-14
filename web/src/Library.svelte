@@ -485,8 +485,10 @@
    * failure as an empty list rather than throwing.
    */
   function warmTrailer(title: Title) {
-    if (!reel || !title.imdbId) return;
-    void trailerURLs(reel, title.type, title.imdbId, routes, {
+    // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
+    // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
+    if (!reel) return;
+    void trailerURLs(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
       prewarm: nativeHls() ? 'direct' : 'full',
     });
   }

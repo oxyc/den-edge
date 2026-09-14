@@ -14,7 +14,9 @@ use std::path::{Component, Path, PathBuf};
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
 /// `tailscale serve` on the tailnet) — TMDB's images and API, OMDb's ratings (both BYOK, straight from the
 /// browser), YouTube's embed for trailers, YouTube's own media hosts — den-reel's `/direct` hands the page a
-/// googlevideo URL so the trailer streams from there instead of crossing the homelab twice — and den-remux's
+/// googlevideo URL so the trailer streams from there instead of crossing the homelab twice — Apple's preview
+/// host, whose trailers are streamed from their CDN rather than kept here, which is what their terms ask —
+/// and den-remux's
 /// video: `blob:` for hls.js, which hands the video element a MediaSource, and `remux`, den-remux's https
 /// origins from the routes table (already checked to be bare origins).
 ///
@@ -26,7 +28,7 @@ fn csp(remux: &[String]) -> String {
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
-         media-src 'self' blob: https://*.googlevideo.com{remux}; \
+         media-src 'self' blob: https://*.googlevideo.com https://video-ssl.itunes.apple.com{remux}; \
          connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{remux}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"

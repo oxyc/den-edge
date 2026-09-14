@@ -6,6 +6,7 @@
   import type { Routes } from '../lib/routes';
   let {
     type,
+    tmdbId,
     imdbId,
     backdrop,
     poster,
@@ -15,6 +16,8 @@
     autoplay = true,
   }: {
     type: MediaType;
+    /** What reel would rather be asked by, and what every title has — unlike the imdb id. */
+    tmdbId?: number;
     imdbId?: string;
     backdrop?: string;
     poster?: string;
@@ -143,15 +146,15 @@
   });
 
   $effect(() => {
-    const [id, base, mediaType, table] = [imdbId, reel, type, routes];
+    const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
     candidates = [];
     candidate = 0;
     playing = ended = failed = false;
-    if (!autoplay || !active || reduced || saving || !id || !base) return;
+    if (!autoplay || !active || reduced || saving || (!ids.tmdb && !ids.imdb) || !base) return;
     const controller = new AbortController();
     // Where HLS plays natively this hero uses YouTube's own URL, so reel need not spend a download
     // on it. Everywhere else `/play` is the only source that carries sound, and it must be warm.
-    void trailerURLs(base, mediaType, id, table, {
+    void trailerURLs(base, mediaType, ids, table, {
       signal: controller.signal,
       prewarm: nativeHls() ? 'direct' : 'full',
     }).then((found) => {

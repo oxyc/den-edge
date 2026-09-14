@@ -214,6 +214,7 @@
       <DetailMedia
         {autoplay}
         type={ref.type}
+        tmdbId={ref.id}
         imdbId={d.imdbId}
         {active}
         {reel}

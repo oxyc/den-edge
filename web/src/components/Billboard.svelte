@@ -200,15 +200,16 @@
     const imdbId = detail?.imdbId;
     const base = reel;
     const table = routes;
-    if (!active || !title || !imdbId || !base || !onScreen || still() || saving() || ambientFailed)
-      return;
+    // No imdb id required any more: reel is asked by the tmdb id every title carries, and told the imdb
+    // one only when this slide's details have arrived carrying it.
+    if (!active || !title || !base || !onScreen || still() || saving() || ambientFailed) return;
     // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
     if (untrack(() => ambient)) return;
     let live = true;
     const timer = setTimeout(() => {
       // Only where YouTube's own stream can actually be played here. Everywhere else reel's copy is
       // what runs, and it has to be warm.
-      void trailerURL(base, title.type, imdbId, table ?? {}, {
+      void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: nativeHls() ? 'direct' : 'full',
       }).then(async (url) => {
         if (!live || !url) return;

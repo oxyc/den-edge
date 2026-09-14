@@ -553,7 +553,10 @@ pub mod tests {
         // And YouTube's own media hosts, which a trailer resolved through den-reel's /direct streams
         // from — without them the browser refuses the video and the page silently falls back to /play.
         assert!(
-            csp.contains("media-src 'self' blob: https://*.googlevideo.com https://pve.example:8443;"),
+            csp.contains(
+                "media-src 'self' blob: https://*.googlevideo.com \
+                 https://video-ssl.itunes.apple.com https://pve.example:8443;"
+            ),
             "{csp}"
         );
         // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows.

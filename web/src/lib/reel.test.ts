@@ -46,7 +46,7 @@ const meta = {
 
 describe('trailerURL', () => {
   const ask = (routes: Routes, fetchImpl: typeof fetch, secure = true) =>
-    trailerURL('/reel/cfg', 'movie', 'tt0111161', routes, { fetchImpl, secure });
+    trailerURL('/reel/cfg', 'movie', { imdb: 'tt0111161' }, routes, { fetchImpl, secure });
 
   it('takes reel’s best trailer and points it at an address this page can reach, signature and all', async () => {
     expect(await ask(ROUTES, answering(meta))).toBe(
@@ -174,7 +174,7 @@ describe('trailer candidates', () => {
       },
     };
     expect(
-      await trailerURLs('/reel/cfg', 'movie', 'tt0111161', ROUTES, {
+      await trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
         fetchImpl: answering(body),
         secure: true,
       }),
@@ -182,5 +182,28 @@ describe('trailer candidates', () => {
       'https://pve.example:8443/reel/play/first.mp4?s=one',
       'https://pve.example:8443/reel/play/second.mp4?s=two',
     ]);
+  });
+
+  it('asks by the tmdb id, colon unencoded, and names the imdb id beside it', async () => {
+    let asked = '';
+    const record: typeof fetch = async (url) => {
+      asked = String(url);
+      return new Response(JSON.stringify({ meta: { links: [] } }), { status: 200 });
+    };
+
+    await trailerURLs('/reel/cfg', 'movie', { tmdb: 157336, imdb: 'tt0816692' }, ROUTES, {
+      fetchImpl: record,
+      secure: true,
+    });
+    // NOT `tmdb%3A157336`: reel matches the prefix against the raw path, so an encoded colon would
+    // simply never be recognised and every one of these would quietly resolve the long way round.
+    expect(asked).toBe('/reel/cfg/meta/movie/tmdb:157336.json?imdb=tt0816692');
+
+    // Only an imdb id: asked for as it always was, with nothing to name alongside it.
+    await trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0816692' }, ROUTES, {
+      fetchImpl: record,
+      secure: true,
+    });
+    expect(asked).toBe('/reel/cfg/meta/movie/tt0816692.json');
   });
 });

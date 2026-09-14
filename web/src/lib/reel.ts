@@ -22,11 +22,42 @@ function reachable(
   return null;
 }
 
+/**
+ * What reel is told about a title.
+ *
+ * A tmdb id is the one it can use outright — asked by an imdb id, it spends a lookup turning it into the
+ * tmdb id we already had. Naming BOTH spares it every later conversion too, since the sources it falls
+ * back on are keyed differently from each other. And a title with no imdb id can reach it at all this way,
+ * where before it simply went without a trailer.
+ */
+export interface TitleIds {
+  tmdb?: number;
+  imdb?: string;
+}
+
+/** Where reel is asked about this title: the id it prefers, and the other one as a companion. */
+function metaURL(
+  base: string,
+  type: MediaType,
+  ids: TitleIds,
+  prewarm: 'full' | 'direct',
+): string | null {
+  // Never encoded: reel matches `tmdb:` on the raw path, so a percent-encoded colon would not be seen.
+  const id =
+    ids.tmdb !== undefined ? `tmdb:${ids.tmdb}` : ids.imdb ? encodeURIComponent(ids.imdb) : null;
+  if (!id) return null;
+  const params = new URLSearchParams();
+  if (prewarm === 'direct') params.set('prewarm', 'direct');
+  if (ids.tmdb !== undefined && ids.imdb) params.set('imdb', ids.imdb);
+  const query = params.toString();
+  return `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${id}.json${query ? `?${query}` : ''}`;
+}
+
 /** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
 export async function trailerURLs(
   base: string,
   type: MediaType,
-  imdbId: string,
+  ids: TitleIds,
   routes: Routes,
   {
     fetchImpl = fetch,
@@ -47,13 +78,10 @@ export async function trailerURLs(
 ): Promise<string[]> {
   const origin = reachable(routes.reel ?? [], secure);
   if (!origin) return [];
+  const asked = metaURL(base, type, ids, prewarm);
+  if (!asked) return [];
   try {
-    const res = await fetchImpl(
-      `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${encodeURIComponent(imdbId)}.json${
-        prewarm === 'direct' ? '?prewarm=direct' : ''
-      }`,
-      { signal, cache: 'no-cache' },
-    );
+    const res = await fetchImpl(asked, { signal, cache: 'no-cache' });
     if (!res.ok) return [];
     const body = await res.json();
     if (!Array.isArray(body?.meta?.links)) return [];
@@ -186,7 +214,7 @@ export async function directTrailer(
 export async function trailerURL(
   base: string,
   type: MediaType,
-  imdbId: string,
+  ids: TitleIds,
   routes: Routes,
   options: {
     fetchImpl?: typeof fetch;
@@ -195,5 +223,5 @@ export async function trailerURL(
     prewarm?: 'full' | 'direct';
   } = {},
 ): Promise<string | null> {
-  return (await trailerURLs(base, type, imdbId, routes, options))[0] ?? null;
+  return (await trailerURLs(base, type, ids, routes, options))[0] ?? null;
 }
