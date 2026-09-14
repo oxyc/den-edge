@@ -75,7 +75,7 @@ async function setup(
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({ contentType: 'image/svg+xml', body: art }),
   );
-  await page.route('https://www.omdbapi.com/**', async (r) => {
+  await page.route('**/ratings/imdb/**', async (r) => {
     await ratingsGate;
     await r.fulfill({
       json: {
