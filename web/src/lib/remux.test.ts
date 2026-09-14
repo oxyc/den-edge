@@ -108,6 +108,19 @@ describe('startSession', () => {
       { failure: 'unreachable' },
     );
   });
+
+  /** A GPU converting something else can mean minutes; knocking every twenty seconds is work it doesn't need. */
+  it('carries the wait den-remux named, and leaves the caller its own when it named none', async () => {
+    const plain = { ...want, subtitleLanguages: [] };
+    const busy = (headers?: HeadersInit) =>
+      startSession(
+        plain,
+        async () =>
+          new Response(JSON.stringify({ error: 'too_many_sessions' }), { status: 429, headers }),
+      );
+    expect(await busy({ 'retry-after': '90' })).toEqual({ failure: 'busy', retryMs: 90_000 });
+    expect(await busy()).toEqual({ failure: 'busy' });
+  });
 });
 
 describe('findRemux', () => {

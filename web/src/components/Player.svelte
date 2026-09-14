@@ -59,7 +59,7 @@
   const REPORT_MS = 60_000;
   /** How long a video may go without a picture before it counts as one the browser can't play. */
   const STUCK_MS = 30_000;
-  /** How long before asking again while every slot, or the GPU, is taken. */
+  /** How long before asking again while every slot, or the GPU, is taken — unless den-remux names its own. */
   const RETRY_MS = 20_000;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
@@ -150,7 +150,9 @@
     if ('failure' in result) {
       failure = result.failure;
       if (result.failure === 'busy' || result.failure === 'transcode')
-        retry = setTimeout(() => void begin(pick), RETRY_MS);
+        // What it asked for, where it said: a converting GPU can mean minutes, and knocking every
+        // twenty seconds until then is work for a box that is already the reason we are waiting.
+        retry = setTimeout(() => void begin(pick), result.retryMs ?? RETRY_MS);
       return;
     }
     session = result;

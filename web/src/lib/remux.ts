@@ -4,6 +4,7 @@
 // (tailscale serve), and a cookie from a one-time browser key lets this browser start sessions.
 
 import type { Playable } from './playable';
+import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
 
 export interface Session {
@@ -53,6 +54,13 @@ export interface Want {
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
+
+/** A refusal, and — when den-remux said so — how long it asked to be left alone for. */
+export interface Refused {
+  failure: Failure;
+  /** From its `Retry-After`; absent when it named none, and the caller's own interval stands. */
+  retryMs?: number;
+}
 
 /** A direct LAN/tailnet probe must finish even when an unreachable route silently drops packets. */
 export const REMUX_PROBE_TIMEOUT_MS = 3_000;
@@ -156,7 +164,7 @@ export async function startSession(
   want: Want,
   fetchImpl: typeof fetch = fetch,
   base = '/remux',
-): Promise<Session | { failure: Failure }> {
+): Promise<Session | Refused> {
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
     .filter((install) => subtitleVerdicts.get(install) !== false)
@@ -192,7 +200,10 @@ export async function startSession(
       subtitleVerdicts.set(candidate, false); // not den-subtitles: the next, or none
       continue;
     }
-    return { failure: failureOf(res.status, error) };
+    // A zero fallback here means "it named nothing", which is the caller's own interval rather than
+    // a wait of no time at all.
+    const named = retryAfterMs(res, 0) || undefined;
+    return { failure: failureOf(res.status, error), retryMs: named };
   }
   return { failure: 'unreachable' };
 }
