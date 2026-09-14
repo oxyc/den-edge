@@ -1,30 +1,39 @@
+// doesthedogdie's content warnings for a title, as den-edge keeps them (`/warnings/imdb/<id>`).
+//
+// Asked of this origin, never of doesthedogdie: the key rides an `x-api-key` header, so a browser preflights, and
+// they answer none. den-edge looks a title up once and keeps it for every browser, so a key here only decides
+// whether a title nobody has opened yet may be looked up: this page's own key when it has one, the household's for
+// a member of the library (`relayFetch` proves membership). A visitor sees what is already kept.
 import type { TitleDetail } from './detail';
+import { relayFetch } from './relayFetch';
+
 export interface Warning {
   id: number;
   label: string;
   votes: number;
 }
+
+/** The warnings to show: confirmed by more yes votes than no, never a spoiler, and among `categories` if any are picked. */
 export function parseWarnings(body: unknown, categories: string[]): Warning[] {
-  const rows = (body as { topicItemStats?: unknown } | null)?.topicItemStats;
+  const rows = (body as { warnings?: unknown } | null)?.warnings;
   if (!Array.isArray(rows)) return [];
   return rows
     .flatMap((r): Warning[] => {
-      const t = r?.topic,
-        yes = Number(r?.yesSum ?? 0),
-        no = Number(r?.noSum ?? 0);
+      const id = Number(r?.id),
+        yes = Number(r?.yes ?? 0),
+        no = Number(r?.no ?? 0);
       if (
-        !t ||
-        !Number.isFinite(t.id) ||
-        t.isSpoiler ||
-        !categories.includes(t.TopicCategory?.name) ||
+        !Number.isInteger(id) ||
+        r?.spoiler ||
+        (categories.length && !categories.includes(r?.category)) ||
         !Number.isFinite(yes) ||
         !Number.isFinite(no) ||
         yes <= no ||
         yes < 1
       )
         return [];
-      const label = t.smmwDescription || t.doesName || t.name;
-      return typeof label === 'string' && label.trim() ? [{ id: t.id, label, votes: yes }] : [];
+      const label = r?.name;
+      return typeof label === 'string' && label.trim() ? [{ id, label, votes: yes }] : [];
     })
     .sort((a, b) => b.votes - a.votes);
 }
@@ -34,32 +43,21 @@ export async function fetchWarnings(
   key: string,
   categories: string[],
   signal?: AbortSignal,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<{ id: number; warnings: Warning[] } | null> {
-  if (!key || !categories.length) return null;
-  // Through den-edge, not doesthedogdie itself. The key rides an `x-api-key` header, so the browser
-  // preflights — and they answer no preflight and send no `Access-Control-Allow-Origin`, so a page
-  // cannot reach them however its CSP is written. The TV can, because a native request is not
-  // CORS-checked. `/warnings/` forwards this one along with the key and hands back their JSON.
-  const get = async (path: string) => {
-    const res = await fetchImpl('/warnings' + path, {
-      signal,
-      headers: { accept: 'application/json', 'x-api-key': key },
-    });
-    return res.ok ? await res.json() : null;
-  };
+  if (!detail.imdbId) return null;
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (key) headers['x-api-key'] = key;
   try {
-    const search = await get(`/search?q=${encodeURIComponent(detail.title.title)}`);
-    const items = Array.isArray(search?.items) ? search.items : [];
-    const match =
-      items.find((i: { imdbId?: string }) => detail.imdbId && i.imdbId === detail.imdbId) ??
-      items.find(
-        (i: { name?: string; releaseYear?: string }) =>
-          i.name?.toLocaleLowerCase() === detail.title.title.toLocaleLowerCase() &&
-          (!detail.title.year || Number(i.releaseYear) === detail.title.year),
-      );
-    if (!match || !Number.isInteger(match.id) || match.id < 1) return null;
-    return { id: match.id, warnings: parseWarnings(await get(`/media/${match.id}`), categories) };
+    const res = await fetchImpl(`/warnings/imdb/${encodeURIComponent(detail.imdbId)}`, {
+      signal,
+      headers,
+    });
+    if (!res.ok) return null;
+    const body: unknown = await res.json();
+    const id = Number((body as { id?: unknown } | null)?.id);
+    if (!Number.isInteger(id) || id < 1) return null;
+    return { id, warnings: parseWarnings(body, categories) };
   } catch {
     return null;
   }

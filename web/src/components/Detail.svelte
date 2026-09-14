@@ -284,11 +284,7 @@
 {:else}
   {@const d = detail}
   <header class="hero" use:stableViewportHeight>
-    {#if warningKey && warningCategories.length}<ContentWarnings
-        detail={d}
-        apiKey={warningKey}
-        categories={warningCategories}
-      />{/if}
+    <ContentWarnings detail={d} apiKey={warningKey} categories={warningCategories} />
     <div class="visual">
       <DetailMedia
         {autoplay}

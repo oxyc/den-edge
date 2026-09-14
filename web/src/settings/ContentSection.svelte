@@ -35,7 +35,6 @@
     prefs,
     tmdbKey,
     hasOmdbKey,
-    hasWarningsKey,
     pin,
     disabled,
     save,
@@ -45,7 +44,6 @@
     /** What TMDB's country and service directories are asked with: the library's key, or den-edge's. */
     tmdbKey: string;
     hasOmdbKey: boolean;
-    hasWarningsKey: boolean;
     /** The parental PIN, when one is set. */
     pin?: string;
     disabled: boolean;
@@ -409,11 +407,6 @@
         >
       {/if}
     </p>
-    {#if !hasWarningsKey}
-      <p class="status bad">
-        Add your doesthedogdie.com key under <a href="#doesthedogdie">Content warnings</a> first.
-      </p>
-    {/if}
     <div class="warning-groups">
       {#each WARNING_GROUPS as group (group.name)}
         <CheckGrid

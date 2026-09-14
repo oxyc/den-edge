@@ -69,13 +69,12 @@ export const KEY_SERVICES: readonly KeyService[] = [
     about:
       'doesthedogdie.com adds crowdsourced content warnings — a dog dies, flashing lights, and ~100 more — to detail pages (free key at doesthedogdie.com/api).',
     placeholder: 'Your doesthedogdie.com API key',
-    // Any answer that isn't a refusal is a working key, as on the TV: a search that finds nothing still is one.
-    // Asked through den-edge's `/warnings/` rather than doesthedogdie directly: the key travels in a header, so
-    // the browser preflights, and they answer none — a page simply cannot reach them. The proxy passes their
-    // status through, so a refusal is still theirs and not ours.
+    // Asked through den-edge's `/warnings/check` rather than doesthedogdie directly: the key travels in a header,
+    // so the browser preflights, and they answer none — a page simply cannot reach them. den-edge asks their
+    // cheapest question with it and passes a refusal on as 401.
     check: (key, fetchImpl = fetch) =>
       ask(
-        '/warnings/search?q=Old%20Yeller',
+        '/warnings/check',
         { headers: { accept: 'application/json', 'x-api-key': key } },
         fetchImpl,
         async () => true,

@@ -93,6 +93,14 @@ pub struct AppState {
     pub tmdb_daily_max: Option<u32>,
     /// Today (as a day number) and what has been spent of it.
     pub tmdb_spent: Mutex<(u64, u32)>,
+    /// The household's doesthedogdie key (env `DOESTHEDOGDIE_KEY`), spent looking up a title a library member opens
+    /// that nobody has yet (`warnings.rs`). `None` leaves lookups to callers who bring their own key.
+    pub warnings_key: Option<String>,
+    /// Where each title's warnings are kept (`<DATA_DIR>/warnings`), for every browser that opens it.
+    pub warnings_cache_dir: Option<std::path::PathBuf>,
+    /// Until when the household key is rested (ms): doesthedogdie said it was rate-limited, or its month is nearly
+    /// spent.
+    pub warnings_rest_until: Mutex<u64>,
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
@@ -151,6 +159,9 @@ impl AppState {
             tmdb_cache_dir: None,
             tmdb_daily_max: None,
             tmdb_spent: Mutex::new((0, 0)),
+            warnings_key: None,
+            warnings_cache_dir: None,
+            warnings_rest_until: Mutex::new(0),
             simkl_client_id: None,
             guest_media_slots: Arc::new(tokio::sync::Semaphore::new(relay::GUEST_MEDIA_STREAMS)),
             media_daily_max: None,
@@ -229,10 +240,14 @@ async fn main() {
     if state.tmdb_key.is_some() {
         state.tmdb_cache_dir = Some(std::path::Path::new(&dir).join("tmdb"));
     }
+    // Always kept, household key or not: a title looked up with a caller's own key is kept for everyone too.
+    state.warnings_key = env_opt("DOESTHEDOGDIE_KEY");
+    state.warnings_cache_dir = Some(std::path::Path::new(&dir).join("warnings"));
     let state = Arc::new(state);
     inbox::sweep(&state).await;
     tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
     tokio::spawn(tmdb::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(warnings::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
@@ -245,7 +260,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={}",
+         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -265,6 +280,7 @@ async fn main() {
             (Some(_), None) => "on".to_owned(),
             (Some(_), Some(max)) => format!("on(max {max}/day)"),
         },
+        if state.warnings_key.is_some() { "household-key" } else { "own-keys" },
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());

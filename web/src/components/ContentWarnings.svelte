@@ -24,10 +24,9 @@
       <ul>
         {#each content.warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
       </ul>
-      <a
-        href={`https://www.doesthedogdie.com/media/${content.id}`}
-        target="_blank"
-        rel="noopener noreferrer">Does the Dog Die?</a
+      <!-- The wording doesthedogdie's API terms require wherever their data shows (§6), word for word. -->
+      <a href="https://www.doesthedogdie.com" target="_blank" rel="noopener noreferrer"
+        >Powered by DoesTheDogDie.com</a
       >
     </div>
   </details>

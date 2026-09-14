@@ -416,7 +416,7 @@ fn spend(state: &AppState) -> bool {
 
 /// A kept answer and how old it is. The file's own timestamp is when it was fetched, so there is no header to
 /// write, parse or keep in step.
-async fn read(file: &Path) -> Option<(Bytes, Duration)> {
+pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration)> {
     let bytes = tokio::fs::read(file).await.ok()?;
     let age = tokio::fs::metadata(file)
         .await
@@ -429,7 +429,7 @@ async fn read(file: &Path) -> Option<(Bytes, Duration)> {
 
 /// Written beside and renamed over, so a reader never sees half an answer. A cache that cannot be written is
 /// not a failure worth refusing a request for.
-async fn write(file: &Path, body: &Bytes) {
+pub(crate) async fn write(file: &Path, body: &Bytes) {
     let Some(dir) = file.parent() else { return };
     if tokio::fs::create_dir_all(dir).await.is_err() {
         return;

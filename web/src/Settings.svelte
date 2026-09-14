@@ -203,7 +203,6 @@
       {prefs}
       tmdbKey={tmdbKeyOf(keys)}
       hasOmdbKey={!!readApiKey(keys, 'omdb')}
-      hasWarningsKey={!!readApiKey(keys, 'doesthedogdie')}
       pin={readApiKey(keys, 'parentalPIN')}
       {disabled}
       save={savePrefs}
@@ -221,7 +220,6 @@
       {edgeVersion}
       credits={mergeCredits(addonCredits)}
       hasOmdbKey={!!readApiKey(keys, 'omdb')}
-      hasWarningsKey={!!readApiKey(keys, 'doesthedogdie')}
     />
   </div>
 </div>
