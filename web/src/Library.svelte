@@ -592,7 +592,15 @@
     };
   });
   const rows = $derived.by(() => {
-    if (!pages) return [];
+    if (!pages) {
+      // No TMDB key, so no TMDB rows — a guest, until the server-side key lands. atlas needs no key at all:
+      // its rows carry their own titles, posters and ids, and the poster images come from a CDN that asks
+      // for none. Without this a guest's home is simply blank, which is what it was.
+      if (!atlas) return [];
+      if (route.page === 'movies' || route.page === 'series')
+        return atlasRows(atlas, route.page === 'movies' ? 'movie' : 'tv');
+      return interleave([atlasRows(atlas, 'movie'), atlasRows(atlas, 'tv')]);
+    }
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
