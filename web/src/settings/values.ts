@@ -87,13 +87,15 @@ export interface DeviceEntry {
   kind: 'tv' | 'browser';
   /** When it last opened the library (ms); undefined when it never said. */
   seen?: number;
+  /** A TV's addons waiting for its approval, by manifest URL. */
+  pending: string[];
 }
 
 /** Every device in `set:devices` that still names itself, most recently seen first. */
 export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
   const devices = new Map<string, Partial<DeviceEntry>>();
   for (const [name, stamped] of Object.entries(row?.values ?? {})) {
-    const match = /^([0-9a-z]+)\.(name|kind|seen)$/i.exec(name);
+    const match = /^([0-9a-z]+)\.(name|kind|seen|pending)$/i.exec(name);
     const value = stamped.value;
     if (!match || !value) continue;
     const [, id = '', field] = match;
@@ -102,11 +104,22 @@ export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
     if (field === 'kind' && 'string' in value)
       device.kind = value.string === 'tv' ? 'tv' : 'browser';
     if (field === 'seen' && 'int' in value) device.seen = value.int;
+    if (field === 'pending' && 'strings' in value) device.pending = value.strings;
     devices.set(id, device);
   }
   return [...devices.values()]
     .flatMap((d): DeviceEntry[] =>
-      d.id && d.name ? [{ id: d.id, name: d.name, kind: d.kind ?? 'browser', seen: d.seen }] : [],
+      d.id && d.name
+        ? [
+            {
+              id: d.id,
+              name: d.name,
+              kind: d.kind ?? 'browser',
+              seen: d.seen,
+              pending: d.pending ?? [],
+            },
+          ]
+        : [],
     )
     .sort((a, b) => (b.seen ?? 0) - (a.seen ?? 0) || a.name.localeCompare(b.name));
 }

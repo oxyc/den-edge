@@ -112,13 +112,23 @@ describe('synced prefs', () => {
       'aaaa000000000001.seen': { value: { int: 5000 }, at },
       'bbbb000000000002.name': { value: { string: 'Mac' }, at },
       'bbbb000000000002.seen': { value: { int: 9000 }, at },
+      'aaaa000000000001.pending': {
+        value: { strings: ['https://addon.example/manifest.json'] },
+        at,
+      },
       // Taken off the list: its name was cleared.
       'cccc000000000003.name': { value: null, at },
       'cccc000000000003.kind': { value: { string: 'browser' }, at },
     });
     expect(readDevices(devices)).toEqual([
-      { id: 'bbbb000000000002', name: 'Mac', kind: 'browser', seen: 9000 },
-      { id: 'aaaa000000000001', name: 'Apple TV', kind: 'tv', seen: 5000 },
+      { id: 'bbbb000000000002', name: 'Mac', kind: 'browser', seen: 9000, pending: [] },
+      {
+        id: 'aaaa000000000001',
+        name: 'Apple TV',
+        kind: 'tv',
+        seen: 5000,
+        pending: ['https://addon.example/manifest.json'],
+      },
     ]);
     const self = { id: 'bbbb000000000002', name: 'Mac', kind: 'browser' as const };
     expect(selfEntry(devices, self, 9000 + SEEN_EVERY - 1)).toBeNull();
