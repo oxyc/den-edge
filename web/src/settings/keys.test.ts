@@ -16,8 +16,8 @@ describe('key checks', () => {
   it('takes a key the service answers, and refuses one it turns away', async () => {
     expect(await service('tmdb').check('K', answering(200))).toBe('accepted');
     expect(await service('tmdb').check('K', answering(401))).toBe('refused');
-    expect(await service('omdb').check('K', answering(200, { Response: 'True' }))).toBe('accepted');
-    expect(await service('omdb').check('K', answering(200, { Response: 'False' }))).toBe('refused');
+    expect(await service('omdb').check('K', answering(200))).toBe('accepted');
+    expect(await service('omdb').check('K', answering(401))).toBe('refused');
     expect(await service('doesthedogdie').check('K', answering(200))).toBe('accepted');
     expect(await service('doesthedogdie').check('K', answering(401))).toBe('refused');
   });

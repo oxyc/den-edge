@@ -150,10 +150,10 @@ export const SUBTITLES_PER_LANGUAGE: readonly { count: number; label: string }[]
   { count: 0, label: 'All' },
 ];
 
-/** `RatingSource`, in the order the TV lists them; `omdb` ones need an OMDb key to show. */
-export const RATING_SOURCES: readonly { id: string; name: string; omdb: boolean }[] = [
-  { id: 'imdb', name: 'IMDb', omdb: true },
-  { id: 'tmdb', name: 'TMDB', omdb: false },
-  { id: 'rottenTomatoes', name: 'Rotten Tomatoes', omdb: true },
-  { id: 'metacritic', name: 'Metacritic', omdb: true },
+/** `RatingSource`, in the order the TV lists them. */
+export const RATING_SOURCES: readonly { id: string; name: string }[] = [
+  { id: 'imdb', name: 'IMDb' },
+  { id: 'tmdb', name: 'TMDB' },
+  { id: 'rottenTomatoes', name: 'Rotten Tomatoes' },
+  { id: 'metacritic', name: 'Metacritic' },
 ];

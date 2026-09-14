@@ -202,7 +202,6 @@
     <ContentSection
       {prefs}
       tmdbKey={tmdbKeyOf(keys)}
-      hasOmdbKey={!!readApiKey(keys, 'omdb')}
       pin={readApiKey(keys, 'parentalPIN')}
       {disabled}
       save={savePrefs}
@@ -216,11 +215,7 @@
       {edgeVersion}
       {write}
     />
-    <AboutSection
-      {edgeVersion}
-      credits={mergeCredits(addonCredits)}
-      hasOmdbKey={!!readApiKey(keys, 'omdb')}
-    />
+    <AboutSection {edgeVersion} credits={mergeCredits(addonCredits)} />
   </div>
 </div>
 

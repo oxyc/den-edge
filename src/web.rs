@@ -23,9 +23,8 @@ use std::path::{Component, Path, PathBuf};
 /// origins). Reel's were missing, and a trailer is fetched from reel itself — so on the public and tailnet
 /// names the policy refused every one of them, which a page reports only as a media load that failed.
 ///
-/// OMDb is what the IMDb, Rotten Tomatoes and Metacritic figures on a title come from. It was missing here, so
-/// the browser refused the call before it was made and the detail page quietly showed TMDB's rating alone —
-/// `fetchRatings` cannot tell a blocked request from a title nobody has rated.
+/// OMDb is not here either: the IMDb, Rotten Tomatoes and Metacritic figures come through `/ratings/`
+/// (`ratings.rs`), which keeps each title for every device.
 ///
 /// doesthedogdie is NOT here, and naming it was a wasted release: the content warnings are fetched with an
 /// `x-api-key` header, which makes the browser preflight, and they answer no preflight and send no
@@ -38,7 +37,7 @@ fn csp(media: &[String]) -> String {
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
-         connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com{media}; \
+         connect-src 'self' https://api.themoviedb.org{media}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )

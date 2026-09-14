@@ -51,16 +51,12 @@ export const KEY_SERVICES: readonly KeyService[] = [
     name: 'omdb',
     label: 'OMDb key',
     about:
-      'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without it, Den shows TMDB ratings only.',
+      'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without one, Den shows the ratings it already keeps for a title.',
     placeholder: 'Your OMDb API key',
-    // OMDb answers a bad key with 401, and a good one for The Shawshank Redemption with `Response: "True"`.
+    // Asked through den-edge's `/ratings/check`, which asks OMDb with the key for a title every working key finds,
+    // and answers a refusal as 401.
     check: (key, fetchImpl = fetch) =>
-      ask(
-        `https://www.omdbapi.com/?i=tt0111161&apikey=${encodeURIComponent(key)}`,
-        {},
-        fetchImpl,
-        async (res) => ((await res.json()) as { Response?: unknown }).Response === 'True',
-      ),
+      ask('/ratings/check', { headers: { 'x-api-key': key } }, fetchImpl, async () => true),
   },
   {
     name: 'doesthedogdie',

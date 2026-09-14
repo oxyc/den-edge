@@ -12,10 +12,10 @@
 import type { LibraryKeys } from './wire';
 
 /**
- * The paths den-edge relays to the addons (`ADDON_RELAY`), and `/warnings/`, where only a member may spend the
- * household's doesthedogdie key. Anything else is somebody else's server.
+ * The paths den-edge relays to the addons (`ADDON_RELAY`), and `/warnings/` and `/ratings/`, where only a member may
+ * spend the household's doesthedogdie and OMDb keys. Anything else is somebody else's server.
  */
-const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/'];
+const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/'];
 const MEMBER_HEADER = 'x-den-library-member';
 
 let credential: string | null = null;

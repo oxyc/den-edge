@@ -1,4 +1,5 @@
 import type { Episode, TitleDetail } from './detail';
+import { relayFetch } from './relayFetch';
 import { compareStamps, type EpisodeRow, type TitleRow } from './wire';
 
 /** TMDB dates are calendar days, not UTC instants: midnight UTC displays yesterday in the Americas. */
@@ -178,18 +179,23 @@ export function parseRatings(body: Record<string, unknown>): Ratings | null {
   };
 }
 
+/**
+ * A title's IMDb, Rotten Tomatoes and Metacritic ratings, as den-edge keeps them for every device (`/ratings/imdb/<id>`,
+ * in OMDb's own shape). This page's key, when it has one, only lets den-edge look up a title nobody has opened yet; a
+ * member of the library is looked up with the household's (`relayFetch` proves membership).
+ */
 export async function fetchRatings(
   imdb: string,
   key: string,
   signal?: AbortSignal,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<Ratings | null> {
-  if (!key || !/^tt\d+$/.test(imdb)) return null;
+  if (!/^tt\d+$/.test(imdb)) return null;
   try {
-    const url = new URL('https://www.omdbapi.com/');
-    url.searchParams.set('i', imdb);
-    url.searchParams.set('apikey', key);
-    const res = await fetchImpl(url, { signal });
+    const res = await fetchImpl(`/ratings/imdb/${imdb}`, {
+      signal,
+      headers: key ? { 'x-api-key': key } : {},
+    });
     return res.ok ? parseRatings(await res.json()) : null;
   } catch {
     return null;

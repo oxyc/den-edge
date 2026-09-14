@@ -34,7 +34,6 @@
   let {
     prefs,
     tmdbKey,
-    hasOmdbKey,
     pin,
     disabled,
     save,
@@ -43,7 +42,6 @@
     prefs: SyncedPrefs;
     /** What TMDB's country and service directories are asked with: the library's key, or den-edge's. */
     tmdbKey: string;
-    hasOmdbKey: boolean;
     /** The parental PIN, when one is set. */
     pin?: string;
     disabled: boolean;
@@ -475,20 +473,12 @@
   >
     <CheckGrid
       legend="Sources"
-      options={RATING_SOURCES.map((s) => ({
-        value: s.id,
-        label: s.name,
-        disabled: s.omdb && !hasOmdbKey,
-      }))}
+      options={RATING_SOURCES.map((s) => ({ value: s.id, label: s.name }))}
       checked={(id) => prefs.ratingSources.includes(id)}
       {disabled}
       onchange={(id, on) => save(change.ratingSources(toggled(prefs.ratingSources, id, on)))}
     />
-    <p class="foot">
-      Choose which ratings show on detail pages. Cards show TMDB only.{#if !hasOmdbKey}
-        IMDb, Rotten Tomatoes, and Metacritic need an OMDb key. Add one under
-        <a href="#omdb">OMDb key</a> to enable them.{/if}
-    </p>
+    <p class="foot">Choose which ratings show on detail pages. Cards show TMDB only.</p>
   </SettingRow>
 
   <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>

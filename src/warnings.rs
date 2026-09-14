@@ -69,7 +69,7 @@ fn verdict(absent: bool, age: Duration) -> Kept {
 }
 
 /// `tt` and up to ten digits: the one thing a path here may carry, and the name a title is kept under.
-fn valid_imdb(id: &str) -> bool {
+pub(crate) fn valid_imdb(id: &str) -> bool {
     id.strip_prefix("tt")
         .is_some_and(|n| (1..=10).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -78,12 +78,9 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
-    let own = match req.headers().get(KEY_HEADER).map(|v| v.to_str().map(str::to_owned)) {
-        None => None,
-        Some(Ok(key)) if !key.is_empty() && key.len() <= 256 && key.bytes().all(|b| b.is_ascii_graphic()) => {
-            Some(key)
-        }
-        Some(_) => return json(StatusCode::BAD_REQUEST, "bad_key"),
+    let own = match callers_key(&req) {
+        Ok(key) => key,
+        Err(refused) => return *refused,
     };
     let member =
         req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -113,7 +110,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked; anyone else is told
     // there is nothing.
-    let Some(key) = spendable(state, member.as_deref(), own).await else {
+    let Some(key) = spendable(state, member.as_deref(), own, state.warnings_key.as_ref()).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
     match lookup(state, &imdb, &key, rid).await {
@@ -123,19 +120,36 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     }
 }
 
-/// A key this request may spend: the caller's own, or the household's for a member of a library here.
-async fn spendable(state: &AppState, member: Option<&str>, own: Option<String>) -> Option<Key> {
+/// The caller's own key (`x-api-key`), when it sent something that could be one.
+pub(crate) fn callers_key(req: &Request) -> Result<Option<String>, Box<Response>> {
+    match req.headers().get(KEY_HEADER).map(|v| v.to_str().map(str::to_owned)) {
+        None => Ok(None),
+        Some(Ok(key)) if !key.is_empty() && key.len() <= 256 && key.bytes().all(|b| b.is_ascii_graphic()) => {
+            Ok(Some(key))
+        }
+        Some(_) => Err(refused(StatusCode::BAD_REQUEST, "bad_key")),
+    }
+}
+
+/// A key this request may spend: the caller's own, or `household` for a member of a library here. Shared with
+/// `ratings.rs`, which lends OMDb's the same way.
+pub(crate) async fn spendable(
+    state: &AppState,
+    member: Option<&str>,
+    own: Option<String>,
+    household: Option<&String>,
+) -> Option<Key> {
     if let Some(key) = own {
         return Some(Key { value: key, household: false });
     }
-    let household = state.warnings_key.as_ref()?;
+    let household = household?;
     crate::library::is_member(state, member).await.then(|| Key { value: household.clone(), household: true })
 }
 
-struct Key {
-    value: String,
-    /// The household's, which is rested when doesthedogdie says so and never blamed on the caller.
-    household: bool,
+pub(crate) struct Key {
+    pub(crate) value: String,
+    /// The household's, which is rested when the service says so and never blamed on the caller.
+    pub(crate) household: bool,
 }
 
 /// Settings' "Save & validate": the caller's key, asked their cheapest question. 204 when it works.

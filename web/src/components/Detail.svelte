@@ -203,7 +203,7 @@
   $effect(() => {
     const [id, key] = [detail?.imdbId, omdbKey];
     ratings = null;
-    if (!id || !key) return;
+    if (!id) return;
     const controller = new AbortController();
     void fetchRatings(id, key, controller.signal).then((loaded) => {
       if (!controller.signal.aborted) ratings = loaded;
@@ -316,13 +316,13 @@
             detail={d}
             {ratings}
             enabled={ratingSources}
-            pending={!!omdbKey && !!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
+            pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
           />
           {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
           {#if productionFacts(d)}<p class="production desktop-overview">
               {productionFacts(d)}
             </p>{/if}
-          {#if omdbKey && d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
+          {#if d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
               {ratings?.awards ? ratings.awards : ''}
             </p>{/if}
         </div>
@@ -379,7 +379,7 @@
   <div class="mobile-overview">
     {#if d.overview}<p class="overview">{d.overview}</p>{/if}
     {#if productionFacts(d)}<p class="production">{productionFacts(d)}</p>{/if}
-    {#if omdbKey && d.imdbId}<p class="awards" title={ratings?.awards}>
+    {#if d.imdbId}<p class="awards" title={ratings?.awards}>
         {ratings?.awards ?? ''}
       </p>{/if}
   </div>

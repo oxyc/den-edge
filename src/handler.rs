@@ -153,6 +153,10 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
     if path.starts_with("/warnings/") {
         return crate::warnings::handle(state, req, rid).await;
     }
+    // OMDb's ratings, kept for every device the same way.
+    if path.starts_with("/ratings/") {
+        return crate::ratings::handle(state, req, rid).await;
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -275,10 +279,11 @@ impl Face {
             || path == "/metrics";
         let web_app_calls =
             path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
-        // TMDB and the content warnings through this origin answer on every name: a browser asks them on the public
-        // one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so neither half
-        // owns them.
-        let tmdb = path.starts_with("/tmdb/") || path.starts_with("/warnings/");
+        // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
+        // on the public one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so
+        // neither half owns them.
+        let tmdb =
+            path.starts_with("/tmdb/") || path.starts_with("/warnings/") || path.starts_with("/ratings/");
         match (self, path) {
             (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
@@ -310,6 +315,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
+        p if p.starts_with("/ratings/") => "/ratings",
         _ => "other",
     }
 }
@@ -664,14 +670,10 @@ pub mod tests {
             ),
             "{csp}"
         );
-        // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows. doesthedogdie
-        // is deliberately NOT here: it answers no CORS preflight, so a page cannot call it however the
-        // policy is written, and `/warnings/` forwards those instead — which `'self'` already covers.
+        // doesthedogdie and OMDb are deliberately NOT here: `/warnings/` and `/ratings/` answer for them on this
+        // origin, which `'self'` already covers.
         assert!(
-            csp.contains(
-                "connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com \
-                 https://pve.example:8443;"
-            ),
+            csp.contains("connect-src 'self' https://api.themoviedb.org https://pve.example:8443;"),
             "{csp}"
         );
         assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");

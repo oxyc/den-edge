@@ -9,12 +9,10 @@
   let {
     edgeVersion,
     credits,
-    hasOmdbKey,
   }: {
     edgeVersion: string | null;
     /** What the installed addons credit, in their order. */
     credits: readonly Credit[];
-    hasOmdbKey: boolean;
   } = $props();
 
   /** `TermsView`, word for word. */
@@ -38,20 +36,22 @@
   ];
 
   /**
-   * The sources Den calls itself, while it does: a key set here is a source it's using. Content warnings are
-   * credited whatever the keys say, since den-edge serves the ones it keeps to every browser — in the wording
-   * doesthedogdie's API terms require (§6).
+   * The sources Den calls itself. Ratings and content warnings are credited whatever the keys say, since den-edge
+   * serves the ones it keeps to every browser: OMDb's under the licence its data carries, doesthedogdie's in the
+   * wording its API terms require (§6).
    */
-  const own = $derived<Credit[]>([
-    ...(hasOmdbKey
-      ? [{ text: 'Ratings by OMDb.', link: 'OMDb', url: 'https://www.omdbapi.com' }]
-      : []),
+  const own: Credit[] = [
+    {
+      text: 'Ratings by OMDb, licensed CC BY-NC 4.0.',
+      link: 'OMDb',
+      url: 'https://www.omdbapi.com',
+    },
     {
       text: 'Content warnings: Powered by DoesTheDogDie.com',
       link: 'Powered by DoesTheDogDie.com',
       url: 'https://www.doesthedogdie.com',
     },
-  ]);
+  ];
 </script>
 
 <SettingsSection id="about" title="About">
