@@ -8,6 +8,7 @@
 // and the install that asked for it, not the host, so it survives the swap.
 
 import type { MediaType } from './library';
+import { relayFetch } from './relayFetch';
 import type { Entry, Routes } from './routes';
 
 /** reel's first address this page can load a video from: never plaintext on an https page, never behind Access. */
@@ -60,7 +61,7 @@ export async function trailerURLs(
   ids: TitleIds,
   routes: Routes,
   {
-    fetchImpl = fetch,
+    fetchImpl = relayFetch,
     secure = globalThis.location?.protocol !== 'http:',
     signal,
     prewarm = 'full',

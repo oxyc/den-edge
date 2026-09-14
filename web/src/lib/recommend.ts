@@ -5,6 +5,7 @@
 
 import type { MediaType, Title } from './library';
 import type { Prefs } from './prefs';
+import { relayFetch } from './relayFetch';
 
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
 export interface Weighted {
@@ -131,7 +132,7 @@ export interface Recommended {
 export async function recommend(
   base: string,
   body: ReturnType<typeof recommendBody>,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<Recommended | null> {
   try {
     const res = await fetchImpl(`${base}/recommend`, {

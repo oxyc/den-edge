@@ -1,5 +1,6 @@
 import { LibraryLog } from './log';
 import type { Title, Shape } from './library';
+import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
@@ -37,6 +38,8 @@ export class LibrarySession {
       try {
         // No key, no library — and nothing to retry, unlike an open that failed.
         if (this.key === null) {
+          // A browser that just gave up its key is a visitor again, and must stop claiming a membership.
+          forgetLibraryCredential();
           this.log = null;
           return;
         }

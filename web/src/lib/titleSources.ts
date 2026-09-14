@@ -1,4 +1,5 @@
 import type { Addon } from './scout';
+import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
 
 export interface TitleSource {
@@ -71,7 +72,7 @@ export async function fetchSources(
   season?: number,
   episode?: number,
   signal?: AbortSignal,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<TitleSource[] | null> {
   try {
     const id =
@@ -95,7 +96,7 @@ export type Preparation = {
 export async function prepareSource(
   url: string,
   queue: boolean,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<Preparation> {
   // Only URLs validated by scoutTicket belong here; refuse a caller supplying a different origin or route.
   if (!/^\/scout\/(?:p\/[\w.~%-]+|(?:[\w.~%-]+\/)?play\/[\w.~%-]+)(?:\?[^#]*)?$/.test(url))

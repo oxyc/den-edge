@@ -4,6 +4,7 @@
 
 import { hkdf } from './crypto';
 import { libraryVault, type Vault } from './localVault';
+import { useLibraryCredential } from './relayFetch';
 import {
   believe,
   compareStamps,
@@ -99,8 +100,12 @@ export class LibraryLog {
     vault: Vault | null = libraryVault,
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    // Every relayed addon call from here on can prove this browser holds a library, which is what earns it
+    // the member's budget rather than a visitor's.
+    useLibraryCredential(keys);
     const log = new LibraryLog(
-      await deriveKeys(raw),
+      keys,
       fetchImpl,
       storage,
       vault && { vault, key: await localKey(raw) },

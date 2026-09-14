@@ -6,6 +6,7 @@
 
 import type { RowDef } from './catalog';
 import type { MediaType, Title } from './library';
+import { relayFetch } from './relayFetch';
 
 const PAGE = 24;
 
@@ -159,7 +160,7 @@ function titlesOf(body: unknown): Title[] {
 export function atlasRows(
   base: string,
   type: MediaType,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): RowDef[] {
   const path = type === 'tv' ? 'series' : 'movie';
   return (type === 'tv' ? SERIES_ROWS : FILM_ROWS).map(({ id, title, where }) => ({

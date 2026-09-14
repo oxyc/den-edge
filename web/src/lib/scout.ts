@@ -4,6 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
+import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
 
 export interface Addon {
@@ -43,7 +44,7 @@ export async function findAddon(
   plugins: string[],
   routes: Routes,
   want: { name: string; id: string; path: string },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<Addon | null> {
   for (const url of plugins) {
     const addon = place(url, routes, want);
@@ -56,7 +57,7 @@ export async function findAddon(
 export async function findAtlas(
   plugins: string[],
   routes: Routes,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
 ): Promise<Addon | null> {
   const plugin = await findAddon(plugins, routes, ATLAS, fetchImpl);
   if (plugin) return plugin;
