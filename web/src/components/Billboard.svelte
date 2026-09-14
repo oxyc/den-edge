@@ -17,6 +17,7 @@
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
   import { directTrailer, hlsURL, nativeHls, trailerSource, trailerURL } from '../lib/reel';
+  import { memberXhrSetup } from '../lib/relayFetch';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -277,7 +278,9 @@
         ambientFailedOver();
         return;
       }
-      engine = new Hls({ enableWorker: false });
+      // The membership claim travels on hls.js's own requests too, or a paired household counts as a
+      // guest against the relay's guest budget — on its own box, from its own sofa.
+      engine = new Hls({ enableWorker: false, xhrSetup: memberXhrSetup });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
       });

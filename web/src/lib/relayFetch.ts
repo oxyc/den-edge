@@ -27,6 +27,17 @@ export function forgetLibraryCredential(): void {
   credential = null;
 }
 
+/**
+ * The same claim, on hls.js's own requests.
+ *
+ * hls.js issues XHRs of its own, so `relayFetch` never sees them — and those are exactly the relayed
+ * calls a member must not be counted as a guest for, since the media relay budgets guests apart. The
+ * credential stays in this module and the allow-list still decides: another host's URL gets nothing.
+ */
+export function memberXhrSetup(xhr: XMLHttpRequest, url: string): void {
+  if (credential && relayed(url)) xhr.setRequestHeader(MEMBER_HEADER, credential);
+}
+
 function relayed(href: string): boolean {
   // With no page to compare against there is no telling our origin from anyone else's, and a path is not
   // enough on its own: `https://elsewhere.example/scout/…` has the same one. The safe answer is "not ours".
