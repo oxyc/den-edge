@@ -107,7 +107,8 @@ fn allowed(path: &str) -> bool {
             // TMDB's own named lists sit where an id goes.
             const LISTS: [&str; 7] =
                 ["popular", "top_rated", "now_playing", "upcoming", "airing_today", "on_the_air", "latest"];
-            if !numeric(id) && !(kind != "collection" && LISTS.contains(&id)) {
+            let named_list = kind != "collection" && LISTS.contains(&id);
+            if !(numeric(id) || named_list) {
                 return false;
             }
             // Named one at a time, because the interesting thing about a record's sub-resources is that some
@@ -208,7 +209,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
                     answer(body, fresh, "miss")
                 }
                 Err(_) if age < RETENTION => answer(body, Duration::from_secs(60), "stale"),
-                Err(response) => response,
+                Err(response) => *response,
             };
         }
     }
@@ -223,26 +224,31 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
             }
             answer(body, fresh, "miss")
         }
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
-/// that instead.
+/// that instead. Boxed: a whole `Response` in the error variant would make every `Result` here as large as
+/// one, answers included.
 async fn fetch(
     state: &AppState,
     path: &str,
     query: Option<&str>,
     key: &str,
     rid: &str,
-) -> Result<Bytes, Response> {
+) -> Result<Bytes, Box<Response>> {
     // The whole point of the daily ceiling: a key that is lent out can be spent by anyone who finds the route,
     // and the household would be the one rate-limited by TMDB afterwards.
     if !spend(state) {
-        return Err(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("tmdb_budget_spent"), 3_600_000));
+        return Err(Box::new(retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &error("tmdb_budget_spent"),
+            3_600_000,
+        )));
     }
     let Some(client) = state.tmdb_client.as_ref() else {
-        return Err(json(StatusCode::NOT_FOUND, "tmdb_proxy_off"));
+        return Err(refused(StatusCode::NOT_FOUND, "tmdb_proxy_off"));
     };
     let out = axum::http::Request::builder()
         .method(Method::GET)
@@ -250,23 +256,23 @@ async fn fetch(
         .header(header::ACCEPT, "application/json")
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
-    let Ok(out) = out else { return Err(json(StatusCode::BAD_REQUEST, "bad_request")) };
+    let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
     let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(e)) => {
             eprintln!("tmdb: {e}");
-            return Err(json(StatusCode::BAD_GATEWAY, "tmdb_unreachable"));
+            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable"));
         }
-        Err(_) => return Err(json(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
+        Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
     };
     let status = answer.status();
     let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
     else {
-        return Err(json(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+        return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
     };
     if !status.is_success() {
         // TMDB's own refusal, passed on as ours without its body: it may name the key.
-        return Err(json(
+        return Err(refused(
             if status == StatusCode::NOT_FOUND { StatusCode::NOT_FOUND } else { StatusCode::BAD_GATEWAY },
             if status == StatusCode::NOT_FOUND { "not_found" } else { "tmdb_refused" },
         ));
@@ -359,6 +365,11 @@ fn answer(body: Bytes, remaining: Duration, how: &'static str) -> Response {
 
 fn json(status: StatusCode, code: &str) -> Response {
     raw_json(status, Body::from(error(code).to_string()), true)
+}
+
+/// The same refusal, boxed for `fetch`'s error variant.
+fn refused(status: StatusCode, code: &str) -> Box<Response> {
+    Box::new(json(status, code))
 }
 
 #[cfg(test)]
