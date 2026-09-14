@@ -73,6 +73,36 @@ function metaURL(
   return `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${id}.json${query ? `?${query}` : ''}`;
 }
 
+/**
+ * What a press already resolved, so the page it opens does not ask again.
+ *
+ * `warmOnIntent` runs this same lookup on pointerdown, ~150ms before the click lands — and the detail
+ * page then threw that away and repeated it, with `cache: 'no-cache'` forcing a revalidation, before
+ * it could name a single source. That round trip was the first thing between opening a title and its
+ * trailer starting. Five minutes: long enough to cover the press and a look around the page, short
+ * enough that reel's own answer still governs.
+ */
+const warmed = new Map<string, { urls: string[]; at: number }>();
+const WARM_TTL_MS = 5 * 60_000;
+
+/**
+ * What the remembered URLs are only true for.
+ *
+ * The origin belongs in it: these are finished play URLs, pointing at whichever of reel's addresses
+ * the page could reach when they were built. Remembering them by title alone would hand a page that
+ * has since moved — discovery answering, a LAN address giving way to the public one — URLs for a
+ * host it can no longer fetch from.
+ */
+function warmKey(origin: string, base: string, type: MediaType, ids: TitleIds): string | null {
+  const id = ids.tmdb !== undefined ? `tmdb:${ids.tmdb}` : ids.imdb;
+  return id ? `${origin}|${base}|${type}|${id}` : null;
+}
+
+/** Forget it. Tests ask the same title twice and mean it both times. */
+export function forgetWarmedTrailers(): void {
+  warmed.clear();
+}
+
 /** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
 export async function trailerURLs(
   base: string,
@@ -98,6 +128,11 @@ export async function trailerURLs(
 ): Promise<string[]> {
   const origin = mediaBase(base, routes.reel ?? [], secure);
   if (!origin) return [];
+  // What the press already resolved, if it is still good: the page that press opened can name its
+  // source on its first render rather than after a round trip.
+  const key = warmKey(origin, base, type, ids);
+  const already = key ? warmed.get(key) : undefined;
+  if (already && Date.now() - already.at < WARM_TTL_MS) return already.urls;
   const asked = metaURL(base, type, ids, prewarm);
   if (!asked) return [];
   try {
@@ -120,6 +155,10 @@ export async function trailerURLs(
         /* One malformed link does not discard the remaining candidates. */
       }
     }
+    // Only a real answer is remembered. An empty list is usually reel saying "not yet" — a resolve
+    // still running, an upstream that faulted — and pinning that for five minutes would leave the
+    // page with no trailer long after one existed.
+    if (key && urls.length) warmed.set(key, { urls, at: Date.now() });
     return urls;
   } catch {
     return [];

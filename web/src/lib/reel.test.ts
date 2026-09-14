@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   directTrailer,
+  forgetWarmedTrailers,
   directURL,
   hlsURL,
   nativeHls,
@@ -44,6 +45,34 @@ const meta = {
     ],
   },
 };
+
+// A press resolves a title's trailer and the page it opens reads that answer back; every test here
+// asks about the same title and means it each time.
+beforeEach(forgetWarmedTrailers);
+
+describe('what a press resolved', () => {
+  const ask = (fetchImpl: typeof fetch) =>
+    trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, { fetchImpl, secure: true });
+
+  it('is served to the page that press opened, without asking again', async () => {
+    const asked: string[] = [];
+    const counting: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response(JSON.stringify(meta), { status: 200 });
+    };
+    const pressed = await ask(counting);
+    expect(await ask(counting), 'the page gets what the press found').toEqual(pressed);
+    expect(asked, 'and reel is asked once, not twice').toHaveLength(1);
+  });
+
+  /** Usually reel saying "not yet" — a resolve still running — and pinning that would cost the trailer. */
+  it('is not remembered when it found nothing', async () => {
+    const nothing: typeof fetch = async () =>
+      new Response(JSON.stringify({ meta: { links: [] } }), { status: 200 });
+    expect(await ask(nothing)).toEqual([]);
+    expect(await ask(answering(meta))).toHaveLength(2);
+  });
+});
 
 describe('trailerURL', () => {
   const ask = (routes: Routes, fetchImpl: typeof fetch, secure = true) =>
