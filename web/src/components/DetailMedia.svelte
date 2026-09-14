@@ -363,6 +363,15 @@
     height: 100%;
     overflow: hidden;
     background: var(--bg);
+
+    /* The same name the billboard's picture carries, so opening a title morphs one into the other
+       instead of cross-fading the whole page through it. Coming back is smooth because Home is never
+       unmounted and its trailer never stopped; going forward there is no page to reuse, and this is
+       the nearest thing — the browser animates the outgoing trailer's last painted frame into this
+       hero, which is already showing the same backdrop. Only one of the two is ever rendered at a
+       time (the inactive page is `hidden`), so the name cannot collide. */
+    view-transition-name: den-hero-media;
+    contain: layout;
   }
 
   .backdrop,

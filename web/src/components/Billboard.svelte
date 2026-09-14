@@ -703,6 +703,14 @@
     position: absolute;
     inset: 0;
     transform: scale(1.14);
+
+    /* Named, and the detail page's hero carries the same name: opening a title then morphs this
+       picture into that one rather than cross-fading the whole page through the background. What the
+       browser captures here is the trailer's last painted frame, and what it morphs into is a hero
+       already showing the same backdrop, so the two ends of the movement match. Coming back needs
+       none of this — Home is never unmounted and its trailer never stopped. */
+    view-transition-name: den-hero-media;
+    contain: layout;
   }
 
   /* The drift, handed to the compositor: tied to the rail's own scroll progress rather than recomputed in
