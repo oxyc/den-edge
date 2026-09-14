@@ -29,6 +29,7 @@ for (const width of [393, 820, 1280]) {
       await guardNetwork(page);
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('**/version', (r) => r.fulfill({ json: { version: '0.67.0' } }));
+      await page.route('**/config', (r) => r.fulfill({ json: { simklClientId: 'client-1' } }));
       await page.route('https://api.themoviedb.org/**', (route) => {
         const url = new URL(route.request().url());
         if (url.pathname.endsWith('/configuration')) return route.fulfill({ json: { images: {} } });
@@ -55,6 +56,12 @@ for (const width of [393, 820, 1280]) {
       await expect(page.getByRole('button', { name: /Hidden genres/ })).toContainText('2');
       await expect(page.getByRole('button', { name: /Parental controls/ })).toContainText('PG-13');
       await expect(page.getByRole('button', { name: /TMDB key/ })).toContainText('Connected');
+
+      // With den-edge publishing SIMKL's client id, SIMKL connects from here too.
+      await page.getByRole('button', { name: /SIMKL Not connected/ }).click();
+      await expect(
+        page.getByRole('region', { name: 'SIMKL' }).getByRole('button', { name: 'Connect SIMKL' }),
+      ).toBeVisible();
 
       // A row opens in place, and its choices save to the library.
       await page.getByRole('button', { name: /Hidden genres/ }).click();

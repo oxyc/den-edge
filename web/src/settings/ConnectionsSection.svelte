@@ -8,6 +8,7 @@
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
+  import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { forgetDevice, parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
   import { links, type Link } from '../lib/links.svelte';
@@ -146,6 +147,69 @@
   // Away from home lives in Advanced; SIMKL's token is here, as a connection.
   const simkl = $derived(!!readApiKey(keys, 'simkl'));
 
+  // SIMKL sign-in, with the code SIMKL gives, as on the TV. den-edge publishes the app's client id; without one, Connect
+  // is left to the TV. Each attempt has a number, so a cancelled or superseded one stops at its next step.
+  let simklClientId = $state<string | null>(null);
+  void fetchSimklClientId().then((id) => (simklClientId = id));
+  let simklPin = $state<SimklPin | null>(null);
+  let simklNote = $state<{ text: string; bad: boolean } | null>(null);
+  let simklAttempt = 0;
+  $effect(() => () => {
+    simklAttempt++;
+  });
+
+  async function connectSimkl() {
+    const clientId = simklClientId;
+    if (!clientId) return;
+    const attempt = ++simklAttempt;
+    simklNote = null;
+    const pin = await requestPin(clientId);
+    if (attempt !== simklAttempt) return;
+    if (!pin) {
+      simklNote = { text: 'Couldn’t get a code from SIMKL. Try again in a moment.', bad: true };
+      return;
+    }
+    simklPin = pin;
+    const expires = Date.now() + pin.expiresIn * 1000;
+    let wait = pin.interval;
+    while (Date.now() < expires) {
+      await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+      if (attempt !== simklAttempt) return;
+      const answer = await pollToken(clientId, pin.userCode);
+      if (attempt !== simklAttempt) return;
+      if (answer.kind === 'authorized') {
+        simklPin = null;
+        if (await write('keys', { simkl: { string: answer.token } }))
+          simklNote = { text: 'Connected to SIMKL.', bad: false };
+        return;
+      }
+      if (answer.kind === 'failed') {
+        simklPin = null;
+        simklNote = {
+          text: 'Couldn’t reach SIMKL. Check your connection and try again.',
+          bad: true,
+        };
+        return;
+      }
+      if (answer.kind === 'slowDown') wait += 5;
+    }
+    simklPin = null;
+    simklNote = { text: 'The code expired — try again.', bad: true };
+  }
+
+  function cancelSimkl() {
+    simklAttempt++;
+    simklPin = null;
+  }
+
+  const httpsOnly = (url: string) => {
+    try {
+      return new URL(url).protocol === 'https:' ? url : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   // Linking another device: this browser hosts the pairing the TV would.
   let code = $state<string | null>(null);
   let asking = $state<string | null>(null);
@@ -264,11 +328,35 @@
           onconfirm={() => void write('keys', { simkl: null })}
         />
       </div>
+    {:else if simklPin}
+      {@const link = httpsOnly(simklPin.verificationUrl)}
+      <div class="pair">
+        <p>
+          Go to {#if link}<a href={link} target="_blank" rel="noreferrer noopener"
+              >{simklPin.verificationUrl.replace(/^https:\/\//, '')}</a
+            >{:else}{simklPin.verificationUrl}{/if} and enter this code:
+        </p>
+        <b class="code">{simklPin.userCode}</b>
+        <p class="status" role="status">Waiting for SIMKL…</p>
+        <button type="button" class="quiet" onclick={cancelSimkl}>Cancel</button>
+      </div>
+    {:else if simklClientId}
+      <div class="form">
+        <button type="button" class="primary" {disabled} onclick={() => void connectSimkl()}
+          >Connect SIMKL</button
+        >
+      </div>
     {/if}
+    {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
+        {simklNote.text}
+      </p>{/if}
     <p class="foot">
-      SIMKL (simkl.com) syncs your watch history and records what you watch. {simkl
-        ? 'Signed in on one of your Apple TVs; the sign-in reaches your devices through your library.'
-        : 'Connect it on your Apple TV, under Settings › SIMKL, and it reaches your other devices through your library.'}
+      SIMKL (<a href="https://simkl.com" target="_blank" rel="noreferrer noopener">simkl.com</a>)
+      syncs your watch history and records what you watch. {simkl
+        ? 'The sign-in reaches your devices through your library.'
+        : simklClientId
+          ? 'Connect it here or on your Apple TV, and it reaches your other devices through your library.'
+          : 'Connect it on your Apple TV, under Settings › SIMKL, and it reaches your other devices through your library.'}
     </p>
   </SettingRow>
 
