@@ -7,7 +7,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
-  import { playable, type Playable } from '../lib/playable';
+  import { playable, withoutHevc, type Playable } from '../lib/playable';
   import {
     downmixLabel,
     nativeHls,
@@ -119,6 +119,16 @@
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
+  /**
+   * Whether this release has already been asked for again with the browser's claims cut back.
+   *
+   * A browser can claim a codec, take the playlist, and then refuse the very first segment — an iPhone
+   * does exactly that with a 4K HDR Main-tier HEVC remux it says it decodes. den-remux keeps a release
+   * the player can't take as the fallback it converts on the GPU, so asking again as a player that takes
+   * no HEVC and no HDR gets that same file converted instead of copied. Once only: a second refusal is a
+   * refusal of H.264, and nothing here makes that smaller.
+   */
+  let degraded = false;
 
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
@@ -152,7 +162,10 @@
       title.originalLanguage,
       navigator.languages,
     );
-    const can = (decodes ??= await playable());
+    const claimed = (decodes ??= await playable());
+    // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC and no
+    // HDR, which is what makes den-remux convert the release rather than copy it again.
+    const can = degraded ? withoutHevc(claimed) : claimed;
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     const maxBitrate = await linkLimit(remux);
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
@@ -259,6 +272,15 @@
   function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
     if (!session || failure) return;
     reportFailure(session, code, message);
+    // It was copied because this browser said it could take it, and it couldn't. Ask for the same release
+    // again as a player that takes none of what it just refused: den-remux had that file queued as the
+    // fallback it converts, so this is the ask it was waiting for. A conversion that won't decode is not
+    // helped by converting it again, so this happens once.
+    if (!degraded && !session.video?.transcoded) {
+      degraded = true;
+      restart({ filename: session.release.filename });
+      return;
+    }
     failure = 'playback';
   }
 
@@ -334,6 +356,9 @@
   function switchRelease(event: Event) {
     const filename = (event.currentTarget as HTMLSelectElement).value;
     if (!session || filename === session.release.filename) return;
+    // Another file gets this browser's full claims: what one release couldn't decode says nothing about
+    // whether the next needs converting.
+    degraded = false;
     restart({ filename });
   }
 
@@ -341,7 +366,9 @@
     if (!session) return;
     report();
     const total = length();
-    if (video && total)
+    // Only a position worth carrying. A release refused before it drew a frame sits at zero, and taking that
+    // forward would throw away where the library says this was left.
+    if (video && total && video.currentTime >= 1)
       startAt = { seconds: video.currentTime, fraction: video.currentTime / total };
     hls?.destroy();
     hls = undefined;

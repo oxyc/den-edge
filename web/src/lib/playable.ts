@@ -38,6 +38,25 @@ export interface Playable {
   av1Hdr: boolean;
 }
 
+/**
+ * The same browser, less what a decode failure has just disproved: no HEVC at any tier, no HDR and no Dolby
+ * Vision. What is left is H.264 and SDR, which den-remux can always make out of a release.
+ *
+ * A browser may claim a codec, take the playlist, and then refuse the very first segment — an iPhone does
+ * exactly that with a 4K HDR Main-tier HEVC remux it says it decodes. den-remux keeps a release the player
+ * can't take as the fallback it converts on the GPU, so claiming less is what asks for that conversion.
+ */
+export function withoutHevc(can: Playable): Playable {
+  return {
+    ...can,
+    hevcMain: 0,
+    hevcMain10: 0,
+    hevcHighTier: 0,
+    hdr: false,
+    dolbyVision: { p5: false, p8: false },
+  };
+}
+
 /** Levels 3.1, 4.0, 4.1, 5.0 and 5.1: 720p up to 4K. */
 const H264_LEVELS = [0x1f, 0x28, 0x29, 0x32, 0x33];
 const HEVC_LEVELS = [93, 120, 123, 150, 153];
