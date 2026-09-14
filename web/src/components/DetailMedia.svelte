@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
-  import { directTrailer, hlsURL, nativeHls, trailerSource, trailerURLs } from '../lib/reel';
+  import { hlsURL, isPlaylist, nativeHls, trailerURLs } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -35,16 +35,7 @@
   const url = $derived(candidates[candidate] ?? null);
   /** YouTube's own URL for this candidate, when one exists that this browser can play. */
   let upgraded = $state<string | null>(null);
-  /**
-   * Whether the direct lookup for the current candidate has settled. Nothing is mounted until it
-   * has.
-   *
-   * Starting reel's copy and swapping to YouTube's when the answer arrived reloaded the element a
-   * second or two in, so the trailer visibly restarted just as you began watching it. Waiting costs
-   * a round-trip `/meta` has usually already warmed; swapping costs a restart every time.
-   */
-  let resolved = $state(false);
-  const source = $derived(resolved ? (upgraded ?? url) : null);
+  const source = $derived(upgraded ?? url);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
   /**
@@ -52,8 +43,13 @@
    *
    * A `<video>` given a master playlist it cannot parse simply errors, so where the browser has no
    * native HLS the element is handed nothing and hls.js feeds it instead.
+   *
+   * The test is on the PATH, and has to be: reel signs its play links, so an HLS URL ends
+   * `…m3u8?s=<tag>`, and asking whether the whole URL ended in `.m3u8` was false for every one of
+   * them. hls.js was never started, the element was handed a playlist to parse by itself, and each
+   * browser errored its way back to reel's `/play` download — the very path this exists to avoid.
    */
-  const managed = $derived(source && !playsHls && source.endsWith('.m3u8') ? source : null);
+  const managed = $derived(source && !playsHls && isPlaylist(source) ? source : null);
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -175,45 +171,22 @@
     return () => controller.abort();
   });
 
-  // Straight from YouTube where that is possible, which skips the download, the re-mux and the bytes
-  // back out through the house — the whole of the wait before a cold trailer shows anything.
+  // YouTube's adaptive master through reel, which skips the download, the re-mux and the bytes back
+  // out through the house — the whole of the wait before a cold trailer shows anything.
   //
-  // This hero carries controls on mobile, so a viewer can turn the sound up: only a source that has
-  // sound will do. That is the HLS master where the browser plays it natively, and reel's own MP4
-  // everywhere else — never the silent video-only stream, which would play perfectly and say nothing.
+  // The source follows from the play URL alone, so it is known on the first render. Asking `/direct`
+  // first, only to learn whether a master exists, put a round trip and a yt-dlp resolve in front of
+  // every trailer with the element held empty for both; the one case it ruled out — a trailer with
+  // no master — is a 404 the error path already reads as "fall back to reel's own file".
   $effect(() => {
     const play = url;
-    upgraded = null;
-    resolved = false;
     // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
     // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
     // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
     // refused full-screen never fires `fullscreenchange` and iOS never fires it at all.
     sound = false;
     touched = false;
-    if (!play) return;
-    // Where the browser needs MSE, the source is known from the play URL alone — reel resolves
-    // behind `/hls`. Asking `/direct` first, only to learn whether a master exists, put a round trip
-    // and a yt-dlp resolve in front of every trailer with the element held empty for both. The one
-    // case it ruled out — a trailer with no master — is a 404 the error path already reads as "fall
-    // back to reel's own file".
-    if (!playsHls) {
-      upgraded = hlsURL(play);
-      resolved = true;
-      return;
-    }
-    let live = true;
-    // Capped, because nothing plays until this settles: a reel that hangs should cost a couple of
-    // seconds and then its own copy, rather than the trailer.
-    const signal = 'timeout' in AbortSignal ? AbortSignal.timeout(2500) : undefined;
-    void directTrailer(play, { signal }).then((direct) => {
-      if (!live) return;
-      upgraded = trailerSource(play, direct, playsHls);
-      resolved = true;
-    });
-    return () => {
-      live = false;
-    };
+    upgraded = play ? hlsURL(play, playsHls) : null;
   });
 
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a

@@ -1,14 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  directTrailer,
   forgetWarmedTrailers,
-  directURL,
   hlsURL,
+  isPlaylist,
   nativeHls,
-  trailerSource,
   trailerURL,
   trailerURLs,
-  type DirectTrailer,
 } from './reel';
 import type { Routes } from './routes';
 
@@ -108,20 +105,6 @@ describe('trailerURL', () => {
   });
 });
 
-describe('directURL', () => {
-  it('keeps the signature and the mount, and only rewrites a play URL', () => {
-    expect(directURL('https://pve.example:8443/reel/play/abc12345678.mp4?s=tag&i=iid')).toBe(
-      'https://pve.example:8443/reel/direct/abc12345678.json?s=tag&i=iid',
-    );
-    expect(directURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
-    expect(directURL('not a url')).toBeNull();
-    // A relayed play URL is a path on this origin, and its lookup has to stay one.
-    expect(directURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
-      '/reel/direct/abc12345678.json?s=tag',
-    );
-  });
-});
-
 describe('hlsURL', () => {
   it('is the play URL’s HLS sibling, signature and all', () => {
     expect(hlsURL('/reel/play/abc12345678.mp4?s=tag')).toBe('/reel/hls/abc12345678.m3u8?s=tag');
@@ -130,87 +113,55 @@ describe('hlsURL', () => {
     );
     expect(hlsURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
   });
+
+  /** What a bare element is given: reel reorders the master, Google still serves every segment. */
+  it('asks for the native master where the element plays the playlist itself', () => {
+    expect(hlsURL('/reel/play/abc12345678.mp4?s=tag', true)).toBe(
+      '/reel/hls/abc12345678.m3u8?s=tag&native=1',
+    );
+    // An unsigned deployment has no query to extend, so the flag opens one.
+    expect(hlsURL('/reel/play/abc12345678.mp4', true)).toBe('/reel/hls/abc12345678.m3u8?native=1');
+  });
 });
 
-describe('trailerSource', () => {
-  const play = '/reel/play/abc12345678.mp4?s=tag';
-  const direct: DirectTrailer = {
-    video: 'https://g/v',
-    audio: null,
-    hls: 'https://g/m.m3u8',
-    width: null,
-    height: null,
-  };
-
-  /** Nothing crosses the homelab at all where the browser can fetch Google's master itself. */
-  it('takes YouTube’s own master where the browser plays HLS natively', () => {
-    expect(trailerSource(play, direct, true)).toBe('https://g/m.m3u8');
-  });
-
-  /** googlevideo sends MSE no CORS header, so reel's copy of the master is the only fetchable one. */
-  it('takes reel’s proxy of that master everywhere else', () => {
-    expect(trailerSource(play, direct, false)).toBe('/reel/hls/abc12345678.m3u8?s=tag');
-  });
-
-  it('has nothing to offer when the resolve found no master', () => {
-    expect(trailerSource(play, { ...direct, hls: null }, false)).toBeNull();
-    expect(trailerSource(play, null, true)).toBeNull();
+describe('isPlaylist', () => {
+  /** The bug it replaced: every signed HLS URL was called not-a-playlist, so hls.js never ran. */
+  it('reads the path, not the query', () => {
+    expect(isPlaylist('/reel/hls/abc12345678.m3u8?s=tag&native=1')).toBe(true);
+    expect(isPlaylist('/reel/hls/abc12345678.m3u8')).toBe(true);
+    expect(isPlaylist('/reel/play/abc12345678.mp4?s=tag')).toBe(false);
   });
 });
 
 describe('nativeHls', () => {
-  it('believes a browser that claims it, and never throws', () => {
-    expect(nativeHls(() => 'maybe')).toBe(true);
-    expect(nativeHls(() => '')).toBe(false);
+  const webkit = { claims: () => 'maybe', apple: true, mse: false };
+
+  it('believes Apple’s WebKit, and a browser with no other way to play it', () => {
+    expect(nativeHls(webkit)).toBe(true);
+    // iPadOS carries MediaSource as well, and its own player is still the right one there.
+    expect(nativeHls({ ...webkit, mse: true })).toBe(true);
+    // Not Apple, but nothing to drive hls.js with either: a bare element is the only player here.
+    expect(nativeHls({ ...webkit, apple: false })).toBe(true);
+  });
+
+  /**
+   * Chrome 151 answers "maybe" and then stalls: it fetches the playlists and never asks for a
+   * segment, so the trailer sits at readyState 0 with no error to fall back from. hls.js instead.
+   */
+  it('does not believe a Chromium that claims it', () => {
+    expect(nativeHls({ claims: () => 'maybe', apple: false, mse: true })).toBe(false);
+  });
+
+  it('refuses a browser that claims nothing, and never throws', () => {
+    expect(nativeHls({ ...webkit, claims: () => '' })).toBe(false);
     expect(
-      nativeHls(() => {
-        throw new Error('no video element here');
+      nativeHls({
+        ...webkit,
+        claims: () => {
+          throw new Error('no video element here');
+        },
       }),
     ).toBe(false);
-  });
-});
-
-describe('directTrailer', () => {
-  const answer = (body: unknown, status = 200): typeof fetch =>
-    (async (input) => {
-      if (String(input) !== 'http://lan/direct/abc12345678.json?s=tag')
-        return new Response('{}', { status: 404 });
-      return new Response(JSON.stringify(body), { status });
-    }) as typeof fetch;
-  const ask = (fetchImpl: typeof fetch) =>
-    directTrailer('http://lan/play/abc12345678.mp4?s=tag', { fetchImpl });
-
-  it('reads the streams reel resolved', async () => {
-    expect(
-      await ask(
-        answer({
-          video: 'https://rr7.googlevideo.com/videoplayback?itag=137',
-          audio: 'https://rr7.googlevideo.com/videoplayback?itag=140',
-          hls: 'https://manifest.googlevideo.com/index.m3u8',
-          width: 1920,
-          height: 1080,
-        }),
-      ),
-    ).toEqual({
-      video: 'https://rr7.googlevideo.com/videoplayback?itag=137',
-      audio: 'https://rr7.googlevideo.com/videoplayback?itag=140',
-      hls: 'https://manifest.googlevideo.com/index.m3u8',
-      width: 1920,
-      height: 1080,
-    });
-  });
-
-  it('carries an answer with no master, and drops a plaintext one', async () => {
-    const got = await ask(answer({ video: 'https://g/v', audio: null, hls: 'http://g/m.m3u8' }));
-    expect(got?.hls).toBeNull();
-    expect(got?.width).toBeNull();
-  });
-
-  it('is null for a reel that refuses, has no such route, or answers unusably', async () => {
-    expect(await ask(answer({}, 403))).toBeNull();
-    expect(await ask(answer({}, 404))).toBeNull();
-    expect(await ask(answer({ video: 42 }))).toBeNull();
-    expect(await ask(answer({ video: 'http://g/v' }))).toBeNull();
   });
 });
 

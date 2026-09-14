@@ -16,7 +16,7 @@
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
-  import { directTrailer, hlsURL, nativeHls, trailerSource, trailerURL } from '../lib/reel';
+  import { hlsURL, isPlaylist, nativeHls, trailerURL } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
@@ -166,8 +166,12 @@
   /**
    * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
    * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.
+   *
+   * By the PATH. reel signs its play links, so a playlist URL ends `…m3u8?s=<tag>`, and a suffix
+   * test called every one of them not-a-playlist: hls.js never started and the slide fell back to
+   * reel's `/play` download.
    */
-  const managed = $derived(ambient && !playsHls && ambient.endsWith('.m3u8') ? ambient : null);
+  const managed = $derived(ambient && !playsHls && isPlaylist(ambient) ? ambient : null);
 
   /** This source will not play: reel's own copy, and then the still picture, are what is left. */
   function ambientFailedOver() {
@@ -231,30 +235,21 @@
     if (untrack(() => ambient)) return;
     let live = true;
     const timer = setTimeout(() => {
-      // Only where YouTube's own stream can actually be played here. Everywhere else reel's copy is
-      // what runs, and it has to be warm.
-      // Resolve only. Every browser now plays YouTube's own adaptive stream — its master directly
-      // where HLS is native, reel's proxy of it everywhere else — so asking reel to download and
-      // remux the whole file buys a fallback nothing normally reaches, at a minute of its CPU.
+      // Resolve only. Every browser plays YouTube's adaptive stream through reel's `/hls` — the
+      // playlist reordered, and the segments still fetched from Google wherever a bare element can
+      // fetch them itself — so asking reel to download and remux the whole file buys a fallback
+      // nothing normally reaches, at a minute of its CPU.
       void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: 'direct',
-      }).then(async (url) => {
+      }).then((url) => {
         if (!live || !url) return;
-        // Straight from YouTube where we can. Asking reel for the URL costs a lookup; asking it for
-        // the file costs a download, an ffmpeg re-mux, a slot on the cache volume and the trailer
-        // crossing the house twice — which is the whole wait before a cold slide shows anything.
-        // Nothing here can want sound (muted, unpressable), so a silent stream is welcome.
+        // Asking reel for the URL costs a lookup; asking it for the file costs a download, an ffmpeg
+        // re-mux, a slot on the cache volume and the trailer crossing the house twice — which is the
+        // whole wait before a cold slide shows anything.
         proxied = url;
-        // Where the browser needs MSE the source follows from the play URL alone, so the slide can
-        // start on it: `/direct` would be a round trip and a resolve spent learning what `/hls`
-        // resolves for itself.
-        if (!playsHls) {
-          ambient = hlsURL(url) ?? url;
-          return;
-        }
-        const direct = await directTrailer(url);
-        if (!live) return;
-        ambient = trailerSource(url, direct, playsHls) ?? url;
+        // The source follows from the play URL alone, so the slide can start on it: `/direct` was a
+        // round trip and a resolve spent learning what `/hls` resolves for itself.
+        ambient = hlsURL(url, playsHls) ?? url;
       });
     }, SETTLE_MS);
     return () => {

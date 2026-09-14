@@ -165,38 +165,34 @@ export async function trailerURLs(
   }
 }
 
-/** What `/direct` answers with: YouTube's own URLs, so a trailer plays without reel fetching it first. */
-export type DirectTrailer = {
-  /** Video-only whenever YouTube answers adaptively, which is now always. Silent on its own. */
-  video: string;
-  /** The separate audio track. A `<video>` element cannot combine it with the stream above. */
-  audio: string | null;
-  /** The HLS master: video, audio and subtitles in one URL, and the only one that carries sound. */
-  hls: string | null;
-  width: number | null;
-  height: number | null;
-};
-
 /**
- * The `/direct/<id>.json` sibling of a `/play/<id>.mp4` URL, query and all.
+ * The `/hls/<id>.m3u8` sibling of a play URL: reel's copy of YouTube's own HLS master.
  *
- * Derived from the play URL rather than asked for separately, because the signature reel demands is
- * over the video and the install — not the path — so the tag `/meta` already handed us is the tag
- * `/direct` wants. That also keeps the whole thing to one `/meta` round-trip.
+ * What every browser plays, by one of two routes. Where the page drives hls.js, this is the only
+ * master it can read at all — googlevideo answers MSE's segment fetches with no CORS header — so
+ * reel rewrites every URI in it to come back through reel.
+ *
+ * `native` is the other route, for a bare `<video>`: reel leaves the URIs on googlevideo, which a
+ * media element may fetch cross-origin, so the segments still come straight from Google and only
+ * the playlist crosses the homelab. It is worth that one request for what reel does to the master
+ * on the way past — it puts the best variant first. YouTube's own order is not a ladder (240p is
+ * listed first, the 144p rungs sit below 1080p), and a native player opens on whichever variant it
+ * reads first, so every trailer on iOS started at 426x240 and spent its ninety seconds climbing.
  */
-export function directURL(playURL: string): string | null {
-  return sibling(playURL, 'direct', 'json');
+export function hlsURL(playURL: string, native = false): string | null {
+  const url = sibling(playURL, 'hls', 'm3u8');
+  if (!url || !native) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}native=1`;
 }
 
 /**
- * The `/hls/<id>.m3u8` sibling of a play URL: reel's proxy for YouTube's own HLS master.
+ * Is this URL an HLS playlist?
  *
- * What a browser without native HLS needs, and the only way it can have it. googlevideo answers
- * MSE's segment fetches with no CORS header, so hls.js cannot read Google's master directly however
- * willing it is; reel fetches it and rewrites every URI in it to come back through reel.
+ * Read from the PATH. reel signs its play links, so a playlist URL ends `…m3u8?s=<tag>`, and asking
+ * whether the whole URL ends in `.m3u8` answered no for every signed one of them.
  */
-export function hlsURL(playURL: string): string | null {
-  return sibling(playURL, 'hls', 'm3u8');
+export function isPlaylist(url: string): boolean {
+  return /\.m3u8$/.test(url.split(/[?#]/)[0] ?? '');
 }
 
 /**
@@ -223,88 +219,40 @@ function sibling(playURL: string, route: string, extension: string): string | nu
   }
 }
 
+/** What decides whether a bare `<video>` is given the playlist, or hls.js is. */
+export interface HlsSupport {
+  /** What a `<video>` says it can do with an HLS master. */
+  claims: () => string;
+  /** Apple's own WebKit: Safari everywhere, and every browser on iOS. */
+  apple: boolean;
+  /** MediaSource, which is what hls.js needs. ManagedMediaSource counts — hls.js drives that too. */
+  mse: boolean;
+}
+
+function support(): HlsSupport {
+  return {
+    claims: () => document.createElement('video').canPlayType('application/vnd.apple.mpegurl'),
+    // Frozen by spec at "Apple Computer, Inc." in WebKit, and "Google Inc." in every Chromium.
+    apple: globalThis.navigator?.vendor === 'Apple Computer, Inc.',
+    mse: 'MediaSource' in globalThis || 'ManagedMediaSource' in globalThis,
+  };
+}
+
 /**
- * Does this browser play HLS from a bare `<video>`? WebKit does, which is every browser on iOS.
+ * Should this browser be handed an HLS master to play by itself?
  *
- * Everywhere else it would take hls.js, and that cannot work here however willing it is: googlevideo
- * answers with no `Access-Control-Allow-Origin`, so MSE — which fetches its segments through XHR —
- * is refused. A plain media load is not subject to that, which is the whole reason this split exists.
+ * The element's own claim is no longer enough. Chrome 151 answers "maybe" — it does have a native
+ * HLS player — and then, given a master, fetches the playlists and never asks for a segment: the
+ * trailer sits at readyState 0, paused, with no data and no error to fall back on. So the claim is
+ * believed where it has always worked, Apple's WebKit, or where there is no MediaSource to run
+ * hls.js with instead, which is the one case a bare element is all there is.
  */
-export function nativeHls(
-  probe = () => document.createElement('video').canPlayType('application/vnd.apple.mpegurl'),
-): boolean {
+export function nativeHls(env: HlsSupport = support()): boolean {
   try {
-    return probe() !== '';
+    if (env.claims() === '') return false;
+    return env.apple || !env.mse;
   } catch {
     return false;
-  }
-}
-
-/**
- * The best source for one candidate where the page can drive an HLS player itself, or null to stay
- * on reel's own `/play`.
- *
- * Both branches play the SAME stream — YouTube's adaptive master, opening on a low variant and
- * climbing — so a cold trailer shows a picture in a second or two instead of after a whole file is
- * downloaded and remuxed. What differs is who fetches it: a browser with native HLS takes Google's
- * URL and the homelab carries nothing at all, and everything else takes reel's proxy of that master,
- * because googlevideo answers MSE's segment fetches with no CORS header and hls.js cannot read a
- * byte of them otherwise.
- *
- * Never the progressive `video` stream, which looked like the cheap option and is the opposite: one
- * open-ended range is throttled hard, dragging a 32 MB 1080p file to a first frame in about 5.4s
- * where HLS reaches one in 1.7s on the same trailer and device. It is also silent — YouTube answers
- * adaptively, so the audio is a separate track a `<video>` cannot combine — and fails outright in
- * some browsers.
- *
- * Null when the resolve found no master, which is the one case `/play` is still the answer to.
- */
-export function trailerSource(
-  playURL: string,
-  direct: DirectTrailer | null,
-  hlsOk = nativeHls(),
-): string | null {
-  if (!direct?.hls) return null;
-  return hlsOk ? direct.hls : hlsURL(playURL);
-}
-
-/**
- * Ask reel for the trailer's own URLs.
- *
- * Null on anything unexpected — an older reel with no such route, a refusal, a malformed answer —
- * and every caller still holds the `/play` URL it was going to use.
- */
-export async function directTrailer(
-  playURL: string,
-  { fetchImpl = relayFetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
-): Promise<DirectTrailer | null> {
-  const ask = directURL(playURL);
-  if (!ask) return null;
-  try {
-    const res = await fetchImpl(ask, { signal });
-    if (!res.ok) return null;
-    const body = await res.json();
-    if (typeof body?.video !== 'string') return null;
-    // https only: the page is served over it, so anything else is blocked as mixed content anyway.
-    const https = (v: unknown) => {
-      if (typeof v !== 'string') return null;
-      try {
-        return new URL(v).protocol === 'https:' ? v : null;
-      } catch {
-        return null;
-      }
-    };
-    if (!https(body.video)) return null;
-    const size = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-    return {
-      video: body.video,
-      audio: https(body.audio),
-      hls: https(body.hls),
-      width: size(body.width),
-      height: size(body.height),
-    };
-  } catch {
-    return null;
   }
 }
 
