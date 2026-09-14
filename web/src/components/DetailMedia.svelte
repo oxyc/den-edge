@@ -69,6 +69,13 @@
    * on a paused element iOS draws that play button across the middle of the picture.
    */
   let touched = $state(false);
+  /**
+   * Whether this source has already been asked to load explicitly, after a refused `play()`.
+   *
+   * Once per source, because `load()` resets the element: asking twice would be a loop of reloads, each
+   * refused for the same reason as the first.
+   */
+  let forced = $state(false);
 
   /**
    * A tap brings up the controls and turns the sound on together.
@@ -212,6 +219,7 @@
     // refused full-screen never fires `fullscreenchange` and iOS never fires it at all.
     sound = false;
     touched = false;
+    forced = false;
     upgraded = play ? hlsURL(play, playsHls) : null;
   });
 
@@ -281,7 +289,17 @@
         if (live) firstFrame();
       })
       .catch(() => {
-        if (live) playing = false;
+        if (!live) return;
+        playing = false;
+        // A refusal is not always final, and on iOS it was being made final by accident. `preload` is
+        // commonly ignored there, so an element whose `play()` was refused may never load at all — and
+        // then `canplay` never fires, `start` never runs, and the trailer waits for a tap that may
+        // never come. Asking for the data outright gives that retry something to happen on. Once per
+        // source, and still through `play()`, so a test can intercept every attempt.
+        if (!forced) {
+          forced = true;
+          player.load();
+        }
       });
     return () => {
       live = false;
@@ -334,7 +352,12 @@
   {#if backdrop || poster}
     <img class="backdrop" class:portrait={!backdrop} src={backdrop ?? poster} alt="" />
   {/if}
-  <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout. -->
+  <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout.
+
+       Playback is started by `play()` alone, never by an `autoplay` attribute. The attribute looked like
+       the fix for iOS — Home's billboard carries one — but it starts the element without calling
+       `play()`, which walks straight past the one test that proves a blocked autoplay leaves the poster
+       up and the video paused. A behaviour no test can intercept is one that breaks quietly later. -->
   <video
     bind:this={video}
     src={managed ? undefined : (source ?? undefined)}
