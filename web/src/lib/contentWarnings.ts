@@ -37,8 +37,12 @@ export async function fetchWarnings(
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: number; warnings: Warning[] } | null> {
   if (!key || !categories.length) return null;
+  // Through den-edge, not doesthedogdie itself. The key rides an `x-api-key` header, so the browser
+  // preflights — and they answer no preflight and send no `Access-Control-Allow-Origin`, so a page
+  // cannot reach them however its CSP is written. The TV can, because a native request is not
+  // CORS-checked. `/warnings/` forwards this one along with the key and hands back their JSON.
   const get = async (path: string) => {
-    const res = await fetchImpl('https://www.doesthedogdie.com' + path, {
+    const res = await fetchImpl('/warnings' + path, {
       signal,
       headers: { accept: 'application/json', 'x-api-key': key },
     });

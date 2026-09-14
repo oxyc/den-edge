@@ -149,6 +149,10 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
     if path.starts_with("/tmdb/") {
         return crate::tmdb::handle(state, req, rid).await;
     }
+    // doesthedogdie's content warnings, which a browser cannot ask for itself: they answer no CORS preflight.
+    if path.starts_with("/warnings/") {
+        return crate::warnings::handle(state, req, rid).await;
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -304,6 +308,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         p if p.starts_with("/tmdb/") => "/tmdb",
+        p if p.starts_with("/warnings/") => "/warnings",
         _ => "other",
     }
 }
@@ -658,15 +663,14 @@ pub mod tests {
             ),
             "{csp}"
         );
-        // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows.
+        // OMDb answers for the IMDb, Rotten Tomatoes and Metacritic figures a title shows. doesthedogdie
+        // is deliberately NOT here: it answers no CORS preflight, so a page cannot call it however the
+        // policy is written, and `/warnings/` forwards those instead — which `'self'` already covers.
         assert!(
-            csp.contains("connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com"),
-            "{csp}"
-        );
-        // And doesthedogdie, which the content warnings come from: without it the browser refused
-        // both the warnings and Settings' check of the key, and a refused check reads as a bad key.
-        assert!(
-            csp.contains("https://www.omdbapi.com https://www.doesthedogdie.com https://pve.example:8443;"),
+            csp.contains(
+                "connect-src 'self' https://api.themoviedb.org https://www.omdbapi.com \
+                 https://pve.example:8443;"
+            ),
             "{csp}"
         );
         assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");

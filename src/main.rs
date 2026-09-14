@@ -16,6 +16,7 @@ mod routes;
 mod store;
 mod sync;
 mod tmdb;
+mod warnings;
 mod web;
 
 use std::collections::HashMap;
@@ -214,14 +215,18 @@ async fn main() {
             std::process::exit(1);
         })
     });
-    // Lent to a device with no key of its own. The client and the cache directory exist only when there is a
-    // key to lend, so a deployment without one carries no TLS stack and no directory it never writes to.
+    // Lent to a device with no key of its own. The cache directory exists only when there is a key to lend, so
+    // a deployment without one carries no directory it will never write to.
     state.simkl_client_id = env_opt("SIMKL_CLIENT_ID");
     state.tmdb_key = env_opt("TMDB_KEY");
     state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
     state.media_daily_max = env_opt("MEDIA_DAILY_MAX_BYTES").and_then(|v| v.parse().ok());
+    // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
+    // a browser that cannot ask doesthedogdie itself. Built whether or not a key is lent — gated on the TMDB
+    // key, a household that never lent one would find the warnings turned off with it, for no reason it could
+    // see.
+    state.tmdb_client = Some(tmdb::client());
     if state.tmdb_key.is_some() {
-        state.tmdb_client = Some(tmdb::client());
         state.tmdb_cache_dir = Some(std::path::Path::new(&dir).join("tmdb"));
     }
     let state = Arc::new(state);
