@@ -129,6 +129,14 @@ class Links {
     writeLinks(this.list);
   }
 
+  /** Open `inboxKey`'s library from now on: the link first, so it's the one the app starts with. */
+  makeCurrent(inboxKey: string): void {
+    const chosen = this.list.find((l) => l.inboxKey === inboxKey);
+    if (!chosen || this.list[0] === chosen) return;
+    this.list = [chosen, ...this.list.filter((l) => l !== chosen)];
+    writeLinks(this.list);
+  }
+
   /** Look around without pairing. */
   browse(): void {
     this.browsing = true;

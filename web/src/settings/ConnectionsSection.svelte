@@ -14,7 +14,7 @@
   import { links, type Link } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
   import { sendToTV } from '../lib/inbox';
-  import { formatCode, host, type HostError } from '../lib/pair';
+  import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
   import { denAddonOf } from '../lib/scout';
@@ -285,6 +285,45 @@
     links.remove(target.inboxKey);
     // The library this page was reading is gone; the app goes back to linking.
     if (target.inboxKey === link.inboxKey) navigate('/');
+  }
+
+  // Joining another TV's library: a browser has no library of its own to merge, so it links to that TV as it linked
+  // to this one, and opens that library from then on. The TV it's linked to now stays listed until it's unlinked.
+  let joinCode = $state('');
+  let joining = $state(false);
+  let joinProblem = $state<string | null>(null);
+  const joinFailures: Record<JoinError, string> = {
+    expired: 'That code has expired or doesn’t exist. Get a new one on the other TV.',
+    claimed: 'That code was already used. Get a new one on the other TV.',
+    throttled: 'Too many tries. Wait a minute and try again.',
+    unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
+    mistyped: 'That isn’t a whole code: it’s 12 letters and digits.',
+    failed:
+      'The other TV didn’t link this browser: the code didn’t match, or it wasn’t allowed. Get a new code there.',
+    insecure:
+      'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
+  };
+  async function joinLibrary() {
+    joining = true;
+    joinProblem = null;
+    const result = await join(joinCode, { label: thisDevice.name });
+    joining = false;
+    if ('error' in result) {
+      joinProblem = joinFailures[result.error];
+      return;
+    }
+    const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+    const { host: name, libraryKey, linkKey } = result.handover;
+    const key = base64(libraryKey);
+    links.add(result.inboxKey, { name, libraryKey: key, linkKey: base64(linkKey) });
+    joinCode = '';
+    if (key === link.libraryKey) {
+      joinProblem = `${name} already shares this library: it's linked to this browser too.`;
+      return;
+    }
+    links.makeCurrent(result.inboxKey);
+    // A new library is a new session from the start: reloaded, the app opens the one now first in the list.
+    location.assign('/');
   }
 
   const deviceIcon = (device: { name: string; kind?: string }) => {
@@ -668,8 +707,44 @@
     </div>
     <p class="foot">
       Give your library to a phone, a laptop, or Den opened at another address, without going to the
-      TV. Joining another TV’s library and resetting the library key are on your Apple TV, under
-      Settings › Linked devices.
+      TV.
+    </p>
+
+    <h3 id="join-library-label">Join another TV’s library</h3>
+    <form
+      class="form"
+      onsubmit={(event) => {
+        event.preventDefault();
+      }}
+    >
+      <input
+        id="join-library-code"
+        class="field mono"
+        autocomplete="off"
+        spellcheck="false"
+        autocapitalize="characters"
+        placeholder="ABCD-EFGH-JKLM"
+        aria-labelledby="join-library-label"
+        value={joinCode}
+        oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
+      />
+      <Confirm
+        label={joining ? 'Waiting…' : 'Join'}
+        question="Switch this browser to that TV’s library?"
+        detail="The TV you’re linked to now stays in your list until you unlink it."
+        confirmLabel="Join"
+        tone="primary"
+        disabled={joining || !parseCode(joinCode)}
+        onconfirm={() => void joinLibrary()}
+      />
+    </form>
+    {#if joining}<p class="status" role="status">
+        Waiting for the other TV to allow this browser…
+      </p>{/if}
+    {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
+    <p class="foot">
+      On the other Apple TV, open Settings › Linked devices and get a code, then type it here.
+      Resetting the library key is on your Apple TV, under Settings › Linked devices.
     </p>
   </SettingRow>
 </SettingsSection>
