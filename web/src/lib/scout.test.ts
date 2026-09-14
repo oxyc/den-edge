@@ -90,6 +90,34 @@ describe('a table that names no address for the service', () => {
     expect(asked, 'a stranger’s config segment is never put in a URL').toEqual([]);
   });
 
+  /**
+   * The household's OWN install, on a public name, is refused just the same — and this is the live
+   * shape, not a hypothetical: a table cut down to edge and play, with installs that are public
+   * names. `d-scout.oxy.fi` is not the page's host, not the tailnet, not a LAN address and not named
+   * by that table, so nothing here can tell it from a stranger's addon, and the safe answer is none.
+   *
+   * Which means a table that names no address for a service is not a neutral state for one whose
+   * installs are public names: it is the service switched off. What turns it back on is the entry.
+   */
+  it('refuses the household’s own public-name install while the table names no address', async () => {
+    const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
+    expect(await findAddon([SCOUT_PUBLIC], PUBLIC_ONLY, SCOUT, fetchImpl)).toBeNull();
+    expect(asked, 'and it is never asked about either').toEqual([]);
+  });
+
+  /** Naming that public address is the whole fix, and it costs no request to the address itself. */
+  it('places that install as soon as the table names its public address', async () => {
+    const named: Routes = { ...PUBLIC_ONLY, scout: [{ url: 'https://d-scout.oxy.fi', access: true }] };
+    const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
+    expect(await findAddon([SCOUT_PUBLIC], named, SCOUT, fetchImpl)).toEqual({
+      install: 'https://d-scout.oxy.fi/sealed-cfg',
+      base: '/scout/sealed-cfg',
+    });
+    // The entry identifies the install; it is never fetched. The browser asks this origin, which the
+    // relay serves — and d-scout itself is behind Access, which a page has no service token for.
+    expect(asked).toEqual(['/scout/sealed-cfg/manifest.json']);
+  });
+
   /** And while the table CAN disqualify it, a stranger's URL is never touched at all. */
   it('leaves other addons alone while the table names addresses', async () => {
     const { asked, fetchImpl } = addons({});
