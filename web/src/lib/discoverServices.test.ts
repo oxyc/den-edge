@@ -41,6 +41,22 @@ it('publishes discovery addons while the playback health request is still pendin
   expect(publish.remux).toHaveBeenCalledWith(null);
 });
 
+/**
+ * A guest has no library to prove holding, and on the public name den-edge now answers scout only to a
+ * device that can. Nothing here should ask it anyway — what keeps that true is the missing publisher,
+ * one conditional spread in Library, which a refactor could quietly undo and leave a guest looking at
+ * an error for a service they were never offered.
+ */
+it('asks scout and den-remux nothing for a guest', async () => {
+  const publish = { atlas: vi.fn(), reel: vi.fn() };
+  discoverServices([], {}, publish);
+  await Promise.resolve();
+  expect(findAddon).not.toHaveBeenCalled();
+  expect(findRemux).not.toHaveBeenCalled();
+  expect(publish.atlas).toHaveBeenCalledWith({ base: '/atlas', install: '/atlas' });
+  expect(publish.reel).toHaveBeenCalledWith({ base: '/reel', install: '/reel' });
+});
+
 it('does not publish late results from disposed settings', async () => {
   let resolve!: (value: string | null) => void;
   vi.mocked(findRemux).mockReturnValue(

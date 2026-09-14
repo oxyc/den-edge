@@ -192,10 +192,32 @@ fn media_allowance_left(state: &AppState) -> bool {
     true
 }
 
-pub async fn relay(state: &AppState, req: Request, target: String, rid: &str) -> Response {
+pub async fn relay(
+    state: &AppState,
+    req: Request,
+    target: String,
+    rid: &str,
+    face: crate::handler::Face,
+) -> Response {
     let method = req.method().clone();
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+    }
+    // On the public web name, scout answers only to a device that holds a library here.
+    //
+    // Not about bandwidth: scout's `/configure` and `/config-key` are reachable through this relay, and
+    // scout still takes an unsealed config — so a stranger could mint an install carrying their own
+    // debrid key, and the indexer scraping that install causes would leave from this house's address.
+    // What that costs is the address itself: indexers rate-limit and blocklist by IP, and the household
+    // is what gets blocked. It is also the reason the public `d-scout` name sits behind Access.
+    //
+    // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
+    // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
+    if face == crate::handler::Face::Web && req.uri().path().starts_with("/scout/") {
+        let claim = member_claim(&req);
+        if !crate::library::is_member(state, claim.as_deref()).await {
+            return json(StatusCode::NOT_FOUND, "not_found");
+        }
     }
     // The visitor's budget is spent first, and only an address past it is asked whether it is a member and has
     // the larger one. That order is deliberate: checking membership first would let a forged member header make
@@ -460,6 +482,38 @@ mod tests {
         // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
         let forged = format!("{LIB}:not-the-token");
         assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Scout's `/configure` mints installs, and an install a stranger makes scrapes indexers from this
+    /// household's address — which is what indexers blocklist. So on the public web name it answers only
+    /// to a device that holds a library here, and to anyone else it is not there at all.
+    #[tokio::test]
+    async fn on_the_web_name_scout_answers_only_to_a_member() {
+        let mut h = harness();
+        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+
+        let guest = h.send("GET", "/scout/manifest.json", None, &[("host", "d.oxy.fi")]).await;
+        assert_eq!(guest.status(), StatusCode::NOT_FOUND, "and nothing says what is being hidden");
+
+        // The LAN and tailnet names are untouched: a TV reaches scout directly, never through here.
+        let lan = h.send("GET", "/scout/manifest.json", None, &[]).await;
+        assert_eq!(lan.status(), StatusCode::BAD_GATEWAY, "relayed as it always was");
+
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+
+        let member = format!("{LIB}:{TOKEN}");
+        let paired = h
+            .send(
+                "GET",
+                "/scout/manifest.json",
+                None,
+                &[("host", "d.oxy.fi"), ("x-den-library-member", &member)],
+            )
+            .await;
+        assert_eq!(paired.status(), StatusCode::BAD_GATEWAY, "relayed, and the addon is not there");
     }
 
     /// Relaying `/reel` at a port nothing listens on: an admitted request reaches the fetch and fails

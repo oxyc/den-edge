@@ -144,7 +144,7 @@ async fn dispatch(state: &AppState, req: Request, route: &'static str, rid: &str
     }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
-        return crate::relay::relay(state, req, target, rid).await;
+        return crate::relay::relay(state, req, target, rid, face).await;
     }
     if path.starts_with("/tmdb/") {
         return crate::tmdb::handle(state, req, rid).await;
@@ -703,6 +703,20 @@ pub mod tests {
         let mut h = split_harness();
         let scout = addon().await;
         Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/scout={scout}"));
+        // Paired, because on the public web name scout answers to nothing else: its `/configure` mints
+        // installs, and an install a stranger makes scrapes indexers from this household's address.
+        let lib = "0123456789abcdef0123456789abcdef";
+        let token = "the-write-token";
+        let started = h
+            .send(
+                "POST",
+                &format!("/lib/{lib}/batch"),
+                Some(json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string()),
+                &[("x-den-library-token", token)],
+            )
+            .await;
+        assert_eq!(started.status(), StatusCode::OK, "the library this membership is proved against");
+        let member = format!("{lib}:{token}");
         let resp = h
             .send(
                 "POST",
@@ -713,6 +727,7 @@ pub mod tests {
                     ("content-type", "application/json"),
                     ("cookie", "CF_Authorization=session"),
                     ("cf-access-client-id", "token"),
+                    ("x-den-library-member", &member),
                 ],
             )
             .await;
@@ -750,6 +765,7 @@ pub mod tests {
                     ("host", "d.oxy.fi"),
                     ("if-modified-since", "Sat, 12 Sep 2026 12:00:00 GMT"),
                     ("accept-encoding", "gzip"),
+                    ("x-den-library-member", &member),
                 ],
             )
             .await;
@@ -761,7 +777,7 @@ pub mod tests {
                 "GET",
                 "/scout/cfg/manifest.json",
                 None,
-                &[("host", "d.oxy.fi"), ("if-none-match", "\"v1\"")],
+                &[("host", "d.oxy.fi"), ("if-none-match", "\"v1\""), ("x-den-library-member", &member)],
             )
             .await;
         assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
