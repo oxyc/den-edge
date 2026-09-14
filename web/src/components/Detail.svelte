@@ -27,6 +27,7 @@
   import TitleSources from './TitleSources.svelte';
   import ContentWarnings from './ContentWarnings.svelte';
   import type { Addon } from '../lib/scout';
+  import { navigateBack } from '../lib/navigation';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -84,6 +85,34 @@
     shown?: (title: Title) => boolean;
   } = $props();
   const panel = $props.id();
+
+  /**
+   * Left and Escape leave the page, as the remote's Back does on the TV — a title you opened with one press
+   * should close with one.
+   *
+   * Only from the page itself. A key pressed while typing is text, not navigation; one another control has
+   * already answered is spoken for; and Escape inside full screen belongs to the video, which the browser
+   * takes before this ever sees it.
+   */
+  $effect(() => {
+    if (!active) return;
+    const back = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'Escape') return;
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (document.fullscreenElement) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target.closest('input, textarea, select, [contenteditable]')
+      ) {
+        return;
+      }
+      event.preventDefault();
+      navigateBack();
+    };
+    window.addEventListener('keydown', back);
+    return () => window.removeEventListener('keydown', back);
+  });
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
@@ -427,14 +456,21 @@
     align-items: end;
     width: 100vw;
 
-    /* Deliberately a little taller than the window: the actions then sit just below the fold, the
-       trailer gets the whole screen, and the buttons are one short scroll away. It has to be a
-       calc around the variable — `stableViewportHeight` sets that at runtime, so a plain clamp
-       here would simply be overridden wherever the action runs. */
-    min-height: calc(var(--stable-hero-height, clamp(640px, 92lvh, 1100px)) + 96px);
+    /* The same height the home billboard takes, so a trailer is the same size wherever you meet it and the
+       page below starts where the eye already expects it. It used to stand deliberately taller than the
+       window — the actions sat just below the fold — which made the two surfaces disagree by a screenful. */
+    min-height: var(--stable-hero-height, clamp(420px, 76lvh, 860px));
     margin-inline: calc(50% - 50vw);
     margin-top: calc(-1 * var(--bar-space));
     margin-bottom: 32px;
+  }
+
+  /* Past this width a height capped in pixels would letterbox the picture, exactly as it would on the
+     billboard, so the hero keeps the same 16:9 floor and the two surfaces stay the same size. */
+  @media (width >= 1000px) {
+    .hero {
+      min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
+    }
   }
 
   .visual {

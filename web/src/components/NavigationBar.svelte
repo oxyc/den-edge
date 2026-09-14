@@ -175,7 +175,11 @@
   .search {
     display: flex;
     align-items: center;
-    flex: 1;
+
+    /* Pushed to the right rather than filling the bar, so it sits just before the menu instead of leaving
+       the links stranded at the far edge with a gulf between. Mobile puts `flex` back when it takes over
+       the whole bar. */
+    margin-left: auto;
     gap: 8px;
     min-width: 140px;
     max-width: 360px;
@@ -285,6 +289,7 @@
 
     .searching .search {
       display: flex;
+      flex: 1;
       max-width: none;
       padding: 0;
       background: none;

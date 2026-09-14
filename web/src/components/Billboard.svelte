@@ -11,6 +11,7 @@
      Motion, Data Saver, or the billboard scrolled off the screen leave the still picture in its place. -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import DetailIcon from './DetailIcon.svelte';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
@@ -326,6 +327,31 @@
     show(Math.min(Math.max(next, 0), shown.length - 1));
   }
 
+  /**
+   * The same paging from the page itself, with nothing focused. A carousel you are looking at is one the
+   * arrow keys should move; before this they worked only once a dot had been tabbed to, which nobody does.
+   *
+   * Left alone when the keys are already spoken for: while typing, and when something else has already
+   * handled the event — a focused dot runs `keyed` itself and this listener sees the key afterwards, so
+   * without that check every press would page twice.
+   */
+  $effect(() => {
+    if (!active || !onScreen) return;
+    const fromPage = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target.closest('input, textarea, select, [contenteditable]')
+      ) {
+        return;
+      }
+      keyed(event);
+    };
+    window.addEventListener('keydown', fromPage);
+    return () => window.removeEventListener('keydown', fromPage);
+  });
+
   // It cycles on its own until you move it, and holds while you are reading it — pointer over it, or a control
   // in it focused. Nothing moves for a viewer who asked for less movement.
   $effect(() => {
@@ -337,6 +363,38 @@
     }, ADVANCE_MS);
     return () => clearInterval(timer);
   });
+
+  /**
+   * Full screen, with the sound on. The billboard's trailer is deliberately mute decoration — nothing here
+   * can ask for audio — so this is the one gesture that says otherwise, and a gesture is the only thing a
+   * browser will unmute for. It goes quiet again on the way out: a trailer still talking over a page the
+   * viewer has returned to is the thing they would then have to hunt down and silence.
+   */
+  async function expand() {
+    const player = ambientPlayer;
+    if (!player) return;
+    player.muted = false;
+    // iOS ignores this (volume is read-only there); unmuting is what carries the sound.
+    player.volume = 1;
+    const leave = () => {
+      if (document.fullscreenElement) return;
+      player.muted = true;
+      document.removeEventListener('fullscreenchange', leave);
+    };
+    document.addEventListener('fullscreenchange', leave);
+    try {
+      if (player.requestFullscreen) await player.requestFullscreen();
+      else
+        (
+          player as HTMLVideoElement & { webkitEnterFullscreen?: () => void }
+        ).webkitEnterFullscreen?.();
+    } catch {
+      // Refused or unsupported: `leave` never fires, so take the listener back off rather than leave one
+      // behind for every press.
+      document.removeEventListener('fullscreenchange', leave);
+    }
+    void player.play().catch(() => {});
+  }
 
   const facts = (title: Title) => {
     const found = known.get(keyOf(title));
@@ -466,6 +524,14 @@
     {/each}
   </div>
 
+  <!-- Only once a trailer is actually running: a button offering full screen over a still photograph would
+       have nothing to show. Desktop only, in CSS — a phone reaches the video's own controls with a tap. -->
+  {#if playing}
+    <button class="expand glass" onclick={expand} aria-label="Play trailer full screen with sound">
+      <DetailIcon name="expand" />
+    </button>
+  {/if}
+
   <!-- Outside the rail: the pager is the one thing that shouldn't slide away with the slide it counts. -->
   {#if shown.length > 1}
     <div class="pager">
@@ -532,6 +598,48 @@
       .billboard {
         min-height: max(var(--stable-hero-height, clamp(420px, 76lvh, 860px)), min(56.25vw, 94lvh));
       }
+    }
+  }
+
+  /* Glass, because this is a control over media — the one place that look is for. */
+  .expand {
+    position: absolute;
+    top: calc(var(--bar-space) + 12px);
+    right: var(--gutter);
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--fg);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  /* Before the hover rule, which is the more specific of the two: a control reached by keyboard has to show
+     itself without waiting for a pointer that may never arrive. */
+  .expand:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .billboard:hover .expand {
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .expand {
+      transition: none;
+    }
+  }
+
+  @media (width <= 759px) {
+    .expand {
+      display: none;
     }
   }
 
@@ -689,8 +797,12 @@
     line-height: 1.05;
 
     /* A ceiling, not a reservation: the text sits at the bottom of the hero, so a one-line title simply leaves
-       the room above it empty rather than a gap under it. */
-    max-block-size: 2.1em;
+       the room above it empty rather than a gap under it.
+
+       Two lines at 1.05em is 2.1em of LINE BOXES, which is not 2.1em of letters: a descender hangs below its
+       line box, so the g in "Our Friends & Neighbors" was sliced off by the overflow. The line clamp below is
+       what holds this to two lines — this only has to be tall enough not to cut through them. */
+    max-block-size: 2.4em;
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
@@ -870,7 +982,8 @@
 
   @media (width >= 360px) and (width <= 759px) {
     h2 {
-      max-block-size: 1.05em;
+      /* Room for the descenders, as above; the clamp is what keeps it to one line. */
+      max-block-size: 1.3em;
       -webkit-line-clamp: 1;
       line-clamp: 1;
     }
