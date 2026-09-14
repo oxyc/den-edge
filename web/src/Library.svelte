@@ -523,6 +523,10 @@
    * failure as an empty list rather than throwing.
    */
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
+    // The page itself, before its trailer. `preloadScreens` fetches this chunk once Home is idle, so
+    // it is usually resident already — but a press within the first second of a visit landed on the
+    // route-level spinner while it downloaded. Idempotent: a second call joins the first.
+    void DetailScreen.load();
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
