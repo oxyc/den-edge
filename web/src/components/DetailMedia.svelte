@@ -296,7 +296,29 @@
         .forEach((element) => describe(element as HTMLMediaElement, 'attached, never played'));
       console.log('[den audio probe]', JSON.stringify({ at, sound, touched, media }));
     };
+
+    /**
+     * Both players report silence on every lever they have — muted, volume 0, renditions off — and the
+     * sound goes on, so the thing making it answers to none of them. In WebKit the only certain way to
+     * stop an item AVFoundation has started is to destroy the source under it. Each is torn down in turn,
+     * at a known moment, and which moment the sound stops at says which player was carrying it. If it
+     * survives both, it belongs to neither and the search moves off these elements entirely.
+     */
+    const tearDown = (player: HTMLVideoElement | null, whose: string) => {
+      if (!player) return;
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      console.log('[den audio probe] torn down:', whose);
+    };
     const timers = [700, 2500, 6000].map((at) => setTimeout(() => look(at), at));
+    timers.push(
+      setTimeout(
+        () => tearDown(document.querySelector<HTMLVideoElement>('video.ambient'), 'billboard'),
+        6500,
+      ),
+      setTimeout(() => tearDown(video ?? null, 'detail'), 9000),
+    );
     return () => timers.forEach((timer) => clearTimeout(timer));
   });
 
