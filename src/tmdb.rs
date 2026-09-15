@@ -265,10 +265,14 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     return answer(body, "public, max-age=60", "stale", modified, asked);
                 }
                 Cached::Refresh => {
-                    return match fetch(state, &path, query.as_deref(), key, rid).await {
-                        Ok(body) => {
-                            write(file, &body).await;
-                            answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
+                    return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
+                        Ok(Fetched::Answer(new, etag)) => {
+                            keep(file, &new, etag.as_deref()).await;
+                            answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
+                        }
+                        Ok(Fetched::Unchanged) => {
+                            renew(file).await;
+                            answer(body, &fresh_policy(fresh, fresh), "revalidated", SystemTime::now(), asked)
                         }
                         Err(response) => *response,
                     };
@@ -283,16 +287,16 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     match fetch(state, &path, query.as_deref(), key, rid).await {
-        Ok(body) => {
+        Ok((body, etag)) => {
             if let Some(file) = &file {
-                write(file, &body).await;
+                keep(file, &body, etag.as_deref()).await;
             }
             answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
         }
         Err(response) => {
             if response.status() == StatusCode::NOT_FOUND {
                 if let Some(file) = &file {
-                    write(file, &Bytes::from_static(ABSENT)).await;
+                    keep(file, &Bytes::from_static(ABSENT), None).await;
                 }
             }
             *response
@@ -309,6 +313,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
         return None;
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
+    let mut stale = None;
     if let Some(file) = &file {
         if let Some((body, age, _)) = read(file).await {
             // A remembered 404 answers as "no such thing" without spending anything.
@@ -318,6 +323,8 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 }
             } else if age < fresh_for(path) {
                 return serde_json::from_slice(&body).ok();
+            } else {
+                stale = Some(body);
             }
         }
     }
@@ -328,22 +335,40 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // one URL, requested in a loop by anyone, drained TMDB_DAILY_MAX at one unit per request, unauthenticated
     // and unthrottled, and that budget is shared with the /tmdb proxy the app browses through. Draining it
     // took out browsing, not just link previews.
-    match fetch(state, path, query, key, "meta").await {
-        Ok(body) => {
+    let fetched = match (&file, &stale) {
+        (Some(file), Some(_)) => revalidate(state, path, query, key, "meta", file).await,
+        _ => fetch(state, path, query, key, "meta").await.map(|(body, etag)| Fetched::Answer(body, etag)),
+    };
+    match fetched {
+        Ok(Fetched::Answer(body, etag)) => {
             if let Some(file) = &file {
-                write(file, &body).await;
+                keep(file, &body, etag.as_deref()).await;
             }
             serde_json::from_slice(&body).ok()
+        }
+        Ok(Fetched::Unchanged) => {
+            if let Some(file) = &file {
+                renew(file).await;
+            }
+            stale.and_then(|body| serde_json::from_slice(&body).ok())
         }
         Err(answer) => {
             if answer.status() == StatusCode::NOT_FOUND {
                 if let Some(file) = &file {
-                    write(file, &Bytes::from_static(ABSENT)).await;
+                    keep(file, &Bytes::from_static(ABSENT), None).await;
                 }
             }
             None
         }
     }
+}
+
+/// What TMDB said to a question.
+enum Fetched {
+    /// An answer, with the ETag TMDB gave it.
+    Answer(Bytes, Option<String>),
+    /// A 304: the kept answer is still TMDB's.
+    Unchanged,
 }
 
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
@@ -355,7 +380,36 @@ async fn fetch(
     query: Option<&str>,
     key: &str,
     rid: &str,
-) -> Result<Bytes, Box<Response>> {
+) -> Result<(Bytes, Option<String>), Box<Response>> {
+    match send(state, path, query, key, rid, None).await? {
+        Fetched::Answer(body, etag) => Ok((body, etag)),
+        // Only a question that names a tag is answered 304.
+        Fetched::Unchanged => Err(refused(StatusCode::BAD_GATEWAY, "tmdb_refused")),
+    }
+}
+
+/// Ask again for the answer kept at `file`, naming the ETag it was kept with, so TMDB can say it is unchanged
+/// rather than send all of it again. An answer kept without a tag is simply asked for.
+async fn revalidate(
+    state: &AppState,
+    path: &str,
+    query: Option<&str>,
+    key: &str,
+    rid: &str,
+    file: &Path,
+) -> Result<Fetched, Box<Response>> {
+    let etag = tokio::fs::read_to_string(file.with_extension("etag")).await.ok();
+    send(state, path, query, key, rid, etag.as_deref().filter(|t| !t.is_empty())).await
+}
+
+async fn send(
+    state: &AppState,
+    path: &str,
+    query: Option<&str>,
+    key: &str,
+    rid: &str,
+    etag: Option<&str>,
+) -> Result<Fetched, Box<Response>> {
     // The whole point of the daily ceiling: a key that is lent out can be spent by anyone who finds the route,
     // and the household would be the one rate-limited by TMDB afterwards.
     if !spend(state) {
@@ -368,13 +422,17 @@ async fn fetch(
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "tmdb_proxy_off"));
     };
-    let out = axum::http::Request::builder()
+    let mut out = axum::http::Request::builder()
         .method(Method::GET)
         .uri(upstream(path, query, key))
         .header(header::ACCEPT, "application/json")
-        .header("x-request-id", rid)
-        .body(Full::new(Bytes::new()));
-    let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
+        .header("x-request-id", rid);
+    if let Some(tag) = etag.and_then(|t| HeaderValue::from_str(t).ok()) {
+        out = out.header(header::IF_NONE_MATCH, tag);
+    }
+    let Ok(out) = out.body(Full::new(Bytes::new())) else {
+        return Err(refused(StatusCode::BAD_REQUEST, "bad_request"));
+    };
     let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(e)) => {
@@ -384,6 +442,11 @@ async fn fetch(
         Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
     };
     let status = answer.status();
+    if status == StatusCode::NOT_MODIFIED && etag.is_some() {
+        refund(state);
+        return Ok(Fetched::Unchanged);
+    }
+    let tag = answer.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
     else {
         return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
@@ -395,7 +458,7 @@ async fn fetch(
             if status == StatusCode::NOT_FOUND { "not_found" } else { "tmdb_refused" },
         ));
     }
-    Ok(bytes)
+    Ok(Fetched::Answer(bytes, tag))
 }
 
 /// Take one from today's allowance (env `TMDB_DAILY_MAX`), or refuse. Only questions that actually leave the
@@ -428,6 +491,15 @@ fn spend(state: &AppState) -> bool {
     true
 }
 
+/// Give back what `spend` took for a question TMDB answered 304. The ceiling bounds what the lent key fetches, and
+/// a 304 carries nothing: it only says the answer already kept is still TMDB's.
+fn refund(state: &AppState) {
+    if state.tmdb_daily_max.is_some() {
+        let mut spent = crate::lock(&state.tmdb_spent);
+        spent.1 = spent.1.saturating_sub(1);
+    }
+}
+
 /// A kept answer, how old it is, and when it was kept. The file's own timestamp is when it was fetched, so there
 /// is no header to write, parse or keep in step — and it is the `Last-Modified` a revalidation is checked against.
 pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
@@ -449,6 +521,28 @@ pub(crate) async fn write(file: &Path, body: &Bytes) {
     let temp = file.with_extension("tmp");
     if tokio::fs::write(&temp, body).await.is_ok() {
         let _ = tokio::fs::rename(&temp, file).await;
+    }
+}
+
+/// An answer kept with the ETag TMDB gave it, beside it as `<name>.etag`, or with none — so a revalidation never
+/// names the tag of a body that is no longer there, which TMDB would answer 304 for. The old tag goes first: a
+/// reader in between asks without one rather than with the wrong one.
+async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) {
+    let tag = file.with_extension("etag");
+    let _ = tokio::fs::remove_file(&tag).await;
+    write(file, body).await;
+    if let Some(etag) = etag {
+        let _ = tokio::fs::write(&tag, etag).await;
+    }
+}
+
+/// TMDB said the kept answer is still its own, so it counts as fetched now, tag and all: freshness and TMDB's six
+/// months start over from this confirmation, as they would from a download of the same bytes.
+async fn renew(file: &Path) {
+    for path in [file.to_path_buf(), file.with_extension("etag")] {
+        if let Ok(f) = tokio::fs::File::options().write(true).open(&path).await {
+            let _ = f.into_std().await.set_modified(SystemTime::now());
+        }
     }
 }
 
@@ -502,8 +596,11 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
     let state = Arc::clone(state);
     tokio::spawn(async move {
         // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
-        if let Ok(body) = fetch(&state, &asking.path, asking.query.as_deref(), &asking.key, "refresh").await {
-            write(&asking.file, &body).await;
+        let (path, query, key) = (&asking.path, asking.query.as_deref(), &asking.key);
+        match revalidate(&state, path, query, key, "refresh", &asking.file).await {
+            Ok(Fetched::Answer(body, etag)) => keep(&asking.file, &body, etag.as_deref()).await,
+            Ok(Fetched::Unchanged) => renew(&asking.file).await,
+            Err(_) => {}
         }
         crate::lock(&state.tmdb_refreshing).remove(&asking.cached);
     });
@@ -766,5 +863,42 @@ mod tests {
         assert_eq!(body.as_ref(), b"{\"id\":550}");
         assert!(age < Duration::from_secs(5));
         assert!(!file.with_extension("tmp").exists(), "the temporary file was left behind");
+    }
+
+    /// A kept answer's ETag travels with it and leaves with it. An answer kept without one, or a 404 kept in its
+    /// place, must never be revalidated with the tag of what was there before: TMDB would answer 304 for a body
+    /// that is not the one on disk.
+    #[tokio::test]
+    async fn an_answer_is_kept_with_its_etag_and_a_304_renews_both() {
+        let dir = temp_dir();
+        let file = cache_path(&dir, &cache_key("/3/trending/all/week", None));
+        let tag = file.with_extension("etag");
+        keep(&file, &Bytes::from_static(b"{\"page\":1}"), Some("W/\"abc\"")).await;
+        assert_eq!(std::fs::read_to_string(&tag).unwrap(), "W/\"abc\"");
+
+        aged(&file, LIST_TTL + Duration::from_secs(60));
+        aged(&tag, LIST_TTL + Duration::from_secs(60));
+        renew(&file).await;
+        assert!(read(&file).await.unwrap().1 < Duration::from_secs(5), "a 304 counts as fetched now");
+        let tag_age = SystemTime::now().duration_since(std::fs::metadata(&tag).unwrap().modified().unwrap());
+        assert!(tag_age.unwrap_or_default() < Duration::from_secs(5), "and so does its tag");
+
+        keep(&file, &Bytes::from_static(b"{\"page\":2}"), None).await;
+        assert!(!tag.exists(), "an answer kept without a tag drops the old one");
+        keep(&file, &Bytes::from_static(b"{\"page\":3}"), Some("W/\"def\"")).await;
+        keep(&file, &Bytes::from_static(ABSENT), None).await;
+        assert!(!tag.exists(), "and so does a 404 kept in its place");
+    }
+
+    /// A 304 carries nothing, so the question it answered is given back to the day's budget.
+    #[test]
+    fn a_304_is_given_back_to_the_days_budget() {
+        let h = Harness::in_dir_with(temp_dir(), |state| state.tmdb_daily_max = Some(3));
+        assert!(spend(&h.state) && spend(&h.state));
+        refund(&h.state);
+        assert_eq!(crate::lock(&h.state.tmdb_spent).1, 1);
+        let unlimited = Harness::in_dir_with(temp_dir(), |_| {});
+        refund(&unlimited.state);
+        assert_eq!(crate::lock(&unlimited.state.tmdb_spent).1, 0, "nothing to give back without a ceiling");
     }
 }
