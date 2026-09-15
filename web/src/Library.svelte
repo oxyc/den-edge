@@ -54,7 +54,7 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
-  import { hlsURL, nativeHls, trailerURLs } from './lib/reel';
+  import { directURL, nativeHls, trailerURLs } from './lib/reel';
   import { relayFetch } from './lib/relayFetch';
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
@@ -582,8 +582,10 @@
       // in the browser's own cache and the page that is about to mount reads it from there — one
       // round trip and a googlevideo fetch taken off the critical path, spent during the ~150ms
       // between the press and the click.
-      const master = found[0] && hlsURL(found[0]);
-      if (master) void relayFetch(master).catch(() => undefined);
+      // Warm what the page will actually play. That is the resolve behind `/direct` now, not a master
+      // playlist — which only the one surface that wants sound ever asks for.
+      const resolved = found[0] && directURL(found[0]);
+      if (resolved) void relayFetch(resolved).catch(() => undefined);
     });
     // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it
     // before it can play anything. Started here, it is usually resident by then.

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   forgetWarmedTrailers,
+  directStreams,
+  directURL,
   hlsURL,
   isPlaylist,
   nativeHls,
@@ -121,6 +123,61 @@ describe('hlsURL', () => {
     );
     // An unsigned deployment has no query to extend, so the flag opens one.
     expect(hlsURL('/reel/play/abc12345678.mp4', true)).toBe('/reel/hls/abc12345678.m3u8?native=1');
+  });
+});
+
+describe('directURL', () => {
+  it('is the play URL’s direct sibling, signature and all', () => {
+    expect(directURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
+      '/reel/direct/abc12345678.json?s=tag',
+    );
+    expect(directURL('https://pve.example:8443/reel/play/abc12345678.mp4?s=tag&i=iid')).toBe(
+      'https://pve.example:8443/reel/direct/abc12345678.json?s=tag&i=iid',
+    );
+    expect(directURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
+  });
+});
+
+describe('directStreams', () => {
+  const answering = (body: unknown, ok = true) =>
+    (async () => ({ ok, json: async () => body })) as unknown as typeof fetch;
+
+  it('reads the URLs reel resolved', async () => {
+    const found = await directStreams('/reel/play/abc12345678.mp4?s=tag', {
+      fetchImpl: answering({
+        video: 'https://r1.googlevideo.com/v',
+        audio: 'https://r1.googlevideo.com/a',
+        hls: 'https://manifest.googlevideo.com/m.m3u8',
+        width: 1920,
+        height: 1080,
+      }),
+    });
+    expect(found).toEqual({
+      video: 'https://r1.googlevideo.com/v',
+      audio: 'https://r1.googlevideo.com/a',
+      hls: 'https://manifest.googlevideo.com/m.m3u8',
+      width: 1920,
+      height: 1080,
+    });
+  });
+
+  /** A muted surface plays `video` alone, so an answer without one is no answer at all. */
+  it('is null without a video URL, a bad status, or a URL with no sibling', async () => {
+    expect(
+      await directStreams('/reel/play/abc12345678.mp4', {
+        fetchImpl: answering({ audio: 'https://r1.googlevideo.com/a' }),
+      }),
+    ).toBeNull();
+    expect(
+      await directStreams('/reel/play/abc12345678.mp4', {
+        fetchImpl: answering({ video: 'https://r1.googlevideo.com/v' }, false),
+      }),
+    ).toBeNull();
+    expect(
+      await directStreams('/reel/crop/abc12345678.json', {
+        fetchImpl: answering({ video: 'https://r1.googlevideo.com/v' }),
+      }),
+    ).toBeNull();
   });
 });
 

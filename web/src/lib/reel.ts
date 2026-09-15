@@ -192,6 +192,68 @@ export function hlsURL(playURL: string, native = false): string | null {
   return `${url}${url.includes('?') ? '&' : '?'}native=1`;
 }
 
+/** What reel resolved for a trailer: YouTube's own URLs, for a page that can play them itself. */
+export interface DirectStreams {
+  /**
+   * Progressive H.264, and video only unless YouTube served a muxed format — which it lists and no
+   * longer serves. reel resolves it with a format string pinned to avc1 under its height cap, so this
+   * is a single file every browser decodes in hardware.
+   */
+  video: string;
+  /** The separate audio track, absent when the format was muxed. A muted surface ignores it entirely. */
+  audio?: string;
+  /** YouTube's HLS master: adaptive, and the only way a `<video>` gets this trailer's SOUND. */
+  hls?: string;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * The `/direct/<id>.json` sibling of a play URL: the googlevideo URLs themselves.
+ *
+ * Signed by the same tag as every other sibling, because reel signs over the video and the install
+ * rather than the path — so the tag `/meta` already handed us is the one this wants.
+ */
+export function directURL(playURL: string): string | null {
+  return sibling(playURL, 'direct', 'json');
+}
+
+/**
+ * Resolve a trailer to the URLs a bare `<video>` can play.
+ *
+ * This is the fast path, and for a muted surface it is the whole of the answer. One request, answered
+ * from reel's resolve cache, and then the element streams from Google with nothing of ours in the
+ * middle: no master playlist, no variant playlist, no initialisation segment, no adaptive ladder to
+ * climb. HLS costs four sequential round trips before a frame and opens on whichever rung its player
+ * guesses — measured here as four seconds at 144p — which buys adaptation a fifteen-second slide never
+ * lives long enough to use.
+ *
+ * `hls` comes back in the same answer, so the one surface that eventually wants sound can switch to it
+ * without asking again.
+ */
+export async function directStreams(
+  playURL: string,
+  { fetchImpl = relayFetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<DirectStreams | null> {
+  const asked = directURL(playURL);
+  if (!asked) return null;
+  try {
+    const res = await fetchImpl(asked, { signal });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (typeof body?.video !== 'string' || !body.video) return null;
+    return {
+      video: body.video,
+      audio: typeof body.audio === 'string' ? body.audio : undefined,
+      hls: typeof body.hls === 'string' ? body.hls : undefined,
+      width: typeof body.width === 'number' ? body.width : undefined,
+      height: typeof body.height === 'number' ? body.height : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Is this URL an HLS playlist?
  *
@@ -243,11 +305,6 @@ function support(): HlsSupport {
     apple: globalThis.navigator?.vendor === 'Apple Computer, Inc.',
     mse: 'MediaSource' in globalThis || 'ManagedMediaSource' in globalThis,
   };
-}
-
-/** Whether hls.js has a MediaSource to drive at all. `ManagedMediaSource` counts; iOS gives that one. */
-export function mediaSource(env: HlsSupport = support()): boolean {
-  return env.mse;
 }
 
 /**

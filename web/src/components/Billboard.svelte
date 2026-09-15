@@ -15,9 +15,7 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import type Hls from 'hls.js';
-  import { hlsURL, isPlaylist, mediaSource, trailerURL } from '../lib/reel';
-  import { memberXhrSetup } from '../lib/relayFetch';
+  import { directStreams, trailerURL } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -161,35 +159,6 @@
   let ambientFailed = $state(false);
   /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
   let proxied = $state<string | null>(null);
-  /**
-   * The platform's own HLS player is a last resort here, not a preference.
-   *
-   * Once AVFoundation has started an item from reel's master it plays that item's audio through to the
-   * end of the trailer, and nothing the page can reach stops it: not `muted`, not `volume`, not switching
-   * the audio rendition off, not `pause()`, not destroying the element and its `src`. All of those were
-   * measured doing nothing while the sound carried on. So a slide left behind on Home was still being
-   * heard over the detail page opened on top of it, and only a reload ever stopped it.
-   *
-   * Through hls.js the same trailer answers to `pause()`, because the page owns the buffer instead of
-   * handing the stream to the platform. A muted ambient slide is exactly the case where control matters
-   * more than letting the platform decode it.
-   *
-   * So: hls.js wherever there is a MediaSource to drive, and the native player only where there is not.
-   * That last case is a phone without one, where hls.js cannot run at all and the alternative is reel
-   * downloading and remuxing the whole file for a fifteen-second slide.
-   */
-  const playsHls = !mediaSource();
-
-  /**
-   * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
-   * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.
-   *
-   * By the PATH. reel signs its play links, so a playlist URL ends `…m3u8?s=<tag>`, and a suffix
-   * test called every one of them not-a-playlist: hls.js never started and the slide fell back to
-   * reel's `/play` download.
-   */
-  const managed = $derived(ambient && !playsHls && isPlaylist(ambient) ? ambient : null);
-
   /** This source will not play: reel's own copy, and then the still picture, are what is left. */
   function ambientFailedOver() {
     playing = false;
@@ -252,81 +221,35 @@
     if (untrack(() => ambient)) return;
     let live = true;
     const timer = setTimeout(() => {
-      // Resolve only. Every browser plays YouTube's adaptive stream through reel's `/hls` — the
-      // playlist reordered, and the segments still fetched from Google wherever a bare element can
-      // fetch them itself — so asking reel to download and remux the whole file buys a fallback
-      // nothing normally reaches, at a minute of its CPU.
+      // Resolve only. Asking reel for the URLs costs a lookup; asking it for the file costs a download,
+      // an ffmpeg re-mux, a slot on the cache volume and the trailer crossing the house twice.
       void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: 'direct',
-      }).then((url) => {
+      }).then(async (url) => {
         if (!live || !url) return;
-        // Asking reel for the URL costs a lookup; asking it for the file costs a download, an ffmpeg
-        // re-mux, a slot on the cache volume and the trailer crossing the house twice — which is the
-        // whole wait before a cold slide shows anything.
+        // reel's own copy, behind YouTube's URL: what is left if the direct stream will not play.
         proxied = url;
-        // The source follows from the play URL alone, so the slide can start on it: `/direct` was a
-        // round trip and a resolve spent learning what `/hls` resolves for itself.
-        ambient = hlsURL(url, playsHls) ?? url;
+        // YouTube's progressive stream, played by the element itself. No playlist, no player.
+        //
+        // This slide is muted and fifteen seconds long, so everything HLS is good at is wasted on it
+        // and everything it costs is paid in full. A master playlist, a variant playlist, an
+        // initialisation segment and the first media segment are four sequential round trips before a
+        // frame, and then ABR opens on whichever rung it guesses — measured here at four seconds of
+        // 144p before it climbed. Adaptation the slide never lives long enough to use.
+        //
+        // `/direct` is one request, answered from reel's resolve cache, and the element then streams
+        // from Google with nothing of ours in the middle. reel pins that format to avc1 under its
+        // height cap, so it is a single file every browser decodes in hardware — which is also why
+        // none of this needs to know which browser it is talking to. The trailer's SOUND is the one
+        // thing this cannot carry, and a muted slide never asks for it.
+        const streams = await directStreams(url);
+        if (!live) return;
+        ambient = streams?.video ?? url;
       });
     }, SETTLE_MS);
     return () => {
       live = false;
       clearTimeout(timer);
-    };
-  });
-
-  // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
-  // `src`, and is torn down with the source it was given, so a slide change cannot leave two engines
-  // feeding one element.
-  $effect(() => {
-    const player = ambientPlayer;
-    const master = managed;
-    if (!player || !master) return;
-    let live = true;
-    let engine: Hls | undefined;
-    void import('hls.js').then(({ default: Hls }) => {
-      if (!live) return;
-      if (!Hls.isSupported()) {
-        ambientFailedOver();
-        return;
-      }
-      // The membership claim travels on hls.js's own requests too, or a paired household counts as a
-      // guest against the relay's guest budget — on its own box, from its own sofa.
-      //
-      // Telling ABR the line is fast, and letting it skip measuring for itself, is the whole of the help
-      // it needs to open high: hls.js otherwise assumes 500 kbps until a fragment has been measured, and
-      // `testBandwidth` makes it start lower still to take that measurement — which on a fifteen-second
-      // slide is the whole slide.
-      engine = new Hls({
-        enableWorker: false,
-        xhrSetup: memberXhrSetup,
-        abrEwmaDefaultEstimate: 5_000_000,
-        testBandwidth: false,
-      });
-      engine.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) ambientFailedOver();
-      });
-      // The rung is ABR's to choose, and is named by nobody here.
-      //
-      // Naming one looked necessary once: hls.js orders `levels` for itself, so asking for level 0 opened
-      // every slide at 144p, and the answer seemed to be to name the richest rung at `MANIFEST_PARSED`
-      // instead. That answer was the bug. Forcing a switch before a single fragment is buffered leaves
-      // Safari flushing and re-appending around it, and the slide crawls: `currentTime` went 0.98s to
-      // 1.08s across four and a half seconds while the decoder ran at some twenty-five times real time,
-      // `readyState` 4, a full buffer under the playhead, and the buffered ranges flipping between
-      // contiguous and gapped every half second. Stock hls.js on the same master, in the same browser, on
-      // the same page, played it at normal speed — opening at level 0 and climbing to 15 within three
-      // seconds. So the estimate above is the only steer, and the rest is left alone.
-      engine.on(Hls.Events.MANIFEST_PARSED, () => {
-        // The element is mounted with no `src`, so nothing has tried to start it yet.
-        if (active && onScreen && foreground) void player.play().catch(() => {});
-      });
-      engine.loadSource(master);
-      engine.attachMedia(player);
-    });
-    return () => {
-      live = false;
-      engine?.destroy();
     };
   });
 
@@ -568,7 +491,7 @@
         bind:this={ambientPlayer}
         class="ambient"
         class:playing
-        src={managed ? undefined : (ambient ?? undefined)}
+        src={ambient ?? undefined}
         autoplay
         muted
         loop
