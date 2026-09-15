@@ -43,7 +43,16 @@
   const url = $derived(candidates[candidate]?.play ?? null);
   /** YouTube's own URL for this candidate, when one exists that this browser can play. */
   let upgraded = $state<string | null>(null);
-  const source = $derived(upgraded ?? url);
+  /**
+   * Whether reel is being asked what to play and has not answered yet.
+   *
+   * Nothing is mounted while this is true, so the poster holds for the ~12 ms an audible `/sources`
+   * takes. It replaced mounting a derived master first, which looked free and was not: reel's log showed
+   * the element fetching TWO masters per hero open, both waiting on the same cold resolve — 2413 ms
+   * spent on the one that was then discarded, beside 2289 ms on the one that was kept.
+   */
+  let asking = $state(false);
+  const source = $derived(asking ? null : (upgraded ?? url));
   /**
    * What reel offered for this candidate, best first, and which of them is mounted.
    *
@@ -338,13 +347,21 @@
     const offered = candidates[candidate]?.sources;
     if (!play) {
       upgraded = null;
+      asking = false;
       return;
     }
-    // Derived first, so the element has a master to fetch on this tick rather than after a round trip.
-    // The hero's whole advantage over the ordered file is that it costs no build and no wait, and
-    // holding it empty while asking would spend exactly that.
-    upgraded = hlsURL(play, playsHls);
-    if (!offered) return;
+    if (!offered) {
+      // A reel older than 0.29.0 names no `/sources`, so the master is derived exactly as every version
+      // before it did. This is the only remaining reason to derive one at all.
+      upgraded = hlsURL(play, playsHls);
+      asking = false;
+      return;
+    }
+    // Ask, and mount nothing until the answer comes. Deriving one to mount in the meantime cost a whole
+    // second master fetch per open for about 12 ms of apparent gain, and on a cold resolve the two
+    // queued behind the same resolve — so the wait was paid twice and half of it discarded.
+    upgraded = null;
+    asking = true;
     let live = true;
     void fetchSources(offered, {
       surface: 'audible',
@@ -358,7 +375,14 @@
       // exactly when the candidate changed — so re-reading `candidates` here to check would add
       // nothing, and would read state belonging to an effect that no longer exists. Svelte warns
       // about that (`derived_inert`) precisely because such a read can see a stale value.
-      if (!live || !top) return;
+      if (!live) return;
+      asking = false;
+      if (!top) {
+        // reel could not say what to play, so fall back to the master this page can name itself — the
+        // same thing an answer without a sources URL gets.
+        upgraded = hlsURL(play, playsHls);
+        return;
+      }
       rungs = answer.sources;
       rung = 0;
       heroCrop = answer.crop ?? null;
