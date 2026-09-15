@@ -86,6 +86,7 @@
   function tap() {
     const player = video;
     if (!player) return;
+    if (justArrived()) return;
     // Once, and only once. After the first tap the native controls are showing, and they sit INSIDE the
     // element — so a tap on their pause button is also a click on the video, and calling play() here
     // again fought the viewer for it: the trailer stopped for a moment and started itself back up. The
@@ -122,10 +123,23 @@
     void player.play().catch(() => {});
   }
 
+  /**
+   * How long after this page appears a press is treated as belonging to the page before it.
+   *
+   * Opening a title from Home leaves a trailer playing out loud, and only that way round: the same page
+   * loaded from its own URL is silent. So the press that asked for the page arrives at the page it asked
+   * for, and lands on whatever this hero has just put under the pointer. Nothing here should be driven by
+   * a press nobody aimed at it, and the only control that grants audio is one of these two.
+   */
+  const NAVIGATION_MS = 400;
+  const arrivedAt = Date.now();
+  const justArrived = () => Date.now() - arrivedAt < NAVIGATION_MS;
+
   /** Take over the screen, with the audio on. */
   async function expand() {
     const player = video;
     if (!player) return;
+    if (justArrived()) return;
     sound = true;
     player.muted = false;
     // iOS ignores this (volume is read-only there); unmuting is what carries the sound.
