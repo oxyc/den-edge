@@ -69,6 +69,7 @@
   } from './lib/services';
   import { fetchServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
+  import { localNetworkRefused } from './lib/remux';
   import type { Routes } from './lib/routes';
   import { installsOf, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
@@ -130,6 +131,8 @@
   let remux = $state<string | null>(null);
   /** This visit's discovery answered, and no route reaches den-remux from here: away from home and off the tailnet. */
   let remuxAway = $state(false);
+  /** …and this browser refused the home network itself (`localNetworkRefused`), which is a different thing to say. */
+  let remuxBlocked = $state(false);
 
   /**
    * Keep where a service actually answered, when the library doesn't already say so.
@@ -240,6 +243,14 @@
                 remux: (found: string | null) => {
                   remux = found;
                   remuxAway = found === null;
+                  // Asked only once nothing answered, and never waited on: what is said under the actions
+                  // is corrected when the browser replies, rather than holding the page for a permission.
+                  remuxBlocked = false;
+                  if (found === null) {
+                    void localNetworkRefused().then((refused) => {
+                      if (!disposed) remuxBlocked = refused;
+                    });
+                  }
                   // Where it answered, kept for the visit that will be shown no private address.
                   void rememberAddress('remux', found);
                 },
@@ -1129,6 +1140,7 @@
     onplay={play}
     onplayhere={playHere}
     away={remuxAway && !!scout && !!tmdbKey}
+    blocked={remuxBlocked}
     onepisode={markEpisodeSeen}
     {shown}
   />

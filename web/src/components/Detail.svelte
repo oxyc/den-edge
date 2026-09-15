@@ -58,6 +58,7 @@
     onplay,
     onplayhere,
     away = false,
+    blocked = false,
     onepisode,
     onseason,
     shown = () => true,
@@ -88,6 +89,8 @@
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
     away?: boolean;
+    /** That device was refused the home network by the browser itself, which `TitleActions` says instead. */
+    blocked?: boolean;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     /**
      * Mark a whole season at once, in one write rather than one per episode. Optional: a surface that has no
@@ -382,6 +385,7 @@
             ? () => onplayhere(d.title, target?.season, target?.episode)
             : undefined}
           {away}
+          {blocked}
           trailerHref={d.trailer
             ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}

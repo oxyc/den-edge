@@ -139,6 +139,26 @@ export async function findRemux(
   return null;
 }
 
+/**
+ * Whether this browser refuses the page the home network, which is a different thing from no route reaching
+ * den-remux — and the two were told apart only by a sentence that assumed the second.
+ *
+ * Chrome's Local Network Access (enforcing since 142) classifies a tailnet address (100.64.0.0/10) as local, so a page
+ * on the public name can be refused before a request leaves. Refusal only: `prompt` means the question has not been
+ * put, and a browser that does not know the name has no such policy — neither is something to tell a viewer about.
+ */
+export async function localNetworkRefused(): Promise<boolean> {
+  const permissions = globalThis.navigator?.permissions;
+  if (!permissions) return false;
+  try {
+    const status = await permissions.query({ name: 'local-network-access' as PermissionName });
+    return status.state === 'denied';
+  } catch {
+    // An unknown permission name throws; that browser does not enforce this either.
+    return false;
+  }
+}
+
 /** The bytes a link is timed over: past a connection's slow start, and a moment of the home upload. */
 export const SPEED_PROBE_BYTES = 2 * 1024 * 1024;
 /** The first of the transfer, after its first byte, that isn't counted: slow start, not the link. */
