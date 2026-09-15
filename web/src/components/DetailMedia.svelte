@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
-  import { hlsURL, isPlaylist, nativeHls, progressiveURL, trailerURLs } from '../lib/reel';
+  import { hlsURL, isPlaylist, nativeHls, trailerURLs } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -33,46 +33,11 @@
   let candidates = $state<string[]>([]);
   let candidate = $state(0);
   const url = $derived(candidates[candidate] ?? null);
-  /**
-   * Which form of this candidate is mounted.
-   *
-   * `file` is reel's ordered progressive MP4 — the same bytes as YouTube's own, with the index moved to the
-   * front. It starts far sooner than anything else (324ms against 4916ms for YouTube's fragmented file, on
-   * Safari, measured) and carries no audio at all, which is the whole of what a muted hero needs.
-   *
-   * `master` is the HLS master. It is the only form with sound, so asking for sound is what mounts it.
-   *
-   * `copy` is reel's own downloaded and re-muxed file: what is left when neither of the others plays.
-   *
-   * A form rather than a nullable URL because there are three rungs and `null` can only say two. It used to
-   * mean "fall back to reel's copy", which left nowhere to put the ordered file.
-   */
-  let form = $state<'file' | 'master' | 'copy'>('file');
-  /**
-   * Where the muted preview had got to when sound was asked for, so the form that replaces it picks the
-   * trailer up rather than restarting it. 0 when there is nothing to resume.
-   */
-  let resumeAt = $state(0);
+  /** YouTube's own URL for this candidate, when one exists that this browser can play. */
+  let upgraded = $state<string | null>(null);
+  const source = $derived(upgraded ?? url);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
-  /**
-   * reel's ordered file for this candidate, when it can name one.
-   *
-   * Null for anything that is not one of reel's signed play URLs, and that absence is load-bearing: where
-   * there is no ordered file the `file` form resolves to the master, so stepping from one to the other
-   * would change nothing. Both places that step check this first, or a form change that leaves the source
-   * untouched would fire no new load, no new error, and the ladder would stop where it stood.
-   */
-  const ordered = $derived(url ? progressiveURL(url) : null);
-  /** This candidate in the form currently chosen; `null` selects reel's own copy, which `url` already names. */
-  const upgraded = $derived.by(() => {
-    const play = url;
-    if (!play || form === 'copy') return null;
-    // Where reel cannot name an ordered file for this URL, the master stands in rather than the download:
-    // it is the same trailer either way, and the download is the slowest thing here.
-    return (form === 'master' ? hlsURL(play, playsHls) : ordered) ?? hlsURL(play, playsHls);
-  });
-  const source = $derived(upgraded ?? url);
   /**
    * The source this page has to drive itself.
    *
@@ -130,7 +95,6 @@
     if (touched) return;
     touched = true;
     sound = true;
-    withSound();
     quieten(player);
     void player.play().catch(() => {});
   }
@@ -208,40 +172,6 @@
     }
   }
 
-  /**
-   * Mount the form that carries sound, from where the silent one had got to.
-   *
-   * The ordered file has no audio track at all — reel builds it from the video stream alone — so every
-   * gesture that grants sound has to bring the master with it. Nothing to do once it is already mounted,
-   * and nothing to do on reel's copy either, which carries its own sound.
-   */
-  function withSound() {
-    // Nothing to switch to where there is no ordered file: the `file` form is already the master there, so
-    // it carries sound as it stands, and moving would only leave a resume point for a load that never comes.
-    if (form !== 'file' || !ordered) return;
-    resumeAt = video?.currentTime ?? 0;
-    form = 'master';
-  }
-
-  /**
-   * Pick the preview's place back up on the form that replaced it.
-   *
-   * Once, and only forwards: someone who asked for sound a minute in should hear it from there, not from
-   * the top. On `loadeddata` rather than `loadedmetadata` because a seek while metadata is still loading
-   * can defer WebKit's first painted frame while the clock is already running — the same reason
-   * `metadata` below leaves the position alone.
-   */
-  function resume() {
-    const player = video;
-    if (player && resumeAt) {
-      const to = resumeAt;
-      resumeAt = 0;
-      if (to > 0 && Number.isFinite(player.duration) && to < player.duration)
-        player.currentTime = to;
-    }
-    firstFrame();
-  }
-
   /** Take over the screen, with the audio on. */
   async function expand() {
     const player = video;
@@ -249,7 +179,6 @@
     if (!pressed) return;
     pressed = false;
     sound = true;
-    withSound();
     // iOS treats volume as read-only, so unmuting is what carries the sound there; everywhere else both go.
     quieten(player);
     // Back to a quiet page on the way out: a trailer still talking after the viewer closed it is
@@ -299,7 +228,6 @@
     if (!pressed) return;
     pressed = false;
     sound = !sound;
-    if (sound) withSound();
     quieten(player);
     // Only on the way up. Muting should leave a playing trailer playing, and a paused one paused.
     if (sound) void player.play().catch(() => {});
@@ -367,21 +295,15 @@
   // every trailer with the element held empty for both; the one case it ruled out — a trailer with
   // no master — is a 404 the error path already reads as "fall back to reel's own file".
   $effect(() => {
-    // Nothing to reset for until there is a candidate, and reading it here is what runs this again for
-    // the next one. Clearing the candidates on the way to a new title therefore leaves these standing,
-    // which costs nothing: with no URL the derived source is null, and the trailer that arrives next
-    // resets them before it can play.
-    if (!url) return;
-    // All of these belong to the trailer that is going away, and `sound` especially: left standing it
-    // makes the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
+    const play = url;
+    // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
+    // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
     // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
     // refused full-screen never fires `fullscreenchange` and iOS never fires it at all.
     sound = false;
     touched = false;
     forced = false;
-    // Every candidate opens on the form that starts soonest, whatever the one before it ended on.
-    form = 'file';
-    resumeAt = 0;
+    upgraded = play ? hlsURL(play, playsHls) : null;
   });
 
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
@@ -397,7 +319,7 @@
     void import('hls.js').then(({ default: Hls }) => {
       if (!live) return;
       if (!Hls.isSupported()) {
-        form = 'copy';
+        upgraded = null;
         return;
       }
       // The membership claim travels on hls.js's own requests too, or a paired household counts as a
@@ -414,7 +336,7 @@
         testBandwidth: false,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) form = 'copy';
+        if (data.fatal) upgraded = null;
       });
       // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
       // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
@@ -493,16 +415,7 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
-    // This same video's master before any other candidate. The ordered file is a rewrite of exactly these
-    // bytes, so a fault in the rewrite says nothing about whether the trailer itself plays — and the master
-    // is one request away, against a whole yt-dlp round trip for anything else.
-    if (form === 'file' && ordered) {
-      // Keep the place, so a failure a viewer never saw does not visibly restart the trailer.
-      resumeAt = video?.currentTime ?? 0;
-      form = 'master';
-      return;
-    }
-    // The next candidate's master before this one's copy. A master refused because YouTube has removed
+    // The next candidate's master before this one's file. A master refused because YouTube has removed
     // the video is refused for reel's copy too — and asking costs a whole yt-dlp round trip to be told
     // the same thing: two seconds for the master, nearly two more for the file, before a trailer that
     // does exist is even started. So walk the candidates first.
@@ -512,8 +425,8 @@
     }
     // Every master refused. reel's own file is what is left, and it is worth one ask: a video with no
     // HLS master at all still plays from it. Once, not once per candidate.
-    if (form !== 'copy') {
-      form = 'copy';
+    if (upgraded) {
+      upgraded = null;
       return;
     }
     failed = true;
@@ -560,7 +473,7 @@
     aria-hidden={!mobile}
     onloadedmetadata={metadata}
     oncanplay={start}
-    onloadeddata={resume}
+    onloadeddata={firstFrame}
     onseeked={firstFrame}
     ontimeupdate={firstFrame}
     onplaying={firstFrame}
