@@ -476,27 +476,17 @@
    * browser will unmute for. It goes quiet again on the way out: a trailer still talking over a page the
    * viewer has returned to is the thing they would then have to hunt down and silence.
    */
-  /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
-  type Renditions = { length: number; [at: number]: { enabled: boolean } };
-
   /**
-   * Quiet, said in the way this browser needs.
+   * Quiet, and quiet is all this needs now.
    *
-   * reel's masters carry a separate audio rendition (`EXT-X-MEDIA:TYPE=AUDIO`), and Safari hands such a
-   * master to AVFoundation, which plays that rendition through a path `muted` never reaches — and keeps
-   * playing it while the element itself reports paused. That is what put trailer sound behind a detail
-   * page: this slide, stopped and muted, carried on talking, and no property readable on the detail
-   * page's own video could show it. The rendition has to be switched off by name, and it does not exist
-   * until metadata has been read.
+   * Switching the master's separate audio rendition off used to live here, for a native player that went
+   * on playing it past `muted`. This slide no longer has one: hls.js feeds it, and disabling a rendition
+   * on a MediaSource element instead makes the media clock wait on audio that will never be rendered —
+   * measured as a beat of playback, a second of nothing, and round again, with twenty seconds buffered
+   * and `readyState` at 4 throughout.
    */
   function hush(player: HTMLMediaElement, loud = false) {
     player.muted = !loud;
-    const tracks = (player as HTMLMediaElement & { audioTracks?: Renditions }).audioTracks;
-    if (!tracks) return;
-    for (let at = 0; at < tracks.length; at += 1) {
-      const track = tracks[at];
-      if (track) track.enabled = loud;
-    }
   }
 
   async function expand() {
