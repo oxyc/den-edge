@@ -6,7 +6,7 @@
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
-  import { started } from '../lib/mediaProbe';
+  import { seen, started } from '../lib/mediaProbe';
   let {
     type,
     tmdbId,
@@ -265,11 +265,11 @@
     const look = (at: number) => {
       // A scratch array rather than a Set: this wants no reactivity, and a component may not hold a
       // plain Set.
-      const seen: HTMLMediaElement[] = [];
+      const listed: HTMLMediaElement[] = [];
       const media: unknown[] = [];
       const describe = (player: HTMLMediaElement, from: string) => {
-        if (seen.includes(player)) return;
-        seen.push(player);
+        if (listed.includes(player)) return;
+        listed.push(player);
         const where = player.closest('[data-detail-media]')
           ? 'detail'
           : player.classList.contains('ambient')
@@ -291,6 +291,7 @@
         });
       };
       started.forEach((entry) => describe(entry.element, entry.from));
+      seen.forEach((entry) => describe(entry.element, entry.from));
       document
         .querySelectorAll('video, audio')
         .forEach((element) => describe(element as HTMLMediaElement, 'attached, never played'));
@@ -298,27 +299,34 @@
     };
 
     /**
-     * Both players report silence on every lever they have — muted, volume 0, renditions off — and the
-     * sound goes on, so the thing making it answers to none of them. In WebKit the only certain way to
-     * stop an item AVFoundation has started is to destroy the source under it. Each is torn down in turn,
-     * at a known moment, and which moment the sound stops at says which player was carrying it. If it
-     * survives both, it belongs to neither and the search moves off these elements entirely.
+     * Destroying the two visible players in turn stopped nothing, so the emitter is neither of them.
+     * This takes the other end: every media element either instrument has ever recorded — played by
+     * script, or merely present in the document at some point, including ones long since removed — has
+     * its source destroyed at once, which in WebKit is the only certain way to stop an item AVFoundation
+     * has started. If the sound stops here, an element nobody was holding was carrying it, and the count
+     * says how many there were to find. If it survives this, no media element is making it.
      */
-    const tearDown = (player: HTMLVideoElement | null, whose: string) => {
-      if (!player) return;
-      player.pause();
-      player.removeAttribute('src');
-      player.load();
-      console.log('[den audio probe] torn down:', whose);
+    const tearDownAll = () => {
+      const all: HTMLMediaElement[] = [];
+      [...started, ...seen].forEach((entry) => {
+        if (!all.includes(entry.element)) all.push(entry.element);
+      });
+      document.querySelectorAll('video, audio').forEach((element) => {
+        const player = element as HTMLMediaElement;
+        if (!all.includes(player)) all.push(player);
+      });
+      all.forEach((player) => {
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
+      });
+      console.log(
+        '[den audio probe] torn down:',
+        JSON.stringify({ all: all.length, played: started.length, everInDocument: seen.length }),
+      );
     };
     const timers = [700, 2500, 6000].map((at) => setTimeout(() => look(at), at));
-    timers.push(
-      setTimeout(
-        () => tearDown(document.querySelector<HTMLVideoElement>('video.ambient'), 'billboard'),
-        6500,
-      ),
-      setTimeout(() => tearDown(video ?? null, 'detail'), 9000),
-    );
+    timers.push(setTimeout(tearDownAll, 6500));
     return () => timers.forEach((timer) => clearTimeout(timer));
   });
 
