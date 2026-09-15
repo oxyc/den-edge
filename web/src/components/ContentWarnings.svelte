@@ -8,6 +8,14 @@
     categories,
   }: { detail: TitleDetail; apiKey: string; categories: string[] } = $props();
   let content = $state<{ id: number; warnings: Warning[] } | null>(null);
+  /**
+   * Whether the panel is open, tracked so it can be closed by something other than the mark that opened it.
+   *
+   * A phone needs that and a laptop does not. Below 760px the panel is a sheet at the bottom of the screen
+   * while the mark is up in the facts row, which may have scrolled away — and a `details` element does not
+   * close on a press outside itself, so there was no way out of it at all.
+   */
+  let open = $state(false);
   $effect(() => {
     const controller = new AbortController();
     content = null;
@@ -19,15 +27,30 @@
 </script>
 
 {#if content?.warnings.length}
-  <details>
+  <details bind:open>
     <!-- Beside the age certificate, carrying the same border and size: what a title contains belongs in
          the row where what it is rated is already read. This one answers to hover and focus, which the
          certificate never does, and the label carries the count for anyone who cannot see the mark. -->
     <summary class="chip" aria-label="Content warnings: {content.warnings.length}"
       ><DetailIcon name="warning" />{content.warnings.length}</summary
     >
+    <!-- The sheet's own way out, and the larger of the two: a press anywhere behind it. Drawn on a phone
+         only, where the panel covers the page rather than hanging off the mark. -->
+    <button
+      class="scrim"
+      tabindex="-1"
+      aria-label="Close content warnings"
+      onclick={() => (open = false)}
+    ></button>
     <div class="warnings">
-      <p class="heading">Content warnings</p>
+      <div class="top">
+        <p class="heading">Content warnings</p>
+        <button class="close" aria-label="Close" onclick={() => (open = false)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            ><path d="m6 6 12 12M18 6 6 18" /></svg
+          >
+        </button>
+      </div>
       <ul>
         {#each content.warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
       </ul>
@@ -150,6 +173,20 @@
     text-decoration: underline;
   }
 
+  .top {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  /* Both belong to the sheet a phone gets, not to the dropdown: on a laptop the mark that opened this is
+     still sitting beside the certificate, which closes it again. */
+  .scrim,
+  .close {
+    display: none;
+  }
+
   /* A phone has no room to hang a panel off this chip. The row begins beside the poster, so a panel
      anchored to the mark's own left edge started well into the width and ran past the right one — and the
      page clips horizontally rather than scrolling, so the warnings and the credit under them were cut off
@@ -164,6 +201,49 @@
       max-width: none;
       max-height: 60vh;
       overflow-y: auto;
+    }
+
+    /* Behind the sheet and across everything, so the way out is wherever the thumb already is. Kept out of
+       the tab order: the control inside the sheet is the one a keyboard or a screen reader should find. */
+    .scrim {
+      display: block;
+      position: fixed;
+      z-index: 39;
+      inset: 0;
+      padding: 0;
+      border: 0;
+      background: rgb(0 0 0 / 0.5);
+      cursor: pointer;
+    }
+
+    /* A finger's worth, in the sheet's own corner. Pulled out into the padding so the glyph sits level with
+       the heading rather than pushing the list down for it. */
+    .close {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      margin: -8px -8px 0 0;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: none;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .close svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentcolor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+    }
+
+    .close:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
   }
 </style>
