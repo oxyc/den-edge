@@ -359,8 +359,9 @@ fn private(policy: &axum::http::HeaderValue) -> axum::http::HeaderValue {
 /// for rather than positioned — but only under reel, so no other addon can be streamed through by naming a
 /// path after one of these.
 fn media(path: &str) -> bool {
-    path.strip_prefix("/reel/")
-        .is_some_and(|rest| rest.split('/').any(|segment| matches!(segment, "play" | "hls" | "seg")))
+    path.strip_prefix("/reel/").is_some_and(|rest| {
+        rest.split('/').any(|segment| matches!(segment, "play" | "hls" | "seg" | "progressive"))
+    })
 }
 
 /// A master a bare `<video>` plays by itself (`?native=1`), which is not a stream through here.
@@ -737,7 +738,19 @@ mod tests {
     /// otherwise any addon could be proxied without a ceiling by naming a path `/play/`.
     #[test]
     fn only_reels_own_media_paths_stream() {
-        for path in ["/reel/play/abc.mp4", "/reel/cfg/play/abc.mp4", "/reel/hls/abc.m3u8", "/reel/seg/1.ts"] {
+        // `/progressive` belongs here for the reason the others do, and it was left out when den-edge
+        // started asking for it: the JSON path collects a whole body and refuses anything past eight
+        // megabytes, so a trailer served that way came back 502 — measured, on a 7 MB slide that only
+        // squeaked under it and a larger one that did not. It forwards no `Range` either, so nothing
+        // relayed that way could seek.
+        for path in [
+            "/reel/play/abc.mp4",
+            "/reel/cfg/play/abc.mp4",
+            "/reel/hls/abc.m3u8",
+            "/reel/seg/1.ts",
+            "/reel/progressive/abc.mp4",
+            "/reel/cfg/progressive/abc.mp4",
+        ] {
             assert!(super::media(path), "{path}");
         }
         for path in [
