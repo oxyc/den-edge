@@ -79,8 +79,9 @@ test('hero adopts reel’s source and crop', async () => {
     await page.route('**/m/s/chosen.webm', serveVideo);
     await open(page);
     const video = page.locator('[data-detail-media] video');
-    // Not derivable from the play URL: this can only have come from reel's answer.
-    await expect(video).toHaveAttribute('src', 'http://internal/m/s/chosen.webm', {
+    // Not derivable from the play URL: this can only have come from reel's answer. And moved onto the
+    // mount the page asked on, since reel names what it mints by the address it was asked at.
+    await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
       timeout: 15000,
     });
     await expect(video).toHaveAttribute('style', /scale\(1\.04/);
@@ -106,7 +107,7 @@ test('hero walks reel’s order when an entry will not play', async () => {
     await page.route('**/m/s/second.webm', serveVideo);
     await open(page);
     const video = page.locator('[data-detail-media] video');
-    await expect(video).toHaveAttribute('src', 'http://internal/m/s/second.webm', {
+    await expect(video).toHaveAttribute('src', '/reel/m/s/second.webm', {
       timeout: 15000,
     });
     // Unmeasured: drawn exactly as it was before any of this, which is every trailer's first view.

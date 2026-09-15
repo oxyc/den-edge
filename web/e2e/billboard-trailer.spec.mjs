@@ -84,7 +84,9 @@ test('billboard plays what reel offers, cropped where reel measured it', async (
     await start(page);
     const video = page.locator('video.ambient');
     // reel's URL, not one this page built: nothing about `/m/s/chosen` is derivable from the play URL.
-    await expect(video).toHaveAttribute('src', 'http://internal/m/s/chosen.webm', {
+    // Moved onto the mount the page asked on, because reel names what it mints by the address it was
+    // asked at — which behind the relay is its LAN one, and unreachable from a phone or past the CSP.
+    await expect(video).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
       timeout: 15000,
     });
     // And the bars are trimmed, rather than drawn inside the hero.
@@ -112,7 +114,7 @@ test('billboard walks reel’s order when the first will not play', async () => 
     await page.route('**/m/s/second.webm', serveVideo);
     await start(page);
     const video = page.locator('video.ambient');
-    await expect(video).toHaveAttribute('src', 'http://internal/m/s/second.webm', {
+    await expect(video).toHaveAttribute('src', '/reel/m/s/second.webm', {
       timeout: 15000,
     });
     // An unmeasured trailer draws as it always did, with no transform at all.
