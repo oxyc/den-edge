@@ -114,4 +114,21 @@
   a {
     color: var(--accent);
   }
+
+  /* A phone has no room to hang a panel off this chip. The row begins beside the poster, so a panel
+     anchored to the mark's own left edge started well into the width and ran past the right one — and the
+     page clips horizontally rather than scrolling, so the warnings and the credit under them were cut off
+     and unreachable. Here it is a sheet across the page instead, which is also how this phone opens the
+     player's own menus. */
+  @media (width <= 759px) {
+    .warnings {
+      position: fixed;
+      z-index: 40;
+      inset: auto var(--gutter) max(12px, env(safe-area-inset-bottom));
+      width: auto;
+      max-width: none;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+  }
 </style>
