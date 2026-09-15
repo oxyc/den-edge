@@ -74,6 +74,7 @@ const SORTS = [
 /** One media type's rows for a service, in the order the channel shows them. */
 function rowsFor(
   type: MediaType,
+  service: Service,
   providers: number[],
   country: string,
   pages: Pages,
@@ -92,7 +93,9 @@ function rowsFor(
       releaseDateLte: id === 'new' ? new Date().toISOString().slice(0, 10) : undefined,
     };
     return {
-      id: `service-${id}-${type}`,
+      // The service and its country are part of the id: a row is keyed by it, and two services sharing an id would
+      // let one keep the other's posters on a surface that is reused rather than rebuilt.
+      id: `service-${service.id}-${country}-${id}-${type}`,
       title: `${title} ${NOUN[type]}`,
       load: (page: number) => pages(`/discover/${type}`, type, discoverParams(query), page),
     };
@@ -108,12 +111,19 @@ export function serviceRows(
   service: Service,
   country: string,
   pages: Pages,
-  { minYear }: { minYear?: number } = {},
+  { minYear, only }: { minYear?: number; only?: MediaType } = {},
 ): RowDef[] {
   // Every id the service folded in, so a title listed under "Netflix Standard with Ads" is still on Netflix.
   const providers = [service.id, ...service.variants];
-  const movies = service.movies ? rowsFor('movie', providers, country, pages, minYear) : [];
-  const series = service.series ? rowsFor('tv', providers, country, pages, minYear) : [];
+  const wanted = (type: MediaType) => (only ? only === type : true);
+  const movies =
+    service.movies && wanted('movie')
+      ? rowsFor('movie', service, providers, country, pages, minYear)
+      : [];
+  const series =
+    service.series && wanted('tv')
+      ? rowsFor('tv', service, providers, country, pages, minYear)
+      : [];
   return movies
     .flatMap((row, i) => (series[i] ? [row, series[i]] : [row]))
     .concat(

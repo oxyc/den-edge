@@ -6,6 +6,7 @@
 <script lang="ts">
   import { tmdbPages } from '../lib/catalog';
   import type { Title } from '../lib/library';
+  import { named } from '../lib/pageTitle';
   import { serviceRows } from '../lib/services';
   import { fetchServices, matches, type Service } from '../settings/services';
   import Browse from './Browse.svelte';
@@ -52,9 +53,23 @@
 
   /** A pick can name a variant TMDB has since demoted, so the directory is searched by fold, not by id. */
   const service = $derived(directory?.find((entry) => matches(entry, id)) ?? null);
+  /** Which of a service's catalogue is shown. Offered only where the service carries both. */
+  let tab = $state<'all' | 'movie' | 'tv'>('all');
+  const both = $derived(!!service?.movies && !!service.series);
   const rows = $derived(
-    service ? serviceRows(service, country, tmdbPages(tmdbKey), { minYear }) : [],
+    service
+      ? serviceRows(service, country, tmdbPages(tmdbKey), {
+          minYear,
+          only: tab === 'all' ? undefined : tab,
+        })
+      : [],
   );
+
+  // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
+  // route's own "Service · Den" stands (`pageTitle`).
+  $effect(() => {
+    if (service) document.title = named(service.name);
+  });
 </script>
 
 {#if service}
@@ -71,6 +86,18 @@
     <h1>{service.name}</h1>
   </header>
   <JustWatchCredit />
+  {#if both}
+    <div class="tabs" role="group" aria-label="What to show">
+      {#each [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series']] as const as [value, label] (value)}
+        <button
+          type="button"
+          class:on={tab === value}
+          aria-pressed={tab === value}
+          onclick={() => (tab = value)}>{label}</button
+        >
+      {/each}
+    </div>
+  {/if}
   <Browse {rows} {shown} />
 {:else if unreachable}
   <p class="note">Couldn’t reach the service directory. Check your connection and try again.</p>
@@ -97,6 +124,29 @@
   h1 {
     margin: 0;
     font-size: 28px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 20px;
+  }
+
+  .tabs button {
+    padding: 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .tabs button.on {
+    border-color: transparent;
+    background: var(--fg);
+    color: var(--bg);
   }
 
   .note {

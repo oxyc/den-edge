@@ -11,7 +11,9 @@
 
 <style>
   .credit {
-    margin: -20px 0 28px;
+    /* Spacing belongs to the surface, not here: this sits under a row on Home and under a brand header on a
+       service's page, and a margin tuned for one lands wrong on the other. */
+    margin: 0 0 24px;
     color: var(--muted);
     font-size: 12px;
   }

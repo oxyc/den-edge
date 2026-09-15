@@ -765,7 +765,9 @@
           directories = { ...directories, [country]: listed };
         },
         () => {
-          // No directory, no tiles: the row draws nothing rather than naming services it cannot name.
+          // No directory, no tiles — but the country is put back, so the next visit to Home asks again rather
+          // than leaving the row empty for the rest of the session over one failed request.
+          delete askedFor[country];
         },
       );
     }
