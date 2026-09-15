@@ -44,19 +44,30 @@ function pressed(event: Event) {
   warmer?.({ type: route.type, id: route.id });
 }
 
-/** Call `warm` for the title a press is heading to. Returns the function that stops listening. */
-export function warmOnIntent(warm: Warm): () => void {
+/** Forget it. The listener and the last-pressed title outlive any one caller, so a test must reset them. */
+export function forgetWarmOnIntent(): void {
+  warmer = null;
+  last = '';
+}
+
+/**
+ * Call `warm` for the title a press is heading to. Returns the function that stops listening.
+ *
+ * `on` is the document in an app and a stand-in in a test, the same way `nativeHls` takes its environment:
+ * what this needs to get right is how many listeners it registers, and that cannot be checked at all from
+ * a test runner with no DOM.
+ */
+export function warmOnIntent(warm: Warm, on: EventTarget = document): () => void {
   const listening = warmer !== null;
   warmer = warm;
   // Capture, so a card that handles the press itself still warms. Passive, so this never delays it.
-  if (!listening)
-    document.addEventListener('pointerdown', pressed, { capture: true, passive: true });
+  if (!listening) on.addEventListener('pointerdown', pressed, { capture: true, passive: true });
   return () => {
     // Only the registration still in force tears down: an instance the router has dropped must not remove
     // the listener a live one is relying on.
     if (warmer !== warm) return;
     warmer = null;
     last = '';
-    document.removeEventListener('pointerdown', pressed, { capture: true });
+    on.removeEventListener('pointerdown', pressed, { capture: true });
   };
 }
