@@ -176,21 +176,27 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         "/config" => revalidated(config(state), req.headers()),
-        // The web app's public name gets the public table when the deployment built one: a visitor there has no
-        // use for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks
-        // is not part of serving them a page. Every other name — the LAN, the tailnet, the device API — is
-        // unchanged, which is what the TVs and a phone on the tailnet read.
-        // The browser's name only. The device API is every bit as public, and gating it too looked like the
-        // same argument — but a TV does not merely READ this table, it matches its own URLs against it and
-        // rewrites them to the address that works from wherever it is standing. Its den-edge origin is the
-        // compiled LAN IP, and away from home it is the LAN `edge` entry, and nothing else, that sends library
-        // sync, pairing, the inbox and the update gate to d-api at all; a LAN subtitles install reaches d-subs
-        // the same way. A public-only answer names neither — and the away fetch OVERWRITES the stored table,
-        // so the TV would discard the one entry keeping it reachable, by its own hand. At home none of this
-        // would show, because an unrewritten LAN URL is just the LAN URL, which works.
+        // Both public names get the public table when the deployment built one: a stranger at either has no use
+        // for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks is
+        // not part of answering them. The LAN and the tailnet keep the whole table, which is what a TV at home
+        // and a phone on the tailnet read.
+        //
+        // The device API was deliberately exempt from this for a while, and the reason it no longer needs to be
+        // is worth recording. A TV does not merely READ this table: it matches its own URLs against it and
+        // rewrites them to whatever works from where it is standing, and an away fetch OVERWRITES its stored
+        // copy — so a public-only answer here used to make it discard the one `edge` entry keeping its sync and
+        // pairing reachable, by its own hand. What changed is on the TV: it now addresses den-edge by the public
+        // name to begin with and takes its table from the LAN face at home, so nothing it needs comes from this
+        // answer. Trailers are the case that looks alarming and is not — the routes table only ever OVERRIDES a
+        // URL that matches an entry, so an addon installed by an address that already works is simply not
+        // rewritten, and reel at home lands on the same LAN address either way.
+        //
+        // What is still load-bearing here is `edge` itself carrying at least one https entry. It is the only
+        // bootstrap a device with no stored table has, and the only fallback when the LAN cannot be reached:
+        // losing it strands a TV, where losing reel would only cost it a trailer.
         "/routes" => {
             let table = match (face, &state.routes_public) {
-                (Face::Web, Some(public)) => public,
+                (Face::Web | Face::Api, Some(public)) => public,
                 _ => &state.routes,
             };
             revalidated(crate::routes::to_json(table).to_string(), req.headers())
@@ -642,17 +648,22 @@ pub mod tests {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().routes_public =
             Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
-        let public = body_json(h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await).await;
-        assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi");
-        assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published");
-        // The device API is just as public and still serves everything, which is not an oversight: a TV away
-        // from home matches its own LAN URLs against this table to learn where to send them, and overwrites
-        // its stored copy with whatever it reads. Gated here, it would discard the `edge` entry that is the
-        // only reason its sync and pairing reach d-api at all.
-        for host in ["d-api.oxy.fi", "192.168.86.193:8094"] {
-            let full = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
-            assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080", "{host}");
+        // BOTH public names, the browser's and the device API's. The device API was exempt while a TV took its
+        // own addressing from this table and would overwrite its stored copy with a public-only answer,
+        // discarding the `edge` entry keeping it reachable. It now addresses den-edge by the public name and
+        // reads its table from the LAN face at home, so nothing it depends on comes from here.
+        for host in ["d.oxy.fi", "d-api.oxy.fi"] {
+            let public = body_json(h.send("GET", "/routes", None, &[("host", host)]).await).await;
+            assert_eq!(public["addons"]["edge"][0]["url"], "https://d-api.oxy.fi", "{host}");
+            assert!(public["addons"]["scout"].is_null(), "the LAN addresses are not published on {host}");
+            // The one entry that must survive the gate: it is the only bootstrap a device with no stored table
+            // has, and the only fallback when the LAN cannot be reached. Losing it strands a TV.
+            let edge = public["addons"]["edge"][0]["url"].as_str().unwrap_or_default();
+            assert!(edge.starts_with("https://"), "edge must keep an https entry on {host}: {edge}");
         }
+        // The LAN keeps the whole table, which is what a TV at home reads.
+        let full = body_json(h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await).await;
+        assert_eq!(full["addons"]["scout"][0]["url"], "http://192.168.86.193:8080");
     }
 
     #[tokio::test]
