@@ -46,13 +46,18 @@ export interface Playable {
  * exactly that. den-remux keeps a release the player can't take as the fallback it converts on the GPU, so
  * claiming less is what asks for that conversion.
  *
- * The sound goes with the picture, which is the lesson of the second attempt. The same iPhone refused a 4K
- * HDR HEVC copy, and then refused the 1080p H.264 conversion of it in exactly the same way at exactly the
- * same point — and the only thing both sessions had in common was an E-AC-3 track copied through untouched.
- * A `MediaError 3` on an initialization segment names no track, so a refusal disproves every claim the
- * session was built on rather than only the video. `eac3` is the least trustworthy of them: it comes from a
- * bare type check, and a type check says yes more readily than a decoder does. `aacMultichannel` stays,
- * because Media Capabilities was asked about that one properly — so the retry is converted, not downmixed.
+ * The sound goes with the picture because the error names neither. A `MediaError 3` on an initialization
+ * segment says only that the player gave up, not which track it gave up on, so a refusal cannot be read as
+ * being about the video alone and the retry must carry none of it forward. `eac3` is the least trustworthy
+ * claim of the set in any case: it comes from a bare type check, and a type check says yes more readily than
+ * a decoder does. `aacMultichannel` stays, because Media Capabilities was asked about that one properly — so
+ * the retry is converted rather than downmixed.
+ *
+ * Read a refusal on Apple's native player as weak evidence, though, and do not add guesses on the strength
+ * of one. The failure that prompted this was not a decode failure at all: Apple's player abandons a slow
+ * initialization segment after about five seconds and reports exactly this error, and den-remux was taking
+ * six to produce one (`CoreMediaErrorDomain -12927`, `-12889 "No response for map"`). hls.js waits longer,
+ * which is why the same release played in Chrome. This reducer is for genuine decode failures.
  */
 export function withoutRefused(can: Playable): Playable {
   return {
