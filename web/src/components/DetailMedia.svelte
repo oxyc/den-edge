@@ -332,8 +332,23 @@
   // first, only to learn whether a master exists, put a round trip and a yt-dlp resolve in front of
   // every trailer with the element held empty for both; the one case it ruled out — a trailer with
   // no master — is a 404 the error path already reads as "fall back to reel's own file".
+  /**
+   * What the effect below last acted on, so an unchanged trailer is not started over.
+   *
+   * It depends on `candidates`, and the effect that fills `candidates` assigns a NEW array every time
+   * it runs — including the runs that follow `active` or `saving` changing, where the trailer has not
+   * changed at all. Everything below then ran a second time: another `/sources` for the same title
+   * (measured from a phone, the second a 0 ms cache hit), and a reset of `sound` under a viewer who
+   * had already turned the sound on. Compared by value, so an equal array asks for nothing.
+   */
+  let asked = { play: '', sources: '' };
+
   $effect(() => {
     const play = url;
+    const offered = candidates[candidate]?.sources;
+    // Both read before the check, so both stay tracked whichever way it goes.
+    if (play && asked.play === play && asked.sources === (offered ?? '')) return;
+    asked = { play: play ?? '', sources: offered ?? '' };
     // Both belong to the trailer that is going away, and `sound` especially: left standing it makes
     // the next one autoplay UNMUTED, which every browser refuses — so `play()` is rejected and the
     // trailer sits there paused for no visible reason. Nothing resets it on its own, because a
@@ -344,7 +359,6 @@
     rungs = [];
     rung = 0;
     heroCrop = null;
-    const offered = candidates[candidate]?.sources;
     if (!play) {
       upgraded = null;
       asking = false;
