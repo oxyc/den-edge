@@ -30,8 +30,14 @@
     playing?: number;
     /** The first frame the compositor actually showed. */
     firstFrame?: number;
-    /** reel's own breakdown, when it sent one: `resolve;dur=…`, `index;dur=…`. */
-    server?: Record<string, number>;
+    /**
+     * reel's own account of the request: `resolve;dur=…`, `index;dur=…`, `cache;desc=hit`.
+     *
+     * Strings, not numbers, because the useful half is sometimes a description rather than a duration —
+     * `cache;desc=hit` is what says an index was reused. Rounding that to a 0 ms duration once had me
+     * reading a perfectly good 32 MB response as a redirect.
+     */
+    server?: Record<string, string>;
     bytes?: number;
     error?: string;
   };
@@ -106,6 +112,16 @@
         kind: 'file' as const,
         on: true,
       },
+      // A height step nothing has asked for before, so reel has no index for it and has to build one. Every
+      // other progressive row here answers `cache;desc=hit` once the page has been used at all, which makes
+      // them warm numbers — useful, but not what a viewer opening a fresh title pays. Check the `reel` column
+      // to confirm this one really did build: `index` with a duration, rather than `cache hit`.
+      {
+        name: 'progressive 480 audio (cold)',
+        url: at('progressive', 'mp4', 'height=480&audio=1'),
+        kind: 'file' as const,
+        on: true,
+      },
       {
         name: 'hls native',
         url: at('hls', 'm3u8', 'native=1'),
@@ -122,8 +138,8 @@
   let chosen = $state<Record<string, boolean>>({});
   const picked = $derived(variants.filter((v) => chosen[v.name] ?? v.on));
 
-  /** reel's Server-Timing for a URL the browser has just fetched, as a plain map of milliseconds. */
-  function serverTiming(url: string): Record<string, number> | undefined {
+  /** reel's Server-Timing for a URL the browser has just fetched: a description where there is one, else ms. */
+  function serverTiming(url: string): Record<string, string> | undefined {
     const entry = performance
       .getEntriesByType('resource')
       .filter((e): e is PerformanceResourceTiming => e.name === new URL(url, location.href).href)
@@ -133,15 +149,27 @@
         (PerformanceResourceTiming & { serverTiming?: PerformanceServerTiming[] }) | undefined
     )?.serverTiming;
     if (!timings?.length) return undefined;
-    return Object.fromEntries(timings.map((t) => [t.name, Math.round(t.duration)]));
+    // The description first: `cache;desc=hit` carries no duration, and it is the one that says whether
+    // this run measured a built index or a reused one — which decides what the number beside it means.
+    return Object.fromEntries(
+      timings.map((t) => [t.name, t.description || `${Math.round(t.duration)}ms`]),
+    );
   }
 
+  /**
+   * Roughly what came down the wire, and only roughly.
+   *
+   * A media element fetches by range, and the entry for the URL then accounts for the headers rather than
+   * the payload — Safari reported 302 bytes for a 32 MB file, which reads exactly like a redirect and is
+   * not one. `encodedBodySize` is the less misleading of the two. Do not draw conclusions from this column
+   * about whether bytes crossed the homelab; read the response with curl for that.
+   */
   function bytesOf(url: string): number | undefined {
     const entry = performance
       .getEntriesByType('resource')
       .filter((e): e is PerformanceResourceTiming => e.name === new URL(url, location.href).href)
       .at(-1);
-    return entry?.transferSize || undefined;
+    return entry?.encodedBodySize || entry?.transferSize || undefined;
   }
 
   /**
