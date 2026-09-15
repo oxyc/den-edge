@@ -300,8 +300,47 @@ impl Face {
     }
 }
 
+/// reel's own route inside the relay mount.
+///
+/// Every relayed request used to log as `other`, which left a hero's ask indistinguishable from a
+/// press's warm-up, and a master fetch from a segment — most of what there is to know when a trailer
+/// is slow. The config segment is optional, so a verb is found by name rather than by position, and an
+/// unknown `/m/<kind>` is still named rather than collapsed: a kind falling through to the JSON path
+/// was the 0.133.0 bug, and a label that hides it would hide the next one too.
+fn reel_route(rest: &str) -> &'static str {
+    let mut rest = rest;
+    loop {
+        let (segment, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut beyond = tail.split('/');
+        let (next, then) = (beyond.next().unwrap_or(""), beyond.next().unwrap_or(""));
+        match segment {
+            "m" if next == "n" => return "/reel/m/n",
+            "m" if next == "s" && then == "seg" => return "/reel/m/s/seg",
+            "m" if next == "s" => return "/reel/m/s",
+            "m" => return "/reel/m",
+            "sources" => return "/reel/sources",
+            "meta" => return "/reel/meta",
+            "play" => return "/reel/play",
+            "hls" if next == "seg" => return "/reel/hls/seg",
+            "hls" => return "/reel/hls",
+            "seg" => return "/reel/seg",
+            "progressive" => return "/reel/progressive",
+            "direct" => return "/reel/direct",
+            "crop" => return "/reel/crop",
+            _ => {}
+        }
+        if tail.is_empty() {
+            return "/reel";
+        }
+        rest = tail;
+    }
+}
+
 /// A stable label per route, so a key in a path never becomes a metric label or a log field.
 pub fn route_label(path: &str) -> &'static str {
+    if let Some(rest) = path.strip_prefix("/reel/") {
+        return reel_route(rest);
+    }
     match path {
         "/health" => "/health",
         "/version" => "/version",
@@ -322,6 +361,11 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
         p if p.starts_with("/ratings/") => "/ratings",
+        // One label each: what happens inside them is their own repo's log to keep.
+        p if p.starts_with("/scout/") => "/scout",
+        p if p.starts_with("/atlas/") => "/atlas",
+        p if p.starts_with("/subtitles/") => "/subtitles",
+        p if p.starts_with("/remux/") => "/remux",
         _ => "other",
     }
 }
@@ -513,6 +557,36 @@ pub fn valid_inbox_key(key: &str) -> bool {
 pub mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// `GET other` for every relayed request is what made a slow trailer unreadable in the log: a hero's
+    /// ask, a press's warm-up, a master and a segment all arrived under the same name. The config
+    /// segment is optional, so the ones that carry it are spelled both ways here.
+    #[test]
+    fn a_relayed_reel_request_names_the_route_it_asked_for() {
+        assert_eq!(route_label("/reel/sources/dQw4w9WgXcQ.json"), "/reel/sources");
+        assert_eq!(route_label("/reel/cfg/sources/dQw4w9WgXcQ.json"), "/reel/sources");
+        assert_eq!(route_label("/reel/m/n/AbC123"), "/reel/m/n");
+        assert_eq!(route_label("/reel/cfg/m/n/AbC123"), "/reel/m/n");
+        assert_eq!(route_label("/reel/m/s/AbC123"), "/reel/m/s");
+        // The carried segments arrive in bulk where a native master's never touch this box at all, so
+        // telling the two apart is most of what the log is for.
+        assert_eq!(route_label("/reel/m/s/seg"), "/reel/m/s/seg");
+        assert_eq!(route_label("/reel/cfg/meta/movie/tmdb:550.json"), "/reel/meta");
+        assert_eq!(route_label("/reel/hls/abc.m3u8"), "/reel/hls");
+        assert_eq!(route_label("/reel/hls/seg"), "/reel/hls/seg");
+        assert_eq!(route_label("/reel/play/abc.mp4"), "/reel/play");
+        assert_eq!(route_label("/reel/progressive/abc.mp4"), "/reel/progressive");
+
+        // A kind this build has never heard of is still reel's, and still named. One falling through to
+        // the JSON path was the 0.133.0 bug; a label reading `other` would have hidden the next one too.
+        assert_eq!(route_label("/reel/m/x/AbC123"), "/reel/m");
+        assert_eq!(route_label("/reel/whatever"), "/reel");
+
+        // The set stays closed: a video id, a config or a ticket must never become a metric label.
+        assert_eq!(route_label("/scout/cfg/manifest.json"), "/scout");
+        assert_eq!(route_label("/atlas/recommend"), "/atlas");
+        assert_eq!(route_label("/nope"), "other");
+    }
 
     /// A residential IPv6 customer gets a /64 — 18 quintillion addresses — so a limit keyed on the full
     /// address counts nothing at all: one visitor spends a fresh source address per request and never meets
