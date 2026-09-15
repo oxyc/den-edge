@@ -96,6 +96,48 @@ test('billboard plays what reel offers, cropped where reel measured it', async (
   }
 });
 
+test('billboard passes over a portrait trailer for one that fills the slide', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await mock(page, {
+      sources: [
+        // A Short, which reel offers because it is the best rung of the trailer it found. On a slide
+        // this wide it plays as a thin strip between two black columns, and the letterbox crop cannot
+        // help: there is no picture at the sides for it to find.
+        {
+          kind: 'mp4',
+          url: 'http://internal/m/s/tall.webm',
+          audio: false,
+          height: 1280,
+          width: 720,
+        },
+        {
+          kind: 'mp4',
+          url: 'http://internal/m/s/wide.webm',
+          audio: false,
+          height: 720,
+          width: 1280,
+        },
+      ],
+      crop: null,
+    });
+    // Both play perfectly well. The first is passed over on its shape alone — not, as in the test
+    // below, because it failed to load.
+    await page.route('**/m/s/tall.webm', serveVideo);
+    await page.route('**/m/s/wide.webm', serveVideo);
+    await start(page);
+    const video = page.locator('video.ambient');
+    await expect(video).toHaveAttribute('src', '/reel/m/s/wide.webm', {
+      timeout: 15000,
+    });
+  } finally {
+    await browser.close();
+  }
+});
+
 test('billboard walks reel’s order when the first will not play', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

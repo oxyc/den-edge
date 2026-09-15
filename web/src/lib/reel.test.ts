@@ -2,15 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   forgetWarmedTrailers,
   cropStyle,
-  directURL,
   fetchSources,
   hlsURL,
   progressiveURL,
   isPlaylist,
   nativeHls,
   trailerCandidates,
-  trailerURL,
-  trailerURLs,
 } from './reel';
 import type { Routes } from './routes';
 
@@ -54,7 +51,10 @@ beforeEach(forgetWarmedTrailers);
 
 describe('what a press resolved', () => {
   const ask = (fetchImpl: typeof fetch) =>
-    trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, { fetchImpl, secure: true });
+    trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
+      fetchImpl,
+      secure: true,
+    });
 
   it('is served to the page that press opened, without asking again', async () => {
     const asked: string[] = [];
@@ -134,40 +134,6 @@ describe('trailerCandidates', () => {
   });
 });
 
-describe('trailerURL', () => {
-  const ask = (routes: Routes, fetchImpl: typeof fetch, secure = true) =>
-    trailerURL('/reel/cfg', 'movie', { imdb: 'tt0111161' }, routes, { fetchImpl, secure });
-
-  it('takes reel’s best trailer and keeps it on this origin, signature and all', async () => {
-    // The relay's mount, not the install's config: a play URL is signed rather than configured. And not
-    // one of reel's own addresses — on a public name the tailnet one resolves for nobody and the public
-    // one is behind Access, which is a trailer that silently never plays.
-    expect(await ask(ROUTES, answering(meta))).toBe('/reel/play/abc123.mp4?s=tag&i=iid');
-  });
-
-  it('falls back to an address this page can reach where reel is not on this origin', async () => {
-    const elsewhere = (routes: Routes, secure = true) =>
-      trailerURL('https://reel.example/cfg', 'movie', { imdb: 'tt0111161' }, routes, {
-        fetchImpl: answering(meta, 200, 'https://reel.example/cfg'),
-        secure,
-      });
-    expect(await elsewhere(ROUTES)).toBe(
-      'https://pve.example:8443/reel/play/abc123.mp4?s=tag&i=iid',
-    );
-    const onLan: Routes = { reel: [{ url: 'http://192.168.86.193:8092' }] };
-    expect(await elsewhere(onLan, false)).toBe(
-      'http://192.168.86.193:8092/play/abc123.mp4?s=tag&i=iid',
-    );
-    const sealed: Routes = { reel: [{ url: 'https://d-reel.oxy.fi', access: true }] };
-    expect(await elsewhere(sealed), 'nothing but an Access address is nothing to play').toBeNull();
-  });
-
-  it('is null when reel has no trailer or answers badly', async () => {
-    expect(await ask(ROUTES, answering({ meta: { links: [] } }))).toBeNull();
-    expect(await ask(ROUTES, answering(meta, 503))).toBeNull();
-  });
-});
-
 describe('hlsURL', () => {
   it('is the play URL’s HLS sibling, signature and all', () => {
     expect(hlsURL('/reel/play/abc12345678.mp4?s=tag')).toBe('/reel/hls/abc12345678.m3u8?s=tag');
@@ -184,18 +150,6 @@ describe('hlsURL', () => {
     );
     // An unsigned deployment has no query to extend, so the flag opens one.
     expect(hlsURL('/reel/play/abc12345678.mp4', true)).toBe('/reel/hls/abc12345678.m3u8?native=1');
-  });
-});
-
-describe('directURL', () => {
-  it('is the play URL’s direct sibling, signature and all', () => {
-    expect(directURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
-      '/reel/direct/abc12345678.json?s=tag',
-    );
-    expect(directURL('https://pve.example:8443/reel/play/abc12345678.mp4?s=tag&i=iid')).toBe(
-      'https://pve.example:8443/reel/direct/abc12345678.json?s=tag&i=iid',
-    );
-    expect(directURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
   });
 });
 
@@ -234,7 +188,7 @@ describe('fetchSources', () => {
 
   const two = {
     sources: [
-      { kind: 'mp4', url: '/reel/m/s/blob1', audio: true, height: 1080 },
+      { kind: 'mp4', url: '/reel/m/s/blob1', audio: true, height: 1080, width: 1920 },
       { kind: 'hls', url: '/reel/m/n/blob2', audio: true, height: null },
     ],
   };
@@ -247,6 +201,11 @@ describe('fetchSources', () => {
     });
     expect(got?.sources.map((s) => s.kind)).toEqual(['mp4', 'hls']);
     expect(got?.sources[0]?.height).toBe(1080);
+    // Both dimensions, because the billboard's question is which of them is larger: a trailer taller
+    // than it is wide is a Short, and fills that slide with black columns no crop can remove. An entry
+    // naming neither — which is every `hls` one — has to read as landscape rather than as portrait.
+    expect(got?.sources[0]?.width).toBe(1920);
+    expect(got?.sources[1]?.width).toBeNull();
     expect(asked).toContain('surface=audible');
     expect(asked).toContain('player=native');
     // The signature it was given travels untouched; reel signs over the video and install, not the query.
@@ -332,7 +291,7 @@ describe('fetchSources', () => {
       }),
     });
     expect(got?.sources).toEqual([
-      { kind: 'mp4', url: '/reel/m/s/blob1', audio: false, height: null },
+      { kind: 'mp4', url: '/reel/m/s/blob1', audio: false, height: null, width: null },
     ]);
   });
 
@@ -457,12 +416,14 @@ describe('trailer candidates', () => {
         ],
       },
     };
-    expect(
-      await trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
-        fetchImpl: answering(body),
-        secure: true,
-      }),
-    ).toEqual(['/reel/play/first.mp4?s=one', '/reel/play/second.mp4?s=two']);
+    const found = await trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
+      fetchImpl: answering(body),
+      secure: true,
+    });
+    expect(found.map((one) => one.play)).toEqual([
+      '/reel/play/first.mp4?s=one',
+      '/reel/play/second.mp4?s=two',
+    ]);
   });
 
   it('asks by the tmdb id, colon unencoded, and names the imdb id beside it', async () => {
@@ -472,7 +433,7 @@ describe('trailer candidates', () => {
       return new Response(JSON.stringify({ meta: { links: [] } }), { status: 200 });
     };
 
-    await trailerURLs('/reel/cfg', 'movie', { tmdb: 157336, imdb: 'tt0816692' }, ROUTES, {
+    await trailerCandidates('/reel/cfg', 'movie', { tmdb: 157336, imdb: 'tt0816692' }, ROUTES, {
       fetchImpl: record,
       secure: true,
     });
@@ -481,7 +442,7 @@ describe('trailer candidates', () => {
     expect(asked).toBe('/reel/cfg/meta/movie/tmdb:157336.json?imdb=tt0816692');
 
     // Only an imdb id: asked for as it always was, with nothing to name alongside it.
-    await trailerURLs('/reel/cfg', 'movie', { imdb: 'tt0816692' }, ROUTES, {
+    await trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0816692' }, ROUTES, {
       fetchImpl: record,
       secure: true,
     });

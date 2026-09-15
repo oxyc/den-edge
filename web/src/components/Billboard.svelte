@@ -288,7 +288,16 @@
           // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
           // is only worth taking where the element parses one itself; offered to anything else it
           // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
-          const playable = offered?.sources.filter((one) => one.kind === 'mp4' || PLAYS_HLS) ?? [];
+          // A portrait trailer — a Short posted 9:16 — fills this slide with two black columns, and the
+          // letterbox crop cannot help: there is no picture at the sides for it to find. reel names the
+          // dimensions where it measured them, so an entry carrying none is taken as landscape, which is
+          // what an `hls` entry looks like whether it is one or not.
+          const playable =
+            offered?.sources.filter(
+              (one) =>
+                (one.kind === 'mp4' || PLAYS_HLS) &&
+                !(one.width && one.height && one.width < one.height),
+            ) ?? [];
           const top = playable[0];
           if (top) {
             proxied = url;

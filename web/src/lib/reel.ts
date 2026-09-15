@@ -178,22 +178,6 @@ function sourceAt(raw: string, asked: URL, mount: string): string | null {
   }
 }
 
-/**
- * Ordered, distinct play URLs: what every surface asked for before `/sources`, and the fallback after.
- *
- * Kept as its own function so each surface moves to `/sources` on its own, rather than all of them
- * moving in the commit that changes what reel is asked.
- */
-export async function trailerURLs(
-  base: string,
-  type: MediaType,
-  ids: TitleIds,
-  routes: Routes,
-  options: Parameters<typeof trailerCandidates>[4] = {},
-): Promise<string[]> {
-  return (await trailerCandidates(base, type, ids, routes, options)).map((found) => found.play);
-}
-
 /** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
 export async function trailerCandidates(
   base: string,
@@ -274,16 +258,6 @@ export function hlsURL(playURL: string, native = false): string | null {
   const url = sibling(playURL, 'hls', 'm3u8');
   if (!url || !native) return url;
   return `${url}${url.includes('?') ? '&' : '?'}native=1`;
-}
-
-/**
- * The `/direct/<id>.json` sibling of a play URL: the googlevideo URLs themselves.
- *
- * Signed by the same tag as every other sibling, because reel signs over the video and the install
- * rather than the path — so the tag `/meta` already handed us is the one this wants.
- */
-export function directURL(playURL: string): string | null {
-  return sibling(playURL, 'direct', 'json');
 }
 
 /**
@@ -411,6 +385,7 @@ export interface Source {
   url: string;
   audio: boolean;
   height: number | null;
+  width: number | null;
 }
 
 /** reel's answer for one trailer on one surface: ordered best-first, and what it knows about the picture. */
@@ -496,6 +471,7 @@ export async function fetchSources(
         url: at,
         audio: entry.audio === true,
         height: typeof entry.height === 'number' ? entry.height : null,
+        width: typeof entry.width === 'number' ? entry.width : null,
       });
     }
     if (!list.length) return null;
@@ -535,21 +511,4 @@ export function cropStyle(crop: Crop | null | undefined): string | null {
   if (!Number.isFinite(scale) || scale <= 1) return null;
   const origin = `${((x + w / 2) * 100).toFixed(3)}% ${((y + h / 2) * 100).toFixed(3)}%`;
   return `transform: scale(${scale.toFixed(4)}); transform-origin: ${origin};`;
-}
-
-/** Browse billboards use the first candidate; detail playback can advance through the full list. */
-export async function trailerURL(
-  base: string,
-  type: MediaType,
-  ids: TitleIds,
-  routes: Routes,
-  options: {
-    fetchImpl?: typeof fetch;
-    secure?: boolean;
-    signal?: AbortSignal;
-    prewarm?: 'full' | 'direct';
-    height?: number;
-  } = {},
-): Promise<string | null> {
-  return (await trailerURLs(base, type, ids, routes, options))[0] ?? null;
 }
