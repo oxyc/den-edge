@@ -1026,6 +1026,7 @@
     id={route.id}
     country={route.country}
     {tmdbKey}
+    {atlas}
     minYear={prefs.minReleaseYear}
     shown={browseShown}
   />

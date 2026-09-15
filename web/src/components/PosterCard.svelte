@@ -19,8 +19,10 @@
     /** Where the card leads. Without one it is not a link: a card that shows a title and opens nothing. */
     href?: string;
   } = $props();
+  // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
+  // title TMDB's own path is missing here, so a row is not half placeholder.
   const poster = $derived(
-    title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : undefined,
+    title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : title.posterUrl,
   );
   const faded = $derived(availability.unavailable(title));
   $effect(() => availability.want(title));

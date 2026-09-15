@@ -11,6 +11,12 @@ export interface Title {
   id: number;
   title: string;
   posterPath?: string;
+  /**
+   * Art for a title TMDB has no poster path for here, as a whole URL: atlas's service catalogs carry one per title,
+   * keyed by IMDb id, which reaches titles its own dataset does not hold. Only ever set from such a catalog, and only
+   * ever used when `posterPath` is absent, so TMDB stays the art everywhere it can be.
+   */
+  posterUrl?: string;
   /** Available in discovery results, before the full detail request finishes. */
   backdropPath?: string;
   year?: number;

@@ -5,18 +5,26 @@
      ends up exactly as deep as the service is rather than promising a catalogue it doesn't have. -->
 <script lang="ts">
   import { tmdbPages } from '../lib/catalog';
-  import type { Title } from '../lib/library';
+  import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
-  import { serviceRows } from '../lib/services';
+  import {
+    atlasCatalogs,
+    atlasServiceRows,
+    mergeServiceRows,
+    serviceRows,
+    type AtlasCatalog,
+  } from '../lib/services';
   import { fetchServices, matches, type Service } from '../settings/services';
   import Browse from './Browse.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
+  import TypeFilter from './TypeFilter.svelte';
 
   let {
     id,
     country,
     tmdbKey,
+    atlas = null,
     minYear,
     shown,
   }: {
@@ -25,6 +33,8 @@
     /** ISO-3166 alpha-2: which country's catalogue this page is. */
     country: string;
     tmdbKey: string;
+    /** Where atlas answers, when this page can reach it: its charts are what TMDB cannot say. */
+    atlas?: string | null;
     /** Settings' release-year floor, applied to every row here as it is everywhere else. */
     minYear?: number;
     shown: (title: Title) => boolean;
@@ -53,17 +63,35 @@
 
   /** A pick can name a variant TMDB has since demoted, so the directory is searched by fold, not by id. */
   const service = $derived(directory?.find((entry) => matches(entry, id)) ?? null);
-  /** Which of a service's catalogue is shown. Offered only where the service carries both. */
-  let tab = $state<'all' | 'movie' | 'tv'>('all');
+  /** Which of a service's catalogue is shown; null is all of it. Offered only where the service carries both. */
+  let tab = $state<MediaType | null>(null);
   const both = $derived(!!service?.movies && !!service.series);
-  const rows = $derived(
-    service
-      ? serviceRows(service, country, tmdbPages(tmdbKey), {
-          minYear,
-          only: tab === 'all' ? undefined : tab,
-        })
-      : [],
-  );
+  /** atlas's catalogs, when it answers. Its rows are left out rather than waited for: TMDB's stand on their own. */
+  let catalogs = $state<AtlasCatalog[]>([]);
+  $effect(() => {
+    const here = atlas;
+    if (!here) return;
+    let current = true;
+    void atlasCatalogs(here).then(
+      (listed) => {
+        if (current) catalogs = listed;
+      },
+      () => {
+        // atlas down or not reachable from here: the page is TMDB's rows, which is what it was before atlas had any.
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
+
+  const only = $derived(tab ?? undefined);
+  const rows = $derived.by(() => {
+    if (!service) return [];
+    const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), { minYear, only });
+    const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only }) : [];
+    return mergeServiceRows(own, tmdb);
+  });
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
   // route's own "Service · Den" stands (`pageTitle`).
@@ -87,15 +115,8 @@
   </header>
   <JustWatchCredit />
   {#if both}
-    <div class="tabs" role="group" aria-label="What to show">
-      {#each [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series']] as const as [value, label] (value)}
-        <button
-          type="button"
-          class:on={tab === value}
-          aria-pressed={tab === value}
-          onclick={() => (tab = value)}>{label}</button
-        >
-      {/each}
+    <div class="tabs">
+      <TypeFilter value={tab} onchange={(value) => (tab = value)} label="Show on this service" />
     </div>
   {/if}
   <Browse {rows} {shown} />
@@ -128,25 +149,7 @@
 
   .tabs {
     display: flex;
-    gap: 8px;
     margin: 0 0 20px;
-  }
-
-  .tabs button {
-    padding: 6px 14px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--muted);
-    font: inherit;
-    font-size: 14px;
-    cursor: pointer;
-  }
-
-  .tabs button.on {
-    border-color: transparent;
-    background: var(--fg);
-    color: var(--bg);
   }
 
   .note {

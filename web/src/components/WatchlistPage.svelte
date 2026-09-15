@@ -8,6 +8,7 @@
   import { titleHref } from '../lib/route';
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
+  import TypeFilter from './TypeFilter.svelte';
 
   let {
     resume,
@@ -50,11 +51,6 @@
   const ASK_FOR = 5000;
   let count = $state(STEP);
   let bottom = $state<HTMLElement>();
-  const FILTERS: { value: MediaType | null; label: string }[] = [
-    { value: null, label: 'All' },
-    { value: 'movie', label: 'Movies' },
-    { value: 'tv', label: 'Series' },
-  ];
   let kind = $state<MediaType | null>(null);
   /** The same three tabs over the watchlist. It was two headed sections, which read as two different things. */
   let savedKind = $state<MediaType | null>(null);
@@ -264,15 +260,11 @@
   <section aria-label="Watchlist">
     <div class="heading">
       <h2>Watchlist <span class="count">{savedShown.length}</span></h2>
-      <div class="filter" role="group" aria-label="Show in Watchlist">
-        {#each FILTERS as filter (filter.label)}
-          <button
-            type="button"
-            aria-pressed={savedKind === filter.value}
-            onclick={() => (savedKind = filter.value)}>{filter.label}</button
-          >
-        {/each}
-      </div>
+      <TypeFilter
+        value={savedKind}
+        onchange={(value) => (savedKind = value)}
+        label="Show in Watchlist"
+      />
     </div>
     {@render grid(savedShown)}
     {#if !savedShown.length}
@@ -285,19 +277,15 @@
   <section aria-label="Watched">
     <div class="heading">
       <h2>Watched <span class="count">{shown.length}</span></h2>
-      <div class="filter" role="group" aria-label="Show in Watched">
-        {#each FILTERS as filter (filter.label)}
-          <button
-            type="button"
-            aria-pressed={kind === filter.value}
-            onclick={() => {
-              kind = filter.value;
-              // A different filter starts the list from its top again.
-              count = STEP;
-            }}>{filter.label}</button
-          >
-        {/each}
-      </div>
+      <TypeFilter
+        value={kind}
+        onchange={(value) => {
+          kind = value;
+          // A different filter starts the list from its top again.
+          count = STEP;
+        }}
+        label="Show in Watched"
+      />
     </div>
     {#each months as month (month.key)}
       <h3>{month.label}</h3>
@@ -379,32 +367,6 @@
 
   .heading h2 {
     margin: 0;
-  }
-
-  .filter {
-    display: flex;
-    gap: 4px;
-    padding: 3px;
-    border-radius: 999px;
-    background: var(--card);
-  }
-
-  .filter button {
-    min-height: 30px;
-    padding: 0 14px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--muted);
-    font: inherit;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .filter button[aria-pressed='true'] {
-    background: rgb(255 255 255 / 0.14);
-    color: var(--fg);
   }
 
   /* Search's grid (SearchResults), so a page of posters looks the same wherever it is. */
