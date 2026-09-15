@@ -672,17 +672,23 @@ pub mod tests {
         // `data:` is hls.js's, not ours: YouTube's master carries subtitle renditions, so it opens a
         // text track on `data:,WEBVTT` before any cue exists. Refused, that is a console error on
         // every trailer with subtitles — the media itself is a string the page wrote.
+        // The tailnet wildcard stands ahead of the table's own entries and does not replace them: a household
+        // on its LAN still reaches den-remux by the address the table names, and the wildcard is only what
+        // lets a page use the tailnet address it stored for itself when the table withholds one.
         assert!(
             csp.contains(
                 "media-src 'self' blob: data: https://*.googlevideo.com \
-                 https://video-ssl.itunes.apple.com https://pve.example:8443;"
+                 https://video-ssl.itunes.apple.com https://*.ts.net:8443 https://pve.example:8443;"
             ),
             "{csp}"
         );
         // doesthedogdie and OMDb are deliberately NOT here: `/warnings/` and `/ratings/` answer for them on this
         // origin, which `'self'` already covers.
         assert!(
-            csp.contains("connect-src 'self' https://api.themoviedb.org https://pve.example:8443;"),
+            csp.contains(
+                "connect-src 'self' https://api.themoviedb.org \
+                 https://*.ts.net:8443 https://pve.example:8443;"
+            ),
             "{csp}"
         );
         assert!(csp.contains("frame-src https://www.youtube-nocookie.com;"), "{csp}");

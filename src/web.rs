@@ -24,6 +24,16 @@ use std::path::{Component, Path, PathBuf};
 /// origins). Reel's were missing, and a trailer is fetched from reel itself — so on the public and tailnet
 /// names the policy refused every one of them, which a page reports only as a media load that failed.
 ///
+/// `https://*.ts.net:8443` is there because the routes table cannot name the address the page will actually
+/// use. On the public name the table deliberately withholds den-remux — a stranger is told nothing about a
+/// household's tailnet — so the page falls back to the tailnet address it stored for itself, and a policy
+/// built from the table has no entry for it. Video never crosses the Cloudflare tunnel, so that fallback is
+/// the only way playback works away from the LAN, and without this it failed as a blocked media load with
+/// nothing on the server to show why. A wildcard rather than one host because a tailnet's name belongs to
+/// its household, not to this box: `pve.tailce93d3.ts.net` is only ours. It is bounded by the scheme and by
+/// `tailscale serve`'s port, and it grants nothing a tailnet peer could not already reach — reaching one at
+/// all requires being on it.
+///
 /// OMDb is not here either: the IMDb, Rotten Tomatoes and Metacritic figures come through `/ratings/`
 /// (`ratings.rs`), which keeps each title for every device.
 ///
@@ -37,8 +47,9 @@ fn csp(media: &[String]) -> String {
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org; \
-         media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com{media}; \
-         connect-src 'self' https://api.themoviedb.org{media}; \
+         media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
+         https://*.ts.net:8443{media}; \
+         connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443{media}; \
          frame-src https://www.youtube-nocookie.com; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -234,6 +245,22 @@ mod tests {
         let policy = super::csp(&[]);
         assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
         assert!(!policy.contains("'unsafe-eval'"));
+    }
+
+    /// A household's tailnet address is the one the page falls back to when the routes table withholds
+    /// den-remux, which it does on the public name — so the policy has to allow it without being able to
+    /// name it. Both directives: the video is a media load, and hls.js fetches its segments with XHR.
+    #[test]
+    fn policy_allows_a_tailnet_it_cannot_name() {
+        let policy = super::csp(&[]);
+        let media = policy.split("media-src").nth(1).expect("a media-src directive");
+        let media = media.split(';').next().expect("the directive ends");
+        assert!(media.contains("https://*.ts.net:8443"), "{policy}");
+        let connect = policy.split("connect-src").nth(1).expect("a connect-src directive");
+        let connect = connect.split(';').next().expect("the directive ends");
+        assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
+        // Bounded: https, and the one port `tailscale serve` publishes.
+        assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
     }
 
     #[test]
