@@ -321,8 +321,15 @@
   $effect(() => {
     const video = ambientPlayer;
     if (!video || !ambient) return;
-    if (active && onScreen && foreground) void video.play().catch(() => {});
-    else video.pause();
+    if (active && onScreen && foreground) {
+      hush(video);
+      void video.play().catch(() => {});
+    } else {
+      video.pause();
+      // Pausing stops the picture. It does not stop a rendition AVFoundation has already started, which
+      // is why a slide left behind on Home could still be heard from the page opened on top of it.
+      hush(video);
+    }
   });
 
   // --- The rail ---
@@ -456,15 +463,38 @@
    * browser will unmute for. It goes quiet again on the way out: a trailer still talking over a page the
    * viewer has returned to is the thing they would then have to hunt down and silence.
    */
+  /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
+  type Renditions = { length: number; [at: number]: { enabled: boolean } };
+
+  /**
+   * Quiet, said in the way this browser needs.
+   *
+   * reel's masters carry a separate audio rendition (`EXT-X-MEDIA:TYPE=AUDIO`), and Safari hands such a
+   * master to AVFoundation, which plays that rendition through a path `muted` never reaches — and keeps
+   * playing it while the element itself reports paused. That is what put trailer sound behind a detail
+   * page: this slide, stopped and muted, carried on talking, and no property readable on the detail
+   * page's own video could show it. The rendition has to be switched off by name, and it does not exist
+   * until metadata has been read.
+   */
+  function hush(player: HTMLMediaElement, loud = false) {
+    player.muted = !loud;
+    const tracks = (player as HTMLMediaElement & { audioTracks?: Renditions }).audioTracks;
+    if (!tracks) return;
+    for (let at = 0; at < tracks.length; at += 1) {
+      const track = tracks[at];
+      if (track) track.enabled = loud;
+    }
+  }
+
   async function expand() {
     const player = ambientPlayer;
     if (!player) return;
-    player.muted = false;
+    hush(player, true);
     // iOS ignores this (volume is read-only there); unmuting is what carries the sound.
     player.volume = 1;
     const leave = () => {
       if (document.fullscreenElement) return;
-      player.muted = true;
+      hush(player);
       document.removeEventListener('fullscreenchange', leave);
     };
     document.addEventListener('fullscreenchange', leave);
@@ -543,7 +573,8 @@
         tabindex="-1"
         onplaying={() => (playing = true)}
         onerror={ambientFailedOver}
-        onloadstart={(event) => (event.currentTarget.muted = true)}
+        onloadstart={(event) => hush(event.currentTarget)}
+        onloadedmetadata={(event) => hush(event.currentTarget)}
       ></video>
     {/if}
     <div class="scrim"></div>
