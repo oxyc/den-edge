@@ -1,5 +1,6 @@
 <script lang="ts">
   import icon from '../assets/den-mark.png';
+  import DetailIcon from './DetailIcon.svelte';
   import { flushSync, untrack } from 'svelte';
   import { navigate, navigateBack } from '../lib/navigation';
   import { parseRoute, searchHref, type Route } from '../lib/route';
@@ -49,12 +50,24 @@
     navigate(searchHref(text), route.page === 'search');
     input?.blur();
   }
+  /**
+   * The strip, and what a phone does with it.
+   *
+   * Five labels of text need about 285px, and at 390px the strip has 236px to put them in — so they were
+   * already running off its right edge, scrolling with the scrollbar hidden and nothing to say they were
+   * there. Two of them give way instead.
+   *
+   * `Home` goes, because the mark beside it is already a link to the same place, 48px wide and always
+   * visible, and it is the one tab whose address differs from the canonical one. `Settings` keeps its glyph
+   * and hides its word: the text stays in the DOM, so the name a screen reader reads and a test looks for is
+   * unchanged, which an `aria-label` swap would have quietly broken.
+   */
   const tabs = [
-    { page: 'library', label: 'Home' },
-    { page: 'movies', label: 'Movies' },
-    { page: 'series', label: 'Series' },
-    { page: 'watchlist', label: 'Watchlist' },
-    { page: 'settings', label: 'Settings' },
+    { page: 'library', label: 'Home', icon: undefined },
+    { page: 'movies', label: 'Movies', icon: undefined },
+    { page: 'series', label: 'Series', icon: undefined },
+    { page: 'watchlist', label: 'Watchlist', icon: undefined },
+    { page: 'settings', label: 'Settings', icon: 'gear' },
   ] as const;
 </script>
 
@@ -101,9 +114,14 @@
   </form>
   <nav aria-label="Main navigation">
     {#each tabs as tab (tab.page)}
-      <a href="/{tab.page}" aria-current={route.page === tab.page ? 'page' : undefined}
-        >{tab.label}</a
+      <a
+        href="/{tab.page}"
+        class:home={tab.page === 'library'}
+        aria-current={route.page === tab.page ? 'page' : undefined}
       >
+        {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
+        {:else}{tab.label}{/if}
+      </a>
     {/each}
   </nav>
   <button
@@ -250,7 +268,16 @@
     gap: clamp(12px, 3vw, 24px);
   }
 
+  /* A target rather than a bare line of text: these had no padding at all, so "Home" was about 37 by 20
+     pixels — under the 24px minimum, and a long way from the 44px this app uses everywhere else. 34px is
+     what the 46px bar can give once its own padding is taken out. */
   nav a {
+    display: grid;
+    grid-auto-flow: column;
+    place-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding-inline: 6px;
     color: var(--muted);
     font-weight: 600;
     text-decoration: none;
@@ -259,6 +286,20 @@
 
   nav a[aria-current='page'] {
     color: var(--fg);
+  }
+
+  /* Every other control in this app shows where the keyboard is; this bar showed nothing at all. */
+  nav a:focus-visible,
+  .brand:focus-visible,
+  .search-toggle:focus-visible,
+  .back:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  nav a :global(svg) {
+    width: 18px;
+    height: 18px;
   }
 
   @media (width <= 759px) {
@@ -303,6 +344,23 @@
 
     nav::-webkit-scrollbar {
       display: none;
+    }
+
+    /* The mark to the left of this is already a link to the same page, and a wider target than the word was. */
+    nav a.home {
+      display: none;
+    }
+
+    /* Read out at every width, drawn only where there is room — the same shape the title actions and the
+       watchlist page use for this. The glyph carries it here, and the name stays in the DOM, so nothing that
+       looks for "Settings" by name stops finding it. */
+    .label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
 
     .searching .leading,
