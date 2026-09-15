@@ -16,6 +16,46 @@
    * close on a press outside itself, so there was no way out of it at all.
    */
   let open = $state(false);
+
+  /** How far down the sheet has been dragged, in pixels; 0 whenever it is not being dragged. */
+  let dragged = $state(0);
+  /** Set while a finger is down on the sheet, so the spring-back animates and the drag itself does not. */
+  let dragging = $state(false);
+  let sheet = $state<HTMLDivElement>();
+  let from: { y: number; at: number } | null = null;
+  /** Far enough down to mean it, or fast enough to be a flick — either dismisses. */
+  const DISMISS_PX = 80;
+  const FLICK_PX_PER_MS = 0.5;
+
+  /**
+   * A downward drag dismisses the sheet, which is what a sheet at the bottom of a screen should answer to.
+   *
+   * Down rather than sideways or up: this panel is anchored to the bottom edge, so down is the direction it
+   * would leave by, and the other two fight the page's own scrolling. It starts only from the top of the
+   * sheet's own scroll — below that a downward drag belongs to the list, which still has somewhere to go.
+   */
+  function grab(event: PointerEvent) {
+    const box = sheet;
+    if (!box || !matchMedia('(max-width: 759px)').matches || box.scrollTop > 0) return;
+    from = { y: event.clientY, at: event.timeStamp };
+    dragging = true;
+  }
+
+  function drag(event: PointerEvent) {
+    if (!from) return;
+    dragged = Math.max(event.clientY - from.y, 0);
+  }
+
+  function release(event: PointerEvent) {
+    const start = from;
+    from = null;
+    dragging = false;
+    dragged = 0;
+    if (!start) return;
+    const travelled = event.clientY - start.y;
+    const speed = travelled / Math.max(event.timeStamp - start.at, 1);
+    if (travelled > DISMISS_PX || speed > FLICK_PX_PER_MS) open = false;
+  }
   $effect(() => {
     const controller = new AbortController();
     content = null;
@@ -42,7 +82,20 @@
       aria-label="Close content warnings"
       onclick={() => (open = false)}
     ></button>
-    <div class="warnings">
+    <!-- A group, because it carries pointer handlers and something has to say what it is. The drag they
+         implement is an extra rather than the way in: the labelled close beside the heading does the same
+         job for a keyboard or a screen reader, so the gesture needs no accessible equivalent of its own. -->
+    <div
+      class="warnings"
+      class:dragging
+      role="group"
+      bind:this={sheet}
+      style={dragged ? `transform: translateY(${dragged}px)` : undefined}
+      onpointerdown={grab}
+      onpointermove={drag}
+      onpointerup={release}
+      onpointercancel={release}
+    >
       <div class="top">
         <p class="heading">Content warnings</p>
         <button class="close" aria-label="Close" onclick={() => (open = false)}>
@@ -201,6 +254,15 @@
       max-width: none;
       max-height: 60vh;
       overflow-y: auto;
+
+      /* The list keeps its own vertical scrolling; the dismiss drag only takes over at the top of it. */
+      touch-action: pan-y;
+      transition: transform 0.18s ease;
+    }
+
+    /* While a finger is down the sheet follows it exactly — a transition here would lag behind the thumb. */
+    .warnings.dragging {
+      transition: none;
     }
 
     /* Behind the sheet and across everything, so the way out is wherever the thumb already is. Kept out of
