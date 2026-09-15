@@ -66,6 +66,14 @@
    */
   const SLIDE_HEIGHT = 720;
 
+  /**
+   * How long the current slide keeps the line to itself before the next one is looked up.
+   *
+   * Long enough that the trailer on screen has claimed its own first bytes, short enough that the
+   * lookup finishes inside the fifteen seconds a slide stands for.
+   */
+  const WARM_MS = 3_000;
+
   const shown = $derived(titles.slice(0, SLIDES));
   let index = $state(0);
   /** Set once you move it by hand: from then on it holds still and is yours to drive. */
@@ -260,6 +268,41 @@
         ambient = progressiveURL(url, SLIDE_HEIGHT) ?? url;
       });
     }, SETTLE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  });
+
+  /**
+   * Resolve the slide AFTER this one, while this one is playing.
+   *
+   * reel answers `/meta?prewarm=direct` at once and resolves in a spawned task, so asking for a trailer
+   * and then immediately playing it does not warm anything — the play request joins the resolve already
+   * running and waits the rest of it out. Measured: a first view paid about 3.6s of resolve against an
+   * index build of 0.6s, while a stream already resolved played in 324ms.
+   *
+   * A slide stands for fifteen seconds, which is a great deal of time to be resolving something in. So
+   * the wait moves off the viewer's path: by the time this neighbour is the one on screen, reel has its
+   * answer and only the index is left to build, behind the still picture.
+   *
+   * The height matters as much as the warming — reel keeps a separate resolve per height step, so
+   * warming at another one would warm an entry this slide never asks for.
+   */
+  $effect(() => {
+    const next = shown[index + 1];
+    const base = reel;
+    const table = routes;
+    if (!active || !next || !base || !onScreen || still() || saving()) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      if (!live) return;
+      const ids = { tmdb: next.id, imdb: known.get(keyOf(next))?.imdbId };
+      void trailerURL(base, next.type, ids, table ?? {}, {
+        prewarm: 'direct',
+        height: SLIDE_HEIGHT,
+      });
+    }, WARM_MS);
     return () => {
       live = false;
       clearTimeout(timer);
