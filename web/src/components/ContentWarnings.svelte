@@ -27,6 +27,7 @@
       ><DetailIcon name="warning" />{content.warnings.length}</summary
     >
     <div class="warnings">
+      <p class="heading">Content warnings</p>
       <ul>
         {#each content.warnings as warning (warning.id)}<li>{warning.label}</li>{/each}
       </ul>
@@ -87,32 +88,66 @@
   .warnings {
     position: absolute;
     z-index: 5;
-    top: calc(100% + 8px);
+    top: calc(100% + 10px);
 
     /* Hung off its own left edge: this row begins beside the poster, so a panel anchored right would
        open toward the middle of the page instead of under the mark it belongs to. */
     left: 0;
-    width: 300px;
-    max-width: min(300px, calc(100vw - 2 * var(--gutter)));
-    padding: 16px;
-    background: #222228;
+    width: 320px;
+    max-width: min(320px, calc(100vw - 2 * var(--gutter)));
+    padding: 14px 16px 12px;
+    background: #1c1c22;
     border: 1px solid var(--line);
-    border-radius: 12px;
-    box-shadow: 0 12px 40px #0008;
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgb(0 0 0 / 0.55);
+    color: var(--fg);
     font-size: 13px;
+    line-height: 1.4;
   }
 
+  /* What the list is. The mark that opens it is a triangle and a number, which says there is something
+     to read but not what — and the panel opens over a page of other text, so it needs its own name. */
+  .heading {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  /* No bullets: these are short phrases rather than prose, and a hairline between them separates them
+     more quietly than a column of dots, which at this width read as clutter down the left edge. */
   ul {
-    margin: 0 0 12px;
-    padding-left: 20px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  li {
+    padding: 6px 0;
   }
 
   li + li {
-    margin-top: 8px;
+    border-top: 1px solid var(--line);
   }
 
+  /* The credit the terms require, kept as a footer: present and legible, but not competing with the
+     warnings for attention, and set off by the same hairline that divides them. */
   a {
+    display: block;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 11px;
+    text-decoration: none;
+  }
+
+  a:hover,
+  a:focus-visible {
     color: var(--accent);
+    text-decoration: underline;
   }
 
   /* A phone has no room to hang a panel off this chip. The row begins beside the poster, so a panel
