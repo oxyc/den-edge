@@ -5,7 +5,9 @@ export const routeKey = (route: Route): string =>
     ? `title/${route.type}/${route.id}`
     : route.page === 'person'
       ? `person/${route.id}`
-      : route.page;
+      : route.page === 'service'
+        ? `service/${route.id}/${route.country}`
+        : route.page;
 
 /** Retained page state: details own a history visit; top-level tabs reuse their browsing surface. */
 export interface PageVisit {
@@ -41,7 +43,9 @@ export class Navigation {
       if (
         page !== this.current &&
         !retained.has(key) &&
-        (page.route.page === 'title' || page.route.page === 'person')
+        (page.route.page === 'title' ||
+          page.route.page === 'person' ||
+          page.route.page === 'service')
       ) {
         this.pages.delete(key);
       }

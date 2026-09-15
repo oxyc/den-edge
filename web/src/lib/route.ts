@@ -17,7 +17,9 @@ export type Route =
   | { page: 'settings' }
   | { page: 'search'; query: string }
   | { page: 'title'; type: MediaType; id: number }
-  | { page: 'person'; id: number };
+  | { page: 'person'; id: number }
+  /** One streaming service in one country: the same service in two countries carries two catalogues. */
+  | { page: 'service'; id: number; country: string };
 
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
@@ -67,6 +69,12 @@ export function parseRoute(url: string): Route {
   if ((first === 'movie' || first === 'tv') && id)
     return { page: 'title', type: first === 'tv' ? 'tv' : 'movie', id };
   if (first === 'person' && id) return { page: 'person', id };
+  if (first === 'service') {
+    const [, provider, country] = /^(\d+)-([A-Za-z]{2})(?:-[^/]*)?$/.exec(second ?? '') ?? [];
+    const numeric = Number(provider);
+    if (provider && country && Number.isInteger(numeric) && numeric > 0)
+      return { page: 'service', id: numeric, country: country.toUpperCase() };
+  }
   return { page: 'library' };
 }
 
@@ -81,10 +89,23 @@ export function routePath(route: Route): string {
       return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
     case 'person':
       return `/person/${route.id}`;
+    case 'service':
+      return serviceHref(route.id, route.country);
     default:
       return `/${route.page}`;
   }
 }
+
+/**
+ * A service's link, named where the name is known: `/service/8-us-netflix`.
+ *
+ * The country is part of the address, not a preference read at the other end: a catalogue is licensed per country, so
+ * `/service/8-us` and `/service/8-fi` are different places and have to be linkable as such.
+ */
+export const serviceHref = (id: number, country: string, name?: string) => {
+  const named = slug(name);
+  return `/service/${id}-${country.toLowerCase()}${named ? `-${named}` : ''}`;
+};
 
 /** A title's link, named where the name is known: `/movie/550-fight-club`. */
 export const titleHref = (title: { type: MediaType; id: number; title?: string }) => {

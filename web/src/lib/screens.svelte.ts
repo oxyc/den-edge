@@ -31,6 +31,7 @@ export const DetailScreen = lazy(() => import('../components/Detail.svelte'));
 export const PersonScreen = lazy(() => import('../components/Person.svelte'));
 export const SearchScreen = lazy(() => import('../components/Search.svelte'));
 export const PlayerScreen = lazy(() => import('../components/Player.svelte'));
+export const ServiceScreen = lazy(() => import('../components/ServicePage.svelte'));
 export const SettingsScreen = lazy(() => import('../Settings.svelte'));
 export const LinkScreen = lazy(() => import('../LinkTV.svelte'));
 
@@ -42,7 +43,14 @@ export function preloadScreens(): void {
   preloading = true;
   const load = () => {
     if (!navigator.onLine) return;
-    for (const screen of [DetailScreen, PersonScreen, SearchScreen, PlayerScreen, SettingsScreen])
+    for (const screen of [
+      DetailScreen,
+      PersonScreen,
+      SearchScreen,
+      PlayerScreen,
+      ServiceScreen,
+      SettingsScreen,
+    ])
       void screen.load();
   };
   if (typeof requestIdleCallback === 'function') requestIdleCallback(load, { timeout: 4000 });

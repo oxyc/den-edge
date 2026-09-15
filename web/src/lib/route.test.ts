@@ -5,6 +5,7 @@ import {
   personHref,
   routePath,
   searchHref,
+  serviceHref,
   slug,
   titleHref,
 } from './route';
@@ -19,6 +20,34 @@ describe('routes', () => {
     expect(parseRoute('/tv/1399')).toEqual({ page: 'title', type: 'tv', id: 1399 });
     expect(parseRoute('/movie/550')).toEqual({ page: 'title', type: 'movie', id: 550 });
     expect(parseRoute('/person/287')).toEqual({ page: 'person', id: 287 });
+    expect(parseRoute('/service/8-us')).toEqual({ page: 'service', id: 8, country: 'US' });
+  });
+
+  it('carries a service’s country in its path, since a catalogue is licensed per country', () => {
+    expect(parseRoute('/service/8-us-netflix')).toEqual({ page: 'service', id: 8, country: 'US' });
+    expect(parseRoute('/service/8-FI')).toEqual({ page: 'service', id: 8, country: 'FI' });
+    expect(serviceHref(8, 'US', 'Netflix')).toBe('/service/8-us-netflix');
+    expect(serviceHref(1899, 'FI')).toBe('/service/1899-fi');
+    expect(parseRoute(serviceHref(337, 'US', 'Disney Plus'))).toEqual({
+      page: 'service',
+      id: 337,
+      country: 'US',
+    });
+    expect(routePath({ page: 'service', id: 8, country: 'US' })).toBe('/service/8-us');
+    for (const path of ['/service/8', '/service/us-8', '/service/8-usa', '/service/0-us'])
+      expect(parseRoute(path), path).toEqual({ page: 'library' });
+  });
+
+  // `warmOnIntent` resolves a trailer for every press whose href parses as a title. A service href has the shape of
+  // a title's `<id>-<slug>` segment, so if it ever read as one, every press on a tile would ask reel to resolve a
+  // trailer for a title id that does not exist — and nothing on screen would show it.
+  it('never reads a service href as a title', () => {
+    for (const href of [
+      serviceHref(8, 'US', 'Netflix'),
+      serviceHref(1899, 'US', 'Max'),
+      serviceHref(337, 'FI'),
+    ])
+      expect(parseRoute(href).page, href).toBe('service');
   });
 
   it('reads a whole href as well as a path, and ignores the fragment', () => {
