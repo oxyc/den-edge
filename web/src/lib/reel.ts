@@ -309,6 +309,144 @@ export function nativeHls(env: HlsSupport = support()): boolean {
   }
 }
 
+/**
+ * What a surface is: whether sound can ever be asked for on it, not how closely it is being watched.
+ *
+ * `silent` never gains sound — Home's billboard, muted behind a scrim. `audible` may be asked for sound at
+ * any moment with no navigation, which is the detail hero: it starts muted and a press unmutes it in place.
+ *
+ * The distinction decides the source, and getting it wrong is expensive in both directions. A silent surface
+ * can take reel's ordered file, which is several times sooner to a frame. An audible one cannot, unless that
+ * file carries audio, or sound costs a reload and a seek at the moment someone reaches for the volume.
+ */
+export type Surface = 'silent' | 'audible';
+
+/** Whether this browser hands a playlist to the element or drives hls.js, which changes what reel offers. */
+export type Player = 'native' | 'hls.js';
+
+/** Where the picture actually is inside the frame, as fractions; `null` until reel has measured it. */
+export interface Crop {
+  letterboxed: boolean;
+  aspect: number;
+  /** `[x, y, w, h]` of the content within the frame. */
+  rect: [number, number, number, number];
+}
+
+/**
+ * One thing reel can play for this trailer. `kind` is the ONLY thing that says how to play `url`.
+ *
+ * Reading it off the path is what the old helpers did, and a minted URL has no path to read: it is
+ * `/m/<blob>` whatever it serves. A missing or wrong `kind` hands a playlist to a bare element.
+ */
+export interface Source {
+  kind: 'mp4' | 'hls';
+  url: string;
+  audio: boolean;
+  height: number | null;
+}
+
+/** reel's answer for one trailer on one surface: ordered best-first, and what it knows about the picture. */
+export interface Sources {
+  sources: Source[];
+  crop?: Crop | null;
+  /** Epoch seconds after which the minted URLs stop working; a 410 means ask again. */
+  expires?: number;
+}
+
+/**
+ * Ask reel what to play, and by asking, have it made ready.
+ *
+ * This replaces deriving sibling paths from a play URL. reel chooses per surface and player from its own
+ * measurements — which are the ones that matter, since the same URL is 232 ms warm and 5131 ms cold — and
+ * the request itself does the warming: it waits for the resolve its first entry plays from, and for the
+ * index when that entry needs one. So there is no separate prewarm to remember, and nothing to keep in
+ * step with what the surface later asks for.
+ */
+export async function fetchSources(
+  sources: string,
+  {
+    surface,
+    player,
+    playable,
+    fetchImpl = relayFetch,
+    signal,
+  }: {
+    surface: Surface;
+    player: Player;
+    /** This browser's codec report, which reel filters its variants by. */
+    playable?: unknown;
+    fetchImpl?: typeof fetch;
+    signal?: AbortSignal;
+  },
+): Promise<Sources | null> {
+  try {
+    const url = new URL(sources, globalThis.location?.href ?? 'http://relative.invalid');
+    url.searchParams.set('surface', surface);
+    url.searchParams.set('player', player);
+    // In the query rather than the header: den-edge's relay forwards only the range and conditional
+    // headers, so `X-Den-Playable` never crosses it. reel reads both and the header wins where it arrives.
+    if (playable) url.searchParams.set('playable', JSON.stringify(playable));
+    const asked = /^[a-z][a-z0-9+.-]*:/i.test(sources)
+      ? url.toString()
+      : `${url.pathname}${url.search}`;
+    const res = await fetchImpl(asked, { signal });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (!Array.isArray(body?.sources)) return null;
+    const list: Source[] = [];
+    for (const entry of body.sources) {
+      // `kind` and `url` are the two that cannot be guessed; anything without both is unusable.
+      if (typeof entry?.url !== 'string') continue;
+      if (entry.kind !== 'mp4' && entry.kind !== 'hls') continue;
+      // Distinct URLs only. A fallback step that lands on the URL already mounted changes nothing, fires
+      // no load and no error, and stops the ladder where it stood — reel dedupes, and so do we.
+      if (list.some((had) => had.url === entry.url)) continue;
+      list.push({
+        kind: entry.kind,
+        url: entry.url,
+        audio: entry.audio === true,
+        height: typeof entry.height === 'number' ? entry.height : null,
+      });
+    }
+    if (!list.length) return null;
+    return { sources: list, crop: crop(body.crop), expires: body.expires };
+  } catch {
+    return null;
+  }
+}
+
+/** reel's crop, or null: anything malformed is "not measured" rather than a guess at the picture. */
+function crop(value: unknown): Crop | null {
+  if (!value || typeof value !== 'object') return null;
+  const { letterboxed, aspect, rect } = value as Partial<Crop>;
+  if (letterboxed !== true || typeof aspect !== 'number') return null;
+  if (!Array.isArray(rect) || rect.length !== 4 || rect.some((n) => typeof n !== 'number'))
+    return null;
+  return { letterboxed, aspect, rect: rect as [number, number, number, number] };
+}
+
+/**
+ * How to draw a letterboxed trailer so the picture fills the box and the bars fall outside it.
+ *
+ * YouTube trailers are routinely 2.x:1 content posted in a 16:9 frame, so a plain `object-fit: cover` still
+ * shows black bands. reel measures where the picture is; this turns that into a scale about the content's
+ * own centre. The trade is the one the Apple TV already makes through the baked `clap`: a 2.39 trailer in a
+ * 16:9 hero loses a little at the sides instead of showing bars.
+ *
+ * Returns null when there is nothing to do, so an unmeasured trailer simply draws as it always did.
+ */
+export function cropStyle(crop: Crop | null | undefined): string | null {
+  if (!crop?.letterboxed) return null;
+  const [x, y, w, h] = crop.rect;
+  if (!(w > 0) || !(h > 0)) return null;
+  // Cover the box with the CONTENT rect rather than the whole frame: the frame is already covering, so the
+  // extra factor is how much of it is picture.
+  const scale = Math.max(1 / w, 1 / h);
+  if (!Number.isFinite(scale) || scale <= 1) return null;
+  const origin = `${((x + w / 2) * 100).toFixed(3)}% ${((y + h / 2) * 100).toFixed(3)}%`;
+  return `transform: scale(${scale.toFixed(4)}); transform-origin: ${origin};`;
+}
+
 /** Browse billboards use the first candidate; detail playback can advance through the full list. */
 export async function trailerURL(
   base: string,

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   forgetWarmedTrailers,
+  cropStyle,
   directURL,
+  fetchSources,
   hlsURL,
   progressiveURL,
   isPlaylist,
@@ -158,6 +160,136 @@ describe('progressiveURL', () => {
     expect(progressiveURL('/reel/play/abc12345678.mp4', 720)).toBe(
       '/reel/progressive/abc12345678.mp4?height=720',
     );
+  });
+});
+
+describe('fetchSources', () => {
+  const SOURCES = '/reel/cfg/sources/abc12345678.json?s=tag&i=iid';
+  /** Captures what was asked, so the surface and player actually reaching reel can be asserted. */
+  let asked = '';
+  const answering = (body: unknown, status = 200): typeof fetch =>
+    (async (input) => {
+      asked = String(input);
+      return new Response(JSON.stringify(body), { status });
+    }) as typeof fetch;
+
+  const two = {
+    sources: [
+      { kind: 'mp4', url: '/reel/m/s/blob1', audio: true, height: 1080 },
+      { kind: 'hls', url: '/reel/m/n/blob2', audio: true, height: null },
+    ],
+  };
+
+  it('names the surface and the player, and keeps reel’s order', async () => {
+    const got = await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'native',
+      fetchImpl: answering(two),
+    });
+    expect(got?.sources.map((s) => s.kind)).toEqual(['mp4', 'hls']);
+    expect(got?.sources[0]?.height).toBe(1080);
+    expect(asked).toContain('surface=audible');
+    expect(asked).toContain('player=native');
+    // The signature it was given travels untouched; reel signs over the video and install, not the query.
+    expect(asked).toContain('s=tag');
+  });
+
+  /** The relay forwards no `X-Den-Playable`, so the report has to ride in the query or never arrive. */
+  it('sends the codec report in the query', async () => {
+    await fetchSources(SOURCES, {
+      surface: 'silent',
+      player: 'hls.js',
+      playable: { h264: 0x33, vp9: true },
+      fetchImpl: answering(two),
+    });
+    expect(asked).toContain(`playable=${encodeURIComponent('{"h264":51,"vp9":true}')}`);
+  });
+
+  it('drops what it cannot play and never the same URL twice', async () => {
+    const got = await fetchSources(SOURCES, {
+      surface: 'silent',
+      player: 'native',
+      fetchImpl: answering({
+        sources: [
+          { kind: 'mp4', url: '/reel/m/s/blob1' },
+          // A kind we don't know how to mount is worse than no entry: it would hand a bare element a
+          // playlist, or hls.js a file.
+          { kind: 'dash', url: '/reel/m/s/blob9' },
+          { kind: 'hls', url: undefined },
+          // A repeat would be a fallback step that changes nothing: no load, no error, ladder stalled.
+          { kind: 'mp4', url: '/reel/m/s/blob1' },
+        ],
+      }),
+    });
+    expect(got?.sources).toEqual([
+      { kind: 'mp4', url: '/reel/m/s/blob1', audio: false, height: null },
+    ]);
+  });
+
+  it('answers null for a refusal or a shape it does not recognise', async () => {
+    expect(
+      await fetchSources(SOURCES, {
+        surface: 'silent',
+        player: 'native',
+        fetchImpl: answering({}, 500),
+      }),
+    ).toBeNull();
+    expect(
+      await fetchSources(SOURCES, {
+        surface: 'silent',
+        player: 'native',
+        fetchImpl: answering({ sources: [] }),
+      }),
+    ).toBeNull();
+    expect(
+      await fetchSources(SOURCES, {
+        surface: 'silent',
+        player: 'native',
+        fetchImpl: answering({ ok: true }),
+      }),
+    ).toBeNull();
+  });
+
+  it('takes a measured crop and treats anything else as not yet measured', async () => {
+    const measured = await fetchSources(SOURCES, {
+      surface: 'silent',
+      player: 'native',
+      fetchImpl: answering({
+        ...two,
+        crop: { letterboxed: true, aspect: 1.85, rect: [0, 0.0194, 1, 0.9611] },
+      }),
+    });
+    expect(measured?.crop).toEqual({
+      letterboxed: true,
+      aspect: 1.85,
+      rect: [0, 0.0194, 1, 0.9611],
+    });
+    // Null on the first ask for a trailer reel has not measured yet — the expected case, not an error.
+    const unmeasured = await fetchSources(SOURCES, {
+      surface: 'silent',
+      player: 'native',
+      fetchImpl: answering({ ...two, crop: null }),
+    });
+    expect(unmeasured?.crop).toBeNull();
+    expect(unmeasured?.sources.length).toBe(2);
+  });
+});
+
+describe('cropStyle', () => {
+  it('scales the content rect up to fill, about its own centre', () => {
+    // reel's real answer for a 1.85 trailer in a 16:9 upload: bars top and bottom.
+    expect(cropStyle({ letterboxed: true, aspect: 1.85, rect: [0, 0.0194, 1, 0.9611] })).toBe(
+      'transform: scale(1.0405); transform-origin: 50.000% 49.995%;',
+    );
+  });
+
+  it('does nothing where there is nothing to trim', () => {
+    expect(cropStyle(null)).toBeNull();
+    expect(cropStyle(undefined)).toBeNull();
+    // Measured and found not letterboxed: draw it as it is.
+    expect(cropStyle({ letterboxed: false, aspect: 1.78, rect: [0, 0, 1, 1] })).toBeNull();
+    // Letterboxed but the rect is the whole frame: scaling by 1 would be a no-op transform on every frame.
+    expect(cropStyle({ letterboxed: true, aspect: 1.78, rect: [0, 0, 1, 1] })).toBeNull();
   });
 });
 
