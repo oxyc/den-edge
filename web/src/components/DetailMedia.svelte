@@ -151,9 +151,26 @@
    * Both directions go through here, so granting sound and taking it back are the same decision read from
    * `sound` rather than two places that can disagree.
    */
+  /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
+  type Renditions = { length: number; [at: number]: { enabled: boolean } };
+
+  function renditions(player: HTMLMediaElement): Renditions | undefined {
+    return (player as HTMLMediaElement & { audioTracks?: Renditions }).audioTracks;
+  }
+
   function quieten(player: HTMLMediaElement) {
     player.muted = !sound;
     player.volume = sound ? 1 : 0;
+    // reel's masters carry `EXT-X-MEDIA:TYPE=AUDIO`, and Safari hands such a master to AVFoundation,
+    // which plays that rendition through a path neither `muted` nor `volume` reaches: the element
+    // reports silence while the sound comes out of it. Switching the rendition itself off is what stops
+    // it. It does not exist until metadata has been read, so this runs again on `loadedmetadata`.
+    const tracks = renditions(player);
+    if (!tracks) return;
+    for (let at = 0; at < tracks.length; at += 1) {
+      const track = tracks[at];
+      if (track) track.enabled = sound;
+    }
   }
 
   /** Take over the screen, with the audio on. */
@@ -258,9 +275,13 @@
           : player.classList.contains('ambient')
             ? 'billboard'
             : 'other';
+        const list = renditions(player);
         media.push({
           where,
           connected: player.isConnected,
+          tracks: list
+            ? Array.from({ length: list.length }, (_, at) => list[at]?.enabled ?? null)
+            : null,
           muted: player.muted,
           paused: player.paused,
           volume: player.volume,
@@ -416,6 +437,9 @@
 
   function metadata() {
     if (!video) return;
+    // A master's audio renditions do not exist until metadata has been read, so every earlier attempt at
+    // silence had nothing to switch off. This is the first point at which it can be made to stick.
+    quieten(video);
     // Keep the trailer at its actual beginning. Seeking during metadata loading can defer
     // WebKit's first painted frame while the audio/video clock is already advancing.
     if (video.videoHeight > video.videoWidth) nextTrailer();
