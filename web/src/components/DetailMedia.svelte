@@ -95,7 +95,7 @@
     if (touched) return;
     touched = true;
     sound = true;
-    player.muted = false;
+    quieten(player);
     void player.play().catch(() => {});
   }
 
@@ -120,7 +120,7 @@
     // Silence is re-asserted rather than assumed: this is the one path that starts playback without having
     // set it, so a stray unmute from anywhere else corrects itself at the next `canplay` instead of being
     // carried into the picture.
-    player.muted = !sound;
+    quieten(player);
     void player.play().catch(() => {});
   }
 
@@ -139,6 +139,22 @@
    */
   let pressed = false;
 
+  /**
+   * Silence, said twice — and the second way is the one that works here.
+   *
+   * A trailer opened from the billboard played out loud on macOS Safari while the element reported `muted`
+   * true at every moment it was measured: 0.7s, 2.5s and 6s in, playing, attached, with the only other media
+   * on the page paused and frozen. So the property was not carrying the intent, and three fixes that set it
+   * correctly changed nothing. `volume` is set with it now, and the two together are what keep it quiet.
+   *
+   * Both directions go through here, so granting sound and taking it back are the same decision read from
+   * `sound` rather than two places that can disagree.
+   */
+  function quieten(player: HTMLMediaElement) {
+    player.muted = !sound;
+    player.volume = sound ? 1 : 0;
+  }
+
   /** Take over the screen, with the audio on. */
   async function expand() {
     const player = video;
@@ -146,15 +162,14 @@
     if (!pressed) return;
     pressed = false;
     sound = true;
-    player.muted = false;
-    // iOS ignores this (volume is read-only there); unmuting is what carries the sound.
-    player.volume = 1;
+    // iOS treats volume as read-only, so unmuting is what carries the sound there; everywhere else both go.
+    quieten(player);
     // Back to a quiet page on the way out: a trailer still talking after the viewer closed it is
     // the thing they would then have to go and silence.
     const leave = () => {
       if (document.fullscreenElement) return;
       sound = false;
-      player.muted = true;
+      quieten(player);
       document.removeEventListener('fullscreenchange', leave);
     };
     document.addEventListener('fullscreenchange', leave);
@@ -172,7 +187,7 @@
       // expand button is on the page you just left. A click aimed there that lands here after the
       // navigation has already spent its gesture gets full screen refused and, before this, audio anyway.
       sound = false;
-      player.muted = true;
+      quieten(player);
       document.removeEventListener('fullscreenchange', leave);
     }
     void player.play().catch(() => {});
@@ -361,7 +376,7 @@
       return;
     }
     let live = true;
-    player.muted = !sound;
+    quieten(player);
     void player
       .play()
       .then(() => {
@@ -466,7 +481,7 @@
     }}
     onerror={nextTrailer}
     onloadstart={(event) => {
-      event.currentTarget.muted = !sound;
+      quieten(event.currentTarget);
     }}
   ></video>
   <div class="scrim" aria-hidden="true"></div>
