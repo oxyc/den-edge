@@ -54,8 +54,7 @@
   import { availability } from './lib/availability.svelte';
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
-  import { directURL, nativeHls, trailerURLs } from './lib/reel';
-  import { relayFetch } from './lib/relayFetch';
+  import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
@@ -564,8 +563,8 @@
    * visible. Atlas gives rows an IMDb id of their own, so nothing has to be looked up first: the tap
    * is enough to start it, and it runs while the page is still being built.
    *
-   * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerURLs` reports a
-   * failure as an empty list rather than throwing.
+   * Fire and forget. It is a warm-up; reel caches the answer either way, and `trailerCandidates`
+   * reports a failure as an empty list rather than throwing.
    */
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
     // The page itself, before its trailer. `preloadScreens` fetches this chunk once Home is idle, so
@@ -575,17 +574,21 @@
     // No imdb id needed any more: reel takes the tmdb id every title has, and is told the imdb one when
     // we happen to hold it. A title whose imdb id was never fetched used to get no trailer at all.
     if (!reel) return;
-    void trailerURLs(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
+    void trailerCandidates(reel, title.type, { tmdb: title.id, imdb: title.imdbId }, routes, {
       prewarm: 'direct',
     }).then((found) => {
-      // The master too, not just the resolve. reel answers it `private, max-age=300`, so this lands
-      // in the browser's own cache and the page that is about to mount reads it from there — one
-      // round trip and a googlevideo fetch taken off the critical path, spent during the ~150ms
-      // between the press and the click.
-      // Warm what the page will actually play. That is the resolve behind `/direct` now, not a master
-      // playlist — which only the one surface that wants sound ever asks for.
-      const resolved = found[0] && directURL(found[0]);
-      if (resolved) void relayFetch(resolved).catch(() => undefined);
+      const first = found[0];
+      if (!first?.sources) return;
+      // Asking IS the warming, and what it warms is the question this press is heading towards. A
+      // detail page is an audible surface — it starts muted and a press unmutes it in place — so this
+      // is the same ask the hero makes when it mounts, answered from the same cache by the time it
+      // does. Warming one thing and playing another is exactly what put a multi-second index build in
+      // front of a viewer once already: a surface warmed one height step and then asked for a
+      // different one, and paid the whole build with the picture still empty.
+      void fetchSources(first.sources, {
+        surface: 'audible',
+        player: nativeHls() ? 'native' : 'hls.js',
+      });
     });
     // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it
     // before it can play anything. Started here, it is usually resident by then.
