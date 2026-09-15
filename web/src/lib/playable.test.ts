@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { playable, withoutHevc, type Probe } from './playable';
+import { playable, withoutRefused, type Probe } from './playable';
 
 /** A browser that plays the codec strings `yes` accepts. */
 const browser = (
@@ -244,8 +244,8 @@ describe('playable', () => {
   });
 });
 
-describe('withoutHevc', () => {
-  it('drops every picture claim a refusal disproved, and keeps the rest', async () => {
+describe('withoutRefused', () => {
+  it('drops every claim a refusal disproved, sound included, and keeps the rest', async () => {
     const iphone: Probe = {
       ...browser(
         () => true,
@@ -260,7 +260,7 @@ describe('withoutHevc', () => {
       dolbyVision: { p5: true, p8: true },
     });
 
-    const cut = withoutHevc(claimed);
+    const cut = withoutRefused(claimed);
     expect(cut).toMatchObject({
       hevcMain: 0,
       hevcMain10: 0,
@@ -270,9 +270,11 @@ describe('withoutHevc', () => {
     });
     // H.264 stays, because it is what den-remux converts a refused release into.
     expect(cut.h264).toBe(claimed.h264);
-    // The audio was never in question: a picture that won't decode says nothing about the sound, and taking
-    // E-AC-3 or 5.1 AAC away here would quietly downmix the retry.
-    expect(cut.eac3).toBe(claimed.eac3);
+    // E-AC-3 goes with it. An iPhone refused a 4K HDR HEVC copy and then refused the 1080p H.264
+    // conversion of it identically, and the one thing both sessions shared was a copied E-AC-3 track — so a
+    // refusal cannot be read as being about the picture alone.
+    expect(cut.eac3).toBe(false);
+    // AAC stays, so that retry is converted rather than downmixed to stereo.
     expect(cut.aacMultichannel).toBe(claimed.aacMultichannel);
     // AV1 too: den-remux only ever copies it, so it is another release's business, not this one's.
     expect(cut.av1).toBe(claimed.av1);

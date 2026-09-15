@@ -7,7 +7,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import type { Title } from '../lib/library';
-  import { playable, withoutHevc, type Playable } from '../lib/playable';
+  import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     downmixLabel,
     nativeHls,
@@ -123,10 +123,12 @@
    * Whether this release has already been asked for again with the browser's claims cut back.
    *
    * A browser can claim a codec, take the playlist, and then refuse the very first segment — an iPhone
-   * does exactly that with a 4K HDR Main-tier HEVC remux it says it decodes. den-remux keeps a release
-   * the player can't take as the fallback it converts on the GPU, so asking again as a player that takes
-   * no HEVC and no HDR gets that same file converted instead of copied. Once only: a second refusal is a
-   * refusal of H.264, and nothing here makes that smaller.
+   * does exactly that with a 4K HDR Main-tier HEVC remux it says it decodes, and did it again with the
+   * 1080p H.264 conversion of that same file while its E-AC-3 track was still being copied through. So a
+   * refusal is taken to disprove the whole session, sound and picture: den-remux keeps a release the
+   * player can't take as the fallback it converts on the GPU, and asking again as a player that takes
+   * none of it is what gets that conversion. Once only: what is left is H.264 with AAC, and nothing here
+   * makes that smaller.
    */
   let degraded = false;
 
@@ -163,9 +165,10 @@
       navigator.languages,
     );
     const claimed = (decodes ??= await playable());
-    // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC and no
-    // HDR, which is what makes den-remux convert the release rather than copy it again.
-    const can = degraded ? withoutHevc(claimed) : claimed;
+    // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR
+    // and no E-AC-3, which is what makes den-remux convert the release — sound included — rather than copy
+    // any part of it again.
+    const can = degraded ? withoutRefused(claimed) : claimed;
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     const maxBitrate = await linkLimit(remux);
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the

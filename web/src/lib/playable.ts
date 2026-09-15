@@ -39,14 +39,22 @@ export interface Playable {
 }
 
 /**
- * The same browser, less what a decode failure has just disproved: no HEVC at any tier, no HDR and no Dolby
- * Vision. What is left is H.264 and SDR, which den-remux can always make out of a release.
+ * The same browser, less everything a refused session rested on: no HEVC at any tier, no HDR, no Dolby
+ * Vision and no E-AC-3. What is left is H.264, SDR and AAC, which den-remux can always make of a release.
  *
  * A browser may claim a codec, take the playlist, and then refuse the very first segment — an iPhone does
- * exactly that with a 4K HDR Main-tier HEVC remux it says it decodes. den-remux keeps a release the player
- * can't take as the fallback it converts on the GPU, so claiming less is what asks for that conversion.
+ * exactly that. den-remux keeps a release the player can't take as the fallback it converts on the GPU, so
+ * claiming less is what asks for that conversion.
+ *
+ * The sound goes with the picture, which is the lesson of the second attempt. The same iPhone refused a 4K
+ * HDR HEVC copy, and then refused the 1080p H.264 conversion of it in exactly the same way at exactly the
+ * same point — and the only thing both sessions had in common was an E-AC-3 track copied through untouched.
+ * A `MediaError 3` on an initialization segment names no track, so a refusal disproves every claim the
+ * session was built on rather than only the video. `eac3` is the least trustworthy of them: it comes from a
+ * bare type check, and a type check says yes more readily than a decoder does. `aacMultichannel` stays,
+ * because Media Capabilities was asked about that one properly — so the retry is converted, not downmixed.
  */
-export function withoutHevc(can: Playable): Playable {
+export function withoutRefused(can: Playable): Playable {
   return {
     ...can,
     hevcMain: 0,
@@ -54,6 +62,7 @@ export function withoutHevc(can: Playable): Playable {
     hevcHighTier: 0,
     hdr: false,
     dolbyVision: { p5: false, p8: false },
+    eac3: false,
   };
 }
 
