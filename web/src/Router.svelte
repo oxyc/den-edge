@@ -152,7 +152,9 @@
         position++;
         for (const at of entries.keys()) if (at >= position) entries.delete(at);
         const pageKey =
-          key.startsWith('title/') || key.startsWith('person/') ? crypto.randomUUID() : key;
+          key.startsWith('title/') || key.startsWith('person/') || key.startsWith('service/')
+            ? crypto.randomUUID()
+            : key;
         entries.set(position, { routeKey: key, pageKey });
         history.pushState({ denNavigation: { scope, position } }, '', path);
       }

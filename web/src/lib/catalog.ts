@@ -24,6 +24,12 @@ export interface DiscoverQuery {
   releaseDateGte?: string;
   releaseDateLte?: string;
   sortBy?: string;
+  /** JustWatch provider ids, OR-joined: what a service's own rows are. */
+  watchProviders?: number[];
+  /** The country the availability is for (ISO-3166 alpha-2). A catalogue is licensed per country. */
+  watchRegion?: string;
+  /** `flatrate` for what a subscription carries, against `rent`/`buy`. */
+  monetization?: string[];
 }
 
 export function discoverParams(q: DiscoverQuery): Record<string, string> {
@@ -40,6 +46,13 @@ export function discoverParams(q: DiscoverQuery): Record<string, string> {
   const date = q.mediaType === 'tv' ? 'first_air_date' : 'primary_release_date';
   if (q.releaseDateGte) params[`${date}.gte`] = q.releaseDateGte;
   if (q.releaseDateLte) params[`${date}.lte`] = q.releaseDateLte;
+  // TMDB ignores `with_watch_providers` when nothing says which country the availability is in — and answers the
+  // whole catalogue as though the filter had been asked for. The pair travels together or not at all.
+  if (q.watchProviders?.length && q.watchRegion) {
+    params.with_watch_providers = q.watchProviders.join('|');
+    params.watch_region = q.watchRegion;
+    if (q.monetization?.length) params.with_watch_monetization_types = q.monetization.join('|');
+  }
   return params;
 }
 

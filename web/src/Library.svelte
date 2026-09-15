@@ -13,6 +13,7 @@
     PlayerScreen,
     preloadScreens,
     SearchScreen,
+    ServiceScreen,
   } from './lib/screens.svelte';
   import {
     addToWatchlist,
@@ -58,6 +59,9 @@
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
+  import { GUEST_PICKS, resolvePicks } from './lib/services';
+  import { fetchServices, type Service } from './settings/services';
+  import ServicesRow from './components/ServicesRow.svelte';
   import type { Routes } from './lib/routes';
   import { installsOf, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
@@ -275,6 +279,7 @@
     if (page) void DetailScreen.load();
     else if (route.page === 'person') void PersonScreen.load();
     else if (route.page === 'search') void SearchScreen.load();
+    else if (route.page === 'service') void ServiceScreen.load();
   });
   $effect(() => {
     if (playing) void PlayerScreen.load();
@@ -742,6 +747,35 @@
     const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
     return [...personalRows(pages, seeds), ...home.slice(0, 7), ...plot, ...home.slice(7)];
   });
+  /**
+   * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
+   * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
+   */
+  const servicePicks = $derived(prefs.services.length ? prefs.services : GUEST_PICKS);
+  /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
+  const askedFor: Record<string, true> = {};
+  let directories = $state<Record<string, Service[]>>({});
+  $effect(() => {
+    if (!tmdbKey) return;
+    for (const { country } of servicePicks) {
+      if (askedFor[country]) continue;
+      askedFor[country] = true;
+      void fetchServices(country, tmdbKey).then(
+        (listed) => {
+          directories = { ...directories, [country]: listed };
+        },
+        () => {
+          // No directory, no tiles: the row draws nothing rather than naming services it cannot name.
+        },
+      );
+    }
+  });
+  /** The picks their country's directory can account for, named and ordered by it. */
+  const services = $derived(
+    [...new Set(servicePicks.map((pick) => pick.country))].flatMap((country) =>
+      resolvePicks(servicePicks, directories[country] ?? [], country),
+    ),
+  );
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
@@ -777,7 +811,8 @@
       route.page === 'title' ||
       route.page === 'person' ||
       route.page === 'search' ||
-      route.page === 'watchlist'
+      route.page === 'watchlist' ||
+      route.page === 'service'
     )
       return;
     const here = atlas;
@@ -982,6 +1017,16 @@
   <Loading label="Loading" page />
 {:else if route.page === 'person'}
   <PersonScreen.current id={route.id} {tmdbKey} {active} />
+{:else if route.page === 'service' && !ServiceScreen.current}
+  <Loading label="Loading" page />
+{:else if route.page === 'service'}
+  <ServiceScreen.current
+    id={route.id}
+    country={route.country}
+    {tmdbKey}
+    minYear={prefs.minReleaseYear}
+    shown={browseShown}
+  />
 {:else if route.page === 'search'}
   <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} />
 {:else if route.page === 'watchlist'}
@@ -1047,6 +1092,9 @@
           />
         {/each}
       </PosterRow>
+    {/if}
+    {#if !facet}
+      <ServicesRow {services} />
     {/if}
     <Browse {rows} shown={browseShown} />
   {/if}
