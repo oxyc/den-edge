@@ -2,7 +2,15 @@
   import { onMount } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
-  import { hlsURL, isPlaylist, nativeHls, trailerURLs } from '../lib/reel';
+  import {
+    cropStyle,
+    fetchSources,
+    hlsURL,
+    isPlaylist,
+    nativeHls,
+    trailerCandidates,
+  } from '../lib/reel';
+  import type { Crop, Source, TrailerCandidate } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
@@ -30,12 +38,23 @@
   } = $props();
   let frame: HTMLDivElement;
   let video = $state<HTMLVideoElement>();
-  let candidates = $state<string[]>([]);
+  let candidates = $state<TrailerCandidate[]>([]);
   let candidate = $state(0);
-  const url = $derived(candidates[candidate] ?? null);
+  const url = $derived(candidates[candidate]?.play ?? null);
   /** YouTube's own URL for this candidate, when one exists that this browser can play. */
   let upgraded = $state<string | null>(null);
   const source = $derived(upgraded ?? url);
+  /**
+   * What reel offered for this candidate, best first, and which of them is mounted.
+   *
+   * For an audible surface reel answers at once and resolves behind it, so this costs the hero a round
+   * trip of about 12 ms rather than the 1.2-2.4 s a resolve takes — which is why the hero can ask at all.
+   */
+  let rungs = $state<Source[]>([]);
+  let rung = $state(0);
+  const mounted = $derived(rungs[rung] ?? null);
+  /** Where the picture sits inside the frame; null until reel has measured this trailer. */
+  let heroCrop = $state<Crop | null>(null);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
   /**
@@ -49,7 +68,17 @@
    * them. hls.js was never started, the element was handed a playlist to parse by itself, and each
    * browser errored its way back to reel's `/play` download — the very path this exists to avoid.
    */
-  const managed = $derived(source && !playsHls && isPlaylist(source) ? source : null);
+  const managed = $derived(
+    mounted
+      ? // reel says what a URL is, because a minted `/m/<blob>` has no extension to read. Getting this
+        // from the path is what the note below is about, and an opaque URL removes the path entirely.
+        mounted.kind === 'hls' && !playsHls
+        ? mounted.url
+        : null
+      : source && !playsHls && isPlaylist(source)
+        ? source
+        : null,
+  );
   let visible = $state(true);
   let foreground = $state(!document.hidden);
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -278,7 +307,7 @@
     // Resolve only. YouTube's adaptive stream carries sound and plays in every browser now — its
     // master directly where HLS is native, reel's proxy of it everywhere else — so a download and
     // remux would only warm a fallback that is not normally reached.
-    void trailerURLs(base, mediaType, ids, table, {
+    void trailerCandidates(base, mediaType, ids, table, {
       signal: controller.signal,
       prewarm: 'direct',
     }).then((found) => {
@@ -303,7 +332,37 @@
     sound = false;
     touched = false;
     forced = false;
-    upgraded = play ? hlsURL(play, playsHls) : null;
+    rungs = [];
+    rung = 0;
+    heroCrop = null;
+    const offered = candidates[candidate]?.sources;
+    if (!play) {
+      upgraded = null;
+      return;
+    }
+    // Derived first, so the element has a master to fetch on this tick rather than after a round trip.
+    // The hero's whole advantage over the ordered file is that it costs no build and no wait, and
+    // holding it empty while asking would spend exactly that.
+    upgraded = hlsURL(play, playsHls);
+    if (!offered) return;
+    let live = true;
+    void fetchSources(offered, {
+      surface: 'audible',
+      player: playsHls ? 'native' : 'hls.js',
+    }).then((answer) => {
+      // `sources` is reel's ordering, which for an audible surface puts the master first — the same
+      // thing the line above derived, named by reel rather than by us. Adopting it is what makes the
+      // fallback list, the crop and the minted accounting reel's to change without a release here.
+      const top = answer?.sources[0];
+      if (!live || !top || candidates[candidate]?.sources !== offered) return;
+      rungs = answer.sources;
+      rung = 0;
+      heroCrop = answer.crop ?? null;
+      upgraded = top.url;
+    });
+    return () => {
+      live = false;
+    };
   });
 
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
@@ -415,6 +474,14 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
+    // reel offered these in order and guarantees them distinct, so a step always changes the source.
+    // A step that did not would fire no load and no error, and the hero would stop here silently.
+    const next = rungs[rung + 1];
+    if (next) {
+      rung += 1;
+      upgraded = next.url;
+      return;
+    }
     // The next candidate's master before this one's file. A master refused because YouTube has removed
     // the video is refused for reel's copy too — and asking costs a whole yt-dlp round trip to be told
     // the same thing: two seconds for the master, nearly two more for the file, before a trailer that
@@ -427,6 +494,8 @@
     // HLS master at all still plays from it. Once, not once per candidate.
     if (upgraded) {
       upgraded = null;
+      rungs = [];
+      rung = 0;
       return;
     }
     failed = true;
@@ -460,6 +529,7 @@
   <video
     bind:this={video}
     src={managed ? undefined : (source ?? undefined)}
+    style={cropStyle(heroCrop) ?? undefined}
     class:playing
     class:present={!!source && !failed && !ended}
     poster={backdrop ?? poster}
