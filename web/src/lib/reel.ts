@@ -450,17 +450,31 @@ export async function fetchSources(
     if (!res.ok) return null;
     const body = await res.json();
     if (!Array.isArray(body?.sources)) return null;
+    // Where this page can reach reel: the mount it just asked on, minus the `/sources/<id>.json`.
+    //
+    // reel names every URL it mints by the address it was asked at, which behind the relay is the LAN
+    // one — so the origin is replaced here exactly as it is for a play or a sources URL. Missing this
+    // broke trailers live: hls.js was handed http://192.168.86.193:8092/m/s/… and the page's
+    // `connect-src` refused it, while on a phone off the LAN that address answers nothing at all.
+    const mount = `${/^[a-z][a-z0-9+.-]*:/i.test(sources) ? url.origin : ''}${url.pathname.replace(
+      /\/sources\/[^/]+$/,
+      '',
+    )}`;
     const list: Source[] = [];
     for (const entry of body.sources) {
       // `kind` and `url` are the two that cannot be guessed; anything without both is unusable.
       if (typeof entry?.url !== 'string') continue;
       if (entry.kind !== 'mp4' && entry.kind !== 'hls') continue;
+      // A path is already on this origin and has nothing to move; anything else is one of reel's own
+      // addresses and is brought here, or dropped if it names something that is not a minted URL.
+      const at = entry.url.startsWith('/') ? entry.url : onOrigin(entry.url, mount, /\/m\/.+$/);
+      if (!at) continue;
       // Distinct URLs only. A fallback step that lands on the URL already mounted changes nothing, fires
       // no load and no error, and stops the ladder where it stood — reel dedupes, and so do we.
-      if (list.some((had) => had.url === entry.url)) continue;
+      if (list.some((had) => had.url === at)) continue;
       list.push({
         kind: entry.kind,
-        url: entry.url,
+        url: at,
         audio: entry.audio === true,
         height: typeof entry.height === 'number' ? entry.height : null,
       });

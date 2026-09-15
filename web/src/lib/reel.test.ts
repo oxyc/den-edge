@@ -264,6 +264,34 @@ describe('fetchSources', () => {
     expect(asked).toContain(`playable=${encodeURIComponent('{"h264":51,"vp9":true}')}`);
   });
 
+  /**
+   * The bug this pins broke trailers live, and the fixtures above are why it was invisible: they all
+   * name paths, which are already on this origin. reel names what it mints by the address it was asked
+   * at — the LAN one, behind the relay — so hls.js was handed http://192.168.86.193:8092/m/s/… and the
+   * page's connect-src refused it, while on a phone off the LAN that address answers nothing at all.
+   */
+  it('brings reel’s minted URLs onto the mount it was asked on', async () => {
+    const got = await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'native',
+      fetchImpl: answering({
+        sources: [
+          { kind: 'hls', url: 'http://192.168.86.193:8092/m/n/blobn?s=tag', audio: true },
+          { kind: 'mp4', url: 'http://192.168.86.193:8092/m/s/blobs?s=tag', audio: true },
+          // Already a path here: nothing to move.
+          { kind: 'mp4', url: '/reel/cfg/m/s/blobp', audio: false },
+          // Not a minted URL. Dropped rather than fetched cross-origin from wherever it points.
+          { kind: 'mp4', url: 'http://192.168.86.193:8092/play/other.mp4?s=tag', audio: true },
+        ],
+      }),
+    });
+    expect(got?.sources.map((one) => one.url)).toEqual([
+      '/reel/cfg/m/n/blobn?s=tag',
+      '/reel/cfg/m/s/blobs?s=tag',
+      '/reel/cfg/m/s/blobp',
+    ]);
+  });
+
   /** A press is a guess: reel answers the same, and does less behind it. */
   it('says when an ask is speculative, and says nothing when it is not', async () => {
     await fetchSources(SOURCES, {
