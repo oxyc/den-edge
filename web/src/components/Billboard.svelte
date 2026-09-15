@@ -15,7 +15,14 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import { progressiveURL, trailerURL } from '../lib/reel';
+  import {
+    cropStyle,
+    fetchSources,
+    nativeHls,
+    progressiveURL,
+    trailerCandidates,
+  } from '../lib/reel';
+  import type { Crop, Source } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -177,9 +184,28 @@
   let ambientFailed = $state(false);
   /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
   let proxied = $state<string | null>(null);
-  /** This source will not play: reel's own copy, and then the still picture, are what is left. */
+  /**
+   * What reel offered for this slide, best first, and which of them is mounted.
+   *
+   * reel chooses from its own measurements rather than this page guessing from a path, and it guarantees
+   * the entries are distinct — which matters more than it sounds: a fallback step that lands on the URL
+   * already playing fires no load and no error, and the slide simply stops with nothing to say why.
+   */
+  let rungs = $state<Source[]>([]);
+  let rung = $state(0);
+  /** Where the picture sits inside the frame; null until reel has measured this trailer. */
+  let ambientCrop = $state<Crop | null>(null);
+  /** Whether a bare element plays a playlist here, which decides what reel is worth offering. */
+  const PLAYS_HLS = nativeHls();
+  /** This source will not play: reel's next offer, then its own copy, then the still picture. */
   function ambientFailedOver() {
     playing = false;
+    const next = rungs[rung + 1];
+    if (next) {
+      rung += 1;
+      ambient = next.url;
+      return;
+    }
     // YouTube's own URL can expire or be withdrawn under us; reel's copy is what to try before
     // giving up on the slide altogether.
     if (proxied && ambient !== proxied) {
@@ -225,6 +251,11 @@
     proxied = null;
     playing = false;
     ambientFailed = false;
+    // What reel offered belonged to the slide that is leaving; left standing, the next one would fall
+    // back through its predecessor's rungs and draw with its crop.
+    rungs = [];
+    rung = 0;
+    ambientCrop = null;
   });
 
   $effect(() => {
@@ -241,11 +272,33 @@
     const timer = setTimeout(() => {
       // Resolve only. Asking reel for the URLs costs a lookup; asking it for the file costs a download,
       // an ffmpeg re-mux, a slot on the cache volume and the trailer crossing the house twice.
-      void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
+      void trailerCandidates(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
-      }).then((url) => {
-        if (!live || !url) return;
+      }).then(async (found) => {
+        const first = found[0];
+        if (!live || !first) return;
+        const url = first.play;
+        if (first.sources) {
+          const offered = await fetchSources(first.sources, {
+            surface: 'silent',
+            player: PLAYS_HLS ? 'native' : 'hls.js',
+          });
+          if (!live) return;
+          // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
+          // is only worth taking where the element parses one itself; offered to anything else it
+          // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
+          const playable = offered?.sources.filter((one) => one.kind === 'mp4' || PLAYS_HLS) ?? [];
+          const top = playable[0];
+          if (top) {
+            proxied = url;
+            rungs = playable;
+            rung = 0;
+            ambientCrop = offered?.crop ?? null;
+            ambient = top.url;
+            return;
+          }
+        }
         // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
         proxied = url;
         // One file with its index in front, played by the element itself. No playlist, no player.
@@ -298,9 +351,20 @@
     const timer = setTimeout(() => {
       if (!live) return;
       const ids = { tmdb: next.id, imdb: known.get(keyOf(next))?.imdbId };
-      void trailerURL(base, next.type, ids, table ?? {}, {
+      void trailerCandidates(base, next.type, ids, table ?? {}, {
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
+      }).then((found) => {
+        const first = found[0];
+        if (!live || !first?.sources) return;
+        // Asking IS the warming. `/sources` waits for the resolve its first entry plays from, and
+        // builds that entry's index where it needs one, so there is no separate prewarm to keep in
+        // step with what this slide will go on to ask for — which is precisely what went wrong when a
+        // surface warmed one height step and then played another, and paid the build in full.
+        void fetchSources(first.sources, {
+          surface: 'silent',
+          player: PLAYS_HLS ? 'native' : 'hls.js',
+        });
       });
     }, WARM_MS);
     return () => {
@@ -548,6 +612,7 @@
         class="ambient"
         class:playing
         src={ambient ?? undefined}
+        style={cropStyle(ambientCrop) ?? undefined}
         autoplay
         muted
         loop
