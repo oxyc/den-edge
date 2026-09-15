@@ -115,6 +115,10 @@
   function start() {
     const player = video;
     if (!player || touched || !allowed || !player.paused || player.ended) return;
+    // Silence is re-asserted rather than assumed: this is the one path that starts playback without having
+    // set it, so a stray unmute from anywhere else corrects itself at the next `canplay` instead of being
+    // carried into the picture.
+    player.muted = !sound;
     void player.play().catch(() => {});
   }
 
@@ -142,9 +146,14 @@
           player as HTMLVideoElement & { webkitEnterFullscreen?: () => void }
         ).webkitEnterFullscreen?.();
     } catch {
-      // Refused, or unsupported: `leave` will never fire, so take it back off rather than leave a
-      // listener behind for every press. The sound stays on — the click that asked for it is gesture
-      // enough to play unmuted where it is — and the next trailer resets it.
+      // Refused, or unsupported: `leave` will never fire, so take it back off rather than leave a listener
+      // behind for every press — and go back to silence. Keeping the sound on here was how a trailer began
+      // talking on a page nobody had pressed anything on: this control is a 44px circle at the hero's top
+      // right, drawn at opacity 0, which still takes clicks, and it sits exactly where the billboard's own
+      // expand button is on the page you just left. A click aimed there that lands here after the
+      // navigation has already spent its gesture gets full screen refused and, before this, audio anyway.
+      sound = false;
+      player.muted = true;
       document.removeEventListener('fullscreenchange', leave);
     }
     void player.play().catch(() => {});
@@ -251,6 +260,10 @@
         xhrSetup: memberXhrSetup,
         abrEwmaDefaultEstimate: 5_000_000,
         testBandwidth: false,
+        // Level 0 IS the best rung — reel sorts every master best-first — so this opens at the top rather
+        // than from an estimate, which still left the first seconds soft on a fast line. ABR measures every
+        // fragment and drops from here if the line cannot hold it.
+        startLevel: 0,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) upgraded = null;

@@ -283,6 +283,10 @@
         xhrSetup: memberXhrSetup,
         abrEwmaDefaultEstimate: 5_000_000,
         testBandwidth: false,
+        // Level 0 IS the best rung — reel sorts every master best-first — so this opens at the top rather
+        // than from an estimate. The estimate above only biased the guess, which still spent the first
+        // seconds of a fifteen-second slide climbing. ABR measures every fragment and drops from here.
+        startLevel: 0,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
