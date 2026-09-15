@@ -93,7 +93,7 @@ function metaURL(
  * never pinned and the next visit asks again. Checked in den-reel's own source and its test, not
  * assumed: `addon.rs` builds both, and a test asserts `no-store` on empty links.
  */
-const warmed = new Map<string, { urls: string[]; at: number }>();
+const warmed = new Map<string, { found: TrailerCandidate[]; at: number }>();
 const WARM_TTL_MS = 5 * 60_000;
 
 /**
@@ -120,8 +120,56 @@ export function forgetWarmedTrailers(): void {
   warmed.clear();
 }
 
-/** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
+/** One trailer reel offered for a title. */
+export interface TrailerCandidate {
+  /** reel's `/play/<id>.mp4?s=…`: the download, and what every pre-`/sources` path was derived from. */
+  play: string;
+  /**
+   * `/sources/<id>.json?s=…`, where reel says what to play on a given surface — null on an answer from
+   * a reel older than 0.29.0, which is the signal to derive it from `play` the way we always did.
+   */
+  sources: string | null;
+}
+
+/**
+ * One of reel's own URLs, moved onto the address this page can actually reach.
+ *
+ * reel names its links by whatever address it was asked at, which is the LAN one behind the relay. What
+ * its signature covers is the video and the install rather than the host, so the path and query travel
+ * and the origin is replaced. `tail` is the shape being kept, so a link naming anything else is refused
+ * rather than rewritten into a path that does not exist.
+ */
+function onOrigin(raw: unknown, origin: string, tail: RegExp): string | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const link = new URL(raw);
+    if (!['http:', 'https:'].includes(link.protocol)) return null;
+    const path = link.pathname.match(tail)?.[0];
+    return path ? `${origin}${path}${link.search}` : null;
+  } catch {
+    // One malformed link does not discard the remaining candidates.
+    return null;
+  }
+}
+
+/**
+ * Ordered, distinct play URLs: what every surface asked for before `/sources`, and the fallback after.
+ *
+ * Kept as its own function so each surface moves to `/sources` on its own, rather than all of them
+ * moving in the commit that changes what reel is asked.
+ */
 export async function trailerURLs(
+  base: string,
+  type: MediaType,
+  ids: TitleIds,
+  routes: Routes,
+  options: Parameters<typeof trailerCandidates>[4] = {},
+): Promise<string[]> {
+  return (await trailerCandidates(base, type, ids, routes, options)).map((found) => found.play);
+}
+
+/** Ordered, distinct candidates. A removed or portrait first video must not hide every other trailer. */
+export async function trailerCandidates(
   base: string,
   type: MediaType,
   ids: TitleIds,
@@ -148,14 +196,14 @@ export async function trailerURLs(
      */
     prewarm?: 'full' | 'direct';
   } = {},
-): Promise<string[]> {
+): Promise<TrailerCandidate[]> {
   const origin = mediaBase(base, routes.reel ?? [], secure);
   if (!origin) return [];
   // What the press already resolved, if it is still good: the page that press opened can name its
   // source on its first render rather than after a round trip.
   const key = warmKey(origin, base, type, ids, height);
   const already = key ? warmed.get(key) : undefined;
-  if (already && Date.now() - already.at < WARM_TTL_MS) return already.urls;
+  if (already && Date.now() - already.at < WARM_TTL_MS) return already.found;
   const asked = metaURL(base, type, ids, prewarm, height);
   if (!asked) return [];
   try {
@@ -163,26 +211,20 @@ export async function trailerURLs(
     if (!res.ok) return [];
     const body = await res.json();
     if (!Array.isArray(body?.meta?.links)) return [];
-    const urls: string[] = [];
+    const found: TrailerCandidate[] = [];
     for (const candidate of body.meta.links) {
-      if (typeof candidate?.trailers !== 'string') continue;
-      try {
-        const link = new URL(candidate.trailers);
-        if (!['http:', 'https:'].includes(link.protocol)) continue;
-        // A PUBLIC_BASE_URL may already include a /reel mount. Only the signed play path travels.
-        const play = link.pathname.match(/\/play\/[^/]+$/)?.[0];
-        if (!play) continue;
-        const url = `${origin}${play}${link.search}`;
-        if (!urls.includes(url)) urls.push(url);
-      } catch {
-        /* One malformed link does not discard the remaining candidates. */
-      }
+      const play = onOrigin(candidate?.trailers, origin, /\/play\/[^/]+$/);
+      if (!play) continue;
+      if (found.some((had) => had.play === play)) continue;
+      // reel names this from 0.29.0. Older answers carry none, and a surface then derives what it
+      // plays from the play URL, exactly as every version before /sources did.
+      found.push({ play, sources: onOrigin(candidate?.sources, origin, /\/sources\/[^/]+$/) });
     }
     // Only a real answer is remembered. An empty list is usually reel saying "not yet" — a resolve
     // still running, an upstream that faulted — and pinning that for five minutes would leave the
     // page with no trailer long after one existed.
-    if (key && urls.length) warmed.set(key, { urls, at: Date.now() });
-    return urls;
+    if (key && found.length) warmed.set(key, { found, at: Date.now() });
+    return found;
   } catch {
     return [];
   }

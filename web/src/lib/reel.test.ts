@@ -8,6 +8,7 @@ import {
   progressiveURL,
   isPlaylist,
   nativeHls,
+  trailerCandidates,
   trailerURL,
   trailerURLs,
 } from './reel';
@@ -72,6 +73,64 @@ describe('what a press resolved', () => {
       new Response(JSON.stringify({ meta: { links: [] } }), { status: 200 });
     expect(await ask(nothing)).toEqual([]);
     expect(await ask(answering(meta))).toHaveLength(2);
+  });
+});
+
+describe('trailerCandidates', () => {
+  const ask = (fetchImpl: typeof fetch) =>
+    trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
+      fetchImpl,
+      secure: true,
+    });
+
+  it('carries reel’s sources URL onto this origin, beside the play URL', async () => {
+    const named = {
+      meta: {
+        links: [
+          {
+            trailers: 'http://192.168.86.193:8092/play/abc123.mp4?s=tag&i=iid',
+            sources: 'http://192.168.86.193:8092/sources/abc123.json?s=tag&i=iid',
+          },
+        ],
+      },
+    };
+    // Both move to the relay's mount for the same reason: reel names them by the address it was asked
+    // at, and its signature covers the video and the install rather than the host.
+    expect(await ask(answering(named))).toEqual([
+      {
+        play: '/reel/play/abc123.mp4?s=tag&i=iid',
+        sources: '/reel/sources/abc123.json?s=tag&i=iid',
+      },
+    ]);
+  });
+
+  /** A reel older than 0.29.0 names none, and the surface then derives what it plays from `play`. */
+  it('is null where reel named no sources URL', async () => {
+    const found = await ask(answering(meta));
+    expect(found.map((one) => one.sources)).toEqual([null, null]);
+    expect(found[0]?.play).toBe('/reel/play/abc123.mp4?s=tag&i=iid');
+  });
+
+  it('keeps the candidate when its sources URL is unusable', async () => {
+    const bent = {
+      meta: {
+        links: [
+          {
+            trailers: 'http://192.168.86.193:8092/play/abc123.mp4?s=tag',
+            // Not a URL this page would fetch, and not reel's shape: neither may cost us the trailer.
+            sources: 'javascript:alert(1)',
+          },
+          {
+            trailers: 'http://192.168.86.193:8092/play/def456.mp4?s=tag2',
+            sources: 'http://192.168.86.193:8092/crop/def456.json?s=tag2',
+          },
+        ],
+      },
+    };
+    expect((await ask(answering(bent))).map((one) => [one.play, one.sources])).toEqual([
+      ['/reel/play/abc123.mp4?s=tag', null],
+      ['/reel/play/def456.mp4?s=tag2', null],
+    ]);
   });
 });
 
