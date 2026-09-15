@@ -153,6 +153,32 @@ function onOrigin(raw: unknown, origin: string, tail: RegExp): string | null {
 }
 
 /**
+ * Where to actually fetch one source reel offered.
+ *
+ * Every url is a URI reference resolved against the `/sources` URL that was asked for — the same rule
+ * reel already uses for the segment URIs inside a playlist, and for the same reason: no proxy has to
+ * forward a host or a prefix, and this page never has to know the mount it is served under.
+ *
+ * Three cases, and all three are real. A relative reference resolves onto this origin, which is what
+ * reel answers from 0.37.0. An absolute URL naming one of reel's OWN addresses is moved onto the mount:
+ * older reels answer that way, naming the LAN address they were asked at, and a browser cannot fetch it
+ * — the page's `connect-src` refuses it and off the LAN it answers nothing at all, which is exactly how
+ * trailers broke. Any other absolute URL passes through untouched, because Google's own file is one of
+ * the rungs reel offers and it is meant to be fetched straight from Google.
+ */
+function sourceAt(raw: string, asked: URL, mount: string): string | null {
+  try {
+    const at = new URL(raw, asked);
+    // Same origin: hand back a path, so it travels through the relay as every other reel URL does.
+    if (at.origin === asked.origin) return `${at.pathname}${at.search}`;
+    const minted = at.pathname.match(/\/m\/.+$/)?.[0];
+    return minted ? `${mount}${minted}${at.search}` : at.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ordered, distinct play URLs: what every surface asked for before `/sources`, and the fallback after.
  *
  * Kept as its own function so each surface moves to `/sources` on its own, rather than all of them
@@ -451,11 +477,6 @@ export async function fetchSources(
     const body = await res.json();
     if (!Array.isArray(body?.sources)) return null;
     // Where this page can reach reel: the mount it just asked on, minus the `/sources/<id>.json`.
-    //
-    // reel names every URL it mints by the address it was asked at, which behind the relay is the LAN
-    // one — so the origin is replaced here exactly as it is for a play or a sources URL. Missing this
-    // broke trailers live: hls.js was handed http://192.168.86.193:8092/m/s/… and the page's
-    // `connect-src` refused it, while on a phone off the LAN that address answers nothing at all.
     const mount = `${/^[a-z][a-z0-9+.-]*:/i.test(sources) ? url.origin : ''}${url.pathname.replace(
       /\/sources\/[^/]+$/,
       '',
@@ -465,9 +486,7 @@ export async function fetchSources(
       // `kind` and `url` are the two that cannot be guessed; anything without both is unusable.
       if (typeof entry?.url !== 'string') continue;
       if (entry.kind !== 'mp4' && entry.kind !== 'hls') continue;
-      // A path is already on this origin and has nothing to move; anything else is one of reel's own
-      // addresses and is brought here, or dropped if it names something that is not a minted URL.
-      const at = entry.url.startsWith('/') ? entry.url : onOrigin(entry.url, mount, /\/m\/.+$/);
+      const at = sourceAt(entry.url, url, mount);
       if (!at) continue;
       // Distinct URLs only. A fallback step that lands on the URL already mounted changes nothing, fires
       // no load and no error, and stops the ladder where it stood — reel dedupes, and so do we.

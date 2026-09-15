@@ -276,19 +276,23 @@ describe('fetchSources', () => {
       player: 'native',
       fetchImpl: answering({
         sources: [
-          { kind: 'hls', url: 'http://192.168.86.193:8092/m/n/blobn?s=tag', audio: true },
+          // What reel answers from 0.37.0: a reference relative to the `/sources` URL itself, so no
+          // proxy forwards a host and this page never has to know its own mount.
+          { kind: 'hls', url: '../m/n/blobr?s=tag', audio: true },
+          // What older reels answer: the LAN address reel was asked at, which no browser can fetch.
           { kind: 'mp4', url: 'http://192.168.86.193:8092/m/s/blobs?s=tag', audio: true },
           // Already a path here: nothing to move.
           { kind: 'mp4', url: '/reel/cfg/m/s/blobp', audio: false },
-          // Not a minted URL. Dropped rather than fetched cross-origin from wherever it points.
-          { kind: 'mp4', url: 'http://192.168.86.193:8092/play/other.mp4?s=tag', audio: true },
+          // Google's own file is one of the rungs reel offers, and is meant to be fetched from Google.
+          { kind: 'mp4', url: 'https://rr3---sn-x.googlevideo.com/videoplayback?x=1', audio: true },
         ],
       }),
     });
     expect(got?.sources.map((one) => one.url)).toEqual([
-      '/reel/cfg/m/n/blobn?s=tag',
+      '/reel/cfg/m/n/blobr?s=tag',
       '/reel/cfg/m/s/blobs?s=tag',
       '/reel/cfg/m/s/blobp',
+      'https://rr3---sn-x.googlevideo.com/videoplayback?x=1',
     ]);
   });
 
