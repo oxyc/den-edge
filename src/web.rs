@@ -55,14 +55,38 @@ fn csp(media: &[String]) -> String {
     )
 }
 
+/// Whether an origin names a tailnet host. The exact name is a household's own — `pve.tailce93d3.ts.net` is
+/// ours — and putting it in a policy served on a public name publishes it to anyone who loads the page.
+fn tailnet(origin: &str) -> bool {
+    let rest = origin.split("://").nth(1).unwrap_or(origin);
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    host.trim_end_matches('.').to_ascii_lowercase().ends_with(".ts.net")
+}
+
+/// The media origins a browser on the public web name is told about: every one except the tailnet's. Nothing
+/// is lost by it — `https://*.ts.net:8443` in the policy already allows the tailnet address a household's own
+/// page stored for itself, which is the whole reason the wildcard is there. It was meant to replace the exact
+/// host on that name rather than stand beside it.
+fn public_media(media: &[String]) -> Vec<String> {
+    media.iter().filter(|origin| !tailnet(origin)).cloned().collect()
+}
+
 pub async fn serve(
     state: &crate::AppState,
     path: &str,
     query: Option<&str>,
     headers: &HeaderMap,
+    face: crate::handler::Face,
 ) -> Response {
     let Some(dir) = state.web_dir.as_deref() else { return not_found() };
-    let media = &state.media_origins;
+    let kept: Vec<String>;
+    let media: &[String] = match face {
+        crate::handler::Face::Web => {
+            kept = public_media(&state.media_origins);
+            &kept
+        }
+        _ => &state.media_origins,
+    };
     let Some(relative) = relative(path) else { return not_found() };
     let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
     let (bytes, file, immutable) = match tokio::fs::read(&asked).await {
@@ -245,6 +269,28 @@ mod tests {
         let policy = super::csp(&[]);
         assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
         assert!(!policy.contains("'unsafe-eval'"));
+    }
+
+    /// The wildcard REPLACES the exact tailnet host on the browser's public name rather than joining it:
+    /// naming `pve.tailce93d3.ts.net` in a policy served to anyone who loads the page publishes whose
+    /// household it is, and the wildcard already allows the address that page stored for itself. Every other
+    /// name — the LAN, the tailnet itself, the device API — is told the whole list, as before.
+    #[test]
+    fn the_public_name_is_told_every_media_origin_but_the_tailnets() {
+        let media = [
+            "https://pve.tailce93d3.ts.net:8443".to_owned(),
+            "http://192.168.86.193:8095/remux".to_owned(),
+            "https://d-remux.oxy.fi".to_owned(),
+        ];
+        assert_eq!(
+            super::public_media(&media),
+            ["http://192.168.86.193:8095/remux", "https://d-remux.oxy.fi"]
+        );
+        assert!(super::tailnet("https://pve.tailce93d3.ts.net:8443"));
+        assert!(super::tailnet("https://pve.tailce93d3.ts.net:8443/remux"));
+        assert!(!super::tailnet("https://d-remux.oxy.fi"));
+        // A suffix, not the host: the name has to END there.
+        assert!(!super::tailnet("https://evil.ts.net.attacker.example"));
     }
 
     /// A household's tailnet address is the one the page falls back to when the routes table withholds
