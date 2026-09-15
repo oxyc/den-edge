@@ -1,7 +1,7 @@
 // What this browser can decode, sent with every session so den-remux can tell whether a release plays here as it is
 // or needs converting (oxyc/den-remux `playable`): the highest level it takes of H.264 (8-bit and High 10), 8-bit and
 // 10-bit HEVC and 8-bit and 10-bit AV1, whether it decodes HDR (PQ) in HEVC and in AV1 and Dolby Vision, whether it
-// plays E-AC-3 audio as it is, and whether it plays 5.1 AAC.
+// plays Dolby Digital and FLAC audio as they are, whether it plays 5.1 and 7.1 AAC, and whether it decodes VP9.
 
 export interface Playable {
   /** H.264's highest `level_idc` (0x33 is 5.1); 0 for none. */
@@ -36,6 +36,21 @@ export interface Playable {
   av1Main10: number;
   /** Whether 10-bit AV1 decodes in PQ. */
   av1Hdr: boolean;
+  /** Whether FLAC plays here, so den-remux copies such a track instead of converting it to AAC. */
+  flac: boolean;
+  /**
+   * Whether 8-channel AAC-LC plays here, so a converted track of eight channels or more stays 7.1 rather than
+   * folding down to 5.1.
+   */
+  aac71: boolean;
+  /**
+   * Whether VP9 profile 0 (8-bit) decodes here. A boolean, not a level, because no service downstream has a level
+   * field for VP9 — so a browser whose decoder tops out below a release's size still says yes, and den-remux copies
+   * it (nothing on the box converts VP9). Asked at level 4.0, which any VP9 decoder answers for.
+   */
+  vp9: boolean;
+  /** Whether VP9 profile 2 (10-bit) decodes here. */
+  vp9Profile2: boolean;
 }
 
 /**
@@ -48,10 +63,13 @@ export interface Playable {
  *
  * The sound goes with the picture because the error names neither. A `MediaError 3` on an initialization
  * segment says only that the player gave up, not which track it gave up on, so a refusal cannot be read as
- * being about the video alone and the retry must carry none of it forward. `eac3` is the least trustworthy
- * claim of the set in any case: it comes from a bare type check, and a type check says yes more readily than
- * a decoder does. `aacMultichannel` stays, because Media Capabilities was asked about that one properly — so
- * the retry is converted rather than downmixed.
+ * being about the video alone and the retry must carry none of it forward. `eac3` and `flac` are the least
+ * trustworthy claims of the set in any case: both come from a bare type check, and a type check says yes more
+ * readily than a decoder does. `aacMultichannel` and `aac71` stay, because Media Capabilities was asked about
+ * those properly — so the retry is converted rather than downmixed.
+ *
+ * VP9 stays for the same reason AV1 does: nothing on the box converts either, so a VP9 release is another
+ * release's business rather than something this retry can ask for differently.
  *
  * Read a refusal on Apple's native player as weak evidence, though, and do not add guesses on the strength
  * of one. The failure that prompted this was not a decode failure at all: Apple's player abandons a slow
@@ -68,6 +86,7 @@ export function withoutRefused(can: Playable): Playable {
     hdr: false,
     dolbyVision: { p5: false, p8: false },
     eac3: false,
+    flac: false,
   };
 }
 
@@ -80,6 +99,12 @@ const HEVC_HIGH_LEVELS = [120, 123, 150, 153];
 const AV1_LEVELS = [8, 9, 12, 13];
 /** From 5.0 (`seq_level_idx` 12) a level holds 4K. */
 const AV1_UHD_LEVEL = 12;
+/**
+ * VP9 at level 4.0 (1080p24) in profile 0 (8-bit) and profile 2 (10-bit). A VP9 codec string must name a level, and
+ * what is reported is a boolean, so this asks at the lowest level worth playing rather than at the highest one.
+ */
+const VP9_PROFILE0 = 'vp09.00.40.08';
+const VP9_PROFILE2 = 'vp09.02.40.10';
 
 export interface Probe {
   /** Whether a `video/mp4; codecs=…` or `audio/mp4; codecs=…` type plays here. */
@@ -172,7 +197,10 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
     hevcMain10,
     hevcHighTier,
     hdr,
-    eac3: probe.supports('audio/mp4; codecs="ec-3"'),
+    // One flag covers the Dolby Digital pair, because den-remux copies an AC-3 track on the strength of it just as it
+    // copies an E-AC-3 one. A browser that takes only the newer of the two would be sent a track it plays as silence,
+    // so both are asked and the flag means both.
+    eac3: probe.supports('audio/mp4; codecs="ec-3"') && probe.supports('audio/mp4; codecs="ac-3"'),
     aacMultichannel: await decodesAudio(probe, {
       contentType: 'audio/mp4; codecs="mp4a.40.2"',
       channels: '6',
@@ -182,6 +210,17 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
     av1,
     av1Main10,
     av1Hdr,
+    flac: probe.supports('audio/mp4; codecs="fLaC"'),
+    aac71: await decodesAudio(probe, {
+      contentType: 'audio/mp4; codecs="mp4a.40.2"',
+      channels: '8',
+      samplerate: 48000,
+    }),
+    // VP9 comes from the type checks alone, as AV1 does. Apple's stack is not special-cased here even though its own
+    // player and hls.js disagree about VP9: den-remux knows which player a session uses and clears what that one
+    // can't take, and this report has no way to say "in hls.js only".
+    vp9: probe.supports(`video/mp4; codecs="${VP9_PROFILE0}"`),
+    vp9Profile2: probe.supports(`video/mp4; codecs="${VP9_PROFILE2}"`),
   };
 }
 

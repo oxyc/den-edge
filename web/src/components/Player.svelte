@@ -261,9 +261,34 @@
         return;
       }
       // -1 is hls.js's own default: the playlist's start, or the beginning.
-      hls = new Hls({ enableWorker: false, startPosition: started ?? -1 });
+      hls = new Hls({
+        enableWorker: false,
+        startPosition: started ?? -1,
+        // den-remux converts on the GPU as the player asks for segments, so the first one of a transcoded release
+        // can take far longer to answer than a copied one. hls.js gives up on a segment about ten seconds late and
+        // by default doesn't retry a timeout at all, which turns a slow conversion into a dead session. Wait
+        // through it instead, and retry twice before calling it broken.
+        fragLoadPolicy: {
+          default: {
+            maxTimeToFirstByteMs: 30_000,
+            maxLoadTimeMs: 120_000,
+            timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
+            errorRetry: { maxNumRetry: 2, retryDelayMs: 1_000, maxRetryDelayMs: 8_000 },
+          },
+        },
+      });
+      // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
+      // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so
+      // the release is still asked for again as a player that takes none of what it just refused.
+      let recovered = false;
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) broke(0, `hls.js ${data.type} ${data.details}`);
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
+          recovered = true;
+          hls?.recoverMediaError();
+          return;
+        }
+        broke(0, `hls.js ${data.type} ${data.details}`);
       });
       hls.loadSource(current.playlist);
       hls.attachMedia(element);

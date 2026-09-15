@@ -36,6 +36,10 @@ describe('playable', () => {
       av1: 13,
       av1Main10: 13,
       av1Hdr: true,
+      flac: true,
+      aac71: true,
+      vp9: true,
+      vp9Profile2: true,
     });
     expect(asked.map((v) => v.contentType)).toEqual([
       'video/mp4; codecs="hvc1.2.4.H153.B0"',
@@ -84,6 +88,10 @@ describe('playable', () => {
       av1: 0,
       av1Main10: 0,
       av1Hdr: false,
+      flac: false,
+      aac71: false,
+      vp9: false,
+      vp9Profile2: false,
     });
   });
 
@@ -100,6 +108,7 @@ describe('playable', () => {
     expect((await playable(chrome)).aacMultichannel).toBe(true);
     expect(asked).toEqual([
       { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: '6', samplerate: 48000 },
+      { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: '8', samplerate: 48000 },
     ]);
     const stereoOnly = browser(
       () => true,
@@ -216,6 +225,52 @@ describe('playable', () => {
     });
   });
 
+  it('takes the Dolby Digital pair together, because one flag copies both', async () => {
+    expect((await playable(browser((codec) => codec === 'ec-3' || codec === 'ac-3'))).eac3).toBe(
+      true,
+    );
+    // A browser with only the newer of the two would be copied an AC-3 track it plays as silence.
+    expect((await playable(browser((codec) => codec === 'ec-3'))).eac3).toBe(false);
+    expect((await playable(browser((codec) => codec === 'ac-3'))).eac3).toBe(false);
+  });
+
+  it('asks Media Capabilities about 7.1 AAC, and folds to 5.1 where it can’t ask', async () => {
+    expect((await playable(browser(() => true))).aac71, 'nothing to ask').toBe(false);
+    const upTo51 = browser(
+      () => true,
+      async () => true,
+      async (audio) => audio.channels !== '8',
+    );
+    expect((await playable(upTo51)).aac71).toBe(false);
+    expect((await playable(upTo51)).aacMultichannel).toBe(true);
+  });
+
+  it('reads FLAC and VP9 off the type checks, and asks VP9 at level 4.0 in both profiles', async () => {
+    const asked: string[] = [];
+    const chrome = browser((codec) => {
+      asked.push(codec);
+      return true;
+    });
+    expect(await playable(chrome)).toMatchObject({ flac: true, vp9: true, vp9Profile2: true });
+    expect(asked).toContain('fLaC');
+    expect(asked).toContain('vp09.00.40.08');
+    expect(asked).toContain('vp09.02.40.10');
+    // Apple's stack is not special-cased, unlike the HEVC High tier: its own player and hls.js disagree about VP9,
+    // and this report has no way to say "in hls.js only", so den-remux clears the pair for the sessions its own
+    // player plays.
+    const safari: Probe = {
+      ...browser(
+        () => true,
+        async () => true,
+      ),
+      apple: true,
+    };
+    expect(await playable(safari)).toMatchObject({ vp9: true, vp9Profile2: true });
+    // A browser with no VP9 decoder says no to the type, and nothing infers it from anything else.
+    const noVp9 = browser((codec) => !codec.startsWith('vp09'));
+    expect(await playable(noVp9)).toMatchObject({ vp9: false, vp9Profile2: false, flac: true });
+  });
+
   it('believes Media Capabilities over a Dolby Vision type check, profile by profile', async () => {
     const hopeful = browser(
       () => true,
@@ -278,6 +333,13 @@ describe('withoutRefused', () => {
     expect(cut.aacMultichannel).toBe(claimed.aacMultichannel);
     // AV1 too: den-remux only ever copies it, so it is another release's business, not this one's.
     expect(cut.av1).toBe(claimed.av1);
+    // VP9 goes the same way as AV1, and for the same reason: nothing on the box converts it either.
+    expect(cut.vp9).toBe(claimed.vp9);
+    expect(cut.vp9Profile2).toBe(claimed.vp9Profile2);
+    // FLAC goes with E-AC-3: both rest on a bare type check, and the refusal named no track.
+    expect(cut.flac).toBe(false);
+    // 7.1 AAC stays for the reason 5.1 does — Media Capabilities was asked about it properly.
+    expect(cut.aac71).toBe(claimed.aac71);
 
     // The claims themselves are untouched, so the next title is still asked as the browser it really is.
     expect(claimed.hevcMain10).toBe(153);
