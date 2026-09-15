@@ -48,6 +48,7 @@
     let current = true;
     directory = null;
     unreachable = false;
+    answered = [];
     void fetchServices(wanted, tmdbKey).then(
       (services) => {
         if (current) directory = services;
@@ -85,12 +86,25 @@
     };
   });
 
+  /**
+   * The media types atlas has answered with titles for. A chart that is listed and comes back empty hides itself, so
+   * replacing TMDB's rows on the strength of the listing alone left a page of nothing but Acclaimed.
+   */
+  let answered = $state<MediaType[]>([]);
   const only = $derived(tab ?? undefined);
   const rows = $derived.by(() => {
     if (!service) return [];
     const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), { minYear, only });
     const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only }) : [];
-    return mergeServiceRows(own, tmdb);
+    const watched = own.map((row) => ({
+      ...row,
+      load: async (page: number) => {
+        const titles = await row.load(page);
+        if (titles.length && !answered.includes(row.type)) answered = [...answered, row.type];
+        return titles;
+      },
+    }));
+    return mergeServiceRows(watched, tmdb, new Set(answered));
   });
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the

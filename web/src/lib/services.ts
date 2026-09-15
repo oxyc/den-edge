@@ -123,19 +123,25 @@ export function atlasServiceRows(
   service: Service,
   country: string,
   { only, fetchImpl = relayFetch }: { only?: MediaType; fetchImpl?: typeof fetch } = {},
-): RowDef[] {
+): (RowDef & { type: MediaType })[] {
   const ids = new Set([service.id, ...service.variants]);
   // What has just arrived leads, as it does in the TMDB rows: then what is popular, then what is about to go or
   // about to land. atlas's manifest lists them popular-first, which is its own order and not this page's.
   const rank = (id: string) =>
     id.endsWith('-new') ? 0 : id.endsWith('-leaving') ? 2 : id.endsWith('-coming') ? 3 : 1;
-  return catalogs
-    .filter((c) => (only ? c.type === only : true) && c.providerIds.some((id) => ids.has(id)))
+  const wanted = catalogs.filter(
+    (c) => (only ? c.type === only : true) && c.providerIds.some((id) => ids.has(id)),
+  );
+  // atlas names a chart after the service alone ("New on Netflix"), and names the film and series ones identically. On
+  // a page showing both, the media type has to be said or the page reads as every row twice.
+  const mixed = wanted.some((c) => c.type === 'movie') && wanted.some((c) => c.type === 'tv');
+  return wanted
     .slice()
     .sort((a, b) => rank(a.id) - rank(b.id))
     .map((catalog) => ({
       id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
-      title: catalog.name,
+      title: mixed ? `${catalog.name} · ${NOUN[catalog.type]}` : catalog.name,
+      type: catalog.type,
       load: async (page: number) => {
         if (page > 1) return [];
         const path = catalog.type === 'tv' ? 'series' : 'movie';
@@ -156,10 +162,19 @@ export function atlasServiceRows(
  * atlas's "New on …" is a real arrivals list where TMDB's is a release date standing in for one. Acclaimed has no
  * atlas equivalent and always comes from TMDB.
  */
-export function mergeServiceRows(atlas: readonly RowDef[], tmdb: readonly RowDef[]): RowDef[] {
-  const covered = new Set(atlas.map((row) => row.id.slice(row.id.lastIndexOf('-') + 1)));
+export function mergeServiceRows(
+  atlas: readonly RowDef[],
+  tmdb: readonly RowDef[],
+  /**
+   * The media types atlas has actually answered for — not the ones it lists charts for.
+   *
+   * A chart that is listed and then comes back empty hides itself, so suppressing TMDB's rows on the listing alone
+   * left a page of nothing but Acclaimed. A row is only replaced once the thing replacing it has titles in it.
+   */
+  answered: ReadonlySet<MediaType>,
+): RowDef[] {
   const superseded = (row: RowDef) =>
-    covered.has(row.id.slice(row.id.lastIndexOf('-') + 1)) &&
+    [...answered].some((type) => row.id.endsWith(`-${type}`)) &&
     (row.id.includes('-popular-') || row.id.includes('-new-'));
   return [...atlas, ...tmdb.filter((row) => !superseded(row))];
 }

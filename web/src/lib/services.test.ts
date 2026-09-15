@@ -100,7 +100,11 @@ describe('atlas rows', () => {
     expect(
       rows.map((row) => row.title),
       'what just arrived leads',
-    ).toEqual(['New on Netflix', 'Popular on Netflix', 'Leaving Netflix Soon']);
+    ).toEqual([
+      'New on Netflix · Movies',
+      'Popular on Netflix · Movies',
+      'Leaving Netflix Soon · Series',
+    ]);
     await Promise.all(rows.map((row) => row.load(1)));
     expect(asked).toEqual([
       '/atlas/catalog/movie/jw-nfx-new/country=FI.json',
@@ -163,7 +167,7 @@ describe('atlas rows', () => {
     const netflix = service({ id: 8, name: 'Netflix' });
     const own = atlasServiceRows('/atlas', atlas, netflix, 'US');
     const tmdb = serviceRows(netflix, 'US', async () => []);
-    const merged = mergeServiceRows(own, tmdb);
+    const merged = mergeServiceRows(own, tmdb, new Set(['movie' as const]));
     expect(merged.map((row) => row.title)).toEqual([
       'New on Netflix',
       'Popular on Netflix',
@@ -186,7 +190,28 @@ describe('atlas rows', () => {
       'UY',
     );
     expect(own).toEqual([]);
-    expect(mergeServiceRows(own, tmdb)).toEqual(tmdb);
+    expect(mergeServiceRows(own, tmdb, new Set())).toEqual(tmdb);
+  });
+
+  it('replaces a TMDB row only once atlas has answered for that type', () => {
+    const netflix = service({ id: 8, name: 'Netflix' });
+    const own = atlasServiceRows(
+      '/atlas',
+      [{ id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] }],
+      netflix,
+      'US',
+    );
+    const tmdb = serviceRows(netflix, 'US', async () => []);
+    // Listed but not yet answered: every TMDB row stands, so the page is never down to Acclaimed alone.
+    expect(mergeServiceRows(own, tmdb, new Set()).map((row) => row.title)).toEqual([
+      'Popular on Netflix',
+      'Recently released Movies',
+      'Recently released Series',
+      'Popular Movies',
+      'Popular Series',
+      'Acclaimed Movies',
+      'Acclaimed Series',
+    ]);
   });
 });
 
