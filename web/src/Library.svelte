@@ -588,6 +588,11 @@
       void fetchSources(first.sources, {
         surface: 'audible',
         player: nativeHls() ? 'native' : 'hls.js',
+        // A press is a guess, not a decision. Without this reel builds the hero's FALLBACK index for
+        // it — roughly forty-five range requests to Google — for a rung the master makes unnecessary,
+        // and it does so for every title glanced at across rows, search results and filmographies. The
+        // resolve still starts, which is the expensive half and the half that actually helps.
+        intent: 'warm',
       });
     });
     // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it

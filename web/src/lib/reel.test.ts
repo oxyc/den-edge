@@ -264,6 +264,25 @@ describe('fetchSources', () => {
     expect(asked).toContain(`playable=${encodeURIComponent('{"h264":51,"vp9":true}')}`);
   });
 
+  /** A press is a guess: reel answers the same, and does less behind it. */
+  it('says when an ask is speculative, and says nothing when it is not', async () => {
+    await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'native',
+      intent: 'warm',
+      fetchImpl: answering(two),
+    });
+    expect(asked).toContain('intent=warm');
+    // The surface that actually plays asks exactly what it asked before this existed — and must, since
+    // its ask is what starts the index, and an identical URL would be answered from the browser cache.
+    await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'native',
+      fetchImpl: answering(two),
+    });
+    expect(asked).not.toContain('intent');
+  });
+
   it('drops what it cannot play and never the same URL twice', async () => {
     const got = await fetchSources(SOURCES, {
       surface: 'silent',

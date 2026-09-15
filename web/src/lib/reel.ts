@@ -409,12 +409,22 @@ export async function fetchSources(
   {
     surface,
     player,
+    intent,
     playable,
     fetchImpl = relayFetch,
     signal,
   }: {
     surface: Surface;
     player: Player;
+    /**
+     * `warm` where this is a guess rather than a decision — a press that may never become a view.
+     *
+     * The answer is identical either way. What changes is the work reel does behind it: a warm ask
+     * starts the resolve, which is the expensive half and the half that helps, and skips building the
+     * fallback index and measuring the crop. Without it a press pays roughly forty-five range requests
+     * to Google to prepare a rung the master makes unnecessary, for every title merely glanced at.
+     */
+    intent?: 'warm';
     /** This browser's codec report, which reel filters its variants by. */
     playable?: unknown;
     fetchImpl?: typeof fetch;
@@ -425,6 +435,11 @@ export async function fetchSources(
     const url = new URL(sources, globalThis.location?.href ?? 'http://relative.invalid');
     url.searchParams.set('surface', surface);
     url.searchParams.set('player', player);
+    // Omitted rather than sent empty when there is no intent, so the surface that plays asks for a
+    // URL byte-identical to the one it asked for before this existed. The warm and the play being
+    // DIFFERENT URLs is the point: the browser's cache must not answer the hero with the press's
+    // reply, because it is the hero's ask that starts the index the fallback needs.
+    if (intent) url.searchParams.set('intent', intent);
     // In the query rather than the header: den-edge's relay forwards only the range and conditional
     // headers, so `X-Den-Playable` never crosses it. reel reads both and the header wins where it arrives.
     if (playable) url.searchParams.set('playable', JSON.stringify(playable));
