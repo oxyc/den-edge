@@ -13,9 +13,14 @@ const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 // reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
 const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
+// The probe is an instrument, not part of the app: it injects a beacon into every page this server hands
+// out. Left on unconditionally it reaches the e2e suite too, where `POST /__probe` reads as an unmocked
+// request and fails every spec that guards the network. On for a session someone is watching from a
+// phone — `env DEN_PROBE=1 npm run dev -- --host` — and off the rest of the time.
+const watching = process.env.DEN_PROBE === '1';
 
 export default defineConfig({
-  plugins: [previewBuild(), probe(), svelte()],
+  plugins: [previewBuild(), ...(watching ? [probe()] : []), svelte()],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
     // http LAN address has no `crypto.subtle` at all. `tailscale serve --bg --https=8443 http://127.0.0.1:5173`

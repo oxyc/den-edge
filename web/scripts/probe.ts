@@ -5,7 +5,9 @@
 // dev server hands out, and logs what it beacons back, so a real browsing session on a real device is
 // readable from the terminal beside reel's own log.
 //
-// `apply: 'serve'` is the whole safety story: this exists under `npm run dev` and cannot reach a build.
+// `apply: 'serve'` keeps this out of a build entirely, and `DEN_PROBE=1` keeps it out of the dev server
+// unless it was asked for (see vite.config.ts). Both matter: injected unconditionally, the beacon lands in
+// the e2e suite as well, where an unmocked `POST /__probe` fails every spec that guards the network.
 import type { Plugin } from 'vite';
 
 /** Runs in the page. Deliberately small, dependency-free, and silent when anything is unsupported. */
