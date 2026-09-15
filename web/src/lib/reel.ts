@@ -81,6 +81,13 @@ function metaURL(
  * it could name a single source. That round trip was the first thing between opening a title and its
  * trailer starting. Five minutes: long enough to cover the press and a look around the page, short
  * enough that reel's own answer still governs.
+ *
+ * The forced revalidation is gone too, so the browser's own cache can answer a later visit outright
+ * instead of a conditional request preceding every trailer. That is safe because reel tells the two
+ * cases apart itself rather than leaving it to the page: an answer carrying links is sent with a
+ * `max-age`, while an EMPTY links list — "no trailer resolved yet" — is sent `no-store`, so a miss is
+ * never pinned and the next visit asks again. Checked in den-reel's own source and its test, not
+ * assumed: `addon.rs` builds both, and a test asserts `no-store` on empty links.
  */
 const warmed = new Map<string, { urls: string[]; at: number }>();
 const WARM_TTL_MS = 5 * 60_000;
@@ -136,7 +143,7 @@ export async function trailerURLs(
   const asked = metaURL(base, type, ids, prewarm);
   if (!asked) return [];
   try {
-    const res = await fetchImpl(asked, { signal, cache: 'no-cache' });
+    const res = await fetchImpl(asked, { signal });
     if (!res.ok) return [];
     const body = await res.json();
     if (!Array.isArray(body?.meta?.links)) return [];
