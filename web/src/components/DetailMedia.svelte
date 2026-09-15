@@ -213,6 +213,34 @@
     };
   });
 
+  // TEMPORARY — remove once the Safari sound is identified.
+  //
+  // Three fixes have aimed at this hero's own controls and none has stopped a trailer arriving with audio when
+  // a title is opened from the billboard. Every one of them assumed which element was making the noise, and
+  // that assumption has never been checked. So this names them all instead: a second after the page appears,
+  // every media element on it, how it is set, and what this component thinks it granted. It asks nothing of
+  // the viewer and reports no data anywhere — one console line, read once, then gone.
+  onMount(() => {
+    const probe = setTimeout(() => {
+      const media = [...document.querySelectorAll('video, audio')].map((element) => {
+        const player = element as HTMLMediaElement;
+        return {
+          tag: player.tagName,
+          src: (player.currentSrc || player.getAttribute('src') || '').slice(-56),
+          muted: player.muted,
+          paused: player.paused,
+          volume: player.volume,
+          ready: player.readyState,
+        };
+      });
+      const frames = [...document.querySelectorAll('iframe')].map((frame) =>
+        (frame.getAttribute('src') ?? '').slice(0, 56),
+      );
+      console.log('[den audio probe]', JSON.stringify({ sound, touched, media, frames }));
+    }, 1000);
+    return () => clearTimeout(probe);
+  });
+
   $effect(() => {
     const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
     candidates = [];
