@@ -15,7 +15,9 @@
       | 'love'
       | 'expand'
       | 'warning'
-      | 'sliders';
+      | 'sliders'
+      | 'sound'
+      | 'mute';
     filled?: boolean;
   } = $props();
 </script>
@@ -47,6 +49,12 @@
   {:else if name === 'expand'}<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
   {:else if name === 'warning'}<path d="M12 4.5 3.2 19.5h17.6L12 4.5Z" /><path
       d="M12 10.5v3.2m0 2.6h.01"
+    />
+  {:else if name === 'sound'}<path d="M4 9.5h3.2L12 6v12l-4.8-3.5H4Z" /><path
+      d="M15.6 9.6a3.6 3.6 0 0 1 0 4.8"
+    /><path d="M18.2 7.4a7 7 0 0 1 0 9.2" />
+  {:else if name === 'mute'}<path d="M4 9.5h3.2L12 6v12l-4.8-3.5H4Z" /><path
+      d="m16 10 5 4m0-4-5 4"
     />
   {:else if name === 'sliders'}<path d="M4 7h9m5 0h2M4 12h3m5 0h8M4 17h9m5 0h2" /><circle
       cx="15.5"

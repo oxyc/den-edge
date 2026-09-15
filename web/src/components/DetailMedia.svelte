@@ -209,6 +209,29 @@
     }
     void player.play().catch(() => {});
   }
+
+  /**
+   * Sound where the viewer is: the other gesture allowed to unmute, and the one that does not take
+   * over the screen.
+   *
+   * Full screen was the only way to hear a trailer, which is a large thing to ask of someone who just
+   * wants to know what it sounds like. This is the same grant without the theatre, and it goes back
+   * the other way too — a second press mutes it again, which full screen has no equivalent of short
+   * of closing.
+   *
+   * Guarded by `pressed` for the same reason `expand` is: a click inherited from the page just left
+   * would otherwise land here and start a trailer talking on a page nobody pressed anything on.
+   */
+  function toggleSound() {
+    const player = video;
+    if (!player) return;
+    if (!pressed) return;
+    pressed = false;
+    sound = !sound;
+    quieten(player);
+    // Only on the way up. Muting should leave a playing trailer playing, and a paused one paused.
+    if (sound) void player.play().catch(() => {});
+  }
   const saving = Boolean(
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData,
   );
@@ -471,12 +494,20 @@
        a phone already gets the video's own controls, and its full-screen is a tap on those. -->
   {#if !mobile && !!source && !failed && !ended}
     <button
-      class="expand glass"
+      class="control expand glass"
       onpointerdown={() => (pressed = true)}
       onclick={expand}
       aria-label="Play trailer full screen with sound"
     >
       <DetailIcon name="expand" />
+    </button>
+    <button
+      class="control sound glass"
+      onpointerdown={() => (pressed = true)}
+      onclick={toggleSound}
+      aria-label={sound ? 'Mute trailer' : 'Play trailer with sound'}
+    >
+      <DetailIcon name={sound ? 'sound' : 'mute'} />
     </button>
   {/if}
 </div>
@@ -535,9 +566,8 @@
       linear-gradient(to right, rgb(0 0 0 / 0.45), transparent 80%);
   }
 
-  .expand {
+  .control {
     position: absolute;
-    top: calc(var(--bar-space) + 12px);
     right: var(--gutter);
     z-index: 1;
     display: grid;
@@ -552,21 +582,31 @@
     transition: opacity 0.2s ease;
   }
 
+  .expand {
+    top: calc(var(--bar-space) + 12px);
+  }
+
+  /* Directly under the one above, a circle and a gap down. Sound is the lesser ask of the two, so it
+     takes the lesser position. */
+  .sound {
+    top: calc(var(--bar-space) + 64px);
+  }
+
   /* Before the hover rule, which is the more specific of the two: a control reached by keyboard has
      to show itself without waiting for a pointer that may never arrive. */
-  .expand:focus-visible {
+  .control:focus-visible {
     opacity: 1;
     outline: 2px solid var(--accent);
     outline-offset: 3px;
   }
 
-  /* Otherwise it appears with the picture it belongs to. */
-  .media:hover .expand {
+  /* Otherwise they appear with the picture they belong to. */
+  .media:hover .control {
     opacity: 1;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .expand {
+    .control {
       transition: none;
     }
   }
