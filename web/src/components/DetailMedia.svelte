@@ -354,7 +354,11 @@
       // thing the line above derived, named by reel rather than by us. Adopting it is what makes the
       // fallback list, the crop and the minted accounting reel's to change without a release here.
       const top = answer?.sources[0];
-      if (!live || !top || candidates[candidate]?.sources !== offered) return;
+      // `live` is the whole guard. The cleanup below clears it whenever this effect re-runs, which is
+      // exactly when the candidate changed — so re-reading `candidates` here to check would add
+      // nothing, and would read state belonging to an effect that no longer exists. Svelte warns
+      // about that (`derived_inert`) precisely because such a read can see a stale value.
+      if (!live || !top) return;
       rungs = answer.sources;
       rung = 0;
       heroCrop = answer.crop ?? null;
