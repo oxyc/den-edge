@@ -55,19 +55,22 @@
    *
    * Five labels of text need about 285px, and at 390px the strip has 236px to put them in — so they were
    * already running off its right edge, scrolling with the scrollbar hidden and nothing to say they were
-   * there. Two of them give way instead.
+   * there. `Home` gives way below 760px: the mark beside it is already a link to the same place, 48px wide
+   * and always visible, and it is the one tab whose address differs from the canonical one.
    *
-   * `Home` goes, because the mark beside it is already a link to the same place, 48px wide and always
-   * visible, and it is the one tab whose address differs from the canonical one. `Settings` keeps its glyph
-   * and hides its word: the text stays in the DOM, so the name a screen reader reads and a test looks for is
-   * unchanged, which an `aria-label` swap would have quietly broken.
+   * `Settings` keeps its mark and hides its word. The text stays in the DOM, so the name a screen reader
+   * reads and a test looks for is unchanged — an `aria-label` swap would have quietly broken both.
+   *
+   * The mark is sliders rather than a cog. A cog is its teeth, and at 18px with this stroke there is no room
+   * to draw them: the first attempt was a small disc with long rays, which is a sun. Three rails with their
+   * knobs offset survives the size, and settings as adjustments is a fair reading of what the page is.
    */
   const tabs = [
     { page: 'library', label: 'Home', icon: undefined },
     { page: 'movies', label: 'Movies', icon: undefined },
     { page: 'series', label: 'Series', icon: undefined },
     { page: 'watchlist', label: 'Watchlist', icon: undefined },
-    { page: 'settings', label: 'Settings', icon: 'gear' },
+    { page: 'settings', label: 'Settings', icon: 'sliders' },
   ] as const;
 </script>
 
@@ -288,6 +291,11 @@
     color: var(--fg);
   }
 
+  nav a :global(svg) {
+    width: 18px;
+    height: 18px;
+  }
+
   /* Every other control in this app shows where the keyboard is; this bar showed nothing at all. */
   nav a:focus-visible,
   .brand:focus-visible,
@@ -295,11 +303,6 @@
   .back:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-  }
-
-  nav a :global(svg) {
-    width: 18px;
-    height: 18px;
   }
 
   @media (width <= 759px) {
@@ -352,8 +355,8 @@
     }
 
     /* Read out at every width, drawn only where there is room — the same shape the title actions and the
-       watchlist page use for this. The glyph carries it here, and the name stays in the DOM, so nothing that
-       looks for "Settings" by name stops finding it. */
+       watchlist page use. The cog carries it here, and the word stays in the DOM, so nothing that looks for
+       "Settings" by name stops finding it. */
     .label {
       position: absolute;
       width: 1px;

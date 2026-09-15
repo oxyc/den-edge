@@ -15,7 +15,7 @@
       | 'love'
       | 'expand'
       | 'warning'
-      | 'gear';
+      | 'sliders';
     filled?: boolean;
   } = $props();
 </script>
@@ -48,9 +48,11 @@
   {:else if name === 'warning'}<path d="M12 4.5 3.2 19.5h17.6L12 4.5Z" /><path
       d="M12 10.5v3.2m0 2.6h.01"
     />
-  {:else if name === 'gear'}<circle cx="12" cy="12" r="3.2" /><path
-      d="M12 3.2v2.4m0 12.8v2.4M4.8 12H2.4m19.2 0h-2.4M6.9 6.9 5.2 5.2m13.6 13.6-1.7-1.7M17.1 6.9l1.7-1.7M5.2 18.8l1.7-1.7"
-    />
+  {:else if name === 'sliders'}<path d="M4 7h9m5 0h2M4 12h3m5 0h8M4 17h9m5 0h2" /><circle
+      cx="15.5"
+      cy="7"
+      r="2.1"
+    /><circle cx="9.5" cy="12" r="2.1" /><circle cx="15.5" cy="17" r="2.1" />
   {:else}<g transform={name === 'dislike' ? 'rotate(180 12 12)' : undefined}
       ><path d="M8 20H4V10h4m0 10V10l4-7c2 0 3 1 2 4l-1 3h6c2 0 2 1 2 2l-2 7-1 1H8Z" /></g
     >{/if}
