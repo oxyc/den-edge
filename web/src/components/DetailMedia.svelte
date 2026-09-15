@@ -6,6 +6,7 @@
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
+  import { started } from '../lib/mediaProbe';
   let {
     type,
     tmdbId,
@@ -241,25 +242,37 @@
     // muted element is not silent, or the one making the noise is not in the document — a detached media
     // element keeps playing in WebKit, and the first probe only enumerated what was attached.
     //
-    // This one names each element, says whether it is still connected, and looks three times rather than
-    // once, because a single glance a second in cannot show sound that begins later.
+    // Emptying `<body>` by hand left the sound playing, which settles it: the emitter is not in the
+    // document, and no walk of the document can reach it. So this reads the registry instead — every
+    // element that ever called `play()`, attached or not — and names the stack that started each one.
     const look = (at: number) => {
-      const media = [...document.querySelectorAll('video, audio')].map((element) => {
-        const player = element as HTMLMediaElement;
+      // A scratch array rather than a Set: this wants no reactivity, and a component may not hold a
+      // plain Set.
+      const seen: HTMLMediaElement[] = [];
+      const media: unknown[] = [];
+      const describe = (player: HTMLMediaElement, from: string) => {
+        if (seen.includes(player)) return;
+        seen.push(player);
         const where = player.closest('[data-detail-media]')
           ? 'detail'
           : player.classList.contains('ambient')
             ? 'billboard'
             : 'other';
-        return {
+        media.push({
           where,
           connected: player.isConnected,
           muted: player.muted,
           paused: player.paused,
           volume: player.volume,
           time: Number(player.currentTime.toFixed(1)),
-        };
-      });
+          src: (player.currentSrc || player.src).slice(-48),
+          from: from.split('\n').slice(1, 4).join(' | ').slice(0, 180),
+        });
+      };
+      started.forEach((entry) => describe(entry.element, entry.from));
+      document
+        .querySelectorAll('video, audio')
+        .forEach((element) => describe(element as HTMLMediaElement, 'attached, never played'));
       console.log('[den audio probe]', JSON.stringify({ at, sound, touched, media }));
     };
     const timers = [700, 2500, 6000].map((at) => setTimeout(() => look(at), at));
