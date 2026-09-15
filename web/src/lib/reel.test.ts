@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   forgetWarmedTrailers,
-  directStreams,
   directURL,
   hlsURL,
+  progressiveURL,
   isPlaylist,
   nativeHls,
   trailerURL,
@@ -138,46 +138,26 @@ describe('directURL', () => {
   });
 });
 
-describe('directStreams', () => {
-  const answering = (body: unknown, ok = true) =>
-    (async () => ({ ok, json: async () => body })) as unknown as typeof fetch;
-
-  it('reads the URLs reel resolved', async () => {
-    const found = await directStreams('/reel/play/abc12345678.mp4?s=tag', {
-      fetchImpl: answering({
-        video: 'https://r1.googlevideo.com/v',
-        audio: 'https://r1.googlevideo.com/a',
-        hls: 'https://manifest.googlevideo.com/m.m3u8',
-        width: 1920,
-        height: 1080,
-      }),
-    });
-    expect(found).toEqual({
-      video: 'https://r1.googlevideo.com/v',
-      audio: 'https://r1.googlevideo.com/a',
-      hls: 'https://manifest.googlevideo.com/m.m3u8',
-      width: 1920,
-      height: 1080,
-    });
+describe('progressiveURL', () => {
+  it('is the play URL’s progressive sibling, signature and all', () => {
+    expect(progressiveURL('/reel/play/abc12345678.mp4?s=tag')).toBe(
+      '/reel/progressive/abc12345678.mp4?s=tag',
+    );
+    expect(progressiveURL('https://pve.example:8443/reel/play/abc12345678.mp4?s=tag&i=iid')).toBe(
+      'https://pve.example:8443/reel/progressive/abc12345678.mp4?s=tag&i=iid',
+    );
+    expect(progressiveURL('https://pve.example:8443/reel/crop/abc12345678.json')).toBeNull();
   });
 
-  /** A muted surface plays `video` alone, so an answer without one is no answer at all. */
-  it('is null without a video URL, a bad status, or a URL with no sibling', async () => {
-    expect(
-      await directStreams('/reel/play/abc12345678.mp4', {
-        fetchImpl: answering({ audio: 'https://r1.googlevideo.com/a' }),
-      }),
-    ).toBeNull();
-    expect(
-      await directStreams('/reel/play/abc12345678.mp4', {
-        fetchImpl: answering({ video: 'https://r1.googlevideo.com/v' }, false),
-      }),
-    ).toBeNull();
-    expect(
-      await directStreams('/reel/crop/abc12345678.json', {
-        fetchImpl: answering({ video: 'https://r1.googlevideo.com/v' }),
-      }),
-    ).toBeNull();
+  /** A rung small enough for a slide behind text, since these bytes cross the homelab. */
+  it('asks for a height when one is wanted', () => {
+    expect(progressiveURL('/reel/play/abc12345678.mp4?s=tag', 720)).toBe(
+      '/reel/progressive/abc12345678.mp4?s=tag&height=720',
+    );
+    // An unsigned deployment has no query to extend, so the height opens one.
+    expect(progressiveURL('/reel/play/abc12345678.mp4', 720)).toBe(
+      '/reel/progressive/abc12345678.mp4?height=720',
+    );
   });
 });
 

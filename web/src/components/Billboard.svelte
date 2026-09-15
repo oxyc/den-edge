@@ -15,7 +15,7 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import { directStreams, trailerURL } from '../lib/reel';
+  import { progressiveURL, trailerURL } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
 
@@ -55,6 +55,16 @@
    * past.
    */
   const SETTLE_MS = 500;
+
+  /**
+   * The rung a slide asks reel for.
+   *
+   * These bytes cross the homelab: a rewritten index means every offset differs from Google's, so
+   * something has to translate, and a redirect cannot. This picture sits behind a scrim and a title,
+   * muted, for fifteen seconds — 720p is roughly a third of 1080p's bytes for something nobody is
+   * studying. The detail hero, which someone is actually watching, asks for no height at all.
+   */
+  const SLIDE_HEIGHT = 720;
 
   const shown = $derived(titles.slice(0, SLIDES));
   let index = $state(0);
@@ -225,26 +235,29 @@
       // an ffmpeg re-mux, a slot on the cache volume and the trailer crossing the house twice.
       void trailerURL(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: 'direct',
-      }).then(async (url) => {
+        height: SLIDE_HEIGHT,
+      }).then((url) => {
         if (!live || !url) return;
-        // reel's own copy, behind YouTube's URL: what is left if the direct stream will not play.
+        // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
         proxied = url;
-        // YouTube's progressive stream, played by the element itself. No playlist, no player.
+        // One file with its index in front, played by the element itself. No playlist, no player.
         //
         // This slide is muted and fifteen seconds long, so everything HLS is good at is wasted on it
-        // and everything it costs is paid in full. A master playlist, a variant playlist, an
-        // initialisation segment and the first media segment are four sequential round trips before a
-        // frame, and then ABR opens on whichever rung it guesses — measured here at four seconds of
-        // 144p before it climbed. Adaptation the slide never lives long enough to use.
+        // and everything it costs is paid in full: a master playlist, a variant playlist, an
+        // initialisation segment and a first media segment are four sequential round trips before a
+        // frame, and then ABR opens on whichever rung it guesses — four seconds of 144p, measured.
         //
-        // `/direct` is one request, answered from reel's resolve cache, and the element then streams
-        // from Google with nothing of ours in the middle. reel pins that format to avc1 under its
-        // height cap, so it is a single file every browser decodes in hardware — which is also why
-        // none of this needs to know which browser it is talking to. The trailer's SOUND is the one
-        // thing this cannot carry, and a muted slide never asks for it.
-        const streams = await directStreams(url);
-        if (!live) return;
-        ambient = streams?.video ?? url;
+        // Nor is Google's own file the answer. It is fragmented — an empty sample table, a `sidx`,
+        // twenty-eight `moof`/`mdat` pairs — so a player that starts at the beginning must visit every
+        // fragment first to learn what is in them. Safari does exactly that: twenty-six range requests
+        // opened and abandoned, 2.4s to metadata and 4.9s before it would play, where Chrome managed
+        // 811ms. reel reads that index once and serves a normal MP4 with a real `moov` at the front,
+        // which measured 1070ms in the same Safari on the same trailer.
+        //
+        // The element's own request is what makes reel build that index, and reel shares one build
+        // between everything asking for the same stream — so there is nothing to pre-warm here. It
+        // takes about 600ms on the box, spent while the still picture is still the thing on screen.
+        ambient = progressiveURL(url, SLIDE_HEIGHT) ?? url;
       });
     }, SETTLE_MS);
     return () => {

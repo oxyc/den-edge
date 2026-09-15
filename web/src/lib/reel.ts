@@ -61,6 +61,7 @@ function metaURL(
   type: MediaType,
   ids: TitleIds,
   prewarm: 'full' | 'direct',
+  height?: number,
 ): string | null {
   // Never encoded: reel matches `tmdb:` on the raw path, so a percent-encoded colon would not be seen.
   const id =
@@ -68,6 +69,9 @@ function metaURL(
   if (!id) return null;
   const params = new URLSearchParams();
   if (prewarm === 'direct') params.set('prewarm', 'direct');
+  // reel keeps a separate resolve per height step, so the warm-up has to name the same one the page
+  // will go on to ask for — otherwise the request that matters pays a cold resolve anyway.
+  if (height) params.set('height', String(height));
   if (ids.tmdb !== undefined && ids.imdb) params.set('imdb', ids.imdb);
   const query = params.toString();
   return `${base}/meta/${type === 'tv' ? 'series' : 'movie'}/${id}.json${query ? `?${query}` : ''}`;
@@ -100,9 +104,15 @@ const WARM_TTL_MS = 5 * 60_000;
  * has since moved — discovery answering, a LAN address giving way to the public one — URLs for a
  * host it can no longer fetch from.
  */
-function warmKey(origin: string, base: string, type: MediaType, ids: TitleIds): string | null {
+function warmKey(
+  origin: string,
+  base: string,
+  type: MediaType,
+  ids: TitleIds,
+  height?: number,
+): string | null {
   const id = ids.tmdb !== undefined ? `tmdb:${ids.tmdb}` : ids.imdb;
-  return id ? `${origin}|${base}|${type}|${id}` : null;
+  return id ? `${origin}|${base}|${type}|${id}|${height ?? ''}` : null;
 }
 
 /** Forget it. Tests ask the same title twice and mean it both times. */
@@ -121,10 +131,16 @@ export async function trailerURLs(
     secure = globalThis.location?.protocol !== 'http:',
     signal,
     prewarm = 'full',
+    height,
   }: {
     fetchImpl?: typeof fetch;
     secure?: boolean;
     signal?: AbortSignal;
+    /**
+     * The rung this surface will go on to ask for. reel keeps one resolve per height step, so naming
+     * it here is what makes the warm-up warm the entry that is actually used.
+     */
+    height?: number;
     /**
      * What reel should get ready. `direct` asks it to resolve YouTube's URLs and skip downloading
      * the file — right for a surface that will play those URLs, and wrong for one that falls back
@@ -137,10 +153,10 @@ export async function trailerURLs(
   if (!origin) return [];
   // What the press already resolved, if it is still good: the page that press opened can name its
   // source on its first render rather than after a round trip.
-  const key = warmKey(origin, base, type, ids);
+  const key = warmKey(origin, base, type, ids, height);
   const already = key ? warmed.get(key) : undefined;
   if (already && Date.now() - already.at < WARM_TTL_MS) return already.urls;
-  const asked = metaURL(base, type, ids, prewarm);
+  const asked = metaURL(base, type, ids, prewarm, height);
   if (!asked) return [];
   try {
     const res = await fetchImpl(asked, { signal });
@@ -192,22 +208,6 @@ export function hlsURL(playURL: string, native = false): string | null {
   return `${url}${url.includes('?') ? '&' : '?'}native=1`;
 }
 
-/** What reel resolved for a trailer: YouTube's own URLs, for a page that can play them itself. */
-export interface DirectStreams {
-  /**
-   * Progressive H.264, and video only unless YouTube served a muxed format — which it lists and no
-   * longer serves. reel resolves it with a format string pinned to avc1 under its height cap, so this
-   * is a single file every browser decodes in hardware.
-   */
-  video: string;
-  /** The separate audio track, absent when the format was muxed. A muted surface ignores it entirely. */
-  audio?: string;
-  /** YouTube's HLS master: adaptive, and the only way a `<video>` gets this trailer's SOUND. */
-  hls?: string;
-  width?: number;
-  height?: number;
-}
-
 /**
  * The `/direct/<id>.json` sibling of a play URL: the googlevideo URLs themselves.
  *
@@ -219,39 +219,23 @@ export function directURL(playURL: string): string | null {
 }
 
 /**
- * Resolve a trailer to the URLs a bare `<video>` can play.
+ * The `/progressive/<id>.mp4` sibling of a play URL: the same trailer with its index in FRONT.
  *
- * This is the fast path, and for a muted surface it is the whole of the answer. One request, answered
- * from reel's resolve cache, and then the element streams from Google with nothing of ours in the
- * middle: no master playlist, no variant playlist, no initialisation segment, no adaptive ladder to
- * climb. HLS costs four sequential round trips before a frame and opens on whichever rung its player
- * guesses — measured here as four seconds at 144p — which buys adaptation a fifteen-second slide never
- * lives long enough to use.
+ * YouTube's own file is fragmented — an empty sample table, a `sidx`, then twenty-eight `moof`/`mdat`
+ * pairs — so a player that wants to start at the beginning has to visit every fragment first to learn
+ * what is in them. Safari does exactly that, measured: twenty-six range requests opened and abandoned
+ * across a 32 MB file before it would play, 2.4s to metadata and 4.9s to `canplay`, where Chrome took
+ * 811ms. reel reads that index once and serves a normal MP4 with a real `moov` at the front, mapping
+ * each byte range back to Google's file.
  *
- * `hls` comes back in the same answer, so the one surface that eventually wants sound can switch to it
- * without asking again.
+ * `height` asks reel for a smaller rung. Worth it where the bytes cross the homelab — which they do
+ * here, since a rewritten index means every offset differs from Google's and something has to
+ * translate — and not worth it on a surface someone is actually watching.
  */
-export async function directStreams(
-  playURL: string,
-  { fetchImpl = relayFetch, signal }: { fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
-): Promise<DirectStreams | null> {
-  const asked = directURL(playURL);
-  if (!asked) return null;
-  try {
-    const res = await fetchImpl(asked, { signal });
-    if (!res.ok) return null;
-    const body = await res.json();
-    if (typeof body?.video !== 'string' || !body.video) return null;
-    return {
-      video: body.video,
-      audio: typeof body.audio === 'string' ? body.audio : undefined,
-      hls: typeof body.hls === 'string' ? body.hls : undefined,
-      width: typeof body.width === 'number' ? body.width : undefined,
-      height: typeof body.height === 'number' ? body.height : undefined,
-    };
-  } catch {
-    return null;
-  }
+export function progressiveURL(playURL: string, height?: number): string | null {
+  const url = sibling(playURL, 'progressive', 'mp4');
+  if (!url || !height) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}height=${height}`;
 }
 
 /**
@@ -336,6 +320,7 @@ export async function trailerURL(
     secure?: boolean;
     signal?: AbortSignal;
     prewarm?: 'full' | 'direct';
+    height?: number;
   } = {},
 ): Promise<string | null> {
   return (await trailerURLs(base, type, ids, routes, options))[0] ?? null;
