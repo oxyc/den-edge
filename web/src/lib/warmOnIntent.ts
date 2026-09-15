@@ -13,23 +13,50 @@
 import type { MediaType } from './library';
 import { parseRoute } from './route';
 
+type Warm = (ref: { type: MediaType; id: number }) => void;
+
+/**
+ * The one callback the document's single listener calls, and what the last press warmed.
+ *
+ * Both are module state on purpose. `Library` is rendered inside the router's per-route snippet and the
+ * router keeps several routes mounted for back-navigation, so this was being registered once per instance —
+ * three listeners, each holding its OWN idea of the last title pressed, so none of them ever de-duplicated
+ * the others. Measured from a phone: one press produced three `/meta` lookups within 16 ms of each other and
+ * three `/sources` asks, so reel resolved the same trailer three times and fetched Google three times over.
+ *
+ * Every instance closes over the same library and routes, so the newest registration is as good as any; the
+ * extra listeners were pure waste rather than a disagreement.
+ */
+let warmer: Warm | null = null;
+let last = '';
+
+function pressed(event: Event) {
+  const target = event.target as Element | null;
+  const href = target?.closest?.('a[href]')?.getAttribute('href');
+  if (!href) return;
+  const route = parseRoute(href);
+  if (route.page !== 'title') return;
+  // The same card pressed twice in a row is one warm-up: a second press while the first is still resolving
+  // tells reel nothing it isn't already doing.
+  const key = `${route.type}:${route.id}`;
+  if (key === last) return;
+  last = key;
+  warmer?.({ type: route.type, id: route.id });
+}
+
 /** Call `warm` for the title a press is heading to. Returns the function that stops listening. */
-export function warmOnIntent(warm: (ref: { type: MediaType; id: number }) => void): () => void {
-  let last = '';
-  const pressed = (event: Event) => {
-    const target = event.target as Element | null;
-    const href = target?.closest?.('a[href]')?.getAttribute('href');
-    if (!href) return;
-    const route = parseRoute(href);
-    if (route.page !== 'title') return;
-    // The same card pressed twice in a row is one warm-up: a second press while the first is still resolving
-    // tells reel nothing it isn't already doing.
-    const key = `${route.type}:${route.id}`;
-    if (key === last) return;
-    last = key;
-    warm({ type: route.type, id: route.id });
-  };
+export function warmOnIntent(warm: Warm): () => void {
+  const listening = warmer !== null;
+  warmer = warm;
   // Capture, so a card that handles the press itself still warms. Passive, so this never delays it.
-  document.addEventListener('pointerdown', pressed, { capture: true, passive: true });
-  return () => document.removeEventListener('pointerdown', pressed, { capture: true });
+  if (!listening)
+    document.addEventListener('pointerdown', pressed, { capture: true, passive: true });
+  return () => {
+    // Only the registration still in force tears down: an instance the router has dropped must not remove
+    // the listener a live one is relying on.
+    if (warmer !== warm) return;
+    warmer = null;
+    last = '';
+    document.removeEventListener('pointerdown', pressed, { capture: true });
+  };
 }
