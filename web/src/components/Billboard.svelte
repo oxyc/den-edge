@@ -16,7 +16,7 @@
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
-  import { appleWebKit, hlsURL, isPlaylist, mediaSource, trailerURL } from '../lib/reel';
+  import { hlsURL, isPlaylist, mediaSource, trailerURL } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
@@ -181,13 +181,6 @@
   const playsHls = !mediaSource();
 
   /**
-   * Whether this browser needs the rung held to H.264.
-   *
-   * Safari accepts VP9 into a SourceBuffer and reports it supported, then decodes it and presents none
-   * of it. True for every browser on iOS as well, which all run WebKit underneath.
-   */
-  const h264Only = appleWebKit();
-  /**
    * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
    * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.
    *
@@ -299,55 +292,34 @@
       }
       // The membership claim travels on hls.js's own requests too, or a paired household counts as a
       // guest against the relay's guest budget — on its own box, from its own sofa.
-      // Open near the top of the ladder instead of climbing to it, as the detail hero does: hls.js
-      // assumes 500 kbps until it has measured a fragment, and `testBandwidth` makes it start lower
-      // still to take that measurement. A slide is fifteen seconds, so the climb is the whole of it.
+      //
+      // Telling ABR the line is fast, and letting it skip measuring for itself, is the whole of the help
+      // it needs to open high: hls.js otherwise assumes 500 kbps until a fragment has been measured, and
+      // `testBandwidth` makes it start lower still to take that measurement — which on a fifteen-second
+      // slide is the whole slide.
       engine = new Hls({
         enableWorker: false,
         xhrSetup: memberXhrSetup,
         abrEwmaDefaultEstimate: 5_000_000,
         testBandwidth: false,
-        // On WebKit, H.264 — because this rung is chosen by bitrate and YouTube's richest one is VP9.
-        //
-        // Safari takes VP9 into a SourceBuffer, decodes it, and presents none of it. Measured on this
-        // slide: itag 616, `currentTime` standing still at 6.69s across four seconds while the decoded
-        // frame count climbed at twice real time, two dropped frames in all, `readyState` 4 and eleven
-        // seconds of contiguous buffer sitting under the playhead. Nothing to wait for and nothing on
-        // screen.
-        //
-        // Only where it breaks. VP9 is around a third smaller than H.264 at the same resolution and
-        // every other browser presents it, and this slide loads on every visit to Home — so the saving
-        // is worth keeping wherever it can be spent.
-        ...(h264Only ? { videoPreference: { videoCodec: 'avc1' } } : {}),
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
       });
-      // Open on the rung carrying the most bits, found by MEASURE rather than by position.
+      // The rung is ABR's to choose, and is named by nobody here.
       //
-      // An index is not a ranking here. reel does sort its masters best-first, but hls.js orders `levels`
-      // for itself, so naming level 0 asked for the WORST rung and opened every slide at 144p — measured,
-      // as the itag in its own segment request. Handed back to ABR once a fragment is in, so a line that
-      // cannot hold this still drops away from it.
+      // Naming one looked necessary once: hls.js orders `levels` for itself, so asking for level 0 opened
+      // every slide at 144p, and the answer seemed to be to name the richest rung at `MANIFEST_PARSED`
+      // instead. That answer was the bug. Forcing a switch before a single fragment is buffered leaves
+      // Safari flushing and re-appending around it, and the slide crawls: `currentTime` went 0.98s to
+      // 1.08s across four and a half seconds while the decoder ran at some twenty-five times real time,
+      // `readyState` 4, a full buffer under the playhead, and the buffered ranges flipping between
+      // contiguous and gapped every half second. Stock hls.js on the same master, in the same browser, on
+      // the same page, played it at normal speed — opening at level 0 and climbing to 15 within three
+      // seconds. So the estimate above is the only steer, and the rest is left alone.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
-        const levels = engine?.levels ?? [];
-        // `videoPreference` is a preference and the opening rung is named here rather than by hls.js, so
-        // the codec is ruled out again where it cannot be presented. A master carrying no H.264 at all
-        // names nothing and leaves ABR to choose, which beats naming a rung that shows no picture.
-        let best = -1;
-        for (let at = 0; at < levels.length; at += 1) {
-          const level = levels[at];
-          if (!level) continue;
-          if (h264Only && !(level.videoCodec ?? '').startsWith('avc')) continue;
-          if (best < 0 || level.bitrate > (levels[best]?.bitrate ?? 0)) best = at;
-        }
-        if (engine && levels.length > 1 && best >= 0) engine.nextLevel = best;
         // The element is mounted with no `src`, so nothing has tried to start it yet.
         if (active && onScreen && foreground) void player.play().catch(() => {});
-      });
-      engine.on(Hls.Events.FRAG_BUFFERED, () => {
-        // The opening rung was ours; every one after it is the line's to choose.
-        if (engine) engine.nextLevel = -1;
       });
       engine.loadSource(master);
       engine.attachMedia(player);
