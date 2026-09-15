@@ -16,7 +16,7 @@
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
-  import { hlsURL, isPlaylist, trailerURL } from '../lib/reel';
+  import { appleWebKit, hlsURL, isPlaylist, mediaSource, trailerURL } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
@@ -161,9 +161,8 @@
   let ambientFailed = $state(false);
   /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
   let proxied = $state<string | null>(null);
-  /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   /**
-   * Safari is not offered its own HLS player here, deliberately.
+   * The platform's own HLS player is a last resort here, not a preference.
    *
    * Once AVFoundation has started an item from reel's master it plays that item's audio through to the
    * end of the trailer, and nothing the page can reach stops it: not `muted`, not `volume`, not switching
@@ -174,8 +173,20 @@
    * Through hls.js the same trailer answers to `pause()`, because the page owns the buffer instead of
    * handing the stream to the platform. A muted ambient slide is exactly the case where control matters
    * more than letting the platform decode it.
+   *
+   * So: hls.js wherever there is a MediaSource to drive, and the native player only where there is not.
+   * That last case is a phone without one, where hls.js cannot run at all and the alternative is reel
+   * downloading and remuxing the whole file for a fifteen-second slide.
    */
-  const playsHls = false;
+  const playsHls = !mediaSource();
+
+  /**
+   * Whether this browser needs the rung held to H.264.
+   *
+   * Safari accepts VP9 into a SourceBuffer and reports it supported, then decodes it and presents none
+   * of it. True for every browser on iOS as well, which all run WebKit underneath.
+   */
+  const h264Only = appleWebKit();
   /**
    * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
    * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.
@@ -296,6 +307,18 @@
         xhrSetup: memberXhrSetup,
         abrEwmaDefaultEstimate: 5_000_000,
         testBandwidth: false,
+        // On WebKit, H.264 — because this rung is chosen by bitrate and YouTube's richest one is VP9.
+        //
+        // Safari takes VP9 into a SourceBuffer, decodes it, and presents none of it. Measured on this
+        // slide: itag 616, `currentTime` standing still at 6.69s across four seconds while the decoded
+        // frame count climbed at twice real time, two dropped frames in all, `readyState` 4 and eleven
+        // seconds of contiguous buffer sitting under the playhead. Nothing to wait for and nothing on
+        // screen.
+        //
+        // Only where it breaks. VP9 is around a third smaller than H.264 at the same resolution and
+        // every other browser presents it, and this slide loads on every visit to Home — so the saving
+        // is worth keeping wherever it can be spent.
+        ...(h264Only ? { videoPreference: { videoCodec: 'avc1' } } : {}),
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
@@ -308,11 +331,17 @@
       // cannot hold this still drops away from it.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
         const levels = engine?.levels ?? [];
-        const best = levels.reduce(
-          (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
-          0,
-        );
-        if (engine && levels.length > 1) engine.nextLevel = best;
+        // `videoPreference` is a preference and the opening rung is named here rather than by hls.js, so
+        // the codec is ruled out again where it cannot be presented. A master carrying no H.264 at all
+        // names nothing and leaves ABR to choose, which beats naming a rung that shows no picture.
+        let best = -1;
+        for (let at = 0; at < levels.length; at += 1) {
+          const level = levels[at];
+          if (!level) continue;
+          if (h264Only && !(level.videoCodec ?? '').startsWith('avc')) continue;
+          if (best < 0 || level.bitrate > (levels[best]?.bitrate ?? 0)) best = at;
+        }
+        if (engine && levels.length > 1 && best >= 0) engine.nextLevel = best;
         // The element is mounted with no `src`, so nothing has tried to start it yet.
         if (active && onScreen && foreground) void player.play().catch(() => {});
       });

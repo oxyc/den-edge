@@ -245,6 +245,23 @@ function support(): HlsSupport {
   };
 }
 
+/** Whether hls.js has a MediaSource to drive at all. `ManagedMediaSource` counts; iOS gives that one. */
+export function mediaSource(env: HlsSupport = support()): boolean {
+  return env.mse;
+}
+
+/**
+ * Apple's own media stack, which decides what a MediaSource can be fed rather than what it claims.
+ *
+ * Safari accepts VP9 into a SourceBuffer and reports it supported, then decodes it and presents none of
+ * it — the frame counter runs at twice real time while the picture stands still. So a caller that hands
+ * segments to MSE has to know it is talking to WebKit, separately from whether a native HLS player is
+ * on offer, which is what `nativeHls` answers.
+ */
+export function appleWebKit(env: HlsSupport = support()): boolean {
+  return env.apple;
+}
+
 /**
  * Should this browser be handed an HLS master to play by itself?
  *
