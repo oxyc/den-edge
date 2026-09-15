@@ -283,17 +283,29 @@
         xhrSetup: memberXhrSetup,
         abrEwmaDefaultEstimate: 5_000_000,
         testBandwidth: false,
-        // Level 0 IS the best rung — reel sorts every master best-first — so this opens at the top rather
-        // than from an estimate. The estimate above only biased the guess, which still spent the first
-        // seconds of a fifteen-second slide climbing. ABR measures every fragment and drops from here.
-        startLevel: 0,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) ambientFailedOver();
       });
-      // The element is mounted with no `src`, so nothing has tried to start it yet.
+      // Open on the rung carrying the most bits, found by MEASURE rather than by position.
+      //
+      // An index is not a ranking here. reel does sort its masters best-first, but hls.js orders `levels`
+      // for itself, so naming level 0 asked for the WORST rung and opened every slide at 144p — measured,
+      // as the itag in its own segment request. Handed back to ABR once a fragment is in, so a line that
+      // cannot hold this still drops away from it.
       engine.on(Hls.Events.MANIFEST_PARSED, () => {
+        const levels = engine?.levels ?? [];
+        const best = levels.reduce(
+          (top, level, at) => (level.bitrate > (levels[top]?.bitrate ?? 0) ? at : top),
+          0,
+        );
+        if (engine && levels.length > 1) engine.nextLevel = best;
+        // The element is mounted with no `src`, so nothing has tried to start it yet.
         if (active && onScreen && foreground) void player.play().catch(() => {});
+      });
+      engine.on(Hls.Events.FRAG_BUFFERED, () => {
+        // The opening rung was ours; every one after it is the line's to choose.
+        if (engine) engine.nextLevel = -1;
       });
       engine.loadSource(master);
       engine.attachMedia(player);
