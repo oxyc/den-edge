@@ -647,8 +647,19 @@
      video can be held off by WebKit's visibility/autoplay heuristics, creating a hidden-player loop. */
   video {
     opacity: 0;
-    background: #000;
     pointer-events: none;
+  }
+
+  /* Black, but only once there is a picture for it to letterbox.
+     Below 760px the video is `object-fit: contain`, so a wide trailer really does have bars inside the
+     element, and this fill is what makes them opaque rather than showing the backdrop through them.
+     Before the first frame it has nothing to letterbox and covers the backdrop instead: the element is
+     made visible as soon as it has a SOURCE rather than a picture (see `present`), and Safari paints no
+     poster for a video whose `src` has not arrived yet, so the fill was the only thing on screen — the
+     hero was black until the trailer started, on macOS and iOS both. Waiting for `playing` keeps the
+     bars and drops the cover. */
+  video.playing {
+    background: #000;
   }
 
   video.present {
