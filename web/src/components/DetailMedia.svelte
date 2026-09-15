@@ -221,24 +221,34 @@
   // every media element on it, how it is set, and what this component thinks it granted. It asks nothing of
   // the viewer and reports no data anywhere — one console line, read once, then gone.
   onMount(() => {
-    const probe = setTimeout(() => {
+    // The first probe answered one question and raised a sharper one: two video elements carry the same
+    // trailer, one of them playing, and BOTH report themselves muted while sound is audible. So either a
+    // muted element is not silent, or the one making the noise is not in the document — a detached media
+    // element keeps playing in WebKit, and the first probe only enumerated what was attached.
+    //
+    // This one names each element, says whether it is still connected, and looks three times rather than
+    // once, because a single glance a second in cannot show sound that begins later.
+    const look = (at: number) => {
       const media = [...document.querySelectorAll('video, audio')].map((element) => {
         const player = element as HTMLMediaElement;
+        const where = player.closest('[data-detail-media]')
+          ? 'detail'
+          : player.classList.contains('ambient')
+            ? 'billboard'
+            : 'other';
         return {
-          tag: player.tagName,
-          src: (player.currentSrc || player.getAttribute('src') || '').slice(-56),
+          where,
+          connected: player.isConnected,
           muted: player.muted,
           paused: player.paused,
           volume: player.volume,
-          ready: player.readyState,
+          time: Number(player.currentTime.toFixed(1)),
         };
       });
-      const frames = [...document.querySelectorAll('iframe')].map((frame) =>
-        (frame.getAttribute('src') ?? '').slice(0, 56),
-      );
-      console.log('[den audio probe]', JSON.stringify({ sound, touched, media, frames }));
-    }, 1000);
-    return () => clearTimeout(probe);
+      console.log('[den audio probe]', JSON.stringify({ at, sound, touched, media }));
+    };
+    const timers = [700, 2500, 6000].map((at) => setTimeout(() => look(at), at));
+    return () => timers.forEach((timer) => clearTimeout(timer));
   });
 
   $effect(() => {
