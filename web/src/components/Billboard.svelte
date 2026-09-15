@@ -16,7 +16,7 @@
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
   import type Hls from 'hls.js';
-  import { hlsURL, isPlaylist, nativeHls, trailerURL } from '../lib/reel';
+  import { hlsURL, isPlaylist, trailerURL } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
@@ -162,7 +162,20 @@
   /** reel's own copy, kept behind YouTube's URL: what to fall back to if the direct stream won't play. */
   let proxied = $state<string | null>(null);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
-  const playsHls = nativeHls();
+  /**
+   * Safari is not offered its own HLS player here, deliberately.
+   *
+   * Once AVFoundation has started an item from reel's master it plays that item's audio through to the
+   * end of the trailer, and nothing the page can reach stops it: not `muted`, not `volume`, not switching
+   * the audio rendition off, not `pause()`, not destroying the element and its `src`. All of those were
+   * measured doing nothing while the sound carried on. So a slide left behind on Home was still being
+   * heard over the detail page opened on top of it, and only a reload ever stopped it.
+   *
+   * Through hls.js the same trailer answers to `pause()`, because the page owns the buffer instead of
+   * handing the stream to the platform. A muted ambient slide is exactly the case where control matters
+   * more than letting the platform decode it.
+   */
+  const playsHls = false;
   /**
    * The source this page has to drive itself: a `<video>` handed a master playlist it cannot parse
    * only errors, so where there is no native HLS the element gets nothing and hls.js feeds it.

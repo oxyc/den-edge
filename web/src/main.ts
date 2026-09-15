@@ -2,10 +2,6 @@ import { mount } from 'svelte';
 import './app.css';
 import App from './App.svelte';
 import { legacyPath } from './lib/route';
-import { watchMedia } from './lib/mediaProbe';
-
-// TEMPORARY: before anything mounts, so no element starts playing unrecorded.
-watchMedia();
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
 // way. It is answered once, before anything renders, by rewriting the address to the path it meant — the app

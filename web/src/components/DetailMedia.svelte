@@ -6,7 +6,6 @@
   import { memberXhrSetup } from '../lib/relayFetch';
   import type { MediaType } from '../lib/library';
   import type { Routes } from '../lib/routes';
-  import { seen, started } from '../lib/mediaProbe';
   let {
     type,
     tmdbId,
@@ -140,17 +139,6 @@
    */
   let pressed = false;
 
-  /**
-   * Silence, said twice — and the second way is the one that works here.
-   *
-   * A trailer opened from the billboard played out loud on macOS Safari while the element reported `muted`
-   * true at every moment it was measured: 0.7s, 2.5s and 6s in, playing, attached, with the only other media
-   * on the page paused and frozen. So the property was not carrying the intent, and three fixes that set it
-   * correctly changed nothing. `volume` is set with it now, and the two together are what keep it quiet.
-   *
-   * Both directions go through here, so granting sound and taking it back are the same decision read from
-   * `sound` rather than two places that can disagree.
-   */
   /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
   type Renditions = { length: number; [at: number]: { enabled: boolean } };
 
@@ -158,6 +146,17 @@
     return (player as HTMLMediaElement & { audioTracks?: Renditions }).audioTracks;
   }
 
+  /**
+   * Silence, said three ways, because on this element none of them is reliably enough on its own.
+   *
+   * Both directions go through here, so granting sound and taking it back are one decision read from
+   * `sound` rather than two places that can disagree.
+   *
+   * What this does NOT do is stop a trailer Safari has already started playing for itself. Once
+   * AVFoundation owns an item, its audio runs to the end of the clip past `muted`, `volume`, the audio
+   * rendition, `pause()`, and destroying the element outright — all measured. That is why the billboard
+   * asks for the managed stream instead of the native one; see the note beside its `playsHls`.
+   */
   function quieten(player: HTMLMediaElement) {
     player.muted = !sound;
     player.volume = sound ? 1 : 0;
@@ -244,90 +243,6 @@
       small.removeEventListener('change', preferences);
       document.removeEventListener('visibilitychange', visibility);
     };
-  });
-
-  // TEMPORARY — remove once the Safari sound is identified.
-  //
-  // Three fixes have aimed at this hero's own controls and none has stopped a trailer arriving with audio when
-  // a title is opened from the billboard. Every one of them assumed which element was making the noise, and
-  // that assumption has never been checked. So this names them all instead: a second after the page appears,
-  // every media element on it, how it is set, and what this component thinks it granted. It asks nothing of
-  // the viewer and reports no data anywhere — one console line, read once, then gone.
-  onMount(() => {
-    // The first probe answered one question and raised a sharper one: two video elements carry the same
-    // trailer, one of them playing, and BOTH report themselves muted while sound is audible. So either a
-    // muted element is not silent, or the one making the noise is not in the document — a detached media
-    // element keeps playing in WebKit, and the first probe only enumerated what was attached.
-    //
-    // Emptying `<body>` by hand left the sound playing, which settles it: the emitter is not in the
-    // document, and no walk of the document can reach it. So this reads the registry instead — every
-    // element that ever called `play()`, attached or not — and names the stack that started each one.
-    const look = (at: number) => {
-      // A scratch array rather than a Set: this wants no reactivity, and a component may not hold a
-      // plain Set.
-      const listed: HTMLMediaElement[] = [];
-      const media: unknown[] = [];
-      const describe = (player: HTMLMediaElement, from: string) => {
-        if (listed.includes(player)) return;
-        listed.push(player);
-        const where = player.closest('[data-detail-media]')
-          ? 'detail'
-          : player.classList.contains('ambient')
-            ? 'billboard'
-            : 'other';
-        const list = renditions(player);
-        media.push({
-          where,
-          connected: player.isConnected,
-          tracks: list
-            ? Array.from({ length: list.length }, (_, at) => list[at]?.enabled ?? null)
-            : null,
-          muted: player.muted,
-          paused: player.paused,
-          volume: player.volume,
-          time: Number(player.currentTime.toFixed(1)),
-          src: (player.currentSrc || player.src).slice(-48),
-          from: from.split('\n').slice(1, 4).join(' | ').slice(0, 180),
-        });
-      };
-      started.forEach((entry) => describe(entry.element, entry.from));
-      seen.forEach((entry) => describe(entry.element, entry.from));
-      document
-        .querySelectorAll('video, audio')
-        .forEach((element) => describe(element as HTMLMediaElement, 'attached, never played'));
-      console.log('[den audio probe]', JSON.stringify({ at, sound, touched, media }));
-    };
-
-    /**
-     * Destroying the two visible players in turn stopped nothing, so the emitter is neither of them.
-     * This takes the other end: every media element either instrument has ever recorded — played by
-     * script, or merely present in the document at some point, including ones long since removed — has
-     * its source destroyed at once, which in WebKit is the only certain way to stop an item AVFoundation
-     * has started. If the sound stops here, an element nobody was holding was carrying it, and the count
-     * says how many there were to find. If it survives this, no media element is making it.
-     */
-    const tearDownAll = () => {
-      const all: HTMLMediaElement[] = [];
-      [...started, ...seen].forEach((entry) => {
-        if (!all.includes(entry.element)) all.push(entry.element);
-      });
-      document.querySelectorAll('video, audio').forEach((element) => {
-        const player = element as HTMLMediaElement;
-        if (!all.includes(player)) all.push(player);
-      });
-      all.forEach((player) => {
-        player.pause();
-        player.removeAttribute('src');
-        player.load();
-      });
-      console.log(
-        '[den audio probe] torn down:',
-        JSON.stringify({ all: all.length, played: started.length, everInDocument: seen.length }),
-      );
-    };
-    const timers = [700, 2500, 6000].map((at) => setTimeout(() => look(at), at));
-    timers.push(setTimeout(tearDownAll, 6500));
-    return () => timers.forEach((timer) => clearTimeout(timer));
   });
 
   $effect(() => {
