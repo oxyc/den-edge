@@ -360,7 +360,20 @@ fn private(policy: &axum::http::HeaderValue) -> axum::http::HeaderValue {
 /// path after one of these.
 fn media(path: &str) -> bool {
     path.strip_prefix("/reel/").is_some_and(|rest| {
-        rest.split('/').any(|segment| matches!(segment, "play" | "hls" | "seg" | "progressive"))
+        let mut segments = rest.split('/').peekable();
+        while let Some(segment) = segments.next() {
+            if matches!(segment, "play" | "hls" | "seg" | "progressive") {
+                return true;
+            }
+            // reel's minted URLs, which name no route and no video: `/m/<kind>/<blob>`. ANY kind counts,
+            // not just the two that exist — a kind added later and not listed here would go down the JSON
+            // path, be collected whole, refused past eight megabytes and forwarded no `Range`, which is
+            // exactly how `/progressive` broke. Being wrongly called media is the safe direction.
+            if segment == "m" && segments.peek().is_some() {
+                return true;
+            }
+        }
+        false
     })
 }
 
@@ -375,9 +388,28 @@ fn media(path: &str) -> bool {
 /// own box. The ceiling still binds what is actually carried: `/hls/seg` finds no lease open and
 /// takes a slot of its own, so asking for a native master buys nothing but the playlist.
 fn native_master(path: &str, query: Option<&str>) -> bool {
-    media_video(path).is_some()
-        && path.ends_with(".m3u8")
-        && query.is_some_and(|q| q.split('&').any(|p| p == "native=1"))
+    minted_native(path)
+        || (media_video(path).is_some()
+            && path.ends_with(".m3u8")
+            && query.is_some_and(|q| q.split('&').any(|p| p == "native=1")))
+}
+
+/// `/m/n/<blob>`: a minted native master, told apart from `/m/s/<blob>` by the path alone.
+///
+/// A minted URL carries its video, form and flags inside a signed blob only reel can read, so the fact this
+/// exemption turns on had nowhere to be seen from here. Asking reel to name the kind in the path is what
+/// keeps the accounting possible — and reel refuses a blob filed under the wrong segment, so the path can be
+/// trusted rather than merely believed. A query flag would have been forgeable; this is not.
+fn minted_native(path: &str) -> bool {
+    path.strip_prefix("/reel/").is_some_and(|rest| {
+        let mut segments = rest.split('/');
+        while let Some(segment) = segments.next() {
+            if segment == "m" {
+                return segments.next() == Some("n");
+            }
+        }
+        false
+    })
 }
 
 /// Media, passed through as it arrives.
@@ -723,6 +755,15 @@ mod tests {
         // The file and the segments are what this box carries, whatever they ask for.
         assert!(!super::native_master("/reel/play/dQw4w9WgXcQ.mp4", Some("native=1")));
         assert!(!super::native_master("/reel/hls/seg", Some("u=x&native=1")));
+        // Minted URLs say which they are in the path, because the blob that decides it is reel's to read.
+        // No `native=1` needed, and none believed: the segment is the whole of it.
+        assert!(super::native_master("/reel/m/n/AbC123", Some("s=tag")));
+        assert!(super::native_master("/reel/cfg/m/n/AbC123", Some("s=tag")));
+        assert!(!super::native_master("/reel/m/s/AbC123", Some("s=tag")));
+        // A proxied master's segments are carried by this box, one slot each.
+        assert!(!super::native_master("/reel/m/s/seg", Some("u=x")));
+        // Claiming it in the query buys nothing now the path is what is read.
+        assert!(!super::native_master("/reel/m/s/AbC123", Some("s=tag&native=1")));
     }
 
     /// A master and a file name their video; a segment carries its own URL in the query and names none.
@@ -750,6 +791,15 @@ mod tests {
             "/reel/seg/1.ts",
             "/reel/progressive/abc.mp4",
             "/reel/cfg/progressive/abc.mp4",
+            // Minted URLs: both kinds, the proxied master's segments, and one behind an install's config.
+            "/reel/m/n/AbC123",
+            "/reel/m/s/AbC123",
+            "/reel/m/s/seg",
+            "/reel/cfg/m/s/AbC123",
+            // A kind reel has not invented yet. Listing only the known ones is how `/progressive` came to
+            // be relayed as JSON, collected whole and refused past eight megabytes, so anything minted
+            // streams — being wrongly called media costs nothing, and being wrongly called JSON breaks it.
+            "/reel/m/x/AbC123",
         ] {
             assert!(super::media(path), "{path}");
         }
@@ -759,6 +809,8 @@ mod tests {
             "/scout/cfg/play/ticket",
             "/atlas/recommend",
             "/playlist",
+            // `m` naming nothing is not a minted URL; reel dropped the bare `/m/<blob>` form.
+            "/reel/m",
         ] {
             assert!(!super::media(path), "{path}");
         }
