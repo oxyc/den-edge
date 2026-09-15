@@ -1,5 +1,5 @@
 <!-- The library as its own page — the TV's Watchlist tab (WatchlistView), taken further: Continue Watching as the TV
-     row builds it, the watchlist split into series and movies, and everything watched as one long list, newest first,
+     row builds it, the watchlist under the same three tabs Watched uses, everything watched as one long list, newest first,
      grouped by month and drawn a screenful at a time as you scroll. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -56,6 +56,8 @@
     { value: 'tv', label: 'Series' },
   ];
   let kind = $state<MediaType | null>(null);
+  /** The same three tabs over the watchlist. It was two headed sections, which read as two different things. */
+  let savedKind = $state<MediaType | null>(null);
   /** The control waiting for its second press, by control and title, and the question it asks. */
   let confirming = $state<{ id: string; question: string } | null>(null);
 
@@ -63,8 +65,7 @@
   // A series with an episode seen is under way: it's in Continue Watching or Watched, so the watchlist doesn't also
   // offer to mark it watched.
   const listed = $derived(saved.filter((t) => !seen.get(key(t))?.length));
-  const series = $derived(listed.filter((t) => t.type === 'tv'));
-  const movies = $derived(listed.filter((t) => t.type === 'movie'));
+  const savedShown = $derived(savedKind ? listed.filter((t) => t.type === savedKind) : listed);
   const shown = $derived(kind ? history.filter((e) => e.title.type === kind) : history);
 
   // Observed again after each step: one step that doesn't reach past the screen — a very wide one — fires nothing
@@ -259,16 +260,24 @@
   </PosterRow>
 {/if}
 
-{#if series.length}
-  <section aria-label="Watchlist series">
-    <h2>Series <span class="count">{series.length}</span></h2>
-    {@render grid(series)}
-  </section>
-{/if}
-{#if movies.length}
-  <section aria-label="Watchlist movies">
-    <h2>Movies <span class="count">{movies.length}</span></h2>
-    {@render grid(movies)}
+{#if listed.length}
+  <section aria-label="Watchlist">
+    <div class="heading">
+      <h2>Watchlist <span class="count">{savedShown.length}</span></h2>
+      <div class="filter" role="group" aria-label="Show in Watchlist">
+        {#each FILTERS as filter (filter.label)}
+          <button
+            type="button"
+            aria-pressed={savedKind === filter.value}
+            onclick={() => (savedKind = filter.value)}>{filter.label}</button
+          >
+        {/each}
+      </div>
+    </div>
+    {@render grid(savedShown)}
+    {#if !savedShown.length}
+      <p class="note">Nothing of these on your watchlist.</p>
+    {/if}
   </section>
 {/if}
 

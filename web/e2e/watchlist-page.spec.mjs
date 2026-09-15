@@ -50,12 +50,18 @@ for (const width of [393, 1280]) {
       await expect(page.getByRole('heading', { name: 'Watchlist', level: 1 })).toBeVisible();
       const resume = page.getByRole('region', { name: 'Continue Watching', exact: true });
       await expect(resume.getByText('Movie 1001')).toBeVisible();
-      await expect(
-        page.getByRole('region', { name: 'Watchlist series' }).getByText('Series 2001'),
-      ).toBeVisible();
-      await expect(
-        page.getByRole('region', { name: 'Watchlist movies' }).getByText('Movie 1002'),
-      ).toBeVisible();
+      const watchlist = page.getByRole('region', { name: 'Watchlist', exact: true });
+      await expect(watchlist.getByText('Series 2001')).toBeVisible();
+      await expect(watchlist.getByText('Movie 1002')).toBeVisible();
+
+      // The watchlist takes the same three tabs as Watched, rather than standing as two headed sections.
+      const savedFilter = watchlist.getByRole('group', { name: 'Show in Watchlist' });
+      await savedFilter.getByRole('button', { name: 'Series' }).click();
+      await expect(watchlist.locator('.name')).toHaveText(['Series 2001']);
+      await savedFilter.getByRole('button', { name: 'Movies' }).click();
+      await expect(watchlist.locator('.name')).toHaveText(['Movie 1002']);
+      await savedFilter.getByRole('button', { name: 'All' }).click();
+      await expect(watchlist.locator('.name')).toHaveCount(2);
 
       // Newest first: the part-watched series (its episode at 9000) leads, then the movies by when they were seen.
       const watched = page.getByRole('region', { name: 'Watched', exact: true });
@@ -113,14 +119,13 @@ for (const width of [393, 1280]) {
       await expect(resume.getByText('Movie 1001')).toHaveCount(0);
       // Taken off, and nothing said about it failing.
       await expect(page.getByRole('alert')).toHaveCount(0);
-      const watchlistMovies = page.getByRole('region', { name: 'Watchlist movies' });
-      await press(watchlistMovies, 'Movie 1002', 'Remove from Watchlist Movie 1002');
-      await expect(watchlistMovies).toHaveCount(0);
+      await press(watchlist, 'Movie 1002', 'Remove from Watchlist Movie 1002');
+      await expect(watchlist.getByText('Movie 1002')).toHaveCount(0);
 
-      // A series marked watched takes every aired episode with it: off the watchlist, into Watched in full.
-      const watchlistSeries = page.getByRole('region', { name: 'Watchlist series' });
-      await press(watchlistSeries, 'Series 2001', 'Mark watched Series 2001');
-      await expect(watchlistSeries).toHaveCount(0);
+      // A series marked watched takes every aired episode with it: off the watchlist, into Watched in full. It
+      // was the last one there, so the section goes with it.
+      await press(watchlist, 'Series 2001', 'Mark watched Series 2001');
+      await expect(watchlist).toHaveCount(0);
       await expect(watched.getByRole('link', { name: /Series 2001/ })).toContainText(
         '14 of 14 episodes',
       );
