@@ -1067,6 +1067,7 @@
       subtitles={installsOf(plugins, routes, 'subs')}
       audioLanguage={playbackPrefs.audioLanguage}
       subtitleLanguage={playbackPrefs.subtitleLanguage}
+      shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
       autoSkip={playbackPrefs.autoSkipSegments}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}

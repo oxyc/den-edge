@@ -45,7 +45,9 @@ describe('wantedLanguages', () => {
   it('asks for the audio setting first, then the browser’s languages', () => {
     expect(wantedLanguages({ audio: 'fi' }, 'en', ['sv-FI', 'en-US', 'fi'])).toEqual({
       audio: ['fi', 'sv', 'en'],
-      subtitleLanguages: [],
+      // No preferred subtitle language is not the same as no subtitles: the browser's own languages are
+      // still worth offering behind a picker. Asking for none is what left the player nothing to switch to.
+      subtitleLanguages: ['sv', 'en', 'fi'],
     });
   });
 
@@ -59,8 +61,27 @@ describe('wantedLanguages', () => {
   it('falls back to the browser’s languages when the title’s is unknown', () => {
     expect(wantedLanguages({}, undefined, ['de-DE', 'de'])).toEqual({
       audio: ['de'],
-      subtitleLanguages: [],
+      subtitleLanguages: ['de'],
     });
+  });
+
+  /**
+   * The chosen language must come FIRST. den-remux marks the first rendition DEFAULT=YES, so whichever
+   * language leads here is the one a player that honours the default would bring up.
+   */
+  it('leads with the chosen language, then Settings’ shown list, then the browser’s', () => {
+    expect(
+      wantedLanguages({ subtitle: 'fi', shownSubtitles: ['sv', 'en'] }, 'ko', ['en-GB', 'de'])
+        .subtitleLanguages,
+    ).toEqual(['fi', 'sv', 'en', 'de']);
+  });
+
+  /** den-remux builds at most four renditions for a session; asking for more buys nothing. */
+  it('asks for no more languages than den-remux will build', () => {
+    expect(
+      wantedLanguages({ shownSubtitles: ['fi', 'sv', 'en', 'de', 'fr', 'es'] }, undefined, ['it'])
+        .subtitleLanguages,
+    ).toEqual(['fi', 'sv', 'en', 'de']);
   });
 });
 
