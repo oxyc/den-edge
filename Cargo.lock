@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "den-edge"
-version = "0.147.4"
+version = "0.147.5"
 dependencies = [
  "axum",
  "flate2",
