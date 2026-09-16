@@ -1189,8 +1189,11 @@
       subtitles={installsOf(plugins, routes, 'subs')}
       audioLanguage={playbackPrefs.audioLanguage}
       subtitleLanguage={playbackPrefs.subtitleLanguage}
+      shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}
+      autoSkip={playbackPrefs.autoSkipSegments}
       resume={resumePoint(target)}
       next={after ? `S${after.season} · E${after.episode}` : undefined}
+      nextEpisode={after ? { season: after.season, episode: after.episode } : undefined}
       onprogress={(fraction, seconds) => void progressed(target, fraction, seconds)}
       onnext={after ? () => (playing = after) : undefined}
       onclose={() => (playing = null)}

@@ -15,6 +15,7 @@ mod pair;
 mod ratings;
 mod relay;
 mod routes;
+mod skipdb;
 mod store;
 mod sync;
 mod tmdb;
@@ -116,6 +117,9 @@ pub struct AppState {
     pub ratings_spent: Mutex<(u64, u32)>,
     /// Titles whose stale ratings are being fetched again right now (`ratings::refresh_behind`).
     pub ratings_refreshing: Mutex<std::collections::HashSet<String>>,
+    /// Where each release's skip segments are kept (`<DATA_DIR>/skipdb`), for every browser that plays it
+    /// (`skipdb.rs`). SkipDB's read API needs no key, so there is nothing to spend and no household key here.
+    pub skipdb_cache_dir: Option<std::path::PathBuf>,
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
@@ -180,6 +184,7 @@ impl AppState {
             warnings_rest_until: Mutex::new(0),
             ratings_key: None,
             ratings_cache_dir: None,
+            skipdb_cache_dir: None,
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),
             ratings_refreshing: Mutex::new(std::collections::HashSet::new()),
@@ -267,12 +272,15 @@ async fn main() {
     state.ratings_key = env_opt("OMDB_KEY");
     state.ratings_daily_max = env_opt("OMDB_DAILY_MAX").and_then(|v| v.parse().ok());
     state.ratings_cache_dir = Some(std::path::Path::new(&dir).join("ratings"));
+    // No key to gate this one on: SkipDB's read API is open, so the only question is where to keep the answers.
+    state.skipdb_cache_dir = Some(std::path::Path::new(&dir).join("skipdb"));
     let state = Arc::new(state);
     inbox::sweep(&state).await;
     tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
     tokio::spawn(tmdb::sweep_forever(Arc::clone(&state)));
     tokio::spawn(warnings::sweep_forever(Arc::clone(&state)));
     tokio::spawn(ratings::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(skipdb::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);

@@ -26,6 +26,14 @@ export interface Session {
   /** The channels the session's audio carries; absent from a den-remux before it said so. */
   audioChannels?: number;
   audioTracks: AudioTrack[];
+  /**
+   * The subtitle renditions in the playlist, in the order den-remux wrote them.
+   *
+   * den-remux has always sent these and this interface never declared them, so the app threw them away and
+   * the player had no picker. One document per language: den-remux exposes the best match it found, which is
+   * why `maxSubtitlesPerLanguage` cannot be honoured here however it is set.
+   */
+  subtitles?: { language: string; name: string }[];
 }
 
 export interface AudioTrack {
@@ -285,16 +293,34 @@ export function forgetSubtitles(): void {
  * on Original, the title's own — then this browser's; and the subtitle setting's language alone, or none where
  * subtitles are off.
  */
+/** den-remux builds at most this many subtitle renditions for a session (its own `MAX_SUBTITLE_LANGS`). */
+const MAX_SUBTITLE_LANGUAGES = 4;
+
 export function wantedLanguages(
-  prefs: { audio?: string; subtitle?: string },
+  prefs: { audio?: string; subtitle?: string; shownSubtitles?: readonly string[] },
   original: string | undefined,
   browser: readonly string[],
 ): Pick<Want, 'audio' | 'subtitleLanguages'> {
   const base = (tag: string) => tag.split('-')[0]!.toLowerCase();
   const first = prefs.audio ?? original;
+  // The preferred language leads, because den-remux marks the FIRST rendition DEFAULT=YES — so the one the
+  // viewer chose in Settings is the one that comes up without asking.
+  //
+  // Asking for more than one is what gives the player a picker at all: a single rendition marked default is
+  // subtitles forced on with nothing to switch to and no Off. And languages are asked for even when the
+  // subtitle setting is unset, or "no preferred language" would keep meaning "no subtitles offered", which is
+  // not the same thing and is not what the setting says.
+  const wanted = [
+    ...(prefs.subtitle ? [prefs.subtitle] : []),
+    ...(prefs.shownSubtitles ?? []),
+    ...browser,
+  ];
   return {
     audio: [...new Set([...(first ? [first] : []), ...browser].map(base).filter(Boolean))],
-    subtitleLanguages: prefs.subtitle ? [base(prefs.subtitle)] : [],
+    subtitleLanguages: [...new Set(wanted.map(base).filter(Boolean))].slice(
+      0,
+      MAX_SUBTITLE_LANGUAGES,
+    ),
   };
 }
 
