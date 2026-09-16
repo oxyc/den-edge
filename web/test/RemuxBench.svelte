@@ -76,8 +76,14 @@
   type Delivery = { file: string; status: number | string; ms: number; bytes?: number };
 
   const PLAYS_HLS = nativeHls(document.createElement('video'));
-  /** A conversion starts on the GPU when the first segment is asked for; give it room before calling it dead. */
-  const STUCK_MS = 60_000;
+  /**
+   * How long a session may go without a picture before the page says so.
+   *
+   * A conversion starts on the GPU when the first segment is asked for, and a resumed 4K copy took 108 s to
+   * paint once — genuinely, with every segment served 200 in single-digit milliseconds. At sixty this called
+   * that run dead while it was still working.
+   */
+  const STUCK_MS = 150_000;
 
   // The scout install is the one thing this page cannot derive: den-remux needs it to find a release, and only
   // the library holds it. Kept here so a phone doesn't have to be handed a sealed config URL twice.
@@ -163,6 +169,8 @@
    * changes between two runs, so reading them late is not a small error.
    */
   let askedFor = $state<Record<string, unknown>>({});
+  /** The second this session was asked to start at, so a post-mortem probes where the player is. */
+  let resumeAsked: number | undefined;
   let busy = $state('');
   let element = $state<HTMLVideoElement>();
 
@@ -264,6 +272,7 @@
       measured = await linkLimit('/remux');
       const capped = capBitrate.trim() ? Number(capBitrate) * 1_000_000 : undefined;
       const at = startAt.trim() ? Number(startAt) : undefined;
+      resumeAsked = at;
       askedFor = {
         refusedReport: refused,
         noEac3,
@@ -404,9 +413,27 @@
           const map = lines.find((line) => line.startsWith('#EXT-X-MAP:'));
           const init = map ? /URI="([^"]+)"/.exec(map)?.[1] : undefined;
           if (init) await ask(new URL(init, media).href, init);
+          // Probe where the PLAYER is, not the start of the film.
+          //
+          // Asking for seg0 on a resumed session makes den-remux begin a whole second job at zero, which
+          // competes with the one the player is waiting on. The instrument then slowed the run it was
+          // measuring — and answered about a part of the stream nobody was watching, which is worse.
+          const segments: { uri: string; at: number }[] = [];
+          let at = 0;
+          lines.forEach((line, index) => {
+            if (!line.startsWith('#EXTINF:')) return;
+            const uri = lines[index + 1];
+            if (uri && !uri.startsWith('#')) segments.push({ uri, at });
+            at += Number.parseFloat(line.slice('#EXTINF:'.length)) || 0;
+          });
+          const watching = Math.max(element?.currentTime ?? 0, resumeAsked ?? 0);
+          // A little before it, so the probe covers the segment being waited on rather than the next one.
+          const found = segments.findIndex((segment) => segment.at >= watching - 12);
+          // No match means the point is past the last segment; take the end, never the beginning.
+          const from = found >= 0 ? found : Math.max(0, segments.length - 3);
           // Three is enough: a source that has stopped answering refuses the first one.
-          for (const segment of lines.filter((line) => line && !line.startsWith('#')).slice(0, 3))
-            await ask(new URL(segment, media).href, segment);
+          for (const segment of segments.slice(from, from + 3))
+            await ask(new URL(segment.uri, media).href, segment.uri);
         }
       }
     } catch {
@@ -453,7 +480,15 @@
       { signal },
     );
     video.requestVideoFrameCallback?.(() => {
-      timings = { ...timings, firstFrame: since(), position: Math.round(video.currentTime) };
+      // A picture that arrives late clears the watchdog's verdict. One run painted at 108 s and still read
+      // as a failure afterwards, which is the opposite of what happened.
+      const stale = timings.error?.startsWith('no picture after') ? undefined : timings.error;
+      timings = {
+        ...timings,
+        firstFrame: since(),
+        position: Math.round(video.currentTime),
+        error: stale,
+      };
     });
     // Safari doesn't always say it failed: it strikes out its play button and fires nothing at all.
     const stuck = setTimeout(() => {
