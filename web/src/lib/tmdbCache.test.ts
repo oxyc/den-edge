@@ -36,7 +36,7 @@ function network() {
 const detail = 'https://api.themoviedb.org/3/movie/603?api_key=secret&append_to_response=credits';
 const discover = 'https://api.themoviedb.org/3/discover/movie?page=1&api_key=secret';
 
-describe('a device with no key of its own', () => {
+describe('every device, with a key of its own or without', () => {
   it('asks this origin instead, and keeps the answer under the same question', async () => {
     vi.stubGlobal('location', { origin: 'https://den.example' });
     const { entries, store } = memory();
@@ -55,11 +55,19 @@ describe('a device with no key of its own', () => {
     vi.unstubAllGlobals();
   });
 
-  it('leaves a browser that has its own key asking TMDB directly', async () => {
-    const { store } = memory();
+  // A browser holding the household's own key used to ask TMDB directly, which spent that key once per device and
+  // kept the answer where no other device could read it. The question is the same either way, so it goes to the one
+  // cache that every device and every visitor shares.
+  it('asks through this origin with a key of its own too, and never sends the key', async () => {
+    vi.stubGlobal('location', { origin: 'https://den.example' });
+    const { entries, store } = memory();
     const net = network();
     await cachingFetch(store, net.fetchImpl, () => 0)(detail);
-    expect(net.asked).toEqual([detail]);
+    expect(net.asked).toEqual(['https://den.example/tmdb/3/movie/603?append_to_response=credits']);
+    expect([...entries.keys()], 'the same entry a keyless browser would have written').toEqual([
+      'https://api.themoviedb.org/3/movie/603?append_to_response=credits',
+    ]);
+    vi.unstubAllGlobals();
   });
 });
 

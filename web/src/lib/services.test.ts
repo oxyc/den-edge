@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   atlasCatalogs,
   atlasServiceRows,
+  fillPosters,
   GUEST_PICKS,
   mergeServiceRows,
   resolvePicks,
@@ -240,6 +241,54 @@ describe('atlas rows', () => {
       'Acclaimed Movies',
       'Acclaimed Series',
     ]);
+  });
+});
+
+describe('fillPosters', () => {
+  const title = (id: number, over: Partial<Title> = {}): Title => ({
+    type: 'tv',
+    id,
+    title: `Title ${id}`,
+    ...over,
+  });
+
+  it('names art for the head of a chart, by TMDB id, and asks nothing for the rest', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (url) => {
+      asked.push(String(url).replace(/\?.*/, ''));
+      return new Response(JSON.stringify({ poster_path: '/found.jpg' }), { status: 200 });
+    };
+    const titles = Array.from({ length: 20 }, (_, i) => title(i + 1));
+    const filled = await fillPosters(titles, 'k', { head: 3, atOnce: 2, fetchImpl });
+    expect(asked).toEqual([
+      'https://api.themoviedb.org/3/tv/1',
+      'https://api.themoviedb.org/3/tv/2',
+      'https://api.themoviedb.org/3/tv/3',
+    ]);
+    expect(filled.slice(0, 3).map((t) => t.posterPath)).toEqual([
+      '/found.jpg',
+      '/found.jpg',
+      '/found.jpg',
+    ]);
+    expect(at(filled, 3).posterPath, 'the tail keeps its placeholder').toBeUndefined();
+  });
+
+  it('asks for nothing when every title already has art, and keeps a title TMDB cannot name', async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls++;
+      return new Response('{}', { status: 404 });
+    };
+    const named = [
+      title(1, { posterPath: '/a.jpg' }),
+      title(2, { posterUrl: 'https://art/b.jpg' }),
+    ];
+    expect(await fillPosters(named, 'k', { fetchImpl })).toEqual(named);
+    expect(calls).toBe(0);
+
+    const unnamed = [title(3)];
+    expect(await fillPosters(unnamed, 'k', { fetchImpl })).toEqual(unnamed);
+    expect(calls).toBe(1);
   });
 });
 

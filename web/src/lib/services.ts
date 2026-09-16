@@ -9,6 +9,7 @@ import { discoverParams, type DiscoverQuery, type Pages, type RowDef } from './c
 import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
+import { tmdbFetch } from './tmdbCache';
 import { matches, type Service } from '../settings/services';
 
 /**
@@ -115,6 +116,53 @@ function titlesOfMetas(body: unknown): Title[] {
 }
 
 /**
+ * How many of a chart's titles are worth naming art for when atlas could not.
+ *
+ * A chart is about a hundred titles and a row shows a handful; almost nobody scrolls one to its end. Filling the head
+ * of it costs a dozen lookups instead of a hundred, and the rest keep their placeholder until someone scrolls — which
+ * is the same bargain the rows themselves make.
+ */
+const FILL_HEAD = 12;
+/** At once. den-edge answers /tmdb at 120 a minute per address, and a page has its own asking to do. */
+const FILL_AT_ONCE = 4;
+
+/**
+ * The art atlas could not name, asked of TMDB by the id atlas gave — never by the IMDb id, which for a split anthology
+ * names something else.
+ *
+ * Every browser asks through den-edge (`tmdbCache`), so a title is fetched from TMDB once and answered from its cache
+ * for every device and visitor after that.
+ */
+export async function fillPosters(
+  titles: Title[],
+  key: string,
+  { head = FILL_HEAD, atOnce = FILL_AT_ONCE, fetchImpl = tmdbFetch } = {},
+): Promise<Title[]> {
+  const wanted = titles.filter((title) => !title.posterPath && !title.posterUrl).slice(0, head);
+  if (!wanted.length) return titles;
+  const found = new Map<string, string>();
+  const key_ = (title: Title) => `${title.type}:${title.id}`;
+  for (let at = 0; at < wanted.length; at += atOnce) {
+    await Promise.all(
+      wanted.slice(at, at + atOnce).map(async (title) => {
+        try {
+          const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
+          const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
+          if (!res.ok) return;
+          const body = (await res.json()) as { poster_path?: unknown };
+          if (typeof body.poster_path === 'string') found.set(key_(title), body.poster_path);
+        } catch {
+          // No art for this one: it keeps its placeholder, and the row is not held up for it.
+        }
+      }),
+    );
+  }
+  return titles.map((title) =>
+    found.has(key_(title)) ? { ...title, posterPath: found.get(key_(title)) } : title,
+  );
+}
+
+/**
  * A service's rows from atlas: what is popular on it, what is new, what is leaving and what is coming — the last three
  * being facts TMDB does not carry at all.
  *
@@ -125,7 +173,16 @@ export function atlasServiceRows(
   catalogs: readonly AtlasCatalog[],
   service: Service,
   country: string,
-  { only, fetchImpl = relayFetch }: { only?: MediaType; fetchImpl?: typeof fetch } = {},
+  {
+    only,
+    tmdbKey,
+    fetchImpl = relayFetch,
+  }: {
+    only?: MediaType;
+    /** With one, the head of a chart gets the art atlas could not name (`fillPosters`). */
+    tmdbKey?: string;
+    fetchImpl?: typeof fetch;
+  } = {},
 ): (RowDef & { type: MediaType })[] {
   const ids = new Set([service.id, ...service.variants]);
   // What has just arrived leads, as it does in the TMDB rows: then what is popular, then what is about to go or
@@ -152,7 +209,8 @@ export function atlasServiceRows(
           `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`,
         );
         if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-        return titlesOfMetas(await res.json());
+        const titles = titlesOfMetas(await res.json());
+        return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
       },
     }));
 }

@@ -16,9 +16,16 @@ const TMDB = 'https://api.themoviedb.org/3/';
  */
 export const TMDB_PROXY_KEY = 'den-proxy';
 
-/** The same question asked of this origin instead of TMDB's, with the sentinel dropped on the way. */
+/**
+ * The same question asked of this origin instead of TMDB's, with the key dropped on the way.
+ *
+ * Every browser goes through den-edge, not only one that borrows the key. den-edge throws away whatever key it is
+ * sent, answers from a cache keyed by the question alone, and keeps it for as long as TMDB's terms allow — so a
+ * household's second device, and a visitor, are answered from what the first device already asked, and a title is
+ * fetched from TMDB once rather than once per browser. A configured key is still the key den-edge uses upstream; it
+ * simply stops being spent separately by each device that holds it.
+ */
 function proxied(url: URL): string {
-  if (url.searchParams.get('api_key') !== TMDB_PROXY_KEY) return url.toString();
   const asked = new URL(url);
   asked.searchParams.delete('api_key');
   const origin = globalThis.location?.origin ?? '';

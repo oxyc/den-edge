@@ -95,7 +95,7 @@
   const rows = $derived.by(() => {
     if (!service) return [];
     const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), { minYear, only });
-    const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only }) : [];
+    const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only, tmdbKey }) : [];
     const watched = own.map((row) => ({
       ...row,
       load: async (page: number) => {
