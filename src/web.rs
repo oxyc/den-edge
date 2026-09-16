@@ -46,7 +46,7 @@ fn csp(media: &[String]) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: https://image.tmdb.org; \
+         img-src 'self' data: https://image.tmdb.org https://images.metahub.space; \
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443{media}; \
@@ -422,7 +422,11 @@ mod tests {
         let h = with_app();
         let root = h.send("GET", "/", None, &[]).await;
         assert_eq!(root.status(), StatusCode::OK);
-        assert!(root.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("image.tmdb.org"));
+        let csp = root.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
+        assert!(csp.contains("image.tmdb.org"));
+        // atlas's catalog rows name JustWatch's art by IMDb id, and for a title the dataset does not carry —
+        // half the series on a service page — it is the only poster there is.
+        assert!(csp.contains("https://images.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
         assert!(body_text(root).await.contains("<title>Den</title>"));
