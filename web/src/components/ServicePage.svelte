@@ -161,6 +161,13 @@
 </script>
 
 {#if service}
+  <!-- The hero first, as Home has it and as the TV's channel page opens. It is full-bleed and pulls itself UP by
+       the height of the navigation bar to run behind it, so anything placed above it is covered rather than
+       cleared — which is what put the brand behind the picture. The brand follows immediately under it, still
+       naming the catalogue before a single row. -->
+  {#if featured.length}
+    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
+  {/if}
   <header class="brand">
     {#if service.logoPath}
       <img
@@ -173,10 +180,6 @@
     {/if}
     <h1>{service.name}</h1>
   </header>
-  <!-- The brand first, so the page says whose catalogue this is before it shows one of its titles. -->
-  {#if featured.length}
-    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
-  {/if}
   <JustWatchCredit />
   {#if both}
     <div class="tabs">
