@@ -193,6 +193,9 @@
    */
   async function begin(pick?: string) {
     if (!title.imdb || !title.scout) return;
+    // Freeze the run that is ending before anything clears it. Snapshotted, not referenced: `current` is
+    // derived from state this function is about to overwrite.
+    if (ran) kept = [...kept, $state.snapshot(current)];
     stop();
     localStorage.setItem(SCOUT_KEY, installOf(scout));
     localStorage.setItem(SUBS_KEY, subtitlesInstall.trim());
@@ -411,6 +414,49 @@
     };
   });
 
+  /** When the run in progress started, so an archived run says which one it was. */
+  let startedAt = $state('');
+
+  /**
+   * Every run before this one, oldest first.
+   *
+   * The page used to hold one session and overwrite it, which threw away a measured comparison the moment
+   * the next release was tapped — and the interesting pair is exactly two runs of the SAME title, one
+   * copied and one converted. A run costs a real transcode on a box that does one at a time, so losing one
+   * is not a small thing.
+   */
+  let kept = $state<unknown[]>([]);
+
+  /** The run as it stands; `begin` freezes a copy of this before starting the next. */
+  const current = $derived({
+    at: startedAt,
+    asked: {
+      refusedReport: refused,
+      capMbit: capBitrate.trim() ? Number(capBitrate) : undefined,
+      measuredLimit: measured,
+      startAt: startAt.trim() ? Number(startAt) : undefined,
+      filename: filename || undefined,
+    },
+    failure,
+    session: session && {
+      release: session.release,
+      duration: session.duration,
+      video: session.video,
+      audioTrack: session.audioTrack,
+      audioChannels: session.audioChannels,
+      audioTracks: session.audioTracks,
+      subtitles: session.subtitles,
+    },
+    decision,
+    variants,
+    renditions,
+    start: playlistStart,
+    timings,
+  });
+
+  /** Whether there is a run worth keeping: a session, or a refusal, which is a result too. */
+  const ran = $derived(!!session || !!failure);
+
   const report = $derived(
     JSON.stringify(
       {
@@ -418,29 +464,8 @@
         nativeHls: PLAYS_HLS,
         at: new Date().toISOString(),
         title: { imdb: title.imdb, season: title.season, episode: title.episode },
-        asked: {
-          refusedReport: refused,
-          capMbit: capBitrate.trim() ? Number(capBitrate) : undefined,
-          measuredLimit: measured,
-          startAt: startAt.trim() ? Number(startAt) : undefined,
-          filename: filename || undefined,
-        },
         playable: claimed,
-        failure,
-        session: session && {
-          release: session.release,
-          duration: session.duration,
-          video: session.video,
-          audioTrack: session.audioTrack,
-          audioChannels: session.audioChannels,
-          audioTracks: session.audioTracks,
-          subtitles: session.subtitles,
-        },
-        decision,
-        variants,
-        renditions,
-        start: playlistStart,
-        timings,
+        runs: [...kept, ...(ran ? [current] : [])],
       },
       null,
       1,
@@ -681,11 +706,20 @@
           <tr>
             <td>{variant.CODECS ?? ''}</td>
             <td>{variant['SUPPLEMENTAL-CODECS'] ?? ''}</td>
-            <!-- A PQ variant without VIDEO-RANGE is dropped by Apple's player without a word: #26. -->
-            <td class={variant['VIDEO-RANGE'] ? '' : 'bad'}
-              >{variant['VIDEO-RANGE'] ?? 'missing'}</td
+            <!-- Absent is not missing: a player takes a variant that names no VIDEO-RANGE as SDR, which is
+                 what a converted or tone-mapped one is, and den-remux names the attribute only where it kept
+                 a range worth naming. It is a fault beside a Dolby Vision variant, where Apple's player drops
+                 a PQ stream that declares none without a word — the #26 fault. Flagging every absence
+                 reported that fault on every converted session, which is the surest way to be ignored. -->
+            <td class={variant['SUPPLEMENTAL-CODECS'] && !variant['VIDEO-RANGE'] ? 'bad' : ''}
+              >{variant['VIDEO-RANGE'] ?? 'SDR by default'}</td
             >
-            <td class={variant['FRAME-RATE'] ? '' : 'bad'}>{variant['FRAME-RATE'] ?? 'missing'}</td>
+            <!-- Safari passes over an HDR variant that names no frame rate; on an SDR one it is not required. -->
+            <td
+              class={/PQ|HLG/.test(variant['VIDEO-RANGE'] ?? '') && !variant['FRAME-RATE']
+                ? 'bad'
+                : ''}>{variant['FRAME-RATE'] ?? '—'}</td
+            >
             <td>{variant.RESOLUTION ?? ''}</td>
             <td>
               {variant.BANDWIDTH ? Math.round(Number(variant.BANDWIDTH) / 1_000_000) + ' Mbit' : ''}
@@ -742,6 +776,7 @@
       <code>init.mp4</code> — which Apple's player abandons after about 3 s on iOS.
     </p>
     <div class="save">
+      {#if kept.length}<span class="note">{kept.length + 1} runs in this report.</span>{/if}
       <button onclick={download}>Download</button>
       <button onclick={share}>Share</button>
       <button onclick={copy}>Copy</button>
