@@ -139,18 +139,19 @@
     const lead = rows[0];
     if (!lead || lead.id === heroFrom) return;
     heroFrom = lead.id;
-    let current = true;
+    const forRow = lead.id;
     void lead.load(1).then(
       (titles) => {
-        if (current) featured = titles.filter(shown).slice(0, SLIDES);
+        // Stale only if a DIFFERENT row has since taken the lead. This must not be a cleanup that cancels on
+        // re-run: `rows` re-derives the moment atlas's catalogs answer, and the cancel threw away the load in
+        // flight while the re-run saw the same row and returned early — so the hero appeared only when a warm
+        // cache let the load finish first, which is why a refresh showed it and a fresh visit did not.
+        if (forRow === heroFrom) featured = titles.filter(shown).slice(0, SLIDES);
       },
       () => {
         // No hero, then — the page is its rows, which is what it was before it had one.
       },
     );
-    return () => {
-      current = false;
-    };
   });
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
