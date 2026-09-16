@@ -54,6 +54,34 @@
   let element = $state<HTMLVideoElement>();
 
   /**
+   * Something real to start from, so the page is usable without hunting a URL down on a phone.
+   *
+   * Asked of reel rather than written into this file: its links are signed, signatures rot, and a signed URL
+   * committed here would be both a secret with a half-life and a 404 waiting to happen. The dev server proxies
+   * /reel, so the relative form is same-origin — which also keeps it off the mixed-content rocks when this page
+   * is served over HTTPS to a phone. `?url=` names a different trailer.
+   */
+  $effect(() => {
+    if (source) return;
+    const asked = new URLSearchParams(location.search).get('url');
+    if (asked) {
+      source = asked;
+      return;
+    }
+    void (async () => {
+      try {
+        const answer = await fetch('/reel/meta/movie/tt0111161.json');
+        const link = (await answer.json())?.meta?.links?.[0]?.trailers;
+        if (typeof link !== 'string') return;
+        const url = new URL(link, location.href);
+        source = `/reel${url.pathname}${url.search}`;
+      } catch {
+        // reel out of reach from here: paste one by hand, as before.
+      }
+    })();
+  });
+
+  /**
    * The variants, derived from one pasted URL.
    *
    * reel signs over the video and the install rather than the path, so the signature on any one of its media
@@ -278,6 +306,57 @@
       1,
     ),
   );
+
+  /** What the saved file is called, so a phone's report and a Mac's don't land on each other. */
+  function reportName(): string {
+    const ua = navigator.userAgent;
+    const who = /iPhone|iPad/.test(ua)
+      ? 'ios'
+      : /Chrome/.test(ua)
+        ? 'chrome'
+        : /Safari/.test(ua)
+          ? 'safari'
+          : 'browser';
+    return `transport-${who}-${new Date().toISOString().slice(0, 10)}.json`;
+  }
+
+  let saved = $state('');
+
+  function download() {
+    const href = URL.createObjectURL(new Blob([report], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = reportName();
+    link.click();
+    saved = `Saved as ${link.download}.`;
+    setTimeout(() => URL.revokeObjectURL(href), 10_000);
+  }
+
+  /**
+   * The share sheet, for a phone where a download is awkward to find again.
+   *
+   * Built and offered inside the click with nothing awaited first: iOS spends the transient activation on the
+   * first await, and a share called after one is refused with no error worth showing.
+   */
+  function share() {
+    const file = new File([report], reportName(), { type: 'application/json' });
+    if (!navigator.canShare?.({ files: [file] })) {
+      saved = 'This browser will not share a file — use Download.';
+      return;
+    }
+    void navigator.share({ files: [file] }).catch(() => {
+      // A dismissed sheet rejects, and that is a choice rather than a failure to report.
+    });
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(report);
+      saved = 'Copied.';
+    } catch {
+      saved = 'Copying was refused — use Download or Share.';
+    }
+  }
 </script>
 
 <main>
@@ -356,8 +435,15 @@
       </tbody>
     </table>
     <p class="note">
-      Times are milliseconds from the moment <code>src</code> was set. Paste this into the ticket:
+      Times are milliseconds from the moment <code>src</code> was set. Take it away with one of these
+      — selecting this much JSON by hand on a phone is its own small misery:
     </p>
+    <div class="save">
+      <button onclick={download}>Download</button>
+      <button onclick={share}>Share</button>
+      <button onclick={copy}>Copy</button>
+      {#if saved}<span class="note">{saved}</span>{/if}
+    </div>
     <textarea readonly rows="8">{report}</textarea>
   {/if}
 </main>
@@ -407,6 +493,13 @@
     margin: 12px 0;
     padding: 8px 16px;
     font: inherit;
+  }
+
+  .save {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
   }
 
   video {
