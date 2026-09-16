@@ -157,6 +157,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if path.starts_with("/ratings/") {
         return crate::ratings::handle(state, req, rid).await;
     }
+    // SkipDB's skip segments, kept the same way, for the web app alone: the Apple TV asks SkipDB itself and
+    // keeps its own answers on the device.
+    if path.starts_with("/skipdb/") {
+        return crate::skipdb::handle(state, req, rid).await;
+    }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
     }
@@ -288,8 +293,10 @@ impl Face {
         // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
         // on the public one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so
         // neither half owns them.
-        let tmdb =
-            path.starts_with("/tmdb/") || path.starts_with("/warnings/") || path.starts_with("/ratings/");
+        let tmdb = path.starts_with("/tmdb/")
+            || path.starts_with("/warnings/")
+            || path.starts_with("/ratings/")
+            || path.starts_with("/skipdb/");
         match (self, path) {
             (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
@@ -361,6 +368,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
         p if p.starts_with("/ratings/") => "/ratings",
+        p if p.starts_with("/skipdb/") => "/skipdb",
         // One label each: what happens inside them is their own repo's log to keep.
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
