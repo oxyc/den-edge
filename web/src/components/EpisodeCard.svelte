@@ -8,6 +8,7 @@
     busy,
     fallback,
     onplay,
+    onplaytv,
     onseen,
     onsources,
   }: {
@@ -16,6 +17,11 @@
     busy: boolean;
     fallback?: string;
     onplay: () => void;
+    /**
+     * Send this episode to the linked TV. Absent for a guest, who has no TV to send to — and distinct from
+     * `onplay`, which starts it here when this browser can play and only falls back to the TV when it can't.
+     */
+    onplaytv?: () => void;
     onseen: (seen: boolean) => void;
     onsources?: () => void;
   } = $props();
@@ -87,6 +93,9 @@
       ><DetailIcon name="more" /></summary
     >
     <div class="menu">
+      {#if onplaytv && !upcoming}<button onclick={() => act(onplaytv)}
+          ><DetailIcon name="play" />Play on TV</button
+        >{/if}
       {#if onsources && !upcoming}<button onclick={() => act(onsources)}
           ><DetailIcon name="sources" />Sources</button
         >{/if}

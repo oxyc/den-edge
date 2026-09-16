@@ -8,10 +8,12 @@
   import {
     episodeProgress,
     fetchRatings,
+    futureDate,
     productionFacts,
     seriesPresentation,
     type Ratings,
   } from '../lib/detailPresentation';
+  import { WATCHED } from '../lib/actions';
   import type { MediaType, Title } from '../lib/library';
   import type { EpisodeRow, TitleRow } from '../lib/wire';
   import PersonCard from './PersonCard.svelte';
@@ -237,6 +239,24 @@
         )
       : [],
   );
+  /**
+   * The open season's aired episodes. What has not aired is left out of the reckoning below: a season still
+   * going out could otherwise never read as watched, however much of it you had seen.
+   */
+  const seasonAired = $derived((seasonEpisodes ?? []).filter((e) => !futureDate(e.airDate)));
+  const seasonSeen = $derived(
+    seasonAired.length > 0 &&
+      seasonAired.every(
+        (e) => episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row) >= WATCHED,
+      ),
+  );
+  /** Mark the open season, through the same write each episode's own control uses. */
+  function markSeason(seen: boolean) {
+    const d = untrack(() => detail);
+    if (!d || displayedSeason === null) return;
+    for (const e of seasonAired) onepisode(d.title, displayedSeason, e.number, seen);
+  }
+
   function playEpisode(number: number) {
     const d = untrack(() => detail),
       picked = untrack(() => displayedSeason);
@@ -395,9 +415,6 @@
       onplay={onplayhere
         ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
         : undefined}
-      onplaytv={onplay
-        ? () => onplay(d.title, sourceCoord?.season, sourceCoord?.episode)
-        : undefined}
     />
   </div>
   <DetailReactions
@@ -445,6 +462,20 @@
             compact
           />
         {/if}
+        {#if seasonAired.length}
+          <button
+            class="season-seen"
+            aria-pressed={seasonSeen}
+            aria-label={seasonSeen
+              ? `Mark season ${displayedSeason} unwatched`
+              : `Mark season ${displayedSeason} watched`}
+            title={seasonSeen ? 'Mark season unwatched' : 'Mark season watched'}
+            disabled={busy || seasonLoading}
+            onclick={() => markSeason(!seasonSeen)}
+          >
+            <DetailIcon name={seasonSeen ? 'eye' : 'check'} />
+          </button>
+        {/if}
       </div>
       <div
         id={panel}
@@ -476,6 +507,9 @@
                 onplay={() => playEpisode(e.number)}
                 onseen={(seen) =>
                   displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
+                onplaytv={onplay && displayedSeason !== null
+                  ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
+                  : undefined}
                 onsources={() => {
                   if (displayedSeason !== null) {
                     sourceTarget = { season: displayedSeason, episode: e.number };
@@ -725,6 +759,35 @@
 
   .season-bar :global(.tabs) {
     margin-bottom: 0;
+  }
+
+  /* The season's watched toggle, beside its download: the same bare mark, so the two read as one set of
+     things you can do to this season rather than as a control and a decoration. */
+  .season-seen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 8px;
+    border: 0;
+    border-radius: 12px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .season-seen:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .season-seen:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .season-seen[aria-pressed='true'] {
+    color: var(--fg);
   }
 
   h2 {
