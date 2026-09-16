@@ -348,9 +348,9 @@
     {/if}
     <p class="foot">
       Services are licensed per country, so pick them by country. Each becomes a brand tile on Home,
-      filled with that country’s catalogue and ranked to your taste. Services from another country
-      get their own shelves, but the “where to watch” badges on individual titles still follow your
-      own region.
+      opening that country’s catalogue. Every pick shares the one shelf, and a tile says which
+      country it is for when you have picked the same service twice. The “where to watch” badges on
+      individual titles still follow your own region.
     </p>
     <p class="foot">Streaming availability by JustWatch.</p>
   </SettingRow>
