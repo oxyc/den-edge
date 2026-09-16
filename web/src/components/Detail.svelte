@@ -712,12 +712,19 @@
     margin-bottom: 20px;
   }
 
-  /* The seasons and their download control on one line, wrapping to two where the tabs need the width. */
+  /* The seasons and their download control on one line, wrapping to two where the tabs need the width.
+     The tabs carry their own bottom margin, which in a centred row would sit the icon above the middle of
+     the pills — so the spacing below moves here, and the tabs give theirs up inside the bar. */
   .season-bar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .season-bar :global(.tabs) {
+    margin-bottom: 0;
   }
 
   h2 {

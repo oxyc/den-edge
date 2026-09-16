@@ -85,7 +85,20 @@
     margin: 0;
   }
 
+  /* Beside the tabs it reads as a mark on the row, not a second control competing with them: no plate, no
+     border, just the icon. The 44px target and the focus ring stay — only the resting chrome goes. */
   .compact button {
-    padding: 8px 12px;
+    padding: 8px;
+    border: 0;
+    background: none;
+    color: var(--muted);
+  }
+
+  .compact button:focus-visible {
+    color: var(--fg);
+  }
+
+  .compact button:hover:not(:disabled) {
+    color: var(--fg);
   }
 </style>
