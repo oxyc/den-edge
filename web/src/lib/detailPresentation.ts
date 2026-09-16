@@ -78,6 +78,22 @@ export function productionFacts(d: TitleDetail): string {
     .join(' · ');
 }
 
+/**
+ * Which episodes of a season a season-wide control may write.
+ *
+ * Specials are none of them: season 0 is excluded from every count here and in the library, so marking it
+ * writes rows nothing will ever show — a season that could be pressed and then read as untouched. Episodes
+ * that have not aired are none of them either, or a season still going out could never read as watched
+ * however much of it had been seen.
+ */
+export function markableEpisodes(
+  season: number | null | undefined,
+  episodes: readonly { number: number; airDate?: string }[] | null | undefined,
+): number[] {
+  if (season === null || season === undefined || season <= 0) return [];
+  return (episodes ?? []).filter((e) => !futureDate(e.airDate)).map((e) => e.number);
+}
+
 /** One reset-aware progress interpretation for the hero, episode rows and all playback actions. */
 export function episodeProgress(episode: EpisodeRow | undefined, row?: TitleRow): number {
   if (

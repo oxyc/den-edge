@@ -8,7 +8,7 @@
   import {
     episodeProgress,
     fetchRatings,
-    futureDate,
+    markableEpisodes,
     productionFacts,
     seriesPresentation,
     type Ratings,
@@ -59,6 +59,7 @@
     onplayhere,
     away = false,
     onepisode,
+    onseason,
     shown = () => true,
     seed,
   }: {
@@ -88,6 +89,11 @@
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
     away?: boolean;
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
+    /**
+     * Mark a whole season at once, in one write rather than one per episode. Optional: a surface that has no
+     * way to write a season simply shows no season control, rather than one that half works.
+     */
+    onseason?: (title: Title, season: number, episodes: number[], seen: boolean) => void;
     shown?: (title: Title) => boolean;
     /**
      * What the page that linked here already knew about this title.
@@ -239,22 +245,19 @@
         )
       : [],
   );
-  /**
-   * The open season's aired episodes. What has not aired is left out of the reckoning below: a season still
-   * going out could otherwise never read as watched, however much of it you had seen.
-   */
-  const seasonAired = $derived((seasonEpisodes ?? []).filter((e) => !futureDate(e.airDate)));
+  /** What a season-wide press may write here: nothing on Specials, and nothing that has yet to air. */
+  const seasonMarkable = $derived(markableEpisodes(displayedSeason, seasonEpisodes));
   const seasonSeen = $derived(
-    seasonAired.length > 0 &&
-      seasonAired.every(
-        (e) => episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row) >= WATCHED,
+    seasonMarkable.length > 0 &&
+      seasonMarkable.every(
+        (number) => episodeProgress(episodes.get(`${displayedSeason}:${number}`), row) >= WATCHED,
       ),
   );
-  /** Mark the open season, through the same write each episode's own control uses. */
+  /** One write for the whole season rather than one per episode — the difference is ~2 requests against ~20. */
   function markSeason(seen: boolean) {
     const d = untrack(() => detail);
     if (!d || displayedSeason === null) return;
-    for (const e of seasonAired) onepisode(d.title, displayedSeason, e.number, seen);
+    onseason?.(d.title, displayedSeason, seasonMarkable, seen);
   }
 
   function playEpisode(number: number) {
@@ -462,7 +465,7 @@
             compact
           />
         {/if}
-        {#if seasonAired.length}
+        {#if onseason && seasonMarkable.length}
           <button
             class="season-seen"
             aria-pressed={seasonSeen}

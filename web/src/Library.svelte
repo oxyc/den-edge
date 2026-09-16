@@ -462,6 +462,47 @@
   }
 
   /**
+   * Mark a whole season, in one write rather than one per episode.
+   *
+   * `markEpisodeSeen` seals, stores and posts once per call, so a ten-episode season through it is twenty
+   * requests and ten records in this browser's storage — which `pendingActions` then scans. `writeActions`
+   * seals them together, keeps them as one record and delivers them in batches, which is what marking a
+   * whole series already does.
+   *
+   * The title's own row is deliberately left alone. A season is not the series, and the series-wide
+   * un-mark works by `episodesReset`, which cannot say "this season only".
+   */
+  async function markSeasonSeen(title: Title, season: number, episodes: number[], seen: boolean) {
+    if (!log || !episodes.length) return;
+    busy = true;
+    failure = null;
+    try {
+      await ensureSyncPolicy();
+      remember(title);
+      const journals: SettingsRow[] = [];
+      clock.see(log.newestStamp());
+      for (const episode of episodes) {
+        const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+        // A stamp each: one shared across the rows would lose the order they merge in.
+        const at = clock.issue();
+        // An episode already in this state journals nothing, and drops out of the write by itself.
+        const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
+        if (event) journals.push(event);
+      }
+      if (!journals.length) return;
+      if (!(await log.writeActions(journals))) failure = SAVE_FAILED;
+      else if (log.pendingActions > 0)
+        notice =
+          'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
+      session.changed();
+    } catch {
+      failure = SAVE_FAILED;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
    * Start the title on the linked TV, as the TV's own Play would — it picks the source.
    *
    * Undefined for a guest, and that is the enforcement: `sendToTV` needs the link's own keys, so with no
@@ -1079,6 +1120,7 @@
     {notice}
     onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
     onseen={setSeen}
+    onseason={markSeasonSeen}
     onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
     onplay={play}
     onplayhere={playHere}

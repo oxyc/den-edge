@@ -6,6 +6,7 @@ import {
   cleanedOverview,
   episodeProgress,
   futureDate,
+  markableEpisodes,
   parseRatings,
   productionFacts,
   seriesPresentation,
@@ -218,5 +219,27 @@ describe('full actor filmography', () => {
       'movie:1',
     ]);
     expect(groups[2]!.films[0]!.title.id).toBe(1);
+  });
+});
+
+describe('markableEpisodes', () => {
+  const episodes = [
+    { number: 1, airDate: '2020-01-01' },
+    { number: 2, airDate: '2020-01-08' },
+    { number: 3, airDate: '2099-01-01' },
+    { number: 4 },
+  ];
+
+  it('offers a season what has aired, and Specials nothing at all', () => {
+    expect(
+      markableEpisodes(1, episodes),
+      'an episode TMDB gave no date is not in the future',
+    ).toEqual([1, 2, 4]);
+    // Season 0 is left out of every count in the app, so marking it would write rows nothing can show —
+    // a control that could be pressed and then read as having done nothing.
+    expect(markableEpisodes(0, episodes)).toEqual([]);
+    // No season open, and no episodes loaded: nothing to write either way.
+    expect(markableEpisodes(null, episodes)).toEqual([]);
+    expect(markableEpisodes(1, null)).toEqual([]);
   });
 });
