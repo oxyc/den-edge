@@ -134,6 +134,8 @@
   let claimed = $state<Playable>();
   let measured = $state<number | undefined>();
   let releases = $state<Release[]>([]);
+  /** den-remux would not say what it could play. An empty list and a refusal are not the same answer. */
+  let listRefused = $state(false);
   let filename = $state('');
   let session = $state<Session>();
   let failure = $state<Refused>();
@@ -201,7 +203,11 @@
     localStorage.setItem(SCOUT_KEY, installOf(scout));
     busy = 'asking den-remux what it could play';
     try {
-      releases = (await listReleases(title)) ?? [];
+      // null is a refusal, [] is a title with nothing playable, and showing both as an empty list read as
+      // "scout has nothing" when the truth was a 429 this page had caused itself.
+      const found = await listReleases(title);
+      listRefused = found === null;
+      releases = found ?? [];
     } finally {
       busy = '';
     }
@@ -664,6 +670,13 @@
         </tr>
       </tbody>
     </table>
+  {/if}
+
+  {#if listRefused}
+    <p class="bad">
+      den-remux would not say what it could play. Usually its rate limit — new sessions, logins and
+      speed tests share ten a minute per visitor — so wait a minute and tap List releases.
+    </p>
   {/if}
 
   {#if releases.length}
