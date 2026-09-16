@@ -17,6 +17,7 @@
     login,
     releaseParts,
     reportFailure,
+    sourceFailed,
     startSession,
     wantedLanguages,
     type AudioTrack,
@@ -101,12 +102,17 @@
   const HIDDEN_SLACK_SECS = 5;
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
-  const messages: Record<'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback', string> = {
+  const messages: Record<
+    'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback' | 'source',
+    string
+  > = {
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
     unsupported: 'This browser can’t play video streams.',
     playback: 'This browser couldn’t play this release. Try it on your TV.',
+    // Deliberately not "couldn't play": the release stopped arriving, and playing it again usually works.
+    source: 'This release stopped responding. Try it again, or pick another one.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
@@ -117,7 +123,7 @@
 
   let video = $state<HTMLVideoElement>();
   let session = $state<Session | null>(null);
-  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | null>(null);
+  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
   let key = $state('');
   let badKey = $state(false);
   /** Seconds until the next episode starts, once this one has ended. */
@@ -260,7 +266,7 @@
         noSource ||
         (!element.paused && element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
       ) {
-        broke(
+        void broke(
           element.error?.code ?? 0,
           `no picture after ${STUCK_MS / 1000} s (readyState ${element.readyState}, networkState ${element.networkState})`,
         );
@@ -306,7 +312,7 @@
           hls?.recoverMediaError();
           return;
         }
-        broke(0, `hls.js ${data.type} ${data.details}`);
+        void broke(0, `hls.js ${data.type} ${data.details}`);
       });
       // hls.js has its subtitle tracks once the master is parsed, and would otherwise show the DEFAULT one.
       hls.on(Hls.Events.MANIFEST_PARSED, applySubtitles);
@@ -317,19 +323,37 @@
   });
 
   /** The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. */
-  function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
+  async function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
     if (!session || failure) return;
-    reportFailure(session, code, message);
+    const current = session;
+    reportFailure(current, code, message);
+    // A dead release looks exactly like this too — `MediaError 3`, and on the native path this page never
+    // sees the segment responses that would say otherwise. Ask den-remux for the segment playback stalled
+    // on before blaming the picture: converting a release whose bytes have stopped arriving cannot help,
+    // and it spends the one GPU slot the box has (oxyc/den#43).
+    if (await sourceFailed(current, stalledAt())) {
+      if (session === current && !failure) failure = 'source';
+      return;
+    }
+    // The session may have been replaced while that was asked.
+    if (session !== current || failure) return;
     // It was copied because this browser said it could take it, and it couldn't. Ask for the same release
     // again as a player that takes none of what it just refused: den-remux had that file queued as the
     // fallback it converts, so this is the ask it was waiting for. A conversion that won't decode is not
     // helped by converting it again, so this happens once.
-    if (!degraded && !session.video?.transcoded) {
+    if (!degraded && !current.video?.transcoded) {
       degraded = true;
-      restart({ filename: session.release.filename });
+      restart({ filename: current.release.filename });
       return;
     }
     failure = 'playback';
+  }
+
+  /** Where playback stopped: the end of what was buffered, else the play head. */
+  function stalledAt(): number {
+    const buffered = video?.buffered;
+    const end = buffered?.length ? buffered.end(buffered.length - 1) : 0;
+    return Math.max(end, video?.currentTime ?? 0);
   }
 
   function length(): number {

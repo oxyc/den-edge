@@ -504,6 +504,61 @@ export function reportFailure(
   void fetchImpl(url, { method: 'POST', body, keepalive: true }).catch(() => undefined);
 }
 
+/**
+ * Whether this session's bytes have stopped arriving, rather than the player having refused them.
+ *
+ * `MediaError 3` is reported for both. On Apple's native player the page never sees the segment responses at
+ * all, so a dead release and an undecodable one are indistinguishable from here — and the retry that asks for
+ * less (`withoutRefused`) is then spent converting a picture that cannot be fetched, on a box that converts
+ * one session at a time. Measured 2026-09-16: four refusals read as a codec fault were every one of them a
+ * source that had stopped answering (oxyc/den#43).
+ *
+ * den-remux answers `502 source_failed` for a segment once its job has failed `MAX_FAILURES` times. Ask for
+ * the segment the player is stalled on, which is why `at` is required: asking for the first one instead
+ * starts a fresh job at the beginning of the film, and that answers about a part of the stream nobody is
+ * watching — with a 200.
+ *
+ * False for anything unclear, a network this browser cannot reach included. Not knowing must never read as a
+ * dead release, because the cost of that mistake is refusing a title that would have played.
+ */
+export async function sourceFailed(
+  session: Session,
+  at: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  try {
+    const master = new URL(session.playlist, globalThis.location?.href ?? 'https://den.invalid/');
+    const variant = (await (await fetchImpl(master.href)).text())
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('#'));
+    if (!variant) return false;
+    const media = new URL(variant, master);
+    const lines = (await (await fetchImpl(media.href)).text())
+      .split('\n')
+      .map((line) => line.trim());
+    let start = 0;
+    let stalled: string | undefined;
+    for (const [index, line] of lines.entries()) {
+      if (!line.startsWith('#EXTINF:')) continue;
+      const uri = lines[index + 1];
+      const span = Number.parseFloat(line.slice('#EXTINF:'.length)) || 0;
+      if (uri && !uri.startsWith('#') && at < start + span) {
+        stalled = uri;
+        break;
+      }
+      start += span;
+    }
+    if (!stalled) return false;
+    const answer = await fetchImpl(new URL(stalled, media).href, { cache: 'no-store' });
+    // The body is never read: a segment is tens of megabytes and the status is the whole answer.
+    void answer.body?.cancel();
+    return answer.status === 502;
+  } catch {
+    return false;
+  }
+}
+
 async function errorCode(res: Response): Promise<string | undefined> {
   try {
     const error = ((await res.json()) as { error?: unknown }).error;

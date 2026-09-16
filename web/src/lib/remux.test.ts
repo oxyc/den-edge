@@ -16,6 +16,7 @@ import {
   onLan,
   releaseParts,
   reportFailure,
+  sourceFailed,
   REMUX_PROBE_TIMEOUT_MS,
   SPEED_PROBE_BYTES,
   startSession,
@@ -572,6 +573,44 @@ describe('listReleases', () => {
     expect(
       await listReleases({ imdb: 'tt1', scout: want.scout }, async () => answer(502, {})),
     ).toBeNull();
+  });
+});
+
+describe('sourceFailed', () => {
+  const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n';
+  const media =
+    '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:6.0,\nseg0.m4s\n#EXTINF:6.0,\nseg1.m4s\n';
+
+  const serving = (status: number, seen: string[] = []) =>
+    (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.endsWith('master.m3u8')) return new Response(master);
+      if (url.endsWith('media.m3u8')) return new Response(media);
+      return new Response('', { status });
+    }) as unknown as typeof fetch;
+
+  it('asks for the segment being waited on, not the first one', async () => {
+    const seen: string[] = [];
+    expect(await sourceFailed(session, 7, serving(502, seen))).toBe(true);
+    // 7 s is inside the SECOND segment. Asking for seg0 would start a fresh job at the beginning of the
+    // film — a part of the stream nobody is watching, which answers 200 and proves nothing.
+    expect(seen.at(-1)).toContain('seg1.m4s');
+  });
+
+  it('is no verdict when the segment is served', async () => {
+    expect(await sourceFailed(session, 1, serving(200))).toBe(false);
+  });
+
+  it('is no verdict when it cannot ask at all', async () => {
+    const offline = (async () => {
+      throw new TypeError('offline');
+    }) as unknown as typeof fetch;
+    expect(await sourceFailed(session, 1, offline)).toBe(false);
+  });
+
+  it('is no verdict past the end of the playlist', async () => {
+    expect(await sourceFailed(session, 9_999, serving(502))).toBe(false);
   });
 });
 
