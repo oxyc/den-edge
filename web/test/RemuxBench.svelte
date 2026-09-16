@@ -261,7 +261,7 @@
       const parsed = parseMaster(masterText);
       variants = parsed.variants;
       renditions = parsed.renditions;
-      playlistStart = parsed.start;
+      playlistStart = await readStart(current.playlist, parsed.variants[0]?.uri);
     } catch {
       // The playlist not being readable from here is worth nothing more than an empty table.
     }
@@ -277,10 +277,7 @@
 
   function parseMaster(text: string) {
     const lines = text.split('\n').map((line) => line.trim());
-    const found: { variants: Variant[]; renditions: Variant[]; start?: Variant } = {
-      variants: [],
-      renditions: [],
-    };
+    const found: { variants: Variant[]; renditions: Variant[] } = { variants: [], renditions: [] };
     lines.forEach((line, index) => {
       if (line.startsWith('#EXT-X-STREAM-INF:'))
         found.variants.push({
@@ -289,10 +286,32 @@
         });
       else if (line.startsWith('#EXT-X-MEDIA:'))
         found.renditions.push(attributes(line.slice('#EXT-X-MEDIA:'.length)));
-      else if (line.startsWith('#EXT-X-START:'))
-        found.start = attributes(line.slice('#EXT-X-START:'.length));
     });
     return found;
+  }
+
+  /**
+   * `EXT-X-START` from the first variant's MEDIA playlist.
+   *
+   * It is not in the master and never was — den-remux writes it in `playlist::media`, and its README says
+   * so outright. Scanning the master for it reported every resume as missing, which is a false failure on
+   * the one case #39 is waiting for, and it would have been read on a phone as den-remux dropping the
+   * resume rather than as this page looking in the wrong file.
+   */
+  async function readStart(master: string, uri: string | undefined): Promise<Variant | undefined> {
+    if (!uri) return undefined;
+    try {
+      const answer = await fetch(new URL(uri, new URL(master, location.href)).href);
+      if (!answer.ok) return undefined;
+      const text = await answer.text();
+      const line = text
+        .split('\n')
+        .map((each) => each.trim())
+        .find((each) => each.startsWith('#EXT-X-START:'));
+      return line ? attributes(line.slice('#EXT-X-START:'.length)) : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   let engine: { destroy: () => void } | undefined;
