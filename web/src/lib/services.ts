@@ -227,8 +227,8 @@ export function atlasServiceRows(
  * equivalent is a release-date sort, which says when a film came out and not when it turned up here.
  */
 const POOLS = [
-  { id: 'new', suffix: '-new', title: 'New on Streaming', soonest: false },
-  { id: 'coming', suffix: '-coming', title: 'Coming to Streaming', soonest: true },
+  { id: 'new', suffix: '-new', title: 'New Releases', soonest: false },
+  { id: 'coming', suffix: '-coming', title: 'Coming Soon', soonest: true },
 ] as const;
 
 /** Charts at once. Twelve services' charts in one go is a burst den-edge's relay would rather not take at once. */
@@ -291,6 +291,39 @@ export function radarRows(
       },
     ];
   });
+}
+
+/**
+ * Home's one "what's new" shelf: what has just landed on the viewer's services, then what has just come out.
+ *
+ * Two rows were asking nearly the same question side by side, and meaning different things by it — TMDB's by
+ * release date, atlas's by the day a title turned up on a service — so a recent film that had just landed
+ * appeared in both, and neither title said which sense of "new" it meant. Merged, the arrivals lead (a 1997 film
+ * added to a service last week is news here in a way its release date can never say), and TMDB's recent releases
+ * follow and page on exactly as they did, less anything the arrivals already named.
+ *
+ * A film that is out but on no service is still worth showing — this household watches through its own sources —
+ * so the release half is not a fallback for the arrivals half. Both are real answers.
+ */
+export function mergeNewRow(arrivals: RowDef, releases: RowDef, title = 'New Releases'): RowDef {
+  const key = (t: Title) => `${t.type}:${t.id}`;
+  return {
+    id: `new-merged-${arrivals.id}`,
+    title,
+    // A chart title says which service it landed on; a TMDB one has no service and keeps the year.
+    caption: (t: Title) => arrivals.caption?.(t) ?? (t.year ? String(t.year) : undefined),
+    load: async (page: number) => {
+      // The charts are one page; past the first, the row is TMDB's alone, which is what pages on.
+      if (page > 1) return releases.load(page);
+      const [landed, out] = await Promise.all([
+        // atlas failing must not take the row with it: TMDB's half stands on its own, as it did before.
+        arrivals.load(1).catch((): Title[] => []),
+        releases.load(1),
+      ]);
+      const seen = new Set(landed.map(key));
+      return [...landed, ...out.filter((title) => !seen.has(key(title)))];
+    },
+  };
 }
 
 /** `work` over `items`, `atOnce` at a time; one that fails contributes nothing rather than failing the row. */

@@ -62,6 +62,7 @@
   import {
     atlasCatalogs,
     GUEST_PICKS,
+    mergeNewRow,
     radarRows,
     resolvePicks,
     type AtlasCatalog,
@@ -783,18 +784,26 @@
       const own = atlas ? atlasRows(atlas, type) : [];
       return [...browse.slice(0, 4), ...radar(type), ...interleave([own, browse.slice(4)])];
     }
-    // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories. The
-    // pooled rows sit behind what is trending and what is new on TMDB, which is the same question answered for
-    // everything rather than for the services this household watches.
+    // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
+    //
+    // What has just landed on this household's services does not get a row of its own here: it leads New
+    // Releases, which was asking the same question of TMDB and meaning the release date by it. What is still
+    // to come has no such twin, so it stays a row.
     const home = homeRows(pages, { minYear });
     const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
+    const pooled = radar();
+    const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
+    const spine = arrivals
+      ? home.map((row) => (row.id === 'new-releases' ? mergeNewRow(arrivals, row) : row))
+      : home;
+    const coming = pooled.filter((row) => row !== arrivals);
     return [
       ...personalRows(pages, seeds),
-      ...home.slice(0, 2),
-      ...radar(),
-      ...home.slice(2, 7),
+      ...spine.slice(0, 2),
+      ...coming,
+      ...spine.slice(2, 7),
       ...plot,
-      ...home.slice(7),
+      ...spine.slice(7),
     ];
   });
   /**

@@ -4,6 +4,7 @@ import {
   atlasServiceRows,
   fillPosters,
   GUEST_PICKS,
+  mergeNewRow,
   mergeServiceRows,
   radarRows,
   resolvePicks,
@@ -11,7 +12,7 @@ import {
   type AtlasCatalog,
 } from './services';
 import type { Service } from '../settings/services';
-import type { Pages } from './catalog';
+import type { Pages, RowDef } from './catalog';
 import type { Title } from './library';
 
 /** The nth of a list, or a failure that says what was missing rather than a TypeError further down. */
@@ -26,6 +27,13 @@ const service = (over: Partial<Service> & Pick<Service, 'id' | 'name'>): Service
   movies: true,
   series: true,
   variants: [],
+  ...over,
+});
+
+const title = (id: number, over: Partial<Title> = {}): Title => ({
+  type: 'tv',
+  id,
+  title: `Title ${id}`,
   ...over,
 });
 
@@ -246,13 +254,6 @@ describe('atlas rows', () => {
 });
 
 describe('fillPosters', () => {
-  const title = (id: number, over: Partial<Title> = {}): Title => ({
-    type: 'tv',
-    id,
-    title: `Title ${id}`,
-    ...over,
-  });
-
   it('names art for the head of a chart, by TMDB id, and asks nothing for the rest', async () => {
     const asked: string[] = [];
     const fetchImpl: typeof fetch = async (url) => {
@@ -399,7 +400,7 @@ describe('radarRows', () => {
     const asked: string[] = [];
     const fetchImpl = serving({ 'jw-nfx-new': [meta(1)], 'jw-mxx-new': [meta(2)] }, asked);
     const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
-    expect(rows.map((row) => row.title)).toEqual(['New on Streaming', 'Coming to Streaming']);
+    expect(rows.map((row) => row.title)).toEqual(['New Releases', 'Coming Soon']);
 
     const titles = await at(rows, 0).load(1);
     expect(asked).toEqual([
@@ -450,6 +451,48 @@ describe('radarRows', () => {
     );
   });
 
+  it('leads New Releases with what just landed, and pages on with TMDB alone', async () => {
+    const fetchImpl = serving({ 'jw-nfx-new': [meta(1)], 'jw-mxx-new': [meta(2)] });
+    const arrivals = at(radarRows('/atlas', catalogs, picks, { names, fetchImpl }), 0);
+    const asked: number[] = [];
+    const releases: RowDef = {
+      id: 'new-releases',
+      title: 'New Releases',
+      load: async (page) => {
+        asked.push(page);
+        // TMDB's first page repeats a title the charts already named — the same media type and id, which is
+        // what makes it the same title — and offers one they did not.
+        return page === 1
+          ? [title(1, { type: 'movie', year: 2026 }), title(9, { type: 'movie', year: 2026 })]
+          : [title(10 * page, { type: 'movie', year: 2026 })];
+      },
+    };
+    const merged = mergeNewRow(arrivals, releases);
+    expect(merged.title).toBe('New Releases');
+
+    const first = await merged.load(1);
+    expect(
+      first.map((t) => t.id),
+      'the arrivals lead, and what TMDB repeats is not shown twice',
+    ).toEqual([1, 2, 9]);
+    expect(merged.caption?.(at(first, 0)), 'a chart title says where it landed').toBe('Netflix');
+    expect(merged.caption?.(at(first, 2)), 'a TMDB title keeps its year').toBe('2026');
+
+    expect((await merged.load(2)).map((t) => t.id)).toEqual([20]);
+    expect(asked, 'the charts are one page; past it the row is TMDB alone').toEqual([1, 2]);
+  });
+
+  it('keeps New Releases whole when atlas cannot answer', async () => {
+    const failing: typeof fetch = async () => new Response('nope', { status: 502 });
+    const arrivals = at(radarRows('/atlas', catalogs, picks, { names, fetchImpl: failing }), 0);
+    const releases: RowDef = {
+      id: 'new-releases',
+      title: 'New Releases',
+      load: async () => [title(9, { type: 'movie', year: 2026 })],
+    };
+    expect((await mergeNewRow(arrivals, releases).load(1)).map((t) => t.id)).toEqual([9]);
+  });
+
   it('builds no row for a kind atlas has no chart of, and none at all without a pick it covers', () => {
     const onlyPopular = catalogs.filter((c) => !c.id.includes('-new') && !c.id.includes('-coming'));
     expect(radarRows('/atlas', onlyPopular, picks)).toEqual([]);
@@ -458,7 +501,7 @@ describe('radarRows', () => {
     );
     // A screen showing one media type only pools the charts of that type.
     expect(radarRows('/atlas', catalogs, picks, { only: 'tv' }).map((r) => r.title)).toEqual([
-      'Coming to Streaming',
+      'Coming Soon',
     ]);
   });
 });
