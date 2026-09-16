@@ -133,6 +133,24 @@
     scout: installOf(scout),
   });
 
+  /**
+   * Ask the two questions that need no decision, the moment the page has what they need.
+   *
+   * Both are cheap and neither commits to anything: the capability probe is local, and `/releases` is a list
+   * scout has already scraped. Making someone tap for them costs two interactions on the device where
+   * interactions are most expensive, which is the device this page exists for.
+   *
+   * `asked` is a plain binding rather than state, so settling it cannot re-run this.
+   */
+  let asked = false;
+
+  $effect(() => {
+    if (asked || !title.imdb || !title.scout) return;
+    asked = true;
+    void probe();
+    void list();
+  });
+
   async function probe() {
     busy = 'asking this browser what it decodes';
     try {
@@ -215,6 +233,10 @@
       session = result;
       filename = result.release.filename;
       await readMaster(result);
+      // Straight into playback: picking a release is already a statement that it should play. On iOS this
+      // usually needs the Play button anyway -- the awaits above spend the tap's transient activation, so
+      // WebKit refuses the start with no error worth showing -- but everywhere else it saves an interaction.
+      play();
     } finally {
       busy = '';
     }
