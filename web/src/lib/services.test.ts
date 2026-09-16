@@ -5,6 +5,7 @@ import {
   fillPosters,
   GUEST_PICKS,
   mergeServiceRows,
+  radarRows,
   resolvePicks,
   serviceRows,
   type AtlasCatalog,
@@ -360,5 +361,104 @@ describe('serviceRows', () => {
     });
     await at(rows, 0).load(1);
     expect(at(asked, 0).params['primary_release_date.gte']).toBe('1990-01-01');
+  });
+});
+
+describe('radarRows', () => {
+  const catalogs: AtlasCatalog[] = [
+    { id: 'jw-nfx-new', name: 'New on Netflix', type: 'movie', providerIds: [8] },
+    { id: 'jw-mxx-new', name: 'New on Max', type: 'movie', providerIds: [1899] },
+    { id: 'jw-nfx-coming', name: 'Coming to Netflix', type: 'tv', providerIds: [8] },
+    { id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] },
+  ];
+  const picks = [
+    { id: 8, country: 'US' },
+    { id: 1899, country: 'US' },
+  ];
+  const names = { 8: 'Netflix', 1899: 'Max' };
+  const meta = (id: number, over: Record<string, unknown> = {}) => ({
+    id: `tt${id}`,
+    imdb_id: `tt${id}`,
+    moviedb_id: id,
+    name: `Title ${id}`,
+    type: 'movie',
+    posterPath: `/${id}.jpg`,
+    ...over,
+  });
+  /** Answers each chart with whatever the test maps its id to, and records what was asked. */
+  const serving =
+    (charts: Record<string, unknown[]>, asked: string[] = []): typeof fetch =>
+    async (url) => {
+      const href = String(url);
+      asked.push(href);
+      const id = Object.keys(charts).find((name) => href.includes(name));
+      return new Response(JSON.stringify({ metas: id ? charts[id] : [] }), { status: 200 });
+    };
+
+  it('pools every service’s chart of a kind into one row, and asks each chart once', async () => {
+    const asked: string[] = [];
+    const fetchImpl = serving({ 'jw-nfx-new': [meta(1)], 'jw-mxx-new': [meta(2)] }, asked);
+    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    expect(rows.map((row) => row.title)).toEqual(['New on Streaming', 'Coming to Streaming']);
+
+    const titles = await at(rows, 0).load(1);
+    expect(asked).toEqual([
+      '/atlas/catalog/movie/jw-nfx-new/country=US.json',
+      '/atlas/catalog/movie/jw-mxx-new/country=US.json',
+    ]);
+    expect(
+      titles.map((t) => t.id),
+      'a turn each, so neither service owns the head',
+    ).toEqual([1, 2]);
+    expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix');
+    // A chart is one page: asking for a second must not repeat the first.
+    expect(await at(rows, 0).load(2)).toEqual([]);
+    expect(asked).toHaveLength(2);
+  });
+
+  it('names a title both services carry once, and says both', async () => {
+    const shared = meta(7);
+    const fetchImpl = serving({ 'jw-nfx-new': [shared], 'jw-mxx-new': [shared] });
+    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    const titles = await at(rows, 0).load(1);
+    expect(titles.map((t) => t.id)).toEqual([7]);
+    expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix · Max');
+  });
+
+  it('leads with what lands soonest, and leaves what carries no date in the charts’ order', async () => {
+    const day = 86_400_000;
+    const soon = Date.now() + day;
+    const later = Date.now() + 30 * day;
+    const fetchImpl = serving({
+      'jw-nfx-coming': [
+        meta(1, { type: 'series' }),
+        meta(2, { type: 'series', denAt: Math.floor(later / 1000) }),
+        meta(3, { type: 'series', denAt: Math.floor(soon / 1000) }),
+      ],
+    });
+    const rows = radarRows('/atlas', catalogs, picks, { names, fetchImpl });
+    const titles = await at(rows, 1).load(1);
+    expect(
+      titles.map((t) => t.id),
+      'dated first, soonest of them leading; the undated keeps its place behind them',
+    ).toEqual([3, 2, 1]);
+    expect(at(titles, 0).arrivesAt).toBe(Math.floor(soon / 1000) * 1000);
+    // The caption of a row about what is still to come says when, as well as where.
+    expect(at(rows, 1).caption?.(at(titles, 0))).toMatch(/^Netflix · /);
+    expect(at(rows, 1).caption?.(at(titles, 2)), 'nothing to say beyond the service').toBe(
+      'Netflix',
+    );
+  });
+
+  it('builds no row for a kind atlas has no chart of, and none at all without a pick it covers', () => {
+    const onlyPopular = catalogs.filter((c) => !c.id.includes('-new') && !c.id.includes('-coming'));
+    expect(radarRows('/atlas', onlyPopular, picks)).toEqual([]);
+    expect(radarRows('/atlas', catalogs, [{ id: 337, country: 'US' }]).map((r) => r.title)).toEqual(
+      [],
+    );
+    // A screen showing one media type only pools the charts of that type.
+    expect(radarRows('/atlas', catalogs, picks, { only: 'tv' }).map((r) => r.title)).toEqual([
+      'Coming to Streaming',
+    ]);
   });
 });

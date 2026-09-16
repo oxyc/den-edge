@@ -494,6 +494,11 @@ export interface RowDef {
   id: string;
   title: string;
   load: (page: number) => Promise<Title[]>;
+  /**
+   * What a card says under its name, where the year is not the useful thing. A row pooling several services says
+   * which of them a title is on, and when it lands there.
+   */
+  caption?: (title: Title) => string | undefined;
 }
 
 /** One page of a TMDB list as titles. Rejects when TMDB doesn't answer; an empty page is the end. */

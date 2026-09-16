@@ -68,7 +68,7 @@
     {#each visible as title (key(title))}
       <PosterCard
         {title}
-        caption={title.year ? String(title.year) : undefined}
+        caption={row.caption?.(title) ?? (title.year ? String(title.year) : undefined)}
         href={titleHref(title)}
       />
     {:else}

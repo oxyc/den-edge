@@ -59,7 +59,13 @@
   import { titleHref, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
-  import { GUEST_PICKS, resolvePicks } from './lib/services';
+  import {
+    atlasCatalogs,
+    GUEST_PICKS,
+    radarRows,
+    resolvePicks,
+    type AtlasCatalog,
+  } from './lib/services';
   import { fetchServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
   import type { Routes } from './lib/routes';
@@ -723,15 +729,50 @@
       owned: new Set(titleRows.map((r) => titleKey(r.title))),
     };
   });
+  /**
+   * atlas's service charts, as its manifest lists them: what the pooled rows can be built from at all.
+   *
+   * Which services have a "new" or a "coming" chart is atlas's to say and changes with its releases, so the rows
+   * are only ever as broad as the manifest — and where it lists none, there are no rows rather than empty ones.
+   */
+  let serviceCatalogs = $state<AtlasCatalog[]>([]);
+  $effect(() => {
+    const here = atlas;
+    if (!here) return;
+    let current = true;
+    void atlasCatalogs(here).then(
+      (listed) => {
+        if (current) serviceCatalogs = listed;
+      },
+      () => {
+        // atlas down or unreachable: the screen is what it was before atlas had charts.
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
+  /** The pooled rows for this screen: what has just landed on the viewer's services, and what is about to. */
+  const radar = (only?: 'movie' | 'tv') =>
+    atlas
+      ? radarRows(atlas, serviceCatalogs, servicePicks, {
+          only,
+          names: serviceNames,
+          tmdbKey: tmdbKey ?? undefined,
+        })
+      : [];
   const rows = $derived.by(() => {
     if (!pages) {
       // No TMDB key, so no TMDB rows — a guest, until the server-side key lands. atlas needs no key at all:
       // its rows carry their own titles, posters and ids, and the poster images come from a CDN that asks
       // for none. Without this a guest's home is simply blank, which is what it was.
       if (!atlas) return [];
-      if (route.page === 'movies' || route.page === 'series')
-        return atlasRows(atlas, route.page === 'movies' ? 'movie' : 'tv');
-      return interleave([atlasRows(atlas, 'movie'), atlasRows(atlas, 'tv')]);
+      // The pooled rows need no key either — atlas's charts carry their own titles — so a visitor gets them too.
+      if (route.page === 'movies' || route.page === 'series') {
+        const type = route.page === 'movies' ? 'movie' : 'tv';
+        return [...radar(type), ...atlasRows(atlas, type)];
+      }
+      return [...radar(), ...interleave([atlasRows(atlas, 'movie'), atlasRows(atlas, 'tv')])];
     }
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
@@ -740,12 +781,21 @@
       // After Popular and the three genre rows, atlas's rows take turns with TMDB's categories and lead each
       // round, as the TV's index rows do: they say something a genre or a decade doesn't.
       const own = atlas ? atlasRows(atlas, type) : [];
-      return [...browse.slice(0, 4), ...interleave([own, browse.slice(4)])];
+      return [...browse.slice(0, 4), ...radar(type), ...interleave([own, browse.slice(4)])];
     }
-    // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories.
+    // Home's spine and recipe rows (seven), then atlas's three strongest film rows before the categories. The
+    // pooled rows sit behind what is trending and what is new on TMDB, which is the same question answered for
+    // everything rather than for the services this household watches.
     const home = homeRows(pages, { minYear });
     const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
-    return [...personalRows(pages, seeds), ...home.slice(0, 7), ...plot, ...home.slice(7)];
+    return [
+      ...personalRows(pages, seeds),
+      ...home.slice(0, 2),
+      ...radar(),
+      ...home.slice(2, 7),
+      ...plot,
+      ...home.slice(7),
+    ];
   });
   /**
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
@@ -776,6 +826,18 @@
   const services = $derived(
     [...new Set(servicePicks.map((pick) => pick.country))].flatMap((country) =>
       resolvePicks(servicePicks, directories[country] ?? [], country),
+    ),
+  );
+  /**
+   * Provider id → the name its country's directory gives it, for a pooled row's captions. Every id a service
+   * folds in maps to the one name, so a title listed under "Netflix Standard with Ads" still reads "Netflix".
+   * A visitor has no directory and so no names: their cards say when a title lands, not where.
+   */
+  const serviceNames: Record<number, string> = $derived(
+    Object.fromEntries(
+      services.flatMap(({ service }) =>
+        [service.id, ...service.variants].map((id) => [id, service.name]),
+      ),
     ),
   );
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */

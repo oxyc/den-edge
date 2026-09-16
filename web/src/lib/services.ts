@@ -110,6 +110,10 @@ function titlesOfMetas(body: unknown): Title[] {
         posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
         year: Number.isInteger(year) && year > 1800 ? year : undefined,
         imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
+        // When it lands on the service, or leaves it (atlas's `denAt`, in seconds). Only its leaving and coming
+        // charts carry one, and a chart older than atlas 0.41.0 carries none at all, so a row must still work
+        // without it.
+        arrivesAt: typeof meta.denAt === 'number' ? meta.denAt * 1000 : undefined,
       },
     ];
   });
@@ -213,6 +217,141 @@ export function atlasServiceRows(
         return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
       },
     }));
+}
+
+/**
+ * The two pooled rows: what has just landed anywhere the viewer looks, and what is about to.
+ *
+ * A service page answers "what is on Netflix"; this answers "what is new", which is the question someone browsing
+ * actually has. Only atlas can: TMDB has no arrival date and no notion of a catalogue changing, so its nearest
+ * equivalent is a release-date sort, which says when a film came out and not when it turned up here.
+ */
+const POOLS = [
+  { id: 'new', suffix: '-new', title: 'New on Streaming', soonest: false },
+  { id: 'coming', suffix: '-coming', title: 'Coming to Streaming', soonest: true },
+] as const;
+
+/** Charts at once. Twelve services' charts in one go is a burst den-edge's relay would rather not take at once. */
+const POOL_AT_ONCE = 6;
+
+/**
+ * One row per pool, over every service the viewer has, in the country each was picked for.
+ *
+ * Coverage is atlas's to decide: a pool only lists the services whose chart of that kind exists, so a row can be
+ * about four services where the page shows six, and says so by simply being the titles it found.
+ */
+export function radarRows(
+  base: string,
+  catalogs: readonly AtlasCatalog[],
+  picks: readonly ServicePick[],
+  {
+    only,
+    names = {},
+    tmdbKey,
+    fetchImpl = relayFetch,
+  }: {
+    only?: MediaType;
+    /** Provider id → the service's name, for the card's caption. A visitor has no directory, and so no names. */
+    names?: Record<number, string>;
+    tmdbKey?: string;
+    fetchImpl?: typeof fetch;
+  } = {},
+): RowDef[] {
+  return POOLS.flatMap((pool) => {
+    const asked = new Map<string, { catalog: AtlasCatalog; country: string }>();
+    for (const catalog of catalogs) {
+      if (!catalog.id.endsWith(pool.suffix) || (only && catalog.type !== only)) continue;
+      for (const pick of picks) {
+        // One request per chart per country, however many of a service's ids the viewer's pick names.
+        if (catalog.providerIds.includes(pick.id))
+          asked.set(`${catalog.id}:${pick.country}`, { catalog, country: pick.country });
+      }
+    }
+    const wanted = [...asked.values()];
+    if (!wanted.length) return [];
+    return [
+      {
+        id: `radar-${pool.id}-${only ?? 'all'}`,
+        title: pool.title,
+        caption: (title: Title) => captionOf(title, pool.soonest),
+        load: async (page: number) => {
+          if (page > 1) return [];
+          const charts = await inBatches(wanted, POOL_AT_ONCE, async ({ catalog, country }) => {
+            const path = catalog.type === 'tv' ? 'series' : 'movie';
+            const res = await fetchImpl(
+              `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`,
+            );
+            if (!res.ok) return [];
+            const named = catalog.providerIds.flatMap((id) => names[id] ?? []).slice(0, 1);
+            return titlesOfMetas(await res.json()).map((title) => ({ ...title, services: named }));
+          });
+          const merged = mergePool(charts, pool.soonest);
+          return tmdbKey ? fillPosters(merged, tmdbKey) : merged;
+        },
+      },
+    ];
+  });
+}
+
+/** `work` over `items`, `atOnce` at a time; one that fails contributes nothing rather than failing the row. */
+async function inBatches<T, R>(
+  items: readonly T[],
+  atOnce: number,
+  work: (item: T) => Promise<R[]>,
+): Promise<R[][]> {
+  const out: R[][] = [];
+  for (let at = 0; at < items.length; at += atOnce) {
+    out.push(
+      ...(await Promise.all(
+        items.slice(at, at + atOnce).map((item) => work(item).catch(() => [])),
+      )),
+    );
+  }
+  return out;
+}
+
+/**
+ * Several services' charts as one row: each service takes a turn, a title on two of them is named once, and a date
+ * decides the order wherever the charts carry one.
+ */
+function mergePool(charts: Title[][], soonest: boolean): Title[] {
+  const order: Title[] = [];
+  const byKey = new Map<string, Title>();
+  // Round-robin rather than one chart after another, so no single service owns the head of the row.
+  for (let i = 0; charts.some((chart) => i < chart.length); i++) {
+    for (const chart of charts) {
+      const title = chart[i];
+      if (!title) continue;
+      const key = `${title.type}:${title.id}`;
+      const already = byKey.get(key);
+      if (already) {
+        // On two services: the card names both instead of the row showing it twice. The kept title is the same
+        // object the row holds, so this reaches the card.
+        already.services = [...new Set([...(already.services ?? []), ...(title.services ?? [])])];
+        continue;
+      }
+      byKey.set(key, title);
+      order.push(title);
+    }
+  }
+  // A date beats the charts' own order — but only for the titles that have one. atlas carried none before 0.41.0,
+  // and a popularity-shaped chart never will, so the undated keep the round-robin exactly as it was above.
+  return order.slice().sort((a, b) => {
+    if (a.arrivesAt === b.arrivesAt) return 0;
+    if (a.arrivesAt === undefined) return 1;
+    if (b.arrivesAt === undefined) return -1;
+    return soonest ? a.arrivesAt - b.arrivesAt : b.arrivesAt - a.arrivesAt;
+  });
+}
+
+const DATE = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+
+/** Which service a pooled card is on, and — for a row about what is still to come — the day it lands. */
+function captionOf(title: Title, dated: boolean): string | undefined {
+  const where = title.services?.length ? title.services.join(' · ') : undefined;
+  const when =
+    dated && title.arrivesAt !== undefined ? DATE.format(new Date(title.arrivesAt)) : undefined;
+  return [where, when].filter(Boolean).join(' · ') || undefined;
 }
 
 /**

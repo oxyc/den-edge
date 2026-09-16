@@ -42,6 +42,14 @@ export interface Title {
   adult?: boolean;
   /** Its IMDb id where whatever named it said so — scout keys availability by it, so no lookup is needed. */
   imdbId?: string;
+  /**
+   * When it arrives on a streaming service, or leaves one — epoch milliseconds, from atlas's chart (`denAt`, which
+   * is in seconds). Only its leaving and coming charts carry one, and nothing else can: TMDB has no arrival date,
+   * so without this a row of what is coming can be ordered only by the order it was sent in.
+   */
+  arrivesAt?: number;
+  /** Which services a pooled row found it on, named for the card's caption ("Netflix", "Max"). */
+  services?: string[];
 }
 
 type Status = 'none' | 'watchlist' | 'inProgress' | 'watched';
