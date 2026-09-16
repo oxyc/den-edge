@@ -13,6 +13,10 @@ const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 // reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
 const reel = process.env.DEN_REEL ?? 'http://192.168.86.193:8092';
+// den-remux, for the player and for test/remux.html. Unlike atlas and reel this keeps the prefix: den-remux's own
+// routes are under /remux, which is why tailscale serve sends /remux to :8095/remux rather than stripping it. A
+// rewrite here would ask it for /session, which it does not serve.
+const remux = process.env.DEN_REMUX ?? 'http://192.168.86.193:8095';
 // The probe is an instrument, not part of the app: it injects a beacon into every page this server hands
 // out. Left on unconditionally it reaches the e2e suite too, where `POST /__probe` reads as an unmocked
 // request and fails every spec that guards the network. On for a session someone is watching from a
@@ -34,6 +38,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/atlas/, ''),
       },
       '/reel': { target: reel, changeOrigin: true, rewrite: (path) => path.replace(/^\/reel/, '') },
+      '/remux': { target: remux, changeOrigin: true },
     },
   },
   build: { target: 'es2022' },
