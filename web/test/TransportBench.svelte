@@ -145,14 +145,19 @@
       // them warm numbers — useful, but not what a viewer opening a fresh title pays. Check the `reel` column
       // to confirm this one really did build: `index` with a duration, rather than `cache hit`.
       //
-      // THIS ROW IS SINGLE-USE PER HEIGHT, and that is not a fault to debug. The first sweep builds the index;
-      // every sweep after it, on this trailer, reads the one that was built and reports `cache hit` — at which
-      // point the number beside it is warm and means nothing it claims to. It was 480 until 2026-09-16, when
-      // two iPhone sweeps had already spent it. Move the height again for the next genuinely cold measurement,
-      // and take the number from the FIRST run rather than the repeats.
+      // THE HEIGHT IS NOT WHAT MAKES THIS COLD, and a sweep that assumes otherwise measures nothing. reel's
+      // `height_cap` rounds a request DOWN to a rung of its ladder — `[720, 480]` — and anything below the
+      // lowest rung is raised to it, so 540, 480 and 360 are one and the same index (`vid@480`). There are
+      // exactly three progressive indexes per trailer: the full ladder, @720 and @480. A number nobody has
+      // typed before is still an index somebody has already built.
+      //
+      // So a genuinely cold measurement needs a TRAILER nobody has resolved at this rung, not a new number:
+      // point `?url=` at one, and read the FIRST run. Every sweep after that, on that trailer, is warm and the
+      // `reel` column will say so — an `index` entry with a duration is a real build, and its absence means
+      // this row measured a cache. (`cache;desc=hit` beside it refers to the URL resolve, not the index.)
       {
-        name: 'progressive 540 audio (cold)',
-        url: at('progressive', 'mp4', 'height=540&audio=1'),
+        name: 'progressive 480 audio (cold on a fresh trailer)',
+        url: at('progressive', 'mp4', 'height=480&audio=1'),
         kind: 'file' as const,
         on: true,
       },
