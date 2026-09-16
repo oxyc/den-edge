@@ -65,8 +65,39 @@
   const SCOUT_KEY = 'den.test.remux.scout';
   const SUBS_KEY = 'den.test.remux.subtitles';
 
-  let scout = $state(localStorage.getItem(SCOUT_KEY) ?? '');
-  let subtitlesInstall = $state(localStorage.getItem(SUBS_KEY) ?? '');
+  /**
+   * The install as den-remux takes it, from whatever was pasted.
+   *
+   * The library holds an install WITH `/manifest.json` on the end, and that is what you get by copying the
+   * URL out of Settings or off a configure page — but den-remux accepts an allowed origin and exactly one
+   * base64url config segment, so the manifest file on the end is a second segment and the session is refused
+   * with `bad_scout` before a request is made (its SSRF guard, `validate_scoped`). The app never meets this
+   * because scout.ts strips the suffix on the way out of the library; this page is typed into by hand.
+   */
+  const MANIFEST = '/manifest.json';
+
+  function installOf(url: string): string {
+    const trimmed = url.trim();
+    const bare = trimmed.endsWith(MANIFEST) ? trimmed.slice(0, -MANIFEST.length) : trimmed;
+    // A trailing slash is a second segment to that guard as surely as the manifest is.
+    return bare.replace(/\/+$/, '');
+  }
+
+  /**
+   * Prefilled from `web/.env`, so a phone doesn't have to be handed a sealed config URL by hand — typing one
+   * into iOS Safari is the single most tedious part of running this page on the device it exists for.
+   *
+   * Safe to keep a credential in: `.env` is gitignored, and `vite build` takes only `index.html` as its
+   * input, so no test page — and no `VITE_` value one of them reads — is ever inlined into a shipped bundle.
+   * The dev server is the only thing that serves this.
+   *
+   * localStorage wins where this browser has been used before, so editing the field still sticks.
+   */
+  const PREFILL_SCOUT = import.meta.env.VITE_REMUX_SCOUT ?? '';
+  const PREFILL_SUBTITLES = import.meta.env.VITE_REMUX_SUBTITLES ?? '';
+
+  let scout = $state(localStorage.getItem(SCOUT_KEY) ?? PREFILL_SCOUT);
+  let subtitlesInstall = $state(localStorage.getItem(SUBS_KEY) ?? PREFILL_SUBTITLES);
   // The browser key is never persisted: den-remux trades it for a short-lived token that lives in remux.ts's
   // own memory, and a key in localStorage would outlive every reason to have typed it.
   let key = $state('');
@@ -99,7 +130,7 @@
     imdb: imdb.trim(),
     season: season.trim() ? Number(season) : undefined,
     episode: episode.trim() ? Number(episode) : undefined,
-    scout: scout.trim(),
+    scout: installOf(scout),
   });
 
   async function probe() {
@@ -126,7 +157,7 @@
 
   async function list() {
     if (!title.imdb || !title.scout) return;
-    localStorage.setItem(SCOUT_KEY, scout.trim());
+    localStorage.setItem(SCOUT_KEY, installOf(scout));
     busy = 'asking den-remux what it could play';
     try {
       releases = (await listReleases(title)) ?? [];
@@ -145,7 +176,7 @@
   async function begin(pick?: string) {
     if (!title.imdb || !title.scout) return;
     stop();
-    localStorage.setItem(SCOUT_KEY, scout.trim());
+    localStorage.setItem(SCOUT_KEY, installOf(scout));
     localStorage.setItem(SUBS_KEY, subtitlesInstall.trim());
     failure = undefined;
     timings = {};
@@ -454,7 +485,7 @@
 
   <form onsubmit={letIn} class="row">
     <span>Browser key</span>
-    <input type="password" bind:value={key} placeholder="remux-browser-key.txt" />
+    <input type="password" bind:value={key} placeholder="only for an availability-only install" />
     <button type="submit" disabled={!key.trim()}>Sign in</button>
     {#if signedIn}<span class="ok">signed in</span>{/if}
     {#if badKey}<span class="bad">den-remux does not know that key</span>{/if}
@@ -462,7 +493,7 @@
 
   <label class="row">
     <span>Scout install</span>
-    <input bind:value={scout} placeholder="https://…/scout/<config>" />
+    <input bind:value={scout} placeholder="https://d-scout.oxy.fi/<config>" />
   </label>
   <label class="row">
     <span>Subtitles</span>
@@ -547,10 +578,9 @@
       {#each releases as release (release.filename)}
         <div class="release">
           <button onclick={() => begin(release.filename)} disabled={!!busy}>Play this one</button>
+          <!-- scout's label already ends with the size, and words it better than a round number does:
+               it says 6.9 GB where rounding here said 7. The `size` field is in the report either way. -->
           <span>{release.label}</span>
-          <span class="note">
-            {release.size ? Math.round(release.size / 1024 ** 3) + ' GB' : ''}
-          </span>
         </div>
       {/each}
     </fieldset>
