@@ -119,15 +119,16 @@
           {@const ready = source.cached === true || job?.state === 'ready'}
           <li>
             <div class="source-copy">
-              <strong>{source.filename}</strong>
-              <p class="badges">
-                {[...source.badges, size(source.size)].filter(Boolean).join(' · ')}
+              <p class="chips">
+                {#each source.badges as badge, i (i)}<span class="chip">{badge}</span>{/each}
+                {#if size(source.size)}<span class="chip quiet">{size(source.size)}</span>{/if}
               </p>
+              <strong>{source.filename}</strong>
               {#if source.probed && source.languages.length}<p class="languages">
                   Audio: {source.languages.join(', ')}
                 </p>{/if}
               <p class="status" class:ready>
-                {ready
+                <span class="dot" aria-hidden="true"></span>{ready
                   ? 'Ready to play'
                   : job?.state === 'preparing'
                     ? `Downloading${job.progress !== undefined ? ` · ${Math.round(job.progress * 100)}%` : ''}`
@@ -213,40 +214,82 @@
   }
 
   ul {
+    display: grid;
+    gap: 10px;
     list-style: none;
     padding: 0;
     margin: 0;
   }
 
+  /* A card each, rather than rows divided by hairlines: a release is a thing you choose between, and the
+     filenames are long enough that a separator alone left the list reading as one paragraph. */
   li {
     display: flex;
     gap: 24px;
     justify-content: space-between;
     align-items: center;
-    padding: 20px 0;
-    border-bottom: 1px solid var(--line);
+    padding: 16px 18px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #ffffff08;
   }
 
   .source-copy {
     min-width: 0;
   }
 
-  strong {
-    overflow-wrap: anywhere;
-    font-size: 15px;
+  /* What the release IS, first and scannable. The filename goes under it as the detail: eighty characters
+     of dots and dashes is not a headline, however much of the truth it carries. */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 8px;
   }
 
-  .badges,
+  .chip {
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: #ffffff14;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .chip.quiet {
+    border: 1px solid var(--line);
+    background: none;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  strong {
+    overflow-wrap: anywhere;
+    font-size: 14px;
+    color: var(--muted);
+  }
+
   .languages {
     font-size: 13px;
     color: var(--muted);
-    margin: 8px 0;
+    margin: 8px 0 0;
   }
 
   .status {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     font-size: 13px;
     color: #ffc177;
     margin: 8px 0 0;
+  }
+
+  /* Colour alone says ready-or-not; the dot gives it a shape as well, for anyone who can't tell the two. */
+  .dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentcolor;
   }
 
   .status.ready {
