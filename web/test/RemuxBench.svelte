@@ -120,6 +120,16 @@
   let startAt = $state('');
   let capBitrate = $state('');
   let refused = $state(false);
+  /**
+   * Claim no Dolby Digital, and change nothing else.
+   *
+   * The discriminator `withoutRefused` cannot be: it zeroes HEVC, HDR, Dolby Vision and E-AC-3 together, so
+   * a session asked that way converts the picture AND the sound and says nothing about which of them a
+   * player refused. An iPhone reporting `MediaError 3` on a copied stream names neither track. Dropping this
+   * one claim keeps the video copied and sends the audio through AAC instead, so the next run differs from
+   * the failing one in exactly one thing.
+   */
+  let noEac3 = $state(false);
 
   let claimed = $state<Playable>();
   let measured = $state<number | undefined>();
@@ -215,7 +225,7 @@
     const started = performance.now();
     try {
       const can = (claimed ??= await playable());
-      const asks = refused ? withoutRefused(can) : can;
+      const asks = refused ? withoutRefused(can) : noEac3 ? { ...can, eac3: false } : can;
       const { audio, subtitleLanguages } = wantedLanguages(
         { subtitle: subtitleLanguage.trim() || undefined },
         undefined,
@@ -461,6 +471,7 @@
     at: startedAt,
     asked: {
       refusedReport: refused,
+      noEac3,
       capMbit: capBitrate.trim() ? Number(capBitrate) : undefined,
       measuredLimit: measured,
       startAt: startAt.trim() ? Number(startAt) : undefined,
@@ -589,6 +600,9 @@
     <input class="small" bind:value={capBitrate} placeholder="Mbit" />
     <label class="check">
       <input type="checkbox" bind:checked={refused} /> ask as a browser that refused
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={noEac3} /> claim no Dolby Digital (audio to AAC, picture unchanged)
     </label>
   </div>
   <p class="note">
