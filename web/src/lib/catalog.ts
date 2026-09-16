@@ -104,23 +104,39 @@ const EXPLORE: Record<MediaType, number[]> = {
   tv: [10759, 35, 18, 80, 10765, 16, 9648, 99, 10764, 10751],
 };
 
-/** Film and TV origins, most catalog-rich first (DiscoveryCatalog.countries). */
-const COUNTRIES: [code: string, demonym: string][] = [
-  ['KR', 'Korean'],
-  ['JP', 'Japanese'],
-  ['ES', 'Spanish'],
-  ['FR', 'French'],
-  ['GB', 'British'],
-  ['IT', 'Italian'],
+/**
+ * Film and TV origins, most catalog-rich first (DiscoveryCatalog.countries), each with the language its row is
+ * predominantly in.
+ *
+ * The language is here for one purpose: not offering a row whose language the viewer has excluded. "Turkish
+ * Series" with Turkish off drew a shelf of titles TMDB files under Turkey but tags as Urdu — so the hide rules,
+ * which read the language, left every card in place and the row read as a wall of exactly what was unwanted.
+ * It is never used to filter a title; a country is not a language, and the cards keep being judged by their own.
+ *
+ * India is deliberately left without one: excluding Hindi is not excluding Indian film, and there is no single
+ * language that row is about.
+ */
+const COUNTRIES: [code: string, demonym: string, language?: string][] = [
+  ['KR', 'Korean', 'ko'],
+  ['JP', 'Japanese', 'ja'],
+  ['ES', 'Spanish', 'es'],
+  ['FR', 'French', 'fr'],
+  ['GB', 'British', 'en'],
+  ['IT', 'Italian', 'it'],
   ['IN', 'Indian'],
-  ['DE', 'German'],
-  ['SE', 'Swedish'],
-  ['DK', 'Danish'],
-  ['BR', 'Brazilian'],
-  ['MX', 'Mexican'],
-  ['CN', 'Chinese'],
-  ['TR', 'Turkish'],
+  ['DE', 'German', 'de'],
+  ['SE', 'Swedish', 'sv'],
+  ['DK', 'Danish', 'da'],
+  ['BR', 'Brazilian', 'pt'],
+  ['MX', 'Mexican', 'es'],
+  ['CN', 'Chinese', 'zh'],
+  ['TR', 'Turkish', 'tr'],
 ];
+
+/** The language a country's row is predominantly in, for suppression only (`COUNTRIES`). */
+const LANGUAGE_OF: Record<string, string> = Object.fromEntries(
+  COUNTRIES.flatMap(([code, , language]) => (language ? [[code, language]] : [])),
+);
 
 interface Recipe {
   id: string;
@@ -423,10 +439,36 @@ export function interleave<T>(lists: T[][]): T[] {
  * preferred first, the recipes for this type, the decades down to the 1950s, the countries — interleaved — then
  * Critically Acclaimed. `minYear` (the TV's year floor) bounds every row, and drops a decade wholly below it.
  */
+/**
+ * Is this row about nothing but languages the viewer has excluded?
+ *
+ * A row whose whole premise is one of them — "K-Drama" with Korean off — has every card hidden by the same
+ * rules, so it draws a heading over an empty shelf and keeps asking TMDB for more of what it will not show.
+ * A row that merely includes such a language among others keeps it: the rest of it still has titles.
+ */
+function onlyExcluded(query: DiscoverQuery, excluded: ReadonlySet<string>): boolean {
+  if (!excluded.size) return false;
+  const languages = query.originalLanguage?.split('|').filter(Boolean) ?? [];
+  if (languages.length) return languages.every((code) => excluded.has(code));
+  // A row that names no language but one origin country is about that country's language in practice —
+  // "Turkish Drama" is `originCountry: ['TR']` and nothing else. That one matters: TMDB files those titles
+  // under Turkey while tagging many of them Urdu, so the hide rules (which read the language) left every
+  // card standing and the row filled with precisely what had been excluded.
+  const countries = query.originCountry ?? [];
+  const spoken = countries.flatMap((code) => LANGUAGE_OF[code] ?? []);
+  return (
+    spoken.length === countries.length && spoken.length > 0 && spoken.every((c) => excluded.has(c))
+  );
+}
+
 export function categories(
   type: MediaType,
   currentYear: number,
-  { preferredGenres = [] as number[], minYear = undefined as number | undefined } = {},
+  {
+    preferredGenres = [] as number[],
+    minYear = undefined as number | undefined,
+    excludedLanguages = new Set<string>(),
+  } = {},
 ): Category[] {
   const noun = type === 'tv' ? 'Series' : 'Movies';
   const dateGte = minYear ? `${minYear}-01-01` : undefined;
@@ -486,7 +528,11 @@ export function categories(
       sortBy: 'vote_average.desc',
     },
   };
-  return [...interleave<Category>([genres, recipes, decades, countries]), acclaimed];
+  // One rule, applied once at the end: a row about nothing but excluded languages is never offered, whether
+  // it says so with a language or with the country that stands for one.
+  return [...interleave<Category>([genres, recipes, decades, countries]), acclaimed].filter(
+    (c) => !onlyExcluded(c.query, excludedLanguages),
+  );
 }
 
 /** A row on a browse screen: its header now, its posters a page at a time. */
@@ -543,7 +589,11 @@ const HOME_RECIPES = ['romantic-comedy', 'nordic-noir', 'police-procedural'];
  */
 export function homeRows(
   pages: Pages,
-  { now = new Date(), minYear = undefined as number | undefined } = {},
+  {
+    now = new Date(),
+    minYear = undefined as number | undefined,
+    excludedLanguages = new Set<string>(),
+  } = {},
 ): RowDef[] {
   const since = new Date(now.getTime() - 120 * 86_400_000);
   const spine: RowDef[] = [
@@ -570,13 +620,13 @@ export function homeRows(
       load: (page) => pages('/movie/upcoming', 'movie', {}, page),
     },
   ];
-  const recipes = HOME_RECIPES.flatMap((slug) => RECIPES.find((r) => r.id === slug) ?? []).map(
-    (r) => discoverRow(pages, `recipe-${r.id}`, r.title, r.query),
-  );
+  const recipes = HOME_RECIPES.flatMap((slug) => RECIPES.find((r) => r.id === slug) ?? [])
+    .filter((r) => !onlyExcluded(r.query, excludedLanguages))
+    .map((r) => discoverRow(pages, `recipe-${r.id}`, r.title, r.query));
   const year = now.getFullYear();
   const tail = interleave([
-    categories('movie', year, { minYear }),
-    categories('tv', year, { minYear }),
+    categories('movie', year, { minYear, excludedLanguages }),
+    categories('tv', year, { minYear, excludedLanguages }),
   ]).filter(
     (c) =>
       c.id !== 'acclaimed-tv' &&
@@ -620,6 +670,7 @@ export function browseRows(
     now = new Date(),
     minYear = undefined as number | undefined,
     hiddenGenres = new Set<number>(),
+    excludedLanguages = new Set<string>(),
   } = {},
 ): RowDef[] {
   const curated = EXPLORE[type].filter((id) => !hiddenGenres.has(id)).slice(0, 3);
@@ -631,7 +682,7 @@ export function browseRows(
   const genreRows = curated.map((id) =>
     discoverRow(pages, `genre-${id}`, GENRES[type][id] ?? '', { mediaType: type, genres: [id] }),
   );
-  const tail = categories(type, now.getFullYear(), { minYear }).filter((c) => {
+  const tail = categories(type, now.getFullYear(), { minYear, excludedLanguages }).filter((c) => {
     const only = c.id.startsWith('genre-') ? c.query.genres?.[0] : undefined;
     return only === undefined || (!curated.includes(only) && !hiddenGenres.has(only));
   });

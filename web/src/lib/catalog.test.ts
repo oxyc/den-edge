@@ -167,3 +167,39 @@ describe('the screens', () => {
     expect(asked).toHaveLength(1);
   });
 });
+
+describe('rows about a language the viewer has excluded', () => {
+  const ids = (excludedLanguages?: Set<string>) =>
+    categories('tv', 2026, excludedLanguages ? { excludedLanguages } : {}).map((c) => c.id);
+
+  it('are not offered at all, whether they say so by language or by country', () => {
+    expect(ids()).toEqual(
+      expect.arrayContaining(['recipe-k-drama-tv', 'recipe-turkish-drama-tv', 'country-TR-tv']),
+    );
+
+    // Hidden cards under a heading is the symptom: the row is about nothing else, so it can only ever draw
+    // a shelf of what the hide rules take straight back out.
+    expect(ids(new Set(['ko']))).not.toContain('recipe-k-drama-tv');
+
+    // Turkey is the harder case. "Turkish Drama" names no language at all, only `originCountry`, and TMDB
+    // tags many titles it files under Turkey as Urdu — so nothing hid them and the row filled with exactly
+    // what had been excluded.
+    const turkish = ids(new Set(['tr']));
+    expect(turkish).not.toContain('recipe-turkish-drama-tv');
+    expect(turkish).not.toContain('country-TR-tv');
+
+    // India stands for no single language, so excluding one never suppresses it.
+    expect(ids(new Set(['hi']))).toContain('country-IN-tv');
+    // And an unrelated exclusion leaves everything else alone.
+    expect(ids(new Set(['ko']))).toContain('country-TR-tv');
+  });
+
+  it('keeps a row about several languages when only one of them is excluded', () => {
+    const many = RECIPES.find((r) => r.query.originalLanguage?.includes('|'));
+    if (!many) throw new Error('no multi-language recipe to check');
+    const type = many.query.mediaType;
+    expect(
+      categories(type, 2026, { excludedLanguages: new Set(['sv']) }).map((c) => c.id),
+    ).toContain(`recipe-${many.id}-${type}`);
+  });
+});

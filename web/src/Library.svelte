@@ -819,7 +819,11 @@
     const minYear = prefs.minReleaseYear;
     if (route.page === 'movies' || route.page === 'series') {
       const type = route.page === 'movies' ? 'movie' : 'tv';
-      const browse = browseRows(type, pages, { minYear, hiddenGenres: prefs.excludedGenres });
+      const browse = browseRows(type, pages, {
+        minYear,
+        hiddenGenres: prefs.excludedGenres,
+        excludedLanguages: prefs.excludedLanguages,
+      });
       // After Popular and the three genre rows, atlas's rows take turns with TMDB's categories and lead each
       // round, as the TV's index rows do: they say something a genre or a decade doesn't.
       const own = atlas ? atlasRows(atlas, type) : [];
@@ -830,7 +834,7 @@
     // What has just landed on this household's services does not get a row of its own here: it leads New
     // Releases, which was asking the same question of TMDB and meaning the release date by it. What is still
     // to come has no such twin, so it stays a row.
-    const home = homeRows(pages, { minYear });
+    const home = homeRows(pages, { minYear, excludedLanguages: prefs.excludedLanguages });
     const plot = atlas ? atlasRows(atlas, 'movie').slice(0, 3) : [];
     const pooled = radar();
     const arrivals = pooled.find((row) => row.id.startsWith('radar-new'));
