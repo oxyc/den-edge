@@ -162,25 +162,29 @@
 </script>
 
 {#if service}
-  <!-- The hero first, as Home has it and as the TV's channel page opens. It is full-bleed and pulls itself UP by
-       the height of the navigation bar to run behind it, so anything placed above it is covered rather than
-       cleared — which is what put the brand behind the picture. The brand follows immediately under it, still
-       naming the catalogue before a single row. -->
-  {#if featured.length}
-    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
-  {/if}
-  <header class="brand">
-    {#if service.logoPath}
-      <img
-        class="logo"
-        src={`https://image.tmdb.org/t/p/w154${service.logoPath}`}
-        alt=""
-        width="64"
-        height="64"
-      />
+  <!-- The brand rides ON the hero, top left, as the TV's channel page does (`ServiceChannelView`: a ZStack
+       aligned `.topLeading`, lockup padded in from the edge) — so the page opens AS this service rather than as
+       a label glued above somebody else's artwork. The hero is full-bleed and pulls itself up behind the
+       navigation bar, which is why the lockup is positioned within this wrapper rather than placed before it.
+       Narrower than the desktop breakpoint it returns to the flow, where a lockup over a short picture crowds
+       the title it happens to be sitting on. -->
+  <div class="hero" class:branded={featured.length > 0}>
+    {#if featured.length}
+      <Billboard titles={featured} {tmdbKey} {reel} {routes} />
     {/if}
-    <h1>{service.name}</h1>
-  </header>
+    <header class="brand">
+      {#if service.logoPath}
+        <img
+          class="logo"
+          src={`https://image.tmdb.org/t/p/w154${service.logoPath}`}
+          alt=""
+          width="64"
+          height="64"
+        />
+      {/if}
+      <h1>{service.name}</h1>
+    </header>
+  </div>
   <JustWatchCredit />
   {#if both}
     <div class="tabs">
@@ -197,11 +201,38 @@
 {/if}
 
 <style>
+  .hero {
+    position: relative;
+  }
+
   .brand {
     display: flex;
     align-items: center;
     gap: 14px;
     margin: 0 0 20px;
+  }
+
+  /* On the picture rather than above it, at every width: the page opens as this service, and the rows keep the
+     line the lockup would otherwise take. */
+  .branded .brand {
+    position: absolute;
+
+    /* Measured from this wrapper, whose own top edge is pulled up with the billboard's negative margin — they
+       collapse — so it sits behind the navigation bar unless the bar's height is added back. */
+    top: calc(var(--bar-space) + 16px);
+    left: 0;
+    z-index: 2;
+    margin: 0;
+
+    /* A label, not a control: the slide beneath it stays pressable through the lockup. */
+    pointer-events: none;
+    text-shadow: 0 2px 14px rgb(0 0 0 / 0.65);
+  }
+
+  @media (width >= 760px) {
+    .branded .brand {
+      top: calc(var(--bar-space) + 24px);
+    }
   }
 
   .logo {
@@ -213,6 +244,48 @@
   h1 {
     margin: 0;
     font-size: 28px;
+  }
+
+  /* On a phone the lockup sits in the flow rather than on the picture, so it can be smaller: it is naming the
+     page, not competing with the artwork above it. */
+  @media (width <= 759px) {
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+    }
+
+    h1 {
+      font-size: 22px;
+    }
+
+    /* The mark alone on a phone — a service's logo is the thing people recognise, and the name would take a
+       third of the width of the picture to repeat it. Hidden from the eye only: the heading still names the
+       page for a screen reader and for the document outline. Where there is no logo the name is all there is,
+       so this applies only when one precedes it. */
+    .branded .logo + h1 {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    /* Three margins stack between the picture and the first row — the hero's own, the credit's and the tabs' —
+       which on a phone is most of a thumb's worth of nothing. Tightened here rather than at each component:
+       the hero's spacing is Home's too, and the credit says in as many words that the surface owns its own. */
+    .hero :global(.billboard) {
+      margin-bottom: 14px;
+    }
+
+    .hero + :global(.credit) {
+      margin-bottom: 12px;
+    }
+
+    .tabs {
+      margin-bottom: 14px;
+    }
   }
 
   .tabs {
