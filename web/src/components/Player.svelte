@@ -26,6 +26,15 @@
   } from '../lib/remux';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
+  import {
+    activeAt,
+    canAutoSkip,
+    fetchSkipSegments,
+    SKIP_LABEL,
+    type SkipKind,
+    type SkipSegment,
+  } from '../lib/skipdb';
+  import { shouldWarmNext } from '../lib/binge';
 
   let {
     title,
@@ -38,8 +47,10 @@
     subtitles,
     audioLanguage,
     subtitleLanguage,
+    autoSkip = false,
     resume,
     next,
+    nextEpisode,
     onprogress,
     onnext,
     onclose,
@@ -58,10 +69,14 @@
     audioLanguage?: string;
     /** Its subtitle language; undefined is off. */
     subtitleLanguage?: string;
+    /** Settings › Playback's "Auto-skip intros & credits". A Skip button shows either way. */
+    autoSkip?: boolean;
     /** Where the library says this was left. */
     resume: { fraction: number; seconds?: number };
     /** The episode after this one, as `S2 · E4`, when there is one. */
     next?: string;
+    /** That episode's own numbers, so it can be warmed before the advance (`shouldWarmNext`). */
+    nextEpisode?: { season?: number; episode?: number };
     onprogress: (fraction: number, seconds: number) => void;
     onnext?: () => void;
     onclose: () => void;
@@ -373,6 +388,77 @@
     upNext = null;
   }
 
+  /** SkipDB's segments for what is playing, and the one under the playhead right now. */
+  let segments = $state<SkipSegment[]>([]);
+  let active = $state<SkipSegment | null>(null);
+  /**
+   * Kinds already skipped in this session, so a viewer who scrubs back into the credits is not yanked out of
+   * them again. Deliberately not `$state`: nothing renders it, and a write must not re-run the tick.
+   */
+  // A plain record rather than a Set: `svelte/prefer-svelte-reactivity` would have any Set here be a
+  // SvelteSet, and reactivity is the one thing this must not have — nothing renders it, and a write must not
+  // re-run the tick that made it. Four kinds do not need a Set anyway.
+  const skipped: Partial<Record<SkipKind, true>> = {};
+
+  /**
+   * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
+   * — see `fetchSkipSegments`. `imdb` is resolved by then: `begin` resolves it before starting a session.
+   */
+  async function loadSegments() {
+    if (!imdb || segments.length || ended) return;
+    const found = await fetchSkipSegments(imdb, {
+      season,
+      episode,
+      durationSeconds: length(),
+    });
+    if (!ended) segments = found;
+  }
+
+  /**
+   * Four times a second, which is what `timeupdate` gives: enough to offer a button the moment a segment starts
+   * and to leave one within a second of it, and far finer than the progress report's minute.
+   */
+  function tick() {
+    if (!video) return;
+    warmNext();
+    if (!segments.length) return;
+    active = activeAt(segments, video.currentTime);
+    if (!autoSkip || !active || !canAutoSkip(active) || skipped[active.kind]) return;
+    skipActive();
+  }
+
+  /** Whether the next episode has already been warmed. Not `$state`: nothing renders it. */
+  let warmedNext = false;
+
+  /**
+   * Ask den-remux what the next episode could play, shortly before this one ends.
+   *
+   * Nothing is kept from the answer. The point is that den-scout has scraped the indexers and cached the list
+   * by the time the advance asks for it in earnest — the slow part of starting an episode — rather than the
+   * viewer waiting through it after the countdown. Choosing a release is left to that session, deliberately.
+   */
+  function warmNext() {
+    if (warmedNext || !imdb || !video || !onnext) return;
+    const to = nextEpisode;
+    if (!to || !shouldWarmNext(video.currentTime, length())) return;
+    warmedNext = true;
+    void listReleases(
+      { imdb, season: to.season, episode: to.episode, scout: scout.install },
+      undefined,
+      remux,
+    );
+  }
+
+  /** Jump just past the active segment — the Skip button's action, and auto-skip's. */
+  function skipActive() {
+    const segment = active;
+    if (!video || !segment) return;
+    skipped[segment.kind] = true;
+    const total = length();
+    video.currentTime = total > 0 ? Math.min(total, segment.end) : segment.end;
+    active = null;
+  }
+
   /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
   function switchAudio(event: Event) {
     const n = Number((event.currentTarget as HTMLSelectElement).value);
@@ -540,9 +626,13 @@
         controls
         autoplay
         playsinline
-        onloadedmetadata={seekToStart}
+        onloadedmetadata={() => {
+          seekToStart();
+          void loadSegments();
+        }}
         onplay={playing}
         onpause={paused}
+        ontimeupdate={tick}
         onended={finished}
         onerror={() => broke()}
       ></video>
@@ -603,6 +693,13 @@
               {/each}
             </select>
           </div>
+        {/if}
+        <!-- Shown whatever the auto-skip setting says, and whatever SkipDB's confidence is: offering a skip
+             costs a press to refuse, while acting on uncertain times costs the end of the episode. In
+             fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
+             auto-skip, being a seek, still works there. -->
+        {#if active}
+          <button class="primary" onclick={skipActive}>{SKIP_LABEL[active.kind]}</button>
         {/if}
         {#if onnext && next}
           {#if upNext !== null}
