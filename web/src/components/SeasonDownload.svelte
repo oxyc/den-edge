@@ -11,6 +11,7 @@
     episodes,
     routes,
     disabled = false,
+    compact = false,
   }: {
     scout: Addon;
     imdb: string;
@@ -18,18 +19,23 @@
     episodes: Episode[];
     routes: Routes;
     disabled?: boolean;
+    /** Beside the season tabs: the icon alone, since the tab it sits next to already says which season. */
+    compact?: boolean;
   } = $props();
   const job = $derived(seasonJobs.get(seasonJobKey(scout, imdb, season)));
+  // Always spoken in full, however little is drawn: "Download" alone would not say what is downloaded.
+  const label = $derived(`Download season ${season}`);
 </script>
 
-<div class="download">
+<div class="download" class:compact>
   <button
     disabled={disabled || job?.running}
+    aria-label={label}
+    title={label}
     onclick={() => void downloadSeason(scout, imdb, season, episodes, routes)}
   >
-    <DetailIcon name="download" />{job?.running
-      ? `Preparing ${job.checked} of ${job.total}`
-      : 'Download season'}
+    <DetailIcon name="download" />{#if job?.running}Preparing {job.checked} of {job.total}{:else if !compact}Download
+      season{/if}
   </button>
   {#if job && !job.running}<p role="status">
       {job.queued} queued · {job.ready} already ready{job.unavailable
@@ -69,5 +75,17 @@
   p {
     font-size: 13px;
     color: var(--muted);
+  }
+
+  /* In the season bar it is one control among the tabs, so it carries no margin of its own. */
+  .compact {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+  }
+
+  .compact button {
+    padding: 8px 12px;
   }
 </style>

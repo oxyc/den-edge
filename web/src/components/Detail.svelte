@@ -424,13 +424,28 @@
               : `${series.watched} of ${series.total} watched`}</span
           >{/if}
       </div>
-      <DetailTabs
-        tabs={d.seasons.map((s) => ({ value: String(s.number), label: s.name }))}
-        value={String(season)}
-        label="Seasons"
-        {panel}
-        onchange={(value) => (season = Number(value))}
-      />
+      <div class="season-bar">
+        <DetailTabs
+          tabs={d.seasons.map((s) => ({ value: String(s.number), label: s.name }))}
+          value={String(season)}
+          label="Seasons"
+          {panel}
+          onchange={(value) => (season = Number(value))}
+        />
+        <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
+             foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
+        {#if scout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+          <SeasonDownload
+            {scout}
+            imdb={d.imdbId}
+            season={displayedSeason}
+            episodes={seasonEpisodes}
+            {routes}
+            disabled={seasonLoading}
+            compact
+          />
+        {/if}
+      </div>
       <div
         id={panel}
         role="tabpanel"
@@ -472,16 +487,6 @@
           </ol>
         {/if}
       </div>
-      {#if scout && d.imdbId && displayedSeason !== null && seasonEpisodes}
-        <SeasonDownload
-          {scout}
-          imdb={d.imdbId}
-          season={displayedSeason}
-          episodes={seasonEpisodes}
-          {routes}
-          disabled={seasonLoading}
-        />
-      {/if}
     </section>
   {/if}
   {#if cast.length}
@@ -705,6 +710,14 @@
     justify-content: space-between;
     gap: 16px;
     margin-bottom: 20px;
+  }
+
+  /* The seasons and their download control on one line, wrapping to two where the tabs need the width. */
+  .season-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
   }
 
   h2 {
