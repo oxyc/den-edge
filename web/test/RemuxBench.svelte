@@ -161,12 +161,16 @@
    *
    * `asked` is a plain binding rather than state, so settling it cannot re-run this.
    */
-  let asked = false;
+  let asked = '';
 
   $effect(() => {
-    if (asked || !title.imdb || !title.scout) return;
-    asked = true;
-    void probe();
+    if (!title.imdb || !title.scout) return;
+    // Per title, not once per page: a boolean here meant typing a new id left the previous title's releases
+    // on screen, or an empty list, until someone thought to tap List releases. Changing the id IS the ask.
+    const key = `${title.imdb}/${title.season ?? ''}/${title.episode ?? ''}`;
+    if (asked === key) return;
+    asked = key;
+    if (!claimed) void probe();
     void list();
   });
 
