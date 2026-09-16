@@ -6,7 +6,7 @@
 // one can only be satisfied by having asked — and that it walks reel's order when an entry will not play.
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const movie = {
@@ -37,7 +37,7 @@ const serveVideo = (route) => {
 
 async function mock(page, sources) {
   await guardNetwork(page);
-  await page.route('https://api.themoviedb.org/**', (r) => r.fulfill({ json: movie }));
+  await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',

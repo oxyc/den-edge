@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 for (const width of [320, 393, 844, 1280])
   test(`billboard reserves text and artwork before loading at ${width}px`, async () => {
@@ -17,7 +17,7 @@ for (const width of [320, 393, 844, 1280])
         requests = 0;
       const metadata = new Promise((r) => (releaseMetadata = r)),
         images = new Promise((r) => (releaseImages = r));
-      await page.route('https://api.themoviedb.org/**', async (r) => {
+      await routeTmdb(page, async (r) => {
         requests++;
         await metadata;
         await r.fulfill({

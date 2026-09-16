@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 for (const scenario of [
   { name: 'late filmography in portrait', width: 390, height: 800, scrolled: false },
@@ -32,7 +32,7 @@ for (const scenario of [
       );
       let releaseFilms;
       const filmsReady = new Promise((resolve) => (releaseFilms = resolve));
-      await page.route('https://api.themoviedb.org/**', async (r) => {
+      await routeTmdb(page, async (r) => {
         const url = r.request().url();
         if (url.includes('combined_credits')) {
           await filmsReady;

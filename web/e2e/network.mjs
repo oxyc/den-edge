@@ -8,6 +8,19 @@ test.afterEach(() => {
   expect(unexpected, 'all API/external requests must be mocked').toEqual([]);
 });
 
+/**
+ * TMDB, however the app asks for it.
+ *
+ * Every browser now asks THIS origin — `/tmdb/3/…` — so that one cache answers every device and visitor, and
+ * the key never leaves den-edge (`tmdbCache.ts`). A fixture that mocks only `api.themoviedb.org` therefore
+ * mocks nothing the app requests, and the guard below reports the real calls as unmocked. Both shapes are
+ * registered so a spec keeps saying what it means: "when the app asks TMDB, answer this".
+ */
+export async function routeTmdb(page, handler) {
+  await page.route('https://api.themoviedb.org/**', handler);
+  await page.route('**/tmdb/3/**', handler);
+}
+
 export async function guardNetwork(page) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
   await page.context().route('**/*', (route) => {

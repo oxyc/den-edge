@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 for (const [width, failed] of [
   [393, false],
@@ -26,7 +26,7 @@ for (const [width, failed] of [
         gates.set(id, { promise, release });
       }
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
-      await page.route('https://api.themoviedb.org/**', async (route) => {
+      await routeTmdb(page, async (route) => {
         const url = new URL(route.request().url());
         const id = Number(url.pathname.match(/\/(?:movie|tv)\/(\d+)$/)?.[1]);
         if (gates.has(id)) {

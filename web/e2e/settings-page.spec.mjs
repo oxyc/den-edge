@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 const PROVIDERS = {
   movie: [
@@ -30,7 +30,7 @@ for (const width of [393, 820, 1280]) {
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
       await page.route('**/version', (r) => r.fulfill({ json: { version: '0.67.0' } }));
       await page.route('**/config', (r) => r.fulfill({ json: { simklClientId: 'client-1' } }));
-      await page.route('https://api.themoviedb.org/**', (route) => {
+      await routeTmdb(page, (route) => {
         const url = new URL(route.request().url());
         if (url.pathname.endsWith('/configuration')) return route.fulfill({ json: { images: {} } });
         if (url.pathname.endsWith('/watch/providers/regions'))

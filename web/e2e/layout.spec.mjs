@@ -1,4 +1,4 @@
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 import { test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
@@ -15,7 +15,7 @@ test('layout regressions', async () => {
     let requests = 0;
     page.on('pageerror', (e) => errors.push(e.message));
     await page.route('**/routes', (route) => route.fulfill({ json: {} }));
-    await page.route('https://api.themoviedb.org/**', (route) => {
+    await routeTmdb(page, (route) => {
       requests++;
       return route.fulfill({
         json: {
@@ -62,7 +62,7 @@ test('layout regressions', async () => {
       let releaseMeta, releaseImages;
       const metadata = new Promise((r) => (releaseMeta = r));
       const pictures = new Promise((r) => (releaseImages = r));
-      await detailPage.route('https://api.themoviedb.org/**', async (route) => {
+      await routeTmdb(detailPage, async (route) => {
         await metadata;
         await route.fulfill({
           json: {

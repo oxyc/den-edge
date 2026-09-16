@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 const art =
   '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="281"><rect width="500" height="281" fill="#264c68"/></svg>';
 const credits = {
@@ -90,7 +90,7 @@ async function setup(
       },
     });
   });
-  await page.route('https://api.themoviedb.org/**', async (r) => {
+  await routeTmdb(page, async (r) => {
     const path = new URL(r.request().url()).pathname;
     requests.push(path);
     if (path.includes('/season/')) {

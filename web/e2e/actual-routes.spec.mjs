@@ -1,4 +1,4 @@
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 import { test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
@@ -28,7 +28,7 @@ test('actual-routes regressions', async () => {
       );
       let releaseActor;
       const actorReady = new Promise((r) => (releaseActor = r));
-      await page.route('https://api.themoviedb.org/**', async (r) => {
+      await routeTmdb(page, async (r) => {
         if (r.request().url().includes('/person/')) {
           await actorReady;
           return r.fulfill({

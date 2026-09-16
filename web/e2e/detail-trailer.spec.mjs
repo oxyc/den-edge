@@ -1,6 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const movie = {
@@ -14,7 +14,7 @@ const movie = {
 };
 async function mock(page, trailer, bytes = videoBytes) {
   await guardNetwork(page);
-  await page.route('https://api.themoviedb.org/**', (r) => r.fulfill({ json: movie }));
+  await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',
@@ -367,7 +367,7 @@ for (const width of [320, 1280])
         });
         await mock(page, (r) => r.fulfill({ json: { meta: { links: [] } } }));
         if (exact)
-          await page.route('https://api.themoviedb.org/**', (r) =>
+          await routeTmdb(page, (r) =>
             r.fulfill({
               json: {
                 ...movie,

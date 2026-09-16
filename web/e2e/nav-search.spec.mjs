@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 const film = (id, title = `Film ${id}`) => ({
   id,
@@ -50,7 +50,7 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="281"><rect width="500" height="281" fill="#264c68"/></svg>',
     }),
   );
-  await page.route('https://api.themoviedb.org/**', async (r) => {
+  await routeTmdb(page, async (r) => {
     const url = new URL(r.request().url());
     if (url.pathname.includes('/search/')) {
       const q = url.searchParams.get('query');

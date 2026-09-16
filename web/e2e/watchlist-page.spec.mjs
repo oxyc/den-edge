@@ -1,5 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 
 for (const width of [393, 1280]) {
   test(`the Watchlist page lists continue watching, the watchlist by type and the watched history at ${width}px`, async () => {
@@ -13,7 +13,7 @@ for (const width of [393, 1280]) {
       });
       await guardNetwork(page);
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
-      await page.route('https://api.themoviedb.org/**', (route) => {
+      await routeTmdb(page, (route) => {
         const [, type, id] =
           new URL(route.request().url()).pathname.match(/\/(movie|tv)\/(\d+)$/) ?? [];
         if (!id) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
