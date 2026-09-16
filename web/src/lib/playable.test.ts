@@ -51,7 +51,7 @@ describe('playable', () => {
     expect(asked[1]).toMatchObject({ transferFunction: 'pq', width: 3840 });
   });
 
-  it('gives Apple’s stack no High tier, whatever it answers', async () => {
+  it('offers Apple’s stack the High tier when its own decoder takes it', async () => {
     const iphone: Probe = {
       ...browser(
         () => true,
@@ -59,7 +59,12 @@ describe('playable', () => {
       ),
       apple: true,
     };
-    expect(await playable(iphone)).toMatchObject({ hevcMain10: 153, hevcHighTier: 0, hdr: true });
+    // Refused outright until 2026-09-16, whatever the browser said, on the evidence of one UHD remux an iPhone
+    // would not play — a refusal later traced to a slow initialization segment and to colour tags read from a
+    // container that named none, both fixed in den-remux. Measured since at 20, 40 and 60 Mbit/s on an iPhone
+    // and on macOS Safari: 2160p High tier plays in every path (oxyc/den#36). Media Capabilities still has the
+    // last word, here as on any other stack — this probe answers yes to it.
+    expect(await playable(iphone)).toMatchObject({ hevcMain10: 153, hevcHighTier: 153, hdr: true });
   });
 
   it('believes Media Capabilities over a type check that takes the High tier', async () => {

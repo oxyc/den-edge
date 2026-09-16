@@ -145,9 +145,22 @@ export async function playable(probe: Probe = browserProbe()): Promise<Playable>
   const highest = (levels: number[], codec: (level: number) => string) =>
     levels.filter((level) => probe.supports(`video/mp4; codecs="${codec(level)}"`)).at(-1) ?? 0;
   const hevcMain10 = highest(HEVC_LEVELS, (level) => `hvc1.2.4.L${level}.B0`);
-  // A type check says yes to a High tier string more readily than a decoder does, so Media Capabilities has the
-  // last word where there is one — and on Apple's stack the answer is no regardless.
-  const highTier = probe.apple ? 0 : highest(HEVC_HIGH_LEVELS, (level) => `hvc1.2.4.H${level}.B0`);
+  // A type check says yes to a High tier string more readily than a decoder does, so Media Capabilities still has
+  // the last word below — but it is asked on Apple's stack now like anywhere else.
+  //
+  // This used to be a flat `probe.apple ? 0 : …`: no High tier for Safari or for any browser on iOS, whatever the
+  // browser said. It was added for one release, a ~24 GB UHD remux an iPhone refused — and that refusal turned out
+  // to be neither the tier nor the bitrate. den-remux was taking 4.1–6.6 s to write `init.mp4` and Apple's player
+  // abandons one that slow, reporting it as a decode error (fixed in 0.19.0), and an HDR10 file whose container
+  // named no colours was probed as SDR so the variant contradicted its own SPS (fixed in 0.20.0). The same title
+  // then played on macOS Safari with its High-tier copy untouched.
+  //
+  // Measured since, with clips built for it (codec lab, 2026-09-16): 2160p High tier at 20, 40 and 60 Mbit/s
+  // played in every path — file, Apple's own HLS player and hls.js — on an iPhone (iOS 18.7) and on macOS Safari
+  // 18.6, nothing above 3.8% frames dropped. No ceiling was found, so there is no honest number to put here.
+  // Sixty megabits is not eighty and six seconds is not a feature, so if a real remux still fails, the answer is
+  // the retry that asks for less (oxyc/den#38) rather than refusing every High-tier release in advance.
+  const highTier = highest(HEVC_HIGH_LEVELS, (level) => `hvc1.2.4.H${level}.B0`);
   const uhd = { width: 3840, height: 2160, bitrate: 40_000_000, framerate: 24 };
   const tierCodec = `video/mp4; codecs="hvc1.2.4.H${highTier}.B0"`;
   const hevcHighTier =
