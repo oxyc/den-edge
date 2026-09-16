@@ -65,6 +65,16 @@
     error?: string;
   };
 
+  /**
+   * What den-remux actually delivered, re-checked after a failure.
+   *
+   * `MediaError 3` means "the player gave up", not "this codec is wrong". A session whose source stops
+   * answering serves `502`s and produces the very same code, and two of the four refusals chased on
+   * 2026-09-16 turned out to be exactly that — visible only in den-remux's journal, hours later, after a
+   * conclusion had already been drawn from them. A run has to carry its own answer to this.
+   */
+  type Delivery = { file: string; status: number | string; ms: number; bytes?: number };
+
   const PLAYS_HLS = nativeHls(document.createElement('video'));
   /** A conversion starts on the GPU when the first segment is asked for; give it room before calling it dead. */
   const STUCK_MS = 60_000;
@@ -144,6 +154,7 @@
   let playlistStart = $state<Variant>();
   let masterText = $state('');
   let timings = $state<Timings>({});
+  let delivery = $state<Delivery[]>([]);
   let busy = $state('');
   let element = $state<HTMLVideoElement>();
 
@@ -230,6 +241,7 @@
     localStorage.setItem(SUBS_KEY, subtitlesInstall.trim());
     failure = undefined;
     timings = {};
+    delivery = [];
     startedAt = new Date().toISOString();
     busy = 'starting a session';
     const started = performance.now();
@@ -343,6 +355,53 @@
     }
   }
 
+  /**
+   * After a failure, ask for the start of the stream again and record what comes back.
+   *
+   * Only the status and the time to headers: the body is cancelled rather than read, because a 4K segment is
+   * tens of megabytes and none of it is needed to tell a `502` from a `200`.
+   */
+  async function postMortem(playlist: string): Promise<void> {
+    const found: Delivery[] = [];
+    const ask = async (url: string, file: string) => {
+      const began = performance.now();
+      try {
+        const answer = await fetch(url, { cache: 'no-store' });
+        const ms = Math.round(performance.now() - began);
+        void answer.body?.cancel();
+        found.push({
+          file,
+          status: answer.status,
+          ms,
+          bytes: Number(answer.headers.get('content-length')) || undefined,
+        });
+      } catch (error) {
+        found.push({ file, status: String(error), ms: Math.round(performance.now() - began) });
+      }
+    };
+    try {
+      const uri = variants[0]?.uri;
+      if (uri) {
+        const media = new URL(uri, new URL(playlist, location.href));
+        const answer = await fetch(media.href, { cache: 'no-store' });
+        if (!answer.ok) {
+          found.push({ file: 'media.m3u8', status: answer.status, ms: 0 });
+        } else {
+          const lines = (await answer.text()).split('\n').map((line) => line.trim());
+          const map = lines.find((line) => line.startsWith('#EXT-X-MAP:'));
+          const init = map ? /URI="([^"]+)"/.exec(map)?.[1] : undefined;
+          if (init) await ask(new URL(init, media).href, init);
+          // Three is enough: a source that has stopped answering refuses the first one.
+          for (const segment of lines.filter((line) => line && !line.startsWith('#')).slice(0, 3))
+            await ask(new URL(segment, media).href, segment);
+        }
+      }
+    } catch {
+      // Out of reach from here is itself an answer, and an empty table says so.
+    }
+    delivery = found;
+  }
+
   let engine: { destroy: () => void } | undefined;
   let listeners: AbortController | undefined;
 
@@ -376,6 +435,7 @@
         timings = { ...timings, error: `media ${code} ${message}` };
         // den-remux otherwise never learns the browser's verdict; it is the same beacon the app sends.
         reportFailure(current, code, message);
+        void postMortem(current.playlist);
       },
       { signal },
     );
@@ -384,8 +444,12 @@
     });
     // Safari doesn't always say it failed: it strikes out its play button and fires nothing at all.
     const stuck = setTimeout(() => {
-      if (timings.firstFrame === undefined && timings.error === undefined)
+      if (timings.firstFrame === undefined && timings.error === undefined) {
         timings = { ...timings, error: `no picture after ${STUCK_MS / 1000} s` };
+        // A silent stall needs this more than an error does: nothing is reported to den-remux on this path,
+        // so its log stays quiet and the session looks, from the box, like one that was simply never watched.
+        void postMortem(current.playlist);
+      }
     }, STUCK_MS);
     signal.addEventListener('abort', () => clearTimeout(stuck));
 
@@ -502,6 +566,7 @@
     renditions,
     start: playlistStart,
     timings,
+    delivery,
   });
 
   /** Whether there is a run worth keeping: a session, or a refusal, which is a result too. */
@@ -845,6 +910,36 @@
         {#if timings.error}<tr class="bad"><th>error</th><td>{timings.error}</td></tr>{/if}
       </tbody>
     </table>
+    {#if delivery.length}
+      <h3>After the failure</h3>
+      {#if delivery.every((piece) => piece.status === 200)}
+        <p class="ok">
+          Every piece came back 200 — the bytes were there and the player refused them. This one is
+          a real decode verdict and counts.
+        </p>
+      {:else}
+        <p class="bad">
+          den-remux would not serve the stream back. A 502 is <code>source_failed</code> — the
+          release stopped answering — and <code>MediaError 3</code> then says nothing about the codec.
+          Discard this run.
+        </p>
+      {/if}
+      <table>
+        <thead>
+          <tr><th>file</th><th>status</th><th>ms</th><th>bytes</th></tr>
+        </thead>
+        <tbody>
+          {#each delivery as piece, index (index)}
+            <tr class={piece.status === 200 ? '' : 'bad'}>
+              <td>{piece.file}</td>
+              <td>{piece.status}</td>
+              <td>{piece.ms}</td>
+              <td>{piece.bytes ? Math.round(piece.bytes / 1024) + 'k' : ''}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
     <p class="note">
       Playback times are milliseconds from the moment the playlist was handed to a player; the
       session time is den-remux's own, and on a converted release it includes writing
