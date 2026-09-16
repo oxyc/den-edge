@@ -53,6 +53,15 @@
     canplay?: number;
     playing?: number;
     firstFrame?: number;
+    /**
+     * Where playback actually started, in seconds into the title.
+     *
+     * The one number that says whether a resume was honoured. Everything else here is about WHEN a frame
+     * appeared; this is about WHICH frame. Without it a session that asked to start ten minutes in and began
+     * at zero looks identical to one that resumed perfectly, which left #39's resume case unclosable from a
+     * report even after the playlist was proven to carry EXT-X-START.
+     */
+    position?: number;
     error?: string;
   };
 
@@ -351,7 +360,7 @@
       { signal },
     );
     video.requestVideoFrameCallback?.(() => {
-      timings = { ...timings, firstFrame: since() };
+      timings = { ...timings, firstFrame: since(), position: Math.round(video.currentTime) };
     });
     // Safari doesn't always say it failed: it strikes out its play button and fires nothing at all.
     const stuck = setTimeout(() => {
@@ -787,6 +796,21 @@
         <tr><th>canplay</th><td>{timings.canplay ?? ''}</td></tr>
         <tr><th>playing</th><td>{timings.playing ?? ''}</td></tr>
         <tr><th>first frame</th><td>{timings.firstFrame ?? ''}</td></tr>
+        {#if timings.position !== undefined}
+          <tr>
+            <th>started at</th>
+            <td>
+              {timings.position} s into the title
+              <!-- A resume is honoured or it is not, and the answer is this one comparison. Ten seconds of
+                   slack: EXT-X-START is PRECISE=YES, but a player may still land on a segment boundary. -->
+              {#if startAt.trim() && Math.abs(timings.position - Number(startAt)) <= 10}
+                <span class="ok">— resumed</span>
+              {:else if startAt.trim()}
+                <span class="bad">— asked for {startAt} s, EXT-X-START was not honoured</span>
+              {/if}
+            </td>
+          </tr>
+        {/if}
         {#if timings.error}<tr class="bad"><th>error</th><td>{timings.error}</td></tr>{/if}
       </tbody>
     </table>
