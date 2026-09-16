@@ -54,12 +54,59 @@
   let element = $state<HTMLVideoElement>();
 
   /**
+   * Films to walk, for the one measurement this page cannot otherwise get: a cold index.
+   *
+   * Whether a film is still cold is a fact about REEL, not about this browser — an index lives on the box and
+   * is warm for everyone the moment anyone sweeps it. So nothing here can detect coldness, and the page names
+   * the film rather than claiming anything about it. Read the `reel` column: an `index` entry with a duration
+   * is a real build, `cache hit` is not.
+   */
+  const FILMS = [
+    'tt0111161',
+    'tt0068646',
+    'tt0071562',
+    'tt0468569',
+    'tt0050083',
+    'tt0108052',
+    'tt0167260',
+    'tt0110912',
+    'tt0060196',
+    'tt0120737',
+  ];
+
+  let movie = $state('');
+
+  /**
+   * Reel's trailer link for a film.
+   *
+   * Kept relative: the dev server proxies /reel, so the relative form is same-origin, which is also what keeps
+   * it off the mixed-content rocks when this page is served over HTTPS to a phone.
+   */
+  async function pickFilm(film: string) {
+    try {
+      const answer = await fetch(`/reel/meta/movie/${film}.json`);
+      const link = (await answer.json())?.meta?.links?.[0]?.trailers;
+      if (typeof link !== 'string') return;
+      const url = new URL(link, location.href);
+      source = `/reel${url.pathname}${url.search}`;
+      movie = film;
+      // The old film's rows would otherwise sit under the new one's name in the report.
+      runs = [];
+    } catch {
+      // reel out of reach from here: paste one by hand, as before.
+    }
+  }
+
+  function nextFilm() {
+    void pickFilm(FILMS[(FILMS.indexOf(movie) + 1) % FILMS.length]);
+  }
+
+  /**
    * Something real to start from, so the page is usable without hunting a URL down on a phone.
    *
    * Asked of reel rather than written into this file: its links are signed, signatures rot, and a signed URL
-   * committed here would be both a secret with a half-life and a 404 waiting to happen. The dev server proxies
-   * /reel, so the relative form is same-origin — which also keeps it off the mixed-content rocks when this page
-   * is served over HTTPS to a phone. `?url=` names a different trailer.
+   * committed here would be both a secret with a half-life and a 404 waiting to happen. `?url=` names a
+   * trailer directly, `?movie=<imdb id>` names a film to look one up for.
    */
   $effect(() => {
     if (source) return;
@@ -68,17 +115,8 @@
       source = asked;
       return;
     }
-    void (async () => {
-      try {
-        const answer = await fetch('/reel/meta/movie/tt0111161.json');
-        const link = (await answer.json())?.meta?.links?.[0]?.trailers;
-        if (typeof link !== 'string') return;
-        const url = new URL(link, location.href);
-        source = `/reel${url.pathname}${url.search}`;
-      } catch {
-        // reel out of reach from here: paste one by hand, as before.
-      }
-    })();
+    const film = new URLSearchParams(location.search).get('movie');
+    void pickFilm(film && /^tt\d+$/.test(film) ? film : FILMS[0]);
   });
 
   /**
@@ -140,8 +178,7 @@
         kind: 'file' as const,
         on: true,
       },
-      // A height step nothing has asked for before, so reel has no index for it and has to build one. Every
-      // other progressive row here answers `cache;desc=hit` once the page has been used at all, which makes
+      // Every progressive row here answers `cache;desc=hit` once the page has been used at all, which makes
       // them warm numbers — useful, but not what a viewer opening a fresh title pays. Check the `reel` column
       // to confirm this one really did build: `index` with a duration, rather than `cache hit`.
       //
@@ -240,6 +277,17 @@
     let engine: { destroy: () => void } | undefined;
     const started = performance.now();
     const since = () => Math.round(performance.now() - started);
+    // Every listener and the deadline hang off this run, and are torn down with it below.
+    //
+    // They used to outlive it, on an element that is deliberately reused, and the damage was silent: a LATER
+    // run's event would fill a field an EARLIER run never filled, timed from the EARLIER run's clock. That is
+    // exactly the `firstFrame 166, playing 5107` on the 2026-09-16 iPhone sweep — the sweep advances at the
+    // first frame, so `playing` was still empty when the next run fired one into it. `??=` cannot catch that,
+    // because the field was genuinely empty. The stray deadline is the same shape: 20 s after a run that
+    // finished in 90 ms, it would stamp `error: timeout` on a row that had already been reported good.
+    const listeners = new AbortController();
+    const { signal } = listeners;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const done = new Promise<void>((resolve) => {
       const mark = (event: Event) => {
         const key = event.type as 'loadstart' | 'loadedmetadata' | 'canplay' | 'playing';
@@ -248,16 +296,20 @@
         if (key === 'playing' && !video.requestVideoFrameCallback) resolve();
       };
       for (const event of ['loadstart', 'loadedmetadata', 'canplay', 'playing'])
-        video.addEventListener(event, mark);
-      video.addEventListener('error', () => {
-        result.error ??= `media ${video.error?.code ?? 0}`;
-        resolve();
-      });
+        video.addEventListener(event, mark, { signal });
+      video.addEventListener(
+        'error',
+        () => {
+          result.error ??= `media ${video.error?.code ?? 0}`;
+          resolve();
+        },
+        { signal },
+      );
       video.requestVideoFrameCallback?.(() => {
         result.firstFrame = since();
         resolve();
       });
-      setTimeout(() => {
+      deadline = setTimeout(() => {
         result.error ??= 'timeout';
         resolve();
       }, TIMEOUT_MS);
@@ -284,6 +336,8 @@
     });
 
     await done;
+    clearTimeout(deadline);
+    listeners.abort();
     // Read the network's account of it before the element is reset and the entry is all there is.
     result.server = serverTiming(src);
     result.bytes = bytesOf(src);
@@ -312,7 +366,16 @@
 
   const report = $derived(
     JSON.stringify(
-      { ua: navigator.userAgent, nativeHls: PLAYS_HLS, at: new Date().toISOString(), runs },
+      {
+        ua: navigator.userAgent,
+        nativeHls: PLAYS_HLS,
+        at: new Date().toISOString(),
+        // Which trailer these numbers are about. Two reports are only comparable if they name the same one,
+        // and a claim that a row was cold is only checkable against the film it was measured on.
+        movie,
+        video: parts?.id,
+        runs,
+      },
       null,
       1,
     ),
@@ -391,6 +454,16 @@
     <span>Repeats</span>
     <input type="number" min="1" max="5" bind:value={repeats} />
   </label>
+  <div class="row">
+    <span>Film</span>
+    <b>{movie || 'from the pasted URL'}</b>
+    <button onclick={nextFilm} disabled={running}>Next trailer</button>
+  </div>
+  <p class="note">
+    A cold index comes from a film nobody has swept yet — never from a height nobody has typed,
+    since reel rounds every height onto one of two rungs. Sweeping a film warms it for every device,
+    so the cold number is the <b>first</b> run on a film, once.
+  </p>
 
   {#if parts}
     <fieldset>
