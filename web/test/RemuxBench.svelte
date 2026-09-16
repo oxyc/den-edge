@@ -146,7 +146,6 @@
   let releases = $state<Release[]>([]);
   /** den-remux would not say what it could play. An empty list and a refusal are not the same answer. */
   let listRefused = $state(false);
-  let filename = $state('');
   let session = $state<Session>();
   let failure = $state<Refused>();
   let variants = $state<Variant[]>([]);
@@ -155,6 +154,15 @@
   let masterText = $state('');
   let timings = $state<Timings>({});
   let delivery = $state<Delivery[]>([]);
+  /**
+   * What this run asked for, frozen when it was asked.
+   *
+   * Read back from the controls instead, it described whatever they had been changed to since — and a run is
+   * archived when the NEXT one starts, so an A/B reported both halves as having asked the same thing while
+   * their playlists plainly showed otherwise. The fields that matter here are exactly the ones a person
+   * changes between two runs, so reading them late is not a small error.
+   */
+  let askedFor = $state<Record<string, unknown>>({});
   let busy = $state('');
   let element = $state<HTMLVideoElement>();
 
@@ -174,17 +182,15 @@
    *
    * `asked` is a plain binding rather than state, so settling it cannot re-run this.
    */
-  let asked = '';
-
   $effect(() => {
-    if (!title.imdb || !title.scout) return;
-    // Per title, not once per page: a boolean here meant typing a new id left the previous title's releases
-    // on screen, or an empty list, until someone thought to tap List releases. Changing the id IS the ask.
-    const key = `${title.imdb}/${title.season ?? ''}/${title.episode ?? ''}`;
-    if (asked === key) return;
-    asked = key;
+    // The capability probe alone, and only once. It asks this browser questions and sends nothing.
+    //
+    // Listing releases used to happen here too, and it was a quiet tax on the thing it was meant to save.
+    // den-remux shares ten requests a minute per visitor between listings, logins and new sessions, and
+    // every HMR reload remounts this component and spent one — so an afternoon of edits could exhaust the
+    // allowance before a single deliberate run, and the refusal then showed up as a title with no releases.
+    // Tapping List releases costs one request when someone means it.
     if (!claimed) void probe();
-    void list();
   });
 
   async function probe() {
@@ -258,6 +264,14 @@
       measured = await linkLimit('/remux');
       const capped = capBitrate.trim() ? Number(capBitrate) * 1_000_000 : undefined;
       const at = startAt.trim() ? Number(startAt) : undefined;
+      askedFor = {
+        refusedReport: refused,
+        noEac3,
+        capMbit: capBitrate.trim() ? Number(capBitrate) : undefined,
+        measuredLimit: measured,
+        startAt: at,
+        filename: pick,
+      };
       const result = await startSession({
         ...title,
         subtitles: subtitlesInstall.trim() ? [subtitlesInstall.trim()] : [],
@@ -276,7 +290,6 @@
         return;
       }
       session = result;
-      filename = result.release.filename;
       await readMaster(result);
       // Straight into playback: picking a release is already a statement that it should play. On iOS this
       // usually needs the Play button anyway -- the awaits above spend the tap's transient activation, so
@@ -543,16 +556,13 @@
   /** The run as it stands; `begin` freezes a copy of this before starting the next. */
   const current = $derived({
     at: startedAt,
-    asked: {
-      refusedReport: refused,
-      noEac3,
-      capMbit: capBitrate.trim() ? Number(capBitrate) : undefined,
-      measuredLimit: measured,
-      startAt: startAt.trim() ? Number(startAt) : undefined,
-      filename: filename || undefined,
-    },
+    asked: askedFor,
     failure,
     session: session && {
+      // den-remux's own id for this session, which its log lines are keyed by. It has no log endpoint and a
+      // browser cannot read journald, so this is what joins a run to the server's account of it: one
+      // `podman logs` and a grep, instead of matching by timestamp and hoping.
+      sid: /\/s\/([^/]+)\//.exec(session.playlist)?.[1],
       release: session.release,
       duration: session.duration,
       video: session.video,
