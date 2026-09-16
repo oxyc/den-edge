@@ -39,6 +39,11 @@
      */
     server?: Record<string, string>;
     bytes?: number;
+    /**
+     * The browser answered this one from its own HTTP cache, so the numbers describe a cache read and
+     * `server` belongs to an EARLIER run: a cached response replays the headers it was stored with.
+     */
+    cached?: boolean;
     error?: string;
   };
 
@@ -249,6 +254,23 @@
   }
 
   /**
+   * Whether the browser answered this from its own HTTP cache instead of the network.
+   *
+   * Worth recording because a cached response replays the `Server-Timing` it was STORED with. Chrome's
+   * second repeat reported `index;dur=2873` for a run that fetched nothing, which reads as the server
+   * having built an index again — it had not, that was the FIRST run's build quoted back, and the numbers
+   * beside it are a cache read. `transferSize` is 0 for a cache hit and non-zero for anything that crossed
+   * the wire, a 304 included.
+   */
+  function fromCache(url: string): boolean {
+    const entry = performance
+      .getEntriesByType('resource')
+      .filter((e): e is PerformanceResourceTiming => e.name === new URL(url, location.href).href)
+      .at(-1);
+    return !!entry && entry.transferSize === 0 && entry.decodedBodySize > 0;
+  }
+
+  /**
    * One load, timed.
    *
    * The element is reused rather than replaced: a fresh `<video>` per run measures element creation and
@@ -341,6 +363,7 @@
     // Read the network's account of it before the element is reset and the entry is all there is.
     result.server = serverTiming(src);
     result.bytes = bytesOf(src);
+    if (fromCache(src)) result.cached = true;
     engine?.destroy();
     video.pause();
     video.removeAttribute('src');
