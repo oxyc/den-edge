@@ -42,11 +42,16 @@ use std::path::{Component, Path, PathBuf};
 /// `Access-Control-Allow-Origin` at all. A page cannot call them however the policy is written — only the TV
 /// can, because a native request is not CORS-checked. So `/warnings/` proxies them here (`warnings.rs`) and
 /// the page asks this origin, which `'self'` already covers.
+///
+/// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
+/// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
+/// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
 fn csp(media: &[String]) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: https://image.tmdb.org https://images.metahub.space; \
+         img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
+         https://live.metahub.space; \
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443{media}; \
@@ -427,6 +432,9 @@ mod tests {
         // atlas's catalog rows name JustWatch's art by IMDb id, and for a title the dataset does not carry —
         // half the series on a service page — it is the only poster there is.
         assert!(csp.contains("https://images.metahub.space"));
+        // And the host that one redirects to. A policy naming only the first blocks what the redirect
+        // arrives at, which is a blank card rather than a visible error.
+        assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
         assert!(body_text(root).await.contains("<title>Den</title>"));

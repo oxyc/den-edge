@@ -24,14 +24,24 @@
   const poster = $derived(
     title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : title.posterUrl,
   );
+  /**
+   * The one picture that did not load, if any.
+   *
+   * Art can be refused as well as missing: a chart's fallback is metahub's, which redirects to another of its
+   * hosts, and anything the page's CSP does not allow is blocked — leaving an empty frame where the title's
+   * own name would at least have said what the card is. Naming the failed URL rather than setting a flag means
+   * a card later given TMDB's own path still tries it.
+   */
+  let failed = $state('');
+  const art = $derived(poster && poster !== failed ? poster : undefined);
   const faded = $derived(availability.unavailable(title));
   $effect(() => availability.want(title));
 </script>
 
 {#snippet body()}
   <span class="art">
-    {#if poster}
-      <img src={poster} alt="" loading="lazy" decoding="async" />
+    {#if art}
+      <img src={art} alt="" loading="lazy" decoding="async" onerror={() => (failed = art ?? '')} />
     {:else}
       <span class="placeholder">{title.title}</span>
     {/if}

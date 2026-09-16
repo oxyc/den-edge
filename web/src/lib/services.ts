@@ -149,7 +149,11 @@ export async function fillPosters(
   key: string,
   { head = FILL_HEAD, atOnce = FILL_AT_ONCE, fetchImpl = tmdbFetch } = {},
 ): Promise<Title[]> {
-  const wanted = titles.filter((title) => !title.posterPath && !title.posterUrl).slice(0, head);
+  // Only TMDB's own path counts as art already named. A chart's `poster` is metahub's, and metahub answers
+  // from images.metahub.space with a redirect to live.metahub.space — a host the page's own CSP does not
+  // allow, so the browser blocks it and the card draws an empty frame. Counting that as art is what left
+  // Libang Libu blank on Netflix's row while TMDB held a perfectly good poster for it.
+  const wanted = titles.filter((title) => !title.posterPath).slice(0, head);
   if (!wanted.length) return titles;
   const found = new Map<string, string>();
   const key_ = (title: Title) => `${title.type}:${title.id}`;

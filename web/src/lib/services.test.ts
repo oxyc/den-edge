@@ -281,22 +281,29 @@ describe('fillPosters', () => {
     expect(at(filled, 3).posterPath, 'the tail keeps its placeholder').toBeUndefined();
   });
 
-  it('asks for nothing when every title already has art, and keeps a title TMDB cannot name', async () => {
+  it('asks even for a title a chart gave art, and keeps what it had when TMDB cannot name it', async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {
       calls++;
       return new Response('{}', { status: 404 });
     };
-    const named = [
-      title(1, { posterPath: '/a.jpg' }),
-      title(2, { posterUrl: 'https://art/b.jpg' }),
-    ];
+    // TMDB's own path is art and is left alone.
+    const named = [title(1, { posterPath: '/a.jpg' })];
     expect(await fillPosters(named, 'k', { fetchImpl })).toEqual(named);
     expect(calls).toBe(0);
 
+    // A chart's own art is metahub's, which the page can only draw if its CSP allows the host metahub
+    // redirects to — so it is asked for anyway, and TMDB's path wins wherever there is one.
+    const chartArt = [title(2, { posterUrl: 'https://art/b.jpg' })];
+    expect(
+      await fillPosters(chartArt, 'k', { fetchImpl }),
+      'and keeps it when TMDB has none',
+    ).toEqual(chartArt);
+    expect(calls).toBe(1);
+
     const unnamed = [title(3)];
     expect(await fillPosters(unnamed, 'k', { fetchImpl })).toEqual(unnamed);
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
 });
 
