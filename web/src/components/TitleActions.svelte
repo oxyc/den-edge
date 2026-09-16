@@ -19,6 +19,7 @@
     onplay,
     onplayhere,
     away = false,
+    blocked = false,
     trailerHref,
     ontrailer,
     share,
@@ -42,6 +43,11 @@
      * plainly under the actions, rather than leaving the button's absence to explain itself.
      */
     away?: boolean;
+    /**
+     * The browser itself refused the home network (`localNetworkRefused`), rather than no route reaching the player.
+     * Said apart, because the other sentence sends someone who is already on Tailscale to go and check Tailscale.
+     */
+    blocked?: boolean;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
     /**
@@ -191,7 +197,12 @@
   >
     {notice}
   </p>{:else if away && !onplayhere}<p class="notice">
-    Playback works on your home network or with Tailscale on this device.
+    {#if blocked}
+      This browser is blocking Den from reaching your home network, so it cannot play here. Allow
+      local network access for this site, then reload.
+    {:else}
+      Playback works on your home network or with Tailscale on this device.
+    {/if}
   </p>{/if}
 
 {#snippet tv()}

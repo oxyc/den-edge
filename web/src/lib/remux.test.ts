@@ -10,6 +10,7 @@ import {
   linkLimit,
   LINK_TTL_MS,
   listReleases,
+  localNetworkRefused,
   login,
   nativeHls,
   onLan,
@@ -184,6 +185,46 @@ describe('startSession', () => {
       );
     expect(await busy({ 'retry-after': '90' })).toEqual({ failure: 'busy', retryMs: 90_000 });
     expect(await busy()).toEqual({ failure: 'busy' });
+  });
+});
+
+describe('localNetworkRefused', () => {
+  const withPermissions = (query: unknown) => {
+    const navigator = globalThis.navigator as unknown as { permissions?: unknown };
+    const had = navigator.permissions;
+    navigator.permissions = query;
+    return () => {
+      navigator.permissions = had;
+    };
+  };
+
+  it('reports only a refusal, and nothing where the browser has no such permission', async () => {
+    const asked: unknown[] = [];
+    let restore = withPermissions({
+      query: async (descriptor: unknown) => {
+        asked.push(descriptor);
+        return { state: 'denied' };
+      },
+    });
+    expect(await localNetworkRefused()).toBe(true);
+    expect(asked).toEqual([{ name: 'local-network-access' }]);
+    restore();
+
+    restore = withPermissions({ query: async () => ({ state: 'prompt' }) });
+    expect(await localNetworkRefused(), 'unanswered is not a refusal').toBe(false);
+    restore();
+
+    restore = withPermissions({
+      query: async () => {
+        throw new TypeError('unknown permission name');
+      },
+    });
+    expect(await localNetworkRefused(), 'a browser without the policy').toBe(false);
+    restore();
+
+    restore = withPermissions(undefined);
+    expect(await localNetworkRefused()).toBe(false);
+    restore();
   });
 });
 
