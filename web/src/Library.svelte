@@ -1145,6 +1145,9 @@
     {tmdbKey}
     {atlas}
     minYear={prefs.minReleaseYear}
+    excludedLanguages={prefs.excludedLanguages}
+    {reel}
+    {routes}
     shown={browseShown}
   />
 {:else if route.page === 'search'}

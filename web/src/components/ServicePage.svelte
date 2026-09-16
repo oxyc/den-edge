@@ -14,7 +14,9 @@
     serviceRows,
     type AtlasCatalog,
   } from '../lib/services';
+  import type { Routes } from '../lib/routes';
   import { fetchServices, matches, type Service } from '../settings/services';
+  import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
@@ -26,6 +28,9 @@
     tmdbKey,
     atlas = null,
     minYear,
+    excludedLanguages = new Set<string>(),
+    reel = null,
+    routes = {},
     shown,
   }: {
     /** The provider id, as TMDB and atlas both name it. */
@@ -37,6 +42,12 @@
     atlas?: string | null;
     /** Settings' release-year floor, applied to every row here as it is everywhere else. */
     minYear?: number;
+    /** Settings' excluded languages: a row about nothing else is not offered here either. */
+    excludedLanguages?: Set<string>;
+    /** Where this page reaches den-reel, for the hero's trailer; without it the hero keeps its still. */
+    reel?: string | null;
+    /** The routes table, for the address the trailer's video loads from. */
+    routes?: Routes;
     shown: (title: Title) => boolean;
   } = $props();
 
@@ -94,7 +105,11 @@
   const only = $derived(tab ?? undefined);
   const rows = $derived.by(() => {
     if (!service) return [];
-    const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), { minYear, only });
+    const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), {
+      minYear,
+      only,
+      excludedLanguages,
+    });
     const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only, tmdbKey }) : [];
     const watched = own.map((row) => ({
       ...row,
@@ -105,6 +120,37 @@
       },
     }));
     return mergeServiceRows(watched, tmdb, new Set(answered));
+  });
+
+  /**
+   * The page's own hero, as the TV's channel page opens with one rather than with a list (`ServiceChannelView`):
+   * the head of this page's leading row — what has just arrived on the service where atlas says so, and its most
+   * popular titles where it doesn't.
+   *
+   * It asks for that row itself instead of waiting to share it. The question is identical, so the row below is
+   * answered from this browser's own TMDB cache rather than from the network, and neither waits on the other.
+   */
+  let featured = $state<Title[]>([]);
+  /** As many as are worth cycling; the TV's hero carries forty, and a service's lead row is shorter than that. */
+  const SLIDES = 12;
+  /** Which row the hero was built from, so a re-derived `rows` doesn't fetch it again. */
+  let heroFrom = '';
+  $effect(() => {
+    const lead = rows[0];
+    if (!lead || lead.id === heroFrom) return;
+    heroFrom = lead.id;
+    let current = true;
+    void lead.load(1).then(
+      (titles) => {
+        if (current) featured = titles.filter(shown).slice(0, SLIDES);
+      },
+      () => {
+        // No hero, then — the page is its rows, which is what it was before it had one.
+      },
+    );
+    return () => {
+      current = false;
+    };
   });
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
@@ -127,6 +173,10 @@
     {/if}
     <h1>{service.name}</h1>
   </header>
+  <!-- The brand first, so the page says whose catalogue this is before it shows one of its titles. -->
+  {#if featured.length}
+    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
+  {/if}
   <JustWatchCredit />
   {#if both}
     <div class="tabs">

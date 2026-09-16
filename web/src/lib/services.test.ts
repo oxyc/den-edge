@@ -206,7 +206,8 @@ describe('atlas rows', () => {
     const own = atlasServiceRows('/atlas', atlas, netflix, 'US');
     const tmdb = serviceRows(netflix, 'US', async () => []);
     const merged = mergeServiceRows(own, tmdb, new Set(['movie' as const]));
-    expect(merged.map((row) => row.title)).toEqual([
+    // The head of the page. The whole catalogue, re-pointed at the service, follows it.
+    expect(merged.map((row) => row.title).slice(0, 6)).toEqual([
       'New on Netflix',
       'Popular on Netflix',
       // The films atlas covers lose TMDB's popular and recently-released; series keep theirs, and Acclaimed has no
@@ -216,6 +217,7 @@ describe('atlas rows', () => {
       'Acclaimed Movies',
       'Acclaimed Series',
     ]);
+    expect(merged.length, 'and then the service’s own depth').toBeGreaterThan(50);
   });
 
   it('is TMDB’s rows alone where atlas carries nothing for the service', () => {
@@ -241,7 +243,11 @@ describe('atlas rows', () => {
     );
     const tmdb = serviceRows(netflix, 'US', async () => []);
     // Listed but not yet answered: every TMDB row stands, so the page is never down to Acclaimed alone.
-    expect(mergeServiceRows(own, tmdb, new Set()).map((row) => row.title)).toEqual([
+    expect(
+      mergeServiceRows(own, tmdb, new Set())
+        .map((row) => row.title)
+        .slice(0, 7),
+    ).toEqual([
       'Popular on Netflix',
       'Recently released Movies',
       'Recently released Series',
@@ -310,9 +316,11 @@ describe('serviceRows', () => {
       pages,
       {},
     );
-    await Promise.all(rows.map((row) => row.load(1)));
+    // The three sorts per type that lead the page; the catalogue's own rows follow, and are checked below.
+    const head = rows.slice(0, 6);
+    await Promise.all(head.map((row) => row.load(1)));
 
-    expect(rows.map((row) => row.title)).toEqual([
+    expect(head.map((row) => row.title)).toEqual([
       'Recently released Movies',
       'Recently released Series',
       'Popular Movies',
@@ -338,16 +346,28 @@ describe('serviceRows', () => {
     for (const { params } of acclaimed) expect(params['vote_count.gte']).toBe('300');
     for (const { params } of asked.filter((a) => a.params.sort_by !== 'vote_average.desc'))
       expect(params['vote_count.gte']).toBe('50');
+
+    // And then the catalogue itself, re-pointed at the service: depth is what the service has, not a page of
+    // three sorts — and every one of those rows asks with the provider filter too, or it would be a row about
+    // everything wearing this service's name.
+    expect(rows.length, 'as deep as the service is').toBeGreaterThan(50);
+    asked.length = 0;
+    await at(rows, 20).load(1);
+    expect(at(asked, 0).params.with_watch_providers).toBe('8|1796');
+    expect(at(asked, 0).params.watch_region).toBe('FI');
+    expect(at(asked, 0).params.with_watch_monetization_types).toBe('flatrate');
   });
 
   it('offers only what the service carries, and never claims a release date is an arrival', async () => {
     asked.length = 0;
     const rows = serviceRows(service({ id: 350, name: 'Apple TV+', movies: false }), 'US', pages);
-    expect(rows.map((row) => row.title)).toEqual([
+    expect(rows.map((row) => row.title).slice(0, 3)).toEqual([
       'Recently released Series',
       'Popular Series',
       'Acclaimed Series',
     ]);
+    // A service with no films offers none anywhere on the page — in the feed below the head either.
+    expect(rows.some((row) => / Movies$/.test(row.title))).toBe(false);
     expect(rows.some((row) => /added/i.test(row.title))).toBe(false);
     await at(rows, 0).load(1);
     // TMDB has no date a title landed on a service, so the recent row is by first air date, up to today.

@@ -5,7 +5,14 @@
 // different films — so every query here names the country, and TMDB's availability is JustWatch's data, which is why
 // both surfaces carry its credit.
 
-import { discoverParams, type DiscoverQuery, type Pages, type RowDef } from './catalog';
+import {
+  categories,
+  discoverParams,
+  interleave,
+  type DiscoverQuery,
+  type Pages,
+  type RowDef,
+} from './catalog';
 import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
@@ -476,7 +483,17 @@ export function serviceRows(
   service: Service,
   country: string,
   pages: Pages,
-  { minYear, only }: { minYear?: number; only?: MediaType } = {},
+  {
+    minYear,
+    only,
+    excludedLanguages = new Set<string>(),
+    now = new Date(),
+  }: {
+    minYear?: number;
+    only?: MediaType;
+    excludedLanguages?: Set<string>;
+    now?: Date;
+  } = {},
 ): RowDef[] {
   // Every id the service folded in, so a title listed under "Netflix Standard with Ads" is still on Netflix.
   const providers = [service.id, ...service.variants];
@@ -489,10 +506,45 @@ export function serviceRows(
     service.series && wanted('tv')
       ? rowsFor('tv', service, providers, country, pages, minYear)
       : [];
-  return movies
+  const lead = movies
     .flatMap((row, i) => (series[i] ? [row, series[i]] : [row]))
     .concat(
       // Whichever list is longer keeps its tail.
       series.slice(movies.length),
     );
+
+  /**
+   * Then the whole catalogue, re-pointed at this service — the TV's own trick (`DiscoveryCatalog`): every
+   * genre, recipe, decade back to the 1950s and country row, each asking only for what this service carries.
+   *
+   * Three sorts is a fixed page whatever the service is. This is not: a row that comes back empty hides
+   * itself, so the page ends up exactly as deep as the service actually is, and a thin one stays short
+   * without anybody choosing a number.
+   */
+  const scoped = (query: DiscoverQuery): DiscoverQuery => ({
+    ...query,
+    watchProviders: providers,
+    watchRegion: country,
+    monetization: FLATRATE,
+  });
+  const carries = (type: MediaType) => (type === 'movie' ? service.movies : service.series);
+  const feedFor = (type: MediaType) =>
+    wanted(type) && carries(type)
+      ? // Acclaimed is already the third row above; the feed would say it twice.
+        categories(type, now.getFullYear(), { minYear, excludedLanguages }).filter(
+          (c) => c.id !== `acclaimed-${type}`,
+        )
+      : [];
+  const feed = interleave([feedFor('movie'), feedFor('tv')]).map((c) => ({
+    id: `service-feed-${service.id}-${country}-${c.id}`,
+    title: c.title,
+    load: (page: number) =>
+      pages(
+        `/discover/${c.query.mediaType}`,
+        c.query.mediaType,
+        discoverParams(scoped(c.query)),
+        page,
+      ),
+  }));
+  return [...lead, ...feed];
 }
