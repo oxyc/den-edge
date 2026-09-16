@@ -145,6 +145,12 @@ export const titleKey = (t: { type: string; id: number }) => `${t.type}:${t.id}`
 /**
  * The record log's rows applied to `library`; the log's state wins. Rows carry no display, so a title arrives
  * unnamed until `untitled` and `withDisplay` fill it in from TMDB.
+ *
+ * **Requires an initialised sync core**, because it asks the shared policy what each row means. That holds in
+ * the app by construction rather than by care: `LibraryLog.open()` awaits `ensureSyncPolicy()`, so a log
+ * cannot exist before the core does, and this is only ever called with one. Anything that builds a log by
+ * hand — a test fixture — must await it first, or every call here throws "Sync core is not initialized".
+ * It is called from a `$derived`, which cannot await, so there is nowhere to fix this further down.
  */
 export function applyLog(library: Library, rows: Row[]): Library {
   const records = new Map(library.records.map((r) => [titleKey(r.title), r]));
