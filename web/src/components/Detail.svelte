@@ -27,6 +27,7 @@
   import DetailReactions from './DetailReactions.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
+  import { isBlocked } from '../lib/parental';
   import Trailer from './Trailer.svelte';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
@@ -59,6 +60,7 @@
     onplayhere,
     away = false,
     blocked = false,
+    ceiling = undefined,
     onepisode,
     onseason,
     shown = () => true,
@@ -91,6 +93,11 @@
     away?: boolean;
     /** That device was refused the home network by the browser itself, which `TitleActions` says instead. */
     blocked?: boolean;
+    /**
+     * The household's parental ceiling (`den.maturityCeiling`). A title rated above it loses Play, Sources,
+     * its episodes and its trailer, exactly as on the TV (`DetailView+Sections.parentalBlocked`).
+     */
+    ceiling?: 'pg13' | 'r';
     onepisode: (title: Title, season: number, episode: number, seen: boolean) => void;
     /**
      * Mark a whole season at once, in one write rather than one per episode. Optional: a surface that has no
@@ -156,6 +163,12 @@
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
+  /**
+   * Whether the household's ceiling blocks this title. The page still exists — it names the title, its year and
+   * its rating, as the TV's does — but nothing that plays it is offered: no Play, no Sources, no episodes and no
+   * trailer. Unknown ratings are not blocked (`parental.isBlocked`), so an unrated title reads as it always did.
+   */
+  const restricted = $derived(!!detail && isBlocked(detail.certifications, region, ceiling));
   let season = $state<number | null>(null);
   let seasonEpisodes = $state<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
@@ -311,7 +324,7 @@
   <header class="hero" use:stableViewportHeight>
     <div class="visual">
       <DetailMedia
-        {autoplay}
+        autoplay={autoplay && !restricted}
         type={ref.type}
         tmdbId={ref.id}
         imdbId={d.imdbId}
@@ -386,6 +399,7 @@
             : undefined}
           {away}
           {blocked}
+          {restricted}
           trailerHref={d.trailer
             ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
             : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
@@ -410,7 +424,7 @@
         {ratings?.awards ?? ''}
       </p>{/if}
   </div>
-  <div class="title-sources">
+  <div class="title-sources" hidden={restricted}>
     <TitleSources
       bind:this={sourcesPanel}
       imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
@@ -430,7 +444,7 @@
     onchange={(value) => onreact(d.title, value)}
   />
 
-  {#if d.seasons.length}
+  {#if d.seasons.length && !restricted}
     {@const regular = d.seasons.filter((s) => s.number > 0)}
     <section class="seasons" aria-label="Episodes">
       <p class="totals">

@@ -160,6 +160,11 @@ export function readDetailPrefs(
   const country = get('den.watchRegion');
   const autoplay = get('den.autoplayTrailers');
   const warnings = get('den.shownWarningCategories');
+  const limit = get('den.maturityCeiling');
+  const ceiling: 'pg13' | 'r' | undefined =
+    limit && 'string' in limit && (limit.string === 'pg13' || limit.string === 'r')
+      ? limit.string
+      : undefined;
   let fallback = 'US';
   try {
     fallback = new Intl.Locale(locale).region ?? fallback;
@@ -172,6 +177,8 @@ export function readDetailPrefs(
       : fallback;
   return {
     region,
+    /** The household's parental ceiling, as the TV reads it (`den.maturityCeiling`); undefined is no limit. */
+    ceiling,
     ratingSources:
       enabled && 'strings' in enabled
         ? enabled.strings.filter((s) => RATING_SOURCES.some((known) => known.id === s))

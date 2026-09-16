@@ -20,6 +20,7 @@
     onplayhere,
     away = false,
     blocked = false,
+    restricted = false,
     trailerHref,
     ontrailer,
     share,
@@ -48,6 +49,8 @@
      * Said apart, because the other sentence sends someone who is already on Tailscale to go and check Tailscale.
      */
     blocked?: boolean;
+    /** The parental ceiling blocks this title: no Play, no Trailer, and a line saying why instead. */
+    restricted?: boolean;
     /** A YouTube watch link, or a trailer search when no exact video is known. */
     trailerHref?: string;
     /**
@@ -104,7 +107,13 @@
 <svelte:window bind:innerWidth={viewportWidth} />
 
 <div class="actions" class:detail-page={detailPage} aria-busy={busy}>
-  {#if onplayhere}
+  {#if restricted}
+    <!-- The ceiling's own slot, where Play would be: the title is still named and rated on the page, but
+         nothing here starts it. The TV says the same thing in the same place. -->
+    <p class="restricted" role="status">
+      {@render lock()}<span>Blocked by parental controls</span>
+    </p>
+  {:else if onplayhere}
     <button class="primary" disabled={busy} onclick={onplayhere}
       >{@render play()}<span>{playLabel}</span></button
     >
@@ -116,7 +125,7 @@
   {/if}
 
   <div class="pills">
-    {#if trailerHref}
+    {#if trailerHref && !restricted}
       <!-- A normal link lets iOS hand off to YouTube, with the website as its fallback.
            Avoid a new mobile tab that can be left blank after the app handoff. -->
       <a
@@ -142,7 +151,7 @@
         }}>{@render clapper()}<span>Trailer</span></a
       >
     {/if}
-    {#if onplayhere && onplay}
+    {#if onplayhere && onplay && !restricted}
       <button class="pill" disabled={busy} onclick={onplay}
         >{@render tv()}<span class="label">Play on TV</span></button
       >
@@ -204,6 +213,13 @@
       Playback works on your home network or with Tailscale on this device.
     {/if}
   </p>{/if}
+
+{#snippet lock()}
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="5" y="10.4" width="14" height="9.6" rx="2.2" />
+    <path d="M8.2 10.4V7.9a3.8 3.8 0 0 1 7.6 0v2.5" />
+  </svg>
+{/snippet}
 
 {#snippet tv()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -444,6 +460,16 @@
 
   .notice {
     color: var(--muted);
+  }
+
+  /* Where Play would be, reading as a statement rather than a control: nothing here is pressable. */
+  .restricted {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0;
+    color: var(--muted);
+    font-weight: 600;
   }
 
   @media (width <= 359px) {

@@ -1141,6 +1141,7 @@
     onplayhere={playHere}
     away={remuxAway && !!scout && !!tmdbKey}
     blocked={remuxBlocked}
+    ceiling={detailPrefs.ceiling}
     onepisode={markEpisodeSeen}
     {shown}
   />

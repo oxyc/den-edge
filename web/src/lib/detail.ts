@@ -3,6 +3,7 @@
 // them TMDB's own shapes.
 
 import type { MediaType, Title } from './library';
+import { strictest } from './parental';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
@@ -46,6 +47,12 @@ export interface TitleDetail {
   lastAirDate?: string;
   lastAired?: { season: number; episode: number };
   certification?: string;
+  /**
+   * The age certification by country, for the parental ceiling rather than for display: the viewer's region
+   * and US, which is what `parental.isBlocked` reads. TMDB's regional entry is often missing where the US one
+   * is not, so a ceiling reading only the viewer's country would let an unrated-here title through.
+   */
+  certifications: Record<string, string>;
   providers: { id: number; name: string; logoPath?: string }[];
   watchLink?: string;
   languages: string[];
@@ -137,6 +144,26 @@ export function parseDetail(
               .sort((a, b) => Number(b.type === 3) - Number(a.type === 3))
               .map((r) => text(r.certification)),
           );
+  // The same ratings by country, for the ceiling rather than for the chip: `parental.isBlocked` reads the
+  // stricter of US and the viewer's region, so both are kept even when only one of them is shown.
+  const certifications: Record<string, string> = {};
+  for (const country of new Set([region.toUpperCase(), 'US'])) {
+    const found =
+      ref.type === 'tv'
+        ? list(obj(body.content_ratings).results)
+            .filter((r) => r.iso_3166_1 === country)
+            .map((r) => text(r.rating) ?? '')
+            .find((rating) => rating !== '')
+        : strictest(
+            list(obj(body.release_dates).results)
+              .filter((r) => r.iso_3166_1 === country)
+              .flatMap((r) =>
+                list(r.release_dates).map((entry) => text(entry.certification) ?? ''),
+              ),
+            country,
+          );
+    if (found) certifications[country] = found;
+  }
   const last = obj(body.last_episode_to_air);
   const collection = obj(body.belongs_to_collection);
   const seasons = list(body.seasons)
@@ -177,6 +204,7 @@ export function parseDetail(
         ? { season: Number(last.season_number), episode: Number(last.episode_number) }
         : undefined,
     certification: certs.find(Boolean),
+    certifications,
     providers: list(providers.flatrate)
       .flatMap((p) =>
         num(p.provider_id) !== undefined && text(p.provider_name)
