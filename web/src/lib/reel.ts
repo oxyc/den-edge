@@ -14,13 +14,60 @@ import type { MediaType } from './library';
 import { relayFetch } from './relayFetch';
 import type { Entry, Routes } from './routes';
 
-/** reel's first address this page can load a video from: never plaintext on an https page, never behind Access. */
+/**
+ * A host a page may only reach from inside the same network: RFC 1918, localhost, `*.local`, and the
+ * tailnet — both by name and by the CGNAT range Tailscale hands out. Chrome's Local Network Access
+ * classifies `100.64.0.0/10` as local exactly as it does the RFC 1918 ranges, and refuses a public
+ * page's request to any of them unless the viewer has granted a permission the page cannot ask for on
+ * its own behalf (oxyc/den-edge#8).
+ */
+function localHost(host: string): boolean {
+  const name = host.toLowerCase();
+  if (
+    name === 'localhost' ||
+    name === '127.0.0.1' ||
+    name === '[::1]' ||
+    name.endsWith('.local') ||
+    name.endsWith('.ts.net')
+  )
+    return true;
+  const labels = name.split('.');
+  if (labels.length !== 4 || !labels.every((l) => /^\d{1,3}$/.test(l) && Number(l) <= 255))
+    return false;
+  const [a = -1, b = -1] = labels.map(Number);
+  return (
+    a === 10 ||
+    (a === 192 && b === 168) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+/**
+ * reel's first address this page can load a video from: never plaintext on an https page, never behind
+ * Access, and never a local address from a page that is not itself local.
+ *
+ * That last one is a guard rather than a fix for anything observed. Today every base reaching
+ * `mediaBase` is relative, so this branch does not run — but nothing enforced that, and an absolute
+ * base here would send video straight at a LAN or tailnet host from the public origin, where the
+ * browser refuses it with no error the page can see. Keeping the check next to the choice means the
+ * accident cannot come back through a different door.
+ */
 function reachable(
   entries: Entry[],
   secure = globalThis.location?.protocol !== 'http:',
+  here = globalThis.location?.hostname ?? '',
 ): string | null {
+  const pageIsLocal = here !== '' && localHost(here);
   for (const entry of entries) {
     if (entry.access || (secure && entry.url.startsWith('http:'))) continue;
+    if (!pageIsLocal) {
+      try {
+        if (localHost(new URL(entry.url).hostname)) continue;
+      } catch {
+        continue; // Not a URL this page can resolve, so not one it can play from either.
+      }
+    }
     return entry.url.replace(/\/$/, '');
   }
   return null;

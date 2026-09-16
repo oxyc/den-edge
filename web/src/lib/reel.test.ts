@@ -49,6 +49,51 @@ const meta = {
 // asks about the same title and means it each time.
 beforeEach(forgetWarmedTrailers);
 
+// Every base in the app today is relative, so the absolute branch below is a guard rather than a path
+// anyone walks. It is tested because "nothing produces this input" is a property of today's callers,
+// not of this function, and the cost of being wrong is silent: the browser refuses a public page's
+// request to a local address with nothing the page can catch (oxyc/den-edge#8).
+describe('where a trailer’s bytes may be loaded from', () => {
+  const absolute = 'https://elsewhere.example/reel';
+  const ask = (routes: Routes, fetchImpl: typeof fetch) =>
+    trailerCandidates(absolute, 'movie', { imdb: 'tt0111161' }, routes, {
+      fetchImpl,
+      secure: true,
+    });
+
+  it('will not load from the tailnet when the page is not on it', async () => {
+    let asked = 0;
+    const counting: typeof fetch = async (input) => {
+      asked += 1;
+      return answering(meta, 200, absolute)(input);
+    };
+    expect(
+      await ask({ reel: [{ url: 'https://pve.tailce93d3.ts.net:8443/reel' }] }, counting),
+    ).toEqual([]);
+    expect(asked, 'and reel is never even asked, since there is nowhere to play from').toBe(0);
+  });
+
+  it('will not load from a LAN address over https either', async () => {
+    expect(
+      await ask(
+        { reel: [{ url: 'https://192.168.86.193:8443/reel' }] },
+        answering(meta, 200, absolute),
+      ),
+    ).toEqual([]);
+  });
+
+  it('still loads from an address the page may actually reach', async () => {
+    const found = await ask(
+      { reel: [{ url: 'https://reel.example.com' }] },
+      answering(meta, 200, absolute),
+    );
+    expect(found.map((candidate) => candidate.play)).toEqual([
+      'https://reel.example.com/play/abc123.mp4?s=tag&i=iid',
+      'https://reel.example.com/play/def456.mp4?s=tag2',
+    ]);
+  });
+});
+
 describe('what a press resolved', () => {
   const ask = (fetchImpl: typeof fetch) =>
     trailerCandidates('/reel/cfg', 'movie', { imdb: 'tt0111161' }, ROUTES, {
