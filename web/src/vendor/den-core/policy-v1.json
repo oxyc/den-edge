@@ -1232,6 +1232,485 @@
         "b": {}
       },
       "error": "invalid_integer"
+    },
+    {
+      "name": "a watched bit with no time adds nothing to a watched mark",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 1, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": { "fraction": 1, "at": 1700000000000 }
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "a watched bit with no time is still held when nothing is known",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 1, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": null
+      },
+      "ok": { "action": "flag" }
+    },
+    {
+      "name": "value zero is an un-watch and clears the mark",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0, "at": [1700000000000, 0, "aaaa"], "viewing": 1 }
+        },
+        "mark": { "fraction": 1, "at": 1600000000000 }
+      },
+      "ok": { "action": "clear" }
+    },
+    {
+      "name": "a newer stamp wins and carries its seconds",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.5, "at": [2000, 0, "aaaa"], "viewing": 0, "seconds": 3000 }
+        },
+        "mark": { "fraction": 0.2, "at": 1000 }
+      },
+      "ok": { "action": "replace", "fraction": 0.5, "at": 2000, "seconds": 3000.0 }
+    },
+    {
+      "name": "an older stamp does not displace a newer mark",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.5, "at": [1000, 0, "aaaa"], "viewing": 0 }
+        },
+        "mark": { "fraction": 0.9, "at": 2000 }
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "an authoritative row wins even when its stamp is older",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.5, "at": [1000, 0, "aaaa"], "viewing": 0 }
+        },
+        "mark": { "fraction": 0.9, "at": 2000 },
+        "authoritative": true
+      },
+      "ok": { "action": "replace", "fraction": 0.5, "at": 1000 }
+    },
+    {
+      "name": "an authoritative row does not override an unknown time",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 1, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": { "fraction": 1, "at": 1700000000000 },
+        "authoritative": true
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "a watched bit with no time does not overwrite partial progress",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 1, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": { "fraction": 0.3, "at": 1700000000000 }
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "equal stamps keep what is held",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.5, "at": [2000, 0, "aaaa"], "viewing": 0 }
+        },
+        "mark": { "fraction": 0.9, "at": 2000 }
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "a bit at exactly the threshold with nothing held is a flag",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.95, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": null
+      },
+      "ok": { "action": "flag" }
+    },
+    {
+      "name": "a bit with no time and no completion is left alone rather than refused",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.4, "at": [0, 0, ""], "viewing": 0 }
+        },
+        "mark": null
+      },
+      "ok": { "action": "keep" }
+    },
+    {
+      "name": "a held mark with no time of its own loses to a real stamp",
+      "request": {
+        "op": "episode_mark",
+        "row": {
+          "kind": "ep",
+          "schema": 2,
+          "title": { "type": "tv", "id": 1399 },
+          "season": 1,
+          "episode": 2,
+          "progress": { "value": 0.5, "at": [2000, 0, "aaaa"], "viewing": 0 }
+        },
+        "mark": { "fraction": 0.9 }
+      },
+      "ok": { "action": "replace", "fraction": 0.5, "at": 2000 }
+    },
+    {
+      "name": "a Specials season counts towards nothing",
+      "request": {
+        "op": "series_state",
+        "seasons": [
+          { "season": 0, "episodes": 3 },
+          { "season": 1, "episodes": 6 }
+        ],
+        "last_aired": null,
+        "watched": [
+          { "season": 1, "episode": 1 },
+          { "season": 1, "episode": 2 }
+        ]
+      },
+      "ok": { "watched": 2, "total": 6, "nextUp": { "season": 1, "episode": 3 }, "complete": false }
+    },
+    {
+      "name": "the aired episodes are the regular seasons in order, up to the last aired",
+      "request": {
+        "op": "aired_episodes",
+        "seasons": [
+          { "season": 0, "episodes": 2 },
+          { "season": 2, "episodes": 2 },
+          { "season": 1, "episodes": 2 }
+        ],
+        "last_aired": { "season": 2, "episode": 1 }
+      },
+      "ok": [
+        { "season": 1, "episode": 1 },
+        { "season": 1, "episode": 2 },
+        { "season": 2, "episode": 1 }
+      ]
+    },
+    {
+      "name": "a series watched to its last aired episode is complete",
+      "request": {
+        "op": "series_state",
+        "seasons": [{ "season": 1, "episodes": 8 }],
+        "last_aired": { "season": 1, "episode": 2 },
+        "watched": [
+          { "season": 1, "episode": 1 },
+          { "season": 1, "episode": 2 }
+        ]
+      },
+      "ok": { "watched": 2, "total": 2, "nextUp": null, "complete": true }
+    },
+    {
+      "name": "the episode after a finale is never a Special",
+      "request": {
+        "op": "episode_after",
+        "seasons": [
+          { "season": 0, "episodes": 3 },
+          { "season": 1, "episodes": 6 }
+        ],
+        "last_aired": null,
+        "at": { "season": 1, "episode": 6 }
+      },
+      "ok": { "next": null, "aired": false }
+    },
+    {
+      "name": "a listed episode that has not aired is reported as listed but unaired",
+      "request": {
+        "op": "episode_after",
+        "seasons": [{ "season": 1, "episodes": 8 }],
+        "last_aired": { "season": 1, "episode": 5 },
+        "at": { "season": 1, "episode": 5 }
+      },
+      "ok": { "next": { "season": 1, "episode": 6 }, "aired": false }
+    },
+    {
+      "name": "an unfinished episode resumes where it was left",
+      "request": {
+        "op": "continue_target",
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "last_played": { "season": 1, "episode": 3, "fraction": 0.4 }
+      },
+      "ok": { "episode": { "season": 1, "episode": 3 }, "fraction": 0.4, "kind": "resume" }
+    },
+    {
+      "name": "a finished episode offers the next one",
+      "request": {
+        "op": "continue_target",
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "last_played": { "season": 1, "episode": 3, "fraction": 1.0 }
+      },
+      "ok": { "episode": { "season": 1, "episode": 4 }, "fraction": 0.0, "kind": "next" }
+    },
+    {
+      "name": "a finished finale starts the series again rather than dead-ending",
+      "request": {
+        "op": "continue_target",
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "last_played": { "season": 1, "episode": 6, "fraction": 1.0 }
+      },
+      "ok": { "episode": { "season": 1, "episode": 1 }, "fraction": 0.0, "kind": "start" }
+    },
+    {
+      "name": "nothing played yet starts at the first aired episode",
+      "request": {
+        "op": "continue_target",
+        "seasons": [
+          { "season": 0, "episodes": 2 },
+          { "season": 1, "episodes": 6 }
+        ],
+        "last_aired": null,
+        "last_played": null
+      },
+      "ok": { "episode": { "season": 1, "episode": 1 }, "fraction": 0.0, "kind": "start" }
+    },
+    {
+      "name": "a two-second look at a later episode does not hide a series finished to E4",
+      "request": {
+        "op": "continue_entry",
+        "mark": { "season": 1, "episode": 5, "fraction": 0.01, "at": 1000 },
+        "finished": { "season": 1, "episode": 4 },
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "next",
+        "code": "next",
+        "episode": { "season": 1, "episode": 5 },
+        "fraction": 0.0,
+        "reason": "the next episode after the furthest finished"
+      }
+    },
+    {
+      "name": "a series known only through a bare watched flag still offers its next episode",
+      "request": {
+        "op": "continue_entry",
+        "mark": null,
+        "finished": null,
+        "flag": { "season": 1, "episode": 4 },
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "next",
+        "code": "next",
+        "episode": { "season": 1, "episode": 5 },
+        "fraction": 0.0,
+        "reason": "the next episode after the furthest finished"
+      }
+    },
+    {
+      "name": "a mark past the floor and ahead of the front resumes",
+      "request": {
+        "op": "continue_entry",
+        "mark": { "season": 1, "episode": 3, "fraction": 0.4, "at": 1000 },
+        "finished": null,
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "resume",
+        "code": "resume",
+        "episode": { "season": 1, "episode": 3 },
+        "fraction": 0.4,
+        "reason": "resuming where it was left"
+      }
+    },
+    {
+      "name": "a flag ahead of the newest mark overtakes it",
+      "request": {
+        "op": "continue_entry",
+        "mark": { "season": 1, "episode": 2, "fraction": 0.5, "at": 1000 },
+        "finished": null,
+        "flag": { "season": 1, "episode": 4 },
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "next",
+        "code": "next",
+        "episode": { "season": 1, "episode": 5 },
+        "fraction": 0.0,
+        "reason": "the next episode after the furthest finished"
+      }
+    },
+    {
+      "name": "a title marked watched is still offered when the layout is known",
+      "request": {
+        "op": "continue_entry",
+        "mark": null,
+        "finished": { "season": 1, "episode": 4 },
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null,
+        "title_watched": true
+      },
+      "ok": {
+        "action": "next",
+        "code": "next",
+        "episode": { "season": 1, "episode": 5 },
+        "fraction": 0.0,
+        "reason": "the next episode after the furthest finished"
+      }
+    },
+    {
+      "name": "a title marked watched with no layout has nothing better to go on",
+      "request": {
+        "op": "continue_entry",
+        "mark": { "season": 1, "episode": 2, "fraction": 0.5, "at": 1000 },
+        "finished": null,
+        "flag": null,
+        "seasons": [],
+        "last_aired": null,
+        "dismissed_at": null,
+        "title_watched": true
+      },
+      "ok": {
+        "action": "none",
+        "code": "title_watched",
+        "episode": null,
+        "fraction": 0.0,
+        "reason": "title watched, no layout to judge it by"
+      }
+    },
+    {
+      "name": "dismissed at or after the last activity stays off the row",
+      "request": {
+        "op": "continue_entry",
+        "mark": { "season": 1, "episode": 2, "fraction": 0.5, "at": 1000 },
+        "finished": null,
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": 2000
+      },
+      "ok": {
+        "action": "none",
+        "code": "dismissed",
+        "episode": null,
+        "fraction": 0.0,
+        "reason": "dismissed"
+      }
+    },
+    {
+      "name": "a finished finale has nothing listed after it",
+      "request": {
+        "op": "continue_entry",
+        "mark": null,
+        "finished": { "season": 1, "episode": 6 },
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 6 }],
+        "last_aired": null,
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "none",
+        "code": "finished",
+        "episode": null,
+        "fraction": 0.0,
+        "reason": "finished: nothing listed after it"
+      }
+    },
+    {
+      "name": "caught up to the last aired episode",
+      "request": {
+        "op": "continue_entry",
+        "mark": null,
+        "finished": { "season": 1, "episode": 5 },
+        "flag": null,
+        "seasons": [{ "season": 1, "episodes": 8 }],
+        "last_aired": { "season": 1, "episode": 5 },
+        "dismissed_at": null
+      },
+      "ok": {
+        "action": "none",
+        "code": "not_aired",
+        "episode": null,
+        "fraction": 0.0,
+        "reason": "caught up: the next episode has not aired"
+      }
     }
   ]
 }
