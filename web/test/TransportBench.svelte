@@ -144,9 +144,15 @@
       // other progressive row here answers `cache;desc=hit` once the page has been used at all, which makes
       // them warm numbers — useful, but not what a viewer opening a fresh title pays. Check the `reel` column
       // to confirm this one really did build: `index` with a duration, rather than `cache hit`.
+      //
+      // THIS ROW IS SINGLE-USE PER HEIGHT, and that is not a fault to debug. The first sweep builds the index;
+      // every sweep after it, on this trailer, reads the one that was built and reports `cache hit` — at which
+      // point the number beside it is warm and means nothing it claims to. It was 480 until 2026-09-16, when
+      // two iPhone sweeps had already spent it. Move the height again for the next genuinely cold measurement,
+      // and take the number from the FIRST run rather than the repeats.
       {
-        name: 'progressive 480 audio (cold)',
-        url: at('progressive', 'mp4', 'height=480&audio=1'),
+        name: 'progressive 540 audio (cold)',
+        url: at('progressive', 'mp4', 'height=540&audio=1'),
         kind: 'file' as const,
         on: true,
       },
@@ -438,11 +444,17 @@
       Times are milliseconds from the moment <code>src</code> was set. Take it away with one of these
       — selecting this much JSON by hand on a phone is its own small misery:
     </p>
+    <!-- Off until the sweep ends. The table fills in as runs land, so these appear while it is still going —
+         and a report taken then is missing rows without saying so, which reads as a browser that refused a
+         transport rather than one that was never asked. Sharing mid-sweep also steals the tab, and a hidden
+         tab stops drawing video: the act of saving would then break the run it was saving. -->
     <div class="save">
-      <button onclick={download}>Download</button>
-      <button onclick={share}>Share</button>
-      <button onclick={copy}>Copy</button>
-      {#if saved}<span class="note">{saved}</span>{/if}
+      <button onclick={download} disabled={running}>Download</button>
+      <button onclick={share} disabled={running}>Share</button>
+      <button onclick={copy} disabled={running}>Copy</button>
+      {#if running}<span class="note"
+          >Saving waits for the sweep — a half-swept report reads like a fault.</span
+        >{:else if saved}<span class="note">{saved}</span>{/if}
     </div>
     <textarea readonly rows="8">{report}</textarea>
   {/if}
