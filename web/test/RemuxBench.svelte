@@ -201,6 +201,7 @@
     localStorage.setItem(SUBS_KEY, subtitlesInstall.trim());
     failure = undefined;
     timings = {};
+    startedAt = new Date().toISOString();
     busy = 'starting a session';
     const started = performance.now();
     try {
