@@ -219,4 +219,43 @@ describe('cachingFetch', () => {
     expect(freshFor('/3/discover/movie')).toBe(6 * HOUR);
     expect(freshFor('/3/search/multi')).toBe(6 * HOUR);
   });
+
+  /**
+   * Only TMDB knows whether a series has ended, so the answer decides this and not the path. Kept for six
+   * months, a series still airing leaves the app believing the season ended months ago — and the next episode,
+   * which `continueWatching` picks from that shape, never appears.
+   */
+  it('keeps a series that is not over for hours, and a finished one for months', () => {
+    const airing = '{"id":1399,"status":"Returning Series","next_episode_to_air":{"id":1}}';
+    const ended = '{"id":1399,"status":"Ended","next_episode_to_air":null}';
+    // Between seasons nothing is scheduled, and the announcement of the next one is what must be noticed.
+    const between = '{"id":1399,"status":"Returning Series","next_episode_to_air":null}';
+    expect(freshFor('/3/tv/1399', airing)).toBe(6 * HOUR);
+    expect(freshFor('/3/tv/1399', between)).toBe(6 * HOUR);
+    expect(freshFor('/3/tv/1399', ended)).toBe(RETENTION);
+    expect(freshFor('/3/tv/1399', '{"id":1399,"status":"Canceled"}')).toBe(RETENTION);
+    // A season's episodes are settled once they have aired, and a film has no such field to read.
+    expect(freshFor('/3/tv/1399/season/2', airing)).toBe(RETENTION);
+    expect(freshFor('/3/movie/603', airing)).toBe(RETENTION);
+    expect(freshFor('/3/tv/1399')).toBe(RETENTION);
+  });
+
+  it('asks again for an airing series the same day, and leaves a finished one alone', async () => {
+    const airing = '{"id":1399,"status":"Returning Series","next_episode_to_air":{"id":1}}';
+    const series = 'https://api.themoviedb.org/3/tv/1399?api_key=secret';
+    const { entries, store } = memory();
+    const net = network();
+    entries.set('https://api.themoviedb.org/3/tv/1399', { body: airing, fetchedAt: 0 });
+    await cachingFetch(store, net.fetchImpl, () => 7 * HOUR)(series);
+    expect(net.asked, 'six hours old and still airing, so it is asked again').toHaveLength(1);
+
+    const settled = memory();
+    settled.entries.set('https://api.themoviedb.org/3/tv/1399', {
+      body: '{"id":1399,"status":"Ended","next_episode_to_air":null}',
+      fetchedAt: 0,
+    });
+    const quiet = network();
+    await cachingFetch(settled.store, quiet.fetchImpl, () => 7 * HOUR)(series);
+    expect(quiet.asked, 'a finished series is what it was six hours ago').toHaveLength(0);
+  });
 });

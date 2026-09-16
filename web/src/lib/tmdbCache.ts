@@ -57,14 +57,33 @@ export interface Store {
  * (`tmdb.rs`): what a film is called, when it came out and who was in it does not change, and asking again
  * every month bought nothing but a wait. Lists and search still move, and keep their hours.
  */
-export function freshFor(path: string): number {
+export function freshFor(path: string, body?: string): number {
   if (
     /\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) ||
     path.includes('/season/')
   )
     return RETENTION;
-  if (/^\/3\/(movie|tv|person)\/\d+$/.test(path)) return RETENTION;
+  if (/^\/3\/(movie|tv|person)\/\d+$/.test(path))
+    return unfinished(path, body) ? DAY / 4 : RETENTION;
   return DAY / 4;
+}
+
+/** Only these are over. Returning, in production and planned are not, whatever is scheduled right now. */
+const OVER = /"status":\s*"(Ended|Canceled)"/;
+
+/**
+ * Does this answer describe a series that can still change?
+ *
+ * A series that is not over is the one record TMDB answers that does not settle, and `continueWatching` reads a
+ * series' shape to decide which episode is next — so kept for six months, Den goes on believing the season ended
+ * months ago and withholds the episode that aired on Friday. The status decides it and not the next episode: a
+ * series between seasons has none scheduled and is not finished, and the day its next season is announced is the
+ * day this has to notice. den-edge reads the same field for the same reason (`tmdb.rs`), so both sides forget it
+ * at the same age.
+ */
+function unfinished(path: string, body: string | undefined): boolean {
+  if (!body || !/^\/3\/tv\/\d+$/.test(path)) return false;
+  return !OVER.test(body);
 }
 
 /** The URL without its key, parameters in order: what an answer is kept under. */
@@ -138,7 +157,8 @@ export function cachingFetch(
     // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
     const kept =
       stored && keepable(stored.body) && now() - stored.fetchedAt < RETENTION ? stored : undefined;
-    const fresh = freshFor(url.pathname);
+    // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
+    const fresh = freshFor(url.pathname, kept?.body);
     const age = kept ? now() - kept.fetchedAt : Infinity;
     if (kept && age < fresh) return answer(kept.body);
     if (kept && age < fresh + STALE_FOR) {

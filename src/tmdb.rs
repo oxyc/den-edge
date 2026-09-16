@@ -111,6 +111,44 @@ fn fresh_for(path: &str) -> Duration {
     }
 }
 
+/// How long an answer stays fresh once TMDB has said what it is.
+///
+/// One record here is not a settled fact: a series that is not over. Its next episode, its latest air date and
+/// its season list all still move, and the app reads a series' shape to decide which episode comes next — so
+/// kept for six months like a finished title's details, Den goes on believing the season ended months ago and
+/// withholds an episode that aired on Friday. An unfinished series is a list, not a record.
+fn fresh_for_answer(path: &str, body: &[u8]) -> Duration {
+    let fresh = fresh_for(path);
+    if fresh == DETAILS_TTL && unfinished(path, body) {
+        LIST_TTL
+    } else {
+        fresh
+    }
+}
+
+/// Does this body describe a series that can still change?
+///
+/// The status decides it, not the next episode: a series BETWEEN seasons has `next_episode_to_air: null` and is
+/// not finished, and the day its next season is announced is precisely the day this has to notice. Only "Ended"
+/// and "Canceled" are over; returning, in production and planned are not. A body whose status cannot be read is
+/// treated as unfinished, because an answer we don't recognise is no evidence that a series is done.
+///
+/// Matched on the text rather than parsed: the alternative is parsing a whole answer on every read to learn one
+/// thing about it.
+fn unfinished(path: &str, body: &[u8]) -> bool {
+    if !(path.starts_with("/3/tv/") && is_entity(path)) {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let over = text.split_once("\"status\":").is_some_and(|(_, rest)| {
+        let rest = rest.trim_start();
+        rest.starts_with("\"Ended\"") || rest.starts_with("\"Canceled\"")
+    });
+    !over
+}
+
 /// `/3/movie/550`, `/3/tv/1399`, `/3/person/287` — a title or a person's own record, and nothing else.
 fn is_entity(path: &str) -> bool {
     let mut parts = path.split('/').skip(1);
@@ -231,12 +269,13 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     let query = req.uri().query().map(str::to_owned);
     let cached = cache_key(&path, query.as_deref());
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cached));
-    let fresh = fresh_for(&path);
 
     // A hit never leaves the box, so it is not counted against anybody's budget: what the limits exist to
     // bound is what this origin asks TMDB, not what it already knows.
     if let Some(file) = &file {
         if let Some((body, age, modified)) = read(file).await {
+            // What TMDB said narrows what the path alone could say: an airing series is kept for hours, not months.
+            let fresh = fresh_for_answer(&path, &body);
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
             //
@@ -268,6 +307,8 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
                         Ok(Fetched::Answer(new, etag)) => {
                             keep(file, &new, etag.as_deref()).await;
+                            // The series may have ended since it was last asked for, which gives it its months back.
+                            let fresh = fresh_for_answer(&path, &new);
                             answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
                         Ok(Fetched::Unchanged) => {
@@ -291,6 +332,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             if let Some(file) = &file {
                 keep(file, &body, etag.as_deref()).await;
             }
+            let fresh = fresh_for_answer(&path, &body);
             answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
         }
         Err(response) => {
@@ -321,7 +363,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 if age < ABSENT_TTL {
                     return None;
                 }
-            } else if age < fresh_for(path) {
+            } else if age < fresh_for_answer(path, &body) {
                 return serde_json::from_slice(&body).ok();
             } else {
                 stale = Some(body);
@@ -749,6 +791,25 @@ mod tests {
         assert_eq!(fresh_for("/3/discover/movie"), LIST_TTL);
         assert_eq!(fresh_for("/3/search/multi"), SEARCH_TTL);
         assert!(DETAILS_TTL <= RETENTION, "nothing may be kept past TMDB's six months");
+    }
+
+    /// A series that is not over is the one record here that does not settle. The app reads its shape to decide
+    /// which episode comes next, so kept for six months it withholds an episode that aired weeks ago.
+    #[test]
+    fn a_series_that_is_not_over_is_kept_for_hours_not_months() {
+        let airing: &[u8] = br#"{"id":1399,"status":"Returning Series","next_episode_to_air":{"id":1}}"#;
+        // Between seasons: nothing scheduled, and the announcement of the next season is what must be noticed.
+        let between: &[u8] = br#"{"id":1399,"status":"Returning Series","next_episode_to_air":null}"#;
+        let ended: &[u8] = br#"{"id":1399,"status":"Ended","next_episode_to_air":null}"#;
+        let cancelled: &[u8] = br#"{"id":1399,"status":"Canceled","next_episode_to_air":null}"#;
+        assert_eq!(fresh_for_answer("/3/tv/1399", airing), LIST_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", between), LIST_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", ended), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", cancelled), DETAILS_TTL);
+        // A series' own record and nothing else: a season's episodes are settled once they have aired, and a
+        // film has no status to read.
+        assert_eq!(fresh_for_answer("/3/tv/1399/season/2", airing), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/movie/550", airing), DETAILS_TTL);
     }
 
     /// The same question from a TV and from a browser is one entry, whatever key either of them sent.
