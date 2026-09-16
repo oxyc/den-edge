@@ -159,6 +159,34 @@ describe('atlas rows', () => {
     expect(at(titles, 0).year).toBe(1999);
   });
 
+  // A chart's art is keyed by IMDb id. TMDB splits an anthology into one show per story where IMDb keeps one, so the
+  // art for a series can belong to a different story: Monster's Lizzie Borden entry drew Dahmer's poster.
+  it('never falls back to a series’ own art, which can belong to another story', async () => {
+    const metas = {
+      metas: [
+        {
+          id: 'tt13207736',
+          imdb_id: 'tt13207736',
+          moviedb_id: 299939,
+          name: 'Monster: The Lizzie Borden Story',
+          type: 'series',
+          poster: 'https://images.metahub.space/poster/medium/tt13207736/img',
+          releaseInfo: '2026',
+        },
+      ],
+    };
+    const rows = atlasServiceRows(
+      '/atlas',
+      [{ id: 'jw-nfx-coming', name: 'Coming to Netflix', type: 'tv', providerIds: [8] }],
+      service({ id: 8, name: 'Netflix' }),
+      'US',
+      { fetchImpl: answering(metas) },
+    );
+    const titles = await at(rows, 0).load(1);
+    expect(at(titles, 0).id).toBe(299939);
+    expect(at(titles, 0).posterUrl, 'no art rather than another story’s').toBeUndefined();
+  });
+
   it('lets atlas’s charts replace TMDB’s, for the media type it covers and no other', () => {
     const atlas: AtlasCatalog[] = [
       { id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] },

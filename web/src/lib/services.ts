@@ -103,7 +103,10 @@ function titlesOfMetas(body: unknown): Title[] {
         id,
         title: meta.name,
         posterPath: typeof meta.posterPath === 'string' ? meta.posterPath : undefined,
-        posterUrl: typeof meta.poster === 'string' ? meta.poster : undefined,
+        // The chart's own art is keyed by IMDb id, and for a series that id is often the whole anthology's: TMDB
+        // splits "Monster" into one show per story, IMDb keeps one, so the Lizzie Borden story was drawn with
+        // Dahmer's poster. Wrong art is worse than none, and a film's two ids agree, so the fallback is films only.
+        posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
         year: Number.isInteger(year) && year > 1800 ? year : undefined,
         imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
       },
