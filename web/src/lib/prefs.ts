@@ -133,8 +133,9 @@ export function isHidden(
 ): boolean {
   if (title.adult) return true;
   // A card with no poster is a blank card. The billboard draws a backdrop instead, and an addon catalog names
-  // titles by id with the artwork left to TMDB — asking for a poster there hides every one of them.
-  if (requirePoster && !title.posterPath) return true;
+  // titles by id with the artwork left to TMDB — asking for a poster there hides every one of them. Art a service
+  // chart carries itself counts: the card draws it, so the title is not blank (`Title.posterUrl`).
+  if (requirePoster && !title.posterPath && !title.posterUrl) return true;
   if (
     !ignoringYearFloor &&
     prefs.minReleaseYear !== undefined &&

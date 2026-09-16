@@ -70,6 +70,10 @@ describe('prefs', () => {
       isHidden(film({ posterPath: undefined, genreIds: [27] }), prefs, { requirePoster: false }),
       'every other rule still applies to it',
     ).toBe(true);
+    expect(
+      isHidden(film({ posterPath: undefined, posterUrl: 'https://example/poster.jpg' }), prefs),
+      'art a service chart carries is a poster: the card draws it',
+    ).toBe(false);
     expect(isHidden(film({ genreIds: [27, 53] }), prefs)).toBe(true);
     expect(isHidden(film({ originalLanguage: 'hi' }), prefs)).toBe(true);
     expect(isHidden(film({ genreIds: [16], originalLanguage: 'ja' }), prefs)).toBe(true);
