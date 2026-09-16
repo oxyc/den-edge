@@ -66,6 +66,20 @@ read_version() {
 if [ -f Cargo.toml ]; then
     echo "==> formatting";  run_rustfmt
     echo "==> tests";       cargo test --quiet
+    # A REPO THAT SHIPS A WEB APP SHIPS IT IN THE SAME IMAGE, so its gates belong here too.
+    #
+    # v0.147.0 was tagged with a fixture that mocked TMDB at a host the app no longer asks, CI's web job failed,
+    # and NO IMAGE was ever published. `den-update` then reports "already at <digest>" — which reads as "nothing
+    # to deploy" and is indistinguishable from a release that never happened. The end-to-end suite is the only
+    # gate that exercises the built page, and it takes about two minutes.
+    #
+    # Guarded on the directory rather than named per repo: this file is copied verbatim into every addon, and a
+    # repo without a web app simply skips it.
+    if [ -d web ]; then
+        echo "==> web lint";  npm --prefix web run lint
+        echo "==> web tests"; npm --prefix web test
+        echo "==> web e2e";   npm --prefix web run test:e2e
+    fi
     version_file="Cargo.toml"
 elif [ -f go.mod ]; then
     echo "==> formatting"
