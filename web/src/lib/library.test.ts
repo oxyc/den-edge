@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { continueWatching, emptyLibrary, watchlist, type Library } from './library';
+import { applyLog, continueWatching, emptyLibrary, watchlist, type Library } from './library';
 
 function record(
   type: 'movie' | 'tv',
@@ -76,6 +76,51 @@ const library: Library = {
   ]),
 };
 
+function epRow(season: number, episode: number, value: number, at: number) {
+  return {
+    kind: 'ep' as const,
+    schema: 2,
+    title: { type: 'tv' as const, id: 7 },
+    season,
+    episode,
+    // The zero stamp is `[0, 0, ""]`: a watched bit learned without a time (wire/library-v2.md §3).
+    progress: {
+      value,
+      at: [at, 0, at === 0 ? '' : 'aaaa'] as [number, number, string],
+      viewing: 0,
+    },
+  };
+}
+
+describe('folding episode rows in', () => {
+  it('holds a timeless watched bit as a flag, never as progress stamped at the epoch', () => {
+    const folded = applyLog(emptyLibrary(), [epRow(1, 2, 1, 0)]);
+    // Written as a mark it became fraction 1 at updatedAt 0, and every later comparison then read real
+    // progress as the older side — the opposite of what the zero stamp is for.
+    expect(folded.marks).toEqual([]);
+    expect([...(folded.flags?.values() ?? [])]).toEqual([
+      { type: 'tv', id: 7, season: 1, episode: 2 },
+    ]);
+  });
+
+  it('lets a timeless bit neither displace nor restamp real progress', () => {
+    const started = applyLog(emptyLibrary(), [epRow(1, 2, 0.4, 1700000000000)]);
+    const then = applyLog(started, [epRow(1, 2, 1, 0)]);
+    expect(then.marks).toMatchObject([
+      { season: 1, episode: 2, fraction: 0.4, updatedAt: 1700000000000 },
+    ]);
+    expect([...(then.flags?.values() ?? [])]).toEqual([]);
+  });
+
+  it('takes a stamped row, and an un-watch clears what was held', () => {
+    const watched = applyLog(emptyLibrary(), [epRow(1, 2, 1, 1700000000000)]);
+    expect(watched.marks).toMatchObject([{ fraction: 1, updatedAt: 1700000000000 }]);
+    const cleared = applyLog(watched, [epRow(1, 2, 0, 1700000001000)]);
+    expect(cleared.marks).toEqual([]);
+    expect([...(cleared.flags?.values() ?? [])]).toEqual([]);
+  });
+});
+
 describe("the TV's rows", () => {
   it('lists the watchlist newest first, without deleted titles', () => {
     expect(watchlist(library).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:11', 'movie:10']);
@@ -98,6 +143,36 @@ describe("the TV's rows", () => {
       ['tv:1', { season: 1, episode: 3 }, 0.4],
       // movie 12 was dismissed after its last activity
       ['movie:14', undefined, 0.6],
+    ]);
+  });
+
+  it('offers the next episode of a series known only through a bare watched flag', () => {
+    // A tracker pull writes no progress at all, so this series has no mark: without the flag counting, a show
+    // watched through SIMKL was watched everywhere except the row whose job is to offer its next episode.
+    const flagged: Library = {
+      records: [record('tv', 9, 'watched')],
+      marks: [],
+      flags: new Map([['tv:9:1:4', { type: 'tv', id: 9, season: 1, episode: 4 }]]),
+      shapes: new Map([['tv:9', { counts: new Map([[1, 6]]) }]]),
+      dismissed: new Map(),
+    };
+    expect(
+      continueWatching(flagged).map((e) => [`${e.title.type}:${e.title.id}`, e.episode]),
+    ).toEqual([['tv:9', { season: 1, episode: 5 }]]);
+  });
+
+  it('lets a flag ahead of the newest mark decide where the series is', () => {
+    // The newest mark is E2; the flag says E4 was watched. The front is the further of the two, so the row
+    // offers E5 rather than resuming E2.
+    const both: Library = {
+      records: [record('tv', 9, 'inProgress')],
+      marks: [mark(9, 1, 2, 0.5, 1000)],
+      flags: new Map([['tv:9:1:4', { type: 'tv', id: 9, season: 1, episode: 4 }]]),
+      shapes: new Map([['tv:9', { counts: new Map([[1, 6]]) }]]),
+      dismissed: new Map(),
+    };
+    expect(continueWatching(both).map((e) => [e.episode, e.fraction])).toEqual([
+      [{ season: 1, episode: 5 }, 0],
     ]);
   });
 

@@ -2,6 +2,7 @@
 // for its Watchlist and Continue Watching rows (LibraryStore, EpisodeProgressStore and ContinueWatchingRow.list),
 // so the web shows the same rows in the same order.
 
+import { syncPolicy } from './syncCore';
 import type { Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
@@ -85,10 +86,44 @@ export interface Shape {
 export interface Library {
   records: LibraryRecord[];
   marks: Mark[];
+  /**
+   * Episodes known to be watched with no time behind it — a tracker import, written with the zero stamp.
+   *
+   * Apart from `marks` deliberately, and the TV keeps them apart for the same reason: such a bit says only
+   * "this was watched". It is not a resume position and it carries no stamp to compare, so storing it as a
+   * mark would put a fraction of 1 at the epoch into the history, where every later comparison reads real
+   * progress as the older side. By `markKey`. Optional, so a library built before this stays valid.
+   */
+  flags?: Map<string, { type: string; id: number; season: number; episode: number }>;
   /** By `type:id`. */
   shapes: Map<string, Shape>;
   dismissed: Map<string, number>;
 }
+
+/**
+ * What the shared policy says one episode row means for what we already hold (`episode_mark`).
+ *
+ * An action rather than a mark, because the TV and the web store watch state differently and neither shape
+ * belongs in the policy: `clear` hold nothing, `keep` what is held still wins, `flag` watched but timeless,
+ * `replace` take the row's figures.
+ */
+type EpisodeAction =
+  | { action: 'clear' | 'keep' | 'flag' }
+  | { action: 'replace'; fraction: number; at: number; seconds?: number };
+
+/**
+ * What Continue Watching should do with one series (`continue_entry`).
+ *
+ * `code` is what to branch on; `reason` is prose for whoever reads a log. Matching the prose is how a
+ * dismissed series was once put back on the row. `episode` is null exactly when the action is `none`.
+ */
+type ContinueAnswer = {
+  action: 'resume' | 'next' | 'start' | 'none';
+  code: string;
+  episode: { season: number; episode: number } | null;
+  fraction: number;
+  reason: string;
+};
 
 export interface ContinueEntry {
   title: Title;
@@ -102,7 +137,7 @@ export interface ContinueEntry {
 const WATCHED = 0.95;
 
 export function emptyLibrary(): Library {
-  return { records: [], marks: [], shapes: new Map(), dismissed: new Map() };
+  return { records: [], marks: [], flags: new Map(), shapes: new Map(), dismissed: new Map() };
 }
 
 export const titleKey = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
@@ -118,6 +153,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
   // A mark of each series, for the display a new episode mark borrows: scanning every mark per episode row was
   // quadratic in a long watch history.
   const seriesMarks = new Map(library.marks.map((m) => [titleKey(m), m]));
+  const flags = new Map(library.flags ?? []);
   const resets = new Map<string, number>();
   for (const row of rows) {
     if (row.kind === 'set') continue; // settings are read by prefs.ts
@@ -130,21 +166,40 @@ export function applyLog(library: Library, rows: Row[]): Library {
         season: row.season,
         episode: row.episode,
       };
-      if (row.progress.value > 0) {
+      // What a row means for what we hold is the shared policy's to decide, so the TV and the web cannot
+      // drift on it — above all on the zero stamp, which says "watched, time unknown". Written here as a
+      // mark it became a fraction of 1 stamped at the epoch, and every later comparison then read real
+      // progress as the older side, which is the opposite of what the stamp is for (wire/library-v2.md §3).
+      //
+      // Authoritative: `rows()` hands us one merged row per name out of the log's own store, so a row IS the
+      // record rather than a claim about it, and there is nothing for it to outrank.
+      const held = marks.get(markKey(episode));
+      const decided = syncPolicy<EpisodeAction>({
+        op: 'episode_mark',
+        row,
+        mark: held ? { fraction: held.fraction, at: held.updatedAt } : null,
+        authoritative: true,
+      });
+      if (decided.action === 'clear') {
+        marks.delete(markKey(episode));
+        flags.delete(markKey(episode));
+      } else if (decided.action === 'flag') {
+        flags.set(markKey(episode), episode);
+      } else if (decided.action === 'replace') {
         // Display comes from the series' other marks, or TMDB once `untitled` asks for it.
-        const series = marks.get(markKey(episode)) ?? seriesMarks.get(key);
+        const series = held ?? seriesMarks.get(key);
         const mark = {
           ...episode,
-          fraction: row.progress.value,
-          updatedAt: row.progress.at[0],
+          fraction: decided.fraction,
+          updatedAt: decided.at,
           title: series?.title ?? '',
           posterPath: series?.posterPath,
           voteAverage: series?.voteAverage ?? 0,
         };
         marks.set(markKey(episode), mark);
         seriesMarks.set(key, mark);
-      } else {
-        marks.delete(markKey(episode)); // un-watched
+        // Real progress supersedes a timeless bit for the same episode.
+        flags.delete(markKey(episode));
       }
       continue;
     }
@@ -165,7 +220,19 @@ export function applyLog(library: Library, rows: Row[]): Library {
     const reset = resets.get(titleKey(mark));
     if (reset !== undefined && mark.updatedAt <= reset) marks.delete(key);
   }
-  return { ...library, records: [...records.values()], marks: [...marks.values()], dismissed };
+  // And every timeless bit for it, whenever it was learned. A flag has no stamp to compare, so it can never
+  // lose the test above — and a series un-watched while fabricated "watched" bits survive would offer them
+  // again on the next pull, and go on doing so forever.
+  for (const [key, flag] of flags) {
+    if (resets.has(titleKey(flag))) flags.delete(key);
+  }
+  return {
+    ...library,
+    records: [...records.values()],
+    marks: [...marks.values()],
+    flags,
+    dismissed,
+  };
 }
 
 const markKey = (m: { type: string; id: number; season: number; episode: number }) =>
@@ -249,35 +316,79 @@ export function continueWatching(library: Library): ContinueEntry[] {
   const seen = new Set<string>();
   const entries: ContinueEntry[] = [];
 
+  // Three summaries per series, because the policy asks three different questions of them and conflating any
+  // two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
+  // far the series is actually finished (the furthest FINISHED mark, which is not the same episode), and how
+  // far a timeless bit says it was watched. Watching E1–E4 and then opening E5 for two seconds leaves the
+  // newest mark on E5 below the floor, and reading that alone drops a series being actively watched.
+  const ahead = (a: { season: number; episode: number }, b: { season: number; episode: number }) =>
+    a.season > b.season || (a.season === b.season && a.episode > b.episode);
   const latest = new Map<string, Mark>();
+  const finished = new Map<string, { season: number; episode: number }>();
+  const flagged = new Map<string, { season: number; episode: number }>();
   for (const mark of library.marks) {
-    const current = latest.get(titleKey(mark));
-    if (!current || mark.updatedAt > current.updatedAt) latest.set(titleKey(mark), mark);
-  }
-  const marks = [...latest.values()]
-    .filter((m) => m.fraction > 0.02 && m.title !== '' && (m.type === 'movie' || m.type === 'tv'))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  for (const mark of marks) {
     const key = titleKey(mark);
-    if (dismissedSince(key, mark.updatedAt) || watchedTitles.has(key) || seen.has(key)) continue;
-    const title: Title = {
-      type: mark.type as MediaType,
-      id: mark.id,
-      title: mark.title,
-      posterPath: mark.posterPath,
-      rating: mark.voteAverage,
-    };
-    const shape = library.shapes.get(key);
-    let episode = { season: mark.season, episode: mark.episode };
-    let fraction = mark.fraction;
-    if (mark.fraction >= WATCHED && shape) {
-      const next = episodeAfter(episode, shape);
-      if (!next || !isAired(next, shape.lastAired)) continue;
-      episode = next;
-      fraction = 0;
+    const current = latest.get(key);
+    if (!current || mark.updatedAt > current.updatedAt) latest.set(key, mark);
+    if (mark.fraction >= WATCHED) {
+      const front = finished.get(key);
+      if (!front || ahead(mark, front))
+        finished.set(key, { season: mark.season, episode: mark.episode });
     }
+  }
+  for (const flag of library.flags?.values() ?? []) {
+    const key = titleKey(flag);
+    const front = flagged.get(key);
+    if (!front || ahead(flag, front))
+      flagged.set(key, { season: flag.season, episode: flag.episode });
+  }
+
+  // A series known only through a flag has no time behind it, so it has no place in an order built on when
+  // things were watched: it sorts last among the series rather than claiming the top.
+  const series = [...new Set([...latest.keys(), ...flagged.keys()])].sort(
+    (a, b) => (latest.get(b)?.updatedAt ?? -Infinity) - (latest.get(a)?.updatedAt ?? -Infinity),
+  );
+  for (const key of series) {
+    const mark = latest.get(key);
+    // A series known only through a bare watched flag has no mark to take its name and art from — a tracker
+    // pull writes no progress — so the record carries the display instead. Without this such a series is
+    // decided correctly and then dropped for want of a title, which is the same as never offering it.
+    const title: Title | undefined = mark
+      ? {
+          type: mark.type as MediaType,
+          id: mark.id,
+          title: mark.title,
+          posterPath: mark.posterPath,
+          rating: mark.voteAverage,
+        }
+      : library.records.find((r) => !r.deleted && titleKey(r.title) === key)?.title;
+    if (!title || title.title === '' || (title.type !== 'movie' && title.type !== 'tv')) continue;
+    const shape = library.shapes.get(key);
+    // Branch on `code`, never on `reason`: matching the prose swallowed "dismissed" once and put a dismissed
+    // series back on the row.
+    const answer = syncPolicy<ContinueAnswer>({
+      op: 'continue_entry',
+      mark: mark
+        ? {
+            season: mark.season,
+            episode: mark.episode,
+            fraction: mark.fraction,
+            at: mark.updatedAt,
+          }
+        : null,
+      finished: finished.get(key) ?? null,
+      flag: flagged.get(key) ?? null,
+      seasons: [...(shape?.counts ?? new Map())].map(([season, episodes]) => ({
+        season,
+        episodes,
+      })),
+      last_aired: shape?.lastAired ?? null,
+      dismissed_at: library.dismissed.get(key) ?? null,
+      title_watched: watchedTitles.has(key),
+    });
+    if (answer.action === 'none' || !answer.episode || seen.has(key)) continue;
     seen.add(key);
-    entries.push({ title, fraction, episode });
+    entries.push({ title, fraction: answer.fraction, episode: answer.episode });
   }
 
   const movies = library.records
