@@ -225,10 +225,12 @@ describe("the TV's rows", () => {
    * supposed the opposite — that every started series vanished until shapes arrived — and the first version
    * of this test asserted that drop and failed, which is the only reason anyone knows otherwise.
    *
-   * The layout is needed to know what comes NEXT, so the narrow case is a series whose latest mark is
-   * FINISHED: `none` with code `no_layout`, dropped where this fold refuses an answer with no episode. That
-   * is the web's half of the TV's symptom, where the same state drew the finished episode at 100%
-   * (oxyc/den#32).
+   * The layout is needed to know what comes NEXT, and there are three ways to end up needing it. The resume
+   * branch is `mark.fraction > RESUME_FLOOR && mark.fraction < WATCHED && ahead`, so `no_layout` is reached
+   * when the mark is finished, when it sits at or below the floor, or when `ahead` is false — an in-progress
+   * mark at or behind the furthest finished episode. The last is the one worth fearing: it drops a series
+   * holding a live resume position, not merely one waiting to advance. All are the web's half of the TV's
+   * symptom, where the same state drew the finished episode at 100% (oxyc/den#32).
    *
    * No viewer meets either state. Home's row and the Watchlist page both wait for `shelvesReady`, set only
    * after the naming pass has fetched a shape for every marked series — `shelfTitleRefs` passes the marks
@@ -238,21 +240,33 @@ describe("the TV's rows", () => {
    * something a test can watch. A surface drawing this row before the shapes arrive would lose finished-mark
    * series silently; it fails this instead.
    */
-  it('resumes a started series with no shape, and holds back one whose last mark is finished', () => {
-    const shapeless = (fraction: number): Library => ({
+  it('resumes a started series with no shape, and holds back the three that need the layout', () => {
+    const shapeless = (fraction: number, flags = new Map()): Library => ({
       records: [record('tv', 9, 'inProgress')],
       marks: [mark(9, 1, 2, fraction, 1000)],
-      flags: new Map(),
+      flags,
       shapes: new Map(),
       dismissed: new Map(),
     });
     expect(
       continueWatching(shapeless(0.5)).map((e) => [e.episode, e.fraction]),
-      'in progress: the mark is the answer',
+      'in progress and ahead: the mark is the answer, no layout needed',
     ).toEqual([[{ season: 1, episode: 2 }, 0.5]]);
     expect(
       continueWatching(shapeless(1)),
       'finished: nothing to offer until the layout lands',
+    ).toEqual([]);
+    expect(
+      continueWatching(shapeless(RESUME_FLOOR)),
+      'at the floor: not a resume point, so it needs the layout too',
+    ).toEqual([]);
+    // `ahead` is false: E4 is flagged watched, so the E2 mark is behind the front. This one loses a real
+    // resume position rather than merely waiting to advance, which is why it is the worst of the three.
+    expect(
+      continueWatching(
+        shapeless(0.5, new Map([['tv:9:1:4', { type: 'tv', id: 9, season: 1, episode: 4 }]])),
+      ),
+      'behind the front: a live resume position, dropped',
     ).toEqual([]);
   });
 
