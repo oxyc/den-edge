@@ -8,6 +8,14 @@ type Reaction = NonNullable<TitleRow['reaction']['value']>;
 /** All but the credits: seen (the TV's `LibraryRecord.watchedThreshold`). */
 export const WATCHED = 0.95;
 
+/**
+ * Below this a play has barely begun, so it does not offer itself as somewhere to resume.
+ *
+ * den-core's `RESUME_FLOOR` (`crates/den-sync/src/series.rs:141`), which `continue_entry` judges a mark
+ * against — so this is the same number the policy uses, not a second opinion about it.
+ */
+export const RESUME_FLOOR = 0.02;
+
 /** A resume point moved to `fraction` (the TV's `updateProgress`); playing past the end of a finished one is a replay. */
 function moved(progress: Progress, fraction: number, seconds: number, at: Stamp): Progress {
   const value = Math.min(1, Math.max(0, fraction));

@@ -1,6 +1,6 @@
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
-  import { WATCHED } from '../lib/actions';
+  import { RESUME_FLOOR, WATCHED } from '../lib/actions';
   import { airDate, cleanedOverview, futureDate } from '../lib/detailPresentation';
   import type { Episode } from '../lib/detail';
   let {
@@ -71,7 +71,7 @@
       <span class="number">{episode.number}</span>
       {#if seen}<span class="watched"><DetailIcon name="check" /></span>{/if}
       {#if !upcoming}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
-      {#if progress > 0.02}<span
+      {#if progress > RESUME_FLOOR}<span
           class="progress"
           style:--progress={`${seen ? 100 : progress * 100}%`}
         ></span>{/if}

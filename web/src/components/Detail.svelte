@@ -13,7 +13,7 @@
     seriesPresentation,
     type Ratings,
   } from '../lib/detailPresentation';
-  import { WATCHED } from '../lib/actions';
+  import { RESUME_FLOOR, WATCHED } from '../lib/actions';
   import type { MediaType, Title } from '../lib/library';
   import type { EpisodeRow, TitleRow } from '../lib/wire';
   import PersonCard from './PersonCard.svelte';
@@ -247,7 +247,8 @@
     ref.type === 'tv' ? (series?.fraction ?? 0) : row && !row.deleted.value ? row.resume.value : 0,
   );
   const continuing = $derived(
-    (fraction > 0.02 && fraction < WATCHED) || (ref.type === 'tv' && series?.kind === 'next'),
+    (fraction > RESUME_FLOOR && fraction < WATCHED) ||
+      (ref.type === 'tv' && series?.kind === 'next'),
   );
   const continueLabel = $derived(
     series?.kind === 'next' && target
@@ -376,7 +377,7 @@
             {#if target && series?.kind === 'resume'}<small
                 >S{target.season} · E{target.episode}</small
               >{/if}
-            {#if fraction > 0.02 && fraction < WATCHED}<span class="resume-track"
+            {#if fraction > RESUME_FLOOR && fraction < WATCHED}<span class="resume-track"
                 ><span style:width={`${fraction * 100}%`}></span></span
               >{/if}
           </span>

@@ -1,4 +1,4 @@
-import { WATCHED } from './actions';
+import { RESUME_FLOOR, WATCHED } from './actions';
 import type { Episode, TitleDetail } from './detail';
 import { relayFetch } from './relayFetch';
 import { compareStamps, type EpisodeRow, type TitleRow } from './wire';
@@ -128,7 +128,8 @@ export function seriesPresentation(
   const latest = [...episodes.values()]
     .filter(
       (e) =>
-        progress(e) > 0.02 && coords.some((c) => c.season === e.season && c.episode === e.episode),
+        progress(e) > RESUME_FLOOR &&
+        coords.some((c) => c.season === e.season && c.episode === e.episode),
     )
     .sort(
       (a, b) =>

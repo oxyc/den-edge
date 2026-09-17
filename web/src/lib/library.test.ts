@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WATCHED } from './actions';
+import { RESUME_FLOOR, WATCHED } from './actions';
 import { applyLog, continueWatching, emptyLibrary, watchlist, type Library } from './library';
 
 function record(
@@ -191,6 +191,32 @@ describe("the TV's rows", () => {
     expect(continueWatching(both).map((e) => [e.episode, e.fraction])).toEqual([
       [{ season: 1, episode: 5 }, 0],
     ]);
+  });
+
+  /**
+   * The floor is den-core's (`crates/den-sync/src/series.rs:141`), and `continue_entry` is what applies it:
+   * a mark resumes only above it. Asked of the policy rather than by comparing two numbers, for the same
+   * reason as the watched threshold — comparing constants would only prove the web consistent with itself.
+   */
+  it('agrees with the shared policy about where a resume begins', () => {
+    const above = RESUME_FLOOR + 0.01;
+    const below = RESUME_FLOOR - 0.01;
+    const started = (fraction: number): Library => ({
+      records: [record('tv', 9, 'inProgress')],
+      marks: [mark(9, 1, 2, fraction, 1000)],
+      flags: new Map(),
+      shapes: new Map([['tv:9', { counts: new Map([[1, 6]]) }]]),
+      dismissed: new Map(),
+    });
+    expect(
+      continueWatching(started(above)).map((e) => [e.episode, e.fraction]),
+      'above the floor, the mark is where to resume',
+    ).toEqual([[{ season: 1, episode: 2 }, above]]);
+    // Below it the play has barely begun: whatever the row offers, it is not that position.
+    expect(
+      continueWatching(started(below)).map((e) => e.fraction),
+      'below the floor, not a resume point',
+    ).not.toEqual([below]);
   });
 
   it('shows nothing for an empty library', () => {
