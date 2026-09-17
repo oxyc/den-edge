@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { WATCHED } from './actions';
 import { applyLog, continueWatching, emptyLibrary, watchlist, type Library } from './library';
 
 function record(
@@ -93,6 +94,22 @@ function epRow(season: number, episode: number, value: number, at: number) {
 }
 
 describe('folding episode rows in', () => {
+  /**
+   * den-core defines the watched threshold once — `crates/den-sync/src/series.rs:6`, "One definition, so a
+   * client cannot hold a different opinion about what 'watched' means" — and this app restated it in eight
+   * places, two of them rival named constants. They agree today; nothing made them keep agreeing.
+   *
+   * So this asks the POLICY where the line is rather than comparing two numbers, which would only prove the
+   * web consistent with itself. A timeless bit at or above the threshold is held as a flag; below it says
+   * nothing at all (`episodes.rs`). Move `WATCHED` on either side without the other and this fails.
+   */
+  it('agrees with the shared policy about where watched begins', () => {
+    const flags = (value: number) =>
+      [...(applyLog(emptyLibrary(), [epRow(1, 2, value, 0)]).flags?.values() ?? [])].length;
+    expect(flags(WATCHED), 'at the threshold').toBe(1);
+    expect(flags(WATCHED - 0.01), 'just below it').toBe(0);
+  });
+
   it('holds a timeless watched bit as a flag, never as progress stamped at the epoch', () => {
     const folded = applyLog(emptyLibrary(), [epRow(1, 2, 1, 0)]);
     // Written as a mark it became fraction 1 at updatedAt 0, and every later comparison then read real

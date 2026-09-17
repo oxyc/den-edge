@@ -247,7 +247,7 @@
     ref.type === 'tv' ? (series?.fraction ?? 0) : row && !row.deleted.value ? row.resume.value : 0,
   );
   const continuing = $derived(
-    (fraction > 0.02 && fraction < 0.95) || (ref.type === 'tv' && series?.kind === 'next'),
+    (fraction > 0.02 && fraction < WATCHED) || (ref.type === 'tv' && series?.kind === 'next'),
   );
   const continueLabel = $derived(
     series?.kind === 'next' && target
@@ -376,7 +376,7 @@
             {#if target && series?.kind === 'resume'}<small
                 >S{target.season} · E{target.episode}</small
               >{/if}
-            {#if fraction > 0.02 && fraction < 0.95}<span class="resume-track"
+            {#if fraction > 0.02 && fraction < WATCHED}<span class="resume-track"
                 ><span style:width={`${fraction * 100}%`}></span></span
               >{/if}
           </span>

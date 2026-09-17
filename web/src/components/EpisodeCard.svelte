@@ -1,5 +1,6 @@
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
+  import { WATCHED } from '../lib/actions';
   import { airDate, cleanedOverview, futureDate } from '../lib/detailPresentation';
   import type { Episode } from '../lib/detail';
   let {
@@ -25,7 +26,7 @@
     onseen: (seen: boolean) => void;
     onsources?: () => void;
   } = $props();
-  const seen = $derived(progress >= 0.95);
+  const seen = $derived(progress >= WATCHED);
   const upcoming = $derived(futureDate(episode.airDate));
   const date = $derived(airDate(episode.airDate));
   let menu: HTMLDetailsElement;

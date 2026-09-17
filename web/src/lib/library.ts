@@ -2,6 +2,7 @@
 // for its Watchlist and Continue Watching rows (LibraryStore, EpisodeProgressStore and ContinueWatchingRow.list),
 // so the web shows the same rows in the same order.
 
+import { WATCHED } from './actions';
 import { syncPolicy } from './syncCore';
 import type { Row } from './wire';
 
@@ -132,9 +133,6 @@ export interface ContinueEntry {
   /** The episode to resume or start next, for a series. */
   episode?: { season: number; episode: number };
 }
-
-/** The ≥95% auto-watched threshold (LibraryRecord.watchedThreshold). */
-const WATCHED = 0.95;
 
 export function emptyLibrary(): Library {
   return { records: [], marks: [], flags: new Map(), shapes: new Map(), dismissed: new Map() };

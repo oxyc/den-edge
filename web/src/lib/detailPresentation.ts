@@ -1,3 +1,4 @@
+import { WATCHED } from './actions';
 import type { Episode, TitleDetail } from './detail';
 import { relayFetch } from './relayFetch';
 import { compareStamps, type EpisodeRow, type TitleRow } from './wire';
@@ -123,7 +124,7 @@ export function seriesPresentation(
     .filter((c) => aired(c.season, c.episode) && !futureDate(d.title.releaseDate));
   const progress = (c: { season: number; episode: number }) =>
     episodeProgress(episodes.get(`${c.season}:${c.episode}`), row);
-  const watched = coords.filter((c) => progress(c) >= 0.95).length;
+  const watched = coords.filter((c) => progress(c) >= WATCHED).length;
   const latest = [...episodes.values()]
     .filter(
       (e) =>
@@ -138,7 +139,7 @@ export function seriesPresentation(
   let fraction = 0;
   let kind: 'start' | 'resume' | 'next' = 'start';
   if (latest) {
-    if (progress(latest) < 0.95) {
+    if (progress(latest) < WATCHED) {
       target = { season: latest.season, episode: latest.episode };
       fraction = progress(latest);
       kind = 'resume';

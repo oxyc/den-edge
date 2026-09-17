@@ -6,6 +6,7 @@
 <script lang="ts">
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
+  import { WATCHED } from '../lib/actions';
   import type { Title } from '../lib/library';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
@@ -199,7 +200,7 @@
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
     const at =
-      from.seconds !== undefined && from.seconds > 5 && from.fraction < 0.95
+      from.seconds !== undefined && from.seconds > 5 && from.fraction < WATCHED
         ? from.seconds
         : undefined;
     const result = await startSession(
@@ -376,7 +377,7 @@
       return;
     }
     const at = from.seconds ?? from.fraction * total;
-    if (at > 5 && at / total < 0.95) video.currentTime = at;
+    if (at > 5 && at / total < WATCHED) video.currentTime = at;
   }
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
