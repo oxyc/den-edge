@@ -219,6 +219,43 @@ describe("the TV's rows", () => {
     ).not.toEqual([below]);
   });
 
+  /**
+   * A mark with no season shape is NOT lost. `continue_entry` answers it from the mark itself, because a
+   * resume needs no layout to reason about (den-core `crates/den-sync/src/series.rs:210`). den-edge#14
+   * supposed the opposite — that every started series vanished until shapes arrived — and the first version
+   * of this test asserted that drop and failed, which is the only reason anyone knows otherwise.
+   *
+   * The layout is needed to know what comes NEXT, so the narrow case is a series whose latest mark is
+   * FINISHED: `none` with code `no_layout`, dropped where this fold refuses an answer with no episode. That
+   * is the web's half of the TV's symptom, where the same state drew the finished episode at 100%
+   * (oxyc/den#32).
+   *
+   * No viewer meets either state. Home's row and the Watchlist page both wait for `shelvesReady`, set only
+   * after the naming pass has fetched a shape for every marked series — `shelfTitleRefs` passes the marks
+   * wholesale, and a `tv` ref with no shape is deliberately not skipped.
+   *
+   * Both halves are pinned because that safety is load order rather than logic, and load order is not
+   * something a test can watch. A surface drawing this row before the shapes arrive would lose finished-mark
+   * series silently; it fails this instead.
+   */
+  it('resumes a started series with no shape, and holds back one whose last mark is finished', () => {
+    const shapeless = (fraction: number): Library => ({
+      records: [record('tv', 9, 'inProgress')],
+      marks: [mark(9, 1, 2, fraction, 1000)],
+      flags: new Map(),
+      shapes: new Map(),
+      dismissed: new Map(),
+    });
+    expect(
+      continueWatching(shapeless(0.5)).map((e) => [e.episode, e.fraction]),
+      'in progress: the mark is the answer',
+    ).toEqual([[{ season: 1, episode: 2 }, 0.5]]);
+    expect(
+      continueWatching(shapeless(1)),
+      'finished: nothing to offer until the layout lands',
+    ).toEqual([]);
+  });
+
   it('shows nothing for an empty library', () => {
     expect(watchlist(emptyLibrary())).toEqual([]);
     expect(continueWatching(emptyLibrary())).toEqual([]);
