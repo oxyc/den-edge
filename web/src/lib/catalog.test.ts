@@ -143,9 +143,19 @@ describe('the screens', () => {
       ['byw-movie-329865', 'Because you watched Arrival'],
       ['wl-tv-693134', 'Because you added Dune: Prophecy to your Watchlist'],
     ]);
-    expect(rows.map((r) => r.headingHref)).toEqual([
-      '/movie/329865-arrival',
-      '/tv/693134-dune-prophecy',
+    expect(rows.map((r) => r.headingLink)).toEqual([
+      {
+        before: 'Because you watched ',
+        label: 'Arrival',
+        after: '',
+        href: '/movie/329865-arrival',
+      },
+      {
+        before: 'Because you added ',
+        label: 'Dune: Prophecy',
+        after: ' to your Watchlist',
+        href: '/tv/693134-dune-prophecy',
+      },
     ]);
     expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
     expect(asked).toEqual(['/movie/329865/recommendations']);

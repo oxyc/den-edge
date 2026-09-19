@@ -5,15 +5,20 @@
 
   let {
     heading,
-    headingHref,
+    headingLink,
     children,
-  }: { heading: string; headingHref?: string; children: Snippet } = $props();
+  }: {
+    heading: string;
+    headingLink?: { before: string; label: string; after: string; href: string };
+    children: Snippet;
+  } = $props();
 </script>
 
 <section class="row" aria-label={heading}>
   <h2>
-    {#if headingHref}
-      <a class="heading-link" href={headingHref}>{heading}</a>
+    {#if headingLink}
+      {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
+      >{headingLink.after}
     {:else}
       {heading}
     {/if}

@@ -21,7 +21,13 @@
     shown: (t: Title) => boolean;
   } = $props();
   let reached = $state(false);
-  let rows = $state<{ heading: string; headingHref?: string; titles: Title[] }[]>([]);
+  let rows = $state<
+    {
+      heading: string;
+      headingLink?: { before: string; label: string; after: string; href: string };
+      titles: Title[];
+    }[]
+  >([]);
   function approach(node: HTMLElement) {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -38,12 +44,28 @@
       key = tmdbKey;
     let live = true;
     const people = [
-      ...d.directors
-        .slice(0, 1)
-        .map((p) => ({ ...p, department: 'Directing', heading: `More from ${p.name}` })),
-      ...d.cast
-        .slice(0, 3)
-        .map((p) => ({ ...p, department: 'Acting', heading: `Starring ${p.name}` })),
+      ...d.directors.slice(0, 1).map((p) => ({
+        ...p,
+        department: 'Directing',
+        heading: `More from ${p.name}`,
+        headingLink: {
+          before: 'More from ',
+          label: p.name,
+          after: '',
+          href: personHref(p.id, p.name),
+        },
+      })),
+      ...d.cast.slice(0, 3).map((p) => ({
+        ...p,
+        department: 'Acting',
+        heading: `Starring ${p.name}`,
+        headingLink: {
+          before: 'Starring ',
+          label: p.name,
+          after: '',
+          href: personHref(p.id, p.name),
+        },
+      })),
     ];
     void Promise.all([
       d.collection
@@ -54,7 +76,7 @@
         : null,
       ...people.map(async (p) => ({
         heading: p.heading,
-        headingHref: personHref(p.id, p.name),
+        headingLink: p.headingLink,
         titles:
           groupFilmography((await fetchFilmography(p.id, key)) ?? [])
             .find((g) => g.department === p.department)
@@ -83,7 +105,7 @@
 
 <div use:approach aria-hidden={!active}>
   {#each related as group (group.heading)}
-    <PosterRow heading={group.heading} headingHref={group.headingHref}>
+    <PosterRow heading={group.heading} headingLink={group.headingLink}>
       {#each group.titles as title (`${title.type}:${title.id}`)}<PosterCard
           {title}
           caption={title.year ? String(title.year) : undefined}
