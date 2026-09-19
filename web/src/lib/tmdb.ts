@@ -154,6 +154,7 @@ export function toTitle(
     year: Number.isFinite(year) ? year : undefined,
     releaseDate: released,
     rating: typeof details.vote_average === 'number' ? details.vote_average : undefined,
+    ratingSource: typeof details.vote_average === 'number' ? 'tmdb' : undefined,
     votes: typeof details.vote_count === 'number' ? details.vote_count : undefined,
     popularity: typeof details.popularity === 'number' ? details.popularity : undefined,
     genreIds,

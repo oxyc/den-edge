@@ -153,6 +153,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if path.starts_with("/warnings/") {
         return crate::warnings::handle(state, req, rid).await;
     }
+    // Allowlisted title metadata learned by a paired client. Provenance keeps direct TMDB observations apart
+    // from Atlas's existing JustWatch-sourced IMDb score.
+    if path == "/metadata/title" || path == "/metadata/title/query" {
+        return crate::title_metadata::handle(state, req).await;
+    }
     // OMDb's ratings, kept for every device the same way.
     if path.starts_with("/ratings/") {
         return crate::ratings::handle(state, req, rid).await;
@@ -296,6 +301,7 @@ impl Face {
         let tmdb = path.starts_with("/tmdb/")
             || path.starts_with("/warnings/")
             || path.starts_with("/ratings/")
+            || path.starts_with("/metadata/")
             || path.starts_with("/skipdb/");
         match (self, path) {
             (Face::Invalid, _) => false,
@@ -367,6 +373,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
+        "/metadata/title" => "/metadata/title",
+        "/metadata/title/query" => "/metadata/title/query",
         p if p.starts_with("/ratings/") => "/ratings",
         p if p.starts_with("/skipdb/") => "/skipdb",
         // One label each: what happens inside them is their own repo's log to keep.
@@ -382,6 +390,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET: &[Method] = &[Method::GET];
     const GET_PUT: &[Method] = &[Method::GET, Method::PUT];
     const POST: &[Method] = &[Method::POST];
+    const PUT: &[Method] = &[Method::PUT];
     const DELETE: &[Method] = &[Method::DELETE];
     match route {
         "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" | "/tmdb" => {
@@ -389,6 +398,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         }
         "/pair/:sid/:slot" => Some(GET_PUT),
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
+        "/metadata/title/query" => Some(POST),
+        "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" => Some(DELETE),
         _ => None,
     }

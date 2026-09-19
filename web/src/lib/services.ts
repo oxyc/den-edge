@@ -17,6 +17,7 @@ import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
 import { tmdbFetch } from './tmdbCache';
+import { rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 import { matches, type Service } from '../settings/services';
 
 /**
@@ -114,6 +115,7 @@ function titlesOfMetas(body: unknown): Title[] {
     // rather than drawn as a card that leads nowhere.
     if (!type || typeof id !== 'number' || typeof meta.name !== 'string') return [];
     const year = Number(String(meta.releaseInfo ?? '').slice(0, 4));
+    const rating = Number(meta.imdbRating);
     return [
       {
         type,
@@ -125,6 +127,9 @@ function titlesOfMetas(body: unknown): Title[] {
         // Dahmer's poster. Wrong art is worse than none, and a film's two ids agree, so the fallback is films only.
         posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
         year: Number.isInteger(year) && year > 1800 ? year : undefined,
+        rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? rating : undefined,
+        ratingSource:
+          Number.isFinite(rating) && rating > 0 && rating <= 10 ? 'justwatch-imdb' : undefined,
         imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
         // When it lands on the service, or leaves it (atlas's `denAt`, in seconds). Only its leaving and coming
         // charts carry one, and a chart older than atlas 0.41.0 carries none at all, so a row must still work
@@ -238,7 +243,9 @@ export function atlasServiceRows(
           `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`,
         );
         if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-        const titles = titlesOfMetas(await res.json());
+        const received = titlesOfMetas(await res.json());
+        rememberAtlasMetadata(received, fetchImpl);
+        const titles = await withSharedTitleMetadata(received, fetchImpl);
         return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
       },
     }));
@@ -311,7 +318,9 @@ export function radarRows(
             return titlesOfMetas(await res.json()).map((title) => ({ ...title, services: named }));
           });
           const merged = mergePool(charts, pool.soonest);
-          return tmdbKey ? fillPosters(merged, tmdbKey) : merged;
+          rememberAtlasMetadata(merged, fetchImpl);
+          const titles = await withSharedTitleMetadata(merged, fetchImpl);
+          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
         },
       },
     ];

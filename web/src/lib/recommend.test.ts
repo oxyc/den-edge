@@ -37,7 +37,15 @@ describe('recommendBody', () => {
       owned: new Set(['tv:1438', 'movie:603', 'nonsense']),
       lists: [
         {
-          titles: [film(1, { releaseDate: '2026-09-01', genreIds: [18], popularity: 9 })],
+          titles: [
+            film(1, {
+              releaseDate: '2026-09-01',
+              genreIds: [18],
+              popularity: 9,
+              rating: 8.4,
+              votes: 200,
+            }),
+          ],
           ranked: true,
         },
         { titles: [film(2), film(3)], ranked: false },
@@ -66,6 +74,8 @@ describe('recommendBody', () => {
       hint: { releaseDate: '2026-09-01', genreIds: [18], popularity: 9 },
     });
     expect(body.candidates[1]).not.toHaveProperty('rank');
+    expect(body.candidates[0]?.hint).not.toHaveProperty('rating');
+    expect(body.candidates[0]?.hint).not.toHaveProperty('votes');
     expect(body.candidates).toHaveLength(3);
   });
 

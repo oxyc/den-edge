@@ -132,8 +132,12 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
     let state = Arc::clone(state);
     tokio::spawn(async move {
         match lookup(&state, &imdb, &key, "refresh").await {
-            Ok(Some(body)) => crate::tmdb::write(&file, &body).await,
-            Ok(None) => crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await,
+            Ok(Some(body)) => {
+                crate::tmdb::write(&file, &body).await;
+            }
+            Ok(None) => {
+                crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await;
+            }
             // Refused, rested or unreachable, and already said so: what is kept stays, and is asked again later.
             Err(_) => {}
         }
