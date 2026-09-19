@@ -33,12 +33,28 @@ const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
 
 /** What TMDB said about a title. atlas reads it only where it knows nothing itself. */
 function hintOf(title: Title) {
+  const tmdbRating =
+    title.ratingSource !== 'justwatch-imdb' &&
+    typeof title.rating === 'number' &&
+    Number.isFinite(title.rating) &&
+    title.rating > 0 &&
+    title.rating <= 10
+      ? title.rating
+      : undefined;
   return {
     releaseDate: title.releaseDate,
     genreIds: title.genreIds,
     originalLanguage: title.originalLanguage,
     countries: title.countries,
     popularity: title.popularity,
+    ...(tmdbRating !== undefined
+      ? {
+          rating: tmdbRating,
+          ...(typeof title.votes === 'number' && Number.isFinite(title.votes) && title.votes >= 0
+            ? { votes: title.votes }
+            : {}),
+        }
+      : {}),
     adult: title.adult,
     imdbId: title.imdbId,
   };

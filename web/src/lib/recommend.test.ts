@@ -74,9 +74,29 @@ describe('recommendBody', () => {
       hint: { releaseDate: '2026-09-01', genreIds: [18], popularity: 9 },
     });
     expect(body.candidates[1]).not.toHaveProperty('rank');
-    expect(body.candidates[0]?.hint).not.toHaveProperty('rating');
-    expect(body.candidates[0]?.hint).not.toHaveProperty('votes');
+    expect(body.candidates[0]?.hint).toMatchObject({ rating: 8.4, votes: 200 });
     expect(body.candidates).toHaveLength(3);
+  });
+
+  it('sends transient or cached TMDB scores but never relabels an Atlas IMDb score', () => {
+    const body = recommendBody({
+      facet: null,
+      prefs: readPrefs(undefined),
+      library: [],
+      owned: new Set(),
+      lists: [
+        {
+          ranked: false,
+          titles: [
+            film(1, { rating: 7.4, votes: 900, ratingSource: 'tmdb' }),
+            film(2, { rating: 8.2, votes: 12_000, ratingSource: 'justwatch-imdb' }),
+          ],
+        },
+      ],
+    });
+    expect(body.candidates[0]?.hint).toMatchObject({ rating: 7.4, votes: 900 });
+    expect(body.candidates[1]?.hint).not.toHaveProperty('rating');
+    expect(body.candidates[1]?.hint).not.toHaveProperty('votes');
   });
 
   it('ranks an unset guest against the visible defaults but preserves an explicit empty selection', () => {
