@@ -32,6 +32,8 @@ const handover: pair.Handover = {
   linkKey: fromHex(p.link.linkKey),
   libraryKey: Uint8Array.from({ length: 32 }, (_, i) => i),
 };
+const hostDeviceId = '0011223344556677';
+const joinerDeviceId = '8899aabbccddeeff';
 
 describe('pairing v1 matches den-spec', () => {
   it("runs the CPace draft's ristretto255 vectors", async () => {
@@ -97,6 +99,15 @@ describe('pairing v1 matches den-spec', () => {
       inbox: p.link.inbox,
       enc: fromHex(p.link.enc),
     });
+  });
+
+  it('round-trips an optional stable host id while opening the old pinned handover', async () => {
+    expect(
+      (await pair.openHandover(fromHex(p.handover.key), fromBase64url(p.handover.d)))?.hostDeviceId,
+    ).toBeUndefined();
+    const identified = { ...handover, hostDeviceId };
+    const sealed = await pair.sealHandover(fromHex(p.handover.key), identified);
+    expect(await pair.openHandover(fromHex(p.handover.key), sealed)).toEqual(identified);
   });
 
   it("stops at the host's message when the host has another secret", async () => {
@@ -219,12 +230,19 @@ describe('hosting a pairing', () => {
     const hosted = pair.host({
       libraryKey,
       label: 'Safari on Mac',
+      deviceId: hostDeviceId,
+      linkKey: fromHex(p.link.linkKey),
       onCode: give,
       allow,
       fetchImpl,
       wait,
     });
-    const joined = pair.join(await code, { label: 'Chrome on Android', fetchImpl, wait });
+    const joined = pair.join(await code, {
+      label: 'Chrome on Android',
+      deviceId: joinerDeviceId,
+      fetchImpl,
+      wait,
+    });
     return {
       libraryKey,
       ...Object.fromEntries([
@@ -236,8 +254,9 @@ describe('hosting a pairing', () => {
 
   it('hands this browser’s library to another, with no TV in it', async () => {
     const { host: hosted, join: joined, libraryKey } = await pairThem(async () => true);
-    expect(hosted).toEqual({ joiner: 'Chrome on Android' });
+    expect(hosted).toMatchObject({ joiner: 'Chrome on Android', inboxKey: p.link.inbox });
     expect(joined).toHaveProperty('handover.host', 'Safari on Mac');
+    expect(joined).toHaveProperty('handover.hostDeviceId', hostDeviceId);
     const handover = (joined as { handover: pair.Handover }).handover;
     expect([...handover.libraryKey]).toEqual([...libraryKey]);
     expect(handover.linkKey).toHaveLength(32);
@@ -253,6 +272,7 @@ describe('hosting a pairing', () => {
 describe('joining through den-edge', () => {
   const options = (fetchImpl: typeof fetch) => ({
     label: p.joinerLabel,
+    deviceId: joinerDeviceId,
     fetchImpl,
     wait: async () => {},
   });

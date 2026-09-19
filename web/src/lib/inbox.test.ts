@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { sealMessage, sendToTV } from './inbox';
+import { receiveDeviceIdentity, sealMessage, sendToTV } from './inbox';
 import { linkKeys } from './pair';
 import { fromHex } from './wire';
 
@@ -63,4 +63,32 @@ describe('sending to a TV', () => {
     }) as typeof fetch;
     expect(await sendToTV(link, play, down)).toBe(false);
   });
+});
+
+describe('receiving a paired device identity', () => {
+  it('opens the sealed stable id and ignores readable relay content', async () => {
+    const sealed = await sealMessage(
+      fromHex(vectors.enc),
+      { type: 'device', name: ' Bedroom TV ', deviceId: 'a1b2c3d4e5f60718' },
+      { sentAt: Date.now() },
+    );
+    const fetchImpl = (async (_: string, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>)['x-den-link']).toBe('abcdef0123456789');
+      return new Response(
+        JSON.stringify({
+          messages: [{ type: 'device', name: 'forged' }, { sealed: 'not-base64!' }, { sealed }],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    expect(await receiveDeviceIdentity(link, fetchImpl)).toEqual({
+      name: 'Bedroom TV',
+      deviceId: 'a1b2c3d4e5f60718',
+    });
+  });
+
+  const link = {
+    inboxKey: 'abcdef0123456789',
+    linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
+  };
 });

@@ -73,9 +73,16 @@ describe('readLinks', () => {
 
   it('keeps legacy handoffs and their newer stable identity fields', () => {
     const legacy = { name: 'Phone', at: 10 };
-    const current = { id: 'handoff-1', name: 'Laptop', at: 20, libraryKey: 'library-1' };
+    const current = {
+      deviceId: 'a1b2c3d4e5f60718',
+      name: 'Laptop',
+      at: 20,
+      libraryKey: 'library-1',
+      inboxKey: 'deadbeefcafe1234',
+      linkKey: 'bGluaw==',
+    };
     const malformed = [
-      { id: 4, name: 'Tablet', at: 30 },
+      { deviceId: 'not-an-id', name: 'Tablet', at: 30 },
       { name: 'Browser', at: 'later' },
       { name: 'TV', at: 40, libraryKey: 7 },
     ];

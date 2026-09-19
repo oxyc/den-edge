@@ -10,25 +10,27 @@ const device = (id: string, name: string, kind: 'tv' | 'browser', seen = 10): De
   seen,
   pending: [],
 });
-const link = (inboxKey: string, name: string, libraryKey = 'current'): Link => ({
+const link = (inboxKey: string, name: string, libraryKey = 'current', deviceId?: string): Link => ({
   inboxKey,
   name,
   linkedAt: 5,
   libraryKey,
   linkKey: `key-${inboxKey}`,
+  deviceId,
 });
-const shared = (name: string, libraryKey?: string, at = 5): Shared => ({
+const shared = (name: string, libraryKey?: string, at = 5, deviceId?: string): Shared => ({
   name,
   at,
   libraryKey,
+  deviceId,
 });
 
 describe('linked device presentation', () => {
-  it('merges unambiguous current-library records and keeps every action source', () => {
+  it('merges current-library records by stable id and keeps every action source', () => {
     const tv = device('tv-1', 'Living Room', 'tv');
     const phone = device('phone-1', 'Alice’s iPhone', 'browser');
-    const tvLink = link('inbox-1', 'Living Room');
-    const handoff = shared('Alice’s iPhone', 'current');
+    const tvLink = link('inbox-1', 'Renamed TV', 'current', 'tv-1');
+    const handoff = shared('Old phone name', 'current', 5, 'phone-1');
 
     expect(linkedDeviceRows([tv, phone], [tvLink], [handoff], 'current')).toEqual([
       {
@@ -50,7 +52,7 @@ describe('linked device presentation', () => {
     ]);
   });
 
-  it('does not guess between duplicate names or fold in a link to another library', () => {
+  it('keeps the conservative legacy fallback for unique names only', () => {
     const first = device('tv-1', 'Apple TV', 'tv');
     const second = device('tv-2', 'Apple TV', 'tv');
     const ambiguous = link('inbox-1', 'Apple TV');
@@ -64,6 +66,15 @@ describe('linked device presentation', () => {
       'link:inbox-2',
     ]);
     expect(rows.slice(0, 2).every((row) => row.links.length === 0)).toBe(true);
+  });
+
+  it('never attaches a stable id to another library or a pending new pairing by name', () => {
+    const phone = device('phone-1', 'Phone', 'browser');
+    const elsewhere = shared('Phone', 'other', 5, 'phone-1');
+    const pending = { ...shared('Phone', 'current'), inboxKey: 'abcdef0123456789', linkKey: 'key' };
+    expect(
+      linkedDeviceRows([phone], [], [elsewhere, pending], 'current').map((row) => row.id),
+    ).toEqual(['device:phone-1', 'shared:phone-1', 'shared:abcdef0123456789']);
   });
 
   it('keeps same-named link and handoff observations distinct rather than inventing one identity', () => {

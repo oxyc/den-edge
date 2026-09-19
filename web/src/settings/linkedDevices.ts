@@ -15,11 +15,9 @@ export interface LinkedDeviceRow {
 const identityName = (name: string | undefined): string => name?.trim().toLowerCase() ?? '';
 
 /**
- * Combines the current library's self-reported devices with records kept by this browser.
- *
- * Pairing v1 does not exchange the stamp device id, so a name by itself is not an identity. A local record is
- * attached to a library device only when both sides name exactly one candidate and the record can be tied to this
- * library. Ambiguous names and records for another library deliberately remain separate rows.
+ * Combines the current library's self-reported devices with records kept by this browser. New pairing records
+ * match only by the stable stamp device id exchanged by pairing. A conservative name/time fallback remains for
+ * records created before either wire field existed and never guesses between duplicate names.
  */
 export function linkedDeviceRows(
   devices: readonly DeviceEntry[],
@@ -35,33 +33,38 @@ export function linkedDeviceRows(
     links: [],
     shared: [],
   }));
+  const deviceByID = new Map(devices.map((device) => [device.id, device]));
 
-  const attachableLink = (link: Link): DeviceEntry | undefined => {
-    if (!currentLibraryKey || link.libraryKey !== currentLibraryKey) return undefined;
+  const legacyLink = (link: Link): DeviceEntry | undefined => {
     const name = identityName(link.name);
     if (!name) return undefined;
-    const candidates = devices.filter(
-      (device) => device.kind === 'tv' && identityName(device.name) === name,
-    );
+    const candidates = devices.filter((device) => identityName(device.name) === name);
     const records = links.filter(
       (candidate) =>
-        candidate.libraryKey === currentLibraryKey && identityName(candidate.name) === name,
+        !candidate.deviceId &&
+        candidate.libraryKey === currentLibraryKey &&
+        identityName(candidate.name) === name,
     );
-    const handoffs = shared.filter((candidate) => {
-      if (identityName(candidate.name) !== name) return false;
-      if (candidate.libraryKey) return candidate.libraryKey === currentLibraryKey;
-      return (
-        candidates.length === 1 &&
-        candidates[0]?.seen !== undefined &&
-        candidates[0].seen >= candidate.at
-      );
-    });
+    const handoffs = shared.filter(
+      (candidate) =>
+        !candidate.deviceId &&
+        !candidate.inboxKey &&
+        candidate.libraryKey === currentLibraryKey &&
+        identityName(candidate.name) === name,
+    );
     return candidates.length === 1 && records.length === 1 && handoffs.length === 0
       ? candidates[0]
       : undefined;
   };
 
-  const attachableShare = (entry: Shared): DeviceEntry | undefined => {
+  const deviceForLink = (link: Link): DeviceEntry | undefined => {
+    if (!currentLibraryKey || link.libraryKey !== currentLibraryKey) return undefined;
+    return link.deviceId ? deviceByID.get(link.deviceId) : legacyLink(link);
+  };
+
+  const legacyShare = (entry: Shared): DeviceEntry | undefined => {
+    // A current pairing with a pending identity has credentials; don't turn its editable label into identity.
+    if (entry.inboxKey || entry.linkKey) return undefined;
     const name = identityName(entry.name);
     const candidates = devices.filter((device) => identityName(device.name) === name);
     const belongsHere =
@@ -70,9 +73,10 @@ export function linkedDeviceRows(
         candidates.length === 1 &&
         candidates[0]?.seen !== undefined &&
         candidates[0].seen >= entry.at);
-    if (!name || !currentLibraryKey || !belongsHere) return undefined;
+    if (!name || !belongsHere) return undefined;
     const records = shared.filter((candidate) => {
-      if (identityName(candidate.name) !== name) return false;
+      if (candidate.deviceId || candidate.inboxKey || identityName(candidate.name) !== name)
+        return false;
       if (candidate.libraryKey) return candidate.libraryKey === currentLibraryKey;
       return (
         candidates.length === 1 &&
@@ -82,15 +86,24 @@ export function linkedDeviceRows(
     });
     const paired = links.filter(
       (candidate) =>
-        candidate.libraryKey === currentLibraryKey && identityName(candidate.name) === name,
+        !candidate.deviceId &&
+        candidate.libraryKey === currentLibraryKey &&
+        identityName(candidate.name) === name,
     );
     return candidates.length === 1 && records.length === 1 && paired.length === 0
       ? candidates[0]
       : undefined;
   };
 
+  const deviceForShare = (entry: Shared): DeviceEntry | undefined => {
+    if (!currentLibraryKey) return undefined;
+    if (entry.deviceId)
+      return entry.libraryKey === currentLibraryKey ? deviceByID.get(entry.deviceId) : undefined;
+    return legacyShare(entry);
+  };
+
   for (const link of links) {
-    const device = attachableLink(link);
+    const device = deviceForLink(link);
     const row = device ? rows.find((candidate) => candidate.device === device) : undefined;
     if (row) row.links.push(link);
     else
@@ -103,19 +116,19 @@ export function linkedDeviceRows(
       });
   }
 
-  shared.forEach((entry) => {
-    const device = attachableShare(entry);
+  for (const entry of shared) {
+    const device = deviceForShare(entry);
     const row = device ? rows.find((candidate) => candidate.device === device) : undefined;
     if (row) row.shared.push(entry);
     else
       rows.push({
-        id: `shared:${entry.id ?? `${entry.at}:${identityName(entry.name)}`}`,
+        id: `shared:${entry.deviceId ?? entry.inboxKey ?? `${entry.at}:${identityName(entry.name)}`}`,
         name: entry.name,
         kind: /Apple TV/i.test(entry.name) ? 'tv' : 'browser',
         links: [],
         shared: [entry],
       });
-  });
+  }
 
   return rows;
 }

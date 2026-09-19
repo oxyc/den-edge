@@ -3,7 +3,7 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network, reset the library key — says where to do it. -->
 <script lang="ts">
-  import { SvelteMap } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -12,7 +12,8 @@
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { forgetDevice, parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
-  import { links, type Link } from '../lib/links.svelte';
+  import { receiveDeviceIdentity } from '../lib/inbox';
+  import { links, type Link, type Shared } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
@@ -249,6 +250,7 @@
     const result = await host({
       libraryKey,
       label: thisDevice.name,
+      deviceId: selfId,
       onCode: (shown) => (code = shown),
       allow: (joiner) =>
         new Promise<boolean>((resolve) => {
@@ -263,7 +265,13 @@
     });
     code = null;
     pairing = false;
-    if ('joiner' in result) links.share(result.joiner, link.libraryKey);
+    if ('joiner' in result) {
+      const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+      links.share(result.joiner, link.libraryKey, {
+        inboxKey: result.inboxKey,
+        linkKey: base64(result.linkKey),
+      });
+    }
     pairNotice =
       'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
   }
@@ -293,14 +301,14 @@
   async function joinLibrary() {
     joining = true;
     joinProblem = null;
-    const result = await join(joinCode, { label: thisDevice.name });
+    const result = await join(joinCode, { label: thisDevice.name, deviceId: selfId });
     joining = false;
     if ('error' in result) {
       joinProblem = joinFailures[result.error];
       return;
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-    const { host: name, libraryKey, linkKey } = result.handover;
+    const { host: name, hostDeviceId, libraryKey, linkKey } = result.handover;
     const key = base64(libraryKey);
     // What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
     // fails leaves it where it was.
@@ -313,7 +321,12 @@
         return;
       }
     }
-    links.add(result.inboxKey, { name, libraryKey: key, linkKey: base64(linkKey) });
+    links.add(result.inboxKey, {
+      name,
+      libraryKey: key,
+      linkKey: base64(linkKey),
+      deviceId: hostDeviceId,
+    });
     joinCode = '';
     if (key === link?.libraryKey) {
       joinProblem = `${name} already shares this library: it's linked to this browser too.`;
@@ -332,6 +345,42 @@
   const listedDevices = $derived(
     linkedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
   );
+
+  /** Learn a new joiner's stable id from its sealed pairing message; reopening Settings retries transient misses. */
+  const attemptedIdentities = new SvelteSet<string>();
+  const identityKey = (entry: Shared) => entry.inboxKey ?? `${entry.at}:${entry.name}`;
+  async function learnIdentity(entry: Shared) {
+    if (!entry.inboxKey || !entry.linkKey || entry.deviceId) return;
+    const credential = { inboxKey: entry.inboxKey, linkKey: entry.linkKey };
+    for (let attempt = 0; attempt < 8 && !entry.deviceId; attempt++) {
+      const identity = await receiveDeviceIdentity(credential);
+      if (identity) {
+        links.identifyShared(entry, identity.deviceId, identity.name);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  $effect(() => {
+    for (const entry of links.shared) {
+      const key = identityKey(entry);
+      if (!entry.deviceId && entry.inboxKey && entry.linkKey && !attemptedIdentities.has(key)) {
+        attemptedIdentities.add(key);
+        void learnIdentity(entry);
+      }
+    }
+  });
+
+  // When a pre-identity record passed the deliberately strict legacy fallback, remember the exact id from then on.
+  $effect(() => {
+    for (const row of listedDevices) {
+      if (!row.device) continue;
+      for (const paired of row.links)
+        if (!paired.deviceId) links.identifyLink(paired, row.device.id);
+      for (const handed of row.shared)
+        if (!handed.deviceId) links.identifyShared(handed, row.device.id);
+    }
+  });
   const deviceStatus = (row: (typeof listedDevices)[number]): string => {
     const status: string[] = [];
     if (row.device) {

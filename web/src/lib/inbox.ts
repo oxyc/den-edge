@@ -4,7 +4,7 @@
 
 import { hex, hkdf } from './crypto';
 import type { Link } from './links.svelte';
-import { toBase64url } from './wire';
+import { fromBase64url, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -62,15 +62,97 @@ export async function sendToTV(
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
   const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+  return appendSealed(link.inboxKey, enc, message, fetchImpl);
+}
+
+/** Queue one sealed message using a raw pairing link key. */
+export async function sendToLink(
+  linkKey: Bytes,
+  message: object,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const { inbox, enc } = await linkKeys(linkKey);
+  return appendSealed(inbox, enc, message, fetchImpl);
+}
+
+async function appendSealed(
+  inbox: string,
+  enc: Bytes,
+  message: object,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
   const body = { sealed: await sealMessage(enc, message) };
   try {
     const res = await fetchImpl('/inbox/append', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-den-link': link.inboxKey },
+      headers: { 'content-type': 'application/json', 'x-den-link': inbox },
       body: JSON.stringify(body),
     });
     return res.ok;
   } catch {
     return false;
   }
+}
+
+export interface DeviceIdentity {
+  name: string;
+  deviceId: string;
+}
+
+/**
+ * Drain a hosted pairing's inbox for the joiner's authenticated stable identity. Browser hosts keep the link key
+ * until this arrives; old joiners simply leave the record name-only for the conservative legacy fallback.
+ */
+export async function receiveDeviceIdentity(
+  link: Pick<Link, 'inboxKey' | 'linkKey'>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DeviceIdentity | null> {
+  try {
+    const response = await fetchImpl('/inbox/drain', {
+      headers: { 'x-den-link': link.inboxKey },
+      cache: 'no-store',
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { messages?: { sealed?: unknown }[] };
+    if (!Array.isArray(body.messages)) return null;
+    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+    const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+    for (const entry of body.messages) {
+      if (typeof entry.sealed !== 'string') continue;
+      try {
+        const combined = fromBase64url(entry.sealed);
+        if (combined.length < 28) continue;
+        const plain = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
+          key,
+          combined.slice(12),
+        );
+        const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
+          sentAt?: unknown;
+          message?: { type?: unknown; name?: unknown; deviceId?: unknown };
+        };
+        const name =
+          typeof envelope.message?.name === 'string'
+            ? envelope.message.name.trim().slice(0, 40)
+            : '';
+        const id = envelope.message?.deviceId;
+        const sentAt = envelope.sentAt;
+        const age = typeof sentAt === 'number' ? Date.now() - sentAt : Number.POSITIVE_INFINITY;
+        if (
+          envelope.message?.type === 'device' &&
+          name &&
+          typeof id === 'string' &&
+          /^[0-9a-f]{16}$/.test(id) &&
+          age <= 7 * 24 * 60 * 60 * 1000 &&
+          age >= -24 * 60 * 60 * 1000
+        )
+          return { name, deviceId: id };
+      } catch {
+        // A malformed or differently keyed message does not identify this link.
+      }
+    }
+  } catch {
+    // The record stays pending and can retry when Settings opens again.
+  }
+  return null;
 }

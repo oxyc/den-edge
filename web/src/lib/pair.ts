@@ -5,7 +5,7 @@
 import { ristretto255, ristretto255_hasher } from '@noble/curves/ed25519.js';
 import { hkdf } from './crypto';
 import { cleanLabel, deviceLabel } from './edge';
-import { linkKeys } from './inbox';
+import { linkKeys, sendToLink } from './inbox';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -259,6 +259,8 @@ export async function hostConfirm(state: HostState, c: Uint8Array): Promise<bool
 
 export interface Handover {
   host: string;
+  /** Stable library stamp id of the host. Missing on handovers from older clients. */
+  hostDeviceId?: string;
   linkKey: Bytes;
   libraryKey: Bytes;
 }
@@ -275,6 +277,7 @@ export async function sealHandover(
   const plaintext = JSON.stringify({
     v: 1,
     host: handover.host,
+    ...(handover.hostDeviceId ? { hostDeviceId: handover.hostDeviceId } : {}),
     linkKey: toBase64url(handover.linkKey),
     libraryKey: toBase64url(handover.libraryKey),
   });
@@ -296,9 +299,13 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
     const body = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
     const linkKey = typeof body.linkKey === 'string' ? fromBase64url(body.linkKey) : null;
     const libraryKey = typeof body.libraryKey === 'string' ? fromBase64url(body.libraryKey) : null;
+    const hostDeviceId =
+      typeof body.hostDeviceId === 'string' && /^[0-9a-f]{16}$/.test(body.hostDeviceId)
+        ? body.hostDeviceId
+        : undefined;
     if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32)
       return null;
-    return { host: body.host, linkKey, libraryKey };
+    return { host: body.host, ...(hostDeviceId ? { hostDeviceId } : {}), linkKey, libraryKey };
   } catch {
     return null;
   }
@@ -315,6 +322,8 @@ export type JoinResult = { handover: Handover; inboxKey: string } | { error: Joi
 
 interface JoinOptions {
   label?: string;
+  /** This browser's stable library stamp device id, sent back sealed after pairing. */
+  deviceId?: string;
   fetchImpl?: typeof fetch;
   wait?: (ms: number) => Promise<void>;
   /** A fixed scalar, for tests. */
@@ -407,19 +416,30 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const d = await read('d');
   const handover = d && (await openHandover(finished.handoverKey, d));
   if (!handover) return fail();
-  return { handover, inboxKey: (await linkKeys(handover.linkKey)).inbox };
+  const inboxKey = (await linkKeys(handover.linkKey)).inbox;
+  if (options.deviceId && /^[0-9a-f]{16}$/.test(options.deviceId)) {
+    await sendToLink(
+      handover.linkKey,
+      { type: 'device', name: label, deviceId: options.deviceId },
+      fetchImpl,
+    );
+  }
+  return { handover, inboxKey };
 }
 
 // --- Hosting a pairing, as the TV does ---
 
 export type HostError = 'unreachable' | 'busy' | 'failed' | 'insecure';
-export type HostResult = { joiner: string } | { error: HostError };
+export type HostResult =
+  { joiner: string; inboxKey: string; linkKey: Bytes } | { error: HostError };
 
 export interface HostOptions {
   /** The library to hand over: this browser's, raw. */
   libraryKey: Bytes;
   /** What the joined device will call this one; this browser by default. */
   label?: string;
+  /** This browser's stable library stamp device id, encrypted in the handover. */
+  deviceId?: string;
   /** The code to show, as soon as den-edge has minted its half of it. */
   onCode: (code: string) => void;
   /** Allow the device this names? It is the label that device sent, and only a device that ran the code right
@@ -478,10 +498,15 @@ export async function host(options: HostOptions): Promise<HostResult> {
   if (!(await options.allow(responded.state.joiner))) return fail();
   const handover = {
     host: label,
+    hostDeviceId: /^[0-9a-f]{16}$/.test(options.deviceId ?? '') ? options.deviceId : undefined,
     linkKey: options.linkKey ?? crypto.getRandomValues(new Uint8Array(32)),
     libraryKey: options.libraryKey,
   };
   const sealed = await sealHandover(responded.state.handoverKey, handover);
   if (!(await put('d', sealed))) return fail();
-  return { joiner: responded.state.joiner };
+  return {
+    joiner: responded.state.joiner,
+    inboxKey: (await linkKeys(handover.linkKey)).inbox,
+    linkKey: handover.linkKey,
+  };
 }

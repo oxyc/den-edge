@@ -12,6 +12,8 @@ export interface Link {
   libraryKey: string;
   /** The link's own key, base64: its inbox messages are sealed under a key it derives. */
   linkKey: string;
+  /** Stable stamp device id of the host, when its handover included one. */
+  deviceId?: string;
 }
 
 /**
@@ -19,12 +21,15 @@ export interface Link {
  * what was given, not a grant that can be taken back: only a new library key cuts a device off.
  */
 export interface Shared {
-  /** Stable for keyed presentation; older stored records predate it and use their name/time tuple. */
-  id?: string;
+  /** Stable stamp device id of the device that received the library. */
+  deviceId?: string;
   name: string;
   at: number;
   /** The library handed over, for reconciling this local record with that library's device list. */
   libraryKey?: string;
+  /** Kept until the joiner's sealed device message supplies `deviceId`; absent on legacy records. */
+  inboxKey?: string;
+  linkKey?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -36,8 +41,10 @@ function isShared(value: unknown): value is Shared {
   return (
     typeof v?.name === 'string' &&
     typeof v.at === 'number' &&
-    (v.id === undefined || typeof v.id === 'string') &&
-    (v.libraryKey === undefined || typeof v.libraryKey === 'string')
+    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId)) &&
+    (v.libraryKey === undefined || typeof v.libraryKey === 'string') &&
+    (v.inboxKey === undefined || /^[0-9a-f]{16,}$/i.test(v.inboxKey)) &&
+    (v.linkKey === undefined || typeof v.linkKey === 'string')
   );
 }
 
@@ -48,7 +55,8 @@ function isLink(value: unknown): value is Link {
     typeof v?.inboxKey === 'string' &&
     /^[0-9a-f]{16,}$/i.test(v.inboxKey) &&
     typeof v.libraryKey === 'string' &&
-    typeof v.linkKey === 'string'
+    typeof v.linkKey === 'string' &&
+    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId))
   );
 }
 
@@ -124,7 +132,7 @@ class Links {
 
   add(
     inboxKey: string,
-    details: { name?: string; libraryKey: string; linkKey: string },
+    details: { name?: string; libraryKey: string; linkKey: string; deviceId?: string },
     now = Date.now(),
   ): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
@@ -132,7 +140,14 @@ class Links {
       details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
     this.list = [
       ...this.list,
-      { inboxKey, name, linkedAt: now, libraryKey: details.libraryKey, linkKey: details.linkKey },
+      {
+        inboxKey,
+        name,
+        linkedAt: now,
+        libraryKey: details.libraryKey,
+        linkKey: details.linkKey,
+        deviceId: details.deviceId,
+      },
     ];
     this.moved = null;
     writeLinks(this.list);
@@ -153,9 +168,31 @@ class Links {
   }
 
   /** Remember a device this browser paired and handed the library to. */
-  share(name: string, libraryKey: string, now = Date.now()): void {
-    this.shared = [...this.shared, { id: crypto.randomUUID(), name, at: now, libraryKey }];
+  share(
+    name: string,
+    libraryKey: string,
+    pairing?: { inboxKey: string; linkKey: string },
+    now = Date.now(),
+  ): Shared {
+    const entry: Shared = { name, at: now, libraryKey, ...pairing };
+    this.shared = [...this.shared, entry];
     writeShared(this.shared);
+    return entry;
+  }
+
+  identifyShared(entry: Shared, deviceId: string, name = entry.name): void {
+    if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.shared.includes(entry)) return;
+    entry.deviceId = deviceId;
+    entry.name = name;
+    this.shared = [...this.shared];
+    writeShared(this.shared);
+  }
+
+  identifyLink(entry: Link, deviceId: string): void {
+    if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.list.includes(entry)) return;
+    entry.deviceId = deviceId;
+    this.list = [...this.list];
+    writeLinks(this.list);
   }
 
   /** Drop that record. The device keeps the library it was given; this only stops listing it. */
