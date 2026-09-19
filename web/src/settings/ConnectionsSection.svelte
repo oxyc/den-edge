@@ -3,15 +3,18 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network, reset the library key — says where to do it. -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
+  import { linkedDeviceRows } from './linkedDevices';
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { forgetDevice, parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
-  import { links, type Link } from '../lib/links.svelte';
+  import { receiveDeviceIdentity } from '../lib/inbox';
+  import { links, type Link, type Shared } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
@@ -248,6 +251,7 @@
     const result = await host({
       libraryKey,
       label: thisDevice.name,
+      deviceId: selfId,
       onCode: (shown) => (code = shown),
       allow: (joiner) =>
         new Promise<boolean>((resolve) => {
@@ -262,7 +266,13 @@
     });
     code = null;
     pairing = false;
-    if ('joiner' in result) links.share(result.joiner);
+    if ('joiner' in result) {
+      const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+      links.share(result.joiner, link.libraryKey, {
+        inboxKey: result.inboxKey,
+        linkKey: base64(result.linkKey),
+      });
+    }
     pairNotice =
       'joiner' in result ? `${result.joiner} now has your library.` : pairFailures[result.error];
   }
@@ -292,14 +302,14 @@
   async function joinLibrary() {
     joining = true;
     joinProblem = null;
-    const result = await join(joinCode, { label: thisDevice.name });
+    const result = await join(joinCode, { label: thisDevice.name, deviceId: selfId });
     joining = false;
     if ('error' in result) {
       joinProblem = joinFailures[result.error];
       return;
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-    const { host: name, libraryKey, linkKey } = result.handover;
+    const { host: name, hostDeviceId, libraryKey, linkKey } = result.handover;
     const key = base64(libraryKey);
     // What this browser saved on its own goes into the TV's library before the browser switches to it, so a move that
     // fails leaves it where it was.
@@ -312,7 +322,12 @@
         return;
       }
     }
-    links.add(result.inboxKey, { name, libraryKey: key, linkKey: base64(linkKey) });
+    links.add(result.inboxKey, {
+      name,
+      libraryKey: key,
+      linkKey: base64(linkKey),
+      deviceId: hostDeviceId,
+    });
     joinCode = '';
     if (key === link?.libraryKey) {
       joinProblem = `${name} already shares this library: it's linked to this browser too.`;
@@ -327,6 +342,83 @@
     if (device.kind === 'tv' || device.name.includes('Apple TV')) return 'tv';
     if (/iPhone|phone|iPad|tablet/i.test(device.name)) return 'phone';
     return 'computer';
+  };
+  const listedDevices = $derived(
+    linkedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
+  );
+
+  /**
+   * Drain sealed pairing identities while Settings is open. A linked device can resend after an upgrade, rename, or
+   * stamp-id change, so learning the first id must not stop later authenticated updates from being applied.
+   */
+  // This is deliberately non-reactive: starting or finishing a request must not retrigger the effect below.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const learningIdentities = new Set<string>();
+  const identityKey = (entry: Shared) => entry.inboxKey ?? `${entry.at}:${entry.name}`;
+  async function learnIdentity(entry: Shared) {
+    if (!entry.inboxKey || !entry.linkKey) return;
+    const key = identityKey(entry);
+    if (learningIdentities.has(key)) return;
+    learningIdentities.add(key);
+    const credential = { inboxKey: entry.inboxKey, linkKey: entry.linkKey };
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const identity = await receiveDeviceIdentity(credential);
+        if (identity) {
+          links.identifyShared(entry, identity.name, identity.deviceId);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } finally {
+      learningIdentities.delete(key);
+    }
+  }
+  function learnIdentities(entries: Shared[]) {
+    for (const entry of entries) void learnIdentity(entry);
+  }
+  const checkIdentities = () => learnIdentities(links.shared);
+  $effect(() => {
+    learnIdentities(links.shared);
+  });
+  onMount(() => {
+    const interval = window.setInterval(checkIdentities, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkIdentities();
+    };
+    window.addEventListener('online', checkIdentities);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('online', checkIdentities);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  });
+
+  const deviceStatus = (row: (typeof listedDevices)[number]): string => {
+    const status: string[] = [];
+    if (row.device) {
+      status.push(
+        row.device.id === selfId
+          ? 'This browser'
+          : row.device.kind === 'tv'
+            ? 'Apple TV'
+            : 'Browser',
+      );
+      if (row.device.seen) status.push(`seen ${day(row.device.seen)}`);
+    }
+    for (const linked of row.links)
+      status.push(`linked to this browser${linked.linkedAt ? ` ${day(linked.linkedAt)}` : ''}`);
+    for (const shared of row.shared) {
+      const relation =
+        shared.libraryKey === link?.libraryKey
+          ? 'given this library'
+          : shared.libraryKey
+            ? 'given another library'
+            : 'library handed off';
+      status.push(`${relation} ${day(shared.at)}`);
+    }
+    return status.join(' · ');
   };
 </script>
 
@@ -592,38 +684,56 @@
   <SettingRow
     id="linked-devices"
     label="Linked devices"
-    value={devices.length ? `${devices.length} linked` : 'Not linked'}
+    value={listedDevices.length
+      ? `${listedDevices.length} device${listedDevices.length === 1 ? '' : 's'}`
+      : 'None'}
   >
-    <h3>Devices with your library</h3>
-    {#if devices.length}
+    <h3>Devices</h3>
+    {#if listedDevices.length}
       <ul class="list">
-        {#each devices as device (device.id)}
+        {#each listedDevices as row (row.id)}
           <li class="line">
-            {@render icon(deviceIcon(device))}
-            <span class="label"
-              >{device.name}<small
-                >{device.id === selfId
-                  ? 'This browser'
-                  : device.kind === 'tv'
-                    ? 'Apple TV'
-                    : 'Browser'}{device.seen ? ` · seen ${day(device.seen)}` : ''}</small
-              ></span
-            >
-            {#if device.id !== selfId}
+            {@render icon(deviceIcon(row))}
+            <span class="label">{row.name}<small>{deviceStatus(row)}</small></span>
+            {#if row.device && row.device.id !== selfId}
               <Confirm
                 label="Remove from list"
-                question="Remove {device.name} from the list?"
+                ariaLabel="Remove {row.name} from list"
+                question="Remove {row.name} from the list?"
                 detail="It still holds your library’s key, and lists itself again the next time it opens your library. To shut it out, reset the library key on your Apple TV."
                 confirmLabel="Remove"
                 {disabled}
-                onconfirm={() => void write('devices', forgetDevice(device.id))}
+                onconfirm={() => void write('devices', forgetDevice(row.device!.id))}
               />
             {/if}
+            {#each row.links as linked (linked.inboxKey)}
+              <Confirm
+                label="Unlink"
+                ariaLabel="Unlink {row.name}"
+                question="Unlink {linked.name ?? 'this Apple TV'}?"
+                detail="This browser stops opening its library. The TV keeps running."
+                onconfirm={() => unlink(linked)}
+              />
+            {/each}
+            {#each row.shared as shared (shared.name + shared.at)}
+              <button
+                type="button"
+                class="quiet"
+                aria-label="Forget {row.name}"
+                onclick={() => links.forgetShared(shared)}>Forget</button
+              >
+            {/each}
           </li>
         {/each}
       </ul>
     {:else}
       <p class="status">None listed yet: a device lists itself when it next opens your library.</p>
+    {/if}
+    {#if listedDevices.some((row) => row.shared.length)}
+      <p class="foot">
+        Forgetting a handoff only stops listing it here — the device keeps the library key it was
+        given.
+      </p>
     {/if}
 
     <h3 id="this-device-label">This browser</h3>
@@ -641,40 +751,6 @@
       This device only · What another device asks to allow, and lists this one under. Two phones of
       the same make guess the same name, so give this one its own.
     </p>
-
-    <h3>Linked to this browser</h3>
-    <ul class="list">
-      {#each links.list as linked (linked.inboxKey)}
-        <li class="line">
-          {@render icon('tv')}
-          <span class="label"
-            >{linked.name ?? 'Apple TV'}{#if linked.linkedAt}<small
-                >linked {day(linked.linkedAt)}</small
-              >{/if}</span
-          >
-          <Confirm
-            label="Unlink"
-            question="Unlink {linked.name ?? 'this Apple TV'}?"
-            detail="This browser stops opening its library. The TV keeps running."
-            onconfirm={() => unlink(linked)}
-          />
-        </li>
-      {/each}
-      {#each links.shared as device (device.name + device.at)}
-        <li class="line">
-          {@render icon(deviceIcon(device))}
-          <span class="label">{device.name}<small>given your library {day(device.at)}</small></span>
-          <button type="button" class="quiet" onclick={() => links.forgetShared(device)}
-            >Forget</button
-          >
-        </li>
-      {/each}
-    </ul>
-    {#if links.shared.length}
-      <p class="foot">
-        Forgetting one only stops listing it here — it keeps the copy of your library it was given.
-      </p>
-    {/if}
 
     <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
     {#if link}

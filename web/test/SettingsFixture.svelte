@@ -65,7 +65,13 @@
     opened: Promise.resolve(log),
     routes: fetchRoutes,
   }) as unknown as LibrarySession;
-  const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
+  const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+  const link = {
+    inboxKey: 'deadbeefcafe1234',
+    name: 'Living Room TV',
+    libraryKey: fixtureLibraryKey,
+    linkKey: 'fixture',
+  };
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">

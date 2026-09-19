@@ -1,5 +1,6 @@
 <script lang="ts">
   import { thisDevice } from './lib/device.svelte';
+  import { browserClock } from './lib/clock';
   import { links } from './lib/links.svelte';
   import { formatCode, join, parseCode, type JoinError } from './lib/pair';
 
@@ -33,6 +34,7 @@
   }
   let busy = $state(false);
   let failure = $state<JoinError | null>(null);
+  const deviceId = browserClock().device;
 
   const messages: Record<JoinError, string> = {
     expired: 'That code has expired or doesn’t exist. Get a new one on the TV.',
@@ -52,18 +54,19 @@
   async function link() {
     busy = true;
     failure = null;
-    const result = await join(code, { label: thisDevice.name });
+    const result = await join(code, { label: thisDevice.name, deviceId });
     busy = false;
     if ('error' in result) {
       failure = result.error;
       return;
     }
     const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-    const { host, libraryKey, linkKey } = result.handover;
+    const { host, hostDeviceId, libraryKey, linkKey } = result.handover;
     links.add(result.inboxKey, {
       name: host,
       libraryKey: base64(libraryKey),
       linkKey: base64(linkKey),
+      deviceId: hostDeviceId,
     });
   }
 

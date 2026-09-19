@@ -6,6 +6,7 @@
 
   let {
     label,
+    ariaLabel,
     question,
     detail,
     confirmLabel = label,
@@ -14,6 +15,8 @@
     onconfirm,
   }: {
     label: string;
+    /** A more specific name where several identical visible action labels share one list. */
+    ariaLabel?: string;
     question: string;
     detail?: string;
     confirmLabel?: string;
@@ -69,7 +72,14 @@
     </span>
   </div>
 {:else}
-  <button type="button" class={tone} {disabled} bind:this={trigger} onclick={ask}>{label}</button>
+  <button
+    type="button"
+    class={tone}
+    {disabled}
+    aria-label={ariaLabel}
+    bind:this={trigger}
+    onclick={ask}>{label}</button
+  >
 {/if}
 
 <style>

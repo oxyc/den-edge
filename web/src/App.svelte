@@ -2,6 +2,9 @@
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
   import { onMount, untrack } from 'svelte';
+  import { browserClock } from './lib/clock';
+  import { thisDevice } from './lib/device.svelte';
+  import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { parseRoute } from './lib/route';
@@ -10,6 +13,42 @@
   import { onTmdbThrottle } from './lib/tmdbCache';
 
   let tmdbLimited = $state(false);
+  const identityClock = browserClock();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight work must not retrigger the effect that starts it.
+  const sendingIdentity = new Set<string>();
+
+  async function syncIdentity(link: (typeof links.list)[number], name: string) {
+    const deviceId = identityClock.device;
+    if (
+      !links.list.includes(link) ||
+      sendingIdentity.has(link.inboxKey) ||
+      (link.sentIdentityName === name && link.sentIdentityDeviceId === deviceId)
+    )
+      return;
+    sendingIdentity.add(link.inboxKey);
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (!links.list.includes(link)) return;
+        if (await sendToTV(link, { type: 'device', name, deviceId })) {
+          links.identityDelivered(link, name, deviceId);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } finally {
+      sendingIdentity.delete(link.inboxKey);
+      // A rename can land while the previous value is in flight. The reactive effect sees it, but the in-flight
+      // guard deliberately declines that call, so start the newer value after releasing the guard.
+      if (thisDevice.name !== name) void syncIdentity(link, thisDevice.name);
+    }
+  }
+
+  function syncIdentities() {
+    const name = thisDevice.name;
+    for (const link of links.list) void syncIdentity(link, name);
+  }
+
+  $effect(() => syncIdentities());
 
   onMount(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
@@ -21,6 +60,18 @@
     return () => {
       stop();
       if (clear) clearTimeout(clear);
+    };
+  });
+
+  onMount(() => {
+    const visible = () => {
+      if (document.visibilityState === 'visible') syncIdentities();
+    };
+    window.addEventListener('online', syncIdentities);
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      window.removeEventListener('online', syncIdentities);
+      document.removeEventListener('visibilitychange', visible);
     };
   });
 

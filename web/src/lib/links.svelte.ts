@@ -12,6 +12,11 @@ export interface Link {
   libraryKey: string;
   /** The link's own key, base64: its inbox messages are sealed under a key it derives. */
   linkKey: string;
+  /** Stable stamp device id of the host, when its handover included one. */
+  deviceId?: string;
+  /** The local identity last delivered through this link. Missing makes an upgraded client resend it. */
+  sentIdentityName?: string;
+  sentIdentityDeviceId?: string;
 }
 
 /**
@@ -19,8 +24,15 @@ export interface Link {
  * what was given, not a grant that can be taken back: only a new library key cuts a device off.
  */
 export interface Shared {
+  /** Stable stamp device id of the device that received the library. */
+  deviceId?: string;
   name: string;
   at: number;
+  /** The library handed over, for reconciling this local record with that library's device list. */
+  libraryKey?: string;
+  /** Kept until the joiner's sealed device message supplies `deviceId`; absent on legacy records. */
+  inboxKey?: string;
+  linkKey?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -29,7 +41,14 @@ const BROWSING_KEY = 'den.browsing';
 
 function isShared(value: unknown): value is Shared {
   const v = value as Partial<Shared> | null;
-  return typeof v?.name === 'string' && typeof v.at === 'number';
+  return (
+    typeof v?.name === 'string' &&
+    typeof v.at === 'number' &&
+    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId)) &&
+    (v.libraryKey === undefined || typeof v.libraryKey === 'string') &&
+    (v.inboxKey === undefined || /^[0-9a-f]{16,}$/i.test(v.inboxKey)) &&
+    (v.linkKey === undefined || typeof v.linkKey === 'string')
+  );
 }
 
 /** A paired link. One made with a six-character code carries no keys, can't reach the library, and pairs again. */
@@ -39,7 +58,10 @@ function isLink(value: unknown): value is Link {
     typeof v?.inboxKey === 'string' &&
     /^[0-9a-f]{16,}$/i.test(v.inboxKey) &&
     typeof v.libraryKey === 'string' &&
-    typeof v.linkKey === 'string'
+    typeof v.linkKey === 'string' &&
+    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId)) &&
+    (v.sentIdentityName === undefined || typeof v.sentIdentityName === 'string') &&
+    (v.sentIdentityDeviceId === undefined || /^[0-9a-f]{16}$/.test(v.sentIdentityDeviceId))
   );
 }
 
@@ -115,7 +137,7 @@ class Links {
 
   add(
     inboxKey: string,
-    details: { name?: string; libraryKey: string; linkKey: string },
+    details: { name?: string; libraryKey: string; linkKey: string; deviceId?: string },
     now = Date.now(),
   ): void {
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
@@ -123,7 +145,14 @@ class Links {
       details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
     this.list = [
       ...this.list,
-      { inboxKey, name, linkedAt: now, libraryKey: details.libraryKey, linkKey: details.linkKey },
+      {
+        inboxKey,
+        name,
+        linkedAt: now,
+        libraryKey: details.libraryKey,
+        linkKey: details.linkKey,
+        deviceId: details.deviceId,
+      },
     ];
     this.moved = null;
     writeLinks(this.list);
@@ -144,9 +173,36 @@ class Links {
   }
 
   /** Remember a device this browser paired and handed the library to. */
-  share(name: string, now = Date.now()): void {
-    this.shared = [...this.shared, { name, at: now }];
+  share(
+    name: string,
+    libraryKey: string,
+    pairing?: { inboxKey: string; linkKey: string },
+    now = Date.now(),
+  ): Shared {
+    const entry: Shared = { name, at: now, libraryKey, ...pairing };
+    this.shared = [...this.shared, entry];
     writeShared(this.shared);
+    return entry;
+  }
+
+  identifyShared(entry: Shared, name: string, deviceId?: string): void {
+    if (
+      !this.shared.includes(entry) ||
+      (deviceId !== undefined && !/^[0-9a-f]{16}$/.test(deviceId))
+    )
+      return;
+    entry.name = name;
+    if (deviceId) entry.deviceId = deviceId;
+    this.shared = [...this.shared];
+    writeShared(this.shared);
+  }
+
+  identityDelivered(entry: Link, name: string, deviceId: string): void {
+    if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.list.includes(entry)) return;
+    entry.sentIdentityName = name;
+    entry.sentIdentityDeviceId = deviceId;
+    this.list = [...this.list];
+    writeLinks(this.list);
   }
 
   /** Drop that record. The device keeps the library it was given; this only stops listing it. */
