@@ -81,12 +81,18 @@
 
   let countries = $state<Country[] | null>(null);
   let countriesFailed = $state(false);
+  let countriesRetry = $state(0);
   $effect(() => {
+    void countriesRetry;
     if (!tmdbKey) return;
+    countriesFailed = false;
     let gone = false;
     fetchCountries(tmdbKey)
       .then((found) => {
-        if (!gone) countries = found;
+        if (!gone) {
+          countries = found;
+          countriesFailed = false;
+        }
       })
       .catch(() => {
         if (!gone) countriesFailed = true;
@@ -360,7 +366,12 @@
         />
       </div>
       {#if countriesFailed}
-        <p class="status bad">Couldn’t load the country list. Check your TMDB key in Settings.</p>
+        <p class="status bad">
+          Couldn’t refresh the country list. Check your TMDB key in Settings.
+          <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
+            >Try again</button
+          >
+        </p>
       {/if}
       {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
         <p class="status bad">

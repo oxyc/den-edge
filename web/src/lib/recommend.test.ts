@@ -19,6 +19,7 @@ describe('recommendBody', () => {
       hideAnime: true,
       minReleaseYear: 1990,
       services: [{ id: 8, country: 'FI' }],
+      servicesConfigured: true,
     };
     const body = recommendBody({
       facet: 'tv',
@@ -66,6 +67,25 @@ describe('recommendBody', () => {
     });
     expect(body.candidates[1]).not.toHaveProperty('rank');
     expect(body.candidates).toHaveLength(3);
+  });
+
+  it('ranks an unset guest against the visible defaults but preserves an explicit empty selection', () => {
+    const guest = readPrefs(undefined);
+    expect(
+      recommendBody({ facet: null, prefs: guest, library: [], owned: new Set(), lists: [] })
+        .services,
+    ).toHaveLength(6);
+
+    const explicitEmpty = { ...guest, servicesConfigured: true };
+    expect(
+      recommendBody({
+        facet: null,
+        prefs: explicitEmpty,
+        library: [],
+        owned: new Set(),
+        lists: [],
+      }).services,
+    ).toEqual([]);
   });
 });
 
