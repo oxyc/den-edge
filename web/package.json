@@ -7,13 +7,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/precompress.mjs",
+    "build:cast": "vite build --config vite.cast.config.ts",
+    "check:cast": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --types vite/client cast/src/main.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint:css": "stylelint \"{src,test}/**/*.{css,svelte}\" --max-warnings 0",
-    "lint": "npm run format:check && npm run lint:js && npm run lint:css && npm run check",
+    "lint": "npm run format:check && npm run lint:js && npm run lint:css && npm run check && npm run check:cast",
     "lint:js": "eslint . --max-warnings 0"
   },
   "devDependencies": {

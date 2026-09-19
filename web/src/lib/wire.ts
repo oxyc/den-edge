@@ -43,20 +43,24 @@ export interface LibraryKeys {
   id: string;
   /** The `x-den-library-token` header. */
   token: string;
+  /** Membership proof for same-origin relayed household services. */
+  member: string;
   enc: CryptoKey;
   mac: CryptoKey;
 }
 
 export async function deriveKeys(libraryKey: Uint8Array<ArrayBuffer>): Promise<LibraryKeys> {
-  const [id, enc, mac, token] = await Promise.all([
+  const [id, enc, mac, token, member] = await Promise.all([
     hkdf(libraryKey, 'den/library/salt/v1', 'den/library/id/v1', 16),
     hkdf(libraryKey, 'den/library/v2', 'enc', 32),
     hkdf(libraryKey, 'den/library/v2', 'mac', 32),
     hkdf(libraryKey, 'den/library/v2', 'token', 32),
+    hkdf(libraryKey, 'den/library/v2', 'member', 32),
   ]);
   return {
     id: hex(id),
     token: hex(token),
+    member: hex(member),
     enc: await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['encrypt', 'decrypt']),
     mac: await crypto.subtle.importKey('raw', mac, { name: 'HMAC', hash: 'SHA-256' }, false, [
       'sign',

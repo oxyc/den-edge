@@ -3,8 +3,8 @@
 //! `tailscale serve` does on the tailnet. So the browser needs no Cloudflare Access service token (which stays on
 //! the TVs), no CORS preflight past Access, and a library's LAN install URLs work as they are. Mostly JSON
 //! goes through; the exception is den-reel's trailer, which is streamed with its ranges intact because on a
-//! public name there is no address a browser can fetch it from directly. den-remux's video never takes this
-//! path — the player is given its own origin.
+//! public name there is no address a browser can fetch it from directly. den-remux's control JSON may take this
+//! path for a member; its video never does — the player is given a signed URL on the public IP-literal origin.
 
 use crate::handler::{error, raw_json, MAX_BODY_BYTES};
 use crate::AppState;
@@ -17,6 +17,7 @@ use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Plain HTTP: every target is a LAN address.
 pub type RelayClient = Client<HttpConnector, Full<Bytes>>;
@@ -56,9 +57,15 @@ const SLOT_WAIT: Duration = Duration::from_secs(5);
 pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<String> {
     relays.iter().find_map(|(prefix, origin)| {
         let rest = path_and_query.strip_prefix(prefix.as_str())?;
+        // den-remux is mounted at /remux in its own HTTP API as well as in the web relay. The other
+        // addons are mounted only by den-edge and therefore have their relay prefix stripped.
+        let keep_prefix = prefix == "/remux";
         match rest.chars().next() {
+            None if keep_prefix => Some(format!("{origin}{prefix}/")),
             None => Some(format!("{origin}/")),
+            Some('/') if keep_prefix => Some(format!("{origin}{prefix}{rest}")),
             Some('/') => Some(format!("{origin}{rest}")),
+            Some('?') if keep_prefix => Some(format!("{origin}{prefix}/{rest}")),
             Some('?') => Some(format!("{origin}/{rest}")),
             _ => None,
         }
@@ -97,7 +104,7 @@ enum Admitted {
     Spent,
 }
 
-/// The membership this request claims, if any: `<id>:<token>` as the app sends it.
+/// The membership this request claims, if any: `<id>:<member-proof>` as the app sends it.
 fn member_claim(req: &Request) -> Option<String> {
     req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned)
 }
@@ -210,8 +217,23 @@ pub async fn relay(
     //
     // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
     // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
-    let member_only = face == crate::handler::Face::Web && req.uri().path().starts_with("/scout/");
+    let remux = req.uri().path().starts_with("/remux/");
+    if remux && !matches!(req.uri().path(), "/remux/health" | "/remux/session" | "/remux/releases") {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
+    let member_only = face == crate::handler::Face::Web && (req.uri().path().starts_with("/scout/") || remux);
     if member_only {
+        let ip = crate::handler::client_ip(state, &req);
+        // A forged member header must meet an address budget before it can make the library store load anything.
+        if let Some(wait) =
+            crate::link::throttled_at(state, &format!("relay-member-gate:{ip}"), MEMBER_PER_WINDOW)
+        {
+            return limited(wait);
+        }
+        // Membership is only a meaningful public gate when strangers cannot create a library for themselves.
+        if remux && state.new_libraries != crate::library::NewLibraries::Members {
+            return json(StatusCode::NOT_FOUND, "not_found");
+        }
         let claim = member_claim(&req);
         if !crate::library::is_member(state, claim.as_deref()).await {
             return json(StatusCode::NOT_FOUND, "not_found");
@@ -220,6 +242,7 @@ pub async fn relay(
     // The visitor's budget is spent first, and only an address past it is asked whether it is a member and has
     // the larger one. That order is deliberate: checking membership first would let a forged member header make
     // every relayed request do a library lookup, which is the work this limit exists to protect.
+    let address = crate::handler::client_addr(state, &req);
     let ip = crate::handler::client_ip(state, &req);
     // A trailer's bytes come through here or not at all. On the public name a browser cannot reach reel
     // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
@@ -272,6 +295,7 @@ pub async fn relay(
         }
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let public_session = member_only && req.uri().path() == "/remux/session" && method == Method::POST;
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
@@ -279,6 +303,11 @@ pub async fn relay(
     let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await else {
         return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
     };
+    let cast = public_session
+        && serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("player").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .is_some_and(|player| player == "cast");
     // Nothing of the browser's goes along but what the addon reads: not its cookies, which carry its Access
     // session, nor anything Cloudflare added. Its validators do, so a revalidation is the addon's 304 rather
     // than the whole answer again, and the encodings it takes, so a large file (atlas's labels) arrives gzipped
@@ -293,6 +322,13 @@ pub async fn relay(
     if let Some(content_type) = content_type {
         out = out.header(header::CONTENT_TYPE, content_type);
     }
+    // Only den-remux consumes this for its per-viewer start budget. Do not broaden the visitor-address data
+    // handed to unrelated addons merely because they share the relay implementation.
+    if remux {
+        if let Some(address) = address {
+            out = out.header("x-forwarded-for", address.to_string());
+        }
+    }
     for (name, value) in conditions {
         out = out.header(name, value);
     }
@@ -306,9 +342,26 @@ pub async fn relay(
         Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
     };
     let (parts, body) = answer.into_parts();
-    let Ok(bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
+    let Ok(mut bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     };
+    if public_session && parts.status == StatusCode::CREATED {
+        if let (Some(base), Some(socket), Some(address)) =
+            (&state.public_media_base, &state.public_media_socket, address)
+        {
+            if open_public_listener(socket, address, cast).await {
+                if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    value["publicBase"] = serde_json::Value::String(base.clone());
+                    if let Some(cast_origin) = &state.cast_origin {
+                        value["castOrigin"] = serde_json::Value::String(cast_origin.clone());
+                    }
+                    if let Ok(encoded) = serde_json::to_vec(&value) {
+                        bytes = Bytes::from(encoded);
+                    }
+                }
+            }
+        }
+    }
     // Only the answer's cache policy, its validators and diagnostic fields cross this boundary. In particular
     // an upstream cannot set a cookie, redirect the browser, or grant another origin access.
     let mut resp = Response::new(Body::from(bytes));
@@ -330,6 +383,9 @@ pub async fn relay(
             resp.headers_mut().insert(name, value.clone());
         }
     }
+    if public_session {
+        resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
     // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
     // The browser keeps its own copy for as long as scout said.
@@ -339,6 +395,26 @@ pub async fn relay(
         }
     }
     resp
+}
+
+/// Ask the root-owned helper for its one operation. It validates the address again and owns every nftables
+/// argument; this process never runs a privileged command or supplies a table, chain, port, or timeout.
+async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr, cast: bool) -> bool {
+    let operation = async {
+        let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
+        let request = serde_json::json!({
+            "open": true,
+            "source": source.to_string(),
+            "scope": if cast { "cast" } else { "browser" },
+        });
+        stream.write_all(request.to_string().as_bytes()).await.ok()?;
+        stream.write_all(b"\n").await.ok()?;
+        stream.shutdown().await.ok()?;
+        let mut answer = [0u8; 3];
+        let read = stream.read(&mut answer).await.ok()?;
+        (read == 3 && answer == *b"ok\n").then_some(())
+    };
+    tokio::time::timeout(Duration::from_secs(2), operation).await.ok().flatten().is_some()
 }
 
 /// A `Cache-Control` with `public` turned into `private`, everything else as it was. One that cannot be read is
@@ -510,6 +586,7 @@ mod tests {
 
     const LIB: &str = "0123456789abcdef0123456789abcdef";
     const TOKEN: &str = "the-write-token";
+    const MEMBER: &str = "the-separate-member-proof";
 
     /// Relaying `/scout` at a port nothing listens on: whatever gets past the limit fails at the fetch, which is
     /// all these need to tell an allowed request from a refused one.
@@ -521,6 +598,124 @@ mod tests {
 
     async fn ask(h: &Harness, headers: &[(&str, &str)]) -> StatusCode {
         h.send("GET", "/scout/manifest.json", None, headers).await.status()
+    }
+
+    async fn registered_library(h: &Harness) -> String {
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK);
+        let claim = format!("{LIB}:{MEMBER}");
+        let registered = h
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::OK);
+        claim
+    }
+
+    #[test]
+    fn remux_keeps_the_prefix_its_upstream_api_owns() {
+        let relays = crate::parse_relays("/scout=http://scout:8080, /remux=http://remux:8095");
+        assert_eq!(
+            super::target(&relays, "/remux/session?x=1").as_deref(),
+            Some("http://remux:8095/remux/session?x=1")
+        );
+        assert_eq!(
+            super::target(&relays, "/scout/cfg/manifest.json").as_deref(),
+            Some("http://scout:8080/cfg/manifest.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn public_remux_is_members_only_and_control_only() {
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays("/remux=http://127.0.0.1:9");
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+
+        assert_eq!(
+            h.send("GET", "/remux/health", None, &[("host", "d.oxy.fi")]).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            h.send("GET", "/remux/video", None, &[("host", "d.oxy.fi")]).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let claim = registered_library(&h).await;
+        let open_mode = h
+            .send("GET", "/remux/health", None, &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)])
+            .await;
+        assert_eq!(open_mode.status(), StatusCode::NOT_FOUND, "public remux requires members mode");
+
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let relayed = h
+            .send("GET", "/remux/health", None, &[("host", "d.oxy.fi"), ("x-den-library-member", &claim)])
+            .await;
+        assert_eq!(relayed.status(), StatusCode::BAD_GATEWAY, "member reached the absent upstream");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn public_base_is_revealed_only_after_the_listener_acknowledges() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
+            assert_eq!(req.uri().path(), "/remux/session");
+            assert_eq!(req.headers()["x-forwarded-for"], "192.168.1.9");
+            (StatusCode::CREATED, json!({ "playlist": "/remux/s/id/sig/master.m3u8" }).to_string())
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = unix.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let _ = sent.send(line);
+            let mut stream = stream.into_inner();
+            stream.write_all(b"ok\n").await.unwrap();
+        });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        state.cast_origin = Some("https://cast.oxy.fi".into());
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let answer = h
+            .send(
+                "POST",
+                "/remux/session",
+                Some(json!({ "player": "cast" }).to_string()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                ],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::CREATED);
+        let body = crate::handler::tests::body_json(answer).await;
+        assert_eq!(body["publicBase"], "https://203.0.113.10");
+        assert_eq!(body["castOrigin"], "https://cast.oxy.fi");
+        let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
+        assert_eq!(ask, json!({ "open": true, "source": "192.168.1.9", "scope": "cast" }));
     }
 
     /// A public name is an unmetered proxy to the addons without this — including atlas's half-megabyte labels.

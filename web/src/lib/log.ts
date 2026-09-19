@@ -49,6 +49,7 @@ interface Snapshot {
   generation?: string;
   head: number;
   entries: [name: string, seq: number, row: Row][];
+  memberRegistered?: boolean;
 }
 
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
@@ -71,6 +72,7 @@ export class LibraryLog {
   private head = 0;
   private generation?: string;
   private recoveryRows?: Row[];
+  private memberRegistered = false;
   /** The TV reset the library key: this log is deleted, its id retired, and this browser's key reaches nothing. */
   moved = false;
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
@@ -189,9 +191,6 @@ export class LibraryLog {
   ): Promise<LibraryLog | null> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
     const keys = await deriveKeys(raw);
-    // Every relayed addon call from here on can prove this browser holds a library, which is what earns it
-    // the member's budget rather than a visitor's.
-    useLibraryCredential(keys);
     const log = new LibraryLog(
       keys,
       fetchImpl,
@@ -205,15 +204,23 @@ export class LibraryLog {
     const saved = await log.kept<Snapshot>(SNAPSHOT);
     if (saved) {
       await policy;
+      log.memberRegistered = saved.memberRegistered ?? false;
       log.generation = saved.generation;
       log.head = saved.head;
       for (const [name, seq, row] of saved.entries) {
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }
+      // The successful marker avoids even an idempotent request on every return visit. Old snapshots migrate
+      // once; a brand-new library has no server log yet and retries after its first successful write below.
+      await log.registerMember();
+      useLibraryCredential(keys);
       log.fromCache = true;
       return log.restoreJournal();
     }
+    // Register before exposing the proof to relayed requests.
+    await log.registerMember();
+    useLibraryCredential(keys);
     let since = 0;
     for (;;) {
       let res: Response;
@@ -385,6 +392,7 @@ export class LibraryLog {
     const snapshot: Snapshot = {
       generation: this.generation,
       head: this.head,
+      memberRegistered: this.memberRegistered,
       entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
     };
     this.saving = this.saving
@@ -464,6 +472,7 @@ export class LibraryLog {
       const applied = batch.applied.find((a) => a.k === k);
       if (applied) {
         this.entries.set(name, { seq: applied.seq, row: target });
+        await this.registerMember();
         return target;
       }
       const conflict = batch.conflicts.find((c) => c.k === k);
@@ -481,6 +490,26 @@ export class LibraryLog {
 
   private headers(): Record<string, string> {
     return { 'x-den-library-token': this.keys.token };
+  }
+
+  private async registerMember(): Promise<void> {
+    if (this.memberRegistered || this.offline) return;
+    try {
+      const res = await this.fetchImpl(`/lib/${this.keys.id}/member`, {
+        method: 'PUT',
+        headers: {
+          ...this.headers(),
+          'x-den-library-member': `${this.keys.id}:${this.keys.member}`,
+        },
+      });
+      if (res.ok) {
+        this.memberRegistered = true;
+        this.dirty = true;
+        this.persist();
+      }
+    } catch {
+      // Sync and playback remain usable; a later write/open retries registration.
+    }
   }
 
   /** Persist one bulk intent atomically in the browser before any request. Network chunks are resumable. */

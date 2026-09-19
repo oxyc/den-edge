@@ -83,6 +83,13 @@ pub struct AppState {
     /// and den-reel's, for a trailer. Reel's were missing, so the policy refused every trailer on the public
     /// and tailnet names.
     pub media_origins: Vec<String>,
+    /// Public IP-literal origin handed only to a proven member after the listener helper opened it.
+    pub public_media_base: Option<String>,
+    /// Host helper socket mounted into the container. The helper owns nftables; den-edge can only request
+    /// the fixed, short-lived public-listener action.
+    pub public_media_socket: Option<std::path::PathBuf>,
+    /// The static Cast sender/player origin allowed to frame the web app's playback handoff.
+    pub cast_origin: Option<String>,
     /// Who may start a library (env `NEW_LIBRARIES`: `open` or `members`).
     pub new_libraries: library::NewLibraries,
     /// The household's TMDB key (env `TMDB_KEY`), lent to devices that have none of their own (`tmdb.rs`).
@@ -178,6 +185,9 @@ impl AppState {
             routes: Vec::new(),
             routes_public: None,
             media_origins: Vec::new(),
+            public_media_base: None,
+            public_media_socket: None,
+            cast_origin: None,
             new_libraries: library::NewLibraries::Open,
             tmdb_key: None,
             tmdb_client: None,
@@ -254,6 +264,19 @@ async fn main() {
     state.routes = env_opt("ROUTES").map(|v| routes::parse(&v)).unwrap_or_default();
     state.routes_public = env_opt("ROUTES_PUBLIC").map(|v| routes::parse(&v));
     state.media_origins = routes::media_origins(&state.routes);
+    state.public_media_base = env_opt("PUBLIC_MEDIA_BASE").and_then(|value| {
+        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
+            eprintln!("PUBLIC_MEDIA_BASE must be a bare https origin — disabling it");
+            None
+        })
+    });
+    state.public_media_socket = env_opt("PUBLIC_MEDIA_SOCKET").map(std::path::PathBuf::from);
+    state.cast_origin = env_opt("CAST_ORIGIN").and_then(|value| {
+        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
+            eprintln!("CAST_ORIGIN must be a bare https origin — disabling it");
+            None
+        })
+    });
     state.new_libraries = env_opt("NEW_LIBRARIES").map_or(library::NewLibraries::Open, |v| {
         library::NewLibraries::parse(&v).unwrap_or_else(|| {
             eprintln!("NEW_LIBRARIES is {v:?}: expected open or members");

@@ -1,7 +1,7 @@
 // Proof that this browser holds a library here, sent with the addon calls that go through den-edge's relay.
 //
 // The relay budgets requests per address: a visitor gets enough to read pages, a member enough to browse
-// properly. Membership is claimed with `x-den-library-member: <id>:<token>`, and until this existed the web
+// properly. Membership is claimed with `x-den-library-member: <id>:<member>`, and until this existed the web
 // app never sent it — so a paired household was charged the visitor's budget and refused part-way through
 // rendering its own home page, with the billboard trailers stopping mid-render.
 //
@@ -16,6 +16,7 @@ import type { LibraryKeys } from './wire';
  * the allowance or permits spending a household key. Anything else is somebody else's server.
  */
 const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/', '/metadata/', '/tmdb/'];
+const REMUX_CONTROL = new Set(['/remux/health', '/remux/session', '/remux/releases']);
 const MEMBER_HEADER = 'x-den-library-member';
 
 let credential: string | null = null;
@@ -26,8 +27,8 @@ export function hasLibraryCredential(): boolean {
 }
 
 /** Remember the open library's credential, so relayed calls can prove membership. */
-export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'token'>): void {
-  credential = `${keys.id}:${keys.token}`;
+export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'member'>): void {
+  credential = `${keys.id}:${keys.member}`;
 }
 
 /** Forget it — an unlinked browser is a visitor again, and must stop claiming otherwise. */
@@ -53,7 +54,10 @@ function relayed(href: string): boolean {
   if (!here) return false;
   try {
     const url = new URL(href, here);
-    return url.origin === new URL(here).origin && RELAYED.some((p) => url.pathname.startsWith(p));
+    return (
+      url.origin === new URL(here).origin &&
+      (RELAYED.some((p) => url.pathname.startsWith(p)) || REMUX_CONTROL.has(url.pathname))
+    );
   } catch {
     // An unparseable URL is not one of ours.
     return false;
