@@ -866,7 +866,7 @@
    * The services Home shows as brand tiles: the household's own picks, or — until a library has any — the six a
    * visitor is shown. A pick names a country as well as a service, because a catalogue is licensed per country.
    */
-  const servicePicks = $derived(prefs.services.length ? prefs.services : GUEST_PICKS);
+  const servicePicks = $derived(prefs.servicesConfigured ? prefs.services : GUEST_PICKS);
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
   let directories = $state<Record<string, Service[]>>({});

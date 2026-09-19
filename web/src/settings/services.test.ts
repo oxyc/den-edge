@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  beginServiceDirectoryLoad,
   canonicalProviderName,
+  completeServiceDirectoryLoad,
+  failServiceDirectoryLoad,
   fetchCountries,
   fetchServices,
+  fetchServicesResult,
   matches,
   mergeServices,
   serviceLabel,
@@ -92,5 +96,48 @@ describe('service directory', () => {
     const services = await fetchServices('FI', 'K', fake);
     expect(services.map((s) => [s.id, s.movies, s.series])).toEqual([[8, true, true]]);
     expect(asked).toContain('/3/watch/providers/tv?watch_region=FI&api_key=K');
+  });
+
+  it('keeps one useful directory half and reports that the result needs a retry', async () => {
+    const partial = (async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname.endsWith('/tv')) return new Response('', { status: 503 });
+      return new Response(
+        JSON.stringify({
+          results: [{ provider_id: 8, provider_name: 'Netflix', display_priority: 1 }],
+        }),
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await fetchServicesResult('FI', 'K', partial);
+    expect(result.complete).toBe(false);
+    expect(result.services.map((service) => [service.id, service.movies, service.series])).toEqual([
+      [8, true, false],
+    ]);
+  });
+
+  it('rejects only when neither directory half can be used', async () => {
+    const failed = (async () => new Response('', { status: 503 })) as unknown as typeof fetch;
+    await expect(fetchServicesResult('FI', 'K', failed)).rejects.toThrow('TMDB 503');
+  });
+
+  it('keeps the last useful list through a failure and ignores a stale answer', () => {
+    const netflix = servicesFrom(
+      [{ provider_id: 8, provider_name: 'Netflix', display_priority: 1 }],
+      'movie',
+      'FI',
+    );
+    const first = beginServiceDirectoryLoad(undefined, 1, 'K');
+    const ready = completeServiceDirectoryLoad(first, 1, { services: netflix, complete: true });
+    const retry = beginServiceDirectoryLoad(ready, 2, 'K');
+
+    expect(failServiceDirectoryLoad(retry, 2)).toMatchObject({
+      services: netflix,
+      status: 'failed',
+    });
+    expect(
+      completeServiceDirectoryLoad(retry, 1, { services: [], complete: true }),
+      'request 1 cannot erase the newer request 2 state',
+    ).toBe(retry);
   });
 });

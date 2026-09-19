@@ -22,6 +22,8 @@ export interface Prefs {
   minReleaseYear?: number;
   /** The services the TV has picked (`den.myServicePicks`, each `"<id>@<CC>"`). */
   services: ServicePick[];
+  /** False until the household saves a choice; an explicit empty array means every default was removed. */
+  servicesConfigured: boolean;
 }
 
 /** TMDB tags anime and Western cartoons alike as Animation; anime is Animation plus Japanese. */
@@ -42,13 +44,17 @@ export function readPrefs(row: SettingsRow | undefined): Prefs {
     return v !== null && 'bool' in v && v.bool;
   };
   const year = value('den.minReleaseYear');
+  const serviceValue = value('den.myServicePicks');
   return {
     excludedGenres: new Set(ints('den.excludedGenreIDs')),
     excludedLanguages: new Set(strings('den.excludedLanguages')),
     hideAnime: bool('den.hideAnime'),
     hideWatched: bool('den.hideWatched'),
     minReleaseYear: year && 'int' in year ? year.int : undefined,
-    services: parseServicePicks(strings('den.myServicePicks')),
+    services: parseServicePicks(
+      serviceValue && 'strings' in serviceValue ? serviceValue.strings : [],
+    ),
+    servicesConfigured: serviceValue !== null && 'strings' in serviceValue,
   };
 }
 
