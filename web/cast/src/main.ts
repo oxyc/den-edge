@@ -1,5 +1,5 @@
 import Hls from 'hls.js';
-import { castErrorAction, castIdleAction } from './lifecycle';
+import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import { signedMedia } from './media';
 import './style.css';
@@ -26,6 +26,7 @@ interface LoadMessage {
 interface CastSession {
   loadMedia(request: unknown): Promise<unknown>;
   getMediaSession(): CastMedia | null;
+  getCastDevice(): { friendlyName?: string };
 }
 
 interface CastMedia {
@@ -65,7 +66,7 @@ interface CastGlobals {
   };
   chrome: {
     cast: {
-      AutoJoinPolicy: { ORIGIN_SCOPED: unknown };
+      AutoJoinPolicy: { PAGE_SCOPED: unknown };
       media: {
         DEFAULT_MEDIA_RECEIVER_APP_ID: string;
         HlsSegmentFormat: { FMP4: unknown };
@@ -171,8 +172,9 @@ async function loadLocal(media: Media): Promise<void> {
   video.currentTime = Math.max(0, media.currentTime ?? 0);
   try {
     await video.play();
+    status.textContent = PLAYING_HERE;
   } catch {
-    status.textContent = 'Press play, or choose Cast';
+    status.textContent = 'Press play';
   }
 }
 
@@ -261,7 +263,7 @@ async function loadCast(): Promise<void> {
     }
     castStarted = true;
     castSubtitleAppliedId = applyCastSubtitle(media.subtitleLanguage) ? current?.id : undefined;
-    status.textContent = 'Playing on Chromecast';
+    status.textContent = castingTo(session.getCastDevice?.().friendlyName);
     video.pause();
     tell('den-cast', { state: 'playing', profile: profile.value });
   } catch {
@@ -328,11 +330,13 @@ function initializeCast(): void {
   });
   castContext.setOptions({
     receiverApplicationId: chrome.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
-    autoJoinPolicy: chrome.AutoJoinPolicy.ORIGIN_SCOPED,
+    // Not ORIGIN_SCOPED: that re-joined any earlier Cast session for this origin on load, so opening a title on
+    // the phone silently started streaming it to a TV. Casting begins only when the Cast button is pressed.
+    autoJoinPolicy: chrome.AutoJoinPolicy.PAGE_SCOPED,
   });
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
-    if (state === 'SESSION_STARTED' || state === 'SESSION_RESUMED') {
+    if (state === 'SESSION_STARTED') {
       void loadCast();
     } else if (state === 'SESSION_ENDED' && castStarted) {
       castStarted = false;

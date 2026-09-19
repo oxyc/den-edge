@@ -12,6 +12,14 @@ export function castIdleAction(
   return 'stopped';
 }
 
+/** What the bar says while the video plays in this browser: the default, and what Cast falls back to when it ends. */
+export const PLAYING_HERE = 'Playing on this device';
+
+/** What the bar says while a Cast receiver plays it, so it is never unclear where the picture is. */
+export function castingTo(device: string | null | undefined): string {
+  return `Casting to ${device?.trim() || 'your TV'}`;
+}
+
 /** Keep the Cast session for one conservative retry, then end it if that fallback also fails. */
 export function castErrorAction(terminal: boolean): CastErrorAction {
   return terminal ? 'stop-receiver' : 'retry-receiver';

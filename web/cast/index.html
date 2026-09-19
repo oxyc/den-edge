@@ -7,12 +7,16 @@
   </head>
   <body>
     <main>
-      <video controls playsinline></video>
+      <video controls playsinline x-webkit-airplay="allow"></video>
       <div class="bar">
-        <div>
+        <div class="now">
           <strong id="title">Choose something in Den</strong>
           <span id="status">Ready</span>
         </div>
+        <google-cast-launcher aria-label="Cast to a TV" title="Cast to a TV"></google-cast-launcher>
+      </div>
+      <details class="cast-options">
+        <summary>Cast options</summary>
         <label>
           <span>Receiver</span>
           <select id="profile">
@@ -24,8 +28,7 @@
             <option value="streamer">Google TV Streamer</option>
           </select>
         </label>
-        <google-cast-launcher aria-label="Cast"></google-cast-launcher>
-      </div>
+      </details>
     </main>
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <script type="module" src="/src/main.ts"></script>

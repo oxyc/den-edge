@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { castErrorAction, castIdleAction } from '../../cast/src/lifecycle';
+import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE } from '../../cast/src/lifecycle';
+
+describe('Cast status text', () => {
+  it('always says where the picture is', () => {
+    expect(PLAYING_HERE).toBe('Playing on this device');
+    expect(castingTo('Living Room TV')).toBe('Casting to Living Room TV');
+    expect(castingTo('  Kitchen  ')).toBe('Casting to Kitchen');
+  });
+
+  it('still names a TV when the receiver has no name', () => {
+    expect(castingTo(undefined)).toBe('Casting to your TV');
+    expect(castingTo('')).toBe('Casting to your TV');
+    expect(castingTo(null)).toBe('Casting to your TV');
+  });
+});
 
 describe('Cast idle lifecycle', () => {
   it('completes only a genuinely finished media session', () => {
