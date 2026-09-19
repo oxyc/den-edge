@@ -240,9 +240,15 @@ test('season requests cannot overwrite a newer selection and retained detail and
     await active().getByRole('tab', { name: 'Season 2', exact: true }).click();
     await expect(active().getByText('Season 2 premiere', { exact: true })).toBeVisible();
     expect(requests.filter((p) => p.endsWith('/season/2'))).toHaveLength(1);
-    await active()
-      .getByRole('link', { name: /A Person/ })
-      .click();
+    await expect(
+      active().getByRole('heading', { name: 'More like this', exact: true }).getByRole('link'),
+    ).toHaveCount(0);
+    const personHeading = active().getByRole('link', {
+      name: 'Starring A Person',
+      exact: true,
+    });
+    await expect(personHeading).toHaveAttribute('href', '/person/7-a-person');
+    await active().getByRole('link', { name: 'A Person Detective', exact: true }).click();
     await expect(active().getByRole('tab', { name: 'Directing' })).toHaveAttribute(
       'aria-selected',
       'true',
