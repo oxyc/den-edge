@@ -1,16 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Title } from '../src/lib/library';
+  import type { RecommendedTitle } from '../src/lib/recommend';
   import Billboard from '../src/components/Billboard.svelte';
   import '../src/app.css';
-  let titles = $state<Title[]>([]);
+  let titles = $state<RecommendedTitle[]>([]);
   // Off unless a test asks for it: the specs that measure layout mock no reel, and handing them one
   // would have them fetching a trailer the network guard refuses.
   const reel = new URLSearchParams(location.search).has('reel') ? '/reel/fixture' : null;
   onMount(() => {
     const load = () => {
       titles = [
-        { type: 'movie', id: 42, title: 'A short title', year: 2026, backdropPath: '/early.jpg' },
+        {
+          type: 'movie',
+          id: 42,
+          title: 'A short title',
+          year: 2026,
+          backdropPath: '/early.jpg',
+          why: { reason: 'profile' },
+        },
         {
           type: 'movie',
           id: 43,

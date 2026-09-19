@@ -73,7 +73,7 @@
   import type { Routes } from './lib/routes';
   import { installsOf, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
-  import { nameSlides, recommend, recommendBody } from './lib/recommend';
+  import { nameSlides, recommend, recommendBody, type RecommendedTitle } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
@@ -916,7 +916,7 @@
    * watched now, what is new or still to come, and what has just landed on this household's own services, weighted
    * towards the library's taste and away from anything it already holds.
    */
-  let featured = $state<Title[]>([]);
+  let featured = $state<RecommendedTitle[]>([]);
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
@@ -927,7 +927,7 @@
     const opened = log;
     const name = keptBillboard(facet);
     if (!opened || !tmdbKey) return;
-    void opened.kept<Title[]>(name).then((saved) => {
+    void opened.kept<RecommendedTitle[]>(name).then((saved) => {
       if (saved?.length && !featured.length) featured = saved;
     });
   });
@@ -1072,7 +1072,10 @@
    * rebuild — or this visit's pick replacing the last one's — must not swap the picture out from under someone
    * looking at it. The rest of the slides are this pick's, and the next visit leads with it.
    */
-  function keepLead(picked: Title[], lead: Title | undefined): Title[] {
+  function keepLead(
+    picked: RecommendedTitle[],
+    lead: RecommendedTitle | undefined,
+  ): RecommendedTitle[] {
     if (!lead || !picked.length) return picked;
     return [lead, ...picked.filter((t) => titleKey(t) !== titleKey(lead))];
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
-import { nameSlides, recommend, recommendBody } from './recommend';
+import { nameSlides, recommend, recommendationReason, recommendBody } from './recommend';
 import { readPrefs } from './prefs';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
@@ -163,6 +163,49 @@ describe('recommend', () => {
     expect(asked[0]!.init?.method).toBe('POST');
   });
 
+  it('keeps every scoring diagnostic and the server-selected reason', async () => {
+    const why = {
+      score: 0.812,
+      fit: 0.722,
+      similar: 1.4,
+      profile: 0.62,
+      people: 0.31,
+      confidence: 0.9,
+      fresh: 0.8,
+      arrived: 0.4,
+      quality: 0.75,
+      buzz: 0.52,
+      reason: 'profile',
+    };
+    const result = await recommend(
+      '/atlas',
+      body,
+      answering(200, { slides: [{ type: 'movie', id: 1, why }] }).fetchImpl,
+    );
+    expect(result?.slides[0]?.why).toEqual(why);
+  });
+
+  it('keeps a slide when why is partial or malformed and preserves its usable fields', async () => {
+    const result = await recommend(
+      '/atlas',
+      body,
+      answering(200, {
+        slides: [
+          {
+            type: 'movie',
+            id: 1,
+            why: { score: 'high', fit: 0.7, similar: null, reason: 42 },
+          },
+          { type: 'series', id: 2, why: 'not-an-object' },
+        ],
+      }).fetchImpl,
+    );
+    expect(result?.slides).toEqual([
+      { type: 'movie', id: 1, imdbId: undefined, why: { fit: 0.7, similar: null } },
+      { type: 'tv', id: 2, imdbId: undefined, why: undefined },
+    ]);
+  });
+
   it('is nothing where atlas can’t rank, so the page ranks for itself', async () => {
     expect(
       await recommend('/atlas', body, answering(404, { error: 'not_found' }).fetchImpl),
@@ -172,6 +215,29 @@ describe('recommend', () => {
       throw new TypeError('offline');
     }) as unknown as typeof fetch;
     expect(await recommend('/atlas', body, offline)).toBeNull();
+  });
+});
+
+describe('recommendationReason', () => {
+  it.each([
+    ['similar', 'Similar to what you watch'],
+    ['profile', 'Fits your viewing taste'],
+    ['people', 'Cast and creators you like'],
+    ['franchise', 'From a franchise you like'],
+    ['arrived', 'New on your services'],
+    ['recent', 'Recently released'],
+    ['upcoming', 'Coming soon'],
+    ['timely', 'New or coming soon'],
+    ['quality', 'Highly rated'],
+    ['buzz', 'Popular now'],
+  ])('renders Atlas reason %s', (reason, copy) => {
+    expect(recommendationReason({ reason })).toBe(copy);
+  });
+
+  it('stays silent for legacy, missing, and unknown reason codes', () => {
+    expect(recommendationReason(undefined)).toBeUndefined();
+    expect(recommendationReason({ fit: 0.7 })).toBeUndefined();
+    expect(recommendationReason({ reason: 'future-signal' })).toBeUndefined();
   });
 });
 
@@ -195,5 +261,17 @@ describe('nameSlides', () => {
     expect(titles.map((t) => `${t.type}:${t.id}`)).toEqual(['movie:2', 'tv:1', 'movie:1']);
     expect(titles[0]!.imdbId).toBe('tt2');
     expect(looked.sort()).toEqual(['movie:2', 'movie:9', 'tv:1']);
+  });
+
+  it('carries why through TMDB naming so a kept billboard can restore it', async () => {
+    const why = { score: 0.8, fit: 0.7, reason: 'similar' };
+    const titles = await nameSlides(
+      [{ type: 'movie', id: 1, why }],
+      new Map([['movie:1', film(1)]]),
+      async () => null,
+      1,
+    );
+    expect(titles).toEqual([{ ...film(1), imdbId: undefined, why }]);
+    expect(JSON.parse(JSON.stringify(titles))[0].why).toEqual(why);
   });
 });
