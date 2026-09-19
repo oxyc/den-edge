@@ -346,7 +346,15 @@
     }
     for (const linked of row.links)
       status.push(`linked to this browser${linked.linkedAt ? ` ${day(linked.linkedAt)}` : ''}`);
-    for (const shared of row.shared) status.push(`given your library ${day(shared.at)}`);
+    for (const shared of row.shared) {
+      const relation =
+        shared.libraryKey === link?.libraryKey
+          ? 'given this library'
+          : shared.libraryKey
+            ? 'given another library'
+            : 'library handed off';
+      status.push(`${relation} ${day(shared.at)}`);
+    }
     return status.join(' · ');
   };
 </script>
@@ -660,8 +668,8 @@
     {/if}
     {#if listedDevices.some((row) => row.shared.length)}
       <p class="foot">
-        Forgetting a handoff only stops listing it here — the device keeps the copy of your library
-        it was given.
+        Forgetting a handoff only stops listing it here — the device keeps the library key it was
+        given.
       </p>
     {/if}
 

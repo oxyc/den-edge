@@ -12,7 +12,7 @@ export interface LinkedDeviceRow {
   shared: Shared[];
 }
 
-const identityName = (name: string | undefined): string => name?.trim().toLocaleLowerCase() ?? '';
+const identityName = (name: string | undefined): string => name?.trim().toLowerCase() ?? '';
 
 /**
  * Combines the current library's self-reported devices with records kept by this browser.

@@ -137,7 +137,7 @@ for (const width of [320, 390, 820, 1280]) {
       const mac = listed.filter({ hasText: 'Mac' });
       await expect(mac).toHaveCount(1);
       await expect(mac).toContainText('Browser · seen');
-      await expect(mac).toContainText('given your library');
+      await expect(mac).toContainText('given this library');
       await expect(mac.getByRole('button', { name: 'Remove Mac from list' })).toBeVisible();
       await expect(mac.getByRole('button', { name: 'Forget Mac' })).toBeVisible();
       // A regular expression, so it's matched with its case: the device's own row reads "This browser · seen".
