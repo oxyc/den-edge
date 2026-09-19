@@ -28,12 +28,22 @@ export interface SyncedPrefs {
   /** Uppercase ISO-3166; undefined follows the device. */
   watchRegion?: string;
   services: ServicePick[];
+  /** Distinguishes guest defaults from a deliberately saved empty selection. */
+  servicesConfigured: boolean;
   /** The parental limit; undefined is none. */
   maturityCeiling?: 'pg13' | 'r';
 }
 
 /** A change to `set:prefs`: each key set, or cleared with null. */
 export type PrefChanges = Record<string, ConfigValue | null>;
+
+/** The picks a service editor starts from; the first edit copies defaults into the synced preference. */
+export function effectiveServicePicks(
+  prefs: Pick<SyncedPrefs, 'services' | 'servicesConfigured'>,
+  defaults: readonly ServicePick[],
+): ServicePick[] {
+  return prefs.servicesConfigured ? prefs.services : [...defaults];
+}
 
 export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   const value = (key: string): ConfigValue | null => row?.values[key]?.value ?? null;
@@ -57,6 +67,7 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
   const region = string('den.watchRegion');
   const ceiling = string('den.maturityCeiling');
   const sources = strings('den.enabledRatingSources');
+  const serviceValue = value('den.myServicePicks');
   return {
     excludedGenres: genres && 'ints' in genres ? genres.ints : [],
     excludedLanguages: strings('den.excludedLanguages') ?? [],
@@ -75,7 +86,10 @@ export function readSyncedPrefs(row: SettingsRow | undefined): SyncedPrefs {
     ),
     shownWarnings: strings('den.shownWarningCategories') ?? [],
     watchRegion: region && /^[a-z]{2}$/i.test(region) ? region.toUpperCase() : undefined,
-    services: parseServicePicks(strings('den.myServicePicks') ?? []),
+    services: parseServicePicks(
+      serviceValue && 'strings' in serviceValue ? serviceValue.strings : [],
+    ),
+    servicesConfigured: serviceValue !== null && 'strings' in serviceValue,
     maturityCeiling: ceiling === 'pg13' || ceiling === 'r' ? ceiling : undefined,
   };
 }

@@ -45,6 +45,7 @@ describe('prefs', () => {
       { id: 8, country: 'US' },
       { id: 1899, country: 'FI' },
     ]);
+    expect(prefs.servicesConfigured).toBe(true);
     const cleared = { ...prefsRow, values: { 'den.minReleaseYear': { value: null, at } } };
     expect(readPrefs(cleared).minReleaseYear).toBeUndefined();
     expect(readPrefs(undefined)).toEqual({
@@ -54,7 +55,19 @@ describe('prefs', () => {
       hideWatched: false,
       minReleaseYear: undefined,
       services: [],
+      servicesConfigured: false,
     });
+  });
+
+  it('keeps an explicit empty service list distinct from an unset guest list', () => {
+    const empty = readPrefs({
+      kind: 'set',
+      schema: 2,
+      name: 'prefs',
+      values: { 'den.myServicePicks': { value: { strings: [] }, at } },
+    });
+    expect(empty.services).toEqual([]);
+    expect(empty.servicesConfigured).toBe(true);
   });
 
   it('hides as the TV does, the year floor only outside search', () => {
