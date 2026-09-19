@@ -399,19 +399,21 @@ const fullDate = (value: string | undefined) =>
 
 /** Newest first, including the order within a year; stable provider order is not chronology. */
 function compareFilmCredits(a: FilmCredit, b: FilmCredit): number {
-  const aDate = fullDate(a.title.releaseDate);
-  const bDate = fullDate(b.title.releaseDate);
-  if (aDate && bDate && aDate !== bDate) return bDate.localeCompare(aDate);
+  return compareTitleDates(a.title, b.title, -1);
+}
 
-  const byYear = (b.title.year ?? 0) - (a.title.year ?? 0);
-  if (byYear) return byYear;
-  if (aDate !== bDate) return bDate ? 1 : -1;
+/** Chronological title order, with incomplete dates last and deterministic ties. */
+function compareTitleDates(a: Title, b: Title, direction: 1 | -1): number {
+  const aDate = fullDate(a.releaseDate);
+  const bDate = fullDate(b.releaseDate);
+  if (aDate && bDate && aDate !== bDate) return direction * aDate.localeCompare(bDate);
 
-  return (
-    a.title.title.localeCompare(b.title.title) ||
-    a.title.type.localeCompare(b.title.type) ||
-    a.title.id - b.title.id
-  );
+  if (a.year !== undefined && b.year !== undefined && a.year !== b.year)
+    return direction * (a.year - b.year);
+  if (a.year !== b.year) return a.year === undefined ? 1 : -1;
+  if (aDate !== bDate) return aDate ? -1 : 1;
+
+  return a.title.localeCompare(b.title) || a.type.localeCompare(b.type) || a.id - b.id;
 }
 
 export async function fetchFilmography(
@@ -436,5 +438,5 @@ export async function fetchCollection(
       return title ? [title] : [];
     })
     .filter((t, i, all) => all.findIndex((other) => other.id === t.id) === i)
-    .sort((a, b) => (a.year ?? Infinity) - (b.year ?? Infinity));
+    .sort((a, b) => compareTitleDates(a, b, 1));
 }

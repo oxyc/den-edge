@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchDetail, parseDetail, parsePerson, parseSeason } from './detail';
+import { fetchCollection, fetchDetail, parseDetail, parsePerson, parseSeason } from './detail';
 
 const movie = {
   title: 'Arrival',
@@ -155,5 +155,28 @@ describe('seasons and people', () => {
       knownFor: 'Acting',
     });
     expect(parsePerson(1, { biography: 'x' })).toBeNull();
+  });
+
+  it('orders a collection by complete release date instead of provider order within a year', async () => {
+    const titles = await fetchCollection(
+      12,
+      'key',
+      async () =>
+        new Response(
+          JSON.stringify({
+            parts: [
+              { id: 2, title: 'Later sequel', release_date: '2026-11-01' },
+              { id: 3, title: 'Year only', release_date: '2026' },
+              { id: 1, title: 'Earlier sequel', release_date: '2026-02-01' },
+            ],
+          }),
+        ),
+    );
+
+    expect(titles.map((title) => title.title)).toEqual([
+      'Earlier sequel',
+      'Later sequel',
+      'Year only',
+    ]);
   });
 });
