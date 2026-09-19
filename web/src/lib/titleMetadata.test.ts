@@ -26,7 +26,7 @@ test('extracts only allowlisted metadata from direct TMDB answers', () => {
 });
 
 test('publishes Atlas JustWatch IMDb ratings with distinct provenance', async () => {
-  useLibraryCredential({ id: 'a', token: 'b' });
+  useLibraryCredential({ id: 'a', member: 'b' });
   const fetchMock = vi.fn(
     async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }),
   );
@@ -47,7 +47,7 @@ test('publishes observations only for a paired browser', async () => {
   const body = '{"id":550,"vote_average":8.4,"vote_count":100,"poster_path":"/f.jpg"}';
   rememberTmdbMetadata('/3/movie/550', body, fetchImpl);
   expect(fetchImpl).not.toHaveBeenCalled();
-  useLibraryCredential({ id: 'a', token: 'b' });
+  useLibraryCredential({ id: 'a', member: 'b' });
   rememberTmdbMetadata('/3/movie/550', body, fetchImpl);
   await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
   expect(fetchImpl).toHaveBeenCalledWith(

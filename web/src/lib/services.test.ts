@@ -195,7 +195,7 @@ describe('atlas rows', () => {
   });
 
   it('keeps and publishes Atlas JustWatch IMDb ratings with their source', async () => {
-    useLibraryCredential({ id: 'a', token: 'b' });
+    useLibraryCredential({ id: 'a', member: 'b' });
     const writes: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       if (url === '/metadata/title') {
@@ -582,7 +582,7 @@ describe('radarRows', () => {
   });
 
   it('keeps and publishes ratings received by a pooled Atlas chart', async () => {
-    useLibraryCredential({ id: 'a', token: 'b' });
+    useLibraryCredential({ id: 'a', member: 'b' });
     const writes: unknown[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       if (url === '/metadata/title') {

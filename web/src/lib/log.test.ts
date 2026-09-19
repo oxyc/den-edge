@@ -242,7 +242,12 @@ describe('LibraryLog', () => {
     };
     let server = await edge();
     let generation = 'original';
+    let memberRegistrations = 0;
     const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'PUT') {
+        memberRegistrations += 1;
+        return new Response('{}', { status: server.stored.size ? 200 : 404 });
+      }
       if (init?.method !== 'POST' && server.stored.size === 0)
         return new Response(JSON.stringify({ generation }), { status: 404 });
       const res = await server.fetchImpl(url, init);
@@ -263,6 +268,10 @@ describe('LibraryLog', () => {
     const reopened = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
     expect(reopened.title(before.title)?.status.value).toBe('watchlist');
     expect(reopened.settings('tracker-event:accepted')).toBeDefined();
+    expect(
+      memberRegistrations,
+      'a restored store invalidates the persisted registration marker and registers again',
+    ).toBeGreaterThanOrEqual(3);
   });
 
   it('persists a complete bulk action before delivery and retries it in bounded batches', async () => {

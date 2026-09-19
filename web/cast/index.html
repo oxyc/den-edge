@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Den Cast</title>
+  </head>
+  <body>
+    <main>
+      <video controls playsinline></video>
+      <div class="bar">
+        <div>
+          <strong id="title">Choose something in Den</strong>
+          <span id="status">Ready</span>
+        </div>
+        <label>
+          <span>Receiver</span>
+          <select id="profile">
+            <option value="legacy">Chromecast 1–2</option>
+            <option value="gen3">Chromecast 3</option>
+            <option value="ultra">Chromecast Ultra</option>
+            <option value="google-tv-hd">Chromecast with Google TV (HD)</option>
+            <option value="google-tv-4k">Chromecast with Google TV (4K)</option>
+            <option value="streamer">Google TV Streamer</option>
+          </select>
+        </label>
+        <google-cast-launcher aria-label="Cast"></google-cast-launcher>
+      </div>
+    </main>
+    <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

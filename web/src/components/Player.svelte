@@ -26,6 +26,7 @@
     type Failure,
     type Release,
     type Session,
+    type Want,
   } from '../lib/remux';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
@@ -124,6 +125,14 @@
   };
 
   let video = $state<HTMLVideoElement>();
+  let castFrame = $state<HTMLIFrameElement>();
+  let remoteTime = 0;
+  let remoteDuration = 0;
+  let remotePaused = true;
+  let casting = $state(false);
+  let castMode = false;
+  let castProfile = 'legacy';
+  let publicMaxBitrate: number | undefined;
   let session = $state<Session | null>(null);
   let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
   let key = $state('');
@@ -196,9 +205,15 @@
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR
     // and no E-AC-3, which is what makes den-remux convert the release — sound included — rather than copy
     // any part of it again.
-    const can = degraded ? withoutRefused(claimed) : claimed;
+    const can = castMode
+      ? castCapabilities(degraded ? 'legacy' : castProfile)
+      : degraded
+        ? withoutRefused(claimed)
+        : claimed;
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
-    const maxBitrate = await linkLimit(remux);
+    // A direct remote origin can be measured before creation. The public control relay cannot: its speed path
+    // appears only inside a signed session, so that first session is measured and replaced just below.
+    const maxBitrate = /^https?:/.test(remux) ? await linkLimit(remux) : publicMaxBitrate;
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -206,26 +221,23 @@
       from.seconds !== undefined && from.seconds > 5 && from.fraction < WATCHED
         ? from.seconds
         : undefined;
-    const result = await startSession(
-      {
-        imdb,
-        season,
-        episode,
-        scout: scout.install,
-        subtitles,
-        subtitleLanguages,
-        audio,
-        videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
-        playable: can,
-        startAt: at,
-        maxBitrate,
-        // For den-remux's log only, so a session can be told apart by the player that played it.
-        player: nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
-        ...pick,
-      },
-      undefined,
-      remux,
-    );
+    const request: Want = {
+      imdb,
+      season,
+      episode,
+      scout: scout.install,
+      subtitles,
+      subtitleLanguages,
+      audio,
+      videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
+      playable: can,
+      startAt: at,
+      maxBitrate,
+      // For den-remux's log only, so a session can be told apart by the player that played it.
+      player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
+      ...pick,
+    };
+    const result = await startSession(request, undefined, remux);
     if (ended) {
       if (!('failure' in result)) endSession(result);
       return;
@@ -261,7 +273,7 @@
 
   $effect(() => {
     const [current, element] = [session, video];
-    if (!current || !element) return;
+    if (!current || current.castOrigin || !element) return;
     // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
     // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that.
     const stuck = setTimeout(() => {
@@ -326,6 +338,139 @@
     return cleanup;
   });
 
+  function sendToCastFrame(): void {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || !frame) return;
+    const poster = title.posterPath
+      ? `https://image.tmdb.org/t/p/w500${title.posterPath}`
+      : undefined;
+    frame.postMessage(
+      {
+        type: 'den-load',
+        id: current.playlist,
+        media: {
+          url: current.playlist,
+          speed: current.speed,
+          measure: publicMaxBitrate === undefined,
+          mode: castMode ? 'cast' : 'browser',
+          title: title.title,
+          subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
+          image: poster,
+          currentTime: started ?? resume.seconds ?? 0,
+          subtitleLanguage: subtitleChoice,
+          terminal: degraded || current.video?.transcoded === true || castProfile === 'legacy',
+        },
+      },
+      current.castOrigin,
+    );
+  }
+
+  function castMessage(event: MessageEvent<unknown>): void {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || event.origin !== current.castOrigin || event.source !== frame)
+      return;
+    const message = event.data as {
+      type?: string;
+      id?: string;
+      currentTime?: number;
+      duration?: number;
+      paused?: boolean;
+      message?: string;
+      state?: string;
+      profile?: string;
+      maxBitrate?: number;
+    };
+    if (message.type === 'den-ready') {
+      sendToCastFrame();
+      return;
+    }
+    if (message.id !== current.playlist) return;
+    if (message.type === 'den-progress') {
+      if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
+      if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
+      if (typeof message.paused === 'boolean' && message.paused !== remotePaused) {
+        remotePaused = message.paused;
+        if (remotePaused) paused();
+        else playing();
+      }
+    } else if (message.type === 'den-speed') {
+      const measured = message.maxBitrate;
+      if (
+        publicMaxBitrate === undefined &&
+        typeof measured === 'number' &&
+        Number.isFinite(measured) &&
+        measured >= 64_000 &&
+        measured <= 1_000_000_000
+      ) {
+        publicMaxBitrate = Math.round(measured);
+        restart({ filename: current.release.filename });
+      }
+    } else if (message.type === 'den-cast-request') {
+      const profile = message.profile ?? 'legacy';
+      if (!castMode || castProfile !== profile) {
+        castProfile = profile;
+        castMode = true;
+        restart({ filename: current.release.filename });
+      }
+    } else if (message.type === 'den-cast' && message.state === 'playing') {
+      casting = true;
+    } else if (message.type === 'den-cast' && message.state === 'stopped') {
+      casting = false;
+      castMode = false;
+      restart({ filename: current.release.filename });
+    } else if (message.type === 'den-ended') {
+      casting = false;
+      finished();
+    } else if (message.type === 'den-error') {
+      casting = false;
+      // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
+      if (degraded || current.video?.transcoded || castProfile === 'legacy') castMode = false;
+      void broke(0, message.message ?? 'cast player failed');
+    }
+  }
+
+  /** Receiver model profiles from Google's published codec matrix. The oldest profile is the default so a
+   * first-generation stick gets H.264 High@4.1 and stereo AAC; newer models opt into the formats they add. */
+  function castCapabilities(profile: string): Playable {
+    const h264 =
+      profile === 'legacy'
+        ? 0x29
+        : profile === 'gen3' || profile === 'ultra' || profile === 'google-tv-hd'
+          ? 0x2a
+          : profile === 'streamer'
+            ? 0x34
+            : 0x33;
+    const hevc =
+      profile === 'google-tv-hd'
+        ? 123
+        : ['ultra', 'google-tv', 'google-tv-4k', 'streamer'].includes(profile)
+          ? 153
+          : 0;
+    // Device AV1 capability does not establish that the Default Receiver accepts AV1 in HLS/fMP4. Keep it off
+    // until that exact delivery path is verified on hardware; HEVC remains the Streamer's best known profile.
+    const av1 = 0;
+    return {
+      h264,
+      h264High10: 0,
+      hevcMain: hevc,
+      hevcMain10: hevc,
+      hevcHighTier: 0,
+      hdr: hevc > 0,
+      eac3: false,
+      aacMultichannel: false,
+      dolbyVision: { p5: false, p8: false },
+      av1,
+      av1Main10: av1,
+      av1Hdr: av1 > 0,
+      flac: false,
+      aac71: false,
+      vp9: false,
+      vp9Profile2: false,
+    };
+  }
+
   /** The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. */
   async function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
     if (!session || failure) return;
@@ -335,7 +480,9 @@
     // sees the segment responses that would say otherwise. Ask den-remux for the segment playback stalled
     // on before blaming the picture: converting a release whose bytes have stopped arriving cannot help,
     // and it spends the one GPU slot the box has (oxyc/den#43).
-    if (await sourceFailed(current, stalledAt())) {
+    // The signed public origin intentionally cannot be connected to by the d.<domain> page; asking it here
+    // would be a CSP violation. The receiver's media error is enough to select the conservative Cast profile.
+    if (!current.publicBase && (await sourceFailed(current, stalledAt()))) {
       if (session === current && !failure) failure = 'source';
       return;
     }
@@ -357,11 +504,12 @@
   function stalledAt(): number {
     const buffered = video?.buffered;
     const end = buffered?.length ? buffered.end(buffered.length - 1) : 0;
-    return Math.max(end, video?.currentTime ?? 0);
+    return Math.max(end, video?.currentTime ?? remoteTime);
   }
 
   function length(): number {
     if (video && Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+    if (remoteDuration > 0) return remoteDuration;
     return session?.duration ?? 0;
   }
 
@@ -385,7 +533,8 @@
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
   function report(slack = 0) {
-    if (video) progress.report(video.currentTime, length(), slack);
+    const at = video?.currentTime ?? remoteTime;
+    if (at > 0) progress.report(at, length(), slack);
   }
 
   function playing() {
@@ -401,7 +550,7 @@
 
   /** The end: count down to the next episode, when there is one. */
   function finished() {
-    progress.complete(video?.currentTime ?? 0);
+    progress.complete(video?.currentTime ?? remoteTime);
     if (!onnext) return;
     upNext = UP_NEXT_SECS;
     countdown = setInterval(() => {
@@ -420,11 +569,10 @@
   /**
    * The subtitle language showing, or null for Off.
    *
-   * Off to begin with, and deliberately: den-remux marks its first rendition DEFAULT=YES, so a player that
-   * honours the default turns subtitles on by itself — which is what the browser's own controls were doing,
-   * with nothing to switch to and no way to turn them off.
+   * Begin with Settings' preference; undefined means Off. den-remux's renditions are non-default so every playback
+   * path starts consistently, then this player applies the explicit choice on its local or away-browser path.
    */
-  let subtitleChoice = $state<string | null>(null);
+  let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
 
   /**
    * Show the chosen rendition and hide the rest.
@@ -446,6 +594,16 @@
     }
     for (const track of Array.from(video?.textTracks ?? []))
       track.mode = choice !== null && track.language === choice ? 'showing' : 'disabled';
+  }
+
+  function sendSubtitleChoice() {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || !frame) return;
+    frame.postMessage(
+      { type: 'den-subtitle', id: current.playlist, language: subtitleChoice },
+      current.castOrigin,
+    );
   }
 
   /** SkipDB's segments for what is playing, and the one under the playhead right now. */
@@ -542,8 +700,8 @@
     const total = length();
     // Only a position worth carrying. A release refused before it drew a frame sits at zero, and taking that
     // forward would throw away where the library says this was left.
-    if (video && total && video.currentTime >= 1)
-      startAt = { seconds: video.currentTime, fraction: video.currentTime / total };
+    const at = video?.currentTime ?? remoteTime;
+    if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
     hls?.destroy();
     hls = undefined;
     endSession(session);
@@ -570,7 +728,8 @@
     clearTimeout(retry);
     report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
     hls?.destroy();
-    if (session) endSession(session);
+    // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
+    if (session && !casting) endSession(session);
   }
 
   function close() {
@@ -631,9 +790,11 @@
     );
     for (const [el] of scrolls) el.style.overflow = 'hidden';
     addEventListener('pagehide', finish);
+    addEventListener('message', castMessage);
     return () => {
       for (const [el, overflow] of scrolls) el.style.overflow = overflow;
       removeEventListener('pagehide', finish);
+      removeEventListener('message', castMessage);
       finish();
     };
   });
@@ -680,24 +841,35 @@
     {:else if !session}
       <p class="note">Finding a release this browser can play…</p>
     {:else}
-      <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
-      <video
-        bind:this={video}
-        controls
-        autoplay
-        playsinline
-        onloadedmetadata={() => {
-          seekToStart();
-          void loadSegments();
-          // The native path has its text tracks by now, and one of them is DEFAULT=YES.
-          applySubtitles();
-        }}
-        onplay={playing}
-        onpause={paused}
-        ontimeupdate={tick}
-        onended={finished}
-        onerror={() => broke()}
-      ></video>
+      {#if session.castOrigin && session.publicBase}
+        <iframe
+          bind:this={castFrame}
+          title="Den Cast player"
+          src={session.castOrigin}
+          allow="autoplay; encrypted-media; fullscreen; presentation"
+          sandbox="allow-scripts allow-same-origin allow-presentation"
+          onload={sendToCastFrame}
+        ></iframe>
+      {:else}
+        <!-- den-remux supplies subtitle renditions through the HLS playlist. -->
+        <video
+          bind:this={video}
+          controls
+          autoplay
+          playsinline
+          onloadedmetadata={() => {
+            seekToStart();
+            void loadSegments();
+            // The native path has its text tracks by now, and one of them is DEFAULT=YES.
+            applySubtitles();
+          }}
+          onplay={playing}
+          onpause={paused}
+          ontimeupdate={tick}
+          onended={finished}
+          onerror={() => broke()}
+        ></video>
+      {/if}
     {/if}
   </div>
   {#if session}
@@ -756,9 +928,8 @@
             </select>
           </div>
         {/if}
-        <!-- den-remux has always sent these renditions and the app threw them away, so the browser's own
-             controls were the only picker and the first rendition came up marked DEFAULT=YES. Its own names
-             are used verbatim: it knows what it found, and translating them here would invent detail. -->
+        <!-- den-remux sends opt-in renditions. Its own names are used verbatim: it knows what it found, and
+             translating them here would invent detail. The same choice is forwarded to Cast. -->
         {#if session.subtitles?.length}
           <div class="pick">
             {@render globe()}
@@ -773,6 +944,7 @@
               onchange={(event) => {
                 subtitleChoice = event.currentTarget.value || null;
                 applySubtitles();
+                sendSubtitleChoice();
               }}
             >
               <option value="">Off</option>
@@ -924,12 +1096,14 @@
     place-items: center;
   }
 
-  video {
+  video,
+  iframe {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
+    border: 0;
   }
 
   form {

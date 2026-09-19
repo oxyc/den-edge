@@ -121,7 +121,7 @@ describe('Availability', () => {
       sent.push(new Headers(init?.headers).get('x-den-library-member'));
       return new Response(JSON.stringify({ availability: { tt7654321: 'unavailable' } }));
     });
-    useLibraryCredential({ id: 'lib', token: 'tok' });
+    useLibraryCredential({ id: 'lib', member: 'tok' });
     try {
       const availability = new Availability(fake(() => ({})).fetchImpl, undefined);
       availability.connect(SCOUT, 'key');

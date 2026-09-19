@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { forgetLibraryCredential, relayFetch, useLibraryCredential } from './relayFetch';
 
-const KEYS = { id: 'abc123', token: 'def456' };
+const KEYS = { id: 'abc123', member: 'def456' };
 const HEADER = 'x-den-library-member';
 const HERE = 'https://den.example/movie/157336';
 
@@ -33,6 +33,9 @@ test('claims membership on the relayed addon and household API paths', async () 
     '/atlas/recommend',
     '/reel/meta/movie/x.json',
     '/tmdb/3/movie/550',
+    '/remux/health',
+    '/remux/session',
+    '/remux/releases',
   ]) {
     await relayFetch(path);
     expect(sent(spy)[HEADER]).toBe('abc123:def456');

@@ -1,0 +1,25 @@
+FROM node:24-alpine AS build
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY web ./
+ARG DEN_PARENT_ORIGINS=https://d.oxy.fi
+ENV VITE_DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
+RUN npm run build:cast
+
+FROM rust:1-alpine AS server
+RUN apk add --no-cache musl-dev
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+ARG DEN_PARENT_ORIGINS=https://d.oxy.fi
+ENV DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
+RUN cargo build --release --locked --bin den-cast
+
+FROM scratch
+ENV WEB_DIR=/web PORT=8080
+COPY --from=server /app/target/release/den-cast /den-cast
+COPY --from=build /web/dist-cast /web
+EXPOSE 8080
+USER 65532:65532
+ENTRYPOINT ["/den-cast"]

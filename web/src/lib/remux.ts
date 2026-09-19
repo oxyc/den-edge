@@ -6,10 +6,17 @@
 import type { Playable } from './playable';
 import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
+import { relayFetch } from './relayFetch';
 
 export interface Session {
   /** `/remux/s/<sid>/<sig>/master.m3u8`: a signed URL, so AirPlay can play it too. */
   playlist: string;
+  /** Session-bound bandwidth probe under the same signature as the playlist. */
+  speed?: string;
+  /** The public IP-literal origin, present only on a member-gated relayed session. */
+  publicBase?: string;
+  /** Static keyless iframe origin that owns browser-away and Cast media requests. */
+  castOrigin?: string;
   /** Seconds. */
   duration: number;
   release: { label: string; filename: string; size: number };
@@ -66,7 +73,7 @@ export interface Want {
   /** Bits a second a session may need, away from home (`linkLimit`): den-remux picks a release, or a transcode, that fits. */
   maxBitrate?: number;
   /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
-  player?: 'native' | 'hls.js';
+  player?: 'native' | 'hls.js' | 'cast';
 }
 
 export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
@@ -111,7 +118,7 @@ function forgetRefusedToken(base: string, response: Response): void {
  */
 export async function findRemux(
   entries: Entry[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
   secure = globalThis.location?.protocol !== 'http:',
 ): Promise<string | null> {
   for (const entry of entries) {
@@ -135,6 +142,15 @@ export async function findRemux(
     } finally {
       clearTimeout(timer);
     }
+  }
+  // The public web name exposes only member-gated control JSON at this same-origin mount. Its session answer
+  // supplies the IP-literal media origin; no video byte follows this relay.
+  try {
+    const res = await fetchImpl('/remux/health');
+    if (res.ok && typeof ((await res.json()) as { status?: unknown }).status === 'string')
+      return '/remux';
+  } catch {
+    // No control relay here either.
   }
   return null;
 }
@@ -219,6 +235,14 @@ async function timeTransfer(
   fetchImpl: typeof fetch,
   now: () => number,
 ): Promise<number | null> {
+  return timeTransferUrl(`${base}/speed?bytes=${SPEED_PROBE_BYTES}`, fetchImpl, now);
+}
+
+async function timeTransferUrl(
+  url: string,
+  fetchImpl: typeof fetch,
+  now: () => number,
+): Promise<number | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SPEED_DEADLINE_MS);
   let first: number | undefined;
@@ -227,7 +251,9 @@ async function timeTransfer(
   let total = 0;
   let counted = 0;
   try {
-    const res = await fetchImpl(`${base}/speed?bytes=${SPEED_PROBE_BYTES}`, {
+    const separator = url.includes('?') ? '&' : '?';
+    const speedUrl = url.includes('bytes=') ? url : `${url}${separator}bytes=${SPEED_PROBE_BYTES}`;
+    const res = await fetchImpl(speedUrl, {
       cache: 'no-store',
       signal: controller.signal,
     });
@@ -375,8 +401,13 @@ export async function startSession(
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const session = (await res.json()) as Session;
-      return /^https?:/.test(base)
-        ? { ...session, playlist: new URL(session.playlist, base).href }
+      const mediaBase = session.publicBase ?? (/^https?:/.test(base) ? base : undefined);
+      return mediaBase
+        ? {
+            ...session,
+            playlist: new URL(session.playlist, mediaBase).href,
+            speed: session.speed ? new URL(session.speed, mediaBase).href : undefined,
+          }
         : session;
     }
     forgetRefusedToken(base, res);

@@ -28,7 +28,10 @@ export async function guardNetwork(page) {
     // The app asks this origin whether it serves atlas or reel itself, when the library lists neither as a
     // plugin — a guest lists nothing at all, and both have a same-origin fallback (findAtlas, findReel).
     // A 404 is what "not served here" looks like, which is what a fixture is.
-    const probe = url.pathname === '/atlas/manifest.json' || url.pathname === '/reel/manifest.json';
+    const probe =
+      url.pathname === '/atlas/manifest.json' ||
+      url.pathname === '/reel/manifest.json' ||
+      url.pathname === '/remux/health';
     if (url.origin === 'http://127.0.0.1:5198' && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });
     // Every detail page asks den-edge for the title's ratings and content warnings, key or not. Unless a spec says

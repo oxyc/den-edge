@@ -14,6 +14,7 @@ on:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/den-edge
+  CAST_IMAGE: ghcr.io/${{ github.repository_owner }}/den-cast
 
 # One publish at a time, never cancelled: a patch rebuild and a release must not race each other to :latest.
 concurrency:
@@ -72,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      cast_digest: ${{ steps.build-cast.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -119,6 +121,22 @@ jobs:
             org.opencontainers.image.version=${{ needs.source.outputs.version }}
             org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
 
+      - name: Derive Cast tags
+        id: meta-cast
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.CAST_IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ needs.source.outputs.version }}-patch.${{ needs.source.outputs.stamp }},enable=${{ github.event_name != 'push' }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.source.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build and push
@@ -137,6 +155,23 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Build and push Cast sender
+        id: build-cast
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.cast
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-cast.outputs.tags }}
+          labels: ${{ steps.meta-cast.outputs.labels }}
+          pull: true
+          no-cache: ${{ needs.source.outputs.patch == 'true' }}
+          cache-from: type=gha,scope=cast
+          cache-to: type=gha,mode=max,scope=cast
+          provenance: mode=max
+          sbom: true
+
       # One scan, of fixable HIGH and CRITICAL findings, which the report and the gate below both read. It was two,
       # and the second re-read the whole image for a subset of what the first had already found.
       - name: Scan image
@@ -146,6 +181,17 @@ jobs:
           version: v0.74.0
           format: json
           output: trivy.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Scan Cast image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.CAST_IMAGE }}@${{ steps.build-cast.outputs.digest }}
+          version: v0.74.0
+          format: json
+          output: trivy-cast.json
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
@@ -162,6 +208,17 @@ jobs:
           sarif_file: trivy.sarif
           category: trivy-image
 
+      - name: Report Cast scan for code scanning
+        continue-on-error: true
+        run: trivy convert --format sarif --output trivy-cast.sarif trivy-cast.json
+
+      - name: Upload Cast scan to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        continue-on-error: true
+        with:
+          sarif_file: trivy-cast.sarif
+          category: trivy-cast-image
+
       # A CRITICAL with a fixed version available fails here, before anything is signed or :latest moves.
       # Unfixed CVEs were already dropped by the scan above. A patch rebuild gates on OS packages only — the
       # part a rebuild can fix; a vulnerable crate needs a release, and holding back a musl or toolchain fix
@@ -173,10 +230,13 @@ jobs:
           set -euo pipefail
           if [ "$PATCH" = true ]; then
             jq '.Results |= map(select(.Class == "os-pkgs"))' trivy.json > gate.json
+            jq '.Results |= map(select(.Class == "os-pkgs"))' trivy-cast.json > gate-cast.json
           else
             cp trivy.json gate.json
+            cp trivy-cast.json gate-cast.json
           fi
           trivy convert --severity CRITICAL --exit-code 1 --format table gate.json
+          trivy convert --severity CRITICAL --exit-code 1 --format table gate-cast.json
 
   # Sign and move :latest only once the image passed its scan gate AND the tagged commit passed CI.
   release:
@@ -201,14 +261,21 @@ jobs:
       - name: Sign the image
         env:
           DIGEST: ${{ needs.build.outputs.digest }}
-        run: cosign sign --yes "$IMAGE@$DIGEST"
+          CAST_DIGEST: ${{ needs.build.outputs.cast_digest }}
+        run: |
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign sign --yes "$CAST_IMAGE@$CAST_DIGEST"
 
       # :latest is what den-update deploys, so it moves last, to exactly the digest that was scanned and signed.
       - name: Point :latest at the signed image
         env:
           DIGEST: ${{ needs.build.outputs.digest }}
+          CAST_DIGEST: ${{ needs.build.outputs.cast_digest }}
         run: |
           set -euo pipefail
           docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
           moved=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
           test "$moved" = "$DIGEST" || { echo "::error::latest resolved to $moved, not the signed $DIGEST"; exit 1; }
+          docker buildx imagetools create --tag "$CAST_IMAGE:latest" "$CAST_IMAGE@$CAST_DIGEST"
+          moved=$(docker buildx imagetools inspect "$CAST_IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
+          test "$moved" = "$CAST_DIGEST" || { echo "::error::Cast latest resolved to $moved, not the signed $CAST_DIGEST"; exit 1; }

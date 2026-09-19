@@ -10,6 +10,7 @@ export default defineConfig(
   globalIgnores([
     'src/vendor/**',
     'dist/**',
+    'dist-cast/**',
     'test-results/**',
     'playwright-report/**',
     'coverage/**',

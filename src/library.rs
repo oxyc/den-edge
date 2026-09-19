@@ -13,6 +13,8 @@
 //! every later request must match it. A library nobody has written is a 404, which carries `generation` too.
 //! With `NEW_LIBRARIES=members`, that first write must also carry `x-den-library-member: <id>:<token>` of another
 //! library here (`NewLibraries`).
+//! `PUT /lib/{id}/member` registers the separately-derived member proof. Older logs accept the write token as a
+//! member proof only until that registration, so clients can migrate one library at a time.
 //!
 //! `generation` is the store's (`Store::generation`): a different one tells a client that remembers how far it
 //! read that this store was restored or started over, so it reads from 0 and writes back what it holds.
@@ -124,6 +126,7 @@ impl NewLibraries {
 
 pub struct Library {
     token_hash: [u8; 32],
+    member_hash: Option<[u8; 32]>,
     head: u64,
     rows: HashMap<String, Row>,
     /// Write lines in the log file, superseded ones included.
@@ -180,10 +183,45 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             let (gzip, identity) = crate::web::encodings(req.headers());
             changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity).await
         }
+        ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
         ("", Method::DELETE) => forget(state, id, token_hash).await,
-        ("batch" | "changes" | "", _) => method_not_allowed(),
+        ("batch" | "changes" | "member" | "", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
+}
+
+/// Replace the temporary legacy membership proof with the key derived specifically for relay membership.
+async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
+    let Some((claimed_id, member)) =
+        req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.split_once(':'))
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_member"));
+    };
+    if claimed_id != id || member.is_empty() || member.len() > 256 {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_member"));
+    }
+    let member_hash: [u8; 32] = Sha256::digest(member.as_bytes()).into();
+    let mut libs = state.libraries.lock().await;
+    if let Err(e) = load(state, &mut libs, id).await {
+        return read_error(e);
+    }
+    let Some(lib) = libs.get_mut(id) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    if !constant_time_eq(&lib.token_hash, &token_hash) {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
+    if lib.member_hash.is_some_and(|stored| !constant_time_eq(&stored, &member_hash)) {
+        return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
+    }
+    if lib.member_hash.is_none() {
+        lib.member_hash = Some(member_hash);
+        if let Err(e) = compact(state, id, lib).await {
+            lib.member_hash = None;
+            return internal("member registration", e);
+        }
+    }
+    json_reply(StatusCode::OK, &json!({ "registered": true }))
 }
 
 /// The library's owner ends it — a rekey moved the library to a new key (issue #8, audit #2). Its log and rows
@@ -205,7 +243,7 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
             Err(e) => return read_error(e),
         };
         match log_header(&line) {
-            Ok(hash) => hash,
+            Ok((hash, _)) => hash,
             Err(e) => return read_error(e),
         }
     };
@@ -262,6 +300,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     }
     let fresh = Library {
         token_hash,
+        member_hash: None,
         head: 0,
         rows: HashMap::new(),
         lines: 0,
@@ -282,7 +321,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     // applied ones to disk, and only then change what is in memory — a failed write changes nothing.
     let mut next_bytes = lib.bytes;
     let mut head = lib.head;
-    let mut out = if existing.is_none() { header_line(&token_hash) } else { String::new() };
+    let mut out = if existing.is_none() { header_line(&token_hash, None) } else { String::new() };
     let mut applied = Vec::new();
     let mut conflicts = Vec::new();
     for w in writes {
@@ -437,7 +476,10 @@ pub async fn is_member(state: &AppState, member: Option<&str>) -> bool {
         return false;
     }
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    libs.get(id).is_some_and(|lib| constant_time_eq(&lib.token_hash, &hash))
+    libs.get(id).is_some_and(|lib| {
+        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
+        constant_time_eq(expected, &hash)
+    })
 }
 
 async fn holds_another(
@@ -454,7 +496,10 @@ async fn holds_another(
     }
     load(state, libs, other).await?;
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    Ok(libs.get(other).is_some_and(|lib| constant_time_eq(&lib.token_hash, &hash)))
+    Ok(libs.get(other).is_some_and(|lib| {
+        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
+        constant_time_eq(expected, &hash)
+    }))
 }
 
 /// Mark `id` used now, and let every library idle for an hour go from memory: a relay that kept every library it
@@ -503,13 +548,23 @@ async fn log_read(reader: &mut BufReader<tokio::fs::File>) -> io::Result<Vec<u8>
     Ok(line)
 }
 
-fn log_header(line: &[u8]) -> io::Result<[u8; 32]> {
+fn log_header(line: &[u8]) -> io::Result<([u8; 32], Option<[u8; 32]>)> {
     let header: Value = serde_json::from_slice(line).map_err(io::Error::other)?;
-    header
+    let token = header
         .get("token")
         .and_then(Value::as_str)
         .and_then(from_hex32)
-        .ok_or_else(|| io::Error::other("unreadable library log header"))
+        .ok_or_else(|| io::Error::other("unreadable library log header"))?;
+    let member = match header.get("member") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(from_hex32)
+                .ok_or_else(|| io::Error::other("unreadable library member hash"))?,
+        ),
+    };
+    Ok((token, member))
 }
 
 /// Replay incrementally under the same byte limit as writes. Historical versions are discarded
@@ -523,9 +578,10 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
     reserve_cache(libs, id, state.library_limits.library_bytes, state.library_limits)?;
     let mut reader = BufReader::new(file);
     let first = log_read(&mut reader).await?;
-    let token_hash = log_header(&first)?;
+    let (token_hash, member_hash) = log_header(&first)?;
     let mut lib = Library {
         token_hash,
+        member_hash,
         head: 0,
         rows: HashMap::new(),
         lines: 0,
@@ -573,7 +629,7 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
 async fn compact(state: &AppState, id: &str, lib: &mut Library) -> io::Result<()> {
     let mut rows: Vec<(&String, &Row)> = lib.rows.iter().collect();
     rows.sort_by_key(|(_, r)| r.seq);
-    let mut out = header_line(&lib.token_hash);
+    let mut out = header_line(&lib.token_hash, lib.member_hash.as_ref());
     for (k, r) in rows {
         out.push_str(&log_line(r.seq, k, &r.v));
     }
@@ -582,8 +638,12 @@ async fn compact(state: &AppState, id: &str, lib: &mut Library) -> io::Result<()
     Ok(())
 }
 
-fn header_line(token_hash: &[u8; 32]) -> String {
-    format!("{}\n", json!({ "token": crate::hex(token_hash) }))
+fn header_line(token_hash: &[u8; 32], member_hash: Option<&[u8; 32]>) -> String {
+    let mut header = json!({ "token": crate::hex(token_hash) });
+    if let Some(member_hash) = member_hash {
+        header["member"] = json!(crate::hex(member_hash));
+    }
+    format!("{}\n", header)
 }
 
 fn log_line(seq: u64, k: &str, v: &str) -> String {
@@ -779,6 +839,39 @@ mod tests {
         let no_token = h.send("GET", &format!("/lib/{LIB}/changes"), None, &[]).await;
         assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(changes(&h, TOKEN, "").await.1["head"], 1, "the refused write changed nothing");
+    }
+
+    #[tokio::test]
+    async fn registering_a_member_proof_replaces_the_legacy_write_proof_and_survives_restart() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c" }])).await;
+        assert!(super::is_member(&h.state, Some(&format!("{LIB}:{TOKEN}"))).await);
+
+        let member = "the-member-proof";
+        let claim = format!("{LIB}:{member}");
+        let registered = h
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::OK);
+        assert!(!super::is_member(&h.state, Some(&format!("{LIB}:{TOKEN}"))).await);
+        assert!(super::is_member(&h.state, Some(&claim)).await);
+
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert!(super::is_member(&restarted.state, Some(&claim)).await);
+        let replaced = restarted
+            .send(
+                "PUT",
+                &format!("/lib/{LIB}/member"),
+                None,
+                &[("x-den-library-token", TOKEN), ("x-den-library-member", &format!("{LIB}:other"))],
+            )
+            .await;
+        assert_eq!(replaced.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

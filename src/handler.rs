@@ -525,18 +525,22 @@ pub fn link_key(req: &Request) -> String {
 /// `X-Forwarded-For` entry, the one the proxy added. From anyone else those headers are ignored: they could say
 /// anything.
 pub fn client_ip(state: &AppState, req: &Request) -> String {
-    let Some(peer) = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()) else {
-        return "unknown".to_owned();
-    };
+    client_addr(state, req).map_or_else(|| "unknown".to_owned(), rate_limit_key)
+}
+
+/// The actual visitor address reported by a trusted proxy. Unlike `client_ip`, IPv6 is not collapsed to a
+/// rate-limit /64: this value is forwarded to den-remux and to the public-listener helper as an address.
+pub fn client_addr(state: &AppState, req: &Request) -> Option<std::net::IpAddr> {
+    let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip())?;
     if state.trusted_proxies.contains(&peer) {
         let reported = header_value(req, "cf-connecting-ip")
             .or_else(|| header_value(req, "x-forwarded-for").and_then(|v| v.rsplit(',').next()))
             .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
-        if let Some(visitor) = reported {
-            return rate_limit_key(visitor);
+        if reported.is_some() {
+            return reported;
         }
     }
-    rate_limit_key(peer)
+    Some(peer)
 }
 
 /// The address as a RATE-LIMIT bucket: an IPv4 host, or an IPv6 /64.

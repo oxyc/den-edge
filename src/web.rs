@@ -46,8 +46,9 @@ use std::path::{Component, Path, PathBuf};
 /// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
 /// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
 /// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
-fn csp(media: &[String]) -> String {
+fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
+    let cast = cast_origin.map_or(String::new(), |origin| format!(" {origin}"));
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
@@ -55,7 +56,7 @@ fn csp(media: &[String]) -> String {
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443{media}; \
-         frame-src https://www.youtube-nocookie.com; \
+         frame-src https://www.youtube-nocookie.com{cast}; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
 }
@@ -112,10 +113,13 @@ pub async fn serve(
     // gzip — which is everything.
     if file.file_name().is_some_and(|name| name == "index.html") {
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
-            return crate::cache::revalidate(respond(html.into_bytes(), &file, false, media), headers);
+            return crate::cache::revalidate(
+                respond(html.into_bytes(), &file, false, media, state.cast_origin.as_deref()),
+                headers,
+            );
         }
     }
-    encoded(bytes, &file, immutable, media, headers).await
+    encoded(bytes, &file, immutable, media, state.cast_origin.as_deref(), headers).await
 }
 
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
@@ -165,6 +169,7 @@ async fn encoded(
     file: &Path,
     immutable: bool,
     media: &[String],
+    cast_origin: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
     let (gzip, identity) = encodings(headers);
@@ -181,7 +186,7 @@ async fn encoded(
         };
         if fresh {
             if let Ok(compressed) = tokio::fs::read(sidecar).await {
-                let mut response = respond(compressed, file, immutable, media);
+                let mut response = respond(compressed, file, immutable, media, cast_origin);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                 return crate::cache::revalidate(response, headers);
             }
@@ -194,7 +199,7 @@ async fn encoded(
         response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
         return response;
     }
-    crate::cache::revalidate(respond(bytes, file, immutable, media), headers)
+    crate::cache::revalidate(respond(bytes, file, immutable, media, cast_origin), headers)
 }
 
 /// The request path as a path under the web directory, or `None` if it would step outside it.
@@ -204,7 +209,13 @@ fn relative(path: &str) -> Option<PathBuf> {
     relative.components().all(|c| matches!(c, Component::Normal(_))).then_some(relative)
 }
 
-fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, media: &[String]) -> Response {
+fn respond(
+    bytes: Vec<u8>,
+    file: &Path,
+    immutable: bool,
+    media: &[String],
+    cast_origin: Option<&str>,
+) -> Response {
     let content_type = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -240,8 +251,8 @@ fn respond(bytes: Vec<u8>, file: &Path, immutable: bool, media: &[String]) -> Re
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if content_type.starts_with("text/html") {
-        let policy = HeaderValue::from_str(&csp(media))
-            .or_else(|_| HeaderValue::from_str(&csp(&[])))
+        let policy = HeaderValue::from_str(&csp(media, cast_origin))
+            .or_else(|_| HeaderValue::from_str(&csp(&[], None)))
             .expect("the policy is ASCII");
         headers.insert(header::CONTENT_SECURITY_POLICY, policy);
         // `robots.txt` asks crawlers not to fetch; this tells the ones that fetch anyway not to keep what
@@ -271,9 +282,27 @@ mod tests {
 
     #[test]
     fn policy_allows_local_wasm_without_allowing_javascript_eval() {
-        let policy = super::csp(&[]);
+        let policy = super::csp(&[], None);
         assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
         assert!(!policy.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn cast_origin_is_only_allowed_to_frame_the_sender() {
+        let origin = "https://cast.example.test";
+        let policy = super::csp(&[], Some(origin));
+        let directive = |name: &str| {
+            policy
+                .split(name)
+                .nth(1)
+                .expect("the directive exists")
+                .split(';')
+                .next()
+                .expect("the directive ends")
+        };
+        assert!(directive("frame-src").contains(origin), "{policy}");
+        assert!(!directive("connect-src").contains(origin), "{policy}");
+        assert!(!directive("media-src").contains(origin), "{policy}");
     }
 
     /// The wildcard REPLACES the exact tailnet host on the browser's public name rather than joining it:
@@ -303,7 +332,7 @@ mod tests {
     /// name it. Both directives: the video is a media load, and hls.js fetches its segments with XHR.
     #[test]
     fn policy_allows_a_tailnet_it_cannot_name() {
-        let policy = super::csp(&[]);
+        let policy = super::csp(&[], None);
         let media = policy.split("media-src").nth(1).expect("a media-src directive");
         let media = media.split(';').next().expect("the directive ends");
         assert!(media.contains("https://*.ts.net:8443"), "{policy}");

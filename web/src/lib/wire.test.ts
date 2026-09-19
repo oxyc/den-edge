@@ -22,7 +22,7 @@ const spec = (file: string) =>
   JSON.parse(readFileSync(new URL(`../../../spec/vectors/${file}`, import.meta.url), 'utf8'));
 const library = spec('library-v2.json') as {
   libraryKey: string;
-  derived: { id: string; token: string };
+  derived: { id: string; token: string; member: string };
   rows: { name: string; k: string; nonce: string; plaintext: string; v: string }[];
 };
 const merges = spec('merge-v2.json') as {
@@ -33,9 +33,13 @@ const merges = spec('merge-v2.json') as {
 };
 
 describe('library wire v2 matches den-spec', () => {
-  it('derives the library id and write token', async () => {
+  it('derives the library id, write token, and separate member proof', async () => {
     const keys = await deriveKeys(fromHex(library.libraryKey));
-    expect([keys.id, keys.token]).toEqual([library.derived.id, library.derived.token]);
+    expect([keys.id, keys.token, keys.member]).toEqual([
+      library.derived.id,
+      library.derived.token,
+      library.derived.member,
+    ]);
   });
 
   it.each(library.rows)('seals and opens $name', async ({ k, nonce, plaintext, v }) => {
