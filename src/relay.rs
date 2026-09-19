@@ -393,6 +393,9 @@ pub async fn relay(
             if open_public_listener(socket, address, cast).await {
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
+                    if let Some(lan) = &state.lan_media_base {
+                        value["lanBase"] = serde_json::Value::String(lan.clone());
+                    }
                     if let Some(cast_origin) = &state.cast_origin {
                         value["castOrigin"] = serde_json::Value::String(cast_origin.clone());
                     }
@@ -794,6 +797,7 @@ mod tests {
         state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
         state.public_media_base = Some("https://203.0.113.10".into());
+        state.lan_media_base = Some("https://lan.media.example:8449".into());
         state.public_media_socket = Some(socket);
         state.cast_origin = Some("https://cast.oxy.fi".into());
         let claim = registered_library(&h).await;
@@ -813,6 +817,7 @@ mod tests {
         assert_eq!(answer.status(), StatusCode::CREATED);
         let body = crate::handler::tests::body_json(answer).await;
         assert_eq!(body["publicBase"], "https://203.0.113.10");
+        assert_eq!(body["lanBase"], "https://lan.media.example:8449");
         assert_eq!(body["castOrigin"], "https://cast.oxy.fi");
         let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
         assert_eq!(ask, json!({ "open": true, "source": "192.168.1.9", "scope": "cast" }));

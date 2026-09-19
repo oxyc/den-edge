@@ -351,6 +351,7 @@
         id: current.playlist,
         media: {
           url: current.playlist,
+          lanUrl: current.lanPlaylist,
           speed: current.speed,
           measure: publicMaxBitrate === undefined,
           mode: castMode ? 'cast' : 'browser',

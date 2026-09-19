@@ -45,6 +45,19 @@ test('a session and its releases claim membership through the same-origin relay'
   expect(claim(spy)).toBe('abc123:def456');
 });
 
+test('a session on the relay names its playlist on both the public and the home-network origin', async () => {
+  const answer = {
+    playlist: '/remux/s/id/sig/master.m3u8',
+    publicBase: 'https://public.media.example',
+    lanBase: 'https://lan.media.example:8449',
+  };
+  const fetchImpl = vi.fn(async () => new Response(JSON.stringify(answer), { status: 201 }));
+  const session = await startSession(WANT, fetchImpl as unknown as typeof fetch);
+  if ('failure' in session) throw new Error('expected a session');
+  expect(session.playlist).toBe('https://public.media.example/remux/s/id/sig/master.m3u8');
+  expect(session.lanPlaylist).toBe('https://lan.media.example:8449/remux/s/id/sig/master.m3u8');
+});
+
 test('a direct den-remux address is given no claim, and neither is a page with no library open', async () => {
   const spy = stub();
   useLibraryCredential({ id: 'abc123', member: 'def456' });
