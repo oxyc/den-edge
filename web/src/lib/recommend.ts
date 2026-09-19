@@ -26,7 +26,46 @@ export interface Slide {
   type: MediaType;
   id: number;
   imdbId?: string;
+  why?: RecommendationWhy;
 }
+
+/** Atlas's scoring diagnostics. The terms are carried intact for inspection; only `reason` is presentation. */
+export interface RecommendationWhy {
+  score?: number;
+  fit?: number;
+  similar?: number | null;
+  profile?: number;
+  people?: number;
+  confidence?: number;
+  fresh?: number;
+  arrived?: number;
+  quality?: number;
+  buzz?: number;
+  /** A stable scorer-selected code. Unknown codes are retained but deliberately have no browser copy. */
+  reason?: string;
+}
+
+/** A named recommendation, including the explanation Atlas attached to this particular ranking. */
+export interface RecommendedTitle extends Title {
+  why?: RecommendationWhy;
+}
+
+const REASONS: Readonly<Record<string, string>> = {
+  similar: 'Similar to what you watch',
+  profile: 'Fits your viewing taste',
+  people: 'Cast and creators you like',
+  franchise: 'From a franchise you like',
+  arrived: 'New on your services',
+  recent: 'Recently released',
+  upcoming: 'Coming soon',
+  timely: 'New or coming soon',
+  quality: 'Highly rated',
+  buzz: 'Popular now',
+};
+
+/** Short billboard copy for Atlas's choice. Missing and newer unknown codes stay silent. */
+export const recommendationReason = (why: RecommendationWhy | undefined): string | undefined =>
+  why?.reason ? REASONS[why.reason] : undefined;
 
 /** What atlas calls a series. */
 const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
@@ -125,6 +164,33 @@ export function recommendBody({
   };
 }
 
+const WHY_NUMBERS = [
+  'score',
+  'fit',
+  'similar',
+  'profile',
+  'people',
+  'confidence',
+  'fresh',
+  'arrived',
+  'quality',
+  'buzz',
+] as const;
+
+/** Read every usable diagnostic independently, so one malformed term cannot discard its slide. */
+function whyOf(value: unknown): RecommendationWhy | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const why: RecommendationWhy = {};
+  for (const field of WHY_NUMBERS) {
+    const number = input[field];
+    if (typeof number === 'number' && Number.isFinite(number)) why[field] = number;
+    else if (field === 'similar' && number === null) why.similar = null;
+  }
+  if (typeof input.reason === 'string' && input.reason) why.reason = input.reason;
+  return Object.keys(why).length ? why : undefined;
+}
+
 /** Titles as atlas names them, in Den's names; anything else dropped. */
 function slidesOf(value: unknown): Slide[] {
   return (Array.isArray(value) ? (value as Record<string, unknown>[]) : []).flatMap(
@@ -133,7 +199,7 @@ function slidesOf(value: unknown): Slide[] {
       if (!type || typeof slide.id !== 'number') return [];
       const imdbId =
         typeof slide.imdbId === 'string' && /^tt\d+$/.test(slide.imdbId) ? slide.imdbId : undefined;
-      return [{ type, id: slide.id, imdbId }];
+      return [{ type, id: slide.id, imdbId, why: whyOf(slide.why) }];
     },
   );
 }
@@ -176,7 +242,7 @@ export async function nameSlides(
   known: Map<string, Title>,
   lookup: (ref: { type: MediaType; id: number }) => Promise<Title | null>,
   lookups: number,
-): Promise<Title[]> {
+): Promise<RecommendedTitle[]> {
   const named = new Map<string, Title>();
   const queue = slides.filter((slide) => !known.has(`${slide.type}:${slide.id}`));
   const work = async () => {
@@ -189,6 +255,6 @@ export async function nameSlides(
   return slides.flatMap((slide) => {
     const key = `${slide.type}:${slide.id}`;
     const title = known.get(key) ?? named.get(key);
-    return title ? [{ ...title, imdbId: title.imdbId ?? slide.imdbId }] : [];
+    return title ? [{ ...title, imdbId: title.imdbId ?? slide.imdbId, why: slide.why }] : [];
   });
 }

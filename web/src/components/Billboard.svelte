@@ -25,6 +25,7 @@
   import type { Crop, Source } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
+  import { recommendationReason, type RecommendedTitle } from '../lib/recommend';
 
   let {
     titles,
@@ -35,7 +36,7 @@
     routes,
   }: {
     /** The billboard's titles, best first. */
-    titles: Title[];
+    titles: RecommendedTitle[];
     active?: boolean;
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
@@ -644,6 +645,7 @@
   <div class="rail" bind:this={rail} onscroll={scrolled} onscrollend={scrolled}>
     {#each shown as title, n (keyOf(title))}
       {@const found = known.get(keyOf(title))}
+      {@const reason = recommendationReason(title.why)}
       <article
         class="slide"
         aria-roledescription="slide"
@@ -665,6 +667,9 @@
                 >{title.title}</a
               ><span class="mobile-title">{title.title}</span>
             </h2>
+            {#if reason}
+              <p class="reason">{reason}</p>
+            {/if}
             <p class="facts">{facts(title)}</p>
             <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
@@ -958,6 +963,7 @@
   /* Shadow the rendered text after line clamping so overflow doesn't cut a hard edge through it.
      Keep it tight: the backdrop fade supplies the broader contrast. */
   h2,
+  .reason,
   .facts,
   .overview {
     filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
@@ -985,6 +991,14 @@
   h2 a {
     color: var(--fg);
     text-decoration: none;
+  }
+
+  .reason {
+    margin: 0;
+    color: rgb(255 255 255 / 0.92);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
   }
 
   /* Nearly white, not the app's secondary grey. That grey is chosen for the page's dark ground; over a

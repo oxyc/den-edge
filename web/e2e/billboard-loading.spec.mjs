@@ -44,6 +44,7 @@ for (const width of [320, 393, 844, 1280])
       const empty = await hero.boundingBox();
       await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
       await expect(page.locator('.slide')).toHaveCount(2);
+      await expect(page.locator('.reason').first()).toHaveText('Fits your viewing taste');
       await expect(hero).not.toHaveAttribute('aria-hidden', 'true');
       // What must not move while a slide loads: the hero's own height, and where everything below it
       // starts. The words inside are deliberately NOT measured — they take the lines they need, and the
