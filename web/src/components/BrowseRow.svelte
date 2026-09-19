@@ -32,8 +32,16 @@
       try {
         const next = await row.load(page + 1);
         page++;
-        const seen = new Set(titles.map(key));
-        titles = [...titles, ...next.filter((t) => !seen.has(key(t)))];
+        const seen = titles.map(key);
+        titles = [
+          ...titles,
+          ...next.filter((title) => {
+            const id = key(title);
+            if (seen.includes(id)) return false;
+            seen.push(id);
+            return true;
+          }),
+        ];
         if (next.length === 0) done = true;
       } catch {
         done = true;
