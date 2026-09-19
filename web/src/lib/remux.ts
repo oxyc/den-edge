@@ -373,7 +373,7 @@ export function wantedLanguages(
 /** A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. */
 export async function startSession(
   want: Want,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
 ): Promise<Session | Refused> {
   const { subtitles, subtitleLanguages, ...fields } = want;
@@ -487,7 +487,7 @@ export interface Release {
  */
 export async function listReleases(
   title: Pick<Want, 'imdb' | 'season' | 'episode' | 'scout'>,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
 ): Promise<Release[] | null> {
   try {
