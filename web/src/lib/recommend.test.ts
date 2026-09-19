@@ -44,6 +44,7 @@ describe('recommendBody', () => {
               popularity: 9,
               rating: 8.4,
               votes: 200,
+              ratingSource: 'tmdb',
             }),
           ],
           ranked: true,
@@ -78,7 +79,7 @@ describe('recommendBody', () => {
     expect(body.candidates).toHaveLength(3);
   });
 
-  it('sends transient or cached TMDB scores but never relabels an Atlas IMDb score', () => {
+  it('sends only explicitly sourced TMDB scores and never relabels another or legacy score', () => {
     const body = recommendBody({
       facet: null,
       prefs: readPrefs(undefined),
@@ -90,6 +91,8 @@ describe('recommendBody', () => {
           titles: [
             film(1, { rating: 7.4, votes: 900, ratingSource: 'tmdb' }),
             film(2, { rating: 8.2, votes: 12_000, ratingSource: 'justwatch-imdb' }),
+            film(3, { rating: 9.1, votes: 20_000 }),
+            film(4, { rating: 8.1, votes: 99.5, ratingSource: 'tmdb' }),
           ],
         },
       ],
@@ -97,6 +100,10 @@ describe('recommendBody', () => {
     expect(body.candidates[0]?.hint).toMatchObject({ rating: 7.4, votes: 900 });
     expect(body.candidates[1]?.hint).not.toHaveProperty('rating');
     expect(body.candidates[1]?.hint).not.toHaveProperty('votes');
+    expect(body.candidates[2]?.hint).not.toHaveProperty('rating');
+    expect(body.candidates[2]?.hint).not.toHaveProperty('votes');
+    expect(body.candidates[3]?.hint).toMatchObject({ rating: 8.1 });
+    expect(body.candidates[3]?.hint).not.toHaveProperty('votes');
   });
 
   it('ranks an unset guest against the visible defaults but preserves an explicit empty selection', () => {
