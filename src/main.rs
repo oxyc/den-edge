@@ -85,6 +85,9 @@ pub struct AppState {
     pub media_origins: Vec<String>,
     /// Public IP-literal origin handed only to a proven member after the listener helper opened it.
     pub public_media_base: Option<String>,
+    /// The same den-remux on the home network, over https, handed with the public base. On home Wi-Fi the router
+    /// does not loop a phone's request for the public address back in, so the player tries this one first.
+    pub lan_media_base: Option<String>,
     /// Host helper socket mounted into the container. The helper owns nftables; den-edge can only request
     /// the fixed, short-lived public-listener action.
     pub public_media_socket: Option<std::path::PathBuf>,
@@ -186,6 +189,7 @@ impl AppState {
             routes_public: None,
             media_origins: Vec::new(),
             public_media_base: None,
+            lan_media_base: None,
             public_media_socket: None,
             cast_origin: None,
             new_libraries: library::NewLibraries::Open,
@@ -267,6 +271,12 @@ async fn main() {
     state.public_media_base = env_opt("PUBLIC_MEDIA_BASE").and_then(|value| {
         origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
             eprintln!("PUBLIC_MEDIA_BASE must be a bare https origin — disabling it");
+            None
+        })
+    });
+    state.lan_media_base = env_opt("LAN_MEDIA_BASE").and_then(|value| {
+        origin(&value).filter(|value| value.starts_with("https://")).or_else(|| {
+            eprintln!("LAN_MEDIA_BASE must be a bare https origin — disabling it");
             None
         })
     });

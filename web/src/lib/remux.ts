@@ -13,8 +13,13 @@ export interface Session {
   playlist: string;
   /** Session-bound bandwidth probe under the same signature as the playlist. */
   speed?: string;
-  /** The public IP-literal origin, present only on a member-gated relayed session. */
+  /** The public origin (an address or a name), present only on a member-gated relayed session. */
   publicBase?: string;
+  /** The same den-remux on the home network over https: reachable from home Wi-Fi, where the router does not loop
+   * a request for the public address back in. The sender tries it first and falls back to the public one. */
+  lanBase?: string;
+  /** This session's playlist on `lanBase`, made absolute the same way as `playlist` is on the public origin. */
+  lanPlaylist?: string;
   /** Static keyless iframe origin that owns browser-away and Cast media requests. */
   castOrigin?: string;
   /** Seconds. */
@@ -407,6 +412,9 @@ export async function startSession(
             ...session,
             playlist: new URL(session.playlist, mediaBase).href,
             speed: session.speed ? new URL(session.speed, mediaBase).href : undefined,
+            lanPlaylist: session.lanBase
+              ? new URL(session.playlist, session.lanBase).href
+              : undefined,
           }
         : session;
     }

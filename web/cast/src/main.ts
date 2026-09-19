@@ -1,4 +1,5 @@
 import Hls from 'hls.js';
+import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import { signedMedia } from './media';
@@ -6,6 +7,8 @@ import './style.css';
 
 interface Media {
   url: string;
+  /** The same playlist on the home network, tried first: on home Wi-Fi the public address is unreachable. */
+  lanUrl?: string;
   speed?: string;
   measure?: boolean;
   mode: 'browser' | 'cast';
@@ -121,6 +124,12 @@ let castStarted = false;
 let replacingCast = false;
 let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
+/** The loads whose home-network address answered: they play from it, in this browser and on a Cast receiver alike. */
+const onLan = new Set<string>();
+
+function playUrl(id: string, media: Media): string {
+  return media.lanUrl && onLan.has(id) ? media.lanUrl : media.url;
+}
 
 const storedProfile = localStorage.getItem('den.cast.profile');
 const keptProfile = storedProfile === 'google-tv' ? 'google-tv-4k' : storedProfile;
@@ -150,19 +159,19 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
 }
 
-async function loadLocal(media: Media): Promise<void> {
+async function loadLocal(media: Media, url: string): Promise<void> {
   hls?.destroy();
   hls = undefined;
   video.removeAttribute('src');
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = media.url;
+    video.src = url;
     video.addEventListener('loadedmetadata', () => applySubtitle(media.subtitleLanguage), {
       once: true,
     });
   } else if (Hls.isSupported()) {
     hls = new Hls();
     hls.on(Hls.Events.MANIFEST_PARSED, () => applySubtitle(media.subtitleLanguage));
-    hls.loadSource(media.url);
+    hls.loadSource(url);
     hls.attachMedia(video);
   } else {
     status.textContent = 'This browser cannot play HLS';
@@ -241,7 +250,7 @@ async function loadCast(): Promise<void> {
     tell('den-cast-request', { profile: profile.value });
     return;
   }
-  const info = new chrome.media.MediaInfo(media.url, 'application/x-mpegURL');
+  const info = new chrome.media.MediaInfo(playUrl(id, media), 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
   info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
   info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.FMP4;
@@ -281,10 +290,15 @@ async function loadCast(): Promise<void> {
 }
 
 async function open(message: LoadMessage): Promise<void> {
-  const measured = await measure(message.media, message.id);
+  // Home first: on home Wi-Fi the router never loops a request for the public address back in, so only the
+  // home-network address can play. Anywhere else this fails fast and the public address is used as before.
+  if (await lanReachable(message.media.lanUrl)) onLan.add(message.id);
+  if (current?.id !== message.id) return;
+  // No home upload sits between this browser and den-remux on the LAN, so there is no link to measure.
+  const measured = onLan.has(message.id) ? false : await measure(message.media, message.id);
   if (current?.id !== message.id || measured) return;
   if (message.media.mode === 'cast') await loadCast();
-  else await loadLocal(message.media);
+  else await loadLocal(message.media, playUrl(message.id, message.media));
   if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
 }
 
@@ -354,7 +368,11 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
-  if (!signedMedia(message.media.url) || !signedSpeed(message.media)) {
+  if (
+    !signedMedia(message.media.url) ||
+    (message.media.lanUrl !== undefined && !signedMedia(message.media.lanUrl)) ||
+    !signedSpeed(message.media)
+  ) {
     event.source?.postMessage(
       { type: 'den-error', id: message.id, message: 'Invalid media URL' },
       {
