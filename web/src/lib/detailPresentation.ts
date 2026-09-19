@@ -1,5 +1,6 @@
 import { RESUME_FLOOR, WATCHED } from './actions';
 import type { Episode, TitleDetail } from './detail';
+import type { Title } from './library';
 import { relayFetch } from './relayFetch';
 import { compareStamps, type EpisodeRow, type TitleRow } from './wire';
 
@@ -30,6 +31,28 @@ export function airDate(value?: string, locale?: string): string {
       year: 'numeric',
     }) ?? ''
   );
+}
+
+export interface PosterReleaseBadge {
+  date: string;
+  text: string;
+  accessibilityLabel: string;
+}
+
+/** A compact future-date badge for a poster; a release today is already released. */
+export function posterReleaseBadge(
+  title: Pick<Title, 'type' | 'releaseDate'>,
+  locale?: string,
+  now = new Date(),
+): PosterReleaseBadge | undefined {
+  if (!futureDate(title.releaseDate, now)) return;
+  const date = calendarDate(title.releaseDate)!;
+  const text = date.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+  return {
+    date: title.releaseDate!,
+    text,
+    accessibilityLabel: `${title.type === 'tv' ? 'Airs' : 'Releases'} ${airDate(title.releaseDate, locale)}`,
+  };
 }
 
 export function cleanedOverview(episode: Episode): string {
