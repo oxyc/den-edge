@@ -74,75 +74,83 @@
   ] as const;
 </script>
 
-<header class="bar glass" class:searching={expanded}>
-  <div class="leading">
-    <a class="brand" href="/" aria-label="Den home"
-      ><img src={icon} width="54" height="32" alt="" /></a
-    >
-    {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
-      <button class="back" type="button" onclick={navigateBack} aria-label="Back">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-          ><path d="m14 5-7 7 7 7" /></svg
-        >
-        Back
-      </button>
-    {/if}
-  </div>
-  <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
+<div class="bar-anchor">
+  <header class="bar glass" class:searching={expanded}>
+    <div class="leading">
+      <a class="brand" href="/" aria-label="Den home"
+        ><img src={icon} width="54" height="32" alt="" /></a
+      >
+      {#if route.page === 'title' || route.page === 'person' || route.page === 'search'}
+        <button class="back" type="button" onclick={navigateBack} aria-label="Back">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+            ><path d="m14 5-7 7 7 7" /></svg
+          >
+          Back
+        </button>
+      {/if}
+    </div>
+    <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
        left a guest on Home with no way to reach Movies, Series or Settings — which is also where pairing is —
        and no way to search, though den-edge lends a keyless browser the key that search needs. -->
-  <form class="search" role="search" id="nav-search" onsubmit={submitted}>
-    <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
-      ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
-    >
-    <input
-      name="search"
-      bind:this={input}
-      bind:value={text}
-      type="search"
-      aria-label="Search movies, series and people"
-      placeholder="Search movies, series and people"
-      autocomplete="off"
-      enterkeyhint="search"
-      onfocus={() => route.page !== 'search' && navigate(searchHref(text))}
-      oninput={searchChanged}
-      onkeydown={(event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          closeSearch();
-        }
-      }}
-    />
-    <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
-  </form>
-  <nav aria-label="Main navigation">
-    {#each tabs as tab (tab.page)}
-      <a
-        href="/{tab.page}"
-        class:home={tab.page === 'library'}
-        aria-current={route.page === tab.page ? 'page' : undefined}
+    <form class="search" role="search" id="nav-search" onsubmit={submitted}>
+      <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
       >
-        {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
-        {:else}{tab.label}{/if}
-      </a>
-    {/each}
-  </nav>
-  <button
-    class="search-toggle"
-    type="button"
-    aria-label="Search"
-    aria-expanded={expanded}
-    aria-controls="nav-search"
-    onclick={openSearch}
-    bind:this={toggle}
-  >
-    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
-      ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+      <input
+        name="search"
+        bind:this={input}
+        bind:value={text}
+        type="search"
+        aria-label="Search movies, series and people"
+        placeholder="Search movies, series and people"
+        autocomplete="off"
+        enterkeyhint="search"
+        onfocus={() => {
+          if (route.page !== 'search') navigate(searchHref(text));
+        }}
+        oninput={searchChanged}
+        onkeydown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            closeSearch();
+          }
+        }}
+      />
+      <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
+    </form>
+    <nav aria-label="Main navigation">
+      {#each tabs as tab (tab.page)}
+        <a
+          href="/{tab.page}"
+          class:home={tab.page === 'library'}
+          aria-current={route.page === tab.page ? 'page' : undefined}
+        >
+          {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
+          {:else}{tab.label}{/if}
+        </a>
+      {/each}
+    </nav>
+    <button
+      class="search-toggle"
+      type="button"
+      aria-label="Search"
+      aria-expanded={expanded}
+      aria-controls="nav-search"
+      onclick={openSearch}
+      bind:this={toggle}
     >
-  </button>
-</header>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
+      >
+    </button>
+  </header>
+</div>
 
 <style>
+  .bar-anchor {
+    display: contents;
+  }
+
   .bar {
     position: fixed;
     top: max(12px, env(safe-area-inset-top));
@@ -306,12 +314,25 @@
   }
 
   @media (width <= 759px) {
-    .back {
-      display: none;
+    /* A focused input must not remain under `position: fixed` on iOS: WebKit can paint its caret at the
+       document-space coordinate after the keyboard changes the visual viewport. A zero-height sticky anchor
+       keeps the same viewport geometry without leaving any fixed ancestor above the native editing control. */
+    .bar-anchor {
+      position: sticky;
+      top: max(12px, env(safe-area-inset-top));
+      z-index: 10;
+      display: block;
+      height: 0;
     }
 
     .bar {
+      position: absolute;
+      top: 0;
       gap: 8px;
+    }
+
+    .back {
+      display: none;
     }
 
     .brand,

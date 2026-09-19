@@ -152,7 +152,12 @@
 
   @media (width < 760px) {
     .row {
+      flex-wrap: wrap;
       min-height: 56px;
+    }
+
+    .label {
+      flex: 1 1 140px;
     }
   }
 

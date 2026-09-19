@@ -383,7 +383,7 @@ export function groupFilmography(
       department,
       films: credits
         .filter((c) => c.department === department)
-        .sort((a, b) => (b.title.year ?? 0) - (a.title.year ?? 0))
+        .sort(compareFilmCredits)
         .filter((c) => {
           const id = `${c.title.type}:${c.title.id}`;
           if (seen.has(id)) return false;
@@ -392,6 +392,32 @@ export function groupFilmography(
         }),
     };
   });
+}
+
+const fullDate = (value: string | undefined) =>
+  value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+
+/** Newest first, including the order within a year; stable provider order is not chronology. */
+function compareFilmCredits(a: FilmCredit, b: FilmCredit): number {
+  return compareTitleDates(a.title, b.title, -1);
+}
+
+/** Chronological title order, with incomplete dates last and deterministic ties. */
+function compareTitleDates(a: Title, b: Title, direction: 1 | -1): number {
+  const aDate = fullDate(a.releaseDate);
+  const bDate = fullDate(b.releaseDate);
+  // A year-only or malformed date cannot be placed in an exact chronology. Keep every complete date ahead
+  // of that tail even when the incomplete value happens to name a newer year.
+  if (Boolean(aDate) !== Boolean(bDate)) return aDate ? -1 : 1;
+  if (aDate && bDate && aDate !== bDate) return direction * aDate.localeCompare(bDate);
+
+  if (a.year !== undefined && b.year !== undefined && a.year !== b.year)
+    return direction * (a.year - b.year);
+  if (a.year !== b.year) return a.year === undefined ? 1 : -1;
+
+  const title = a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+  const type = a.type < b.type ? -1 : a.type > b.type ? 1 : 0;
+  return title || type || a.id - b.id;
 }
 
 export async function fetchFilmography(
@@ -415,6 +441,6 @@ export async function fetchCollection(
         num(r.id) === undefined ? null : toTitle({ type: 'movie', id: Number(r.id) }, r);
       return title ? [title] : [];
     })
-    .filter((t, i, all) => all.findIndex((other) => other.id === t.id) === i)
-    .sort((a, b) => (a.year ?? Infinity) - (b.year ?? Infinity));
+    .sort((a, b) => compareTitleDates(a, b, 1))
+    .filter((t, i, all) => all.findIndex((other) => other.id === t.id) === i);
 }

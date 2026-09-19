@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { genreEntries, MOVIE_GENRES, TV_GENRES } from './catalogs';
 import {
   change,
+  effectiveServicePicks,
   forgetDevice,
   hashPin,
   parsePublicKey,
@@ -14,6 +15,7 @@ import {
   selfEntry,
   toggled,
 } from './values';
+import { GUEST_PICKS } from '../lib/services';
 import type { SettingsRow, Stamp } from '../lib/wire';
 
 const at: Stamp = [1000, 0, 'tv01'];
@@ -42,6 +44,20 @@ describe('synced prefs', () => {
       shownWarnings: [],
       watchRegion: undefined,
       services: [],
+      servicesConfigured: false,
+    });
+  });
+
+  it('distinguishes guest service defaults from a deliberately saved empty selection', () => {
+    const guest = readSyncedPrefs(undefined);
+    expect(guest.servicesConfigured).toBe(false);
+    expect(effectiveServicePicks(guest, GUEST_PICKS)).toEqual(GUEST_PICKS);
+    const explicit = readSyncedPrefs(row({ 'den.myServicePicks': { value: { strings: [] }, at } }));
+    expect(explicit.services).toEqual([]);
+    expect(explicit.servicesConfigured).toBe(true);
+    expect(effectiveServicePicks(explicit, GUEST_PICKS)).toEqual([]);
+    expect(change.services(effectiveServicePicks(explicit, GUEST_PICKS))).toEqual({
+      'den.myServicePicks': { strings: [] },
     });
   });
 

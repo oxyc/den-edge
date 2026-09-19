@@ -8,6 +8,7 @@ import {
   futureDate,
   markableEpisodes,
   parseRatings,
+  posterReleaseBadge,
   productionFacts,
   seriesPresentation,
   titleFacts,
@@ -46,6 +47,20 @@ describe('detail presentation', () => {
     expect(airDate('2026-09-12', 'en-US')).toBe('Sep 12, 2026');
     expect(futureDate('2026-09-12', new Date(2026, 8, 12, 0))).toBe(false);
     expect(futureDate('2026-09-13', new Date(2026, 8, 12, 23))).toBe(true);
+  });
+  it('uses the future release date itself as a compact poster badge', () => {
+    const now = new Date(2026, 8, 19, 23, 59);
+    expect(posterReleaseBadge({ type: 'movie', releaseDate: '2026-10-03' }, 'en-US', now)).toEqual({
+      date: '2026-10-03',
+      text: 'Oct 3',
+      accessibilityLabel: 'Releases Oct 3, 2026',
+    });
+    expect(
+      posterReleaseBadge({ type: 'tv', releaseDate: '2026-10-03' }, 'en-US', now),
+    ).toMatchObject({ text: 'Oct 3', accessibilityLabel: 'Airs Oct 3, 2026' });
+    expect(
+      posterReleaseBadge({ type: 'movie', releaseDate: '2026-09-19' }, 'en-US', now),
+    ).toBeUndefined();
   });
   it('shows series year ranges and release dates, and only known production facts', () => {
     expect(titleFacts(detail({ status: 'Ended', last_air_date: '2023-01-01' }))).toEqual([
@@ -191,18 +206,52 @@ describe('detail presentation', () => {
 });
 
 describe('full actor filmography', () => {
+  it('orders titles within the same year by their complete release date', () => {
+    const films = groupFilmography(
+      parseFilmography({
+        cast: [
+          {
+            id: 101,
+            media_type: 'movie',
+            title: 'Crime 101',
+            release_date: '2026-02-13',
+          },
+          {
+            id: 102,
+            media_type: 'movie',
+            title: 'Being Heumann',
+            release_date: '2026-06-01',
+          },
+          { id: 104, media_type: 'movie', title: 'Alpha tie', release_date: '2026-06-01' },
+          { id: 104, media_type: 'movie', title: 'Alpha tie', release_date: '2026-06-01' },
+          { id: 103, media_type: 'movie', title: 'Newer year only', release_date: '2027' },
+          { id: 105, media_type: 'movie', title: 'No date' },
+        ],
+      }),
+    )[0]!.films;
+
+    expect(films.map((credit) => credit.title.title)).toEqual([
+      'Alpha tie',
+      'Being Heumann',
+      'Crime 101',
+      'Newer year only',
+      'No date',
+    ]);
+  });
+
   it('keeps cameos, TV guest credits and production, deduplicates within each department and orders newest first', () => {
-    const movie = (id: number, year: string) => ({
+    const movie = (id: number, year: string, date = `${year}-01-01`) => ({
       id,
       media_type: 'movie',
       title: `Movie ${id}`,
-      release_date: `${year}-01-01`,
+      release_date: date,
     });
     const parsed = parseFilmography({
       cast: [
         { ...movie(1, '2020'), character: 'Self' },
-        movie(2, '2025'),
-        movie(2, '2025'),
+        movie(2, '2025', '2025-02-01'),
+        movie(2, '2025', '2025-02-01'),
+        movie(5, '2025', '2025-11-01'),
         { id: 2, media_type: 'tv', name: 'Series', first_air_date: '2024-01-01', episode_count: 1 },
       ],
       crew: [
@@ -214,6 +263,7 @@ describe('full actor filmography', () => {
     const groups = groupFilmography(parsed);
     expect(groups.map((g) => g.department)).toEqual(['Acting', 'Directing', 'Production', 'Sound']);
     expect(groups[0]!.films.map((c) => `${c.title.type}:${c.title.id}`)).toEqual([
+      'movie:5',
       'movie:2',
       'tv:2',
       'movie:1',

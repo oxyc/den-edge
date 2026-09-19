@@ -3,6 +3,7 @@
 // GenreCatalog). Pure definitions: each row fetches its own pages, once it scrolls into view.
 
 import type { MediaType, Title } from './library';
+import { titleHref } from './route';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
@@ -539,6 +540,8 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** The named title/person within a contextual heading, and its destination. */
+  headingLink?: { before: string; label: string; after: string; href: string };
   load: (page: number) => Promise<Title[]>;
   /**
    * What a card says under its name, where the year is not the useful thing. A row pooling several services says
@@ -643,19 +646,18 @@ export function personalRows(
   pages: Pages,
   { watched, watchlisted, owned }: { watched: Title[]; watchlisted: Title[]; owned: Set<string> },
 ): RowDef[] {
-  const row = (id: string, title: string, seed: Title): RowDef => ({
+  const row = (id: string, before: string, after: string, seed: Title): RowDef => ({
     id: `${id}-${seed.type}-${seed.id}`,
-    title,
+    title: `${before}${seed.title}${after}`,
+    headingLink: { before, label: seed.title, after, href: titleHref(seed) },
     load: async (page) =>
       (await pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, page)).filter(
         (t) => !owned.has(`${t.type}:${t.id}`),
       ),
   });
   return [
-    ...watched.map((seed) => row('byw', `Because you watched ${seed.title}`, seed)),
-    ...watchlisted.map((seed) =>
-      row('wl', `Because you added ${seed.title} to your Watchlist`, seed),
-    ),
+    ...watched.map((seed) => row('byw', 'Because you watched ', '', seed)),
+    ...watchlisted.map((seed) => row('wl', 'Because you added ', ' to your Watchlist', seed)),
   ];
 }
 

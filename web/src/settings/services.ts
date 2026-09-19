@@ -20,6 +20,50 @@ export interface Service {
   variants: number[];
 }
 
+/** A country directory may still have one useful half when TMDB's movie or TV request fails. */
+export interface ServiceDirectoryResult {
+  services: Service[];
+  complete: boolean;
+}
+
+export interface ServiceDirectoryLoad {
+  services: Service[];
+  status: 'loading' | 'ready' | 'partial' | 'failed';
+  request: number;
+  key: string;
+}
+
+export function beginServiceDirectoryLoad(
+  previous: ServiceDirectoryLoad | undefined,
+  request: number,
+  key: string,
+): ServiceDirectoryLoad {
+  return { services: previous?.services ?? [], status: 'loading', request, key };
+}
+
+/** Complete only the request that still owns this country; an older answer cannot replace a retry. */
+export function completeServiceDirectoryLoad(
+  current: ServiceDirectoryLoad,
+  request: number,
+  result: ServiceDirectoryResult,
+): ServiceDirectoryLoad {
+  if (current.request !== request) return current;
+  return {
+    services: result.complete ? result.services : mergeServices(current.services, result.services),
+    status: result.complete ? 'ready' : 'partial',
+    request,
+    key: current.key,
+  };
+}
+
+/** A failed retry keeps the last useful list on screen and becomes retryable again. */
+export function failServiceDirectoryLoad(
+  current: ServiceDirectoryLoad,
+  request: number,
+): ServiceDirectoryLoad {
+  return current.request === request ? { ...current, status: 'failed' } : current;
+}
+
 interface ProviderEntry {
   provider_id?: unknown;
   provider_name?: unknown;
@@ -153,13 +197,16 @@ export async function fetchCountries(key: string, fetchImpl = tmdbFetch): Promis
     );
 }
 
-/** One country's services, movies and series merged. */
-export async function fetchServices(
+/**
+ * One country's services, movies and series merged, retaining either half when only the other request fails.
+ * A caller that can show a retry keeps the partial list on screen; both halves failing still rejects.
+ */
+export async function fetchServicesResult(
   country: string,
   key: string,
   fetchImpl = tmdbFetch,
-): Promise<Service[]> {
-  const [movies, series] = await Promise.all(
+): Promise<ServiceDirectoryResult> {
+  const settled = await Promise.allSettled(
     (['movie', 'tv'] as const).map(async (kind) =>
       servicesFrom(
         resultsOf(await tmdb(`/watch/providers/${kind}?watch_region=${country}`, key, fetchImpl)),
@@ -168,5 +215,22 @@ export async function fetchServices(
       ),
     ),
   );
-  return mergeServices(movies ?? [], series ?? []);
+  const fulfilled = settled.flatMap((result) =>
+    result.status === 'fulfilled' ? [result.value] : [],
+  );
+  if (!fulfilled.length) {
+    throw (
+      settled.find((result) => result.status === 'rejected')?.reason ?? new Error('TMDB failed')
+    );
+  }
+  return { services: mergeServices(...fulfilled), complete: fulfilled.length === settled.length };
+}
+
+/** One country's services for callers that do not render a partial/retry state. */
+export async function fetchServices(
+  country: string,
+  key: string,
+  fetchImpl = tmdbFetch,
+): Promise<Service[]> {
+  return (await fetchServicesResult(country, key, fetchImpl)).services;
 }

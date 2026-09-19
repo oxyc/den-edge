@@ -6,6 +6,7 @@
 import type { MediaType, Title } from './library';
 import type { Prefs } from './prefs';
 import { relayFetch } from './relayFetch';
+import { GUEST_PICKS } from './services';
 
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
 export interface Weighted {
@@ -73,7 +74,9 @@ export function recommendBody({
     version: 1,
     surface: facet === 'movie' ? 'movies' : facet === 'tv' ? 'series' : 'home',
     now: now.toISOString(),
-    services: prefs.services,
+    // Home uses these same six picks until the household saves a selection. Keep atlas's ranking input in
+    // step with the shelves on screen; an explicitly saved empty array remains empty.
+    services: prefs.servicesConfigured ? prefs.services : GUEST_PICKS,
     library: library.map(({ ref, weight, at }) => {
       const title = named.get(`${ref.type}:${ref.id}`);
       return {

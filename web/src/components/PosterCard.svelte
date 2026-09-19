@@ -5,6 +5,7 @@
      faded, as on the TV. -->
 <script lang="ts">
   import { availability } from '../lib/availability.svelte';
+  import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
 
   let {
@@ -35,6 +36,7 @@
   let failed = $state('');
   const art = $derived(poster && poster !== failed ? poster : undefined);
   const faded = $derived(availability.unavailable(title));
+  const release = $derived(posterReleaseBadge(title));
   $effect(() => availability.want(title));
 </script>
 
@@ -48,6 +50,11 @@
     {#if title.rating}
       <span class="rating" aria-label="Rated {title.rating.toFixed(1)}"
         >★ {title.rating.toFixed(1)}</span
+      >
+    {/if}
+    {#if release}
+      <time class="release" datetime={release.date} aria-label={release.accessibilityLabel}
+        >{release.text}</time
       >
     {/if}
     {#if progress !== undefined && progress > 0}
@@ -136,6 +143,18 @@
     font-weight: 600;
   }
 
+  .release {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.72);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
   .progress {
     position: absolute;
     right: 8px;
@@ -167,6 +186,9 @@
   }
 
   .caption {
+    overflow: hidden;
     color: var(--muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>
