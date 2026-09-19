@@ -3,6 +3,7 @@
 // opens too.
 
 import { hex, hkdf } from './crypto';
+import { cleanLabel } from './edge';
 import type { Link } from './links.svelte';
 import { fromBase64url, toBase64url } from './wire';
 
@@ -21,6 +22,40 @@ export async function linkKeys(linkKey: Bytes): Promise<{ inbox: string; enc: By
 }
 
 const AAD = new TextEncoder().encode('den/inbox/v1');
+const REPLAY_KEY = 'den.inboxReplay.v1';
+const SEAL_WINDOW = 7 * 24 * 60 * 60 * 1000;
+const SEAL_AHEAD = 24 * 60 * 60 * 1000;
+const visitReplay = new Map<string, number>();
+
+function replayEntries(storage: Storage | undefined, now: number): Record<string, number> {
+  try {
+    const parsed = JSON.parse(storage?.getItem(REPLAY_KEY) ?? '{}') as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, number] => {
+        const [id, expires] = entry;
+        return /^[0-9a-f]{32}$/.test(id) && typeof expires === 'number' && expires > now;
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+/** Admit a sealed envelope once for the queue's lifetime, including across page reloads. */
+function admit(id: string, now: number, storage: Storage | undefined): boolean {
+  for (const [seen, expires] of visitReplay) if (expires <= now) visitReplay.delete(seen);
+  const kept = replayEntries(storage, now);
+  if (visitReplay.has(id) || kept[id]) return false;
+  const expires = now + SEAL_WINDOW;
+  visitReplay.set(id, expires);
+  kept[id] = expires;
+  try {
+    storage?.setItem(REPLAY_KEY, JSON.stringify(kept));
+  } catch {
+    // The visit-scoped map still refuses the replay when site data is unavailable.
+  }
+  return true;
+}
 
 /** The random parts of a sealed message, pinned by tests. */
 export interface Sealing {
@@ -61,8 +96,12 @@ export async function sendToTV(
   message: object,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
-  const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-  return appendSealed(link.inboxKey, enc, message, fetchImpl);
+  try {
+    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+    return appendSealed(link.inboxKey, enc, message, fetchImpl);
+  } catch {
+    return false;
+  }
 }
 
 /** Queue one sealed message using a raw pairing link key. */
@@ -71,8 +110,12 @@ export async function sendToLink(
   message: object,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
-  const { inbox, enc } = await linkKeys(linkKey);
-  return appendSealed(inbox, enc, message, fetchImpl);
+  try {
+    const { inbox, enc } = await linkKeys(linkKey);
+    return appendSealed(inbox, enc, message, fetchImpl);
+  } catch {
+    return false;
+  }
 }
 
 async function appendSealed(
@@ -96,7 +139,7 @@ async function appendSealed(
 
 export interface DeviceIdentity {
   name: string;
-  deviceId: string;
+  deviceId?: string;
 }
 
 /**
@@ -106,6 +149,8 @@ export interface DeviceIdentity {
 export async function receiveDeviceIdentity(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   fetchImpl: typeof fetch = fetch,
+  now = Date.now(),
+  storage: Storage | undefined = globalThis.localStorage,
 ): Promise<DeviceIdentity | null> {
   try {
     const response = await fetchImpl('/inbox/drain', {
@@ -117,6 +162,7 @@ export async function receiveDeviceIdentity(
     if (!Array.isArray(body.messages)) return null;
     const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
     const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+    let newest: (DeviceIdentity & { sentAt: number }) | null = null;
     for (const entry of body.messages) {
       if (typeof entry.sealed !== 'string') continue;
       try {
@@ -128,29 +174,40 @@ export async function receiveDeviceIdentity(
           combined.slice(12),
         );
         const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
+          id?: unknown;
           sentAt?: unknown;
           message?: { type?: unknown; name?: unknown; deviceId?: unknown };
         };
         const name =
-          typeof envelope.message?.name === 'string'
-            ? envelope.message.name.trim().slice(0, 40)
-            : '';
+          typeof envelope.message?.name === 'string' ? cleanLabel(envelope.message.name) : '';
         const id = envelope.message?.deviceId;
+        const hasId = Object.prototype.hasOwnProperty.call(envelope.message ?? {}, 'deviceId');
         const sentAt = envelope.sentAt;
-        const age = typeof sentAt === 'number' ? Date.now() - sentAt : Number.POSITIVE_INFINITY;
+        const age = typeof sentAt === 'number' ? now - sentAt : Number.POSITIVE_INFINITY;
         if (
+          typeof envelope.id === 'string' &&
+          /^[0-9a-f]{32}$/.test(envelope.id) &&
           envelope.message?.type === 'device' &&
           name &&
-          typeof id === 'string' &&
-          /^[0-9a-f]{16}$/.test(id) &&
-          age <= 7 * 24 * 60 * 60 * 1000 &&
-          age >= -24 * 60 * 60 * 1000
-        )
-          return { name, deviceId: id };
+          (!hasId || (typeof id === 'string' && /^[0-9a-f]{16}$/.test(id))) &&
+          typeof sentAt === 'number' &&
+          Number.isFinite(sentAt) &&
+          age <= SEAL_WINDOW &&
+          age >= -SEAL_AHEAD &&
+          admit(envelope.id, now, storage) &&
+          (!newest || sentAt > newest.sentAt)
+        ) {
+          newest = { name, ...(hasId ? { deviceId: id as string } : {}), sentAt };
+        }
       } catch {
         // A malformed or differently keyed message does not identify this link.
       }
     }
+    if (newest)
+      return {
+        name: newest.name,
+        ...(newest.deviceId ? { deviceId: newest.deviceId } : {}),
+      };
   } catch {
     // The record stays pending and can retry when Settings opens again.
   }

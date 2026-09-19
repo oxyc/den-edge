@@ -3,7 +3,8 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network, reset the library key — says where to do it. -->
 <script lang="ts">
-  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+  import { onMount } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -346,41 +347,54 @@
     linkedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
   );
 
-  /** Learn a new joiner's stable id from its sealed pairing message; reopening Settings retries transient misses. */
-  const attemptedIdentities = new SvelteSet<string>();
+  /**
+   * Drain sealed pairing identities while Settings is open. A linked device can resend after an upgrade, rename, or
+   * stamp-id change, so learning the first id must not stop later authenticated updates from being applied.
+   */
+  // This is deliberately non-reactive: starting or finishing a request must not retrigger the effect below.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const learningIdentities = new Set<string>();
   const identityKey = (entry: Shared) => entry.inboxKey ?? `${entry.at}:${entry.name}`;
   async function learnIdentity(entry: Shared) {
-    if (!entry.inboxKey || !entry.linkKey || entry.deviceId) return;
+    if (!entry.inboxKey || !entry.linkKey) return;
+    const key = identityKey(entry);
+    if (learningIdentities.has(key)) return;
+    learningIdentities.add(key);
     const credential = { inboxKey: entry.inboxKey, linkKey: entry.linkKey };
-    for (let attempt = 0; attempt < 8 && !entry.deviceId; attempt++) {
-      const identity = await receiveDeviceIdentity(credential);
-      if (identity) {
-        links.identifyShared(entry, identity.deviceId, identity.name);
-        return;
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const identity = await receiveDeviceIdentity(credential);
+        if (identity) {
+          links.identifyShared(entry, identity.name, identity.deviceId);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      learningIdentities.delete(key);
     }
   }
+  function learnIdentities(entries: Shared[]) {
+    for (const entry of entries) void learnIdentity(entry);
+  }
+  const checkIdentities = () => learnIdentities(links.shared);
   $effect(() => {
-    for (const entry of links.shared) {
-      const key = identityKey(entry);
-      if (!entry.deviceId && entry.inboxKey && entry.linkKey && !attemptedIdentities.has(key)) {
-        attemptedIdentities.add(key);
-        void learnIdentity(entry);
-      }
-    }
+    learnIdentities(links.shared);
+  });
+  onMount(() => {
+    const interval = window.setInterval(checkIdentities, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkIdentities();
+    };
+    window.addEventListener('online', checkIdentities);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('online', checkIdentities);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   });
 
-  // When a pre-identity record passed the deliberately strict legacy fallback, remember the exact id from then on.
-  $effect(() => {
-    for (const row of listedDevices) {
-      if (!row.device) continue;
-      for (const paired of row.links)
-        if (!paired.deviceId) links.identifyLink(paired, row.device.id);
-      for (const handed of row.shared)
-        if (!handed.deviceId) links.identifyShared(handed, row.device.id);
-    }
-  });
   const deviceStatus = (row: (typeof listedDevices)[number]): string => {
     const status: string[] = [];
     if (row.device) {

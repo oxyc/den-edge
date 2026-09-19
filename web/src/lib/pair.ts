@@ -17,6 +17,8 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DSI = utf8.encode('CPaceRistretto255');
 const CI = utf8.encode('den/pair/v1');
 const HANDOVER = utf8.encode('den/pair/v1/handover');
+export const isStampDeviceId = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{16}$/.test(value);
 
 /** A typed or scanned code: uppercased, spaces and dashes dropped, and refused unless it is 12 alphabet characters. */
 export function parseCode(input: string): { nameplate: string; secret: string } | null {
@@ -299,10 +301,8 @@ export async function openHandover(key: Bytes, d: Uint8Array): Promise<Handover 
     const body = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
     const linkKey = typeof body.linkKey === 'string' ? fromBase64url(body.linkKey) : null;
     const libraryKey = typeof body.libraryKey === 'string' ? fromBase64url(body.libraryKey) : null;
-    const hostDeviceId =
-      typeof body.hostDeviceId === 'string' && /^[0-9a-f]{16}$/.test(body.hostDeviceId)
-        ? body.hostDeviceId
-        : undefined;
+    if (body.hostDeviceId !== undefined && !isStampDeviceId(body.hostDeviceId)) return null;
+    const hostDeviceId = isStampDeviceId(body.hostDeviceId) ? body.hostDeviceId : undefined;
     if (typeof body.host !== 'string' || linkKey?.length !== 32 || libraryKey?.length !== 32)
       return null;
     return { host: body.host, ...(hostDeviceId ? { hostDeviceId } : {}), linkKey, libraryKey };
@@ -386,6 +386,8 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
     options;
   const parsed = parseCode(code);
   if (!parsed) return { error: 'mistyped' };
+  if (options.deviceId !== undefined && !isStampDeviceId(options.deviceId))
+    return { error: 'failed' };
   if (!secureContext()) return { error: 'insecure' };
   const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
   const send = (path: string, method: string, body: unknown) =>
@@ -417,7 +419,7 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const handover = d && (await openHandover(finished.handoverKey, d));
   if (!handover) return fail();
   const inboxKey = (await linkKeys(handover.linkKey)).inbox;
-  if (options.deviceId && /^[0-9a-f]{16}$/.test(options.deviceId)) {
+  if (options.deviceId) {
     await sendToLink(
       handover.linkKey,
       { type: 'device', name: label, deviceId: options.deviceId },
@@ -471,6 +473,8 @@ export async function host(options: HostOptions): Promise<HostResult> {
   const { fetchImpl = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } =
     options;
   if (!secureContext()) return { error: 'insecure' };
+  if (options.deviceId !== undefined && !isStampDeviceId(options.deviceId))
+    return { error: 'failed' };
   const sid = options.sid ?? randomSid();
   const secret = options.secret ?? randomSecret();
   const { send, put, read, end } = relay(sid, fetchImpl, wait);
@@ -498,7 +502,7 @@ export async function host(options: HostOptions): Promise<HostResult> {
   if (!(await options.allow(responded.state.joiner))) return fail();
   const handover = {
     host: label,
-    hostDeviceId: /^[0-9a-f]{16}$/.test(options.deviceId ?? '') ? options.deviceId : undefined,
+    hostDeviceId: options.deviceId,
     linkKey: options.linkKey ?? crypto.getRandomValues(new Uint8Array(32)),
     libraryKey: options.libraryKey,
   };

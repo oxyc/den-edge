@@ -65,10 +65,11 @@
     opened: Promise.resolve(log),
     routes: fetchRoutes,
   }) as unknown as LibrarySession;
+  const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
   const link = {
     inboxKey: 'deadbeefcafe1234',
     name: 'Living Room TV',
-    libraryKey: 'fixture',
+    libraryKey: fixtureLibraryKey,
     linkKey: 'fixture',
   };
 </script>

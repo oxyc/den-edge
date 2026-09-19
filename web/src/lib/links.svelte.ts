@@ -14,6 +14,9 @@ export interface Link {
   linkKey: string;
   /** Stable stamp device id of the host, when its handover included one. */
   deviceId?: string;
+  /** The local identity last delivered through this link. Missing makes an upgraded client resend it. */
+  sentIdentityName?: string;
+  sentIdentityDeviceId?: string;
 }
 
 /**
@@ -56,7 +59,9 @@ function isLink(value: unknown): value is Link {
     /^[0-9a-f]{16,}$/i.test(v.inboxKey) &&
     typeof v.libraryKey === 'string' &&
     typeof v.linkKey === 'string' &&
-    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId))
+    (v.deviceId === undefined || /^[0-9a-f]{16}$/.test(v.deviceId)) &&
+    (v.sentIdentityName === undefined || typeof v.sentIdentityName === 'string') &&
+    (v.sentIdentityDeviceId === undefined || /^[0-9a-f]{16}$/.test(v.sentIdentityDeviceId))
   );
 }
 
@@ -180,17 +185,22 @@ class Links {
     return entry;
   }
 
-  identifyShared(entry: Shared, deviceId: string, name = entry.name): void {
-    if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.shared.includes(entry)) return;
-    entry.deviceId = deviceId;
+  identifyShared(entry: Shared, name: string, deviceId?: string): void {
+    if (
+      !this.shared.includes(entry) ||
+      (deviceId !== undefined && !/^[0-9a-f]{16}$/.test(deviceId))
+    )
+      return;
     entry.name = name;
+    if (deviceId) entry.deviceId = deviceId;
     this.shared = [...this.shared];
     writeShared(this.shared);
   }
 
-  identifyLink(entry: Link, deviceId: string): void {
+  identityDelivered(entry: Link, name: string, deviceId: string): void {
     if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.list.includes(entry)) return;
-    entry.deviceId = deviceId;
+    entry.sentIdentityName = name;
+    entry.sentIdentityDeviceId = deviceId;
     this.list = [...this.list];
     writeLinks(this.list);
   }

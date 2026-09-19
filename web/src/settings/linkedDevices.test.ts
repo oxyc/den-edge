@@ -52,7 +52,7 @@ describe('linked device presentation', () => {
     ]);
   });
 
-  it('keeps the conservative legacy fallback for unique names only', () => {
+  it('keeps legacy records separate even when their editable name is unique', () => {
     const first = device('tv-1', 'Apple TV', 'tv');
     const second = device('tv-2', 'Apple TV', 'tv');
     const ambiguous = link('inbox-1', 'Apple TV');
@@ -74,7 +74,7 @@ describe('linked device presentation', () => {
     const pending = { ...shared('Phone', 'current'), inboxKey: 'abcdef0123456789', linkKey: 'key' };
     expect(
       linkedDeviceRows([phone], [], [elsewhere, pending], 'current').map((row) => row.id),
-    ).toEqual(['device:phone-1', 'shared:phone-1', 'shared:abcdef0123456789']);
+    ).toEqual(['device:phone-1', 'shared:other:phone-1', 'shared:abcdef0123456789']);
   });
 
   it('keeps same-named link and handoff observations distinct rather than inventing one identity', () => {
@@ -83,18 +83,28 @@ describe('linked device presentation', () => {
     const handoff = shared('Den', 'current');
     const rows = linkedDeviceRows([tv], [tvLink], [handoff], 'current');
 
-    expect(rows.map((row) => row.id)).toEqual(['device:tv-1', 'link:inbox-1', 'shared:5:den']);
+    expect(rows.map((row) => row.id)).toEqual([
+      'device:tv-1',
+      'link:inbox-1',
+      'shared:current:5:den:0',
+    ]);
   });
 
-  it('reconciles a legacy handoff only after that uniquely named device has checked in', () => {
+  it('never promotes a legacy label to identity after a same-named device checks in', () => {
     const checkedIn = device('phone-1', 'Phone', 'browser', 20);
     const handoff = shared('Phone', undefined, 10);
-    expect(linkedDeviceRows([checkedIn], [], [handoff], 'current')).toHaveLength(1);
-
-    const stale = device('phone-1', 'Phone', 'browser', 5);
-    expect(linkedDeviceRows([stale], [], [handoff], 'current').map((row) => row.id)).toEqual([
+    expect(linkedDeviceRows([checkedIn], [], [handoff], 'current').map((row) => row.id)).toEqual([
       'device:phone-1',
-      'shared:10:phone',
+      'shared:legacy:10:phone:0',
+    ]);
+  });
+
+  it('keeps the same device handed different libraries as separately actionable rows', () => {
+    const first = shared('Phone', 'first', 5, 'phone-1');
+    const second = shared('Phone', 'second', 6, 'phone-1');
+    expect(linkedDeviceRows([], [], [first, second], 'current').map((row) => row.id)).toEqual([
+      'shared:first:phone-1',
+      'shared:second:phone-1',
     ]);
   });
 });

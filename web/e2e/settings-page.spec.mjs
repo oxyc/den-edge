@@ -26,6 +26,7 @@ for (const width of [320, 390, 820, 1280]) {
         locale: 'fi-FI',
       });
       await context.addInitScript(() => {
+        const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
         localStorage.setItem(
           'den.links',
           JSON.stringify([
@@ -33,14 +34,22 @@ for (const width of [320, 390, 820, 1280]) {
               inboxKey: 'deadbeefcafe1234',
               name: 'Living Room TV',
               linkedAt: 4000,
-              libraryKey: 'fixture',
+              libraryKey: fixtureLibraryKey,
               linkKey: 'fixture',
+              deviceId: 'aaaa000000000001',
             },
           ]),
         );
         localStorage.setItem(
           'den.shared',
-          JSON.stringify([{ id: 'handoff-mac', name: 'Mac', at: 8000, libraryKey: 'fixture' }]),
+          JSON.stringify([
+            {
+              name: 'Mac',
+              at: 8000,
+              libraryKey: fixtureLibraryKey,
+              deviceId: 'bbbb000000000002',
+            },
+          ]),
         );
       });
       const page = await context.newPage();

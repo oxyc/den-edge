@@ -16,8 +16,8 @@ const identityName = (name: string | undefined): string => name?.trim().toLowerC
 
 /**
  * Combines the current library's self-reported devices with records kept by this browser. New pairing records
- * match only by the stable stamp device id exchanged by pairing. A conservative name/time fallback remains for
- * records created before either wire field existed and never guesses between duplicate names.
+ * match only by the stable stamp device id exchanged by pairing. Legacy records remain separate because an editable
+ * label is never identity; associating one exactly requires pairing again.
  */
 export function linkedDeviceRows(
   devices: readonly DeviceEntry[],
@@ -35,71 +35,15 @@ export function linkedDeviceRows(
   }));
   const deviceByID = new Map(devices.map((device) => [device.id, device]));
 
-  const legacyLink = (link: Link): DeviceEntry | undefined => {
-    const name = identityName(link.name);
-    if (!name) return undefined;
-    const candidates = devices.filter((device) => identityName(device.name) === name);
-    const records = links.filter(
-      (candidate) =>
-        !candidate.deviceId &&
-        candidate.libraryKey === currentLibraryKey &&
-        identityName(candidate.name) === name,
-    );
-    const handoffs = shared.filter(
-      (candidate) =>
-        !candidate.deviceId &&
-        !candidate.inboxKey &&
-        candidate.libraryKey === currentLibraryKey &&
-        identityName(candidate.name) === name,
-    );
-    return candidates.length === 1 && records.length === 1 && handoffs.length === 0
-      ? candidates[0]
-      : undefined;
-  };
-
   const deviceForLink = (link: Link): DeviceEntry | undefined => {
     if (!currentLibraryKey || link.libraryKey !== currentLibraryKey) return undefined;
-    return link.deviceId ? deviceByID.get(link.deviceId) : legacyLink(link);
-  };
-
-  const legacyShare = (entry: Shared): DeviceEntry | undefined => {
-    // A current pairing with a pending identity has credentials; don't turn its editable label into identity.
-    if (entry.inboxKey || entry.linkKey) return undefined;
-    const name = identityName(entry.name);
-    const candidates = devices.filter((device) => identityName(device.name) === name);
-    const belongsHere =
-      entry.libraryKey === currentLibraryKey ||
-      (!entry.libraryKey &&
-        candidates.length === 1 &&
-        candidates[0]?.seen !== undefined &&
-        candidates[0].seen >= entry.at);
-    if (!name || !belongsHere) return undefined;
-    const records = shared.filter((candidate) => {
-      if (candidate.deviceId || candidate.inboxKey || identityName(candidate.name) !== name)
-        return false;
-      if (candidate.libraryKey) return candidate.libraryKey === currentLibraryKey;
-      return (
-        candidates.length === 1 &&
-        candidates[0]?.seen !== undefined &&
-        candidates[0].seen >= candidate.at
-      );
-    });
-    const paired = links.filter(
-      (candidate) =>
-        !candidate.deviceId &&
-        candidate.libraryKey === currentLibraryKey &&
-        identityName(candidate.name) === name,
-    );
-    return candidates.length === 1 && records.length === 1 && paired.length === 0
-      ? candidates[0]
-      : undefined;
+    return link.deviceId ? deviceByID.get(link.deviceId) : undefined;
   };
 
   const deviceForShare = (entry: Shared): DeviceEntry | undefined => {
-    if (!currentLibraryKey) return undefined;
-    if (entry.deviceId)
-      return entry.libraryKey === currentLibraryKey ? deviceByID.get(entry.deviceId) : undefined;
-    return legacyShare(entry);
+    if (!currentLibraryKey || entry.libraryKey !== currentLibraryKey || !entry.deviceId)
+      return undefined;
+    return deviceByID.get(entry.deviceId);
   };
 
   for (const link of links) {
@@ -116,13 +60,13 @@ export function linkedDeviceRows(
       });
   }
 
-  for (const entry of shared) {
+  for (const [index, entry] of shared.entries()) {
     const device = deviceForShare(entry);
     const row = device ? rows.find((candidate) => candidate.device === device) : undefined;
     if (row) row.shared.push(entry);
     else
       rows.push({
-        id: `shared:${entry.deviceId ?? entry.inboxKey ?? `${entry.at}:${identityName(entry.name)}`}`,
+        id: `shared:${entry.inboxKey ?? `${entry.libraryKey ?? 'legacy'}:${entry.deviceId ?? `${entry.at}:${identityName(entry.name)}:${index}`}`}`,
         name: entry.name,
         kind: /Apple TV/i.test(entry.name) ? 'tv' : 'browser',
         links: [],

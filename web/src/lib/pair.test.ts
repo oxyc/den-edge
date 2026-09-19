@@ -23,6 +23,7 @@ const vectors = JSON.parse(
   > & {
     wrongSecret: { b: string };
     handover: { key: string; nonce: string; d: string };
+    handoverWithHostDeviceId: { key: string; nonce: string; d: string };
     link: { linkKey: string; inbox: string; enc: string };
   };
 };
@@ -106,9 +107,20 @@ describe('pairing v1 matches den-spec', () => {
     expect(
       (await pair.openHandover(fromHex(p.handover.key), fromBase64url(p.handover.d)))?.hostDeviceId,
     ).toBeUndefined();
+    expect(
+      await pair.openHandover(
+        fromHex(p.handoverWithHostDeviceId.key),
+        fromBase64url(p.handoverWithHostDeviceId.d),
+      ),
+    ).toEqual({ ...handover, hostDeviceId: 'a1b2c3d4e5f60718' });
     const identified = { ...handover, hostDeviceId };
     const sealed = await pair.sealHandover(fromHex(p.handover.key), identified);
     expect(await pair.openHandover(fromHex(p.handover.key), sealed)).toEqual(identified);
+    const malformed = await pair.sealHandover(fromHex(p.handover.key), {
+      ...handover,
+      hostDeviceId: 'A1b2c3d4e5f60718',
+    });
+    expect(await pair.openHandover(fromHex(p.handover.key), malformed)).toBeNull();
   });
 
   it("stops at the host's message when the host has another secret", async () => {

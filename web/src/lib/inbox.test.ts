@@ -11,6 +11,7 @@ const vectors = JSON.parse(
   linkKey: string;
   enc: string;
   cases: { nonce: string; plaintext: string; sealed: string }[];
+  device: { nonce: string; plaintext: string; sealed: string };
 };
 
 describe('inbox v1 matches den-spec', () => {
@@ -66,6 +67,17 @@ describe('sending to a TV', () => {
 });
 
 describe('receiving a paired device identity', () => {
+  it('opens den-spec’s pinned sealed identity vector', async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ messages: [{ sealed: vectors.device.sealed }] }), {
+        status: 200,
+      })) as typeof fetch;
+    expect(await receiveDeviceIdentity(link, fetchImpl, 1_789_000_120_000)).toEqual({
+      name: 'Mac · Chrome',
+      deviceId: '0011223344556677',
+    });
+  });
+
   it('opens the sealed stable id and ignores readable relay content', async () => {
     const sealed = await sealMessage(
       fromHex(vectors.enc),
@@ -85,6 +97,47 @@ describe('receiving a paired device identity', () => {
       name: 'Bedroom TV',
       deviceId: 'a1b2c3d4e5f60718',
     });
+  });
+
+  it('rejects malformed-present ids and malformed or replayed envelopes', async () => {
+    const identity = { type: 'device', name: 'Bedroom TV', deviceId: 'a1b2c3d4e5f60718' };
+    const now = 1_800_000_000_000;
+    const response = (sealed: string) =>
+      (async () =>
+        new Response(JSON.stringify({ messages: [{ sealed }] }), { status: 200 })) as typeof fetch;
+    const invalidDevice = await sealMessage(
+      fromHex(vectors.enc),
+      { ...identity, deviceId: 'A1b2c3d4e5f60718' },
+      { id: '10000000000000000000000000000000', sentAt: now },
+    );
+    expect(await receiveDeviceIdentity(link, response(invalidDevice), now)).toBeNull();
+    const missingEnvelopeId = await sealMessage(fromHex(vectors.enc), identity, {
+      id: 'bad',
+      sentAt: now,
+    });
+    expect(await receiveDeviceIdentity(link, response(missingEnvelopeId), now)).toBeNull();
+
+    const replayed = await sealMessage(fromHex(vectors.enc), identity, {
+      id: '20000000000000000000000000000000',
+      sentAt: now,
+    });
+    expect(await receiveDeviceIdentity(link, response(replayed), now)).toEqual({
+      name: 'Bedroom TV',
+      deviceId: identity.deviceId,
+    });
+    expect(await receiveDeviceIdentity(link, response(replayed), now)).toBeNull();
+  });
+
+  it('keeps a legacy name-only device message without inventing an id', async () => {
+    const now = 1_800_000_100_000;
+    const sealed = await sealMessage(
+      fromHex(vectors.enc),
+      { type: 'device', name: ' Old browser ' },
+      { id: '30000000000000000000000000000000', sentAt: now },
+    );
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ messages: [{ sealed }] }), { status: 200 })) as typeof fetch;
+    expect(await receiveDeviceIdentity(link, fetchImpl, now)).toEqual({ name: 'Old browser' });
   });
 
   const link = {
