@@ -244,7 +244,7 @@ test('season requests cannot overwrite a newer selection and retained detail and
       active().getByRole('heading', { name: 'More like this', exact: true }).getByRole('link'),
     ).toHaveCount(0);
     const personHeading = active().getByRole('link', {
-      name: 'Starring A Person',
+      name: 'A Person',
       exact: true,
     });
     await expect(personHeading).toHaveAttribute('href', '/person/7-a-person');
