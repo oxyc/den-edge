@@ -564,17 +564,18 @@ pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
     Some((Bytes::from(bytes), age, modified))
 }
 
-/// Written beside and renamed over, so a reader never sees half an answer. A cache that cannot be written is
-/// not a failure worth refusing a request for.
-pub(crate) async fn write(file: &Path, body: &Bytes) {
-    let Some(dir) = file.parent() else { return };
+/// Written beside and renamed over, so a reader never sees half an answer. Ordinary caches may ignore a
+/// failure; endpoints that promise persistence can surface it.
+pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
+    let Some(dir) = file.parent() else { return false };
     if tokio::fs::create_dir_all(dir).await.is_err() {
-        return;
+        return false;
     }
     let temp = file.with_extension("tmp");
     if tokio::fs::write(&temp, body).await.is_ok() {
-        let _ = tokio::fs::rename(&temp, file).await;
+        return tokio::fs::rename(&temp, file).await.is_ok();
     }
+    false
 }
 
 /// An answer kept with the ETag TMDB gave it, beside it as `<name>.etag`, or with none — so a revalidation never

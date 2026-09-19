@@ -103,8 +103,8 @@ fn nonempty(fields: &InputFields) -> bool {
 }
 fn valid_observation(o: &Observation) -> bool {
     valid_ref(&o.kind, o.id) && nonempty(&o.fields)
-        && o.fields.rating.map_or(true, valid_rating)
-        && o.fields.poster_path.as_deref().map_or(true, valid_poster)
+        && o.fields.rating.is_none_or(valid_rating)
+        && o.fields.poster_path.as_deref().is_none_or(valid_poster)
 }
 fn fresh(at: u64, now: u64) -> bool {
     at <= now && now - at < RETENTION_MS
@@ -114,21 +114,21 @@ fn sanitize(fields: &mut StoredFields, now: u64) {
     if fields
         .rating
         .as_ref()
-        .map_or(false, |v| !fresh(v.observed_at, now) || !valid_rating(v.value))
+        .is_some_and(|v| !fresh(v.observed_at, now) || !valid_rating(v.value))
     {
         fields.rating = None;
     }
     if fields
         .vote_count
         .as_ref()
-        .map_or(false, |v| !fresh(v.observed_at, now))
+        .is_some_and(|v| !fresh(v.observed_at, now))
     {
         fields.vote_count = None;
     }
     if fields
         .poster_path
         .as_ref()
-        .map_or(false, |v| !fresh(v.observed_at, now) || !valid_poster(&v.value))
+        .is_some_and(|v| !fresh(v.observed_at, now) || !valid_poster(&v.value))
     {
         fields.poster_path = None;
     }
@@ -183,12 +183,8 @@ async fn query(state: &AppState, req: Request) -> Response {
         let Some((bytes, _, _)) = crate::tmdb::read(&path).await else {
             continue;
         };
-        let Ok(mut entry) = serde_json::from_slice::<Entry>(&bytes) else {
-            let _ = tokio::fs::remove_file(path).await;
-            continue;
-        };
+        let Ok(mut entry) = serde_json::from_slice::<Entry>(&bytes) else { continue };
         if entry.kind != r.kind || entry.id != r.id || entry.source != "tmdb" {
-            let _ = tokio::fs::remove_file(path).await;
             continue;
         }
         sanitize(&mut entry.fields, now);
@@ -225,7 +221,7 @@ async fn publish(state: &AppState, req: Request) -> Response {
     let now = state.now();
     for o in body.entries {
         let Some(path) = file(state, &o.kind, o.id) else {
-            continue;
+            return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("metadata_store_unavailable"));
         };
         let mut fields = if let Some((bytes, _, _)) = crate::tmdb::read(&path).await {
             serde_json::from_slice::<Entry>(&bytes)
@@ -261,8 +257,11 @@ async fn publish(state: &AppState, req: Request) -> Response {
             source: "tmdb".into(),
             fields,
         };
-        if let Ok(bytes) = serde_json::to_vec(&entry) {
-            crate::tmdb::write(&path, &bytes.into()).await;
+        let Ok(bytes) = serde_json::to_vec(&entry) else {
+            return json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"));
+        };
+        if !crate::tmdb::write(&path, &bytes.into()).await {
+            return json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"));
         }
     }
     json_reply(StatusCode::NO_CONTENT, &Value::Null)
@@ -426,5 +425,52 @@ mod tests {
         let dir = h.state.tmdb_metadata_cache_dir.as_ref().unwrap();
         tokio::fs::write(dir.join("movie-550.json"), b"not-json").await.unwrap();
         assert_eq!(get(&h).await, json!({"entries":[]}));
+
+        let future = json!({
+            "type":"movie","id":550,"source":"tmdb",
+            "fields":{"rating":{"value":9.9,"observedAt":h.state.now() + 1}}
+        });
+        tokio::fs::write(dir.join("movie-550.json"), future.to_string()).await.unwrap();
+        assert_eq!(get(&h).await, json!({"entries":[]}));
+    }
+
+    #[tokio::test]
+    async fn batches_and_storage_are_bounded_and_failed_storage_is_reported() {
+        let h = harness().await;
+        let member = format!("{LIB}:{TOKEN}");
+        let entries: Vec<Value> = (1..=MAX_ENTRIES + 1)
+            .map(|id| json!({"type":"movie","id":id,"fields":{"rating":8.0}}))
+            .collect();
+        assert_eq!(
+            h.send(
+                "PUT",
+                "/metadata/tmdb",
+                Some(json!({"entries": entries}).to_string()),
+                &[(crate::library::MEMBER_HEADER, &member)],
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut unavailable = Harness::new();
+        let body = json!({"writes":[{"k":"aaaaaaaaaaaaaaaa","base":0,"v":"c1"}]}).to_string();
+        assert_eq!(
+            unavailable
+                .send(
+                    "POST",
+                    &format!("/lib/{LIB}/batch"),
+                    Some(body),
+                    &[("x-den-library-token", TOKEN)],
+                )
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        Arc::get_mut(&mut unavailable.state).unwrap().tmdb_metadata_cache_dir = None;
+        assert_eq!(
+            put(&unavailable, json!({"rating":8.0})).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

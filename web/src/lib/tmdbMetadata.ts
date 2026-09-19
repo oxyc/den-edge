@@ -27,6 +27,8 @@ interface Stored {
   };
 }
 
+const RETENTION_MS = 180 * 86_400_000;
+
 const validKind = (value: unknown): value is Kind => value === 'movie' || value === 'tv';
 const validPoster = (value: unknown): value is string =>
   typeof value === 'string' && /^\/[A-Za-z0-9._/-]+$/.test(value) && !value.includes('..');
@@ -37,6 +39,8 @@ const validObserved = <T>(
   field !== undefined &&
   Number.isFinite(field.observedAt) &&
   field.observedAt >= 0 &&
+  field.observedAt <= Date.now() &&
+  Date.now() - field.observedAt < RETENTION_MS &&
   value(field.value);
 
 /** Allowlisted poster metadata contained in a TMDB answer the caller just received. */
@@ -138,7 +142,10 @@ export async function withSharedTmdbMetadata(
         : undefined;
       return {
         ...title,
-        rating: title.rating ?? rating,
+        rating:
+          typeof title.rating === 'number' && title.rating > 0
+            ? title.rating
+            : (rating ?? title.rating),
         votes: title.votes ?? votes,
         posterPath: title.posterPath ?? posterPath,
       };

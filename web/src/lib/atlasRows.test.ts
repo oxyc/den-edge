@@ -6,6 +6,7 @@ describe('atlasRows', () => {
     (async (url: string) => {
       asked.push(url);
       if (url === '/metadata/tmdb/query') {
+        const observedAt = Date.now();
         return new Response(
           JSON.stringify({
             entries: [
@@ -14,8 +15,8 @@ describe('atlasRows', () => {
                 id: 2,
                 source: 'tmdb',
                 fields: {
-                  rating: { value: 7.8, observedAt: 1 },
-                  voteCount: { value: 12, observedAt: 1 },
+                  rating: { value: 7.8, observedAt },
+                  voteCount: { value: 12, observedAt },
                 },
               },
             ],
