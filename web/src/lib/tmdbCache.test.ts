@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   cachingFetch,
   freshFor,
+  onTmdbThrottle,
   RETENTION,
   TMDB_PROXY_KEY,
   type Entry,
@@ -72,6 +73,22 @@ describe('every device, with a key of its own or without', () => {
 });
 
 describe('cachingFetch', () => {
+  it('reports a rate limit that leaves the page without an answer', async () => {
+    const waits: number[] = [];
+    const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
+    const refused: typeof fetch = async () =>
+      new Response('{"error":"rate_limited"}', {
+        status: 429,
+        headers: { 'retry-after': '17' },
+      });
+    try {
+      expect((await cachingFetch(memory().store, refused)(detail)).status).toBe(429);
+      expect(waits).toEqual([17_000]);
+    } finally {
+      stop();
+    }
+  });
+
   it('answers from the store while fresh, and never keeps the key', async () => {
     const { entries, store } = memory();
     const net = network();

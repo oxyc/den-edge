@@ -25,10 +25,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test('claims membership on the relayed addon paths', async () => {
+test('claims membership on the relayed addon and household API paths', async () => {
   const spy = stub();
   useLibraryCredential(KEYS);
-  for (const path of ['/scout/abc/manifest.json', '/atlas/recommend', '/reel/meta/movie/x.json']) {
+  for (const path of [
+    '/scout/abc/manifest.json',
+    '/atlas/recommend',
+    '/reel/meta/movie/x.json',
+    '/tmdb/3/movie/550',
+  ]) {
     await relayFetch(path);
     expect(sent(spy)[HEADER]).toBe('abc123:def456');
   }

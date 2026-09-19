@@ -1,12 +1,28 @@
 <script lang="ts">
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { parseRoute } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
+  import { onTmdbThrottle } from './lib/tmdbCache';
+
+  let tmdbLimited = $state(false);
+
+  onMount(() => {
+    let clear: ReturnType<typeof setTimeout> | undefined;
+    const stop = onTmdbThrottle(({ retryMs }) => {
+      tmdbLimited = true;
+      if (clear) clearTimeout(clear);
+      clear = setTimeout(() => (tmdbLimited = false), retryMs);
+    });
+    return () => {
+      stop();
+      if (clear) clearTimeout(clear);
+    };
+  });
 
   $effect(() => {
     if (links.current) preloadSyncPolicy();
@@ -47,6 +63,12 @@
 <NavigationBar {route} {query} />
 
 <main>
+  {#if tmdbLimited}
+    <p class="tmdb-limit" role="alert">
+      TMDB is temporarily limiting requests. Some titles may be missing; try again after a short
+      wait.
+    </p>
+  {/if}
   {#if links.current}
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
       <RoutedLibrary link={links.current} {query} onchange={(next) => (route = next)} />
@@ -68,5 +90,16 @@
     max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) calc(32px + env(safe-area-inset-bottom));
+  }
+
+  .tmdb-limit {
+    position: relative;
+    z-index: 4;
+    margin: 0 0 18px;
+    padding: 12px 16px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--card) 92%, var(--accent));
+    color: var(--fg);
   }
 </style>

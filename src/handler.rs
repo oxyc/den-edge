@@ -99,7 +99,7 @@ fn harden(headers: &mut HeaderMap) {
 }
 
 /// The request's `Origin` when it is one of `WEB_ORIGINS` — the Den web app, which the browser serves from
-/// another origin than den-edge's. No credentials are involved: the keys travel in headers the app sets.
+/// another origin than den-edge's. Credentials travel only in explicit headers this allow-list permits.
 fn allowed_origin(state: &AppState, req: &Request) -> Option<HeaderValue> {
     let origin = req.headers().get(header::ORIGIN)?;
     let value = origin.to_str().ok()?;
@@ -115,7 +115,7 @@ fn preflight() -> Response {
     headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST, DELETE"));
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type, x-den-link, x-den-library-token"),
+        HeaderValue::from_static("content-type, x-den-link, x-den-library-token, x-den-library-member"),
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
     resp
@@ -1044,7 +1044,12 @@ pub mod tests {
         assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
         assert_eq!(preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://pve.example");
         let allowed = preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS].to_str().unwrap();
-        assert!(allowed.contains("x-den-library-token") && allowed.contains("x-den-link"), "{allowed}");
+        assert!(
+            allowed.contains("x-den-library-token")
+                && allowed.contains("x-den-library-member")
+                && allowed.contains("x-den-link"),
+            "{allowed}"
+        );
 
         let get = h.send("GET", "/health", None, &[("origin", "https://pve.example")]).await;
         assert_eq!(get.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://pve.example");
