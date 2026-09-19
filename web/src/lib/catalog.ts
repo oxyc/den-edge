@@ -3,6 +3,7 @@
 // GenreCatalog). Pure definitions: each row fetches its own pages, once it scrolls into view.
 
 import type { MediaType, Title } from './library';
+import { titleHref } from './route';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
@@ -539,6 +540,8 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** Optional destination for a heading that names the title or person which produced this row. */
+  headingHref?: string;
   load: (page: number) => Promise<Title[]>;
   /**
    * What a card says under its name, where the year is not the useful thing. A row pooling several services says
@@ -646,6 +649,7 @@ export function personalRows(
   const row = (id: string, title: string, seed: Title): RowDef => ({
     id: `${id}-${seed.type}-${seed.id}`,
     title,
+    headingHref: titleHref(seed),
     load: async (page) =>
       (await pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, page)).filter(
         (t) => !owned.has(`${t.type}:${t.id}`),

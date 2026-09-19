@@ -8,7 +8,7 @@
   import type { Title } from '../lib/library';
   import PosterRow from './PosterRow.svelte';
   import PosterCard from './PosterCard.svelte';
-  import { titleHref } from '../lib/route';
+  import { personHref, titleHref } from '../lib/route';
   let {
     detail,
     tmdbKey,
@@ -21,7 +21,7 @@
     shown: (t: Title) => boolean;
   } = $props();
   let reached = $state(false);
-  let rows = $state<{ heading: string; titles: Title[] }[]>([]);
+  let rows = $state<{ heading: string; headingHref?: string; titles: Title[] }[]>([]);
   function approach(node: HTMLElement) {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -54,6 +54,7 @@
         : null,
       ...people.map(async (p) => ({
         heading: p.heading,
+        headingHref: personHref(p.id, p.name),
         titles:
           groupFilmography((await fetchFilmography(p.id, key)) ?? [])
             .find((g) => g.department === p.department)
@@ -82,7 +83,7 @@
 
 <div use:approach aria-hidden={!active}>
   {#each related as group (group.heading)}
-    <PosterRow heading={group.heading}>
+    <PosterRow heading={group.heading} headingHref={group.headingHref}>
       {#each group.titles as title (`${title.type}:${title.id}`)}<PosterCard
           {title}
           caption={title.year ? String(title.year) : undefined}

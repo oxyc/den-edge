@@ -64,7 +64,7 @@
 </script>
 
 <div bind:this={wrapper} class:gone={done && visible.length === 0}>
-  <PosterRow heading={row.title}>
+  <PosterRow heading={row.title} headingHref={row.headingHref}>
     {#each visible as title (key(title))}
       <PosterCard
         {title}

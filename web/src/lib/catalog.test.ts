@@ -143,6 +143,10 @@ describe('the screens', () => {
       ['byw-movie-329865', 'Because you watched Arrival'],
       ['wl-movie-693134', 'Because you added Dune: Part Two to your Watchlist'],
     ]);
+    expect(rows.map((r) => r.headingHref)).toEqual([
+      '/movie/329865-arrival',
+      '/movie/693134-dune-part-two',
+    ]);
     expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
     expect(asked).toEqual(['/movie/329865/recommendations']);
   });

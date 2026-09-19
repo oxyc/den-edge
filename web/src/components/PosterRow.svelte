@@ -3,11 +3,21 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  let { heading, children }: { heading: string; children: Snippet } = $props();
+  let {
+    heading,
+    headingHref,
+    children,
+  }: { heading: string; headingHref?: string; children: Snippet } = $props();
 </script>
 
 <section class="row" aria-label={heading}>
-  <h2>{heading}</h2>
+  <h2>
+    {#if headingHref}
+      <a class="heading-link" href={headingHref}>{heading}<span aria-hidden="true">›</span></a>
+    {:else}
+      {heading}
+    {/if}
+  </h2>
   <div class="track">
     {@render children()}
   </div>
@@ -24,6 +34,20 @@
   h2 {
     margin: 0 0 12px;
     font-size: 20px;
+  }
+
+  .heading-link {
+    display: inline-flex;
+    gap: 8px;
+    align-items: baseline;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .heading-link:hover,
+  .heading-link:focus-visible {
+    text-decoration: underline;
+    text-underline-offset: 4px;
   }
 
   .track {
