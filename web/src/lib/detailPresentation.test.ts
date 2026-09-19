@@ -8,6 +8,7 @@ import {
   futureDate,
   markableEpisodes,
   parseRatings,
+  posterReleaseBadge,
   productionFacts,
   seriesPresentation,
   titleFacts,
@@ -46,6 +47,20 @@ describe('detail presentation', () => {
     expect(airDate('2026-09-12', 'en-US')).toBe('Sep 12, 2026');
     expect(futureDate('2026-09-12', new Date(2026, 8, 12, 0))).toBe(false);
     expect(futureDate('2026-09-13', new Date(2026, 8, 12, 23))).toBe(true);
+  });
+  it('uses the future release date itself as a compact poster badge', () => {
+    const now = new Date(2026, 8, 19, 23, 59);
+    expect(posterReleaseBadge({ type: 'movie', releaseDate: '2026-10-03' }, 'en-US', now)).toEqual({
+      date: '2026-10-03',
+      text: 'Oct 3',
+      accessibilityLabel: 'Releases Oct 3, 2026',
+    });
+    expect(
+      posterReleaseBadge({ type: 'tv', releaseDate: '2026-10-03' }, 'en-US', now),
+    ).toMatchObject({ text: 'Oct 3', accessibilityLabel: 'Airs Oct 3, 2026' });
+    expect(
+      posterReleaseBadge({ type: 'movie', releaseDate: '2026-09-19' }, 'en-US', now),
+    ).toBeUndefined();
   });
   it('shows series year ranges and release dates, and only known production facts', () => {
     expect(titleFacts(detail({ status: 'Ended', last_air_date: '2023-01-01' }))).toEqual([
