@@ -7,6 +7,7 @@
 import type { RowDef } from './catalog';
 import type { MediaType, Title } from './library';
 import { relayFetch } from './relayFetch';
+import { withSharedTmdbMetadata } from './tmdbMetadata';
 
 const PAGE = 24;
 
@@ -174,7 +175,7 @@ export function atlasRows(
       });
       const res = await fetchImpl(`${base}/index/row/${path}.json?${query}`);
       if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-      return titlesOf(await res.json());
+      return withSharedTmdbMetadata(titlesOf(await res.json()), fetchImpl);
     },
   }));
 }

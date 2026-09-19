@@ -13,6 +13,7 @@ mod meta;
 mod metrics;
 mod pair;
 mod ratings;
+mod tmdb_metadata;
 mod relay;
 mod routes;
 mod skipdb;
@@ -111,6 +112,12 @@ pub struct AppState {
     pub ratings_key: Option<String>,
     /// Where each title's ratings are kept (`<DATA_DIR>/ratings`), for every device that opens it.
     pub ratings_cache_dir: Option<std::path::PathBuf>,
+    /// Allowlisted TMDB poster metadata observed by paired clients. This is separate from Atlas and from the
+    /// full-response proxy cache: Atlas never transports ratings, and this shared index exists even when the
+    /// household has no TMDB key configured.
+    pub tmdb_metadata_cache_dir: Option<std::path::PathBuf>,
+    /// Serializes the small read/merge/write records so simultaneous partial observations cannot erase fields.
+    pub tmdb_metadata_writes: tokio::sync::Mutex<()>,
     /// Questions the household key may ask OMDb in a UTC day (env `OMDB_DAILY_MAX`); `None` is no ceiling of ours.
     pub ratings_daily_max: Option<u32>,
     /// Today (as a day number) and what the household key has spent of it.
@@ -184,6 +191,8 @@ impl AppState {
             warnings_rest_until: Mutex::new(0),
             ratings_key: None,
             ratings_cache_dir: None,
+            tmdb_metadata_cache_dir: None,
+            tmdb_metadata_writes: tokio::sync::Mutex::new(()),
             skipdb_cache_dir: None,
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),
@@ -272,6 +281,7 @@ async fn main() {
     state.ratings_key = env_opt("OMDB_KEY");
     state.ratings_daily_max = env_opt("OMDB_DAILY_MAX").and_then(|v| v.parse().ok());
     state.ratings_cache_dir = Some(std::path::Path::new(&dir).join("ratings"));
+    state.tmdb_metadata_cache_dir = Some(std::path::Path::new(&dir).join("tmdb-metadata"));
     // No key to gate this one on: SkipDB's read API is open, so the only question is where to keep the answers.
     state.skipdb_cache_dir = Some(std::path::Path::new(&dir).join("skipdb"));
     let state = Arc::new(state);
@@ -280,6 +290,7 @@ async fn main() {
     tokio::spawn(tmdb::sweep_forever(Arc::clone(&state)));
     tokio::spawn(warnings::sweep_forever(Arc::clone(&state)));
     tokio::spawn(ratings::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(tmdb_metadata::sweep_forever(Arc::clone(&state)));
     tokio::spawn(skipdb::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 

@@ -15,10 +15,15 @@ import type { LibraryKeys } from './wire';
  * The paths den-edge relays to the addons (`ADDON_RELAY`), and the same-origin APIs where membership changes
  * the allowance or permits spending a household key. Anything else is somebody else's server.
  */
-const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/', '/tmdb/'];
+const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/', '/metadata/', '/tmdb/'];
 const MEMBER_HEADER = 'x-den-library-member';
 
 let credential: string | null = null;
+
+/** Whether this browser can authenticate a shared-cache write, without exposing the credential itself. */
+export function hasLibraryCredential(): boolean {
+  return credential !== null;
+}
 
 /** Remember the open library's credential, so relayed calls can prove membership. */
 export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'token'>): void {

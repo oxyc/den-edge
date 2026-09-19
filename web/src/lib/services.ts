@@ -17,6 +17,7 @@ import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
 import { tmdbFetch } from './tmdbCache';
+import { withSharedTmdbMetadata } from './tmdbMetadata';
 import { matches, type Service } from '../settings/services';
 
 /**
@@ -224,7 +225,7 @@ export function atlasServiceRows(
           `${base}/catalog/${path}/${catalog.id}/country=${encodeURIComponent(country)}.json`,
         );
         if (!res.ok) throw new Error(`atlas answered ${res.status}`);
-        const titles = titlesOfMetas(await res.json());
+        const titles = await withSharedTmdbMetadata(titlesOfMetas(await res.json()), fetchImpl);
         return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
       },
     }));
