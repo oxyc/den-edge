@@ -21,9 +21,21 @@
     TV_GENRES,
     WARNING_GROUPS,
   } from './catalogs';
-  import { fetchCountries, fetchServices, matches, type Country, type Service } from './services';
+  import { GUEST_PICKS } from '../lib/services';
+  import {
+    beginServiceDirectoryLoad,
+    completeServiceDirectoryLoad,
+    failServiceDirectoryLoad,
+    fetchCountries,
+    fetchServicesResult,
+    matches,
+    type Country,
+    type Service,
+    type ServiceDirectoryLoad,
+  } from './services';
   import {
     change,
+    effectiveServicePicks,
     hashPin,
     pinMatches,
     toggled,
@@ -69,12 +81,18 @@
 
   let countries = $state<Country[] | null>(null);
   let countriesFailed = $state(false);
+  let countriesRetry = $state(0);
   $effect(() => {
+    void countriesRetry;
     if (!tmdbKey) return;
+    countriesFailed = false;
     let gone = false;
     fetchCountries(tmdbKey)
       .then((found) => {
-        if (!gone) countries = found;
+        if (!gone) {
+          countries = found;
+          countriesFailed = false;
+        }
       })
       .catch(() => {
         if (!gone) countriesFailed = true;
@@ -112,17 +130,42 @@
   let servicesCountry = $state<string | null>(null);
   const shownCountry = $derived(servicesCountry ?? region);
   let serviceFilter = $state('');
-  const directories = new SvelteMap<string, Service[] | 'failed'>();
+  const directories = new SvelteMap<string, ServiceDirectoryLoad>();
+  let serviceRequest = 0;
+  function loadServices(code: string, retry = false) {
+    if (!tmdbKey) return;
+    const current = directories.get(code);
+    if (
+      !retry &&
+      current?.key === tmdbKey &&
+      (current.status === 'loading' || current.status === 'ready')
+    )
+      return;
+    if (current?.status === 'loading' && current.key === tmdbKey) return;
+    const request = ++serviceRequest;
+    directories.set(code, beginServiceDirectoryLoad(current, request, tmdbKey));
+    void fetchServicesResult(code, tmdbKey).then(
+      (found) => {
+        const latest = directories.get(code);
+        if (latest) directories.set(code, completeServiceDirectoryLoad(latest, request, found));
+      },
+      () => {
+        const latest = directories.get(code);
+        if (latest) directories.set(code, failServiceDirectoryLoad(latest, request));
+      },
+    );
+  }
   $effect(() => {
     const code = shownCountry;
-    if (!servicesOpen || !tmdbKey || directories.has(code)) return;
-    fetchServices(code, tmdbKey)
-      .then((found) => directories.set(code, found))
-      .catch(() => directories.set(code, 'failed'));
+    if (!servicesOpen || !tmdbKey) return;
+    const current = directories.get(code);
+    if (!current || current.key !== tmdbKey) loadServices(code);
   });
-  const directory = $derived(directories.get(shownCountry));
+  const directoryLoad = $derived(directories.get(shownCountry));
+  const directory = $derived(directoryLoad?.services ?? []);
+  const effectiveServices = $derived(effectiveServicePicks(prefs, GUEST_PICKS));
   const picksByCountry = $derived(
-    prefs.services.reduce(
+    effectiveServices.reduce(
       (counts, pick) => counts.set(pick.country, (counts.get(pick.country) ?? 0) + 1),
       new Map<string, number>(),
     ),
@@ -163,40 +206,41 @@
     ];
   });
   const serviceOptions = $derived(
-    Array.isArray(directory)
-      ? directory
-          .filter((s) => s.name.toLowerCase().includes(serviceFilter.trim().toLowerCase()))
-          .map((s) => ({
-            value: s.id,
-            label: s.name,
-            note:
-              s.movies && !s.series
-                ? '(movies only)'
-                : s.series && !s.movies
-                  ? '(series only)'
-                  : undefined,
-          }))
-      : [],
+    directory
+      .filter((s) => s.name.toLowerCase().includes(serviceFilter.trim().toLowerCase()))
+      .map((s) => ({
+        value: s.id,
+        label: s.name,
+        note:
+          s.movies && !s.series
+            ? '(movies only)'
+            : s.series && !s.movies
+              ? '(series only)'
+              : undefined,
+      })),
   );
   const isPicked = (service: Service, country: string) =>
-    prefs.services.some((p) => p.country === country && matches(service, p.id));
+    effectiveServices.some((p) => p.country === country && matches(service, p.id));
   /** The picks named, where their country's services have loaded; a service from another country says which. */
   const pickNames = $derived(
-    prefs.services
+    effectiveServices
       .flatMap((pick) => {
-        const found = directories.get(pick.country);
-        const service = Array.isArray(found) ? found.find((s) => matches(s, pick.id)) : undefined;
+        const found = directories.get(pick.country)?.services ?? [];
+        const service = found.find((s) => matches(s, pick.id));
         if (!service) return [];
         return [pick.country === region ? service.name : `${service.name} (${pick.country})`];
       })
       .sort(),
   );
   function toggleService(id: number, on: boolean) {
-    if (!Array.isArray(directory)) return;
     const service = directory.find((s) => s.id === id);
     if (!service) return;
     const country = shownCountry;
-    const rest = prefs.services.filter((p) => !(p.country === country && matches(service, p.id)));
+    // The first edit materializes the guest defaults. From then on an empty array is an intentional choice,
+    // rather than a signal to silently restore those defaults.
+    const rest = effectiveServices.filter(
+      (p) => !(p.country === country && matches(service, p.id)),
+    );
     save(change.services(on ? [...rest, { id: service.id, country }] : rest));
   }
 
@@ -290,11 +334,11 @@
     </p>
   </SettingRow>
 
-  <SettingRow id="my-services" label="My services" value={count(prefs.services.length, '')}>
+  <SettingRow id="my-services" label="My services" value={count(effectiveServices.length, '')}>
     <p class="summary">
       <span
-        >{prefs.services.length
-          ? `${prefs.services.length} service${prefs.services.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
+        >{effectiveServices.length
+          ? `${effectiveServices.length} service${effectiveServices.length === 1 ? '' : 's'}${pickNames.length ? ` · ${pickNames.join(', ')}` : ''}`
           : 'None selected'}</span
       >
     </p>
@@ -322,17 +366,26 @@
         />
       </div>
       {#if countriesFailed}
-        <p class="status bad">Couldn’t load the country list. Check your TMDB key in Settings.</p>
-      {/if}
-      {#if directory === 'failed'}
         <p class="status bad">
-          Couldn’t load {countryName(shownCountry)}’s services. Try again later.
+          Couldn’t refresh the country list. Check your TMDB key in Settings.
+          <button type="button" class="link-button" onclick={() => (countriesRetry += 1)}
+            >Try again</button
+          >
         </p>
-      {:else if !directory}
+      {/if}
+      {#if directoryLoad?.status === 'failed' || directoryLoad?.status === 'partial'}
+        <p class="status bad">
+          {directoryLoad.status === 'partial'
+            ? `Some of ${countryName(shownCountry)}’s services couldn’t be loaded.`
+            : `Couldn’t load ${countryName(shownCountry)}’s services.`}
+          <button type="button" class="link-button" onclick={() => loadServices(shownCountry, true)}
+            >Try again</button
+          >
+        </p>
+      {/if}
+      {#if !directoryLoad || (directoryLoad.status === 'loading' && !directory.length)}
         <p class="status">Loading services…</p>
-      {:else if !directory.length}
-        <p class="status">No services listed for {countryName(shownCountry)}</p>
-      {:else}
+      {:else if directory.length}
         <CheckGrid
           legend="{countryName(shownCountry)} · most prominent first"
           options={serviceOptions}
@@ -344,6 +397,8 @@
           {disabled}
           onchange={toggleService}
         />
+      {:else if directoryLoad.status === 'ready'}
+        <p class="status">No services listed for {countryName(shownCountry)}</p>
       {/if}
     {/if}
     <p class="foot">
