@@ -133,7 +133,7 @@ describe('the screens', () => {
       ];
     };
     const arrival = { type: 'movie' as const, id: 329865, title: 'Arrival' };
-    const dune = { type: 'movie' as const, id: 693134, title: 'Dune: Part Two' };
+    const dune = { type: 'tv' as const, id: 693134, title: 'Dune: Prophecy' };
     const rows = personalRows(recs, {
       watched: [arrival],
       watchlisted: [dune],
@@ -141,7 +141,21 @@ describe('the screens', () => {
     });
     expect(rows.map((r) => [r.id, r.title])).toEqual([
       ['byw-movie-329865', 'Because you watched Arrival'],
-      ['wl-movie-693134', 'Because you added Dune: Part Two to your Watchlist'],
+      ['wl-tv-693134', 'Because you added Dune: Prophecy to your Watchlist'],
+    ]);
+    expect(rows.map((r) => r.headingLink)).toEqual([
+      {
+        before: 'Because you watched ',
+        label: 'Arrival',
+        after: '',
+        href: '/movie/329865-arrival',
+      },
+      {
+        before: 'Because you added ',
+        label: 'Dune: Prophecy',
+        after: ' to your Watchlist',
+        href: '/tv/693134-dune-prophecy',
+      },
     ]);
     expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
     expect(asked).toEqual(['/movie/329865/recommendations']);
