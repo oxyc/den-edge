@@ -47,6 +47,10 @@
 
   .plate {
     display: grid;
+
+    /* An implicit `auto` track honors a control row's min-content width. At 320px, a label beside the
+       four-choice subtitle control widened the entire page instead of letting that row wrap. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
   }
 

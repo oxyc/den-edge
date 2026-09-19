@@ -127,10 +127,43 @@ for (const width of [320, 390, 1280])
       });
       const homeY = await page.evaluate(() => scrollY);
       expect(homeY).toBeGreaterThan(300);
+      const closedBar = width < 760 ? await page.locator('.bar').boundingBox() : null;
       await openSearch(page, width);
+      if (width < 760) {
+        const geometry = await page.evaluate(() => {
+          const bar = document.querySelector('.bar');
+          const form = document.querySelector('form.search');
+          const field = form.querySelector('input');
+          const rect = (element) => {
+            const box = element.getBoundingClientRect();
+            return { top: box.top, right: box.right, bottom: box.bottom, left: box.left };
+          };
+          return {
+            position: getComputedStyle(bar).position,
+            bar: rect(bar),
+            form: rect(form),
+            field: rect(field),
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        expect(geometry.position, 'focused iOS input leaves the fixed formatting context').toBe(
+          'absolute',
+        );
+        expect(Math.abs(geometry.bar.top - closedBar.y)).toBeLessThanOrEqual(1);
+        expect(geometry.field.top).toBeGreaterThanOrEqual(geometry.form.top);
+        expect(geometry.field.bottom).toBeLessThanOrEqual(geometry.form.bottom);
+        expect(geometry.form.left).toBeGreaterThanOrEqual(geometry.bar.left);
+        expect(geometry.form.right).toBeLessThanOrEqual(geometry.bar.right);
+        expect(geometry.scrollWidth).toBe(width);
+      }
       await input(page).fill('Neon');
       await expect(active(page).getByRole('link', { name: 'Film 108 2026' })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      if (width < 760) {
+        const editingBar = await page.locator('.bar').boundingBox();
+        expect(Math.abs(editingBar.y - closedBar.y)).toBeLessThanOrEqual(1);
+        await expect(input(page)).toBeInViewport();
+      }
       await page.screenshot({ path: test.info().outputPath(`search-${width}.png`) });
       const card = active(page).getByRole('link', { name: 'Film 108 2026' });
       await card.scrollIntoViewIfNeeded();
