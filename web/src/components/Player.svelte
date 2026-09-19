@@ -424,6 +424,7 @@
       finished();
     } else if (message.type === 'den-error') {
       casting = false;
+      castMode = false;
       void broke(0, message.message ?? 'cast player failed');
     }
   }
@@ -434,12 +435,17 @@
     const h264 =
       profile === 'legacy'
         ? 0x29
-        : profile === 'gen3' || profile === 'ultra'
+        : profile === 'gen3' || profile === 'ultra' || profile === 'google-tv-hd'
           ? 0x2a
           : profile === 'streamer'
             ? 0x34
             : 0x33;
-    const hevc = ['ultra', 'google-tv', 'streamer'].includes(profile) ? 153 : 0;
+    const hevc =
+      profile === 'google-tv-hd'
+        ? 123
+        : ['ultra', 'google-tv', 'google-tv-4k', 'streamer'].includes(profile)
+          ? 153
+          : 0;
     // Device AV1 capability does not establish that the Default Receiver accepts AV1 in HLS/fMP4. Keep it off
     // until that exact delivery path is verified on hardware; HEVC remains the Streamer's best known profile.
     const av1 = 0;
@@ -921,8 +927,8 @@
           </div>
         {/if}
         <!-- den-remux sends opt-in renditions. Its own names are used verbatim: it knows what it found, and
-             translating them here would invent detail. Cast has its receiver-native track picker instead. -->
-        {#if session.subtitles?.length && !casting}
+             translating them here would invent detail. The same choice is forwarded to Cast. -->
+        {#if session.subtitles?.length}
           <div class="pick">
             {@render globe()}
             <span class="value" aria-hidden="true"

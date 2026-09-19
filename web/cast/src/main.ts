@@ -1,4 +1,5 @@
 import Hls from 'hls.js';
+import { castIdleAction } from './lifecycle';
 import { signedLinkLimit } from './link';
 import './style.css';
 
@@ -22,12 +23,22 @@ interface LoadMessage {
 
 interface CastSession {
   loadMedia(request: unknown): Promise<unknown>;
+  getMediaSession(): CastMedia | null;
+}
+
+interface CastMedia {
+  idleReason?: string | null;
+  media?: {
+    tracks?: { trackId: number; language?: string | null; type?: string | null }[];
+  };
+  editTracksInfo(request: unknown, success?: () => void, error?: () => void): void;
 }
 
 interface CastContext {
   setOptions(options: Record<string, unknown>): void;
-  addEventListener(type: string, listener: () => void): void;
+  addEventListener(type: string, listener: (event: unknown) => void): void;
   getCurrentSession(): CastSession | null;
+  endCurrentSession(stopCasting: boolean): void;
 }
 
 interface RemotePlayer {
@@ -35,7 +46,7 @@ interface RemotePlayer {
   duration: number;
   isPaused: boolean;
   playerState?: string;
-  idleReason?: string;
+  isConnected: boolean;
 }
 
 interface RemotePlayerController {
@@ -74,6 +85,7 @@ interface CastGlobals {
           hlsVideoSegmentFormat?: unknown;
         };
         LoadRequest: new (info: unknown) => { currentTime?: number; activeTrackIds?: number[] };
+        EditTracksInfoRequest: new (activeTrackIds?: number[]) => unknown;
       };
     };
   };
@@ -103,9 +115,12 @@ let hls: Hls | undefined;
 let castContext: CastContext | undefined;
 let remotePlayer: RemotePlayer | undefined;
 let castStarted = false;
+let replacingCast = false;
+let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
 
-const keptProfile = localStorage.getItem('den.cast.profile');
+const storedProfile = localStorage.getItem('den.cast.profile');
+const keptProfile = storedProfile === 'google-tv' ? 'google-tv-4k' : storedProfile;
 if (keptProfile && [...profile.options].some((option) => option.value === keptProfile))
   profile.value = keptProfile;
 profile.addEventListener('change', () => {
@@ -184,18 +199,54 @@ function applySubtitle(language: string | null | undefined): void {
     track.mode = language != null && track.language === language ? 'showing' : 'disabled';
 }
 
-async function measure(media: Media, id: string): Promise<void> {
-  if (!media.measure || !media.speed || measuredId === id) return;
+async function measure(media: Media, id: string): Promise<boolean> {
+  if (!media.measure || !media.speed || measuredId === id) return false;
   measuredId = id;
-  const maxBitrate = await signedLinkLimit(media.speed);
-  if (current?.id === id && maxBitrate) tell('den-speed', { maxBitrate });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const maxBitrate = await signedLinkLimit(media.speed);
+    if (current?.id !== id) return false;
+    if (maxBitrate) {
+      tell('den-speed', { maxBitrate });
+      return true;
+    }
+  }
+  return false;
+}
+
+function sameLanguage(track: string | null | undefined, wanted: string): boolean {
+  if (!track) return false;
+  const one = track.toLowerCase();
+  const two = wanted.toLowerCase();
+  return one === two || one.split('-')[0] === two.split('-')[0];
+}
+
+function applyCastSubtitle(language: string | null | undefined): boolean {
+  const chrome = window.chrome?.cast;
+  const media = castContext?.getCurrentSession()?.getMediaSession();
+  if (!chrome || !media) return false;
+  const tracks = media.media?.tracks;
+  if (language && !tracks?.length) return false;
+  const track = language
+    ? tracks?.find(
+        (candidate) =>
+          (!candidate.type || candidate.type === 'TEXT') &&
+          sameLanguage(candidate.language, language),
+      )
+    : undefined;
+  media.editTracksInfo(
+    new chrome.media.EditTracksInfoRequest(track ? [track.trackId] : []),
+    () => undefined,
+    () => undefined,
+  );
+  return true;
 }
 
 async function loadCast(): Promise<void> {
+  const id = current?.id;
   const session = castContext?.getCurrentSession();
   const media = current?.media;
   const chrome = window.chrome?.cast;
-  if (!session || !media || !chrome) return;
+  if (!id || !session || !media || !chrome) return;
   if (media.mode !== 'cast') {
     tell('den-cast-request', { profile: profile.value });
     return;
@@ -211,19 +262,37 @@ async function loadCast(): Promise<void> {
   info.metadata = metadata;
   const request = new chrome.media.LoadRequest(info);
   request.currentTime = Math.max(0, media.currentTime ?? 0);
-  // The Default Media Receiver owns its track picker. Begin with captions off, matching an unset Den preference;
-  // the receiver UI can then enable one of the HLS subtitle renditions.
+  // Load with captions off, then apply Den's preference after the receiver has parsed the HLS renditions.
   request.activeTrackIds = [];
   try {
+    replacingCast = castStarted;
     await session.loadMedia(request);
+    if (current?.id !== id) {
+      void loadCast();
+      return;
+    }
     castStarted = true;
+    castSubtitleAppliedId = applyCastSubtitle(media.subtitleLanguage) ? current?.id : undefined;
     status.textContent = 'Playing on Chromecast';
     video.pause();
     tell('den-cast', { state: 'playing', profile: profile.value });
   } catch {
+    replacingCast = false;
+    if (current?.id !== id) {
+      void loadCast();
+      return;
+    }
     status.textContent = 'Chromecast could not load this release';
     tell('den-error', { message: status.textContent });
   }
+}
+
+async function open(message: LoadMessage): Promise<void> {
+  const measured = await measure(message.media, message.id);
+  if (current?.id !== message.id || measured) return;
+  if (message.media.mode === 'cast') await loadCast();
+  else await loadLocal(message.media);
+  if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
 }
 
 function initializeCast(): void {
@@ -240,18 +309,44 @@ function initializeCast(): void {
       duration: remotePlayer.duration,
       paused: remotePlayer.isPaused,
     });
-    if (remotePlayer.playerState === 'IDLE') {
-      castStarted = false;
-      if (remotePlayer.idleReason === 'FINISHED') tell('den-ended');
-      else tell('den-cast', { state: 'stopped', reason: remotePlayer.idleReason });
+    if (remotePlayer.playerState !== 'IDLE') {
+      replacingCast = false;
+      if (
+        current &&
+        castSubtitleAppliedId !== current.id &&
+        applyCastSubtitle(current.media.subtitleLanguage)
+      )
+        castSubtitleAppliedId = current.id;
+      return;
+    }
+    const reason = castContext?.getCurrentSession()?.getMediaSession()?.idleReason;
+    const action = castIdleAction(reason, replacingCast);
+    if (action === 'replaced') return;
+    replacingCast = false;
+    castStarted = false;
+    if (action === 'finished') tell('den-ended');
+    else if (action === 'error') {
+      castContext?.endCurrentSession(true);
+      tell('den-error', { message: 'Chromecast could not continue playback' });
+    } else {
+      // CANCELLED means the media was stopped; an unrelated sender's LOAD is merely disconnected from.
+      castContext?.endCurrentSession(reason !== 'INTERRUPTED');
+      tell('den-cast', { state: 'stopped', reason });
     }
   });
   castContext.setOptions({
     receiverApplicationId: chrome.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
     autoJoinPolicy: chrome.AutoJoinPolicy.ORIGIN_SCOPED,
   });
-  castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, () => {
-    void loadCast();
+  castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
+    const state = (event as { sessionState?: string }).sessionState;
+    if (state === 'SESSION_STARTED' || state === 'SESSION_RESUMED') {
+      void loadCast();
+    } else if (state === 'SESSION_ENDED' && castStarted) {
+      castStarted = false;
+      replacingCast = false;
+      tell('den-cast', { state: 'stopped', reason: 'SESSION_ENDED' });
+    }
   });
 }
 
@@ -276,14 +371,15 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (current?.id === message.id) {
     current = message as LoadMessage;
     applySubtitle(current.media.subtitleLanguage);
+    castSubtitleAppliedId = undefined;
+    if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
+      castSubtitleAppliedId = current.id;
     return;
   }
   current = message as LoadMessage;
   title.textContent = current.media.title;
   status.textContent = current.media.subtitle ?? 'Opening…';
-  void loadLocal(current.media).then(() => applySubtitle(current?.media.subtitleLanguage));
-  void measure(current.media, current.id);
-  void loadCast();
+  void open(current);
 });
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
@@ -292,6 +388,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (message.type !== 'den-subtitle' || message.id !== current.id) return;
   current.media.subtitleLanguage = typeof message.language === 'string' ? message.language : null;
   applySubtitle(current.media.subtitleLanguage);
+  castSubtitleAppliedId = undefined;
+  if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
+    castSubtitleAppliedId = current.id;
 });
 
 video.addEventListener('timeupdate', () =>

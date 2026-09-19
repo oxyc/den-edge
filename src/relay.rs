@@ -52,6 +52,7 @@ pub(crate) const MAX_IN_FLIGHT: usize = 16;
 const MEDIA_PER_WINDOW: u32 = 600;
 /// How long a request waits for one of those slots before giving up, so a queue can't grow without bound.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
+const FAILED_SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Where `path_and_query` goes when it is under one of `relays`: that addon's LAN origin with the rest of it.
 pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<String> {
@@ -70,6 +71,36 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
             _ => None,
         }
     })
+}
+
+fn session_end_url(target: &str, body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let playlist = value.get("playlist")?.as_str()?;
+    let root = playlist.strip_suffix("/master.m3u8")?;
+    let mut pieces = root.strip_prefix("/remux/s/")?.split('/');
+    let safe = |piece: &str| {
+        piece.len() == 22 && piece.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    };
+    if !pieces.next().is_some_and(safe) || !pieces.next().is_some_and(safe) || pieces.next().is_some() {
+        return None;
+    }
+    let mut url = url::Url::parse(target).ok()?;
+    url.set_path(root);
+    url.set_query(None);
+    Some(url.to_string())
+}
+
+async fn discard_failed_public_session(state: &AppState, target: &str, body: &[u8], rid: &str) {
+    let Some(url) = session_end_url(target, body) else { return };
+    let Ok(request) = axum::http::Request::builder()
+        .method(Method::DELETE)
+        .uri(url)
+        .header("x-request-id", rid)
+        .body(Full::new(Bytes::new()))
+    else {
+        return;
+    };
+    let _ = tokio::time::timeout(FAILED_SESSION_CLEANUP_TIMEOUT, state.relay_client.request(request)).await;
 }
 
 /// Guest trailer streams that may run at once. Small on purpose: the household's upload is what a
@@ -296,6 +327,11 @@ pub async fn relay(
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
     let public_session = member_only && req.uri().path() == "/remux/session" && method == Method::POST;
+    if public_session
+        && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
+    {
+        return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
+    }
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
@@ -328,6 +364,11 @@ pub async fn relay(
         if let Some(address) = address {
             out = out.header("x-forwarded-for", address.to_string());
         }
+        if public_session {
+            // Internal signal for remux's public-session gauge. It lets the root gate close while unrelated LAN
+            // playback continues; the public listener still trusts only den-edge's root-owned Unix-socket call.
+            out = out.header("x-den-public-session", "1");
+        }
     }
     for (name, value) in conditions {
         out = out.header(name, value);
@@ -359,6 +400,13 @@ pub async fn relay(
                         bytes = Bytes::from(encoded);
                     }
                 }
+            } else {
+                discard_failed_public_session(state, &target, &bytes, rid).await;
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("public_listener_unavailable"),
+                    1_000,
+                );
             }
         }
     }
@@ -619,6 +667,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_public_session_cleanup_uses_only_a_strict_signed_playlist() {
+        let sid = "A".repeat(22);
+        let sig = "b".repeat(22);
+        let body = json!({ "playlist": format!("/remux/s/{sid}/{sig}/master.m3u8") }).to_string();
+        assert_eq!(
+            super::session_end_url("http://den-remux:8095/remux/session?x=1", body.as_bytes()).as_deref(),
+            Some(format!("http://den-remux:8095/remux/s/{sid}/{sig}").as_str())
+        );
+        assert!(super::session_end_url(
+            "http://den-remux:8095/remux/session",
+            br#"{"playlist":"http://evil/remux/s/a/b/master.m3u8"}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn remux_keeps_the_prefix_its_upstream_api_owns() {
         let relays = crate::parse_relays("/scout=http://scout:8080, /remux=http://remux:8095");
         assert_eq!(
@@ -670,6 +734,7 @@ mod tests {
         let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
             assert_eq!(req.uri().path(), "/remux/session");
             assert_eq!(req.headers()["x-forwarded-for"], "192.168.1.9");
+            assert_eq!(req.headers()["x-den-public-session"], "1");
             (StatusCode::CREATED, json!({ "playlist": "/remux/s/id/sig/master.m3u8" }).to_string())
         });
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
@@ -716,6 +781,77 @@ mod tests {
         assert_eq!(body["castOrigin"], "https://cast.oxy.fi");
         let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
         assert_eq!(ask, json!({ "open": true, "source": "192.168.1.9", "scope": "cast" }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_listener_ends_the_public_session_and_returns_a_retry() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let sid = "A".repeat(22);
+        let sig = "b".repeat(22);
+        let session_path = format!("/remux/s/{sid}/{sig}");
+        let playlist = format!("{session_path}/master.m3u8");
+        let (deleted_tx, deleted_rx) = tokio::sync::oneshot::channel();
+        let deleted_tx = Arc::new(std::sync::Mutex::new(Some(deleted_tx)));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let deleted_tx = Arc::clone(&deleted_tx);
+            move |req: axum::extract::Request| {
+                let deleted_tx = Arc::clone(&deleted_tx);
+                let playlist = playlist.clone();
+                let session_path = session_path.clone();
+                async move {
+                    if req.method() == axum::http::Method::DELETE {
+                        assert_eq!(req.uri().path(), session_path);
+                        if let Some(sent) = deleted_tx.lock().unwrap().take() {
+                            let _ = sent.send(());
+                        }
+                        (StatusCode::NO_CONTENT, String::new())
+                    } else {
+                        (StatusCode::CREATED, json!({ "playlist": playlist }).to_string())
+                    }
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = unix.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            stream.into_inner().write_all(b"no\n").await.unwrap();
+        });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let answer = h
+            .send(
+                "POST",
+                "/remux/session",
+                Some(json!({ "player": "cast" }).to_string()),
+                &[
+                    ("host", "d.oxy.fi"),
+                    ("content-type", "application/json"),
+                    ("x-den-library-member", &claim),
+                ],
+            )
+            .await;
+        assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(answer.headers().contains_key("retry-after"));
+        deleted_rx.await.unwrap();
     }
 
     /// A public name is an unmetered proxy to the addons without this — including atlas's half-megabyte labels.
