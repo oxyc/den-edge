@@ -1,5 +1,6 @@
 import Hls from 'hls.js';
 import { castErrorAction, castIdleAction } from './lifecycle';
+import { signedMedia } from './media';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import './style.css';
 
@@ -110,6 +111,10 @@ const parents = new Set(
     .map((origin: string) => origin.trim())
     .filter(Boolean),
 );
+const mediaDomains: string[] = (import.meta.env.VITE_DEN_MEDIA_DOMAINS ?? '481920.xyz')
+  .split(',')
+  .map((domain: string) => domain.trim().toLowerCase())
+  .filter(Boolean);
 let parentOrigin: string | undefined;
 let current: LoadMessage | undefined;
 let hls: Hls | undefined;
@@ -128,20 +133,6 @@ profile.addEventListener('change', () => {
   localStorage.setItem('den.cast.profile', profile.value);
   if (castContext?.getCurrentSession()) tell('den-cast-request', { profile: profile.value });
 });
-
-function signedMedia(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const ip = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsed.hostname) || parsed.hostname.includes(':');
-    return (
-      parsed.protocol === 'https:' &&
-      ip &&
-      /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/master\.m3u8$/.test(parsed.pathname)
-    );
-  } catch {
-    return false;
-  }
-}
 
 function signedSpeed(media: Media): boolean {
   if (!media.speed) return true;
@@ -363,7 +354,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
-  if (!signedMedia(message.media.url) || !signedSpeed(message.media)) {
+  if (!signedMedia(message.media.url, mediaDomains) || !signedSpeed(message.media)) {
     event.source?.postMessage(
       { type: 'den-error', id: message.id, message: 'Invalid media URL' },
       {

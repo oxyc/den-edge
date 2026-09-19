@@ -5,6 +5,9 @@ RUN npm ci --ignore-scripts
 COPY web ./
 ARG DEN_PARENT_ORIGINS=https://d.oxy.fi
 ENV VITE_DEN_PARENT_ORIGINS=$DEN_PARENT_ORIGINS
+# Zones the sender accepts a signed media URL on besides an IP literal: one label under a wildcard-certified zone.
+ARG DEN_MEDIA_DOMAINS=481920.xyz
+ENV VITE_DEN_MEDIA_DOMAINS=$DEN_MEDIA_DOMAINS
 RUN npm run build:cast
 
 FROM rust:1-alpine AS server
