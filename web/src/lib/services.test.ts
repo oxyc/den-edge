@@ -224,7 +224,9 @@ describe('atlas rows', () => {
       'US',
       { fetchImpl },
     );
-    expect(await at(rows, 0).load(1)).toMatchObject([{ id: 550, rating: 7.4 }]);
+    expect(await at(rows, 0).load(1)).toMatchObject([
+      { id: 550, rating: 7.4, ratingSource: 'justwatch-imdb' },
+    ]);
     expect(writes.map((body) => JSON.parse(body))).toEqual([
       {
         entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
@@ -584,7 +586,7 @@ describe('radarRows', () => {
       radarRows('/atlas', catalogs, [picks[0]!], { names, fetchImpl }),
       0,
     ).load(1);
-    expect(titles).toMatchObject([{ id: 7, rating: 7.4 }]);
+    expect(titles).toMatchObject([{ id: 7, rating: 7.4, ratingSource: 'justwatch-imdb' }]);
     expect(writes).toEqual([
       {
         entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
