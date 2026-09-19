@@ -14,7 +14,7 @@ const PROVIDERS = {
   ],
 };
 
-for (const width of [393, 820, 1280]) {
+for (const width of [320, 390, 820, 1280]) {
   test(`Settings covers the TV's sections, opens rows in place and saves at ${width}px`, async () => {
     const browser = await chromium.launch({
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -48,9 +48,13 @@ for (const width of [393, 820, 1280]) {
       });
       await page.goto('http://127.0.0.1:5198/test/settings.html');
 
+      const expectViewportWidth = async () =>
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+
       await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
       for (const section of ['Connections', 'Playback', 'Content', 'Advanced', 'About'])
         await expect(page.getByRole('heading', { name: section, level: 2 })).toBeVisible();
+      await expectViewportWidth();
 
       // The seeded library, said the way the TV's rows say it.
       await expect(page.getByRole('button', { name: /Hidden genres/ })).toContainText('2');
@@ -75,6 +79,7 @@ for (const width of [393, 820, 1280]) {
       const services = page.getByRole('region', { name: 'My services' });
       await expect(services.getByRole('checkbox', { name: /Netflix/ })).toBeChecked();
       await expect(services.getByText('(series only)')).toBeVisible();
+      await expectViewportWidth();
 
       // Parental controls stay locked behind the PIN.
       await page.getByRole('button', { name: /Parental controls/ }).click();
@@ -126,7 +131,7 @@ for (const width of [393, 820, 1280]) {
       );
       await expect(page.getByRole('button', { name: 'Collapse all in Settings' })).toBeVisible();
 
-      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await expectViewportWidth();
       await page.screenshot({
         path: test.info().outputPath(`settings-${width}.png`),
         fullPage: true,
