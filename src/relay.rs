@@ -448,12 +448,15 @@ pub async fn relay(
 /// Ask the root-owned helper for its one operation. It validates the address again and owns every nftables
 /// argument; this process never runs a privileged command or supplies a table, chain, port, or timeout.
 async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr, cast: bool) -> bool {
+    // The media base is an IPv4 literal. A visitor Cloudflare saw over IPv6 fetches it from an address this
+    // process never sees (dual-stack, NAT64, carrier NAT), so an exact-address grant would drop its own session.
+    let wide = cast || source.is_ipv6();
     let operation = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
         let request = serde_json::json!({
             "open": true,
             "source": source.to_string(),
-            "scope": if cast { "cast" } else { "browser" },
+            "scope": if wide { "cast" } else { "browser" },
         });
         stream.write_all(request.to_string().as_bytes()).await.ok()?;
         stream.write_all(b"\n").await.ok()?;
@@ -462,7 +465,9 @@ async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr
         stream.read_exact(&mut answer).await.ok()?;
         (answer == *b"ok\n").then_some(())
     };
-    tokio::time::timeout(Duration::from_secs(2), operation).await.ok().flatten().is_some()
+    // The helper may have to start the TLS proxy container before it answers, and a timeout here makes it tear
+    // that proxy down again, so every retry would start cold.
+    tokio::time::timeout(Duration::from_secs(10), operation).await.ok().flatten().is_some()
 }
 
 /// A `Cache-Control` with `public` turned into `private`, everything else as it was. One that cannot be read is
@@ -693,6 +698,36 @@ mod tests {
             super::target(&relays, "/scout/cfg/manifest.json").as_deref(),
             Some("http://scout:8080/cfg/manifest.json")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ipv6_visitor_gets_the_wide_scope_and_an_ipv4_visitor_its_own_address() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let _ = sent.send(line);
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
+        });
+
+        for source in ["2001:db8::7", "203.0.113.7"] {
+            assert!(super::open_public_listener(&socket, source.parse().unwrap(), false).await);
+        }
+        let scope =
+            |line: String| serde_json::from_str::<serde_json::Value>(line.trim()).unwrap()["scope"].clone();
+        assert_eq!(scope(received.recv().await.unwrap()), "cast");
+        assert_eq!(scope(received.recv().await.unwrap()), "browser");
     }
 
     #[tokio::test]
