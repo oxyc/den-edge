@@ -89,6 +89,40 @@ describe('cachingFetch', () => {
     }
   });
 
+  it('retains the longest active rate limit for a listener that mounts late', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2100-01-01T00:00:00Z'));
+    let retryAfter = '60';
+    const refused: typeof fetch = async () =>
+      new Response('{"error":"rate_limited"}', {
+        status: 429,
+        headers: { 'retry-after': retryAfter },
+      });
+    const cached = cachingFetch(memory().store, refused);
+    try {
+      await cached(detail); // No listener yet: the root UI can still be mounting.
+      vi.advanceTimersByTime(10_000);
+
+      const waits: number[] = [];
+      const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
+      try {
+        expect(waits).toEqual([50_000]);
+
+        retryAfter = '5';
+        await cached(detail);
+        expect(waits).toEqual([50_000]);
+
+        retryAfter = '120';
+        await cached(detail);
+        expect(waits).toEqual([50_000, 120_000]);
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('answers from the store while fresh, and never keeps the key', async () => {
     const { entries, store } = memory();
     const net = network();

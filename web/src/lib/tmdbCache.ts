@@ -58,15 +58,28 @@ export interface TmdbThrottle {
 }
 
 const throttleListeners = new Set<(throttle: TmdbThrottle) => void>();
+let throttleUntil = 0;
 
-/** Hear only refusals that leave a page without a usable cached answer. */
+/**
+ * Hear only refusals that leave a page without a usable cached answer.
+ *
+ * The deadline is retained as well as broadcast. A page can ask for TMDB while Svelte is still mounting the
+ * root listener, and several concurrent questions can be refused with different waits. A late listener gets
+ * the wait still in force, while a shorter later refusal cannot clear a longer one early.
+ */
 export function onTmdbThrottle(listener: (throttle: TmdbThrottle) => void): () => void {
   throttleListeners.add(listener);
+  const retryMs = throttleUntil - Date.now();
+  if (retryMs > 0) listener({ retryMs });
   return () => throttleListeners.delete(listener);
 }
 
 function announceThrottle(res: Response): void {
-  const throttle = { retryMs: retryAfterMs(res, 60_000) };
+  const now = Date.now();
+  const proposedUntil = now + retryAfterMs(res, 60_000, () => now);
+  if (proposedUntil <= throttleUntil) return;
+  throttleUntil = proposedUntil;
+  const throttle = { retryMs: throttleUntil - now };
   for (const listener of throttleListeners) listener(throttle);
 }
 
