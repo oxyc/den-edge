@@ -240,12 +240,15 @@ describe('atlas rows', () => {
     expect(settled, 'the page does not publish throwaway rows while atlas is unresolved').toBe(
       false,
     );
-    answer([title(1, { type: 'movie' })]);
+    answer([title(1, { type: 'movie' }), title(1, { type: 'movie' })]);
     const rows = await pending;
     expect(rows.map(({ id, title }) => ({ id, title }))).toEqual(
       tmdb.map(({ id, title }) => ({ id, title })),
     );
-    expect(await at(rows, 1).load(1)).toEqual([title(1, { type: 'movie' })]);
+    expect(
+      await at(rows, 1).load(1),
+      'the addon first page is deduplicated before the fallback continues it',
+    ).toEqual([title(1, { type: 'movie' })]);
     expect((await at(rows, 1).load(2)).map((item) => item.id)).toEqual([2]);
     expect(
       asked,

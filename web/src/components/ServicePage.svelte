@@ -22,6 +22,7 @@
     country,
     tmdbKey,
     atlas = null,
+    atlasReady = true,
     minYear,
     excludedLanguages = new Set<string>(),
     reel = null,
@@ -35,6 +36,8 @@
     tmdbKey: string;
     /** Where atlas answers, when this page can reach it: its charts are what TMDB cannot say. */
     atlas?: string | null;
+    /** False while addon discovery is unresolved; null Atlas is final only once this becomes true. */
+    atlasReady?: boolean;
     /** Settings' release-year floor, applied to every row here as it is everywhere else. */
     minYear?: number;
     /** Settings' excluded languages: a row about nothing else is not offered here either. */
@@ -77,6 +80,7 @@
   $effect(() => {
     const selected = service;
     const here = atlas;
+    const addonsSettled = atlasReady;
     const mediaType = only;
     const year = minYear;
     const languages = excludedLanguages;
@@ -84,7 +88,7 @@
     rows = [];
     featured = [];
     heroFrom = '';
-    if (!selected) return;
+    if (!selected || !addonsSettled) return;
     const tmdb = serviceRows(selected, country, tmdbPages(tmdbKey), {
       minYear: year,
       only: mediaType,

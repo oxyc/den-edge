@@ -592,8 +592,9 @@
 <section
   class="billboard"
   use:stableViewportHeight
-  aria-roledescription="carousel"
-  aria-label="Featured"
+  aria-roledescription={shown.length ? 'carousel' : undefined}
+  aria-label={shown.length ? 'Featured' : undefined}
+  aria-hidden={shown.length ? undefined : 'true'}
   bind:this={frame}
   onpointerenter={() => (held = true)}
   onpointerleave={() => (held = false)}

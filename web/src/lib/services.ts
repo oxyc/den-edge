@@ -428,7 +428,13 @@ export async function settleServiceRows(
     await Promise.all(
       atlas.map(async (row) => {
         try {
-          const titles = await row.load(1);
+          const seen = new Set<string>();
+          const titles = (await row.load(1)).filter((title) => {
+            const key = `${title.type}:${title.id}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
           return titles.length ? { row, titles } : null;
         } catch {
           return null;
