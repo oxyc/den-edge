@@ -1,12 +1,17 @@
 import Hls from 'hls.js';
+import { signedLinkLimit } from './link';
 import './style.css';
 
 interface Media {
   url: string;
+  speed?: string;
+  measure?: boolean;
+  mode: 'browser' | 'cast';
   title: string;
   subtitle?: string;
   image?: string;
   currentTime?: number;
+  subtitleLanguage?: string | null;
 }
 
 interface LoadMessage {
@@ -30,6 +35,7 @@ interface RemotePlayer {
   duration: number;
   isPaused: boolean;
   playerState?: string;
+  idleReason?: string;
 }
 
 interface RemotePlayerController {
@@ -67,7 +73,7 @@ interface CastGlobals {
           hlsSegmentFormat?: unknown;
           hlsVideoSegmentFormat?: unknown;
         };
-        LoadRequest: new (info: unknown) => { currentTime?: number };
+        LoadRequest: new (info: unknown) => { currentTime?: number; activeTrackIds?: number[] };
       };
     };
   };
@@ -97,11 +103,15 @@ let hls: Hls | undefined;
 let castContext: CastContext | undefined;
 let remotePlayer: RemotePlayer | undefined;
 let castStarted = false;
+let measuredId: string | undefined;
 
 const keptProfile = localStorage.getItem('den.cast.profile');
 if (keptProfile && [...profile.options].some((option) => option.value === keptProfile))
   profile.value = keptProfile;
-profile.addEventListener('change', () => localStorage.setItem('den.cast.profile', profile.value));
+profile.addEventListener('change', () => {
+  localStorage.setItem('den.cast.profile', profile.value);
+  if (castContext?.getCurrentSession()) tell('den-cast-request', { profile: profile.value });
+});
 
 function signedMedia(url: string): boolean {
   try {
@@ -111,6 +121,20 @@ function signedMedia(url: string): boolean {
       parsed.protocol === 'https:' &&
       ip &&
       /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/master\.m3u8$/.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function signedSpeed(media: Media): boolean {
+  if (!media.speed) return true;
+  try {
+    const playlist = new URL(media.url);
+    const speed = new URL(media.speed);
+    return (
+      playlist.origin === speed.origin &&
+      playlist.pathname.replace(/master\.m3u8$/, 'speed') === speed.pathname
     );
   } catch {
     return false;
@@ -128,8 +152,12 @@ async function loadLocal(media: Media): Promise<void> {
   video.removeAttribute('src');
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = media.url;
+    video.addEventListener('loadedmetadata', () => applySubtitle(media.subtitleLanguage), {
+      once: true,
+    });
   } else if (Hls.isSupported()) {
     hls = new Hls();
+    hls.on(Hls.Events.MANIFEST_PARSED, () => applySubtitle(media.subtitleLanguage));
     hls.loadSource(media.url);
     hls.attachMedia(video);
   } else {
@@ -145,11 +173,33 @@ async function loadLocal(media: Media): Promise<void> {
   }
 }
 
+function applySubtitle(language: string | null | undefined): void {
+  if (hls) {
+    hls.subtitleDisplay = language != null;
+    hls.subtitleTrack =
+      language == null ? -1 : hls.subtitleTracks.findIndex((track) => track.lang === language);
+    return;
+  }
+  for (const track of Array.from(video.textTracks))
+    track.mode = language != null && track.language === language ? 'showing' : 'disabled';
+}
+
+async function measure(media: Media, id: string): Promise<void> {
+  if (!media.measure || !media.speed || measuredId === id) return;
+  measuredId = id;
+  const maxBitrate = await signedLinkLimit(media.speed);
+  if (current?.id === id && maxBitrate) tell('den-speed', { maxBitrate });
+}
+
 async function loadCast(): Promise<void> {
   const session = castContext?.getCurrentSession();
   const media = current?.media;
   const chrome = window.chrome?.cast;
   if (!session || !media || !chrome) return;
+  if (media.mode !== 'cast') {
+    tell('den-cast-request', { profile: profile.value });
+    return;
+  }
   const info = new chrome.media.MediaInfo(media.url, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
   info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
@@ -161,6 +211,9 @@ async function loadCast(): Promise<void> {
   info.metadata = metadata;
   const request = new chrome.media.LoadRequest(info);
   request.currentTime = Math.max(0, media.currentTime ?? 0);
+  // The Default Media Receiver owns its track picker. Begin with captions off, matching an unset Den preference;
+  // the receiver UI can then enable one of the HLS subtitle renditions.
+  request.activeTrackIds = [];
   try {
     await session.loadMedia(request);
     castStarted = true;
@@ -187,9 +240,10 @@ function initializeCast(): void {
       duration: remotePlayer.duration,
       paused: remotePlayer.isPaused,
     });
-    if (remotePlayer.playerState === 'IDLE' && remotePlayer.currentTime > 0) {
+    if (remotePlayer.playerState === 'IDLE') {
       castStarted = false;
-      tell('den-ended');
+      if (remotePlayer.idleReason === 'FINISHED') tell('den-ended');
+      else tell('den-cast', { state: 'stopped', reason: remotePlayer.idleReason });
     }
   });
   castContext.setOptions({
@@ -209,7 +263,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!parents.has(event.origin) || event.source !== window.parent) return;
   const message = event.data as Partial<LoadMessage>;
   if (message.type !== 'den-load' || typeof message.id !== 'string' || !message.media) return;
-  if (!signedMedia(message.media.url)) {
+  if (!signedMedia(message.media.url) || !signedSpeed(message.media)) {
     event.source?.postMessage(
       { type: 'den-error', id: message.id, message: 'Invalid media URL' },
       {
@@ -219,11 +273,25 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     return;
   }
   parentOrigin = event.origin;
+  if (current?.id === message.id) {
+    current = message as LoadMessage;
+    applySubtitle(current.media.subtitleLanguage);
+    return;
+  }
   current = message as LoadMessage;
   title.textContent = current.media.title;
   status.textContent = current.media.subtitle ?? 'Opening…';
-  void loadLocal(current.media);
+  void loadLocal(current.media).then(() => applySubtitle(current?.media.subtitleLanguage));
+  void measure(current.media, current.id);
   void loadCast();
+});
+
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent || !current) return;
+  const message = event.data as { type?: string; id?: string; language?: unknown };
+  if (message.type !== 'den-subtitle' || message.id !== current.id) return;
+  current.media.subtitleLanguage = typeof message.language === 'string' ? message.language : null;
+  applySubtitle(current.media.subtitleLanguage);
 });
 
 video.addEventListener('timeupdate', () =>

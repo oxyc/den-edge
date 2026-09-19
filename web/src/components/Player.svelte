@@ -19,7 +19,6 @@
     login,
     releaseParts,
     reportFailure,
-    publicSessionLimit,
     sourceFailed,
     startSession,
     wantedLanguages,
@@ -130,9 +129,10 @@
   let remoteTime = 0;
   let remoteDuration = 0;
   let remotePaused = true;
-  let casting = false;
+  let casting = $state(false);
   let castMode = false;
   let castProfile = 'legacy';
+  let publicMaxBitrate: number | undefined;
   let session = $state<Session | null>(null);
   let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
   let key = $state('');
@@ -213,7 +213,7 @@
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     // A direct remote origin can be measured before creation. The public control relay cannot: its speed path
     // appears only inside a signed session, so that first session is measured and replaced just below.
-    const maxBitrate = /^https?:/.test(remux) ? await linkLimit(remux) : undefined;
+    const maxBitrate = /^https?:/.test(remux) ? await linkLimit(remux) : publicMaxBitrate;
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -237,14 +237,7 @@
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
       ...pick,
     };
-    let result = await startSession(request, undefined, remux);
-    if (!('failure' in result) && maxBitrate === undefined && result.publicBase) {
-      const measured = await publicSessionLimit(result);
-      if (measured) {
-        endSession(result);
-        result = await startSession({ ...request, maxBitrate: measured }, undefined, remux);
-      }
-    }
+    const result = await startSession(request, undefined, remux);
     if (ended) {
       if (!('failure' in result)) endSession(result);
       return;
@@ -358,10 +351,14 @@
         id: current.playlist,
         media: {
           url: current.playlist,
+          speed: current.speed,
+          measure: publicMaxBitrate === undefined,
+          mode: castMode ? 'cast' : 'browser',
           title: title.title,
           subtitle: season !== undefined ? `S${season} · E${episode}` : undefined,
           image: poster,
           currentTime: started ?? resume.seconds ?? 0,
+          subtitleLanguage: subtitleChoice,
         },
       },
       current.castOrigin,
@@ -382,6 +379,7 @@
       message?: string;
       state?: string;
       profile?: string;
+      maxBitrate?: number;
     };
     if (message.type === 'den-ready') {
       sendToCastFrame();
@@ -396,17 +394,36 @@
         if (remotePaused) paused();
         else playing();
       }
-    } else if (message.type === 'den-cast' && message.state === 'playing') {
-      casting = true;
+    } else if (message.type === 'den-speed') {
+      const measured = message.maxBitrate;
+      if (
+        publicMaxBitrate === undefined &&
+        typeof measured === 'number' &&
+        Number.isFinite(measured) &&
+        measured >= 64_000 &&
+        measured <= 1_000_000_000
+      ) {
+        publicMaxBitrate = Math.round(measured);
+        restart({ filename: current.release.filename });
+      }
+    } else if (message.type === 'den-cast-request') {
       const profile = message.profile ?? 'legacy';
       if (!castMode || castProfile !== profile) {
         castProfile = profile;
         castMode = true;
         restart({ filename: current.release.filename });
       }
+    } else if (message.type === 'den-cast' && message.state === 'playing') {
+      casting = true;
+    } else if (message.type === 'den-cast' && message.state === 'stopped') {
+      casting = false;
+      castMode = false;
+      restart({ filename: current.release.filename });
     } else if (message.type === 'den-ended') {
+      casting = false;
       finished();
     } else if (message.type === 'den-error') {
+      casting = false;
       void broke(0, message.message ?? 'cast player failed');
     }
   }
@@ -423,7 +440,9 @@
             ? 0x34
             : 0x33;
     const hevc = ['ultra', 'google-tv', 'streamer'].includes(profile) ? 153 : 0;
-    const av1 = profile === 'streamer' ? 13 : 0;
+    // Device AV1 capability does not establish that the Default Receiver accepts AV1 in HLS/fMP4. Keep it off
+    // until that exact delivery path is verified on hardware; HEVC remains the Streamer's best known profile.
+    const av1 = 0;
     return {
       h264,
       h264High10: 0,
@@ -542,11 +561,10 @@
   /**
    * The subtitle language showing, or null for Off.
    *
-   * Off to begin with, and deliberately: den-remux marks its first rendition DEFAULT=YES, so a player that
-   * honours the default turns subtitles on by itself — which is what the browser's own controls were doing,
-   * with nothing to switch to and no way to turn them off.
+   * Begin with Settings' preference; undefined means Off. den-remux's renditions are non-default so every playback
+   * path starts consistently, then this player applies the explicit choice on its local or away-browser path.
    */
-  let subtitleChoice = $state<string | null>(null);
+  let subtitleChoice = $state<string | null>(untrack(() => subtitleLanguage ?? null));
 
   /**
    * Show the chosen rendition and hide the rest.
@@ -568,6 +586,16 @@
     }
     for (const track of Array.from(video?.textTracks ?? []))
       track.mode = choice !== null && track.language === choice ? 'showing' : 'disabled';
+  }
+
+  function sendSubtitleChoice() {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || !frame) return;
+    frame.postMessage(
+      { type: 'den-subtitle', id: current.playlist, language: subtitleChoice },
+      current.castOrigin,
+    );
   }
 
   /** SkipDB's segments for what is playing, and the one under the playhead right now. */
@@ -892,10 +920,9 @@
             </select>
           </div>
         {/if}
-        <!-- den-remux has always sent these renditions and the app threw them away, so the browser's own
-             controls were the only picker and the first rendition came up marked DEFAULT=YES. Its own names
-             are used verbatim: it knows what it found, and translating them here would invent detail. -->
-        {#if session.subtitles?.length}
+        <!-- den-remux sends opt-in renditions. Its own names are used verbatim: it knows what it found, and
+             translating them here would invent detail. Cast has its receiver-native track picker instead. -->
+        {#if session.subtitles?.length && !casting}
           <div class="pick">
             {@render globe()}
             <span class="value" aria-hidden="true"
@@ -909,6 +936,7 @@
               onchange={(event) => {
                 subtitleChoice = event.currentTarget.value || null;
                 applySubtitles();
+                sendSubtitleChoice();
               }}
             >
               <option value="">Off</option>

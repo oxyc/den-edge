@@ -424,31 +424,6 @@ export async function startSession(
   return { failure: 'unreachable' };
 }
 
-/** Measure a newly opened public session and return the bitrate cap for the replacement session. */
-export async function publicSessionLimit(
-  session: Session,
-  fetchImpl: typeof fetch = fetch,
-  now?: () => number,
-): Promise<number | undefined> {
-  if (!session.publicBase || !session.speed) return undefined;
-  const rate = await measureLinkAt(session.publicBase, session.speed, fetchImpl, now);
-  return rate ? Math.round(rate * LINK_HEADROOM) : undefined;
-}
-
-function measureLinkAt(
-  key: string,
-  speed: string,
-  fetchImpl: typeof fetch,
-  now: (() => number) | undefined,
-): Promise<number | null> {
-  const clock = now ?? (() => performance.now());
-  const kept = links.get(key);
-  if (kept && clock() - kept.at < LINK_TTL_MS) return kept.rate;
-  const rate = timeTransferUrl(speed, fetchImpl, clock);
-  links.set(key, { at: clock(), rate });
-  return rate;
-}
-
 /**
  * What is playing, as the player names it: the release, and — where den-remux couldn't send it as it is — what it
  * came down to, so a converted 4K remux doesn't pass for the 4K it says on the tin.

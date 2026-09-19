@@ -234,6 +234,7 @@ export class LibraryLog {
       await policy;
       if (res.status === 404) {
         if (!(await log.stageRecovery())) return null;
+        log.memberRegistered = false;
         log.head = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
         return log.restoreJournal();
@@ -246,6 +247,8 @@ export class LibraryLog {
       const page = (await res.json()) as Page;
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (!(await log.stageRecovery())) return null;
+        log.memberRegistered = false;
+        await log.registerMember();
         log.generation = page.generation;
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
@@ -294,6 +297,7 @@ export class LibraryLog {
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
             if (!(await this.stageRecovery())) return false;
+            this.memberRegistered = false;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
@@ -307,6 +311,8 @@ export class LibraryLog {
             page.head < this.head
           ) {
             if (!(await this.stageRecovery())) return false;
+            this.memberRegistered = false;
+            await this.registerMember();
             this.generation = page.generation;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
