@@ -25,6 +25,24 @@ for (const width of [320, 390, 820, 1280]) {
         reducedMotion: 'reduce',
         locale: 'fi-FI',
       });
+      await context.addInitScript(() => {
+        localStorage.setItem(
+          'den.links',
+          JSON.stringify([
+            {
+              inboxKey: 'deadbeefcafe1234',
+              name: 'Living Room TV',
+              linkedAt: 4000,
+              libraryKey: 'fixture',
+              linkKey: 'fixture',
+            },
+          ]),
+        );
+        localStorage.setItem(
+          'den.shared',
+          JSON.stringify([{ id: 'handoff-mac', name: 'Mac', at: 8000, libraryKey: 'fixture' }]),
+        );
+      });
       const page = await context.newPage();
       await guardNetwork(page);
       await page.route('**/routes', (r) => r.fulfill({ json: {} }));
@@ -99,9 +117,29 @@ for (const width of [320, 390, 820, 1280]) {
 
       await page.getByRole('button', { name: /Linked devices/ }).click();
       const devices = page.getByRole('region', { name: 'Linked devices' });
-      // The two the library holds, and this browser, which lists itself as it opens the library.
+      await expect(devices.getByRole('heading', { name: 'Devices', exact: true })).toBeVisible();
+      await expect(
+        devices.getByRole('heading', { name: 'Devices with your library', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        devices.getByRole('heading', { name: 'Linked to this browser', exact: true }),
+      ).toHaveCount(0);
+      // The TV link and handoff are folded into their current-library device rows, with both actions retained.
       const listed = devices.getByRole('listitem');
-      await expect(listed.filter({ hasText: 'Living Room TV' })).toContainText('Apple TV');
+      const tv = listed.filter({ hasText: 'Living Room TV' });
+      await expect(tv).toHaveCount(1);
+      await expect(tv).toContainText('Apple TV · seen');
+      await expect(tv).toContainText('linked to this browser');
+      await expect(
+        tv.getByRole('button', { name: 'Remove Living Room TV from list' }),
+      ).toBeVisible();
+      await expect(tv.getByRole('button', { name: 'Unlink Living Room TV' })).toBeVisible();
+      const mac = listed.filter({ hasText: 'Mac' });
+      await expect(mac).toHaveCount(1);
+      await expect(mac).toContainText('Browser · seen');
+      await expect(mac).toContainText('given your library');
+      await expect(mac.getByRole('button', { name: 'Remove Mac from list' })).toBeVisible();
+      await expect(mac.getByRole('button', { name: 'Forget Mac' })).toBeVisible();
       // A regular expression, so it's matched with its case: the device's own row reads "This browser · seen".
       await expect(listed.filter({ hasText: /Browser · seen/ })).toContainText('Mac');
       await expect(listed.filter({ hasText: 'This browser' })).toHaveCount(1);

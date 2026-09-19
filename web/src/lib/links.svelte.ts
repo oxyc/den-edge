@@ -19,8 +19,12 @@ export interface Link {
  * what was given, not a grant that can be taken back: only a new library key cuts a device off.
  */
 export interface Shared {
+  /** Stable for keyed presentation; older stored records predate it and use their name/time tuple. */
+  id?: string;
   name: string;
   at: number;
+  /** The library handed over, for reconciling this local record with that library's device list. */
+  libraryKey?: string;
 }
 
 const STORAGE_KEY = 'den.links';
@@ -29,7 +33,12 @@ const BROWSING_KEY = 'den.browsing';
 
 function isShared(value: unknown): value is Shared {
   const v = value as Partial<Shared> | null;
-  return typeof v?.name === 'string' && typeof v.at === 'number';
+  return (
+    typeof v?.name === 'string' &&
+    typeof v.at === 'number' &&
+    (v.id === undefined || typeof v.id === 'string') &&
+    (v.libraryKey === undefined || typeof v.libraryKey === 'string')
+  );
 }
 
 /** A paired link. One made with a six-character code carries no keys, can't reach the library, and pairs again. */
@@ -144,8 +153,8 @@ class Links {
   }
 
   /** Remember a device this browser paired and handed the library to. */
-  share(name: string, now = Date.now()): void {
-    this.shared = [...this.shared, { name, at: now }];
+  share(name: string, libraryKey: string, now = Date.now()): void {
+    this.shared = [...this.shared, { id: crypto.randomUUID(), name, at: now, libraryKey }];
     writeShared(this.shared);
   }
 
