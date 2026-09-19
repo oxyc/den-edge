@@ -13,6 +13,6 @@ export function castIdleAction(
 }
 
 /** Keep the Cast session for one conservative retry, then end it if that fallback also fails. */
-export function castErrorAction(fallback: boolean): CastErrorAction {
-  return fallback ? 'stop-receiver' : 'retry-receiver';
+export function castErrorAction(terminal: boolean): CastErrorAction {
+  return terminal ? 'stop-receiver' : 'retry-receiver';
 }

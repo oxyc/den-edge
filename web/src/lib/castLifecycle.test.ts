@@ -14,7 +14,7 @@ describe('Cast idle lifecycle', () => {
     expect(castIdleAction('INTERRUPTED', false)).toBe('stopped');
   });
 
-  it('keeps the receiver for one conservative retry, then stops after fallback fails', () => {
+  it('keeps the receiver for one conservative retry, then stops on a terminal attempt', () => {
     expect(castErrorAction(false)).toBe('retry-receiver');
     expect(castErrorAction(true)).toBe('stop-receiver');
   });

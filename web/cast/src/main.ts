@@ -13,7 +13,7 @@ interface Media {
   image?: string;
   currentTime?: number;
   subtitleLanguage?: string | null;
-  fallback?: boolean;
+  terminal?: boolean;
 }
 
 interface LoadMessage {
@@ -284,7 +284,7 @@ async function loadCast(): Promise<void> {
       return;
     }
     castStarted = false;
-    if (castErrorAction(media.fallback === true) === 'stop-receiver')
+    if (castErrorAction(media.terminal === true) === 'stop-receiver')
       castContext?.endCurrentSession(true);
     status.textContent = 'Chromecast could not load this release';
     tell('den-error', { message: status.textContent });
@@ -330,7 +330,7 @@ function initializeCast(): void {
     castStarted = false;
     if (action === 'finished') tell('den-ended');
     else if (action === 'error') {
-      if (castErrorAction(current?.media.fallback === true) === 'stop-receiver')
+      if (castErrorAction(current?.media.terminal === true) === 'stop-receiver')
         castContext?.endCurrentSession(true);
       tell('den-error', { message: 'Chromecast could not continue playback' });
     } else {
