@@ -4,6 +4,9 @@
 // a return visit never waits on TMDB for what it showed last time; an older one TMDB can't refresh is served stale
 // rather than not at all, and nothing is kept past TMDB's six-month limit on cached content.
 
+import { relayFetch } from './relayFetch';
+import { retryAfterMs } from './retryAfter';
+
 const TMDB = 'https://api.themoviedb.org/3/';
 
 /**
@@ -48,6 +51,36 @@ export interface Store {
   /** Drop what was fetched before `cutoff`. */
   prune(cutoff: number): Promise<void>;
   clear(): Promise<void>;
+}
+
+export interface TmdbThrottle {
+  retryMs: number;
+}
+
+const throttleListeners = new Set<(throttle: TmdbThrottle) => void>();
+let throttleUntil = 0;
+
+/**
+ * Hear only refusals that leave a page without a usable cached answer.
+ *
+ * The deadline is retained as well as broadcast. A page can ask for TMDB while Svelte is still mounting the
+ * root listener, and several concurrent questions can be refused with different waits. A late listener gets
+ * the wait still in force, while a shorter later refusal cannot clear a longer one early.
+ */
+export function onTmdbThrottle(listener: (throttle: TmdbThrottle) => void): () => void {
+  throttleListeners.add(listener);
+  const retryMs = throttleUntil - Date.now();
+  if (retryMs > 0) listener({ retryMs });
+  return () => throttleListeners.delete(listener);
+}
+
+function announceThrottle(res: Response): void {
+  const now = Date.now();
+  const proposedUntil = now + retryAfterMs(res, 60_000, () => now);
+  if (proposedUntil <= throttleUntil) return;
+  throttleUntil = proposedUntil;
+  const throttle = { retryMs: throttleUntil - now };
+  for (const listener of throttleListeners) listener(throttle);
 }
 
 /**
@@ -129,7 +162,7 @@ function answer(body: string): Response {
 /** `fetch`, keeping TMDB's GET answers in `store`; everything else goes straight to the network. */
 export function cachingFetch(
   store: Store | null,
-  network: typeof fetch = (input, init) => fetch(input, init),
+  network: typeof fetch = relayFetch,
   now: () => number = Date.now,
 ): typeof fetch {
   let pruned = false;
@@ -178,7 +211,10 @@ export function cachingFetch(
     }
     try {
       const res = await network(asked, init);
-      if (!res.ok) return kept && res.status >= 500 ? answer(kept.body) : res;
+      if (!res.ok) {
+        if (res.status === 429) announceThrottle(res);
+        return kept && res.status >= 500 ? answer(kept.body) : res;
+      }
       const body = await res.text();
       const fetched = entry(res, body);
       if (fetched) void store.put(key, fetched).catch(() => undefined);

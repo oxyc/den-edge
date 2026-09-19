@@ -53,7 +53,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// TMDB's largest answers here — a series with every season's credits — are well under this.
 const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// Proxied questions per address per minute. A detail page asks a handful; a crawl asks thousands.
-const PER_WINDOW: u32 = 120;
+/// A paired household gets room to name a large library; an anonymous visitor gets enough to browse.
+const GUEST_PER_WINDOW: u32 = 120;
+const MEMBER_PER_WINDOW: u32 = 600;
 
 /// How long an answer to `path` stays fresh — the same split the app makes in `tmdbCache.ts`.
 /// A body this exact size and shape means "TMDB says there is no such thing". It is stored like any other
@@ -324,8 +326,17 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
     }
     let ip = crate::handler::client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_at(state, &format!("tmdb:{ip}"), PER_WINDOW) {
-        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW) {
+        // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
+        // header therefore buys nothing, while a paired household can finish naming a large library.
+        let member = req.headers().get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
+        if !crate::library::is_member(state, member).await {
+            return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait);
+        }
+        if let Some(wait) = crate::link::throttled_at(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)
+        {
+            return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+        }
     }
     match fetch(state, &path, query.as_deref(), key, rid).await {
         Ok((body, etag)) => {
@@ -961,5 +972,36 @@ mod tests {
         let unlimited = Harness::in_dir_with(temp_dir(), |_| {});
         refund(&unlimited.state);
         assert_eq!(crate::lock(&unlimited.state.tmdb_spent).1, 0, "nothing to give back without a ceiling");
+    }
+
+    #[tokio::test]
+    async fn a_library_member_can_name_titles_past_the_visitor_allowance() {
+        const LIB: &str = "0123456789abcdef";
+        const TOKEN: &str = "the-library-token";
+        const IP: &str = "192.168.1.9";
+
+        let h = lending(&temp_dir(), None);
+        let body = serde_json::json!({
+            "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }]
+        })
+        .to_string();
+        let started =
+            h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(started.status(), StatusCode::OK);
+
+        for _ in 0..GUEST_PER_WINDOW {
+            assert!(crate::link::throttled_at(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW).is_none());
+        }
+
+        let forged = format!("{LIB}:wrong");
+        let refused =
+            h.send("GET", "/tmdb/3/movie/550", None, &[(crate::library::MEMBER_HEADER, &forged)]).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.headers().contains_key(header::RETRY_AFTER));
+
+        let member = format!("{LIB}:{TOKEN}");
+        let admitted =
+            h.send("GET", "/tmdb/3/movie/550", None, &[(crate::library::MEMBER_HEADER, &member)]).await;
+        assert_ne!(admitted.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
