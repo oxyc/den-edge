@@ -253,37 +253,47 @@ describe('atlas rows', () => {
     ).toEqual([1, 2]);
   });
 
-  it.each([
-    ['empty', async () => []],
-    [
-      'failure',
-      async () => {
-        throw new Error('offline');
-      },
-    ],
-  ])('keeps the exact TMDB rows after delayed atlas %s', async (_case, load) => {
-    const tmdb: RowDef[] = [
-      {
-        id: 'service-tmdb-8-US-new-movie',
-        title: 'Recently released Movies',
-        load: async () => [],
-      },
-      { id: 'service-tmdb-8-US-popular-movie', title: 'Popular Movies', load: async () => [] },
-    ];
-    const rows = await settleServiceRows(
-      [
+  it.each(['empty', 'failure'])(
+    'keeps the exact TMDB rows after delayed atlas %s',
+    async (answer) => {
+      let resolve!: (titles: Title[]) => void;
+      let reject!: (reason: Error) => void;
+      const delayed = new Promise<Title[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const tmdb: RowDef[] = [
         {
-          id: 'atlas',
-          title: 'Popular on Netflix',
-          type: 'movie',
-          replaces: 'popular',
-          load,
+          id: 'service-tmdb-8-US-new-movie',
+          title: 'Recently released Movies',
+          load: async () => [],
         },
-      ],
-      tmdb,
-    );
-    expect(rows).toEqual(tmdb);
-  });
+        { id: 'service-tmdb-8-US-popular-movie', title: 'Popular Movies', load: async () => [] },
+      ];
+      let settled = false;
+      const pending = settleServiceRows(
+        [
+          {
+            id: 'atlas',
+            title: 'Popular on Netflix',
+            type: 'movie',
+            replaces: 'popular',
+            load: () => delayed,
+          },
+        ],
+        tmdb,
+      ).then((rows) => {
+        settled = true;
+        return rows;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      if (answer === 'empty') resolve([]);
+      else reject(new Error('offline'));
+      const rows = await pending;
+      expect(rows).toEqual(tmdb);
+    },
+  );
 
   it('replaces only the exact semantic slot and inserts successful addon-only rows after the stable head', async () => {
     const netflix = service({ id: 8, name: 'Netflix' });
