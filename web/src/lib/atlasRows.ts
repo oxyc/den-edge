@@ -17,6 +17,12 @@ interface AtlasRow {
   where: Where;
 }
 
+/** A card score from atlas. Sidecars published before ratings simply omit it. */
+const ratingOf = (value: unknown): number | undefined => {
+  const rating = typeof value === 'number' ? value : NaN;
+  return Number.isFinite(rating) && rating > 0 ? rating : undefined;
+};
+
 const mood = (label: string): Where => ({ mood: label });
 const subgenre = (label: string): Where => ({ subgenre: label });
 
@@ -146,6 +152,7 @@ function titlesOf(body: unknown): Title[] {
         title: t.title,
         posterPath: typeof t.posterPath === 'string' ? t.posterPath : undefined,
         year: typeof t.year === 'number' ? t.year : undefined,
+        rating: ratingOf(t.rating),
         genreIds: Array.isArray(t.genreIds)
           ? t.genreIds.filter((g): g is number => typeof g === 'number')
           : undefined,

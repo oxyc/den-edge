@@ -95,6 +95,11 @@ export async function atlasCatalogs(
 }
 
 /** One of atlas's catalog answers as titles: Stremio metas, which name TMDB's id and carry art of their own. */
+const catalogRating = (value: unknown): number | undefined => {
+  const rating = typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(rating) && rating > 0 ? rating : undefined;
+};
+
 function titlesOfMetas(body: unknown): Title[] {
   const metas = (body as { metas?: unknown } | null)?.metas;
   if (!Array.isArray(metas)) return [];
@@ -116,6 +121,7 @@ function titlesOfMetas(body: unknown): Title[] {
         // Dahmer's poster. Wrong art is worse than none, and a film's two ids agree, so the fallback is films only.
         posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
         year: Number.isInteger(year) && year > 1800 ? year : undefined,
+        rating: catalogRating(meta.imdbRating),
         imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
         // When it lands on the service, or leaves it (atlas's `denAt`, in seconds). Only its leaving and coming
         // charts carry one, and a chart older than atlas 0.41.0 carries none at all, so a row must still work

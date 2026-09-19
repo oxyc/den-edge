@@ -12,6 +12,11 @@ type Json = Record<string, unknown>;
 
 const records = (value: unknown): Json[] => (Array.isArray(value) ? (value as Json[]) : []);
 
+const ratingOf = (value: unknown): number | undefined => {
+  const rating = typeof value === 'number' ? value : NaN;
+  return Number.isFinite(rating) && rating > 0 ? rating : undefined;
+};
+
 /** atlas names a series `series`; Den says `tv`. */
 function refs(value: unknown): Ref[] {
   return records(value).flatMap((r) => {
@@ -99,6 +104,7 @@ export function searchSources(
             title: h.title,
             posterPath: typeof h.posterPath === 'string' ? h.posterPath : undefined,
             year: typeof h.year === 'number' ? h.year : undefined,
+            rating: ratingOf(h.rating),
             genreIds: Array.isArray(h.genreIds)
               ? h.genreIds.filter((g): g is number => typeof g === 'number')
               : undefined,

@@ -138,6 +138,7 @@ describe('atlas rows', () => {
           posterPath: '/known.jpg',
           poster: 'https://images.metahub.space/poster/medium/tt1/img',
           releaseInfo: '1999',
+          imdbRating: '7.8',
         },
         {
           id: 'tt2',
@@ -167,6 +168,8 @@ describe('atlas rows', () => {
     expect(at(titles, 1).posterPath).toBeUndefined();
     expect(at(titles, 1).posterUrl).toMatch(/metahub/);
     expect(at(titles, 0).year).toBe(1999);
+    expect(at(titles, 0).rating, 'the poster is rated before any detail request').toBe(7.8);
+    expect(at(titles, 1).rating, 'legacy/unrated chart entries still decode').toBeUndefined();
   });
 
   // A chart's art is keyed by IMDb id. TMDB splits an anthology into one show per story where IMDb keeps one, so the
