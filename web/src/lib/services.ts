@@ -403,10 +403,25 @@ function mergePool(charts: Title[][], soonest: boolean): Title[] {
 }
 
 const DATE = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+const SERVICE_NAME_MAX = 15;
+
+/** Keep a poster caption's provider beside its date instead of letting a marketplace variant consume the row. */
+export function compactServiceName(name: string): string {
+  const channel = name.replace(/\s+Amazon Channel$/i, '').trim();
+  const letters = [...channel];
+  return letters.length <= SERVICE_NAME_MAX
+    ? channel
+    : `${letters
+        .slice(0, SERVICE_NAME_MAX - 1)
+        .join('')
+        .trimEnd()}…`;
+}
 
 /** Which service a pooled card is on, and — for a row about what is still to come — the day it lands. */
 function captionOf(title: Title, dated: boolean): string | undefined {
-  const where = title.services?.length ? title.services.join(' · ') : undefined;
+  const where = title.services?.length
+    ? title.services.map(compactServiceName).join(' · ')
+    : undefined;
   const when =
     dated && title.arrivesAt !== undefined ? DATE.format(new Date(title.arrivesAt)) : undefined;
   return [where, when].filter(Boolean).join(' · ') || undefined;

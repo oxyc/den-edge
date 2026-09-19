@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compactServiceName,
   atlasCatalogs,
   atlasServiceRows,
   fillPosters,
@@ -35,6 +36,14 @@ const title = (id: number, over: Partial<Title> = {}): Title => ({
   id,
   title: `Title ${id}`,
   ...over,
+});
+
+describe('poster service captions', () => {
+  it('drops marketplace suffixes and caps any remaining provider name', () => {
+    expect(compactServiceName('HBO Max Amazon Channel')).toBe('HBO Max');
+    expect(compactServiceName('An Exceptionally Long Service Name')).toBe('An Exceptional…');
+    expect([...compactServiceName('An Exceptionally Long Service Name')]).toHaveLength(15);
+  });
 });
 
 describe('resolvePicks', () => {
