@@ -316,7 +316,9 @@ export function radarRows(
             return titlesOfMetas(await res.json()).map((title) => ({ ...title, services: named }));
           });
           const merged = mergePool(charts, pool.soonest);
-          return tmdbKey ? fillPosters(merged, tmdbKey) : merged;
+          rememberAtlasMetadata(merged, fetchImpl);
+          const titles = await withSharedTitleMetadata(merged, fetchImpl);
+          return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
         },
       },
     ];

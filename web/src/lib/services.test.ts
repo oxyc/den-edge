@@ -557,6 +557,7 @@ describe('radarRows', () => {
     expect(asked).toEqual([
       '/atlas/catalog/movie/jw-nfx-new/country=US.json',
       '/atlas/catalog/movie/jw-mxx-new/country=US.json',
+      '/metadata/title/query',
     ]);
     expect(
       titles.map((t) => t.id),
@@ -565,7 +566,30 @@ describe('radarRows', () => {
     expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix');
     // A chart is one page: asking for a second must not repeat the first.
     expect(await at(rows, 0).load(2)).toEqual([]);
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
+  });
+
+  it('keeps and publishes ratings received by a pooled Atlas chart', async () => {
+    useLibraryCredential({ id: 'a', token: 'b' });
+    const writes: unknown[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      if (url === '/metadata/title') {
+        writes.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 204 });
+      }
+      if (url === '/metadata/title/query') return new Response('{"entries":[]}');
+      return new Response(JSON.stringify({ metas: [meta(7, { imdbRating: '7.4' })] }));
+    }) as unknown as typeof fetch;
+    const titles = await at(
+      radarRows('/atlas', catalogs, [picks[0]!], { names, fetchImpl }),
+      0,
+    ).load(1);
+    expect(titles).toMatchObject([{ id: 7, rating: 7.4 }]);
+    expect(writes).toEqual([
+      {
+        entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+      },
+    ]);
   });
 
   it('names a title both services carry once, and says both', async () => {
