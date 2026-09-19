@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE } from '../../cast/src/lifecycle';
+import {
+  castErrorAction,
+  castIdleAction,
+  castingTo,
+  PLAYING_HERE,
+  statusShown,
+} from '../../cast/src/lifecycle';
+
+describe('Cast status pill', () => {
+  it('stays off the video unless it says something the picture does not', () => {
+    expect(statusShown('')).toBe(false);
+    expect(statusShown(PLAYING_HERE)).toBe(false);
+    expect(statusShown(castingTo('Living Room TV'))).toBe(true);
+    expect(statusShown('Chromecast could not load this release')).toBe(true);
+    expect(statusShown('Press play')).toBe(true);
+  });
+});
 
 describe('Cast status text', () => {
   it('always says where the picture is', () => {

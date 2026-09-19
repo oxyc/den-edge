@@ -8,27 +8,24 @@
   <body>
     <main>
       <video controls playsinline x-webkit-airplay="allow"></video>
-      <div class="bar">
-        <div class="now">
-          <strong id="title">Choose something in Den</strong>
-          <span id="status">Ready</span>
-        </div>
+      <div class="overlay">
+        <span id="status" class="pill" role="status" hidden></span>
         <google-cast-launcher aria-label="Cast to a TV" title="Cast to a TV"></google-cast-launcher>
+        <details class="cast-options">
+          <summary aria-label="Cast options" title="Cast options">⋯</summary>
+          <label>
+            <span>Receiver</span>
+            <select id="profile">
+              <option value="legacy">Chromecast 1–2</option>
+              <option value="gen3">Chromecast 3</option>
+              <option value="ultra">Chromecast Ultra</option>
+              <option value="google-tv-hd">Chromecast with Google TV (HD)</option>
+              <option value="google-tv-4k">Chromecast with Google TV (4K)</option>
+              <option value="streamer">Google TV Streamer</option>
+            </select>
+          </label>
+        </details>
       </div>
-      <details class="cast-options">
-        <summary>Cast options</summary>
-        <label>
-          <span>Receiver</span>
-          <select id="profile">
-            <option value="legacy">Chromecast 1–2</option>
-            <option value="gen3">Chromecast 3</option>
-            <option value="ultra">Chromecast Ultra</option>
-            <option value="google-tv-hd">Chromecast with Google TV (HD)</option>
-            <option value="google-tv-4k">Chromecast with Google TV (4K)</option>
-            <option value="streamer">Google TV Streamer</option>
-          </select>
-        </label>
-      </details>
     </main>
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <script type="module" src="/src/main.ts"></script>

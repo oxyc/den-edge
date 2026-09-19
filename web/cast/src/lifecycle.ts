@@ -15,7 +15,12 @@ export function castIdleAction(
 /** What the bar says while the video plays in this browser: the default, and what Cast falls back to when it ends. */
 export const PLAYING_HERE = 'Playing on this device';
 
-/** What the bar says while a Cast receiver plays it, so it is never unclear where the picture is. */
+/** Whether the text is worth putting over the video: not when it only repeats what the picture already shows. */
+export function statusShown(text: string): boolean {
+  return text !== '' && text !== PLAYING_HERE;
+}
+
+/** What the pill says while a Cast receiver plays it, so it is never unclear where the picture is. */
 export function castingTo(device: string | null | undefined): string {
   return `Casting to ${device?.trim() || 'your TV'}`;
 }

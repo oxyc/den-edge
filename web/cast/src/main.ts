@@ -1,6 +1,6 @@
 import Hls from 'hls.js';
 import { lanReachable } from './lan';
-import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE } from './lifecycle';
+import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import { signedMedia } from './media';
 import './style.css';
@@ -106,9 +106,14 @@ declare global {
 }
 
 const video = document.querySelector('video')!;
-const title = document.querySelector('#title')!;
-const status = document.querySelector('#status')!;
+const statusPill = document.querySelector<HTMLElement>('#status')!;
 const profile = document.querySelector<HTMLSelectElement>('#profile')!;
+
+/** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
+function setStatus(text: string): void {
+  statusPill.textContent = text;
+  statusPill.hidden = !statusShown(text);
+}
 const parents = new Set(
   (import.meta.env.VITE_DEN_PARENT_ORIGINS ?? 'https://d.oxy.fi')
     .split(',')
@@ -174,16 +179,17 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     hls.loadSource(url);
     hls.attachMedia(video);
   } else {
-    status.textContent = 'This browser cannot play HLS';
-    tell('den-error', { message: status.textContent });
+    const message = 'This browser cannot play HLS';
+    setStatus(message);
+    tell('den-error', { message });
     return;
   }
   video.currentTime = Math.max(0, media.currentTime ?? 0);
   try {
     await video.play();
-    status.textContent = PLAYING_HERE;
+    setStatus(PLAYING_HERE);
   } catch {
-    status.textContent = 'Press play';
+    setStatus('Press play');
   }
 }
 
@@ -272,7 +278,7 @@ async function loadCast(): Promise<void> {
     }
     castStarted = true;
     castSubtitleAppliedId = applyCastSubtitle(media.subtitleLanguage) ? current?.id : undefined;
-    status.textContent = castingTo(session.getCastDevice?.().friendlyName);
+    setStatus(castingTo(session.getCastDevice?.().friendlyName));
     video.pause();
     tell('den-cast', { state: 'playing', profile: profile.value });
   } catch {
@@ -284,8 +290,9 @@ async function loadCast(): Promise<void> {
     castStarted = false;
     if (castErrorAction(media.terminal === true) === 'stop-receiver')
       castContext?.endCurrentSession(true);
-    status.textContent = 'Chromecast could not load this release';
-    tell('den-error', { message: status.textContent });
+    const message = 'Chromecast could not load this release';
+    setStatus(message);
+    tell('den-error', { message });
   }
 }
 
@@ -391,8 +398,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     return;
   }
   current = message as LoadMessage;
-  title.textContent = current.media.title;
-  status.textContent = current.media.subtitle ?? 'Opening…';
+  document.title = current.media.title;
+  setStatus('');
   void open(current);
 });
 
