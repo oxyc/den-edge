@@ -383,7 +383,7 @@ export function groupFilmography(
       department,
       films: credits
         .filter((c) => c.department === department)
-        .sort((a, b) => (b.title.year ?? 0) - (a.title.year ?? 0))
+        .sort(compareFilmCredits)
         .filter((c) => {
           const id = `${c.title.type}:${c.title.id}`;
           if (seen.has(id)) return false;
@@ -392,6 +392,26 @@ export function groupFilmography(
         }),
     };
   });
+}
+
+const fullDate = (value: string | undefined) =>
+  value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+
+/** Newest first, including the order within a year; stable provider order is not chronology. */
+function compareFilmCredits(a: FilmCredit, b: FilmCredit): number {
+  const aDate = fullDate(a.title.releaseDate);
+  const bDate = fullDate(b.title.releaseDate);
+  if (aDate && bDate && aDate !== bDate) return bDate.localeCompare(aDate);
+
+  const byYear = (b.title.year ?? 0) - (a.title.year ?? 0);
+  if (byYear) return byYear;
+  if (aDate !== bDate) return bDate ? 1 : -1;
+
+  return (
+    a.title.title.localeCompare(b.title.title) ||
+    a.title.type.localeCompare(b.title.type) ||
+    a.title.id - b.title.id
+  );
 }
 
 export async function fetchFilmography(
