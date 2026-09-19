@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { hex } from './crypto';
+import { receiveDeviceIdentity } from './inbox';
 import * as pair from './pair';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
@@ -194,6 +195,7 @@ function relay(secret: string, approve = true) {
     write-once and answer 202 until written. */
 function fakeEdge(nameplate = 'ABCD') {
   const slots = new Map<string, string>();
+  const inbox: string[] = [];
   let sid = '';
   const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status });
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -205,6 +207,15 @@ function fakeEdge(nameplate = 'ABCD') {
     }
     if (url === '/pair/open')
       return body.nameplate === nameplate ? json(200, { sid }) : json(410, {});
+    if (url === '/inbox/append') {
+      if (typeof body.sealed !== 'string') return json(400, {});
+      inbox.push(body.sealed);
+      return json(200, { appended: true });
+    }
+    if (url === '/inbox/drain') {
+      const messages = inbox.splice(0).map((sealed) => ({ sealed }));
+      return json(200, { messages });
+    }
     const slot = url.startsWith(`/pair/${sid}/`) ? url.slice(`/pair/${sid}/`.length) : null;
     if (!slot) return json(404, {});
     if (init?.method === 'PUT') {
@@ -245,6 +256,7 @@ describe('hosting a pairing', () => {
     });
     return {
       libraryKey,
+      fetchImpl,
       ...Object.fromEntries([
         ['host', await hosted],
         ['join', await joined],
@@ -253,13 +265,23 @@ describe('hosting a pairing', () => {
   }
 
   it('hands this browser’s library to another, with no TV in it', async () => {
-    const { host: hosted, join: joined, libraryKey } = await pairThem(async () => true);
+    const { host: hosted, join: joined, libraryKey, fetchImpl } = await pairThem(async () => true);
     expect(hosted).toMatchObject({ joiner: 'Chrome on Android', inboxKey: p.link.inbox });
     expect(joined).toHaveProperty('handover.host', 'Safari on Mac');
     expect(joined).toHaveProperty('handover.hostDeviceId', hostDeviceId);
     const handover = (joined as { handover: pair.Handover }).handover;
     expect([...handover.libraryKey]).toEqual([...libraryKey]);
     expect(handover.linkKey).toHaveLength(32);
+    if (!('linkKey' in (hosted as pair.HostResult))) throw new Error('host did not finish');
+    expect(
+      await receiveDeviceIdentity(
+        {
+          inboxKey: hosted.inboxKey,
+          linkKey: btoa(String.fromCharCode(...hosted.linkKey)),
+        },
+        fetchImpl,
+      ),
+    ).toEqual({ name: 'Chrome on Android', deviceId: joinerDeviceId });
   });
 
   it('hands over nothing when the host refuses', async () => {
