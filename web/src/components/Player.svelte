@@ -359,6 +359,7 @@
           image: poster,
           currentTime: started ?? resume.seconds ?? 0,
           subtitleLanguage: subtitleChoice,
+          fallback: degraded,
         },
       },
       current.castOrigin,
@@ -424,7 +425,8 @@
       finished();
     } else if (message.type === 'den-error') {
       casting = false;
-      castMode = false;
+      // Keep the receiver session for one conservative H.264 retry; only that retry's failure returns local.
+      if (degraded) castMode = false;
       void broke(0, message.message ?? 'cast player failed');
     }
   }

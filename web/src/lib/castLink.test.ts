@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { signedLinkLimit } from '../../cast/src/link';
+import { signedLinkLimit, usableLinkLimit } from '../../cast/src/link';
 
 describe('signed public link measurement', () => {
   it('downloads only the supplied signed probe and keeps headroom', async () => {
@@ -33,5 +33,10 @@ describe('signed public link measurement', () => {
         throw new TypeError('offline');
       }),
     ).toBeUndefined();
+  });
+
+  it('does not suspend playback for a sample below the parent player floor', () => {
+    expect(usableLinkLimit(63_999)).toBeUndefined();
+    expect(usableLinkLimit(64_000)).toBe(64_000);
   });
 });

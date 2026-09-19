@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { castIdleAction } from '../../cast/src/lifecycle';
+import { castErrorAction, castIdleAction } from '../../cast/src/lifecycle';
 
 describe('Cast idle lifecycle', () => {
   it('completes only a genuinely finished media session', () => {
@@ -12,5 +12,10 @@ describe('Cast idle lifecycle', () => {
     expect(castIdleAction('ERROR', false)).toBe('error');
     expect(castIdleAction('INTERRUPTED', true)).toBe('replaced');
     expect(castIdleAction('INTERRUPTED', false)).toBe('stopped');
+  });
+
+  it('keeps the receiver for one conservative retry, then stops after fallback fails', () => {
+    expect(castErrorAction(false)).toBe('retry-receiver');
+    expect(castErrorAction(true)).toBe('stop-receiver');
   });
 });

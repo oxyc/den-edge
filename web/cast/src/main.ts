@@ -1,6 +1,6 @@
 import Hls from 'hls.js';
-import { castIdleAction } from './lifecycle';
-import { signedLinkLimit } from './link';
+import { castErrorAction, castIdleAction } from './lifecycle';
+import { signedLinkLimit, usableLinkLimit } from './link';
 import './style.css';
 
 interface Media {
@@ -13,6 +13,7 @@ interface Media {
   image?: string;
   currentTime?: number;
   subtitleLanguage?: string | null;
+  fallback?: boolean;
 }
 
 interface LoadMessage {
@@ -203,7 +204,7 @@ async function measure(media: Media, id: string): Promise<boolean> {
   if (!media.measure || !media.speed || measuredId === id) return false;
   measuredId = id;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const maxBitrate = await signedLinkLimit(media.speed);
+    const maxBitrate = usableLinkLimit(await signedLinkLimit(media.speed));
     if (current?.id !== id) return false;
     if (maxBitrate) {
       tell('den-speed', { maxBitrate });
@@ -282,6 +283,9 @@ async function loadCast(): Promise<void> {
       void loadCast();
       return;
     }
+    castStarted = false;
+    if (castErrorAction(media.fallback === true) === 'stop-receiver')
+      castContext?.endCurrentSession(true);
     status.textContent = 'Chromecast could not load this release';
     tell('den-error', { message: status.textContent });
   }
@@ -326,7 +330,8 @@ function initializeCast(): void {
     castStarted = false;
     if (action === 'finished') tell('den-ended');
     else if (action === 'error') {
-      castContext?.endCurrentSession(true);
+      if (castErrorAction(current?.media.fallback === true) === 'stop-receiver')
+        castContext?.endCurrentSession(true);
       tell('den-error', { message: 'Chromecast could not continue playback' });
     } else {
       // CANCELLED means the media was stopped; an unrelated sender's LOAD is merely disconnected from.

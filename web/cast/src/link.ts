@@ -3,6 +3,11 @@ const SKIP_MS = 150;
 const READ_MS = 4_000;
 const DEADLINE_MS = 10_000;
 const HEADROOM = 0.7;
+const MIN_PLAYABLE_BITRATE = 64_000;
+
+export function usableLinkLimit(value: number | undefined): number | undefined {
+  return value !== undefined && value >= MIN_PLAYABLE_BITRATE ? value : undefined;
+}
 
 /** Measure only the signed URL handed over by Den. This runs on the keyless Cast origin, whose CSP may reach it. */
 export async function signedLinkLimit(

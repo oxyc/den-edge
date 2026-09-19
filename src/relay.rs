@@ -459,8 +459,8 @@ async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr
         stream.write_all(b"\n").await.ok()?;
         stream.shutdown().await.ok()?;
         let mut answer = [0u8; 3];
-        let read = stream.read(&mut answer).await.ok()?;
-        (read == 3 && answer == *b"ok\n").then_some(())
+        stream.read_exact(&mut answer).await.ok()?;
+        (answer == *b"ok\n").then_some(())
     };
     tokio::time::timeout(Duration::from_secs(2), operation).await.ok().flatten().is_some()
 }
