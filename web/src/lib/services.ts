@@ -68,6 +68,15 @@ export interface AtlasCatalog {
   providerIds: number[];
 }
 
+/** The stable whole-catalog slot a chart can improve without changing the row the page already published. */
+export type ServiceRowSlot = 'new' | 'popular';
+
+export type AtlasServiceRow = RowDef & {
+  type: MediaType;
+  /** Leaving/coming rows have no TMDB equivalent and therefore do not replace a stable service slot. */
+  replaces?: ServiceRowSlot;
+};
+
 /**
  * atlas's own catalogs for services, read from its manifest rather than named here.
  *
@@ -198,7 +207,7 @@ export function atlasServiceRows(
     tmdbKey?: string;
     fetchImpl?: typeof fetch;
   } = {},
-): (RowDef & { type: MediaType })[] {
+): AtlasServiceRow[] {
   const ids = new Set([service.id, ...service.variants]);
   // What has just arrived leads, as it does in the TMDB rows: then what is popular, then what is about to go or
   // about to land. atlas's manifest lists them popular-first, which is its own order and not this page's.
@@ -217,6 +226,11 @@ export function atlasServiceRows(
       id: `service-atlas-${service.id}-${country}-${catalog.id}-${catalog.type}`,
       title: mixed ? `${catalog.name} · ${NOUN[catalog.type]}` : catalog.name,
       type: catalog.type,
+      replaces: catalog.id.endsWith('-new')
+        ? ('new' as const)
+        : catalog.id.endsWith('-leaving') || catalog.id.endsWith('-coming')
+          ? undefined
+          : ('popular' as const),
       load: async (page: number) => {
         if (page > 1) return [];
         const path = catalog.type === 'tv' ? 'series' : 'movie';
@@ -406,21 +420,84 @@ function captionOf(title: Title, dated: boolean): string | undefined {
  * atlas's "New on …" is a real arrivals list where TMDB's is a release date standing in for one. Acclaimed has no
  * atlas equivalent and always comes from TMDB.
  */
-export function mergeServiceRows(
-  atlas: readonly RowDef[],
+export async function settleServiceRows(
+  atlas: readonly AtlasServiceRow[],
   tmdb: readonly RowDef[],
-  /**
-   * The media types atlas has actually answered for — not the ones it lists charts for.
-   *
-   * A chart that is listed and then comes back empty hides itself, so suppressing TMDB's rows on the listing alone
-   * left a page of nothing but Acclaimed. A row is only replaced once the thing replacing it has titles in it.
-   */
-  answered: ReadonlySet<MediaType>,
-): RowDef[] {
-  const superseded = (row: RowDef) =>
-    [...answered].some((type) => row.id.endsWith(`-${type}`)) &&
-    (row.id.includes('-popular-') || row.id.includes('-new-'));
-  return [...atlas, ...tmdb.filter((row) => !superseded(row))];
+): Promise<RowDef[]> {
+  const answered = (
+    await Promise.all(
+      atlas.map(async (row) => {
+        try {
+          const seen = new Set<string>();
+          const titles = (await row.load(1)).filter((title) => {
+            const key = `${title.type}:${title.id}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          return titles.length ? { row, titles } : null;
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter((answer): answer is { row: AtlasServiceRow; titles: Title[] } => answer !== null);
+
+  const used = new Set<string>();
+  const stable = tmdb.map((fallback) => {
+    const answer = answered.find(
+      ({ row }) =>
+        row.replaces &&
+        fallback.id.endsWith(`-${row.replaces}-${row.type}`) &&
+        !used.has(`${row.replaces}:${row.type}`),
+    );
+    if (!answer || !answer.row.replaces) return fallback;
+    used.add(`${answer.row.replaces}:${answer.row.type}`);
+
+    // Keep the published row's identity and heading. The chart supplies its first page; TMDB supplies the
+    // endless catalog behind it. Skip duplicate-only fallback pages so Browse does not mistake one for EOF.
+    const seen = new Set(answer.titles.map((title) => `${title.type}:${title.id}`));
+    let fallbackPage = 1;
+    const pages = new Map<number, Title[]>([[1, answer.titles]]);
+    let serial = Promise.resolve<Title[]>([]);
+    const load = (page: number) => {
+      const cached = pages.get(page);
+      if (cached) return Promise.resolve(cached);
+      serial = serial.then(async () => {
+        const already = pages.get(page);
+        if (already) return already;
+        for (;;) {
+          const titles = await fallback.load(fallbackPage++);
+          if (!titles.length) {
+            pages.set(page, []);
+            return [];
+          }
+          const unique = titles.filter((title) => {
+            const key = `${title.type}:${title.id}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          if (unique.length) {
+            pages.set(page, unique);
+            return unique;
+          }
+        }
+      });
+      return serial;
+    };
+    return { ...fallback, load };
+  });
+
+  const extras = answered
+    .filter(({ row }) => !row.replaces)
+    .map(({ row, titles }) => ({
+      ...row,
+      load: (page: number) => Promise.resolve(page === 1 ? titles : []),
+    }));
+  const afterHead = stable.findIndex((row) => !row.id.startsWith('service-tmdb-'));
+  const split = afterHead < 0 ? stable.length : afterHead;
+  return [...stable.slice(0, split), ...extras, ...stable.slice(split)];
 }
 
 /** Subscription only. TMDB leaks rent and buy through this filter even so, which the vote floors below cover for. */
