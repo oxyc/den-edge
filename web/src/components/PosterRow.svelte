@@ -13,7 +13,7 @@
 <section class="row" aria-label={heading}>
   <h2>
     {#if headingHref}
-      <a class="heading-link" href={headingHref}>{heading}<span aria-hidden="true">›</span></a>
+      <a class="heading-link" href={headingHref}>{heading}</a>
     {:else}
       {heading}
     {/if}
@@ -37,9 +37,6 @@
   }
 
   .heading-link {
-    display: inline-flex;
-    gap: 8px;
-    align-items: baseline;
     color: inherit;
     text-decoration: none;
   }
