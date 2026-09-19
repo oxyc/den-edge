@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendUniqueTitles,
   browseRows,
   categories,
   discoverParams,
@@ -52,6 +53,8 @@ describe('primary genre shelves', () => {
     expect(primaryGenre([12, 35, 10751, 16]), 'Adventure · Comedy · Family · Animation').toBe(16);
     expect(primaryGenre([18, 35]), 'Comedy is more specific than Drama').toBe(35);
     expect(primaryGenre([18, 80]), 'Crime is more specific than Drama').toBe(80);
+    expect(primaryGenre([10751, 14]), 'equal rarity keeps TMDB order').toBe(10751);
+    expect(primaryGenre([14, 10751]), 'equal rarity stays deterministic in reverse').toBe(14);
     expect(primaryGenre([])).toBeUndefined();
   });
 
@@ -71,6 +74,13 @@ describe('primary genre shelves', () => {
       true,
     );
     expect(popular?.filter).toBeUndefined();
+    expect(rows.find((row) => row.id.startsWith('recipe-'))?.filter).toBeUndefined();
+  });
+
+  it('deduplicates pages by typed identity, including duplicates inside one page', () => {
+    const movie = { type: 'movie' as const, id: 1, title: 'Movie' };
+    const series = { type: 'tv' as const, id: 1, title: 'Series' };
+    expect(appendUniqueTitles([movie], [movie, movie, series])).toEqual([movie, series]);
   });
 });
 

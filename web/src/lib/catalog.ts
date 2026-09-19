@@ -145,6 +145,21 @@ export function matchesPrimaryGenre(title: Title, genre: number): boolean {
   return primaryGenre(title.genreIds ?? []) === genre;
 }
 
+/** Append a fetched page once per typed title identity; movie and TV ids occupy separate namespaces. */
+export function appendUniqueTitles(existing: readonly Title[], next: readonly Title[]): Title[] {
+  const key = (title: Title) => `${title.type}:${title.id}`;
+  const seen = new Set(existing.map(key));
+  return [
+    ...existing,
+    ...next.filter((title) => {
+      const id = key(title);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }),
+  ];
+}
+
 /** The TV's Explore order per type (GenreCatalog.exploreChips). */
 const EXPLORE: Record<MediaType, number[]> = {
   movie: [28, 35, 18, 27, 878, 10749, 53, 12, 16, 80, 14, 9648, 99],

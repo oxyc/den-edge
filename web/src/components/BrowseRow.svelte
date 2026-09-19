@@ -2,7 +2,7 @@
      first page loads when the row nears the screen, and the next when you scroll to its end. A row that turns out
      empty hides itself. -->
 <script lang="ts">
-  import type { RowDef } from '../lib/catalog';
+  import { appendUniqueTitles, type RowDef } from '../lib/catalog';
   import type { Title } from '../lib/library';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
@@ -32,22 +32,17 @@
       try {
         const next = await row.load(page + 1);
         page++;
-        const seen = titles.map(key);
-        titles = [
-          ...titles,
-          ...next.filter((title) => {
-            const id = key(title);
-            if (seen.includes(id)) return false;
-            seen.push(id);
-            return true;
-          }),
-        ];
+        titles = appendUniqueTitles(titles, next);
         if (next.length === 0) done = true;
       } catch {
         done = true;
       }
       if (titles.filter(visibleHere).length >= FILL * page) break;
     }
+    // With no admitted card the tail marker never moves, so IntersectionObserver cannot trigger another
+    // burst. Resolve the row after the same bounded three-page search as native instead of leaving skeletons
+    // on screen forever.
+    if (!titles.some(visibleHere)) done = true;
     loading = false;
   }
 
