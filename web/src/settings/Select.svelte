@@ -48,6 +48,13 @@
 <style>
   select {
     max-width: 58%;
+
+    /* iOS sizes a select to its widest option and lets the text spill out of a narrower box, which is not an element's
+       own box and so widens the whole page sideways (a region named "Automatic (United States of America)"). Let it
+       shrink and clip its own text. */
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
     min-height: 40px;
     padding: 0 30px 0 10px;
     border: 0;
