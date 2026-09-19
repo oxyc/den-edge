@@ -15,6 +15,8 @@ export interface DiscoverQuery {
   mediaType: MediaType;
   genres?: number[];
   genreJoin?: 'and' | 'or';
+  /** Client-side shelf membership. TMDB's genre filter includes titles carrying this only secondarily. */
+  primaryGenre?: number;
   /** Always OR-joined, as every recipe uses them. */
   keywords?: number[];
   withoutGenres?: number[];
@@ -98,6 +100,50 @@ export const GENRES: Record<MediaType, Record<number, string>> = {
     37: 'Western',
   },
 };
+
+/**
+ * TMDB genre lists are inclusive rather than statements of primacy. Prefer the most specific genre so broad
+ * secondary labels such as Comedy and Drama do not pull an Adventure/Animation title into their shelves.
+ * These prevalence priors mirror DenKit's `GenreRarity`; the dataset's classified primary genre can supersede
+ * them in the native client, while the web always has this metadata-only fallback.
+ */
+const GENRE_RARITY: Record<number, number> = {
+  18: 0.5,
+  35: 0.65,
+  28: 0.85,
+  53: 0.9,
+  12: 1,
+  10749: 1,
+  878: 1.1,
+  14: 1.15,
+  10751: 1.15,
+  27: 1.2,
+  16: 1.2,
+  9648: 1.25,
+  80: 1.35,
+  99: 1.45,
+  36: 1.45,
+  10402: 1.55,
+  10752: 1.55,
+  37: 1.85,
+};
+
+export function primaryGenre(genreIds: readonly number[]): number | undefined {
+  let best: number | undefined;
+  let weight = -Infinity;
+  for (const id of genreIds) {
+    const candidate = GENRE_RARITY[id] ?? 1;
+    if (candidate > weight) {
+      best = id;
+      weight = candidate;
+    }
+  }
+  return best;
+}
+
+export function matchesPrimaryGenre(title: Title, genre: number): boolean {
+  return primaryGenre(title.genreIds ?? []) === genre;
+}
 
 /** The TV's Explore order per type (GenreCatalog.exploreChips). */
 const EXPLORE: Record<MediaType, number[]> = {
@@ -490,7 +536,13 @@ export function categories(
           {
             id: `genre-${id}-${type}`,
             title: `${name} ${noun}`,
-            query: { mediaType: type, genres: [id], voteCountGte: 50, releaseDateGte: dateGte },
+            query: {
+              mediaType: type,
+              genres: [id],
+              primaryGenre: id,
+              voteCountGte: 50,
+              releaseDateGte: dateGte,
+            },
           },
         ]
       : [];
@@ -543,6 +595,8 @@ export interface RowDef {
   /** The named title/person within a contextual heading, and its destination. */
   headingLink?: { before: string; label: string; after: string; href: string };
   load: (page: number) => Promise<Title[]>;
+  /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
+  filter?: (title: Title) => boolean;
   /**
    * What a card says under its name, where the year is not the useful thing. A row pooling several services says
    * which of them a title is on, and when it lands there.
@@ -577,6 +631,10 @@ export function tmdbPages(key: string, fetchImpl: typeof fetch = tmdbFetch): Pag
 const discoverRow = (pages: Pages, id: string, title: string, query: DiscoverQuery): RowDef => ({
   id,
   title,
+  filter:
+    query.primaryGenre === undefined
+      ? undefined
+      : (item) => matchesPrimaryGenre(item, query.primaryGenre!),
   load: (page) =>
     pages(`/discover/${query.mediaType}`, query.mediaType, discoverParams(query), page),
 });
@@ -682,7 +740,11 @@ export function browseRows(
     load: (page) => pages(`/${type}/popular`, type, {}, page),
   };
   const genreRows = curated.map((id) =>
-    discoverRow(pages, `genre-${id}`, GENRES[type][id] ?? '', { mediaType: type, genres: [id] }),
+    discoverRow(pages, `genre-${id}`, GENRES[type][id] ?? '', {
+      mediaType: type,
+      genres: [id],
+      primaryGenre: id,
+    }),
   );
   const tail = categories(type, now.getFullYear(), { minYear, excludedLanguages }).filter((c) => {
     const only = c.id.startsWith('genre-') ? c.query.genres?.[0] : undefined;

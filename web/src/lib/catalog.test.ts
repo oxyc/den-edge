@@ -6,6 +6,7 @@ import {
   homeRows,
   interleave,
   personalRows,
+  primaryGenre,
   RECIPES,
   tmdbPages,
   type Pages,
@@ -43,6 +44,33 @@ describe('discover queries, as DenKit builds them', () => {
       'first_air_date.gte': '1990-01-01',
       'first_air_date.lte': '1999-12-31',
     });
+  });
+});
+
+describe('primary genre shelves', () => {
+  it('uses the most specific genre rather than admitting every secondary TMDB label', () => {
+    expect(primaryGenre([12, 35, 10751, 16]), 'Adventure · Comedy · Family · Animation').toBe(16);
+    expect(primaryGenre([18, 35]), 'Comedy is more specific than Drama').toBe(35);
+    expect(primaryGenre([18, 80]), 'Crime is more specific than Drama').toBe(80);
+    expect(primaryGenre([])).toBeUndefined();
+  });
+
+  it('marks only plain genre rows for primary-genre filtering', () => {
+    const rows = browseRows('movie', async () => []);
+    const comedy = rows.find((row) => row.id === 'genre-35');
+    const popular = rows.find((row) => row.id === 'popular');
+    expect(
+      comedy?.filter?.({
+        type: 'movie',
+        id: 277834,
+        title: 'Moana',
+        genreIds: [12, 35, 10751, 16],
+      }),
+    ).toBe(false);
+    expect(comedy?.filter?.({ type: 'movie', id: 1, title: 'A comedy', genreIds: [18, 35] })).toBe(
+      true,
+    );
+    expect(popular?.filter).toBeUndefined();
   });
 });
 

@@ -441,6 +441,16 @@ describe('serviceRows', () => {
     // three sorts — and every one of those rows asks with the provider filter too, or it would be a row about
     // everything wearing this service's name.
     expect(rows.length, 'as deep as the service is').toBeGreaterThan(50);
+    const comedy = rows.find((row) => row.title === 'Comedy Movies');
+    expect(
+      comedy?.filter?.({
+        type: 'movie',
+        id: 277834,
+        title: 'Moana',
+        genreIds: [12, 35, 10751, 16],
+      }),
+      'scoping a genre shelf to a service keeps its primary-genre rule',
+    ).toBe(false);
     asked.length = 0;
     await at(rows, 20).load(1);
     expect(at(asked, 0).params.with_watch_providers).toBe('8|1796');

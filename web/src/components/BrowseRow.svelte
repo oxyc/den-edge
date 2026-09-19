@@ -21,7 +21,8 @@
   let wrapper: HTMLElement;
   let end: HTMLElement;
 
-  const visible = $derived(titles.filter(shown));
+  const visibleHere = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
+  const visible = $derived(titles.filter(visibleHere));
   const key = (t: Title) => `${t.type}:${t.id}`;
 
   async function more() {
@@ -37,7 +38,7 @@
       } catch {
         done = true;
       }
-      if (titles.filter(shown).length >= FILL * page) break;
+      if (titles.filter(visibleHere).length >= FILL * page) break;
     }
     loading = false;
   }

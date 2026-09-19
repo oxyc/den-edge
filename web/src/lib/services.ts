@@ -9,6 +9,7 @@ import {
   categories,
   discoverParams,
   interleave,
+  matchesPrimaryGenre,
   type DiscoverQuery,
   type Pages,
   type RowDef,
@@ -639,6 +640,10 @@ export function serviceRows(
   const feed = interleave([feedFor('movie'), feedFor('tv')]).map((c) => ({
     id: `service-feed-${service.id}-${country}-${c.id}`,
     title: c.title,
+    filter:
+      c.query.primaryGenre === undefined
+        ? undefined
+        : (title: Title) => matchesPrimaryGenre(title, c.query.primaryGenre!),
     load: (page: number) =>
       pages(
         `/discover/${c.query.mediaType}`,
