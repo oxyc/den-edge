@@ -7,13 +7,8 @@
   import { tmdbPages } from '../lib/catalog';
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
-  import {
-    atlasCatalogs,
-    atlasServiceRows,
-    mergeServiceRows,
-    serviceRows,
-    type AtlasCatalog,
-  } from '../lib/services';
+  import { atlasCatalogs, atlasServiceRows, settleServiceRows, serviceRows } from '../lib/services';
+  import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
   import { fetchServices, matches, type Service } from '../settings/services';
   import Billboard from './Billboard.svelte';
@@ -59,7 +54,6 @@
     let current = true;
     directory = null;
     unreachable = false;
-    answered = [];
     void fetchServices(wanted, tmdbKey).then(
       (services) => {
         if (current) directory = services;
@@ -78,48 +72,50 @@
   /** Which of a service's catalogue is shown; null is all of it. Offered only where the service carries both. */
   let tab = $state<MediaType | null>(null);
   const both = $derived(!!service?.movies && !!service.series);
-  /** atlas's catalogs, when it answers. Its rows are left out rather than waited for: TMDB's stand on their own. */
-  let catalogs = $state<AtlasCatalog[]>([]);
+  const only = $derived(tab ?? undefined);
+  let rows = $state<RowDef[]>([]);
   $effect(() => {
+    const selected = service;
     const here = atlas;
-    if (!here) return;
+    const mediaType = only;
+    const year = minYear;
+    const languages = excludedLanguages;
     let current = true;
-    void atlasCatalogs(here).then(
-      (listed) => {
-        if (current) catalogs = listed;
-      },
-      () => {
-        // atlas down or not reachable from here: the page is TMDB's rows, which is what it was before atlas had any.
-      },
-    );
+    rows = [];
+    featured = [];
+    heroFrom = '';
+    if (!selected) return;
+    const tmdb = serviceRows(selected, country, tmdbPages(tmdbKey), {
+      minYear: year,
+      only: mediaType,
+      excludedLanguages: languages,
+    });
+    if (!here) {
+      rows = tmdb;
+      return;
+    }
+    void atlasCatalogs(here)
+      .then((catalogs) =>
+        settleServiceRows(
+          atlasServiceRows(here, catalogs, selected, country, {
+            only: mediaType,
+            tmdbKey,
+          }),
+          tmdb,
+        ),
+      )
+      .then(
+        (settled) => {
+          if (current) rows = settled;
+        },
+        () => {
+          // Manifest failure is a settled answer too: publish the complete TMDB page once, with stable row keys.
+          if (current) rows = tmdb;
+        },
+      );
     return () => {
       current = false;
     };
-  });
-
-  /**
-   * The media types atlas has answered with titles for. A chart that is listed and comes back empty hides itself, so
-   * replacing TMDB's rows on the strength of the listing alone left a page of nothing but Acclaimed.
-   */
-  let answered = $state<MediaType[]>([]);
-  const only = $derived(tab ?? undefined);
-  const rows = $derived.by(() => {
-    if (!service) return [];
-    const tmdb = serviceRows(service, country, tmdbPages(tmdbKey), {
-      minYear,
-      only,
-      excludedLanguages,
-    });
-    const own = atlas ? atlasServiceRows(atlas, catalogs, service, country, { only, tmdbKey }) : [];
-    const watched = own.map((row) => ({
-      ...row,
-      load: async (page: number) => {
-        const titles = await row.load(page);
-        if (titles.length && !answered.includes(row.type)) answered = [...answered, row.type];
-        return titles;
-      },
-    }));
-    return mergeServiceRows(watched, tmdb, new Set(answered));
   });
 
   /**
@@ -166,12 +162,11 @@
        aligned `.topLeading`, lockup padded in from the edge) — so the page opens AS this service rather than as
        a label glued above somebody else's artwork. The hero is full-bleed and pulls itself up behind the
        navigation bar, which is why the lockup is positioned within this wrapper rather than placed before it.
-       Narrower than the desktop breakpoint it returns to the flow, where a lockup over a short picture crowds
-       the title it happens to be sitting on. -->
-  <div class="hero" class:branded={featured.length > 0}>
-    {#if featured.length}
-      <Billboard titles={featured} {tmdbKey} {reel} {routes} />
-    {/if}
+       The same shell is present before titles arrive, so the lockup and every row keep their position. -->
+  <div class="hero branded">
+    <!-- Billboard reserves its final responsive height even with no titles. Keeping it mounted makes directory,
+         atlas, poster and trailer latency unable to move the service rows below it. -->
+    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
     <header class="brand">
       {#if service.logoPath}
         <img
