@@ -8,6 +8,7 @@
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
   import type { Title } from '../lib/library';
+  import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     downmixLabel,
@@ -134,8 +135,10 @@
   let timer: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
-  let reported = -1;
   let ended = false;
+  const progress = new PlaybackProgressReporter((fraction, seconds) =>
+    onprogress(fraction, seconds),
+  );
   /** Where the next session starts: a language switch picks up where the last one was. */
   let startAt: { fraction: number; seconds?: number } | null = null;
   /** The second den-remux was asked to start the playing session at; undefined when it was asked for none. */
@@ -382,15 +385,11 @@
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
   function report(slack = 0) {
-    const total = length();
-    if (!video || !total || video.currentTime < 1) return;
-    const second = Math.floor(video.currentTime);
-    if (reported >= 0 && Math.abs(second - reported) <= slack) return;
-    reported = second;
-    onprogress(video.currentTime / total, second);
+    if (video) progress.report(video.currentTime, length(), slack);
   }
 
   function playing() {
+    progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
   }
@@ -402,7 +401,7 @@
 
   /** The end: count down to the next episode, when there is one. */
   function finished() {
-    report();
+    progress.complete(video?.currentTime ?? 0);
     if (!onnext) return;
     upNext = UP_NEXT_SECS;
     countdown = setInterval(() => {
