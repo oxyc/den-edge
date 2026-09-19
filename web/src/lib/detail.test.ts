@@ -166,7 +166,10 @@ describe('seasons and people', () => {
           JSON.stringify({
             parts: [
               { id: 2, title: 'Later sequel', release_date: '2026-11-01' },
-              { id: 3, title: 'Year only', release_date: '2026' },
+              { id: 3, title: 'Newer year only', release_date: '2027' },
+              { id: 4, title: 'No date' },
+              { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
+              { id: 5, title: 'Alpha tie', release_date: '2026-02-01' },
               { id: 1, title: 'Earlier sequel', release_date: '2026-02-01' },
             ],
           }),
@@ -174,9 +177,11 @@ describe('seasons and people', () => {
     );
 
     expect(titles.map((title) => title.title)).toEqual([
+      'Alpha tie',
       'Earlier sequel',
       'Later sequel',
-      'Year only',
+      'Newer year only',
+      'No date',
     ]);
   });
 });

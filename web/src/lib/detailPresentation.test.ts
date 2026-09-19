@@ -207,15 +207,20 @@ describe('full actor filmography', () => {
             title: 'Being Heumann',
             release_date: '2026-06-01',
           },
-          { id: 103, media_type: 'movie', title: 'Year only', release_date: '2026' },
+          { id: 104, media_type: 'movie', title: 'Alpha tie', release_date: '2026-06-01' },
+          { id: 104, media_type: 'movie', title: 'Alpha tie', release_date: '2026-06-01' },
+          { id: 103, media_type: 'movie', title: 'Newer year only', release_date: '2027' },
+          { id: 105, media_type: 'movie', title: 'No date' },
         ],
       }),
     )[0]!.films;
 
     expect(films.map((credit) => credit.title.title)).toEqual([
+      'Alpha tie',
       'Being Heumann',
       'Crime 101',
-      'Year only',
+      'Newer year only',
+      'No date',
     ]);
   });
 
