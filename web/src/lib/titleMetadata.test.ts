@@ -88,7 +88,12 @@ test('hydrates missing fields without replacing fresher local card metadata', as
     ],
     fetchImpl,
   );
-  expect(hydrated).toMatchObject({ rating: 8.4, votes: 100, posterPath: '/shared.jpg' });
+  expect(hydrated).toMatchObject({
+    rating: 8.4,
+    ratingSource: 'tmdb',
+    votes: 100,
+    posterPath: '/shared.jpg',
+  });
   expect(retained).toMatchObject({ rating: 9, posterPath: '/local.jpg' });
 });
 
@@ -120,6 +125,7 @@ test('rejects expired and future field timestamps independently', async () => {
     id: 550,
     title: 'Fight Club',
     rating: undefined,
+    ratingSource: undefined,
     votes: undefined,
     posterPath: '/shared.jpg',
   });

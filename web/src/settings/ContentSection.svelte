@@ -533,7 +533,7 @@
       {disabled}
       onchange={(id, on) => save(change.ratingSources(toggled(prefs.ratingSources, id, on)))}
     />
-    <p class="foot">Choose which ratings show on detail pages. Cards show TMDB only.</p>
+    <p class="foot">Choose which ratings show on detail pages. Cards identify TMDB and Atlas IMDb scores.</p>
   </SettingRow>
 
   <SettingRow id="parental-controls" label="Parental controls" value={limitLabel}>

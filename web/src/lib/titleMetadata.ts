@@ -169,10 +169,16 @@ export async function withSharedTitleMetadata(
         fields
           .filter((field): field is Observed<T> => validObserved(field, valid))
           .sort((a, b) => b.observedAt - a.observedAt)[0]?.value;
-      const rating = newest(
-        observed.map((entry) => entry.fields.rating),
-        (value) => Number.isFinite(value) && value > 0 && value <= 10,
-      );
+      const rating = observed
+        .flatMap((entry) =>
+          validObserved(
+            entry.fields.rating,
+            (value) => Number.isFinite(value) && value > 0 && value <= 10,
+          )
+            ? [{ ...entry.fields.rating, source: entry.source }]
+            : [],
+        )
+        .sort((a, b) => b.observedAt - a.observedAt)[0];
       const votes = newest(
         observed.filter((entry) => entry.source === 'tmdb').map((entry) => entry.fields.voteCount),
         (value) => Number.isInteger(value) && value >= 0,
@@ -186,7 +192,11 @@ export async function withSharedTitleMetadata(
         rating:
           typeof title.rating === 'number' && title.rating > 0
             ? title.rating
-            : (rating ?? title.rating),
+            : (rating?.value ?? title.rating),
+        ratingSource:
+          typeof title.rating === 'number' && title.rating > 0
+            ? title.ratingSource
+            : (rating?.source ?? title.ratingSource),
         votes: title.votes ?? votes,
         posterPath: title.posterPath ?? posterPath,
       };

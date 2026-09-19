@@ -7,6 +7,7 @@ import { syncPolicy } from './syncCore';
 import type { Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
+export type PosterRatingSource = 'tmdb' | 'justwatch-imdb';
 
 export interface Title {
   type: MediaType;
@@ -25,6 +26,8 @@ export interface Title {
   /** The full release date (`YYYY-MM-DD`) where TMDB gave one: a year can't tell last month from last January. */
   releaseDate?: string;
   rating?: number;
+  /** Provenance for the score on this card. Atlas carries JustWatch's IMDb score; TMDB carries its own. */
+  ratingSource?: PosterRatingSource;
   /** How many votes that rating rests on — a 9.4 from eleven people is not a recommendation. */
   votes?: number;
   /** TMDB's popularity: how much attention it is getting now, which an unreleased title can have and a rating

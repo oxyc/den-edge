@@ -128,6 +128,8 @@ function titlesOfMetas(body: unknown): Title[] {
         posterUrl: type === 'movie' && typeof meta.poster === 'string' ? meta.poster : undefined,
         year: Number.isInteger(year) && year > 1800 ? year : undefined,
         rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? rating : undefined,
+        ratingSource:
+          Number.isFinite(rating) && rating > 0 && rating <= 10 ? 'justwatch-imdb' : undefined,
         imdbId: typeof meta.imdb_id === 'string' ? meta.imdb_id : undefined,
         // When it lands on the service, or leaves it (atlas's `denAt`, in seconds). Only its leaving and coming
         // charts carry one, and a chart older than atlas 0.41.0 carries none at all, so a row must still work

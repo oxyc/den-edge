@@ -48,8 +48,12 @@
       <span class="placeholder">{title.title}</span>
     {/if}
     {#if title.rating}
-      <span class="rating" aria-label="Rated {title.rating.toFixed(1)}"
-        >★ {title.rating.toFixed(1)}</span
+      <span
+        class="rating"
+        aria-label="{title.ratingSource === 'justwatch-imdb'
+          ? 'IMDb'
+          : 'TMDB'} rating {title.rating.toFixed(1)}"
+        >{title.ratingSource === 'justwatch-imdb' ? 'IMDb' : '★'} {title.rating.toFixed(1)}</span
       >
     {/if}
     {#if release}

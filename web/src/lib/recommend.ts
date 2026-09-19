@@ -39,8 +39,6 @@ function hintOf(title: Title) {
     originalLanguage: title.originalLanguage,
     countries: title.countries,
     popularity: title.popularity,
-    rating: title.rating,
-    votes: title.votes,
     adult: title.adult,
     imdbId: title.imdbId,
   };

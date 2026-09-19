@@ -255,7 +255,12 @@ pub async fn sweep_forever(state: Arc<AppState>) {
         return;
     };
     loop {
+        // A sweep decides from the file's old mtime and then removes it. Serialize that decision with
+        // publication, otherwise a writer can atomically replace an expired file between those two steps and
+        // the sweep will delete the fresh observation.
+        let _write = state.title_metadata_writes.lock().await;
         crate::tmdb::sweep_older_than(&dir, RETENTION).await;
+        drop(_write);
         tokio::time::sleep(Duration::from_secs(86_400)).await;
     }
 }

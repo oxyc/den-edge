@@ -59,6 +59,7 @@ describe('atlasRows', () => {
         originalLanguage: 'ko',
         imdbId: 'tt0000002',
         rating: 7.8,
+        ratingSource: 'tmdb',
         votes: 12,
       },
     ]);

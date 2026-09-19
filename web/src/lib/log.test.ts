@@ -671,6 +671,7 @@ describe('tmdb', () => {
         year: 2016,
         releaseDate: '2016-11-11',
         rating: 7.6,
+        ratingSource: 'tmdb',
       },
     });
     const series = await fetchDetails(
