@@ -1,6 +1,7 @@
 import Hls from 'hls.js';
 import { castErrorAction, castIdleAction } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
+import { signedMedia } from './media';
 import './style.css';
 
 interface Media {
@@ -128,20 +129,6 @@ profile.addEventListener('change', () => {
   localStorage.setItem('den.cast.profile', profile.value);
   if (castContext?.getCurrentSession()) tell('den-cast-request', { profile: profile.value });
 });
-
-function signedMedia(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const ip = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsed.hostname) || parsed.hostname.includes(':');
-    return (
-      parsed.protocol === 'https:' &&
-      ip &&
-      /^\/remux\/s\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}\/master\.m3u8$/.test(parsed.pathname)
-    );
-  } catch {
-    return false;
-  }
-}
 
 function signedSpeed(media: Media): boolean {
   if (!media.speed) return true;
