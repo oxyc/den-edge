@@ -5,7 +5,7 @@ import {
   fillPosters,
   GUEST_PICKS,
   mergeNewRow,
-  mergeServiceRows,
+  settleServiceRows,
   radarRows,
   resolvePicks,
   serviceRows,
@@ -197,65 +197,126 @@ describe('atlas rows', () => {
     expect(at(titles, 0).posterUrl, 'no art rather than another story’s').toBeUndefined();
   });
 
-  it('lets atlas’s charts replace TMDB’s, for the media type it covers and no other', () => {
-    const atlas: AtlasCatalog[] = [
-      { id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] },
-      { id: 'jw-nfx-new', name: 'New on Netflix', type: 'movie', providerIds: [8] },
+  it('settles delayed atlas success into the existing row identity and keeps paging without duplicates', async () => {
+    let answer!: (titles: Title[]) => void;
+    const delayed = new Promise<Title[]>((resolve) => (answer = resolve));
+    const atlas = [
+      {
+        id: 'service-atlas-8-US-jw-nfx-movie',
+        title: 'Popular on Netflix',
+        type: 'movie' as const,
+        replaces: 'popular' as const,
+        load: () => delayed,
+      },
     ];
-    const netflix = service({ id: 8, name: 'Netflix' });
-    const own = atlasServiceRows('/atlas', atlas, netflix, 'US');
-    const tmdb = serviceRows(netflix, 'US', async () => []);
-    const merged = mergeServiceRows(own, tmdb, new Set(['movie' as const]));
-    // The head of the page. The whole catalogue, re-pointed at the service, follows it.
-    expect(merged.map((row) => row.title).slice(0, 6)).toEqual([
-      'New on Netflix',
-      'Popular on Netflix',
-      // The films atlas covers lose TMDB's popular and recently-released; series keep theirs, and Acclaimed has no
-      // atlas equivalent for either.
-      'Recently released Series',
-      'Popular Series',
-      'Acclaimed Movies',
-      'Acclaimed Series',
-    ]);
-    expect(merged.length, 'and then the service’s own depth').toBeGreaterThan(50);
-  });
-
-  it('is TMDB’s rows alone where atlas carries nothing for the service', () => {
-    const paramount = service({ id: 531, name: 'Paramount+' });
-    const tmdb = serviceRows(paramount, 'UY', async () => []);
-    const own = atlasServiceRows(
-      '/atlas',
-      [{ id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] }],
-      paramount,
-      'UY',
+    const asked: number[] = [];
+    const popular: RowDef = {
+      id: 'service-tmdb-8-US-popular-movie',
+      title: 'Popular Movies',
+      load: async (page) => {
+        asked.push(page);
+        return page === 1
+          ? [title(1, { type: 'movie' })]
+          : page === 2
+            ? [title(2, { type: 'movie' })]
+            : [];
+      },
+    };
+    const tmdb: RowDef[] = [
+      {
+        id: 'service-tmdb-8-US-new-movie',
+        title: 'Recently released Movies',
+        load: async () => [],
+      },
+      popular,
+      { id: 'service-feed-8-US-action-movie', title: 'Action Movies', load: async () => [] },
+    ];
+    let settled = false;
+    const pending = settleServiceRows(atlas, tmdb).then((rows) => {
+      settled = true;
+      return rows;
+    });
+    await Promise.resolve();
+    expect(settled, 'the page does not publish throwaway rows while atlas is unresolved').toBe(
+      false,
     );
-    expect(own).toEqual([]);
-    expect(mergeServiceRows(own, tmdb, new Set())).toEqual(tmdb);
+    answer([title(1, { type: 'movie' }), title(1, { type: 'movie' })]);
+    const rows = await pending;
+    expect(rows.map(({ id, title }) => ({ id, title }))).toEqual(
+      tmdb.map(({ id, title }) => ({ id, title })),
+    );
+    expect(
+      await at(rows, 1).load(1),
+      'the addon first page is deduplicated before the fallback continues it',
+    ).toEqual([title(1, { type: 'movie' })]);
+    expect((await at(rows, 1).load(2)).map((item) => item.id)).toEqual([2]);
+    expect(
+      asked,
+      'a duplicate-only TMDB page is skipped, rather than ending the endless row',
+    ).toEqual([1, 2]);
   });
 
-  it('replaces a TMDB row only once atlas has answered for that type', () => {
+  it.each(['empty', 'failure'])(
+    'keeps the exact TMDB rows after delayed atlas %s',
+    async (answer) => {
+      let resolve!: (titles: Title[]) => void;
+      let reject!: (reason: Error) => void;
+      const delayed = new Promise<Title[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const tmdb: RowDef[] = [
+        {
+          id: 'service-tmdb-8-US-new-movie',
+          title: 'Recently released Movies',
+          load: async () => [],
+        },
+        { id: 'service-tmdb-8-US-popular-movie', title: 'Popular Movies', load: async () => [] },
+      ];
+      let settled = false;
+      const pending = settleServiceRows(
+        [
+          {
+            id: 'atlas',
+            title: 'Popular on Netflix',
+            type: 'movie',
+            replaces: 'popular',
+            load: () => delayed,
+          },
+        ],
+        tmdb,
+      ).then((rows) => {
+        settled = true;
+        return rows;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      if (answer === 'empty') resolve([]);
+      else reject(new Error('offline'));
+      const rows = await pending;
+      expect(rows).toEqual(tmdb);
+    },
+  );
+
+  it('replaces only the exact semantic slot and inserts successful addon-only rows after the stable head', async () => {
     const netflix = service({ id: 8, name: 'Netflix' });
+    const tmdb = serviceRows(netflix, 'US', async () => []);
     const own = atlasServiceRows(
       '/atlas',
-      [{ id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] }],
+      [
+        { id: 'jw-nfx', name: 'Popular on Netflix', type: 'movie', providerIds: [8] },
+        { id: 'jw-nfx-leaving', name: 'Leaving Netflix', type: 'movie', providerIds: [8] },
+      ],
       netflix,
       'US',
+      { fetchImpl: answering({ metas: [{ moviedb_id: 1, name: 'One', type: 'movie' }] }) },
     );
-    const tmdb = serviceRows(netflix, 'US', async () => []);
-    // Listed but not yet answered: every TMDB row stands, so the page is never down to Acclaimed alone.
-    expect(
-      mergeServiceRows(own, tmdb, new Set())
-        .map((row) => row.title)
-        .slice(0, 7),
-    ).toEqual([
-      'Popular on Netflix',
-      'Recently released Movies',
-      'Recently released Series',
-      'Popular Movies',
-      'Popular Series',
-      'Acclaimed Movies',
-      'Acclaimed Series',
-    ]);
+    const rows = await settleServiceRows(own, tmdb);
+    expect(rows.slice(0, 6).map((row) => row.id)).toEqual(tmdb.slice(0, 6).map((row) => row.id));
+    expect(rows.slice(0, 6).map((row) => row.title)).toEqual(
+      tmdb.slice(0, 6).map((row) => row.title),
+    );
+    expect(at(rows, 6).title).toBe('Leaving Netflix');
   });
 });
 

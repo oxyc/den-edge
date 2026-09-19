@@ -123,6 +123,8 @@
   let scout = $state<Addon | null>(null);
   /** Where this page reaches atlas, search's indexes; null where it can't. */
   let atlas = $state<string | null>(null);
+  /** Distinguishes "Atlas discovery still running" from its settled no-Atlas answer. */
+  let atlasReady = $state(false);
   /** Where this page reaches reel, the billboard's trailers; null where it can't. */
   let reel = $state<string | null>(null);
   /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
@@ -211,6 +213,7 @@
         });
       } else shelvesReady = true;
       plugins = opened ? readPlugins(opened.settings('plugins')) : [];
+      atlasReady = false;
       const [key, installed] = [tmdbKey, plugins];
       // Where the last visit found the addons, used until this visit's discovery answers. A guest keeps
       // nothing between visits — what is kept lives in the library — so there is nothing to restore.
@@ -258,6 +261,7 @@
             : {}),
           atlas: (found) => {
             atlas = found?.base ?? null;
+            atlasReady = true;
           },
           reel: (found) => {
             reel = found?.base ?? null;
@@ -1157,6 +1161,7 @@
     country={route.country}
     {tmdbKey}
     {atlas}
+    {atlasReady}
     minYear={prefs.minReleaseYear}
     excludedLanguages={prefs.excludedLanguages}
     {reel}

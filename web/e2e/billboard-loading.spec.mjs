@@ -40,9 +40,11 @@ for (const width of [320, 393, 844, 1280])
       });
       await page.goto('http://127.0.0.1:5198/test/billboard.html');
       const hero = page.locator('.billboard');
+      await expect(hero).toHaveAttribute('aria-hidden', 'true');
       const empty = await hero.boundingBox();
       await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
       await expect(page.locator('.slide')).toHaveCount(2);
+      await expect(hero).not.toHaveAttribute('aria-hidden', 'true');
       // What must not move while a slide loads: the hero's own height, and where everything below it
       // starts. The words inside are deliberately NOT measured — they take the lines they need, and the
       // text block reserves its room (`.text` has a min-height and sits its content at the bottom), so a
