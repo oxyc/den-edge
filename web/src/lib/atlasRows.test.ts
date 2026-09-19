@@ -5,7 +5,7 @@ describe('atlasRows', () => {
   const answering = (asked: string[]) =>
     (async (url: string) => {
       asked.push(url);
-      if (url === '/metadata/tmdb/query') {
+      if (url === '/metadata/title/query') {
         const observedAt = Date.now();
         return new Response(
           JSON.stringify({
@@ -64,7 +64,7 @@ describe('atlasRows', () => {
     ]);
     expect(asked).toEqual([
       '/atlas/auto_nfx/index/row/movie.json?pacing=slow-burn&tone=bleak&skip=24&limit=24',
-      '/metadata/tmdb/query',
+      '/metadata/title/query',
     ]);
   });
 
@@ -75,9 +75,9 @@ describe('atlasRows', () => {
     await series.find((r) => r.id === 'atlas-subgenre-whodunit-tv')!.load(1);
     expect(asked).toEqual([
       '/atlas/index/row/series.json?mood=Dark+%26+Gritty&skip=0&limit=24',
-      '/metadata/tmdb/query',
+      '/metadata/title/query',
       '/atlas/index/row/series.json?subgenre=Whodunit%2FMurder+Mystery&skip=0&limit=24',
-      '/metadata/tmdb/query',
+      '/metadata/title/query',
     ]);
   });
 

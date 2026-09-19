@@ -153,10 +153,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if path.starts_with("/warnings/") {
         return crate::warnings::handle(state, req, rid).await;
     }
-    // Allowlisted poster metadata learned by a paired client from a direct TMDB answer. Kept outside Atlas so
-    // dataset payloads never become a rating distribution channel.
-    if path == "/metadata/tmdb" || path == "/metadata/tmdb/query" {
-        return crate::tmdb_metadata::handle(state, req).await;
+    // Allowlisted title metadata learned by a paired client. Provenance keeps direct TMDB observations apart
+    // from Atlas's existing JustWatch-sourced IMDb score.
+    if path == "/metadata/title" || path == "/metadata/title/query" {
+        return crate::title_metadata::handle(state, req).await;
     }
     // OMDb's ratings, kept for every device the same way.
     if path.starts_with("/ratings/") {
@@ -373,8 +373,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
-        "/metadata/tmdb" => "/metadata/tmdb",
-        "/metadata/tmdb/query" => "/metadata/tmdb/query",
+        "/metadata/title" => "/metadata/title",
+        "/metadata/title/query" => "/metadata/title/query",
         p if p.starts_with("/ratings/") => "/ratings",
         p if p.starts_with("/skipdb/") => "/skipdb",
         // One label each: what happens inside them is their own repo's log to keep.
@@ -398,8 +398,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         }
         "/pair/:sid/:slot" => Some(GET_PUT),
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
-        "/metadata/tmdb/query" => Some(POST),
-        "/metadata/tmdb" => Some(PUT),
+        "/metadata/title/query" => Some(POST),
+        "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" => Some(DELETE),
         _ => None,
     }

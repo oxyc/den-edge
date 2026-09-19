@@ -6,7 +6,7 @@
 
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
-import { rememberTmdbMetadata } from './tmdbMetadata';
+import { rememberTmdbMetadata } from './titleMetadata';
 
 const TMDB = 'https://api.themoviedb.org/3/';
 

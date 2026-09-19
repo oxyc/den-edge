@@ -2,6 +2,7 @@ import type { Title } from './library';
 import { hasLibraryCredential, relayFetch } from './relayFetch';
 
 type Kind = 'movie' | 'tv';
+type Source = 'tmdb' | 'justwatch-imdb';
 interface Fields {
   rating?: number;
   voteCount?: number;
@@ -10,6 +11,7 @@ interface Fields {
 interface Observation {
   type: Kind;
   id: number;
+  source: Source;
   fields: Fields;
 }
 interface Observed<T> {
@@ -19,7 +21,7 @@ interface Observed<T> {
 interface Stored {
   type: Kind;
   id: number;
-  source: 'tmdb';
+  source: Source;
   fields: {
     rating?: Observed<number>;
     voteCount?: Observed<number>;
@@ -76,7 +78,8 @@ export function metadataIn(path: string, body: string): Observation[] {
     )
       fields.voteCount = item.vote_count;
     if (validPoster(item.poster_path)) fields.posterPath = item.poster_path;
-    if (Object.keys(fields).length) found.set(`${type}:${id}`, { type, id: id as number, fields });
+    if (Object.keys(fields).length)
+      found.set(`${type}:${id}`, { type, id: id as number, source: 'tmdb', fields });
   }
   return [...found.values()];
 }
@@ -89,15 +92,43 @@ export function rememberTmdbMetadata(
   if (!hasLibraryCredential()) return;
   const entries = metadataIn(path, body);
   if (!entries.length) return;
-  void fetchImpl('/metadata/tmdb', {
+  void publishTitleMetadata(entries, fetchImpl);
+}
+
+function publishTitleMetadata(
+  entries: Observation[],
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Response | undefined> {
+  if (!hasLibraryCredential() || !entries.length) return Promise.resolve(undefined);
+  return fetchImpl('/metadata/title', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ entries }),
   }).catch(() => undefined);
 }
 
+/** Persist JustWatch's IMDb scores exactly where an Atlas response gave them to this client. */
+export function rememberAtlasMetadata(titles: Title[], fetchImpl: typeof fetch = relayFetch): void {
+  const entries: Observation[] = titles.flatMap((title) =>
+    typeof title.rating === 'number' &&
+    Number.isFinite(title.rating) &&
+    title.rating > 0 &&
+    title.rating <= 10
+      ? [
+          {
+            type: title.type,
+            id: title.id,
+            source: 'justwatch-imdb',
+            fields: { rating: title.rating },
+          },
+        ]
+      : [],
+  );
+  void publishTitleMetadata(entries.slice(0, 100), fetchImpl);
+}
+
 /** Fill missing poster fields from observations made by another paired client, in one bounded request. */
-export async function withSharedTmdbMetadata(
+export async function withSharedTitleMetadata(
   titles: Title[],
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<Title[]> {
@@ -111,35 +142,45 @@ export async function withSharedTmdbMetadata(
     .slice(0, 100);
   if (!wanted.length) return titles;
   try {
-    const response = await fetchImpl('/metadata/tmdb/query', {
+    const response = await fetchImpl('/metadata/title/query', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ titles: wanted.map(({ type, id }) => ({ type, id })) }),
     });
     if (!response.ok) return titles;
     const answer = (await response.json()) as { entries?: Stored[] };
-    const entries = new Map<string, Stored>();
+    const entries = new Map<string, Stored[]>();
     for (const entry of Array.isArray(answer.entries) ? answer.entries : []) {
       if (
-        entry.source === 'tmdb' &&
+        (entry.source === 'tmdb' || entry.source === 'justwatch-imdb') &&
         validKind(entry.type) &&
         Number.isInteger(entry.id) &&
         entry.id > 0
       )
-        entries.set(`${entry.type}:${entry.id}`, entry);
+        entries.set(`${entry.type}:${entry.id}`, [
+          ...(entries.get(`${entry.type}:${entry.id}`) ?? []),
+          entry,
+        ]);
     }
     return titles.map((title) => {
-      const fields = entries.get(`${title.type}:${title.id}`)?.fields;
-      if (!fields) return title;
-      const rating = validObserved(fields.rating, (v) => Number.isFinite(v) && v > 0 && v <= 10)
-        ? fields.rating.value
-        : undefined;
-      const votes = validObserved(fields.voteCount, (v) => Number.isInteger(v) && v >= 0)
-        ? fields.voteCount.value
-        : undefined;
-      const posterPath = validObserved(fields.posterPath, validPoster)
-        ? fields.posterPath.value
-        : undefined;
+      const observed = entries.get(`${title.type}:${title.id}`) ?? [];
+      if (!observed.length) return title;
+      const newest = <T>(fields: (Observed<T> | undefined)[], valid: (value: T) => boolean) =>
+        fields
+          .filter((field): field is Observed<T> => validObserved(field, valid))
+          .sort((a, b) => b.observedAt - a.observedAt)[0]?.value;
+      const rating = newest(
+        observed.map((entry) => entry.fields.rating),
+        (value) => Number.isFinite(value) && value > 0 && value <= 10,
+      );
+      const votes = newest(
+        observed.filter((entry) => entry.source === 'tmdb').map((entry) => entry.fields.voteCount),
+        (value) => Number.isInteger(value) && value >= 0,
+      );
+      const posterPath = newest(
+        observed.filter((entry) => entry.source === 'tmdb').map((entry) => entry.fields.posterPath),
+        validPoster,
+      );
       return {
         ...title,
         rating:

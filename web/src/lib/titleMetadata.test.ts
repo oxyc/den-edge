@@ -1,6 +1,11 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
-import { metadataIn, rememberTmdbMetadata, withSharedTmdbMetadata } from './tmdbMetadata';
+import {
+  metadataIn,
+  rememberAtlasMetadata,
+  rememberTmdbMetadata,
+  withSharedTitleMetadata,
+} from './titleMetadata';
 
 afterEach(() => forgetLibraryCredential());
 
@@ -11,8 +16,28 @@ test('extracts only allowlisted metadata from direct TMDB answers', () => {
       '{"id":550,"vote_average":8.4,"vote_count":100,"poster_path":"/f.jpg","overview":"ignored"}',
     ),
   ).toEqual([
-    { type: 'movie', id: 550, fields: { rating: 8.4, voteCount: 100, posterPath: '/f.jpg' } },
+    {
+      type: 'movie',
+      id: 550,
+      source: 'tmdb',
+      fields: { rating: 8.4, voteCount: 100, posterPath: '/f.jpg' },
+    },
   ]);
+});
+
+test('publishes Atlas JustWatch IMDb ratings with distinct provenance', async () => {
+  useLibraryCredential({ id: 'a', token: 'b' });
+  const fetchMock = vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }),
+  );
+  rememberAtlasMetadata(
+    [{ type: 'movie', id: 550, title: 'Fight Club', rating: 7.4 }],
+    fetchMock as unknown as typeof fetch,
+  );
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+  expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+    entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+  });
 });
 
 test('publishes observations only for a paired browser', async () => {
@@ -26,7 +51,7 @@ test('publishes observations only for a paired browser', async () => {
   rememberTmdbMetadata('/3/movie/550', body, fetchImpl);
   await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
   expect(fetchImpl).toHaveBeenCalledWith(
-    '/metadata/tmdb',
+    '/metadata/title',
     expect.objectContaining({ method: 'PUT' }),
   );
 });
@@ -40,6 +65,12 @@ test('hydrates missing fields without replacing fresher local card metadata', as
           {
             type: 'movie',
             id: 550,
+            source: 'justwatch-imdb',
+            fields: { rating: { value: 7.4, observedAt: observedAt - 1 } },
+          },
+          {
+            type: 'movie',
+            id: 550,
             source: 'tmdb',
             fields: {
               rating: { value: 8.4, observedAt },
@@ -50,7 +81,7 @@ test('hydrates missing fields without replacing fresher local card metadata', as
         ],
       }),
     )) as unknown as typeof fetch;
-  const [hydrated, retained] = await withSharedTmdbMetadata(
+  const [hydrated, retained] = await withSharedTitleMetadata(
     [
       { type: 'movie', id: 550, title: 'Fight Club', rating: 0 },
       { type: 'movie', id: 550, title: 'Local', rating: 9, posterPath: '/local.jpg' },
@@ -80,7 +111,7 @@ test('rejects expired and future field timestamps independently', async () => {
         ],
       }),
     )) as unknown as typeof fetch;
-  const [hydrated] = await withSharedTmdbMetadata(
+  const [hydrated] = await withSharedTitleMetadata(
     [{ type: 'movie', id: 550, title: 'Fight Club' }],
     fetchImpl,
   );
