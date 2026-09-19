@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compactServiceName,
   atlasCatalogs,
   atlasServiceRows,
   fillPosters,
@@ -35,6 +36,27 @@ const title = (id: number, over: Partial<Title> = {}): Title => ({
   id,
   title: `Title ${id}`,
   ...over,
+});
+
+describe('poster service captions', () => {
+  it('drops every known marketplace suffix, including after surrounding whitespace', () => {
+    expect(compactServiceName('  HBO Max Amazon Channel  ')).toBe('HBO Max');
+    expect(compactServiceName('Paramount+ Apple TV Channel')).toBe('Paramount+');
+    expect(compactServiceName('MUBI Apple TV+ Channel')).toBe('MUBI');
+    expect(compactServiceName('AMC+ Roku Premium Channel')).toBe('AMC+');
+    expect(compactServiceName('Amazon Channel')).toBe('Amazon Channel');
+  });
+
+  it('caps provider names by visible characters without splitting Unicode graphemes', () => {
+    expect(compactServiceName('An Exceptionally Long Service Name')).toBe('An Exceptional…');
+    expect(compactServiceName(`aaaaaaaaaaaaa👨‍👩‍👧‍👦bc`)).toBe(`aaaaaaaaaaaaa👨‍👩‍👧‍👦…`);
+    expect(compactServiceName(`aaaaaaaaaaaaae\u0301bc`)).toBe(`aaaaaaaaaaaaae\u0301…`);
+    expect([
+      ...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+        compactServiceName('An Exceptionally Long Service Name'),
+      ),
+    ]).toHaveLength(15);
+  });
 });
 
 describe('resolvePicks', () => {
@@ -512,6 +534,19 @@ describe('radarRows', () => {
     const titles = await at(rows, 0).load(1);
     expect(titles.map((t) => t.id)).toEqual([7]);
     expect(at(rows, 0).caption?.(at(titles, 0))).toBe('Netflix · Max');
+  });
+
+  it('caps the whole provider list so several services cannot crowd out an arrival date', async () => {
+    const shared = meta(7, { type: 'series', denAt: Math.floor(Date.now() / 1000) + 86_400 });
+    const coming: AtlasCatalog[] = [
+      catalogs.find((catalog) => catalog.id === 'jw-nfx-coming')!,
+      { id: 'jw-mxx-coming', name: 'Coming to Max', type: 'tv', providerIds: [1899] },
+    ];
+    const fetchImpl = serving({ 'jw-nfx-coming': [shared], 'jw-mxx-coming': [shared] });
+    const longNames = { 8: 'Netflix', 1899: 'An Exceptionally Long Service Name' };
+    const rows = radarRows('/atlas', coming, picks, { names: longNames, fetchImpl });
+    const titles = await at(rows, 0).load(1);
+    expect(at(rows, 0).caption?.(at(titles, 0))).toMatch(/^Netflix · An E… · /);
   });
 
   it('leads with what lands soonest, and leaves what carries no date in the charts’ order', async () => {

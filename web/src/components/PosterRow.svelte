@@ -57,7 +57,7 @@
     gap: 14px;
     margin: 0 calc(-1 * var(--gutter));
     padding: 0 var(--gutter) 8px;
-    overflow-x: auto;
+    overflow: auto hidden;
     scroll-snap-type: x proximity;
     scroll-padding-inline: var(--gutter);
     scrollbar-width: none;

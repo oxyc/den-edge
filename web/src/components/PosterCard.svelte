@@ -186,6 +186,9 @@
   }
 
   .caption {
+    overflow: hidden;
     color: var(--muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>
