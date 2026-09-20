@@ -10,6 +10,7 @@
   import ContentSection from './settings/ContentSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
+  import SharingSection from './settings/SharingSection.svelte';
   import {
     readDevices,
     readServers,
@@ -198,6 +199,7 @@
       {disabled}
       {write}
     />
+    <SharingSection {link} {plugins} {routes} ready={!!log} />
     <PlaybackSection {prefs} {disabled} save={savePrefs} />
     <ContentSection
       {prefs}

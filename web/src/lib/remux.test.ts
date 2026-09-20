@@ -168,6 +168,7 @@ describe('startSession', () => {
     const failing = (status: number, error: string) =>
       startSession(plain, async () => answer(status, { error }));
     expect(await failing(401, 'not_logged_in')).toEqual({ failure: 'login' });
+    expect(await failing(410, 'grant_expired')).toEqual({ failure: 'ended' });
     expect(await failing(404, 'no_playable_release')).toEqual({ failure: 'none' });
     expect(await failing(429, 'too_many_sessions')).toEqual({ failure: 'busy' });
     expect(await failing(503, 'transcode_unavailable')).toEqual({ failure: 'transcode' });
@@ -175,6 +176,28 @@ describe('startSession', () => {
     expect(await startSession(plain, async () => Promise.reject(new TypeError('offline')))).toEqual(
       { failure: 'unreachable' },
     );
+  });
+
+  it('says a guest’s revoked grant ended, and that a session has no public address for this network', async () => {
+    vi.stubGlobal('location', { href: 'https://den.example/', origin: 'https://den.example' });
+    try {
+      const guest = {
+        ...want,
+        scout: 'https://den.example/scout/~a1b2c3d4',
+        subtitleLanguages: [],
+      };
+      const failing = (wanted: Want, status: number, error: string) =>
+        startSession(wanted, async () => answer(status, { error }));
+      expect(await failing(guest, 404, 'not_found')).toEqual({ failure: 'ended' });
+      expect(await failing(guest, 404, 'no_playable_release')).toEqual({ failure: 'none' });
+      expect(await failing(guest, 503, 'public_media_unavailable')).toEqual({ failure: 'public' });
+      // A library's own 404 is still a title with no release.
+      expect(await failing({ ...want, subtitleLanguages: [] }, 404, 'not_found')).toEqual({
+        failure: 'none',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   /** A GPU converting something else can mean minutes; knocking every twenty seconds is work it doesn't need. */

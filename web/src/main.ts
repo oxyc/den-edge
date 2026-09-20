@@ -1,6 +1,9 @@
 import { mount } from 'svelte';
 import './app.css';
 import App from './App.svelte';
+import { parseInvite } from './lib/grants';
+import { guestGrants } from './lib/grants.svelte';
+import { links } from './lib/links.svelte';
 import { legacyPath } from './lib/route';
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
@@ -8,6 +11,16 @@ import { legacyPath } from './lib/route';
 // itself then only ever reads paths. `#pair=…` is not a route and is left alone for the pairing screen to read.
 const legacy = legacyPath(location.hash);
 if (legacy) history.replaceState(history.state, '', legacy + location.search);
+
+// An invite link (`#invite=<code>`) opens Settings › Sharing with the code filled in, for the viewer to redeem. The code
+// leaves the address at once, so it isn't kept in history or shared onward by copying the URL.
+const invited = parseInvite(location.hash);
+if (invited) {
+  guestGrants.invite = invited;
+  // A first-time guest has no library to open, and without browsing the app shows only the pairing screen.
+  links.browse();
+  history.replaceState(history.state, '', '/settings#sharing');
+}
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');
