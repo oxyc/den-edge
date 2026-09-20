@@ -7,6 +7,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
+  import { hlsConfig } from '../lib/hlsConfig';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -311,23 +312,7 @@
         failure = 'unsupported';
         return;
       }
-      // -1 is hls.js's own default: the playlist's start, or the beginning.
-      hls = new Hls({
-        enableWorker: false,
-        startPosition: started ?? -1,
-        // den-remux converts on the GPU as the player asks for segments, so the first one of a transcoded release
-        // can take far longer to answer than a copied one. hls.js gives up on a segment about ten seconds late and
-        // by default doesn't retry a timeout at all, which turns a slow conversion into a dead session. Wait
-        // through it instead, and retry twice before calling it broken.
-        fragLoadPolicy: {
-          default: {
-            maxTimeToFirstByteMs: 30_000,
-            maxLoadTimeMs: 120_000,
-            timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
-            errorRetry: { maxNumRetry: 2, retryDelayMs: 1_000, maxRetryDelayMs: 8_000 },
-          },
-        },
-      });
+      hls = new Hls(hlsConfig(started));
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so
       // the release is still asked for again as a player that takes none of what it just refused.
@@ -402,6 +387,10 @@
     if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
+      // The iframe has no `video` here to fire loadedmetadata and timeupdate, so its progress is what starts the
+      // skip segments and drives the skip button, auto-skip and the next-episode warm-up.
+      if (remoteDuration > 0) void loadSegments();
+      tick();
       if (typeof message.paused === 'boolean' && message.paused !== remotePaused) {
         remotePaused = message.paused;
         if (remotePaused) paused();
@@ -629,6 +618,8 @@
   // SvelteSet, and reactivity is the one thing this must not have — nothing renders it, and a write must not
   // re-run the tick that made it. Four kinds do not need a Set anyway.
   const skipped: Partial<Record<SkipKind, true>> = {};
+  /** The length SkipDB was last asked about; 0 before it was asked. */
+  let askedFor = 0;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
@@ -636,6 +627,11 @@
    */
   async function loadSegments() {
     if (!imdb || segments.length || ended) return;
+    // Asked again only for a different length: another release is another encode, but the same one is not asked
+    // for at every progress tick of a player that has no `loadedmetadata` to say it once.
+    const asked = length();
+    if (askedFor > 0 && Math.abs(asked - askedFor) < 2) return;
+    askedFor = asked;
     const found = await fetchSkipSegments(imdb, {
       season,
       episode,
@@ -649,10 +645,10 @@
    * and to leave one within a second of it, and far finer than the progress report's minute.
    */
   function tick() {
-    if (!video) return;
-    warmNext();
+    const at = video?.currentTime ?? remoteTime;
+    warmNext(at);
     if (!segments.length) return;
-    active = activeAt(segments, video.currentTime);
+    active = activeAt(segments, at);
     if (!autoSkip || !active || !canAutoSkip(active) || skipped[active.kind]) return;
     skipActive();
   }
@@ -667,10 +663,10 @@
    * by the time the advance asks for it in earnest — the slow part of starting an episode — rather than the
    * viewer waiting through it after the countdown. Choosing a release is left to that session, deliberately.
    */
-  function warmNext() {
-    if (warmedNext || !imdb || !video || !onnext) return;
+  function warmNext(at: number) {
+    if (warmedNext || !imdb || !onnext) return;
     const to = nextEpisode;
-    if (!to || !shouldWarmNext(video.currentTime, length())) return;
+    if (!to || !shouldWarmNext(at, length())) return;
     warmedNext = true;
     void listReleases(
       { imdb, season: to.season, episode: to.episode, scout: scout.install },
@@ -682,11 +678,22 @@
   /** Jump just past the active segment — the Skip button's action, and auto-skip's. */
   function skipActive() {
     const segment = active;
-    if (!video || !segment) return;
-    skipped[segment.kind] = true;
+    if (!segment) return;
     const total = length();
-    video.currentTime = total > 0 ? Math.min(total, segment.end) : segment.end;
+    const to = total > 0 ? Math.min(total, segment.end) : segment.end;
+    if (video) video.currentTime = to;
+    else if (!seekCastFrame(to)) return;
+    skipped[segment.kind] = true;
     active = null;
+  }
+
+  /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
+  function seekCastFrame(time: number): boolean {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || !frame) return false;
+    frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
+    return true;
   }
 
   /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
