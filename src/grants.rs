@@ -2290,7 +2290,7 @@ mod tests {
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
         state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.oxy.fi");
-        for host in ["d.oxy.fi", "d-api.oxy.fi", "192.168.86.193:8094"] {
+        for host in ["d.oxy.fi", "d-api.oxy.fi", "192.168.1.2:8094"] {
             let resp = h
                 .send(
                     "POST",

@@ -158,7 +158,7 @@ test('a member who is also a guest plays their own library as a member', async (
   rememberGrant(GID, 'sekrit');
   await relayFetch('/remux/session', {
     method: 'POST',
-    body: JSON.stringify({ imdb: 'tt1', scout: 'http://192.168.86.193:8080/sealed' }),
+    body: JSON.stringify({ imdb: 'tt1', scout: 'http://192.168.1.2:8080/sealed' }),
   });
   expect(sent(spy)[HEADER]).toBe('abc123:def456');
   expect(sent(spy)[GRANT]).toBeUndefined();
