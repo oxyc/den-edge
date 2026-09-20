@@ -45,6 +45,7 @@ interface CastContext {
   setOptions(options: Record<string, unknown>): void;
   addEventListener(type: string, listener: (event: unknown) => void): void;
   getCurrentSession(): CastSession | null;
+  getCastState(): string;
   endCurrentSession(stopCasting: boolean): void;
 }
 
@@ -64,7 +65,7 @@ interface RemotePlayerController {
 interface CastGlobals {
   framework: {
     CastContext: { getInstance(): CastContext };
-    CastContextEventType: { SESSION_STATE_CHANGED: string };
+    CastContextEventType: { SESSION_STATE_CHANGED: string; CAST_STATE_CHANGED: string };
     RemotePlayer: new () => RemotePlayer;
     RemotePlayerController: new (player: RemotePlayer) => RemotePlayerController;
     RemotePlayerEventType: { ANY_CHANGE: string };
@@ -132,6 +133,8 @@ let castContext: CastContext | undefined;
 let remotePlayer: RemotePlayer | undefined;
 let remoteController: RemotePlayerController | undefined;
 let castStarted = false;
+/** Whether a receiver is on the network, once the SDK has said; undefined before that. */
+let castDevices: boolean | undefined;
 let replacingCast = false;
 let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
@@ -168,6 +171,11 @@ function signedSpeed(media: Media): boolean {
 function tell(type: string, fields: Record<string, unknown> = {}): void {
   if (!parentOrigin || !current) return;
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
+}
+
+/** Tell the player whether a Chromecast is discoverable, so it can say so when Cast was asked for and there is none. */
+function announceDevices(): void {
+  if (castDevices !== undefined) tell('den-cast-availability', { available: castDevices });
 }
 
 async function loadLocal(media: Media, url: string): Promise<void> {
@@ -352,6 +360,11 @@ function initializeCast(): boolean {
   const chrome = window.chrome?.cast;
   if (!cast || !chrome) return false;
   castContext = cast.CastContext.getInstance();
+  castDevices = castContext.getCastState() !== 'NO_DEVICES_AVAILABLE';
+  castContext.addEventListener(cast.CastContextEventType.CAST_STATE_CHANGED, (event) => {
+    castDevices = (event as { castState?: string }).castState !== 'NO_DEVICES_AVAILABLE';
+    announceDevices();
+  });
   remotePlayer = new cast.RemotePlayer();
   const controller = new cast.RemotePlayerController(remotePlayer);
   remoteController = controller;
@@ -410,7 +423,11 @@ function initializeCast(): boolean {
 }
 
 window.__onGCastApiAvailable = (available) => {
-  if (!available) return;
+  if (!available) {
+    castDevices = false;
+    announceDevices();
+    return;
+  }
   // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
   // controls) the launcher would draw as an empty circle over the video. Google's launcher also hides itself
   // while no receiver is on the network, so revealing it is not the same as showing it.
@@ -420,6 +437,8 @@ window.__onGCastApiAvailable = (available) => {
   } catch (error) {
     // A button that was never initialised does nothing, so it stays hidden; the console says why.
     console.error('Cast could not start:', error);
+    castDevices = false;
+    announceDevices();
   }
 };
 
@@ -453,6 +472,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   document.title = current.media.title;
   setStatus('');
   void open(current);
+  // The SDK may have answered before this load arrived: say what it found now that there is a player to tell.
+  announceDevices();
 });
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
