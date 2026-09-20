@@ -149,7 +149,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     // comes before the member gate below, which a guest never passes.
     let req = match crate::relay::guest(state, req, rid, face).await {
         Ok(resp) => return resp,
-        Err(req) => req,
+        Err(req) => *req,
     };
     if path.starts_with("/grant/") || crate::grants::is_host_path(&path) {
         return crate::grants::handle(state, req).await;

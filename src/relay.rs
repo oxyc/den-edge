@@ -297,12 +297,12 @@ pub async fn guest(
     req: Request,
     rid: &str,
     face: crate::handler::Face,
-) -> Result<Response, Request> {
+) -> Result<Response, Box<Request>> {
     let path = req.uri().path().to_owned();
     let parsed = crate::grants::parse_guest_path(&path);
     let remux = path.starts_with("/remux/") && req.headers().contains_key(crate::grants::HEADER);
     if parsed.is_none() && !remux {
-        return Err(req);
+        return Err(Box::new(req));
     }
     let not_found = || json(StatusCode::NOT_FOUND, "not_found");
     let ip = crate::handler::client_ip(state, &req);

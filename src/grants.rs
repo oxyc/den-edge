@@ -558,11 +558,11 @@ async fn list(state: &AppState, host: &str) -> Response {
 }
 
 /// A grant that is this host's and has not been revoked. A revoked one is gone for the host's purposes too.
-async fn owned(state: &AppState, host: &str, gid: &str) -> Result<Record, Response> {
+async fn owned(state: &AppState, host: &str, gid: &str) -> Result<Record, Box<Response>> {
     match load(state, gid).await {
         Ok(Some(r)) if r.host == host && r.revoked_at.is_none() => Ok(r),
-        Ok(_) => Err(not_found()),
-        Err(e) => Err(internal("grant read", e)),
+        Ok(_) => Err(Box::new(not_found())),
+        Err(e) => Err(Box::new(internal("grant read", e))),
     }
 }
 
@@ -575,7 +575,7 @@ async fn update(state: &AppState, host: &str, gid: &str, req: Request) -> Respon
     let _lock = state.grants.lock.lock().await;
     let mut record = match owned(state, host, gid).await {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if body.as_object().and_then(|map| apply(&mut record, map, now, false)).is_none() {
         return bad_request();
