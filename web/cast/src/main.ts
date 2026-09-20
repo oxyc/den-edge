@@ -102,7 +102,8 @@ interface CastGlobals {
 declare global {
   interface Window {
     __onGCastApiAvailable?: (available: boolean) => void;
-    cast?: CastGlobals['framework'];
+    /** Google's Cast namespace: the framework is at `cast.framework`, not on `cast` itself. */
+    cast?: { framework?: CastGlobals['framework'] };
     chrome?: CastGlobals['chrome'];
   }
 }
@@ -345,10 +346,11 @@ async function open(message: LoadMessage): Promise<void> {
   if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
 }
 
-function initializeCast(): void {
-  const cast = window.cast;
+/** Starts the Cast framework; false when the SDK loaded without the framework or the chrome.cast API. */
+function initializeCast(): boolean {
+  const cast = window.cast?.framework;
   const chrome = window.chrome?.cast;
-  if (!cast || !chrome) return;
+  if (!cast || !chrome) return false;
   castContext = cast.CastContext.getInstance();
   remotePlayer = new cast.RemotePlayer();
   const controller = new cast.RemotePlayerController(remotePlayer);
@@ -404,14 +406,21 @@ function initializeCast(): void {
       tell('den-cast', { state: 'stopped', reason: 'SESSION_ENDED' });
     }
   });
+  return true;
 }
 
 window.__onGCastApiAvailable = (available) => {
   if (!available) return;
-  initializeCast();
   // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
-  // controls) the launcher would draw as an empty circle over the video.
-  castLauncher.hidden = false;
+  // controls) the launcher would draw as an empty circle over the video. Google's launcher also hides itself
+  // while no receiver is on the network, so revealing it is not the same as showing it.
+  try {
+    if (!initializeCast()) throw new Error('the Cast SDK loaded without its framework');
+    castLauncher.hidden = false;
+  } catch (error) {
+    // A button that was never initialised does nothing, so it stays hidden; the console says why.
+    console.error('Cast could not start:', error);
+  }
 };
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
