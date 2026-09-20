@@ -1132,6 +1132,7 @@
   <DetailScreen.current
     {reel}
     {routes}
+    {atlas}
     active={active && !playing}
     ref={page}
     {tmdbKey}

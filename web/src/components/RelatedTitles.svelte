@@ -1,33 +1,30 @@
+<!-- The rows under a title's cast: its franchise, More like this, and what its director and leads have done. A row
+     appears once it has something to show, and goes on loading as it is scrolled to its end (`BrowseRow`). -->
 <script lang="ts">
-  import {
-    fetchCollection,
-    fetchFilmography,
-    groupFilmography,
-    type TitleDetail,
-  } from '../lib/detail';
+  import type { RowDef } from '../lib/catalog';
+  import type { TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import PosterRow from './PosterRow.svelte';
-  import PosterCard from './PosterCard.svelte';
-  import { personHref, titleHref } from '../lib/route';
+  import { collectionRow, firstScreen, moreLikeThisRow, personRow } from '../lib/relatedRows';
+  import BrowseRow from './BrowseRow.svelte';
+
   let {
     detail,
     tmdbKey,
+    atlas = null,
     active,
     shown,
   }: {
     detail: TitleDetail;
     tmdbKey: string;
+    /** Where this page reaches atlas, for the titles its index finds closest; null where it can't. */
+    atlas?: string | null;
     active: boolean;
     shown: (t: Title) => boolean;
   } = $props();
+
   let reached = $state(false);
-  let rows = $state<
-    {
-      heading: string;
-      headingLink?: { before: string; label: string; after: string; href: string };
-      titles: Title[];
-    }[]
-  >([]);
+  let rows = $state<RowDef[]>([]);
+
   function approach(node: HTMLElement) {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -38,79 +35,32 @@
     observer.observe(node);
     return { destroy: () => observer.disconnect() };
   }
+
+  // Each row is read once the rows are near the screen, and shown if it has anything. A row remembers what it has
+  // loaded, so a new title, or an atlas that answers late, builds them afresh.
   $effect(() => {
     if (!reached) return;
-    const d = detail,
-      key = tmdbKey;
-    let live = true;
-    const people = [
-      ...d.directors.slice(0, 1).map((p) => ({
-        ...p,
-        department: 'Directing',
-        heading: `More from ${p.name}`,
-        headingLink: {
-          before: 'More from ',
-          label: p.name,
-          after: '',
-          href: personHref(p.id, p.name),
-        },
-      })),
-      ...d.cast.slice(0, 3).map((p) => ({
-        ...p,
-        department: 'Acting',
-        heading: `Starring ${p.name}`,
-        headingLink: {
-          before: 'Starring ',
-          label: p.name,
-          after: '',
-          href: personHref(p.id, p.name),
-        },
-      })),
+    const options = { key: tmdbKey };
+    const self = detail.title;
+    const defined = [
+      ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
+      moreLikeThisRow(detail, atlas, options),
+      ...detail.directors.slice(0, 1).map((p) => personRow(p, 'Directing', self, options)),
+      ...detail.cast.slice(0, 3).map((p) => personRow(p, 'Acting', self, options)),
     ];
-    void Promise.all([
-      d.collection
-        ? fetchCollection(d.collection.id, key).then((titles) => ({
-            heading: d.collection!.name,
-            titles,
-          }))
-        : null,
-      ...people.map(async (p) => ({
-        heading: p.heading,
-        headingLink: p.headingLink,
-        titles:
-          groupFilmography((await fetchFilmography(p.id, key)) ?? [])
-            .find((g) => g.department === p.department)
-            ?.films.map((c) => c.title)
-            .slice(0, 20) ?? [],
-      })),
-    ]).then((loaded) => {
-      if (live) rows = loaded.filter((r): r is NonNullable<typeof r> => r !== null);
+    let live = true;
+    void Promise.all(defined.map((row) => firstScreen(row, shown))).then((found) => {
+      if (live) rows = found.filter((row): row is RowDef => row !== null);
     });
     return () => {
       live = false;
+      rows = [];
     };
   });
-  const visible = (titles: Title[]) =>
-    titles.filter((t) => shown(t) && !(t.type === detail.title.type && t.id === detail.title.id));
-  const related = $derived(
-    [
-      ...rows.filter((r) => r.heading === detail.collection?.name),
-      { heading: 'More like this', titles: detail.more },
-      ...rows.filter((r) => r.heading !== detail.collection?.name),
-    ]
-      .map((r) => ({ ...r, titles: visible(r.titles) }))
-      .filter((r) => r.titles.length),
-  );
 </script>
 
 <div use:approach aria-hidden={!active}>
-  {#each related as group (group.heading)}
-    <PosterRow heading={group.heading} headingLink={group.headingLink}>
-      {#each group.titles as title (`${title.type}:${title.id}`)}<PosterCard
-          {title}
-          caption={title.year ? String(title.year) : undefined}
-          href={titleHref(title)}
-        />{/each}
-    </PosterRow>
+  {#each rows as row (row.id)}
+    <BrowseRow {row} {shown} />
   {/each}
 </div>

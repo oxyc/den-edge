@@ -90,9 +90,6 @@ export interface PersonDetail {
   knownFor?: string;
 }
 
-/** The top of the bill: a row, not the whole call sheet. */
-const CAST_LIMIT = 20;
-
 export function parseDetail(
   ref: { type: MediaType; id: number },
   body: Json,
@@ -237,7 +234,7 @@ export function parseDetail(
     directors,
     genres: list(body.genres).flatMap((g) => text(g.name) ?? []),
     seasons,
-    cast: cast.slice(0, CAST_LIMIT),
+    cast,
     more: more.filter(
       (t, i, all) => all.findIndex((other) => other.type === t.type && other.id === t.id) === i,
     ),

@@ -41,6 +41,7 @@
     active = true,
     reel = null,
     routes = {},
+    atlas = null,
     tmdbKey,
     omdbKey = '',
     warningKey = '',
@@ -72,6 +73,8 @@
     active?: boolean;
     reel?: string | null;
     routes?: Routes;
+    /** Where this page reaches atlas, whose index names the titles closest to this one; null where it can't. */
+    atlas?: string | null;
     tmdbKey: string;
     omdbKey?: string;
     warningKey?: string;
@@ -172,6 +175,22 @@
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
+  /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
+  const CAST_PAGE = 20;
+  let castShown = $state(CAST_PAGE);
+  function castEnd(node: HTMLElement) {
+    $effect(() => {
+      if (!active || castShown >= cast.length) return;
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((e) => e.isIntersecting)) castShown += CAST_PAGE;
+        },
+        { rootMargin: '200px' },
+      );
+      observer.observe(node);
+      return () => observer.disconnect();
+    });
+  }
   /**
    * Whether the household's ceiling blocks this title. The page still exists — it names the title, its year and
    * its rating, as the TV's does — but nothing that plays it is offered: no Play, no Sources, no episodes and no
@@ -196,6 +215,7 @@
     season = null;
     seasonEpisodes = undefined;
     displayedSeason = null;
+    castShown = CAST_PAGE;
     void fetchDetail(current, key, undefined, country).then((loaded) => {
       if (!live) return;
       detail = loaded;
@@ -561,20 +581,25 @@
   {/if}
   {#if cast.length}
     <PosterRow heading="Cast & Crew">
-      {#each cast as c (c.id)}<PersonCard
+      {#each cast.slice(0, castShown) as c (c.id)}<PersonCard
           id={c.id}
           name={c.name}
           role={c.role}
           profilePath={c.profilePath}
         />{/each}
+      <span use:castEnd class="cast-end" aria-hidden="true"></span>
     </PosterRow>
   {/if}
-  <RelatedTitles detail={d} {tmdbKey} {active} {shown} />
+  <RelatedTitles detail={d} {tmdbKey} {atlas} {active} {shown} />
 {/if}
 
 <style>
   .title-sources {
     margin-bottom: 24px;
+  }
+
+  .cast-end {
+    width: 1px;
   }
 
   .hero {
