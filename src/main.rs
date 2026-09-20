@@ -7,6 +7,7 @@
 mod cache;
 mod grants;
 mod handler;
+mod home;
 mod inbox;
 mod library;
 mod link;
@@ -86,9 +87,13 @@ pub struct AppState {
     pub media_origins: Vec<String>,
     /// Public IP-literal origin handed only to a proven member after the listener helper opened it.
     pub public_media_base: Option<String>,
-    /// The same den-remux on the home network, over https, handed with the public base. On home Wi-Fi the router
-    /// does not loop a phone's request for the public address back in, so the player tries this one first.
+    /// The same den-remux on the home network, over https, handed with the public base — but only to a client whose
+    /// public address is the home's (`home.rs`). On home Wi-Fi the router does not loop a phone's request for the
+    /// public address back in, so the player tries this one first; anywhere else it is unreachable and only costs a
+    /// failed connection.
     pub lan_media_base: Option<String>,
+    /// Where the home's public address is now, read from the public media base's host (`home.rs`).
+    pub home_address: home::HomeAddress,
     /// Host helper socket mounted into the container. The helper owns nftables; den-edge can only request
     /// the fixed, short-lived public-listener action.
     pub public_media_socket: Option<std::path::PathBuf>,
@@ -197,6 +202,7 @@ impl AppState {
             media_origins: Vec::new(),
             public_media_base: None,
             lan_media_base: None,
+            home_address: home::HomeAddress::default(),
             public_media_socket: None,
             cast_origin: None,
             new_libraries: library::NewLibraries::Open,
