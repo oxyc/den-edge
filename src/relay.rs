@@ -643,8 +643,12 @@ async fn relay_with(
             if open_public_listener(socket, address, cast).await {
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
+                    // Only to a client behind the home's own router. Anyone else — a remote member, an invited
+                    // guest — cannot reach a private address, and would try it first on every play regardless.
                     if let Some(lan) = &state.lan_media_base {
-                        value["lanBase"] = serde_json::Value::String(lan.clone());
+                        if state.home_address.is_behind_home_router(base, address).await {
+                            value["lanBase"] = serde_json::Value::String(lan.clone());
+                        }
                     }
                     if let Some(cast_origin) = &state.cast_origin {
                         value["castOrigin"] = serde_json::Value::String(cast_origin.clone());
@@ -1012,9 +1016,11 @@ mod tests {
         assert_eq!(relayed.status(), StatusCode::BAD_GATEWAY, "member reached the absent upstream");
     }
 
+    /// A member on the public name (source `192.168.1.9`, the harness's peer) starts a Cast session against a
+    /// listener that acknowledges, with `public_base` as the public media base. Returns the answer and what the
+    /// listener was asked.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn public_base_is_revealed_only_after_the_listener_acknowledges() {
+    async fn members_cast_session(public_base: &str) -> (serde_json::Value, serde_json::Value) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1046,7 +1052,7 @@ mod tests {
         let state = Arc::get_mut(&mut h.state).unwrap();
         state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
-        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_base = Some(public_base.into());
         state.lan_media_base = Some("https://lan.media.example:8449".into());
         state.public_media_socket = Some(socket);
         state.cast_origin = Some("https://cast.oxy.fi".into());
@@ -1066,11 +1072,45 @@ mod tests {
             .await;
         assert_eq!(answer.status(), StatusCode::CREATED);
         let body = crate::handler::tests::body_json(answer).await;
-        assert_eq!(body["publicBase"], "https://203.0.113.10");
-        assert_eq!(body["lanBase"], "https://lan.media.example:8449");
-        assert_eq!(body["castOrigin"], "https://cast.oxy.fi");
         let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
+        (body, ask)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn public_base_is_revealed_only_after_the_listener_acknowledges() {
+        let (body, ask) = members_cast_session("https://203.0.113.10").await;
+        assert_eq!(body["publicBase"], "https://203.0.113.10");
+        assert_eq!(body["castOrigin"], "https://cast.oxy.fi");
         assert_eq!(ask, json!({ "open": true, "source": "192.168.1.9", "scope": "cast" }));
+    }
+
+    /// The LAN name resolves to a private address, so it means something only to a client behind the home's router,
+    /// whose public address is the home's. A member playing from anywhere else would try it first on every play.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_lan_base_is_not_handed_to_a_client_away_from_home() {
+        let (body, _) = members_cast_session("https://203.0.113.10").await;
+        assert!(body.get("lanBase").is_none(), "the client is not at the home address: {body}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_lan_base_is_handed_to_a_client_behind_the_homes_router() {
+        // The public base is at the client's own address: the same router, so the home address is the client's.
+        let (body, _) = members_cast_session("https://192.168.1.9").await;
+        assert_eq!(body["lanBase"], "https://lan.media.example:8449");
+        assert_eq!(body["publicBase"], "https://192.168.1.9");
+    }
+
+    /// With the home's address unknown, nobody is handed the LAN base: a wrong guess costs every visitor a failed
+    /// connection, and a missing one only the home's own phone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_lan_base_is_withheld_when_the_home_address_is_unknown() {
+        let (body, _) = members_cast_session("https://home.invalid").await;
+        assert!(body.get("lanBase").is_none(), "{body}");
+        assert_eq!(body["publicBase"], "https://home.invalid");
     }
 
     #[cfg(unix)]

@@ -2111,7 +2111,9 @@ mod tests {
             s.remux_edge_secret = Some("s".into());
             s.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
             s.trusted_proxies = vec![IpAddr::from([192, 168, 1, 9])];
-            s.public_media_base = Some("https://203.0.113.10".into());
+            // The home's address is the last of the guest's four sources, so that one is behind the home's router.
+            s.public_media_base = Some("https://203.0.113.4".into());
+            s.lan_media_base = Some("https://lan.media.example:8449".into());
             s.public_media_socket = Some(socket);
         });
         let h = members_only(h).await;
@@ -2138,7 +2140,12 @@ mod tests {
 
         let resp = start("203.0.113.1", body.clone()).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
-        assert_eq!(body_json(resp).await["publicBase"], "https://203.0.113.10");
+        let answer = body_json(resp).await;
+        assert_eq!(answer["publicBase"], "https://203.0.113.4");
+        assert!(
+            answer.get("lanBase").is_none(),
+            "a guest away from home is not handed the LAN address: {answer}"
+        );
         let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
         assert_eq!(asked, json!({ "open": true, "source": "203.0.113.1", "scope": "browser" }));
 
@@ -2149,7 +2156,11 @@ mod tests {
         assert_eq!(start("203.0.113.1", cast).await.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         for source in ["203.0.113.2", "203.0.113.3", "203.0.113.4"] {
-            assert_eq!(start(source, body.clone()).await.status(), StatusCode::CREATED, "{source}");
+            let resp = start(source, body.clone()).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "{source}");
+            let answer = body_json(resp).await;
+            // Only the source that is the home's own address is behind its router.
+            assert_eq!(answer.get("lanBase").is_some(), source == "203.0.113.4", "{source}: {answer}");
         }
         let refused = start("203.0.113.5", body.clone()).await;
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS, "a fifth source address");
