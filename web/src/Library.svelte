@@ -728,6 +728,19 @@
   );
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
+  /**
+   * What a title's OWN rows hide — "More like this", its collection, its cast's other work.
+   *
+   * The discovery rules do not apply here. A year floor and Hide Watched shape what to show you NEXT; on a
+   * title's page you are asking what RESEMBLES this, so an old film or one you have already seen is a
+   * legitimate answer, and dropping it leaves a short row with nothing saying why.
+   *
+   * The content rules still do: an adult title, a hidden genre or language, and a card with no poster stay
+   * hidden, because those say what you do not want to see at all rather than what to show you next.
+   * So this does NOT explain a missing neighbour that sits in an excluded genre — Begin Again is absent
+   * from Once's row because Once's genres are hidden, and only unhiding them brings it back.
+   */
+  const relatedShown = (title: Title) => !isHidden(title, prefs, { ignoringYearFloor: true });
   /** The billboard's own rule: everything the rows hide, except the missing poster it doesn't draw. */
   const featuredShown = (title: Title) =>
     !isHidden(title, prefs, { requirePoster: false }) &&
@@ -1160,7 +1173,7 @@
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}
     onepisode={markEpisodeSeen}
-    {shown}
+    shown={relatedShown}
   />
 {:else if (route.page === 'person' && !PersonScreen.current) || (route.page === 'search' && !SearchScreen.current)}
   <Loading label="Loading" page />
