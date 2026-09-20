@@ -7,6 +7,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
+  import { canOfferCast, CAST_DISCOVERY_MS } from '../lib/castOffer';
   import { hlsConfig } from '../lib/hlsConfig';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
@@ -135,6 +136,19 @@
   let casting = $state(false);
   let castMode = false;
   let castProfile = 'legacy';
+  /** The same-origin control relay: the only route whose sessions carry a public address and the cast page. */
+  const RELAY = '/remux';
+  /**
+   * Where den-remux is asked, which starts as the page's own route and moves to the relay when the viewer asks to
+   * cast from a direct (tailnet or home-network) one: those play in a plain video element that has no Cast button.
+   */
+  let route = $state(untrack(() => remux));
+  let routeBeforeCast = untrack(() => remux);
+  /**
+   * `waiting` once Cast was asked for and the cast page has not yet said whether a receiver is on the network;
+   * `none` when it said no (or did not answer in time, or the relay has no public route); `idle` otherwise.
+   */
+  let castOffer = $state<'idle' | 'waiting' | 'none'>('idle');
   let publicMaxBitrate: number | undefined;
   let session = $state<Session | null>(null);
   let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
@@ -219,7 +233,7 @@
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     // A direct remote origin can be measured before creation. The public control relay cannot: its speed path
     // appears only inside a signed session, so that first session is measured and replaced just below.
-    const maxBitrate = /^https?:/.test(remux) ? await linkLimit(remux) : publicMaxBitrate;
+    const maxBitrate = /^https?:/.test(route) ? await linkLimit(route) : publicMaxBitrate;
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -243,7 +257,7 @@
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
       ...pick,
     };
-    const result = await startSession(request, undefined, remux);
+    const result = await startSession(request, undefined, route);
     if (ended) {
       if (!('failure' in result)) endSession(result);
       return;
@@ -258,13 +272,15 @@
     }
     started = at;
     session = result;
+    // Asked to cast, but the relay's session has no public address or cast page: nothing can be cast from here.
+    if (castOffer === 'waiting' && !(result.castOrigin && result.publicBase)) castOffer = 'none';
     swapped = swapNotice(
       pick?.filename,
       result,
       (name) => releases.find((r) => r.filename === name)?.label ?? name,
     );
     if (!releases.length) {
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux, {
+      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
         videoCodecs: request.videoCodecs,
         playable: can,
       }).then((list) => {
@@ -275,7 +291,7 @@
 
   async function letIn(event: SubmitEvent) {
     event.preventDefault();
-    const ok = await login(key.trim(), undefined, remux);
+    const ok = await login(key.trim(), undefined, route);
     badKey = ok === false;
     if (ok === null) failure = 'unreachable';
     if (!ok) return;
@@ -378,6 +394,7 @@
       state?: string;
       profile?: string;
       maxBitrate?: number;
+      available?: boolean;
     };
     if (message.type === 'den-ready') {
       sendToCastFrame();
@@ -408,6 +425,11 @@
         publicMaxBitrate = Math.round(measured);
         restart({ filename: current.release.filename });
       }
+    } else if (message.type === 'den-cast-availability') {
+      // Whether a Chromecast is on the network. A receiver appearing late clears the notice; "none" only matters
+      // to a viewer who asked to cast.
+      if (message.available) castOffer = 'idle';
+      else if (castOffer === 'waiting') castOffer = 'none';
     } else if (message.type === 'den-cast-request') {
       const profile = message.profile ?? 'legacy';
       if (!castMode || castProfile !== profile) {
@@ -431,6 +453,38 @@
       void broke(0, message.message ?? 'cast player failed');
     }
   }
+
+  /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
+  const castable = canOfferCast();
+
+  /**
+   * The Cast button for a plain in-page player: move to the relay, whose sessions carry the public address and the
+   * cast page, and restart at the same second. Google's own button then shows in that page, when it finds a receiver.
+   */
+  function offerCast() {
+    if (!session) return;
+    routeBeforeCast = route;
+    route = RELAY;
+    castOffer = 'waiting';
+    restart({ filename: session.release.filename });
+  }
+
+  /** Nothing to cast to: back to the route this page started on, at the same second. */
+  function leaveCast() {
+    castOffer = 'idle';
+    route = routeBeforeCast;
+    castMode = false;
+    if (session) restart({ filename: session.release.filename });
+  }
+
+  // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
+  $effect(() => {
+    if (castOffer !== 'waiting' || !session?.castOrigin) return;
+    const wait = setTimeout(() => {
+      if (castOffer === 'waiting') castOffer = 'none';
+    }, CAST_DISCOVERY_MS);
+    return () => clearTimeout(wait);
+  });
 
   /** Receiver model profiles from Google's published codec matrix. The oldest profile is the default so a
    * first-generation stick gets H.264 High@4.1 and stereo AAC; newer models opt into the formats they add. */
@@ -671,7 +725,7 @@
     void listReleases(
       { imdb, season: to.season, episode: to.episode, scout: scout.install },
       undefined,
-      remux,
+      route,
     );
   }
 
@@ -828,6 +882,16 @@
 <div class="player" role="dialog" aria-modal="true" aria-label={heading}>
   <header>
     <b>{heading}</b>
+    {#if castable && session && !session.castOrigin && route !== RELAY}
+      <button class="close cast" aria-label="Cast to a TV" title="Cast to a TV" onclick={offerCast}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+          <path d="M2 12a9 9 0 0 1 8 8" />
+          <path d="M2 16a5 5 0 0 1 4 4" />
+          <path d="M2 20h.01" />
+        </svg>
+      </button>
+    {/if}
     <button class="close" aria-label="Close" onclick={close}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <path d="m6 6 12 12M18 6 6 18" />
@@ -896,6 +960,14 @@
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
+      {#if castOffer === 'none'}
+        <p class="swap" role="status">
+          <span
+            >No Chromecast found. Check that it is awake and on the same network as this device.</span
+          >
+          <button onclick={leaveCast}>Back to the normal player</button>
+        </p>
+      {/if}
       {#if swapped}
         <p class="swap" role="status">
           <span>{swapped}</span>
@@ -1098,6 +1170,11 @@
     width: 44px;
     padding: 0;
     border-color: transparent;
+  }
+
+  /* Beside Close, at the right: the two are one group, so the title keeps the width. */
+  .cast {
+    margin-left: auto;
   }
 
   /* Where the browser draws the open menu itself, on its own ground. */
