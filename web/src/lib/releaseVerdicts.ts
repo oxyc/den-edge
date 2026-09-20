@@ -19,7 +19,9 @@ export function swapNotice(
   if (!filename || filename === session.release.filename) return null;
   const what = requestedName(filename);
   const why = said?.why?.trim();
-  const cannot = why ? `Couldn’t play ${what} here (${why})` : `Couldn’t play ${what} in this browser`;
+  const cannot = why
+    ? `Couldn’t play ${what} here (${why})`
+    : `Couldn’t play ${what} in this browser`;
   return `${cannot} — playing ${session.release.label} instead.`;
 }
 

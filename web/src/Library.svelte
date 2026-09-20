@@ -1146,6 +1146,7 @@
     onreact={(title, reaction) => act(title, (row, at) => react(row, reaction, at))}
     onplay={play}
     onplayhere={playHere}
+    {remux}
     away={remuxAway && !!scout && !!tmdbKey}
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}

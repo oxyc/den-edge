@@ -27,7 +27,9 @@
     type Release,
     type Session,
     type Want,
+    videoCodecsOf,
   } from '../lib/remux';
+  import { optionLabel, swapNotice } from '../lib/releaseVerdicts';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -156,6 +158,8 @@
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
+  /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
+  let swapped = $state<string | null>(null);
   /**
    * Whether this release has already been asked for again with the browser's claims cut back.
    *
@@ -188,6 +192,7 @@
   ) {
     clearTimeout(retry);
     failure = null;
+    swapped = null;
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
       if (!found) {
@@ -229,7 +234,7 @@
       subtitles,
       subtitleLanguages,
       audio,
-      videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
+      videoCodecs: videoCodecsOf(can),
       playable: can,
       startAt: at,
       maxBitrate,
@@ -252,12 +257,18 @@
     }
     started = at;
     session = result;
+    swapped = swapNotice(
+      pick?.filename,
+      result,
+      (name) => releases.find((r) => r.filename === name)?.label ?? name,
+    );
     if (!releases.length) {
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then(
-        (list) => {
-          releases = list ?? [];
-        },
-      );
+      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux, {
+        videoCodecs: request.videoCodecs,
+        playable: can,
+      }).then((list) => {
+        releases = list ?? [];
+      });
     }
   }
 
@@ -878,6 +889,12 @@
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
+      {#if swapped}
+        <p class="swap" role="status">
+          <span>{swapped}</span>
+          <button onclick={() => (swapped = null)}>Dismiss</button>
+        </p>
+      {/if}
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -902,7 +919,9 @@
             <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
               <!-- Keyed by place: two releases can share a file name (the same encode under two infohashes). -->
               {#each releases as release, n (n)}
-                <option value={release.filename}>{release.label}</option>
+                <option value={release.filename} disabled={release.plays === 'no'}
+                  >{optionLabel(release)}</option
+                >
               {/each}
             </select>
           </div>
@@ -1156,6 +1175,19 @@
     min-width: 0;
     max-width: 70ch;
     margin: 0;
+  }
+
+  /* Another release opened than the one picked: a line of its own above the footer's rows. */
+  .swap {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0;
+    color: rgb(255 255 255 / 0.85);
+    font-size: 14px;
   }
 
   .playing {

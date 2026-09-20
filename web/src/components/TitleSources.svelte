@@ -4,6 +4,9 @@
   import DetailIcon from './DetailIcon.svelte';
   import { downloads } from '../lib/downloadQueue.svelte';
   import { fetchSources, type TitleSource } from '../lib/titleSources';
+  import { playable } from '../lib/playable';
+  import { listReleases, videoCodecsOf } from '../lib/remux';
+  import { unplayable } from '../lib/releaseVerdicts';
   import type { Addon } from '../lib/scout';
   import type { Routes } from '../lib/routes';
   let {
@@ -13,6 +16,7 @@
     season,
     episode,
     active,
+    remux = null,
     onplay,
   }: {
     imdb?: string;
@@ -21,9 +25,13 @@
     season?: number;
     episode?: number;
     active: boolean;
+    /** Where den-remux answers (`findRemux`), asked which releases play in this browser. */
+    remux?: string | null;
     onplay?: (filename: string) => void;
   } = $props();
   let sources = $state<TitleSource[] | null | undefined>();
+  /** The releases this browser can't play, by filename, with den-remux's reason. Empty until (unless) it says. */
+  let refused = $state(new Map<string, string>());
   let open = $state(false),
     retry = $state(0);
   let panel = $state<HTMLDivElement>();
@@ -46,6 +54,34 @@
       if (!controller.signal.aborted) sources = loaded;
     });
     return () => controller.abort();
+  });
+  // Asked once per title or episode, and only where Play is offered. A den-remux that can't say leaves every
+  // release playable.
+  let asked = '';
+  $effect(() => {
+    const [addon, id, base, s, e, shown, offered] = [
+      scout,
+      imdb,
+      remux,
+      season,
+      episode,
+      open,
+      !!onplay,
+    ];
+    const which = `${base}:${addon?.install}:${id}:${s}:${e}`;
+    if (which !== asked) refused = new Map();
+    if (!shown || !offered || !addon || !id || base === null || which === asked) return;
+    asked = which;
+    void (async () => {
+      const claims = await playable();
+      const list = await listReleases(
+        { imdb: id, season: s, episode: e, scout: addon.install },
+        undefined,
+        base,
+        { videoCodecs: videoCodecsOf(claims), playable: claims },
+      );
+      if (asked === which) refused = unplayable(list);
+    })().catch(() => undefined);
   });
   $effect(() => {
     if (!active || !sources) return;
@@ -142,8 +178,13 @@
                 ></progress>{/if}
             </div>
             <div class="source-actions">
-              {#if ready && onplay}<button class="control" onclick={() => onplay(source.filename)}
-                  ><DetailIcon name="play" />Play</button
+              {#if ready && onplay}<button
+                  class="control"
+                  disabled={refused.has(source.filename)}
+                  title={refused.has(source.filename)
+                    ? `Can’t play in this browser${refused.get(source.filename) ? `: ${refused.get(source.filename)}` : ''}`
+                    : undefined}
+                  onclick={() => onplay(source.filename)}><DetailIcon name="play" />Play</button
                 >
               {:else if !ready}<button
                   class="control"
