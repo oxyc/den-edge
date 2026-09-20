@@ -1,6 +1,6 @@
 <script lang="ts">
   import Loading from './components/Loading.svelte';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import PosterCard from './components/PosterCard.svelte';
@@ -71,6 +71,8 @@
   import ServicesRow from './components/ServicesRow.svelte';
   import { localNetworkRefused } from './lib/remux';
   import type { Routes } from './lib/routes';
+  import { guestGrants } from './lib/grants.svelte';
+  import { sharedInstallOf } from './lib/grants';
   import { installsOf, type Addon } from './lib/scout';
   import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody, type RecommendedTitle } from './lib/recommend';
@@ -184,6 +186,8 @@
     // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
     // the discovery below: atlas gives them rows and reel gives them trailers, both on this origin.
     if (opened === undefined) return;
+    // The addons shared with this browser join the library's own for lookups; nothing writes them back to it.
+    const shared = guestGrants.pluginUrls();
     let disposed = false;
     let stopDiscovery: (() => void) | undefined;
     // Only the shared settings revision and opened log trigger reconfiguration.
@@ -212,7 +216,7 @@
           });
         });
       } else shelvesReady = true;
-      plugins = opened ? readPlugins(opened.settings('plugins')) : [];
+      plugins = [...(opened ? readPlugins(opened.settings('plugins')) : []), ...shared];
       atlasReady = false;
       const [key, installed] = [tmdbKey, plugins];
       // Where the last visit found the addons, used until this visit's discovery answers. A guest keeps
@@ -234,10 +238,11 @@
         const kept = readPrivateAddresses(opened?.settings(ADDRESSES));
         const forDiscovery = { ...foundRoutes, remux: ahead(kept.remux, foundRoutes.remux) };
         stopDiscovery = discoverServices(installed, forDiscovery, {
-          // A guest is handed neither publisher, so those probes are never issued and the playback
-          // services cannot be discovered at all. Structural, rather than a callback someone has to
-          // remember to leave out.
-          ...(opened
+          // A guest holding no shared grant is handed neither publisher, so those probes are never issued
+          // and the playback services cannot be discovered at all. Structural, rather than a callback
+          // someone has to remember to leave out. A guest holding a grant plays through the shared scout
+          // and den-remux, so it is handed both.
+          ...(opened || shared.length > 0
             ? {
                 scout: (found: Addon | null) => {
                   scout = found;
@@ -274,6 +279,9 @@
       stopDiscovery?.();
     };
   });
+
+  // A grant's name, end date or ended state as den-edge holds it now.
+  onMount(() => void guestGrants.refresh());
 
   // What discovery found, kept for the next visit once it has settled for a moment.
   $effect(() => {
@@ -1248,6 +1256,8 @@
 {#if playing && scout && remux !== null && PlayerScreen.current}
   {@const target = playing}
   {@const after = following}
+  <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
+  {@const guestSource = !!sharedInstallOf(scout.install)}
   {#key `${titleKey(target.title)}:${target.season}:${target.episode}`}
     <PlayerScreen.current
       title={target.title}
@@ -1257,7 +1267,9 @@
       {tmdbKey}
       {scout}
       {remux}
-      subtitles={installsOf(plugins, routes, 'subs')}
+      subtitles={installsOf(plugins, routes, 'subs').filter(
+        (install) => !!sharedInstallOf(install) === guestSource,
+      )}
       audioLanguage={playbackPrefs.audioLanguage}
       subtitleLanguage={playbackPrefs.subtitleLanguage}
       shownSubtitleLanguages={playbackPrefs.shownSubtitleLanguages}

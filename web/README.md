@@ -23,6 +23,15 @@ npm run build         # Production bundle and precompressed assets
 
 See [the browser test guide](e2e/README.md) for Playwright setup and [detail parity coverage](test/DETAIL_PARITY.md) for screen behavior.
 
+## Sharing
+
+Settings › Sharing lends a library's addons to a guest. The host names a guest, picks the addons and gets an invite code (or a `/#invite=<code>` link); the guest pastes it under "Shared with you", or opens the link, which fills the code in and opens Sharing for them to redeem. A guest needs no library of their own.
+
+- `src/lib/grants.ts` is the den-edge client for both sides: the host's `/lib/{id}/grants` routes and the guest's `/grant/redeem`, `/grant/addons` and `/grant/{gid}`.
+- `src/lib/grants.svelte.ts` holds what a guest was given. It lives in browser storage only (`den.grants`), never in the library log, so it cannot sync to a TV this browser later pairs with. An expired grant is kept and asked again, since its host can extend it; a grant den-edge no longer knows is dropped for good.
+- `src/settings/SharingSection.svelte` is the screen.
+- A guest's addons are virtual installs, `/<addon>/~<gid>`, on this origin. `relayFetch` sends `x-den-grant: <gid>:<secret>` to those bases (and to a `/remux` session naming one) in place of the library's membership proof. The header is same-origin only and never goes in a URL. A shared scout answers no `/stream` or `/play`, so a guest gets no Sources list or downloads and plays through den-remux.
+
 ## CSS conventions
 
 - Keep component styles in the component's `<style>` block. Reserve `src/app.css` for shared tokens, page defaults, and common chrome such as glass surfaces.

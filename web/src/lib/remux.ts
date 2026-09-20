@@ -3,6 +3,7 @@
 // play, and keeps scout's tickets and the debrid's links to itself. Its routes are on this origin under /remux
 // (tailscale serve), and a cookie from a one-time browser key lets this browser start sessions.
 
+import { sharedInstallOf } from './grants';
 import type { Playable } from './playable';
 import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
@@ -87,7 +88,7 @@ export interface Want {
   player?: 'native' | 'hls.js' | 'cast';
 }
 
-export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable';
+export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable' | 'ended' | 'public';
 
 /** A refusal, and — when den-remux said so — how long it asked to be left alone for. */
 export interface Refused {
@@ -433,7 +434,10 @@ export async function startSession(
     // A zero fallback here means "it named nothing", which is the caller's own interval rather than
     // a wait of no time at all.
     const named = retryAfterMs(res, 0) || undefined;
-    return { failure: failureOf(res.status, error), retryMs: named };
+    return {
+      failure: failureOf(res.status, error, !!sharedInstallOf(want.scout)),
+      retryMs: named,
+    };
   }
   return { failure: 'unreachable' };
 }
@@ -635,10 +639,16 @@ async function errorCode(res: Response): Promise<string | undefined> {
   }
 }
 
-function failureOf(status: number, error: string | undefined): Failure {
+function failureOf(status: number, error: string | undefined, shared: boolean): Failure {
   if (status === 401) return 'login';
-  if (status === 404) return 'none';
+  // A shared library's access ran out (`grant_expired`): not a fault of the player.
+  if (status === 410 && error === 'grant_expired') return 'ended';
+  // A revoked or unknown grant is a plain 404 from its `~<gid>` base, which reads like a title with no release —
+  // den-remux's own answer for that names itself.
+  if (status === 404) return shared && error !== 'no_playable_release' ? 'ended' : 'none';
   if (status === 429) return 'busy';
   if (error === 'transcode_unavailable') return 'transcode';
+  // The session has no public address to hand this network (a guest on IPv6, or Cast).
+  if (status === 503 && error === 'public_media_unavailable') return 'public';
   return 'unreachable';
 }

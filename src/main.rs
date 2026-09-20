@@ -5,6 +5,7 @@
 //! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
 mod cache;
+mod grants;
 mod handler;
 mod inbox;
 mod library;
@@ -161,6 +162,12 @@ pub struct AppState {
     /// because a refusal mid-playback is a stall rather than a clean fall back to the embed. A guest's
     /// lease holds one of `guest_media_slots`, which comes back when the lease expires.
     pub media_leases: Mutex<HashMap<String, relay::Lease>>,
+    /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
+    pub grants: grants::Grants,
+    /// Shared with den-remux (env `REMUX_EDGE_SECRET` here, `EDGE_SECRET` there): what lets den-edge name a grant
+    /// as a session's owner and end its sessions. Unset, a guest is offered no remux at all — without it remux
+    /// would count the guest's sessions as the host's.
+    pub remux_edge_secret: Option<String>,
 }
 
 impl AppState {
@@ -215,6 +222,8 @@ impl AppState {
             media_daily_max: None,
             media_spent: Arc::new(Mutex::new((0, 0))),
             media_leases: Mutex::new(HashMap::new()),
+            grants: grants::Grants::default(),
+            remux_edge_secret: None,
         }
     }
 
@@ -299,6 +308,7 @@ async fn main() {
     state.tmdb_key = env_opt("TMDB_KEY");
     state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
     state.media_daily_max = env_opt("MEDIA_DAILY_MAX_BYTES").and_then(|v| v.parse().ok());
+    state.remux_edge_secret = env_opt("REMUX_EDGE_SECRET");
     // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
     // a browser that cannot ask doesthedogdie itself. Built whether or not a key is lent — gated on the TMDB
     // key, a household that never lent one would find the warnings turned off with it, for no reason it could
@@ -324,6 +334,7 @@ async fn main() {
     tokio::spawn(ratings::sweep_forever(Arc::clone(&state)));
     tokio::spawn(title_metadata::sweep_forever(Arc::clone(&state)));
     tokio::spawn(skipdb::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(grants::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
@@ -336,7 +347,7 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={}",
+         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -362,6 +373,7 @@ async fn main() {
             (Some(_), None) => "household-key".to_owned(),
             (Some(_), Some(max)) => format!("household-key(max {max}/day)"),
         },
+        on(state.remux_edge_secret.is_some()),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());

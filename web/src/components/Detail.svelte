@@ -29,6 +29,7 @@
   import TitleSources from './TitleSources.svelte';
   import { isBlocked } from '../lib/parental';
   import Trailer from './Trailer.svelte';
+  import { sharedInstallOf } from '../lib/grants';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
   import { named } from '../lib/pageTitle';
@@ -163,6 +164,11 @@
    * every such case read as "no trailer here".
    */
   let trailerOpen = $state(false);
+  /**
+   * A scout shared through a grant answers no `/stream` or `/play` (den-edge refuses both on its `~<gid>` base), so
+   * the release list and downloads are not offered: a guest plays through den-remux alone.
+   */
+  const guestScout = $derived(!!scout && !!sharedInstallOf(scout.install));
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
@@ -428,21 +434,23 @@
         {ratings?.awards ?? ''}
       </p>{/if}
   </div>
-  <div class="title-sources" hidden={restricted}>
-    <TitleSources
-      bind:this={sourcesPanel}
-      imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
-      {scout}
-      {routes}
-      {active}
-      {remux}
-      season={ref.type === 'tv' ? sourceCoord?.season : undefined}
-      episode={sourceCoord?.episode}
-      onplay={onplayhere
-        ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
-        : undefined}
-    />
-  </div>
+  {#if !guestScout}
+    <div class="title-sources" hidden={restricted}>
+      <TitleSources
+        bind:this={sourcesPanel}
+        imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
+        {scout}
+        {routes}
+        {active}
+        {remux}
+        season={ref.type === 'tv' ? sourceCoord?.season : undefined}
+        episode={sourceCoord?.episode}
+        onplay={onplayhere
+          ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
+          : undefined}
+      />
+    </div>
+  {/if}
   <DetailReactions
     value={row && !row.deleted.value ? row.reaction.value : null}
     {busy}
@@ -477,7 +485,7 @@
         />
         <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
              foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
-        {#if scout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+        {#if scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
           <SeasonDownload
             {scout}
             imdb={d.imdbId}
@@ -536,12 +544,14 @@
                 onplaytv={onplay && displayedSeason !== null
                   ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
                   : undefined}
-                onsources={() => {
-                  if (displayedSeason !== null) {
-                    sourceTarget = { season: displayedSeason, episode: e.number };
-                    void sourcesPanel?.show();
-                  }
-                }}
+                onsources={guestScout
+                  ? undefined
+                  : () => {
+                      if (displayedSeason !== null) {
+                        sourceTarget = { season: displayedSeason, episode: e.number };
+                        void sourcesPanel?.show();
+                      }
+                    }}
               />
             {/each}
           </ol>

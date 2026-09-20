@@ -13,6 +13,8 @@
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { forgetDevice, parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
+  import type { GrantAddon } from '../lib/grants';
+  import { guestGrants } from '../lib/grants.svelte';
   import { receiveDeviceIdentity } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
@@ -127,6 +129,25 @@
     // TMDB's terms: cached content goes when the key it was fetched with does.
     if (service.name === 'tmdb') await clearTmdbCache();
   }
+
+  // Addons another library shares with this browser (`grants.svelte.ts`): listed, never editable, and not the library's.
+  const sharedLabels: Record<GrantAddon, string> = {
+    scout: 'Den Scout',
+    atlas: 'Den Atlas',
+    reel: 'Den Reel',
+    subtitles: 'Den Subtitles',
+  };
+  const sharedAddons = $derived(
+    guestGrants.list.flatMap((grant) =>
+      grant.ended
+        ? []
+        : (Object.keys(grant.addons) as GrantAddon[]).map((addon) => ({
+            gid: grant.gid,
+            host: grant.name,
+            addon,
+          })),
+    ),
+  );
 
   // Plugins, and the signing key each can be pinned to.
   let addonDraft = $state('');
@@ -649,8 +670,20 @@
           </li>
         {/each}
       </ul>
-    {:else}
+    {:else if !sharedAddons.length}
       <p class="status">No plugins yet. Add a manifest URL below.</p>
+    {/if}
+    {#if sharedAddons.length}
+      <h3>Shared with you</h3>
+      <ul class="list">
+        {#each sharedAddons as shared (`${shared.gid}/${shared.addon}`)}
+          <li class="line">
+            <span class="label"
+              >{sharedLabels[shared.addon]}<small>Shared by {shared.host} · read-only</small></span
+            >
+          </li>
+        {/each}
+      </ul>
     {/if}
     <p class="foot">
       A plugin sees what you browse and supplies what you play, so an Apple TV installs one only

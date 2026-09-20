@@ -41,7 +41,10 @@ const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
 /// once. These two bound the sustained rate, so they can be generous: enough that ordinary browsing never
 /// notices them, and low enough that mining every title through this origin does.
 const MEMBER_PER_WINDOW: u32 = 600;
-const GUEST_PER_WINDOW: u32 = 120;
+pub(crate) const GUEST_PER_WINDOW: u32 = 120;
+/// Relayed calls per grant per minute, whoever they come from: guests share NATs, so the per-address budget
+/// alone would let one grant spread its browsing over many addresses.
+pub(crate) const GRANT_PER_WINDOW: u32 = 300;
 /// Relayed fetches in flight at once, across everyone. The addons are one small box: without this a handful of
 /// visitors on a public name can hold every upstream socket and starve the TVs that actually live here.
 pub(crate) const MAX_IN_FLIGHT: usize = 16;
@@ -234,6 +237,200 @@ pub async fn relay(
     rid: &str,
     face: crate::handler::Face,
 ) -> Response {
+    relay_with(state, req, target, rid, face, None).await
+}
+
+/// A grant guest's call, already authenticated (`guest`).
+struct Guest {
+    gid: String,
+    /// The host's real install segment for the addon this call reaches; `None` for a `/remux` control call.
+    segment: Option<String>,
+    /// The grant's escrowed installs, which a `/remux/session` body is translated to.
+    installs: std::collections::BTreeMap<String, String>,
+    /// Whether the answer names the install and so must come back with `~<gid>` in its place.
+    scrub: bool,
+    /// A manifest, which loses the host's install id and the name of their debrid service.
+    manifest: bool,
+}
+
+impl Guest {
+    fn remux(&self) -> bool {
+        self.segment.is_none()
+    }
+
+    /// An answer as the guest may see it, or `None` when it cannot be made so (an encoding this cannot read).
+    fn answer(&self, headers: &axum::http::HeaderMap, body: &Bytes) -> Option<Bytes> {
+        let Some(segment) = self.segment.as_ref().filter(|_| self.scrub || self.manifest) else {
+            return Some(body.clone());
+        };
+        let json = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|t| t.contains("json"));
+        if !json || body.is_empty() {
+            return Some(body.clone());
+        }
+        if headers.get(header::CONTENT_ENCODING).is_some_and(|e| e != "identity") {
+            return None;
+        }
+        let mut text = std::str::from_utf8(body).ok()?.to_owned();
+        if self.scrub {
+            text = text.replace(segment.as_str(), &format!("~{}", self.gid));
+        }
+        if !self.manifest {
+            return Some(Bytes::from(text));
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        crate::grants::strip_manifest(&mut value);
+        serde_json::to_vec(&value).ok().map(Bytes::from)
+    }
+}
+
+/// A guest's call to a grant's addon (`/<addon>/~<gid>/…`) or to the `/remux` control plane with `x-den-grant`,
+/// or the request handed back when it is neither.
+///
+/// The grant is the whole gate: it is looked up after the address budget (a forged header must meet a budget
+/// before it can make anything read a file) and before anything a member would pass, and a guest is never
+/// treated as a member — whatever `x-den-library-member` it sends is not read.
+pub async fn guest(
+    state: &AppState,
+    req: Request,
+    rid: &str,
+    face: crate::handler::Face,
+) -> Result<Response, Box<Request>> {
+    let path = req.uri().path().to_owned();
+    let parsed = crate::grants::parse_guest_path(&path);
+    let remux = path.starts_with("/remux/") && req.headers().contains_key(crate::grants::HEADER);
+    if parsed.is_none() && !remux {
+        return Err(Box::new(req));
+    }
+    let not_found = || json(StatusCode::NOT_FOUND, "not_found");
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(wait) = crate::link::throttled_at(state, &format!("relay-guest-gate:{ip}"), MEMBER_PER_WINDOW)
+    {
+        return Ok(limited(wait));
+    }
+    let path_gid = match &parsed {
+        Some(Ok(p)) => Some(p.gid.as_str()),
+        Some(Err(())) => return Ok(not_found()),
+        None => None,
+    };
+    let claim = req.headers().get(crate::grants::HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let live = match crate::grants::authenticate(state, claim.as_deref(), path_gid).await {
+        Ok(live) => live,
+        Err(crate::grants::Denied::NotFound) => return Ok(not_found()),
+        Err(crate::grants::Denied::Expired(at)) => {
+            return Ok(crate::handler::json_reply(
+                StatusCode::GONE,
+                &serde_json::json!({ "error": "grant_expired", "expiredAt": at }),
+            ))
+        }
+    };
+    if let Some(wait) =
+        crate::link::throttled_at(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
+    {
+        return Ok(limited(wait));
+    }
+    let query = req.uri().query().map(str::to_owned);
+    let (target, guest) = match parsed {
+        Some(Ok(p)) => {
+            let shared = live.addons.iter().any(|a| a == p.addon);
+            let Some(segment) = live.installs.get(p.addon).filter(|_| shared).cloned() else {
+                return Ok(not_found());
+            };
+            // A path the streaming branch would take is refused whatever the allowlist says: a guest's bytes never
+            // leave through `stream`, only through the session remux opens for it.
+            if !crate::grants::allowed(p.addon, req.method(), &p.rest)
+                || media(&path)
+                || crate::grants::query_names(query.as_deref(), &["debug"])
+            {
+                return Ok(not_found());
+            }
+            let real = format!("/{}/{segment}{}", p.addon, p.rest);
+            let real = query.as_ref().map_or(real.clone(), |q| format!("{real}?{q}"));
+            let Some(target) = target(&state.relays, &real) else { return Ok(not_found()) };
+            let guest = Guest {
+                gid: live.gid,
+                scrub: p.addon != "atlas",
+                manifest: p.rest == "/manifest.json",
+                segment: Some(segment),
+                installs: Default::default(),
+            };
+            (target, guest)
+        }
+        _ => {
+            // Without the shared secret remux would count a guest's sessions as the host's own, and unless
+            // strangers cannot start libraries a grant is not a gate at all (`relay_with` asks the same of members).
+            let control = matches!(path.as_str(), "/remux/health" | "/remux/session" | "/remux/releases");
+            if state.remux_edge_secret.is_none()
+                || !control
+                || !crate::grants::libraries_are_members_only(state)
+            {
+                return Ok(not_found());
+            }
+            // An install of the guest's own in the query would bypass the body rewrite below.
+            if crate::grants::query_names(query.as_deref(), &["scout", "subtitles"]) {
+                return Ok(json(StatusCode::BAD_REQUEST, "bad_request"));
+            }
+            let pq = req.uri().path_and_query().map_or(path.clone(), |pq| pq.as_str().to_owned());
+            let Some(target) = target(&state.relays, &pq) else { return Ok(not_found()) };
+            let guest = Guest {
+                gid: live.gid,
+                segment: None,
+                installs: live.installs,
+                scrub: false,
+                manifest: false,
+            };
+            (target, guest)
+        }
+    };
+    Ok(relay_with(state, req, target, rid, face, Some(guest)).await)
+}
+
+/// `/remux/session` and `/remux/releases` name the guest's installs as `<origin>/<addon>/~<gid>` — the same shape
+/// the web app sends for a real one, with the grant in the segment's place. Each is translated to the host's real
+/// install at the relay table's own origin, so the guest never sees it and never chooses where remux fetches from.
+/// Anything else in either field is refused.
+fn remux_body(relays: &[(String, String)], guest: &Guest, body: &[u8]) -> Option<Bytes> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let fields = value.as_object_mut()?;
+    for addon in ["scout", "subtitles"] {
+        let Some(field) = fields.get_mut(addon).filter(|f| !f.is_null()) else { continue };
+        *field = serde_json::Value::String(real_install(relays, guest, addon, field.as_str()?)?);
+    }
+    serde_json::to_vec(&value).ok().map(Bytes::from)
+}
+
+fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: &str) -> Option<String> {
+    let url = url::Url::parse(given).ok()?;
+    let plain = url.host_str().is_some()
+        && matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none();
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    let virtual_install = [addon.as_bytes().to_vec(), format!("~{}", guest.gid).into_bytes()];
+    let named = matches!(segments.len(), 2 | 3)
+        && segments.get(2).is_none_or(|last| last.is_empty())
+        && segments
+            .iter()
+            .zip(&virtual_install)
+            .all(|(s, want)| crate::grants::percent_decode(s).is_some_and(|got| got == *want));
+    if !plain || !named {
+        return None;
+    }
+    target(relays, &format!("/{addon}/{}", guest.installs.get(addon)?))
+}
+
+async fn relay_with(
+    state: &AppState,
+    req: Request,
+    target: String,
+    rid: &str,
+    face: crate::handler::Face,
+    grant: Option<Guest>,
+) -> Response {
     let method = req.method().clone();
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
@@ -252,7 +449,10 @@ pub async fn relay(
     if remux && !matches!(req.uri().path(), "/remux/health" | "/remux/session" | "/remux/releases") {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
-    let member_only = face == crate::handler::Face::Web && (req.uri().path().starts_with("/scout/") || remux);
+    // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
+    let member_only = grant.is_none()
+        && face == crate::handler::Face::Web
+        && (req.uri().path().starts_with("/scout/") || remux);
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -284,7 +484,7 @@ pub async fn relay(
         }
         // Read here rather than inside `admit`: an async fn holding a `&Request` is not `Send`, and
         // this one is awaited inside the handler.
-        let claim = member_claim(&req);
+        let claim = if grant.is_some() { None } else { member_claim(&req) };
         return match admit(state, claim.as_deref(), &ip).await {
             Admitted::Yes { guest } => stream(state, req, target, rid, guest).await,
             // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
@@ -301,9 +501,15 @@ pub async fn relay(
             ),
         };
     }
-    if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW) {
-        let member =
-            req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    // A grant's calls are counted against the grant (`guest`), not against the address they come from, so a
+    // household's guests do not share one budget.
+    let visitor_wait = if grant.is_some() {
+        None
+    } else {
+        crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW)
+    };
+    if let Some(visitor_wait) = visitor_wait {
+        let member = member_claim(&req);
         if !crate::library::is_member(state, member.as_deref()).await {
             return limited(visitor_wait);
         }
@@ -326,24 +532,52 @@ pub async fn relay(
         }
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
-    let public_session = member_only && req.uri().path() == "/remux/session" && method == Method::POST;
+    // A guest's session gets the public listener as a member's does, but only on the public name, where a member's
+    // does too.
+    let guest_remux = face == crate::handler::Face::Web && grant.as_ref().is_some_and(Guest::remux);
+    let public_session =
+        (member_only || guest_remux) && req.uri().path() == "/remux/session" && method == Method::POST;
     if public_session
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
     {
         return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
     }
+    // An answer that has to be rewritten cannot be read compressed, so a guest's is asked for as it is.
+    let identity = grant.as_ref().is_some_and(|g| g.scrub || g.manifest);
     let conditions: Vec<_> = [header::IF_NONE_MATCH, header::IF_MODIFIED_SINCE, header::ACCEPT_ENCODING]
         .into_iter()
+        .filter(|name| !(identity && *name == header::ACCEPT_ENCODING))
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
+    let control = req.uri().path().to_owned();
     let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await else {
         return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
+    };
+    let body = match &grant {
+        Some(g) if g.remux() && method == Method::POST && control != "/remux/health" => {
+            match remux_body(&state.relays, g, &body) {
+                Some(rewritten) => rewritten,
+                None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+            }
+        }
+        _ => body,
     };
     let cast = public_session
         && serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("player").and_then(serde_json::Value::as_str).map(str::to_owned))
             .is_some_and(|player| player == "cast");
+    if let (true, Some(g), Some(source)) = (public_session, &grant, address) {
+        // The wide scope opens the listener to more than the guest's own address, and a guest is never given it:
+        // an IPv6 or Cast guest is turned away rather than let in to everyone. Nor may one grant open sources
+        // without end by changing address.
+        if cast || source.is_ipv6() {
+            return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
+        }
+        if !state.grants.allow_source(&g.gid, source, state.now()) {
+            return json(StatusCode::TOO_MANY_REQUESTS, "too_many_sources");
+        }
+    }
     // Nothing of the browser's goes along but what the addon reads: not its cookies, which carry its Access
     // session, nor anything Cloudflare added. Its validators do, so a revalidation is the addon's 304 rather
     // than the whole answer again, and the encodings it takes, so a large file (atlas's labels) arrives gzipped
@@ -357,6 +591,15 @@ pub async fn relay(
         .header("x-request-id", rid);
     if let Some(content_type) = content_type {
         out = out.header(header::CONTENT_TYPE, content_type);
+    }
+    if identity {
+        out = out.header(header::ACCEPT_ENCODING, "identity");
+    }
+    if let (Some(g), Some(secret)) = (grant.as_ref().filter(|g| g.remux()), &state.remux_edge_secret) {
+        // What tells remux this session is a guest's, to be counted, capped and ended apart from the host's.
+        out = out
+            .header("x-den-edge-secret", secret.as_str())
+            .header("x-den-owner", format!("grant:{}", g.gid));
     }
     // Only den-remux consumes this for its per-viewer start budget. Do not broaden the visitor-address data
     // handed to unrelated addons merely because they share the relay implementation.
@@ -386,6 +629,13 @@ pub async fn relay(
     let Ok(mut bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     };
+    if let Some(g) = &grant {
+        // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
+        match g.answer(&parts.headers, &bytes) {
+            Some(scrubbed) => bytes = scrubbed,
+            None => return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable"),
+        }
+    }
     if public_session && parts.status == StatusCode::CREATED {
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
@@ -440,7 +690,7 @@ pub async fn relay(
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
     // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
     // The browser keeps its own copy for as long as scout said.
-    if member_only {
+    if member_only || grant.is_some() {
         if let Some(policy) = resp.headers().get(header::CACHE_CONTROL).map(private) {
             resp.headers_mut().insert(header::CACHE_CONTROL, policy);
         }

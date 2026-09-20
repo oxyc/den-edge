@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Routes } from './routes';
-import { denAddonOf, findAddon, findAtlas, findReel, installsOf, SCOUT } from './scout';
+import {
+  denAddonOf,
+  findAddon,
+  findAtlas,
+  findReel,
+  hostedInstalls,
+  installsOf,
+  SCOUT,
+} from './scout';
 
 const ROUTES: Routes = {
   scout: [
@@ -180,5 +188,77 @@ describe('installsOf', () => {
       'http://192.168.86.193:8093/subs-cfg',
       'https://d-subs.oxy.fi/subs-cfg',
     ]);
+  });
+});
+
+describe('addons shared through a grant', () => {
+  const SHARED = (addon: string) => `https://den.example/${addon}/~a1b2c3d4/manifest.json`;
+  beforeEach(() =>
+    vi.stubGlobal('location', { href: 'https://den.example/', hostname: 'den.example' }),
+  );
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('are asked on their own ~gid base, whatever the routes table says', async () => {
+    const { asked, fetchImpl } = addons({ '/scout/~a1b2c3d4/manifest.json': 'com.den.scout' });
+    // The library's own plugin comes first, and a shared one is what is left when it has none.
+    expect(await findAddon([SHARED('scout')], {}, SCOUT, fetchImpl)).toEqual({
+      install: 'https://den.example/scout/~a1b2c3d4',
+      base: '/scout/~a1b2c3d4',
+    });
+    expect(asked).toEqual(['/scout/~a1b2c3d4/manifest.json']);
+    expect(await findAddon([SHARED('atlas')], ROUTES, SCOUT, addons({}).fetchImpl)).toBeNull();
+    expect(
+      await findAddon(
+        [SCOUT_LAN, SHARED('scout')],
+        ROUTES,
+        SCOUT,
+        addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' }).fetchImpl,
+      ),
+    ).toMatchObject({
+      base: '/scout/sealed-cfg',
+    });
+  });
+
+  it('find atlas and reel the same way', async () => {
+    expect(
+      await findAtlas(
+        [SHARED('atlas')],
+        {},
+        addons({ '/atlas/~a1b2c3d4/manifest.json': 'com.den.atlas' }).fetchImpl,
+      ),
+    ).toMatchObject({ base: '/atlas/~a1b2c3d4' });
+    expect(
+      await findReel(
+        [SHARED('reel')],
+        {},
+        addons({ '/reel/~a1b2c3d4/manifest.json': 'com.den.reel' }).fetchImpl,
+      ),
+    ).toMatchObject({ base: '/reel/~a1b2c3d4' });
+  });
+
+  it('give den-remux their ~gid subtitles install, as an origin and one segment', () => {
+    expect(installsOf([SHARED('scout'), SHARED('subtitles'), SUBS_LAN], ROUTES, 'subs')).toEqual([
+      'https://den.example/subtitles/~a1b2c3d4',
+      'http://192.168.86.193:8093/subs-cfg',
+    ]);
+  });
+});
+
+describe('hostedInstalls', () => {
+  it('is the config segment of each Den addon the library has, and nothing for one it lacks', () => {
+    expect(
+      hostedInstalls(
+        [THEIRS, SCOUT_LAN, SUBS_PUBLIC, 'http://192.168.86.193:8081/atlas-cfg/manifest.json'],
+        ROUTES,
+      ),
+    ).toEqual({ scout: 'sealed-cfg', subtitles: 'subs-cfg', atlas: 'atlas-cfg' });
+  });
+
+  it('skips an install that is not a plain base64url segment', () => {
+    expect(hostedInstalls(['http://192.168.86.193:8080/a.b%20c/manifest.json'], ROUTES)).toEqual(
+      {},
+    );
+    expect(hostedInstalls(['http://192.168.86.193:8080/~x/manifest.json'], ROUTES)).toEqual({});
+    expect(hostedInstalls([], ROUTES)).toEqual({});
   });
 });

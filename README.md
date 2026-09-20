@@ -26,6 +26,9 @@ the rest is small JSON it validates and bounds.
 | `DELETE /sync/{id}` | erases a backup an older link or the retired settings backup left |
 | `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
 | `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
+| `POST`/`GET /lib/{id}/grants`, `PUT`/`DELETE /lib/{id}/grants/{gid}` | a library owner's guest grants (oxyc/den#100): invite a named guest (`{name, addons, installs, codeExpiresAt?, accessDays? or accessUntil?, devices?}` → `{gid, code, grant}`, the code shown once), list, edit or extend, revoke. Authenticated by `x-den-library-member: <id>:<proof>` for the library in the path; at most 10 live grants per library (`409 too_many_grants`). `installs` is one bare base64url config segment per addon, never a URL |
+| `POST /grant/redeem` `{code, secretHash}` | a guest redeems an invite: `{gid, name, addons, expiresAt}`. One `404 invalid_code` for every failure; idempotent for the same `secretHash`; the access clock starts at the first redeem; throttled per address |
+| `GET /grant/addons`, `DELETE /grant/{gid}` | with `x-den-grant: <gid>:<secret>`: the guest's virtual installs (`/<addon>/~<gid>`; `410 grant_expired` once access ended), and leaving |
 
 `POST /pair/open` allows 20 tries a minute from one address (`429` past that).
 
@@ -46,6 +49,15 @@ A library is one append-only log under `lib/`: its token's hash, then a line per
 answer goes out, replayed into memory on first use and rewritten without superseded lines once they
 outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
 ciphertext the clients seal and merge.
+
+Guest grants live under `grants/` (mode 0700): one file per grant and an index, holding only SHA-256 hashes of the
+invite code and each device's secret, plus the escrow — the host's config segment per shared addon, which is a
+bearer copy of their installs. Leave `grants/` out of backups; a restored store simply reissues its invites. A
+guest's `x-den-grant` header makes the relay swap `/<addon>/~<gid>/…` for the host's real install (never a member,
+a path allowlist, manifests stripped of `denInstallId` and debrid names, never forwarded upstream), and lets
+`/remux/health|releases|session` through with `x-den-edge-secret` and `x-den-owner: grant:<gid>`. Access is
+checked from the clock on every call. A background sweep asks den-remux to end the sessions of a grant that
+was revoked or expired, and reaps its record 30 days later.
 
 `DATA_DIR/generation` is a random id minted the first time the store opens. Every `/lib` answer carries it.
 Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
@@ -80,11 +92,12 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
 | `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |
-| `WEB_HOSTS` | unset | the web app's public names (comma-separated, e.g. `d.oxy.fi`, behind Cloudflare Access). A request for one gets the web app, `/health`/`/version`, `/routes` and the routes the web app calls (`/pair/…`, `/lib/…`, `/inbox/append`) — never what only a TV does (draining its inbox, unlinking, `/sync`), `/config` or `/metrics` |
+| `WEB_HOSTS` | unset | the web app's public names (comma-separated, e.g. `d.oxy.fi`, behind Cloudflare Access). A request for one gets the web app, `/health`/`/version`, `/routes` and the routes the web app calls (`/pair/…`, `/lib/…`, `/grant/…`, `/inbox/append`) — never what only a TV does (draining its inbox, unlinking, `/sync`), `/config` or `/metrics` |
 | `API_HOSTS` | unset | the device API's public names (e.g. `d-api.oxy.fi`, Access bypassed). A request for one gets the device routes and never the web app, which would otherwise be served past Access. A name in neither list (the LAN address, the tailnet's) serves both halves |
 | `ADDON_RELAY` | unset | `/<prefix>=<LAN origin>` pairs, comma-separated (`/scout=http://192.168.86.193:8080,/atlas=http://192.168.86.193:8081`). The web app asks its addons at `/<prefix>/…` on its own origin and den-edge fetches them at the LAN address: JSON only (GET, HEAD, POST), without the browser's cookies or headers, not on the `API_HOSTS` names. So the browser never holds the Access token, and needs no CORS past Access |
 | `ROUTES` | unset | every address for each service, in order: `<service>=<entry> <entry> …;<service>=…`, an entry `[access:]http(s)://host[:port][/path]` (`access:` marks a name behind Cloudflare Access). Served as `GET /routes`; den-remux's https entries are allowed in the web app's `connect-src` and `media-src`. den's `render-env.sh` builds it from four facts (oxyc/den#16) |
 | `NEW_LIBRARIES` | `open` | who may start a library. `open`: any first write. `members`: only a device that proves it holds another library here, with `x-den-library-member: <id>:<token>` on its first write, as a TV moving its library to a new key does. So a stranger reaching the public device API can't use den-edge as storage, and neither can a new household (den #21). A store that lost its data needs `open` again for its TVs to write their libraries back |
+| `REMUX_EDGE_SECRET` | unset | shared with den-remux (its `EDGE_SECRET`). Set, a grant guest may use the `/remux` control routes and den-edge can end a grant's sessions (`POST /remux/admin/kill`); unset, guests are offered no remux, because remux would count their sessions as the host's |
 | `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address pairing limit reads `CF-Connecting-IP`, else the last `X-Forwarded-For` entry; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
 

@@ -8,6 +8,7 @@
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
   import { canOfferCast, CAST_DISCOVERY_MS } from '../lib/castOffer';
+  import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
@@ -110,9 +111,10 @@
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
   const messages: Record<
-    'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback' | 'source',
+    'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback' | 'source' | 'public',
     string
   > = {
+    public: 'Playback isn’t available from this network yet.',
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',
@@ -919,6 +921,10 @@
       </form>
     {:else if failure === 'busy' || failure === 'transcode'}
       <p class="note" role="status">{waits[failure]}</p>
+    {:else if failure === 'ended'}
+      <p class="error" role="alert">
+        {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with you.
+      </p>
     {:else if failure}
       <p class="error" role="alert">{messages[failure]}</p>
     {:else if !session}

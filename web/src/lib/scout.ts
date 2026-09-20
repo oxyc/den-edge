@@ -4,6 +4,7 @@
 // on the public name and tailscale serve serves on the tailnet, with the install's config segment after it. An addon
 // that is not Den's is never sent anything.
 
+import { SEGMENT, sharedInstallOf, type GrantAddon } from './grants';
 import { isLanURL } from './prefs';
 import { relayFetch } from './relayFetch';
 import { within, type Routes } from './routes';
@@ -24,6 +25,12 @@ const MANIFEST = '/manifest.json';
 /** Where this page would ask the plugin at `url`, when it is the service `want` names; null otherwise. */
 function place(url: string, routes: Routes, want: { name: string; path: string }): Addon | null {
   if (!url.endsWith(MANIFEST)) return null;
+  // An addon shared with this browser (`grants.svelte.ts`) is asked on its own `~<gid>` base and nowhere else.
+  const shared = sharedInstallOf(url);
+  if (shared)
+    return shared.path.startsWith(`${want.path}/`)
+      ? { install: shared.install, base: shared.path }
+      : null;
   const install = url.slice(0, -MANIFEST.length);
   const listed = routes[want.name];
   // The URL's own segment only where the table names no address for this service at all — which is
@@ -159,10 +166,41 @@ export function denAddonOf(url: string, routes: Routes): { label: string; role: 
   return DEN_ADDONS.find((addon) => within(install, routes[addon.name]) !== null) ?? null;
 }
 
+/**
+ * The single config segment of each of the library's own scout, atlas, reel and subtitles installs — what a grant
+ * escrows, so den-edge builds the address itself. An addon with no install, or one whose segment isn't plain base64url,
+ * is left out.
+ */
+export function hostedInstalls(
+  plugins: string[],
+  routes: Routes,
+): Partial<Record<GrantAddon, string>> {
+  const installs: Partial<Record<GrantAddon, string>> = {};
+  const wants: [GrantAddon, { name: string; path: string }][] = [
+    ['scout', SCOUT],
+    ['atlas', ATLAS],
+    ['reel', REEL],
+    ['subtitles', { name: 'subs', path: '/subtitles' }],
+  ];
+  for (const [addon, want] of wants) {
+    for (const url of plugins) {
+      const segment = place(url, routes, want)?.base.slice(want.path.length + 1);
+      if (segment && SEGMENT.test(segment)) {
+        installs[addon] = segment;
+        break;
+      }
+    }
+  }
+  return installs;
+}
+
 /** The library's installs of the service `name` (den-subtitles, for den-remux), without their manifest file. */
 export function installsOf(plugins: string[], routes: Routes, name: string): string[] {
   return plugins.flatMap((url) => {
     if (!url.endsWith(MANIFEST)) return [];
+    const shared = sharedInstallOf(url);
+    if (shared)
+      return shared.addon === (name === 'subs' ? 'subtitles' : name) ? [shared.install] : [];
     const install = url.slice(0, -MANIFEST.length);
     return within(install, routes[name]) === null ? [] : [install];
   });
