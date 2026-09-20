@@ -21,8 +21,10 @@ import {
   SPEED_PROBE_BYTES,
   startSession,
   wantedLanguages,
+  videoCodecsOf,
   type Want,
 } from './remux';
+import type { Playable } from './playable';
 
 const want: Want = {
   imdb: 'tt0111161',
@@ -564,7 +566,8 @@ describe('listReleases', () => {
       },
       'https://pve.example:8443/remux',
     );
-    expect(list).toEqual([{ label: '1080p • WEB-DL', filename: 'a.mkv', size: 1 }]);
+    // A den-remux that gives no verdict is taken to play everything.
+    expect(list).toEqual([{ label: '1080p • WEB-DL', filename: 'a.mkv', size: 1, plays: 'yes' }]);
     expect(calls[0]![0]).toBe('https://pve.example:8443/remux/releases');
     expect(JSON.parse(String(calls[0]![1]!.body))).toEqual({
       imdb: 'tt0903624',
@@ -573,6 +576,39 @@ describe('listReleases', () => {
     expect(
       await listReleases({ imdb: 'tt1', scout: want.scout }, async () => answer(502, {})),
     ).toBeNull();
+  });
+
+  it('sends the browser’s claims and reads each release’s verdict', async () => {
+    const bodies: unknown[] = [];
+    const claims = { videoCodecs: ['h264', 'hevc'], playable: { hevcMain: 153 } as Playable };
+    const list = await listReleases(
+      { imdb: 'tt1', scout: want.scout },
+      async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return answer(200, {
+          releases: [
+            { label: 'a', filename: 'a.mkv', plays: 'no', why: 'Dolby Vision profile 5' },
+            { label: 'b', filename: 'b.mkv', plays: 'convert' },
+            { label: 'c', filename: 'c.mkv', plays: 'yes', why: '' },
+            { label: 'd', filename: 'd.mkv', plays: 'maybe', why: 7 },
+          ],
+        });
+      },
+      '/remux',
+      claims,
+    );
+    expect(bodies[0]).toEqual({ imdb: 'tt1', scout: want.scout, ...claims });
+    expect(list).toEqual([
+      { label: 'a', filename: 'a.mkv', plays: 'no', why: 'Dolby Vision profile 5' },
+      { label: 'b', filename: 'b.mkv', plays: 'convert' },
+      { label: 'c', filename: 'c.mkv', plays: 'yes' },
+      { label: 'd', filename: 'd.mkv', plays: 'yes' },
+    ]);
+  });
+
+  it('names h264 and, where it decodes it, hevc', () => {
+    expect(videoCodecsOf({ hevcMain: 0, hevcMain10: 0 } as Playable)).toEqual(['h264']);
+    expect(videoCodecsOf({ hevcMain: 0, hevcMain10: 153 } as Playable)).toEqual(['h264', 'hevc']);
   });
 });
 

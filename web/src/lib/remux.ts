@@ -24,7 +24,13 @@ export interface Session {
   castOrigin?: string;
   /** Seconds. */
   duration: number;
-  release: { label: string; filename: string; size: number };
+  release: {
+    label: string;
+    filename: string;
+    size: number;
+    /** Set when den-remux opened this release instead of the one asked for, with why it couldn't play that one. */
+    requested?: { filename: string; why?: string };
+  };
   /** What plays: the codec, the size it plays at, and whether den-remux converted and tone-mapped it. */
   video?: {
     codec: string;
@@ -482,36 +488,58 @@ export function nativeHls(
   return (env.vendor ?? '').startsWith('Apple') || !env.mse;
 }
 
+/** Whether this browser plays a release: as it is, after a conversion, or not at all. */
+export type Plays = 'yes' | 'convert' | 'no';
+
 /** A release den-remux could play, as it lists them: never a URL. */
 export interface Release {
   label: string;
   filename: string;
   size?: number | null;
+  /** den-remux's verdict for the claims it was sent; `yes` from a den-remux that gives none. */
+  plays: Plays;
+  /** A short reason for a `convert` or `no`, when den-remux gives one. */
+  why?: string;
+}
+
+/** What a browser decodes, as the session request states it: den-remux judges each release against it. */
+export type Claims = Pick<Want, 'videoCodecs' | 'playable'>;
+
+/** The `videoCodecs` a browser's `playable` claims stand for: `h264`, and `hevc` when it decodes it. */
+export function videoCodecsOf(can: Playable): string[] {
+  return can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'];
 }
 
 /**
  * The releases den-remux could play for a title, in the order it would try them, so the player can pick one by
- * `filename`; null when it can't say.
+ * `filename`; null when it can't say. Given the browser's `claims` it also says which of them play here (`plays`).
  */
 export async function listReleases(
   title: Pick<Want, 'imdb' | 'season' | 'episode' | 'scout'>,
   fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
+  claims?: Claims,
 ): Promise<Release[] | null> {
   try {
     const res = await fetchImpl(`${base}/releases`, {
       method: 'POST',
       headers: browserHeaders(base),
-      body: JSON.stringify(title),
+      body: JSON.stringify(claims ? { ...title, ...claims } : title),
     });
     forgetRefusedToken(base, res);
     if (!res.ok) return null;
     const releases = ((await res.json()) as { releases?: unknown }).releases;
-    return Array.isArray(releases)
-      ? releases.filter(
-          (r): r is Release => typeof r?.label === 'string' && typeof r?.filename === 'string',
-        )
-      : null;
+    if (!Array.isArray(releases)) return null;
+    return releases
+      .filter(
+        (r): r is Record<string, unknown> & { label: string; filename: string } =>
+          typeof r?.label === 'string' && typeof r?.filename === 'string',
+      )
+      .map(({ plays, why, ...release }) => ({
+        ...(release as Omit<Release, 'plays' | 'why'>),
+        plays: plays === 'no' || plays === 'convert' ? plays : 'yes',
+        ...(typeof why === 'string' && why ? { why } : {}),
+      }));
   } catch {
     return null;
   }
