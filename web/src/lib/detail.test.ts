@@ -68,6 +68,18 @@ describe('title pages', () => {
     expect(detail.runtime).toBe(55);
   });
 
+  it('keeps the whole cast, for the page to reveal as it is scrolled, not the first twenty', () => {
+    const long = {
+      ...movie,
+      credits: {
+        cast: Array.from({ length: 45 }, (_, i) => ({ id: 100 + i, name: `Actor ${i}` })),
+      },
+    };
+    const detail = parseDetail({ type: 'movie', id: 1 }, long)!;
+    expect(detail.cast).toHaveLength(45);
+    expect(detail.cast[44]).toMatchObject({ id: 144 });
+  });
+
   it('refuses a title TMDB gives no name', () => {
     expect(parseDetail({ type: 'movie', id: 1 }, {})).toBeNull();
   });
