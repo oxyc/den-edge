@@ -1,4 +1,5 @@
 import Hls from 'hls.js';
+import { hlsConfig } from '../../src/lib/hlsConfig';
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
@@ -57,6 +58,7 @@ interface RemotePlayer {
 
 interface RemotePlayerController {
   addEventListener(type: string, listener: () => void): void;
+  seek(): void;
 }
 
 interface CastGlobals {
@@ -125,6 +127,7 @@ let current: LoadMessage | undefined;
 let hls: Hls | undefined;
 let castContext: CastContext | undefined;
 let remotePlayer: RemotePlayer | undefined;
+let remoteController: RemotePlayerController | undefined;
 let castStarted = false;
 let replacingCast = false;
 let castSubtitleAppliedId: string | undefined;
@@ -168,13 +171,32 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   hls?.destroy();
   hls = undefined;
   video.removeAttribute('src');
+  const start = Math.max(0, media.currentTime ?? 0);
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url;
-    video.addEventListener('loadedmetadata', () => applySubtitle(media.subtitleLanguage), {
-      once: true,
-    });
+    // A native player takes a start position once it knows the stream; set before that it is ignored.
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
+        if (start > 0 && Math.abs(video.currentTime - start) > 2) video.currentTime = start;
+        applySubtitle(media.subtitleLanguage);
+      },
+      { once: true },
+    );
   } else if (Hls.isSupported()) {
-    hls = new Hls();
+    // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
+    hls = new Hls(hlsConfig(start > 0 ? start : undefined));
+    let recovered = false;
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
+        // A decoder that lost its place: reset the buffer and carry on, once.
+        recovered = true;
+        hls?.recoverMediaError();
+        return;
+      }
+      tell('den-error', { message: `hls.js ${data.type} ${data.details}` });
+    });
     hls.on(Hls.Events.MANIFEST_PARSED, () => applySubtitle(media.subtitleLanguage));
     hls.loadSource(url);
     hls.attachMedia(video);
@@ -184,13 +206,24 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     tell('den-error', { message });
     return;
   }
-  video.currentTime = Math.max(0, media.currentTime ?? 0);
+  describeToSystem(media);
   try {
     await video.play();
     setStatus(PLAYING_HERE);
   } catch {
     setStatus('Press play');
   }
+}
+
+/** What the lock screen and the system's media controls show for this page's video: the title and its poster. */
+function describeToSystem(media: Media): void {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: media.subtitle ?? media.title,
+    artist: media.subtitle ? media.title : undefined,
+    album: media.title,
+    artwork: media.image ? [{ src: media.image, sizes: '500x750', type: 'image/jpeg' }] : [],
+  });
 }
 
 function applySubtitle(language: string | null | undefined): void {
@@ -316,6 +349,7 @@ function initializeCast(): void {
   castContext = cast.CastContext.getInstance();
   remotePlayer = new cast.RemotePlayer();
   const controller = new cast.RemotePlayerController(remotePlayer);
+  remoteController = controller;
   controller.addEventListener(cast.RemotePlayerEventType.ANY_CHANGE, () => {
     if (!castStarted || !remotePlayer) return;
     tell('den-progress', {
@@ -412,6 +446,21 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   castSubtitleAppliedId = undefined;
   if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
     castSubtitleAppliedId = current.id;
+});
+
+/** The outside player's Skip button: move this page's video, or the receiver it is casting to, to `time`. */
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent || !current) return;
+  const message = event.data as { type?: string; id?: string; time?: unknown };
+  if (message.type !== 'den-seek' || message.id !== current.id) return;
+  if (typeof message.time !== 'number' || !Number.isFinite(message.time) || message.time < 0)
+    return;
+  if (castStarted && remotePlayer && remoteController) {
+    remotePlayer.currentTime = message.time;
+    remoteController.seek();
+  } else {
+    video.currentTime = message.time;
+  }
 });
 
 video.addEventListener('timeupdate', () =>

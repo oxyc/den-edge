@@ -58,6 +58,7 @@
     onreact,
     onplay,
     onplayhere,
+    remux = null,
     away = false,
     blocked = false,
     ceiling = undefined,
@@ -89,6 +90,8 @@
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
     onplay?: (title: Title, season?: number, episode?: number) => void;
     onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
+    /** Where den-remux answers (`findRemux`), so the Sources list can say which releases won't play here. */
+    remux?: string | null;
     /** A library member whose device reaches no den-remux route, so nothing plays here: `TitleActions` says where it does. */
     away?: boolean;
     /** That device was refused the home network by the browser itself, which `TitleActions` says instead. */
@@ -432,6 +435,7 @@
       {scout}
       {routes}
       {active}
+      {remux}
       season={ref.type === 'tv' ? sourceCoord?.season : undefined}
       episode={sourceCoord?.episode}
       onplay={onplayhere

@@ -9,6 +9,9 @@
   box-sizing: border-box;
 }
 
+/* `html` too: a percentage height needs every ancestor to have one, or inside the player's iframe the page shrinks to
+   the video's own aspect ratio and sits as a strip at the top instead of filling the stage. */
+html,
 body,
 main {
   width: 100%;
@@ -26,6 +29,7 @@ video {
   width: 100%;
   height: 100%;
   background: #000;
+  object-fit: contain;
 }
 
 .overlay {

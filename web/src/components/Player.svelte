@@ -7,6 +7,7 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
+  import { hlsConfig } from '../lib/hlsConfig';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -27,7 +28,9 @@
     type Release,
     type Session,
     type Want,
+    videoCodecsOf,
   } from '../lib/remux';
+  import { optionLabel, swapNotice } from '../lib/releaseVerdicts';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -156,6 +159,8 @@
   let decodes: Playable | undefined;
   /** The title's releases den-remux could play, to pick another from. */
   let releases = $state<Release[]>([]);
+  /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
+  let swapped = $state<string | null>(null);
   /**
    * Whether this release has already been asked for again with the browser's claims cut back.
    *
@@ -188,6 +193,7 @@
   ) {
     clearTimeout(retry);
     failure = null;
+    swapped = null;
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
       if (!found) {
@@ -229,7 +235,7 @@
       subtitles,
       subtitleLanguages,
       audio,
-      videoCodecs: can.hevcMain || can.hevcMain10 ? ['h264', 'hevc'] : ['h264'],
+      videoCodecs: videoCodecsOf(can),
       playable: can,
       startAt: at,
       maxBitrate,
@@ -252,12 +258,18 @@
     }
     started = at;
     session = result;
+    swapped = swapNotice(
+      pick?.filename,
+      result,
+      (name) => releases.find((r) => r.filename === name)?.label ?? name,
+    );
     if (!releases.length) {
-      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux).then(
-        (list) => {
-          releases = list ?? [];
-        },
-      );
+      void listReleases({ imdb, season, episode, scout: scout.install }, undefined, remux, {
+        videoCodecs: request.videoCodecs,
+        playable: can,
+      }).then((list) => {
+        releases = list ?? [];
+      });
     }
   }
 
@@ -300,23 +312,7 @@
         failure = 'unsupported';
         return;
       }
-      // -1 is hls.js's own default: the playlist's start, or the beginning.
-      hls = new Hls({
-        enableWorker: false,
-        startPosition: started ?? -1,
-        // den-remux converts on the GPU as the player asks for segments, so the first one of a transcoded release
-        // can take far longer to answer than a copied one. hls.js gives up on a segment about ten seconds late and
-        // by default doesn't retry a timeout at all, which turns a slow conversion into a dead session. Wait
-        // through it instead, and retry twice before calling it broken.
-        fragLoadPolicy: {
-          default: {
-            maxTimeToFirstByteMs: 30_000,
-            maxLoadTimeMs: 120_000,
-            timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
-            errorRetry: { maxNumRetry: 2, retryDelayMs: 1_000, maxRetryDelayMs: 8_000 },
-          },
-        },
-      });
+      hls = new Hls(hlsConfig(started));
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so
       // the release is still asked for again as a player that takes none of what it just refused.
@@ -391,6 +387,10 @@
     if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
+      // The iframe has no `video` here to fire loadedmetadata and timeupdate, so its progress is what starts the
+      // skip segments and drives the skip button, auto-skip and the next-episode warm-up.
+      if (remoteDuration > 0) void loadSegments();
+      tick();
       if (typeof message.paused === 'boolean' && message.paused !== remotePaused) {
         remotePaused = message.paused;
         if (remotePaused) paused();
@@ -618,6 +618,8 @@
   // SvelteSet, and reactivity is the one thing this must not have — nothing renders it, and a write must not
   // re-run the tick that made it. Four kinds do not need a Set anyway.
   const skipped: Partial<Record<SkipKind, true>> = {};
+  /** The length SkipDB was last asked about; 0 before it was asked. */
+  let askedFor = 0;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
@@ -625,6 +627,11 @@
    */
   async function loadSegments() {
     if (!imdb || segments.length || ended) return;
+    // Asked again only for a different length: another release is another encode, but the same one is not asked
+    // for at every progress tick of a player that has no `loadedmetadata` to say it once.
+    const asked = length();
+    if (askedFor > 0 && Math.abs(asked - askedFor) < 2) return;
+    askedFor = asked;
     const found = await fetchSkipSegments(imdb, {
       season,
       episode,
@@ -638,10 +645,10 @@
    * and to leave one within a second of it, and far finer than the progress report's minute.
    */
   function tick() {
-    if (!video) return;
-    warmNext();
+    const at = video?.currentTime ?? remoteTime;
+    warmNext(at);
     if (!segments.length) return;
-    active = activeAt(segments, video.currentTime);
+    active = activeAt(segments, at);
     if (!autoSkip || !active || !canAutoSkip(active) || skipped[active.kind]) return;
     skipActive();
   }
@@ -656,10 +663,10 @@
    * by the time the advance asks for it in earnest — the slow part of starting an episode — rather than the
    * viewer waiting through it after the countdown. Choosing a release is left to that session, deliberately.
    */
-  function warmNext() {
-    if (warmedNext || !imdb || !video || !onnext) return;
+  function warmNext(at: number) {
+    if (warmedNext || !imdb || !onnext) return;
     const to = nextEpisode;
-    if (!to || !shouldWarmNext(video.currentTime, length())) return;
+    if (!to || !shouldWarmNext(at, length())) return;
     warmedNext = true;
     void listReleases(
       { imdb, season: to.season, episode: to.episode, scout: scout.install },
@@ -671,11 +678,22 @@
   /** Jump just past the active segment — the Skip button's action, and auto-skip's. */
   function skipActive() {
     const segment = active;
-    if (!video || !segment) return;
-    skipped[segment.kind] = true;
+    if (!segment) return;
     const total = length();
-    video.currentTime = total > 0 ? Math.min(total, segment.end) : segment.end;
+    const to = total > 0 ? Math.min(total, segment.end) : segment.end;
+    if (video) video.currentTime = to;
+    else if (!seekCastFrame(to)) return;
+    skipped[segment.kind] = true;
     active = null;
+  }
+
+  /** Ask the cast page's own player, or the receiver it is casting to, to move to `time`. */
+  function seekCastFrame(time: number): boolean {
+    const current = session;
+    const frame = castFrame?.contentWindow;
+    if (!current?.castOrigin || !frame) return false;
+    frame.postMessage({ type: 'den-seek', id: current.playlist, time }, current.castOrigin);
+    return true;
   }
 
   /** Another audio track is another session of the same release (den-remux encodes one), from the same second. */
@@ -878,6 +896,12 @@
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
+      {#if swapped}
+        <p class="swap" role="status">
+          <span>{swapped}</span>
+          <button onclick={() => (swapped = null)}>Dismiss</button>
+        </p>
+      {/if}
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -902,7 +926,9 @@
             <select aria-label="Release" value={session.release.filename} onchange={switchRelease}>
               <!-- Keyed by place: two releases can share a file name (the same encode under two infohashes). -->
               {#each releases as release, n (n)}
-                <option value={release.filename}>{release.label}</option>
+                <option value={release.filename} disabled={release.plays === 'no'}
+                  >{optionLabel(release)}</option
+                >
               {/each}
             </select>
           </div>
@@ -1156,6 +1182,19 @@
     min-width: 0;
     max-width: 70ch;
     margin: 0;
+  }
+
+  /* Another release opened than the one picked: a line of its own above the footer's rows. */
+  .swap {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0;
+    color: rgb(255 255 255 / 0.85);
+    font-size: 14px;
   }
 
   .playing {
