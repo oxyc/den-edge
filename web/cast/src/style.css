@@ -62,6 +62,12 @@ video {
   white-space: nowrap;
 }
 
+/* `display` below would otherwise win over the hidden attribute. */
+google-cast-launcher[hidden],
+.cast-options[hidden] {
+  display: none;
+}
+
 google-cast-launcher,
 .cast-options summary {
   display: grid;

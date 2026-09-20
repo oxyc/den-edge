@@ -110,6 +110,8 @@ declare global {
 const video = document.querySelector('video')!;
 const statusPill = document.querySelector<HTMLElement>('#status')!;
 const profile = document.querySelector<HTMLSelectElement>('#profile')!;
+const castLauncher = document.querySelector<HTMLElement>('google-cast-launcher')!;
+const castOptions = document.querySelector<HTMLElement>('.cast-options')!;
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
 function setStatus(text: string): void {
@@ -211,7 +213,8 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     await video.play();
     setStatus(PLAYING_HERE);
   } catch {
-    setStatus('Press play');
+    // A browser that won't start playback without a tap refuses here. That is its autoplay policy, not a fault, and
+    // the video's own controls already carry the play button, so nothing more is said over the picture.
   }
 }
 
@@ -391,6 +394,8 @@ function initializeCast(): void {
   });
   castContext.addEventListener(cast.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
     const state = (event as { sessionState?: string }).sessionState;
+    // The receiver menu is for choosing what the connected Chromecast is, so it is there only while one is.
+    castOptions.hidden = !(state === 'SESSION_STARTED' || state === 'SESSION_RESUMED');
     if (state === 'SESSION_STARTED') {
       void loadCast();
     } else if (state === 'SESSION_ENDED' && castStarted) {
@@ -402,7 +407,11 @@ function initializeCast(): void {
 }
 
 window.__onGCastApiAvailable = (available) => {
-  if (available) initializeCast();
+  if (!available) return;
+  initializeCast();
+  // Only a browser with the Cast SDK has anything to cast from; elsewhere (Safari has AirPlay in its own
+  // controls) the launcher would draw as an empty circle over the video.
+  castLauncher.hidden = false;
 };
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {

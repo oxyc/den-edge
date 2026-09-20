@@ -10,8 +10,14 @@
       <video controls playsinline x-webkit-airplay="allow"></video>
       <div class="overlay">
         <span id="status" class="pill" role="status" hidden></span>
-        <google-cast-launcher aria-label="Cast to a TV" title="Cast to a TV"></google-cast-launcher>
-        <details class="cast-options">
+        <!-- Both are revealed by main.ts: the launcher only where the Cast SDK exists (Chromium; Safari has AirPlay
+             instead and would draw an empty circle), the receiver menu only while a Cast session is connected. -->
+        <google-cast-launcher
+          aria-label="Cast to a TV"
+          title="Cast to a TV"
+          hidden
+        ></google-cast-launcher>
+        <details class="cast-options" hidden>
           <summary aria-label="Cast options" title="Cast options">⋯</summary>
           <label>
             <span>Receiver</span>
