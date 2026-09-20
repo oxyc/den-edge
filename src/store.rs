@@ -44,7 +44,7 @@ fn load_generation(dir: &Path) -> io::Result<String> {
 }
 
 /// The kinds of record, one directory each.
-pub const NAMESPACES: [&str; 5] = ["inbox", "plugins", "settings", "sync", "lib"];
+pub const NAMESPACES: [&str; 6] = ["inbox", "plugins", "settings", "sync", "lib", "grants"];
 
 /// The cap unless `STORE_CAP_BYTES` sets one: far past one household's few MB.
 pub const DEFAULT_CAP: u64 = 1 << 30;
@@ -54,6 +54,12 @@ impl Store {
         let mut used = 0;
         for ns in NAMESPACES {
             std::fs::create_dir_all(dir.join(ns))?;
+            // Guest grants hold a bearer copy of a host's addon installs (`grants.rs`).
+            #[cfg(unix)]
+            if ns == "grants" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dir.join(ns), std::fs::Permissions::from_mode(0o700))?;
+            }
             for entry in std::fs::read_dir(dir.join(ns))? {
                 used += entry?.metadata()?.len();
             }
@@ -135,6 +141,12 @@ impl Store {
         tokio::fs::rename(&tmp, &path).await?;
         self.account(old, value.len() as u64);
         Ok(())
+    }
+
+    /// Make a rename or removal in `ns` durable: `replace_file` syncs the data, but the directory entry that
+    /// names it is only on disk once the directory is synced too.
+    pub async fn sync_dir(&self, ns: &str) -> io::Result<()> {
+        tokio::fs::File::open(self.dir.join(ns)).await?.sync_all().await
     }
 
     pub async fn delete(&self, ns: &str, key: &str) -> io::Result<()> {

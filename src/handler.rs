@@ -115,7 +115,9 @@ fn preflight() -> Response {
     headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, PUT, POST, DELETE"));
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type, x-den-link, x-den-library-token, x-den-library-member"),
+        HeaderValue::from_static(
+            "content-type, x-den-link, x-den-library-token, x-den-library-member, x-den-grant",
+        ),
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
     resp
@@ -143,6 +145,15 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
         return bare_json(StatusCode::NOT_FOUND, &error("not_found"));
     }
     let path_and_query = req.uri().path_and_query().map_or_else(|| path.clone(), |pq| pq.as_str().to_owned());
+    // A guest's `/<addon>/~<gid>/…` and its `/remux` control calls, on every face: the grant is the gate, and it
+    // comes before the member gate below, which a guest never passes.
+    let req = match crate::relay::guest(state, req, rid, face).await {
+        Ok(resp) => return resp,
+        Err(req) => req,
+    };
+    if path.starts_with("/grant/") || crate::grants::is_host_path(&path) {
+        return crate::grants::handle(state, req).await;
+    }
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
         return crate::relay::relay(state, req, target, rid, face).await;
     }
@@ -291,10 +302,13 @@ impl Face {
     /// `/config` was a TV's alone until the web app needed the same public client configuration — the SIMKL
     /// client id it must have to offer a sign-in. It carries no secret and never has.
     fn serves(self, path: &str) -> bool {
-        let device = ["/link", "/inbox", "/pair/", "/sync/", "/lib/"].iter().any(|p| path.starts_with(p))
-            || path == "/metrics";
-        let web_app_calls =
-            path.starts_with("/pair/") || path.starts_with("/lib/") || path == "/inbox/append";
+        let device =
+            ["/link", "/inbox", "/pair/", "/sync/", "/lib/", "/grant/"].iter().any(|p| path.starts_with(p))
+                || path == "/metrics";
+        let web_app_calls = path.starts_with("/pair/")
+            || path.starts_with("/lib/")
+            || path.starts_with("/grant/")
+            || path == "/inbox/append";
         // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
         // on the public one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so
         // neither half owns them.
@@ -368,6 +382,12 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/pair/") && p.matches('/').count() == 3 => "/pair/:sid/:slot",
         p if p.starts_with("/pair/") => "/pair/:sid",
         p if p.starts_with("/sync/") => "/sync/:id",
+        "/grant/redeem" => "/grant/redeem",
+        "/grant/addons" => "/grant/addons",
+        p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
+        // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
+        p if crate::grants::is_host_path(p) && p.matches('/').count() == 3 => "/lib/:id/grants",
+        p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
@@ -392,7 +412,13 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const POST: &[Method] = &[Method::POST];
     const PUT: &[Method] = &[Method::PUT];
     const DELETE: &[Method] = &[Method::DELETE];
+    const GET_POST: &[Method] = &[Method::GET, Method::POST];
+    const PUT_DELETE: &[Method] = &[Method::PUT, Method::DELETE];
     match route {
+        "/lib/:id/grants" => Some(GET_POST),
+        "/lib/:id/grants/:gid" => Some(PUT_DELETE),
+        "/grant/redeem" => Some(POST),
+        "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" | "/tmdb" => {
             Some(GET)
         }
@@ -400,7 +426,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
         "/metadata/title/query" => Some(POST),
         "/metadata/title" => Some(PUT),
-        "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" => Some(DELETE),
+        "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" | "/grant/:gid" => Some(DELETE),
         _ => None,
     }
 }

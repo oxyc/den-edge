@@ -250,6 +250,11 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     if !constant_time_eq(&stored_token, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    // The owner's guests go with the token that vouched for them.
+    let revoked = match crate::grants::revoke_host(state, id).await {
+        Ok(gids) => gids,
+        Err(e) => return internal("library grants revoke", e),
+    };
     if let Err(e) = state.store.replace_file(NS, id, MOVED, b"").await {
         return internal("library retire", e);
     }
@@ -257,6 +262,10 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
         return internal("library delete", e);
     }
     libs.remove(id);
+    drop(libs);
+    for gid in revoked {
+        crate::grants::end_sessions(state, &gid).await;
+    }
     json_reply(StatusCode::OK, &json!({ "deleted": true }))
 }
 
