@@ -64,7 +64,12 @@ describe('primary genre shelves', () => {
   it('prefers the corpus label over the rarity heuristic, and falls back when there is none', () => {
     // Moana is Adventure · Comedy · Family · Animation in TMDB. The heuristic picks Animation because it
     // is the rarest label; atlas says what it IS.
-    const moana = { type: 'movie', id: 277834, title: 'Moana', genreIds: [12, 35, 10751, 16] } as Title;
+    const moana = {
+      type: 'movie',
+      id: 277834,
+      title: 'Moana',
+      genreIds: [12, 35, 10751, 16],
+    } as Title;
     expect(shelfGenre(moana), 'no corpus label: the heuristic decides').toBe(16);
     expect(shelfGenre({ ...moana, primaryGenreName: 'Adventure' })).toBe(12);
     expect(matchesPrimaryGenre({ ...moana, primaryGenreName: 'Adventure' }, 12)).toBe(true);

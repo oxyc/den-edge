@@ -152,7 +152,8 @@ function titlesOf(body: unknown): Title[] {
           : undefined,
         originalLanguage: typeof t.originalLanguage === 'string' ? t.originalLanguage : undefined,
         imdbId: typeof t.imdbId === 'string' ? t.imdbId : undefined,
-        primaryGenreName: typeof t.primaryGenre === 'string' && t.primaryGenre ? t.primaryGenre : undefined,
+        primaryGenreName:
+          typeof t.primaryGenre === 'string' && t.primaryGenre ? t.primaryGenre : undefined,
       },
     ];
   });
