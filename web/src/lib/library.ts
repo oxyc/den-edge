@@ -43,6 +43,14 @@ export interface Title {
   collectionId?: number;
   /** What the TV's hide rules look at (`prefs.ts`): TMDB genre ids, original language, the adult flag. */
   genreIds?: number[];
+  /**
+   * The corpus's narrative primary genre ("Crime", "Coming-of-Age"), when the row that supplied this card
+   * knew it — an atlas row or query does, TMDB does not. It answers what TMDB's `genreIds` cannot: which of
+   * a title's genres it actually IS, rather than which it merely carries. Undefined is normal and means
+   * "fall back to the rarity heuristic", not "no genre" — atlas describes 47,618 titles and TMDB has
+   * millions, so anything outside the corpus has none.
+   */
+  primaryGenreName?: string;
   originalLanguage?: string;
   adult?: boolean;
   /** Its IMDb id where whatever named it said so — scout keys availability by it, so no lookup is needed. */
