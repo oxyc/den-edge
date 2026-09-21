@@ -141,8 +141,32 @@ export function primaryGenre(genreIds: readonly number[]): number | undefined {
   return best;
 }
 
+/**
+ * The TMDB genre id a title actually IS, for shelf membership.
+ *
+ * The corpus's own label first, where the card carries one — an atlas row and `/index/query` both do. It is
+ * a NAME, so it is matched back through this type's `GENRES` table; a label that names no TMDB genre for
+ * this type (the taxonomy has "Coming-of-Age", TMDB does not) falls through rather than excluding the
+ * title on a technicality.
+ *
+ * Then the rarity heuristic over TMDB's ids, which is all there is for the millions of titles atlas has
+ * never seen. Keeping that fallback explicit is the point: without it every row outside the 47,618-title
+ * corpus would read as empty.
+ *
+ * This mirrors the TV's `IndexPrimaryGenre` so both clients answer the same genre for the same card.
+ */
+export function shelfGenre(title: Title): number | undefined {
+  const named = title.primaryGenreName;
+  if (named) {
+    for (const [id, name] of Object.entries(GENRES[title.type] ?? {})) {
+      if (name === named) return Number(id);
+    }
+  }
+  return primaryGenre(title.genreIds ?? []);
+}
+
 export function matchesPrimaryGenre(title: Title, genre: number): boolean {
-  return primaryGenre(title.genreIds ?? []) === genre;
+  return shelfGenre(title) === genre;
 }
 
 /** Append a fetched page once per typed title identity; movie and TV ids occupy separate namespaces. */

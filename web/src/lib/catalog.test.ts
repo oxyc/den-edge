@@ -6,12 +6,15 @@ import {
   discoverParams,
   homeRows,
   interleave,
+  matchesPrimaryGenre,
   personalRows,
   primaryGenre,
   RECIPES,
+  shelfGenre,
   tmdbPages,
   type Pages,
 } from './catalog';
+import type { Title } from './library';
 
 describe('discover queries, as DenKit builds them', () => {
   it('joins genres AND or OR, keywords and countries OR, and dates by the type’s own field', () => {
@@ -56,6 +59,31 @@ describe('primary genre shelves', () => {
     expect(primaryGenre([10751, 14]), 'equal rarity keeps TMDB order').toBe(10751);
     expect(primaryGenre([14, 10751]), 'equal rarity stays deterministic in reverse').toBe(14);
     expect(primaryGenre([])).toBeUndefined();
+  });
+
+  it('prefers the corpus label over the rarity heuristic, and falls back when there is none', () => {
+    // Moana is Adventure · Comedy · Family · Animation in TMDB. The heuristic picks Animation because it
+    // is the rarest label; atlas says what it IS.
+    const moana = {
+      type: 'movie',
+      id: 277834,
+      title: 'Moana',
+      genreIds: [12, 35, 10751, 16],
+    } as Title;
+    expect(shelfGenre(moana), 'no corpus label: the heuristic decides').toBe(16);
+    expect(shelfGenre({ ...moana, primaryGenreName: 'Adventure' })).toBe(12);
+    expect(matchesPrimaryGenre({ ...moana, primaryGenreName: 'Adventure' }, 12)).toBe(true);
+    expect(matchesPrimaryGenre({ ...moana, primaryGenreName: 'Adventure' }, 16)).toBe(false);
+
+    // The taxonomy is not TMDB's: a label naming no TMDB genre for this type falls through to the
+    // heuristic rather than excluding the title from every shelf.
+    expect(shelfGenre({ ...moana, primaryGenreName: 'Coming-of-Age' })).toBe(16);
+
+    // Genre ids are per media type. "Crime" is 80 for both, but a series' table is a different one, and a
+    // film label must not be resolved against it.
+    const series = { type: 'tv', id: 1438, title: 'The Wire', genreIds: [18] } as Title;
+    expect(shelfGenre({ ...series, primaryGenreName: 'Crime' })).toBe(80);
+    expect(shelfGenre({ ...series, primaryGenreName: 'Science Fiction' }), 'films only').toBe(18);
   });
 
   it('marks only plain genre rows for primary-genre filtering', () => {
