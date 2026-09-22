@@ -94,6 +94,40 @@ export function inviteLink(origin: string, code: string): string {
   return `${origin}/#invite=${code}`;
 }
 
+const CODES_KEY = 'den.inviteCodes';
+
+/**
+ * The codes of the invites this browser made, by grant, so a link can be copied again until it is used. den-edge keeps
+ * only a hash, so another browser of the same library has nothing to copy. Only codes of the `unused` grants are kept.
+ */
+export function keptCodes(
+  unused?: readonly string[],
+  storage: Storage | undefined = globalThis.localStorage,
+): Record<string, string> {
+  try {
+    const kept = JSON.parse(storage?.getItem(CODES_KEY) ?? '{}') as Record<string, string>;
+    if (!unused) return kept;
+    const live = Object.fromEntries(Object.entries(kept).filter(([gid]) => unused.includes(gid)));
+    if (Object.keys(live).length !== Object.keys(kept).length)
+      storage?.setItem(CODES_KEY, JSON.stringify(live));
+    return live;
+  } catch {
+    return {};
+  }
+}
+
+export function keepCode(
+  gid: string,
+  code: string,
+  storage: Storage | undefined = globalThis.localStorage,
+): void {
+  try {
+    storage?.setItem(CODES_KEY, JSON.stringify({ ...keptCodes(undefined, storage), [gid]: code }));
+  } catch {
+    // Not kept: the link can still be copied while it is on screen.
+  }
+}
+
 /** The shared addon a manifest or install URL on this origin names, or null for any other. */
 export function sharedInstallOf(
   url: string,
