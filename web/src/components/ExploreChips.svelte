@@ -117,6 +117,8 @@
     onclick={() => {
       sheetFilter = '';
       sheet?.showModal();
+      // The sheet itself, not its filter: focus there would raise a phone's keyboard over what it lists.
+      sheet?.focus();
     }}>More…</button
   >
 </nav>
@@ -173,7 +175,7 @@
   {@render lists(railFilter)}
 </nav>
 
-<dialog class="sheet" bind:this={sheet} aria-label="All categories">
+<dialog class="sheet" bind:this={sheet} aria-label="All categories" tabindex="-1">
   <div class="sheet-body">
     <header>
       <input
