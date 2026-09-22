@@ -65,8 +65,12 @@ export function swipeHistory(
     )
       return;
     const element = event.target as Element;
+    // `data-no-swipe` marks text meant to be selected, such as a code to copy: a long-press drag
+    // that extends a selection is horizontal, and would otherwise turn the page.
     if (
-      element.closest('input, textarea, select, [contenteditable], [role="dialog"], video, iframe')
+      element.closest(
+        'input, textarea, select, [contenteditable], [role="dialog"], video, iframe, [data-no-swipe]',
+      )
     )
       return;
     // Interior drags belong to carousels. At the screen edge, history owns the gesture,
@@ -105,6 +109,8 @@ export function swipeHistory(
     const rawX = touch.clientX - start.x;
     const dy = Math.abs(touch.clientY - start.y);
     if (!claimed) {
+      // Dragging a selection handle is not a swipe.
+      if (target.getSelection?.()?.toString()) return reset();
       if (dy > 12 && dy >= Math.abs(rawX)) return reset();
       if (Math.abs(rawX) <= 16 || Math.abs(rawX) <= dy * 2) return;
       const direction = rawX > 0 ? 1 : -1;

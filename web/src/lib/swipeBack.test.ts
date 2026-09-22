@@ -19,16 +19,18 @@ afterEach(() => {
   stop?.();
   vi.unstubAllGlobals();
 });
-function gestureHarness(rail = false) {
+function gestureHarness(rail = false, { noSwipe = false, selected = '' } = {}) {
   vi.stubGlobal('innerWidth', 390);
   vi.stubGlobal('getComputedStyle', () => ({ overflowX: rail ? 'auto' : 'visible' }));
   const element = {
-    closest: () => null,
+    closest: (selector: string) => (noSwipe && selector.includes('[data-no-swipe]') ? {} : null),
     parentElement: null,
     scrollWidth: rail ? 800 : 390,
     clientWidth: 390,
   };
-  const document = new EventTarget();
+  const document = Object.assign(new EventTarget(), {
+    getSelection: () => ({ toString: () => selected }),
+  });
   const preview = {
     move: vi.fn(),
     finish: vi.fn(async () => {}),
@@ -75,6 +77,18 @@ it('claims a right-edge Forward swipe even over a carousel', async () => {
   send('touchend', 230);
   await Promise.resolve();
   expect(forward.navigate).toHaveBeenCalledOnce();
+});
+it('leaves a drag on text marked to be selected alone, such as a code to copy', () => {
+  const { send, forward } = gestureHarness(false, { noSwipe: true });
+  expect(send('touchstart', 300)).toBe(false);
+  expect(send('touchmove', 200)).toBe(false);
+  expect(forward.preview).not.toHaveBeenCalled();
+});
+it('does not turn the page while a selection is being dragged', () => {
+  const { send, forward } = gestureHarness(false, { selected: 'ABCD-1234' });
+  send('touchstart', 300);
+  expect(send('touchmove', 200)).toBe(false);
+  expect(forward.preview).not.toHaveBeenCalled();
 });
 it('leaves interior carousel drags to the carousel', () => {
   const { send, forward, back } = gestureHarness(true);
