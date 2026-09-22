@@ -3,7 +3,7 @@
   import Loading from './Loading.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import { downloads } from '../lib/downloadQueue.svelte';
-  import { fetchSources, type TitleSource } from '../lib/titleSources';
+  import { ageOf, fetchSourceList, type SourceAnswer, type TitleSource } from '../lib/titleSources';
   import { playable } from '../lib/playable';
   import { listReleases, videoCodecsOf } from '../lib/remux';
   import { unplayable } from '../lib/releaseVerdicts';
@@ -30,6 +30,8 @@
     onplay?: (filename: string) => void;
   } = $props();
   let sources = $state<TitleSource[] | null | undefined>();
+  /** What scout said about the list: whether empty means none exist, and whether it is old or short. */
+  let answer = $state<SourceAnswer | undefined>();
   /** The releases this browser can't play, by filename, with den-remux's reason. Empty until (unless) it says. */
   let refused = $state(new Map<string, string>());
   let open = $state(false),
@@ -48,10 +50,13 @@
     const [addon, id, table, s, e] = [scout, imdb, routes, season, episode];
     void retry;
     sources = undefined;
+    answer = undefined;
     if (!addon || !id) return;
     const controller = new AbortController();
-    void fetchSources(addon, id, table, s, e, controller.signal).then((loaded) => {
-      if (!controller.signal.aborted) sources = loaded;
+    void fetchSourceList(addon, id, table, s, e, controller.signal).then((loaded) => {
+      if (controller.signal.aborted) return;
+      sources = loaded.sources;
+      answer = loaded.answer;
     });
     return () => controller.abort();
   });
@@ -141,10 +146,21 @@
     {:else if sources === undefined}<Loading label="Loading sources" />
     {:else if sources === null}<p class="note">Couldn’t reach the source service.</p>
       <button class="control" onclick={() => retry++}>Try again</button>
+    {:else if sources.length === 0 && answer?.kind === 'unknown'}<p class="note">
+        Your sources didn’t answer, so there may be releases this couldn’t see.
+      </p>
+      <button class="control" onclick={() => retry++}>Try again</button>
     {:else if sources.length === 0}<p class="note">
         No sources found for this {season === undefined ? 'movie' : 'episode'}.
       </p>
     {:else}
+      {#if answer?.outage}<p class="note">
+          Your sources didn’t answer, so this is the list from {ageOf(answer.outage.builtAt)} ago.
+        </p>
+      {:else if answer?.kind === 'partial' && answer.missing > 0}<p class="note">
+          {answer.missing === 1 ? 'One source' : `${answer.missing} sources`} didn’t answer, so this list
+          may be short.
+        </p>{/if}
       <ul>
         {#each sources as source (source.filename)}
           {@const job = jobState(source)}

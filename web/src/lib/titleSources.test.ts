@@ -1,5 +1,13 @@
 import { expect, it } from 'vitest';
-import { parseSources, prepareSource, scoutTicket, fetchSources } from './titleSources';
+import {
+  ageOf,
+  fetchSourceList,
+  parseAnswer,
+  parseSources,
+  prepareSource,
+  scoutTicket,
+  fetchSources,
+} from './titleSources';
 import { DownloadQueue } from './downloadQueue.svelte';
 const addon = { install: 'http://lan:8080/config', base: '/scout/config' };
 const routes = { scout: [{ url: 'http://lan:8080' }] };
@@ -36,6 +44,59 @@ it('scopes series sources to the exact requested episode', async () => {
   }) as typeof fetch;
   await fetchSources(addon, 'tt1', routes, 3, 7, undefined, network);
   expect(path).toBe('/scout/config/stream/series/tt1%3A3%3A7.json');
+});
+it('reads what scout says about its list, and nothing from an older scout or a malformed one', () => {
+  const den = (extra: object) => ({
+    streams: [],
+    den: { v: 1, generatedAt: '2026-09-22T12:00:00Z', coverage: { sources: [] }, ...extra },
+  });
+  expect(parseAnswer({ streams: [] })).toBeUndefined();
+  expect(parseAnswer(den({ answerKind: 'maybe' }))).toBeUndefined();
+  expect(parseAnswer({ streams: [], den: 'live' })).toBeUndefined();
+  expect(parseAnswer(den({ answerKind: 'empty' }))).toEqual({ kind: 'empty', missing: 0 });
+  // Only a source that could have been asked and did not answer counts as missing.
+  expect(
+    parseAnswer(
+      den({
+        answerKind: 'unknown',
+        coverage: {
+          sources: [
+            { id: 'torrentio', outcome: 'answered' },
+            { id: 'comet', outcome: 'timeout' },
+            { id: 'mediafusion', outcome: 'skipped_misconfigured' },
+            { id: 'torz', outcome: 'quarantined' },
+            { id: 'own', outcome: 'unreachable' },
+          ],
+        },
+      }),
+    ),
+  ).toMatchObject({ kind: 'unknown', missing: 2 });
+  // A held list is an outage only when scout says so; a list merely past its freshness is not.
+  expect(parseAnswer(den({ answerKind: 'stale', degraded: 'stale_list' }))?.outage).toEqual({
+    builtAt: Date.parse('2026-09-22T12:00:00Z'),
+  });
+  expect(parseAnswer(den({ answerKind: 'stale' }))?.outage).toBeUndefined();
+});
+it('hands the list and scout’s account of it back together', async () => {
+  const network = (async () =>
+    Response.json({
+      streams: [raw],
+      den: { answerKind: 'partial', coverage: { sources: [] } },
+    })) as typeof fetch;
+  const got = await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, network);
+  expect(got.sources).toHaveLength(1);
+  expect(got.answer?.kind).toBe('partial');
+  const down = (async () => new Response('', { status: 502 })) as typeof fetch;
+  expect(
+    await fetchSourceList(addon, 'tt1', routes, undefined, undefined, undefined, down),
+  ).toEqual({ sources: null });
+});
+it('says how long ago a held list was built', () => {
+  const now = Date.parse('2026-09-22T12:00:00Z');
+  expect(ageOf(now - 20_000, now)).toBe('1 min');
+  expect(ageOf(now - 5 * 60_000, now)).toBe('5 min');
+  expect(ageOf(now - 3 * 3_600_000, now)).toBe('3 h');
+  expect(ageOf(now - 3 * 86_400_000, now)).toBe('3 days');
 });
 it('queues once, probes without adding again, and never follows media redirects', async () => {
   const asked: { path: string; redirect?: string }[] = [];
