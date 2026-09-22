@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
 import type { RowDef } from './catalog';
-import { collectionRow, firstScreen, moreLikeThisRow, personRow } from './relatedRows';
+import { collectionRow, firstScreen, moreLikeThisRow, personRow, personRows } from './relatedRows';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });
@@ -204,6 +204,91 @@ describe('personRow', () => {
     const row = personRow({ id: 9, name: 'Ana' }, 'Acting', self, { key: 'k' });
     expect(row.filter?.(self)).toBe(false);
     expect(row.filter?.(named(1))).toBe(true);
+  });
+
+  it('keeps a writer’s row to what they wrote, headed by the role it was asked for', async () => {
+    const fetchImpl = answering({
+      '/3/person/9/combined_credits': {
+        cast: acting.slice(0, 3),
+        crew: [
+          {
+            id: 2,
+            media_type: 'movie',
+            title: 'Written',
+            job: 'Screenplay',
+            department: 'Writing',
+          },
+          {
+            id: 3,
+            media_type: 'movie',
+            title: 'Directed',
+            job: 'Director',
+            department: 'Directing',
+          },
+        ],
+      },
+    });
+    const written = personRow({ id: 9, name: 'Ana' }, 'Writing', self, { key: 'k', fetchImpl });
+    expect((await written.load(1)).map((t) => t.title)).toEqual(['Written']);
+    expect(written.title).toBe('Written by Ana');
+    const created = personRow({ id: 9, name: 'Ana' }, 'Writing', self, { key: 'k' }, 'Created by ');
+    expect(created.title).toBe('Created by Ana');
+    expect(created.headingLink?.before).toBe('Created by ');
+  });
+});
+
+describe('personRows', () => {
+  const p = (id: number) => ({ id, name: `P${id}` });
+  const plan = (d: Partial<Parameters<typeof personRows>[0]>) =>
+    personRows({ directors: [], creators: [], writers: [], cast: [], ...d }).map(
+      (r) => `${r.before}${r.person.name}`,
+    );
+
+  it('shows a film’s writer between its director and its leads', () => {
+    expect(plan({ directors: [p(1)], writers: [p(2)], cast: [p(3), p(4)] })).toEqual([
+      'More from P1',
+      'Written by P2',
+      'Starring P3',
+      'Starring P4',
+    ]);
+  });
+
+  it('gives a writer-director one row, as director', () => {
+    expect(plan({ directors: [p(1)], writers: [p(1)] })).toEqual(['More from P1']);
+  });
+
+  it('falls to the next writer when the first also directed', () => {
+    expect(plan({ directors: [p(1)], writers: [p(1), p(2)] })).toEqual([
+      'More from P1',
+      'Written by P2',
+    ]);
+  });
+
+  it('gives a series with no director its creator, ahead of its writer', () => {
+    expect(plan({ creators: [p(5)], writers: [p(5), p(6)], cast: [p(7)] })).toEqual([
+      'Created by P5',
+      'Written by P6',
+      'Starring P7',
+    ]);
+  });
+
+  it('gives an actor-director one row, and the next lead takes the actor slot', () => {
+    expect(plan({ directors: [p(1)], cast: [p(1), p(2), p(3), p(4)] })).toEqual([
+      'More from P1',
+      'Starring P2',
+      'Starring P3',
+      'Starring P4',
+    ]);
+  });
+
+  it('stops at five rows, dropping leads first', () => {
+    expect(
+      plan({ directors: [p(1)], creators: [p(2)], writers: [p(3)], cast: [p(4), p(5), p(6)] }),
+    ).toEqual(['More from P1', 'Created by P2', 'Written by P3', 'Starring P4', 'Starring P5']);
+  });
+
+  it('makes no row for missing credits', () => {
+    expect(plan({})).toEqual([]);
   });
 });
 
