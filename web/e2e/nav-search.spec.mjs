@@ -448,6 +448,42 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
   }
 });
 
+test('atlas’s counts take out what would show nothing, and only in the kinds they count', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = [];
+    // Beside Sweden: dramas and thrillers only. Languages go uncounted.
+    await page.route('**/atlas/index/facets/**', (r) => {
+      asked.push(new URL(r.request().url()).pathname + new URL(r.request().url()).search);
+      return r.fulfill({ json: { genre: { 18: 7, 53: 2 } } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('sweden');
+    await rail.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect.poll(() => asked.at(-1)).toBe('/atlas/index/facets/movie.json?sel=country:SE');
+    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('');
+    const genres = rail.getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('button', { name: 'Thriller', exact: true })).toBeVisible();
+    // Languages weren't counted, so none of them is hidden.
+    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('english');
+    await expect(rail.getByRole('button', { name: 'English · language' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [1100, 1440])
   test(`the rail's one filter finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
     const browser = await chromium.launch({

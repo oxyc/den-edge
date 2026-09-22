@@ -159,6 +159,10 @@ function titlesOf(body: unknown): Title[] {
   });
 }
 
+/** What atlas row `id` (its own id, `mood-feel-good`) asks atlas for: `{ mood: 'Feel-good' }`. */
+export const atlasWhere = (type: MediaType, id: string): Where | undefined =>
+  (type === 'tv' ? SERIES_ROWS : FILM_ROWS).find((row) => row.id === id)?.where;
+
 /** atlas's rows for a browse screen of `type`, from atlas at `base`. */
 export function atlasRows(
   base: string,

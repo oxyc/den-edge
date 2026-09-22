@@ -18,6 +18,7 @@ import {
   type RowDef,
 } from './catalog';
 import { atlasRows } from './atlasRows';
+import { countedEmpty, type FacetCounts } from './facetCounts';
 import type { MediaType, Title } from './library';
 
 export const FOR_YOU = 'for-you';
@@ -504,29 +505,37 @@ function atlasFilter(set: readonly string[]): (title: Title) => boolean {
 }
 
 /**
- * The options that would show nothing beside `selection`, judged from its feed alone — no request. Only once that
- * feed is `complete` (every page loaded) is what is loaded all there is, and only an option that narrows it can be
- * judged by it: a genre, or a language or a decade where none is picked yet, on the fields every discover item has.
- * A country, a recipe, a mood and anything replacing a pick are never hidden this way: nothing loaded says.
+ * The options that would show nothing beside `selection`. The one place the rail learns what is empty.
  *
- * The one place the rail learns what is empty, so a real count can take its place.
+ * Where atlas answered with its counts (`facetCounts.ts`), an option with none in a kind it counted is empty. And
+ * once the selection's own feed is `complete` (every page loaded), what is loaded is all there is: a genre, or a
+ * language or a decade where none is picked yet, that nothing in it matches is empty too. Without counts that is all
+ * there is to go on.
+ *
+ * Neither judges an option that takes over a pick's slot — another country, another mood — since it replaces what
+ * the counts and the feed were counted beside rather than narrowing it.
  */
 export function emptyOptions(
   selection: readonly string[],
   loaded: readonly Title[],
   complete: boolean,
   chips: Chip[],
+  { counts, type = 'movie' }: { counts?: FacetCounts | null; type?: MediaType } = {},
 ): Set<string> {
   const empty = new Set<string>();
-  if (!complete || !selection.length) return empty;
   const picked = new Set(selection.map(slotOf));
   for (const chip of chips) {
     const slot = slotOf(chip.id);
-    const narrows =
-      slot === 'genre' || ((slot === 'language' || slot === 'decade') && !picked.has(slot));
-    if (!narrows || selection.includes(chip.id)) continue;
-    const keep = atlasFilter([chip.id]);
-    if (!loaded.some(keep)) empty.add(chip.id);
+    if (!slot || selection.includes(chip.id)) continue;
+    const replaces = slot !== 'genre' && picked.has(slot);
+    if (replaces) continue;
+    if (counts && countedEmpty(chip.id, type, counts)) {
+      empty.add(chip.id);
+      continue;
+    }
+    const narrows = slot === 'genre' || slot === 'language' || slot === 'decade';
+    if (complete && selection.length && narrows && !loaded.some(atlasFilter([chip.id])))
+      empty.add(chip.id);
   }
   return empty;
 }

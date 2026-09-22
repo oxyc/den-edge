@@ -28,6 +28,7 @@
   import { searchHref, type Explore } from '../lib/route';
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
+  import { fetchFacetCounts, type FacetCounts } from '../lib/facetCounts';
 
   let {
     query,
@@ -216,8 +217,29 @@
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
   );
   /**
-   * Options not worth offering: any that can't stand beside the selection, and — once the feed is loaded to its
-   * end — any that nothing in it matches (`emptyOptions`, no request).
+   * atlas's counts beside the selection (`facetCounts.ts`): one request per selection, a moment after it settles,
+   * the last one dropped when the next begins. Null where atlas has none to give, which leaves the feed to judge.
+   */
+  let counts = $state<FacetCounts | null>(null);
+  $effect(() => {
+    const here = atlas;
+    const type = exploreType;
+    const set = selectionKey ? selectionKey.split(',') : [];
+    counts = null;
+    if (!here || typing) return;
+    const ask = new AbortController();
+    const timer = setTimeout(async () => {
+      const answer = await fetchFacetCounts(here, type, set, { signal: ask.signal });
+      if (!ask.signal.aborted) counts = answer;
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      ask.abort();
+    };
+  });
+  /**
+   * Options not worth offering: any that can't stand beside the selection, and any that would show nothing beside
+   * it (`emptyOptions`: atlas's counts, and the feed once it has loaded to its end).
    */
   const empty = $derived(
     typing
@@ -229,6 +251,7 @@
             .filter((t) => t !== null),
           feed.pager.exhausted,
           chips,
+          { counts, type: exploreType },
         ),
   );
   const hidden = (id: string) => !offered(shownSelection, id, exploreType) || empty.has(id);
