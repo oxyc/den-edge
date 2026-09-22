@@ -325,6 +325,8 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await openSearch(page, 1280);
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const chip = (name) => rail.getByRole('button', { name, exact: true });
+    const picks = active(page).getByRole('group', { name: 'Selected' });
+    const pill = (name) => picks.getByRole('button', { name: `Remove ${name}`, exact: true });
     const heading = (name) => active(page).getByRole('heading', { name, exact: true });
 
     await input(page).fill('Neon');
@@ -336,16 +338,18 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     // A genre narrows the typed results and keeps the query; the fixture's films are all dramas.
     await chip('Drama').click();
     await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
-    await expect(chip('Remove Drama')).toBeVisible();
+    await expect(pill('Drama')).toBeVisible();
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
     // Genres stack, all applying: no drama here is also a comedy.
     await chip('Comedy').click();
     await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18,genre-35$/);
     await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
-    // A pill takes its pick back out.
-    await chip('Remove Comedy').click();
-    await chip('Remove Drama').click();
+    // A pill takes its pick back out; Clear all takes the rest, and the query stays.
+    await pill('Comedy').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
+    await picks.getByRole('button', { name: 'Clear all' }).click();
     await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(picks).toHaveCount(0);
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
 
     // A recipe can't be combined with a query: it opens in its place, and Back returns to the search.
@@ -353,7 +357,7 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
     await expect(heading('Explore')).toBeVisible();
     await expect(input(page)).toHaveValue('');
-    await expect(chip('Remove Heist')).toBeVisible();
+    await expect(pill('Heist')).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?q=Neon$/);
     await expect(input(page)).toHaveValue('Neon');
@@ -411,16 +415,21 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const card = (id) => active(page).getByRole('link', { name: `Film ${id} 2026` });
 
-    // Sweden is found by the filter, and becomes a pill at the top.
-    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('swe');
+    // Sweden is found by the filter, and becomes a pill over the grid. The filter empties and keeps the cursor,
+    // so the next refinement starts from the sections.
+    const filter = rail.getByRole('searchbox', { name: 'Filter categories' });
+    await filter.fill('swe');
     await rail.getByRole('button', { name: 'Sweden · country', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?c=country-SE$/);
-    const selected = rail.getByRole('group', { name: 'Selected' });
+    await expect(filter).toHaveValue('');
+    await expect(filter).toBeFocused();
+    await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(rail.getByRole('group', { name: 'Selected' })).toHaveCount(0);
     await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
     await expect(card(205)).toBeVisible();
 
     // + Action: both apply, in one discover query.
-    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('');
     await rail
       .getByRole('group', { name: 'Genres' })
       .getByRole('button', { name: 'Action', exact: true })

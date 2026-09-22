@@ -6,11 +6,10 @@
        the same short lists. One line on a tablet too: wrapped, the lines covered half its screen.
      - from 1100px, a rail down the side, as the TV's is, with the filter at its top.
 
-     What is picked stacks, and leaves its section for a Selected group at the top — above the rail's filter, above
-     the phone strip, at the top of the sheet — as pills that take it back out. The sections then offer only what
-     can still be added: `hidden` says which options can't. -->
+     What is picked stacks, and leaves its section: the picks are shown above the grid (Search), and these offer only
+     what can still be added — `hidden` says which options can't. -->
 <script lang="ts">
-  import { KIND, chipsOf, matchChips, type Chip, type ChipGroup } from '../lib/explore';
+  import { KIND, matchChips, type Chip, type ChipGroup } from '../lib/explore';
 
   let {
     chips,
@@ -40,7 +39,6 @@
   const STRIP_FIRST = 3;
 
   const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
-  const picked = $derived(chipsOf(selected, chips));
   /** What can still be added: not picked, not hidden. */
   const open = (chip: Chip) => !selected.includes(chip.id) && !hidden(chip.id);
   const sections = $derived(
@@ -59,11 +57,20 @@
     }));
 
   let railFilter = $state('');
+  let railInput = $state<HTMLInputElement>();
   let sheet = $state<HTMLDialogElement>();
   let sheetFilter = $state('');
 
+  /**
+   * A chip picked. One found by the rail's filter empties it — the next refinement starts from the sections — and
+   * keeps the cursor there to type it.
+   */
   function choose(id: string) {
     sheet?.close();
+    if (railFilter.trim()) {
+      railFilter = '';
+      railInput?.focus({ preventScroll: true });
+    }
     onchange(id);
   }
 </script>
@@ -79,32 +86,6 @@
       >{/if}</button
   >
 {/snippet}
-
-<!-- The picks, each a pill that takes it back out. -->
-{#snippet selection()}
-  {#if picked.length}
-    <div class="selected" role="group" aria-label="Selected">
-      <h2 class="heading">Selected</h2>
-      <div class="pills">
-        {#each picked as item (item.id)}
-          <button
-            type="button"
-            class="pill"
-            aria-label="Remove {item.label}"
-            data-chip={item.id}
-            onclick={() => onchange(item.id)}
-            >{item.label}<span class="kind">{` · ${KIND[item.group]}`}</span><span
-              class="x"
-              aria-hidden="true">✕</span
-            ></button
-          >
-        {/each}
-      </div>
-    </div>
-  {/if}
-{/snippet}
-
-<div class="strip-selection">{@render selection()}</div>
 
 <nav class="strip" aria-label="Browse by category">
   {#each [...forYou, ...sections.flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
@@ -163,12 +144,12 @@
 {/snippet}
 
 <nav class="rail" aria-label="Browse by category">
-  {@render selection()}
   <input
     class="filter"
     type="search"
     placeholder="Mood, genre, language, decade…"
     aria-label="Filter categories"
+    bind:this={railInput}
     bind:value={railFilter}
   />
   {#if !railFilter.trim()}{#each forYou as item (item.id)}{@render chip(item)}{/each}{/if}
@@ -187,7 +168,6 @@
       />
       <button type="button" class="done" onclick={() => sheet?.close()}>Done</button>
     </header>
-    {@render selection()}
     {@render lists(sheetFilter)}
   </div>
 </dialog>
@@ -289,65 +269,8 @@
     font-size: 14px;
   }
 
-  /* The picks: filled pills, each with the ✕ that takes it out. */
-  .selected {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-
-  .pills {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 100%;
-    min-height: 32px;
-    padding: 0 10px 0 12px;
-    overflow: hidden;
-    border: 0;
-    border-radius: 999px;
-    background: var(--fg);
-    color: var(--bg);
-    font: inherit;
-    font-size: 14px;
-    font-weight: 600;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    cursor: pointer;
-  }
-
-  .pill .kind {
-    color: inherit;
-    opacity: 0.6;
-  }
-
   .chip[aria-pressed='true'] .kind {
     color: inherit;
-  }
-
-  .x {
-    font-size: 11px;
-    opacity: 0.7;
-  }
-
-  .pill:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
-  }
-
-  .strip-selection .heading {
-    display: none;
-  }
-
-  .strip-selection {
-    align-self: stretch;
-    min-width: 0;
   }
 
   /* "Show all": a quiet line of text in the list's own colour, not a control competing with the chips. */
@@ -371,13 +294,8 @@
   /* From 1100px: the rail, grouped under headings. It fills its column and no wider: stretched rather than sized
      to its longest label, and a label too long for it ends in an ellipsis rather than pushing it sideways. */
   @media (width >= 1100px) {
-    .strip,
-    .strip-selection {
+    .strip {
       display: none;
-    }
-
-    .rail .pills {
-      margin: 0 0 0 4px;
     }
 
     .rail {

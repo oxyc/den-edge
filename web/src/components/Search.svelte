@@ -212,10 +212,23 @@
     go({ type: explore.type, chips: set }, keep ? query : '');
   }
 
-  /** What the rail shows as picked: everything, or while typing only the genres that narrow the results. */
+  /** What is shown as picked: everything, or while typing only the genres that narrow the results. */
   const shownSelection = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
   );
+  const picked = $derived(chipsOf(shownSelection, chips));
+
+  /** Every pick shown taken out at once. While typing that is the genres narrowing it; the query stays. */
+  function clearAll() {
+    status = '';
+    go(
+      {
+        type: explore.type,
+        chips: typing ? selection.filter((id) => slotOf(id) !== 'genre') : [],
+      },
+      typing ? query : '',
+    );
+  }
   /**
    * atlas's counts beside the selection (`facetCounts.ts`): one request per selection, a moment after it settles,
    * the last one dropped when the next begins. Null where atlas has none to give, which leaves the feed to judge.
@@ -287,6 +300,22 @@
       <ExploreChips {chips} selected={shownSelection} {hidden} {typing} onchange={pick} />
     </div>
     <div class="feed">
+      <!-- The picks, over what they pick, at every width: quiet, since the grid is what they are about. -->
+      {#if picked.length}
+        <div class="picks" role="group" aria-label="Selected">
+          {#each picked as item (item.id)}
+            <button
+              type="button"
+              class="pick"
+              aria-label="Remove {item.label}"
+              data-chip={item.id}
+              onclick={() => pick(item.id)}
+              >{item.label}<span class="x" aria-hidden="true">✕</span></button
+            >
+          {/each}
+          <button type="button" class="clear" onclick={clearAll}>Clear all</button>
+        </div>
+      {/if}
       <p class="status" role="status">{status}</p>
       {#if typing}
         {#if suggestions.length}
@@ -350,6 +379,67 @@
     margin: 0;
     color: var(--muted);
     font-size: 14px;
+  }
+
+  /* The picks: small, outlined, muted — a note of what is applied, not chips competing with the rail's. */
+  .picks {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 14px;
+  }
+
+  .pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    min-height: 28px;
+    padding: 0 8px 0 10px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+
+  .pick:hover {
+    border-color: var(--muted);
+    color: var(--fg);
+  }
+
+  .x {
+    font-size: 10px;
+  }
+
+  .clear {
+    min-height: 28px;
+    margin-left: 6px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+
+  .clear:hover {
+    color: var(--fg);
+  }
+
+  .pick:focus-visible,
+  .clear:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .status:not(:empty) {
