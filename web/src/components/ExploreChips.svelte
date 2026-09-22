@@ -1,15 +1,17 @@
-<!-- Search's Explore categories (the TV's Explore rail): For You, then atlas's moods, the recipes and the genres — the
-     first two say what a genre can't, so they lead. There are far too many to list, so each shows its strongest few,
-     and one filter reaches the rest: typed into, it shows every match across all three.
+<!-- Search's Explore categories (the TV's Explore rail): For You, then atlas's moods, the recipes, the genres, and the
+     languages, countries and decades — the first two say what a genre can't, so they lead. Each shows its strongest
+     few, and "Show all" the rest, so every kind can be browsed without typing; typed into, the nav field finds them
+     too (Search's Browse row).
 
-     - under 1100px, one strip that scrolls sideways and ends in "More…", which opens a sheet with the filter over
-       the same short lists. One line on a tablet too: wrapped, the lines covered half its screen.
-     - from 1100px, a rail down the side, as the TV's is, with the filter at its top.
+     - under 1100px, one strip that scrolls sideways — the moods, recipes and genres — and ends in "More…", which
+       opens every section in a sheet. One line on a tablet too: wrapped, the lines covered half its screen. Hidden
+       while a query is typed: the Browse row is what to pick from then.
+     - from 1100px, a rail down the side, as the TV's is.
 
      What is picked stacks, and leaves its section: the picks are shown above the grid (Search), and these offer only
      what can still be added — `hidden` says which options can't. -->
 <script lang="ts">
-  import { KIND, matchChips, type Chip, type ChipGroup } from '../lib/explore';
+  import type { Chip, ChipGroup } from '../lib/explore';
 
   let {
     chips,
@@ -33,7 +35,12 @@
     ['mood', 'Moods'],
     ['recipe', 'Recipes'],
     ['genre', 'Genres'],
+    ['language', 'Languages'],
+    ['country', 'Countries'],
+    ['decade', 'Decades'],
   ];
+  /** The kinds the phone strip samples: the rest wait in the sheet. */
+  const STRIP_KINDS: ChipGroup[] = ['mood', 'recipe', 'genre'];
   /** How many of each a section shows unfiltered: the rail's and the sheet's, and the phone strip's. */
   const LIST_FIRST = 8;
   const STRIP_FIRST = 3;
@@ -56,72 +63,43 @@
       more: section.chips.length > LIST_FIRST,
     }));
 
-  let railFilter = $state('');
-  let railInput = $state<HTMLInputElement>();
   let sheet = $state<HTMLDialogElement>();
-  let sheetFilter = $state('');
 
-  /**
-   * A chip picked. One found by the rail's filter empties it — the next refinement starts from the sections — and
-   * keeps the cursor there to type it.
-   */
   function choose(id: string) {
     sheet?.close();
-    if (railFilter.trim()) {
-      railFilter = '';
-      railInput?.focus({ preventScroll: true });
-    }
     onchange(id);
   }
 </script>
 
-{#snippet chip(item: Chip, kind = false)}
+{#snippet chip(item: Chip)}
   <button
     type="button"
     class="chip"
     aria-pressed={item.group === 'for-you' && !typing && selected.length === 0}
     data-chip={item.id}
-    onclick={() => choose(item.id)}
-    >{item.label}{#if kind && KIND[item.group]}<span class="kind">{` · ${KIND[item.group]}`}</span
-      >{/if}</button
+    onclick={() => choose(item.id)}>{item.label}</button
   >
 {/snippet}
 
-<nav class="strip" aria-label="Browse by category">
-  {#each [...forYou, ...sections.flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
-    {@render chip(item)}
-  {/each}
-  <button
-    type="button"
-    class="chip more"
-    aria-haspopup="dialog"
-    onclick={() => {
-      sheetFilter = '';
-      sheet?.showModal();
-      // The sheet itself, not its filter: focus there would raise a phone's keyboard over what it lists.
-      sheet?.focus();
-    }}>More…</button
-  >
-</nav>
-
-{#snippet lists(text: string)}
-  {#if text.trim()}
-    <!-- Typed into, the filter shows one list across every kind — mood, recipe, genre, language, country, decade —
-         ranked by how well each matches, so nobody has to know which kind "Swedish" is. The kind is a label only. -->
-    {@const found = matchChips(text, chips).filter(open)}
-    {#if found.length}
-      <div class="section" role="group" aria-label="Matches">
-        <div class="list results">
-          {#each found as item (item.id)}{@render chip(item, true)}{/each}
-        </div>
-      </div>
-    {:else}
-      <p class="none">Nothing to browse matches “{text.trim()}”.</p>
-    {/if}
-  {:else}
-    {@render sectioned()}
-  {/if}
-{/snippet}
+{#if !typing}
+  <nav class="strip" aria-label="Browse by category">
+    {#each [...forYou, ...sections
+        .filter((s) => STRIP_KINDS.includes(s.group))
+        .flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
+      {@render chip(item)}
+    {/each}
+    <button
+      type="button"
+      class="chip more"
+      aria-haspopup="dialog"
+      onclick={() => {
+        sheet?.showModal();
+        // The sheet itself, not its first control: focus there would scroll a phone's sheet past its top.
+        sheet?.focus();
+      }}>More…</button
+    >
+  </nav>
+{/if}
 
 {#snippet sectioned()}
   {#each listed() as section (section.group)}
@@ -144,31 +122,17 @@
 {/snippet}
 
 <nav class="rail" aria-label="Browse by category">
-  <input
-    class="filter"
-    type="search"
-    placeholder="Mood, genre, language, decade…"
-    aria-label="Filter categories"
-    bind:this={railInput}
-    bind:value={railFilter}
-  />
-  {#if !railFilter.trim()}{#each forYou as item (item.id)}{@render chip(item)}{/each}{/if}
-  {@render lists(railFilter)}
+  {#each forYou as item (item.id)}{@render chip(item)}{/each}
+  {@render sectioned()}
 </nav>
 
 <dialog class="sheet" bind:this={sheet} aria-label="All categories" tabindex="-1">
   <div class="sheet-body">
     <header>
-      <input
-        class="filter"
-        type="search"
-        placeholder="Mood, genre, language, decade…"
-        aria-label="Filter categories"
-        bind:value={sheetFilter}
-      />
+      <h2 class="title">Browse</h2>
       <button type="button" class="done" onclick={() => sheet?.close()}>Done</button>
     </header>
-    {@render lists(sheetFilter)}
+    {@render sectioned()}
   </div>
 </dialog>
 
@@ -203,28 +167,10 @@
     color: var(--fg);
   }
 
-  .filter {
-    width: 100%;
-    min-height: 34px;
-    padding: 0 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--card);
-    color: var(--fg);
-    font: inherit;
-    font-size: 16px;
-  }
-
   /* Inset, so no scrolling parent — the rail, the strip, the sheet — clips the ring. */
-  button:focus-visible,
-  .filter:focus-visible {
+  button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
-  }
-
-  .kind {
-    color: var(--muted);
-    font-weight: 400;
   }
 
   /* Under 1100px: one line, sideways, as wide as the column it sits in rather than as its chips. */
@@ -261,16 +207,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-  }
-
-  .none {
-    margin: 12px 0;
-    color: var(--muted);
-    font-size: 14px;
-  }
-
-  .chip[aria-pressed='true'] .kind {
-    color: inherit;
   }
 
   /* "Show all": a quiet line of text in the list's own colour, not a control competing with the chips. */
@@ -319,10 +255,6 @@
       margin: 0 0 4px 12px;
     }
 
-    .rail .filter {
-      font-size: 14px;
-    }
-
     .rail .chip {
       min-width: 0;
       min-height: 32px;
@@ -342,10 +274,6 @@
     .rail .chip[aria-pressed='true'] {
       background: rgb(255 255 255 / 0.14);
       color: var(--fg);
-    }
-
-    .rail .none {
-      margin: 0 12px;
     }
 
     .rail .toggle {
@@ -380,9 +308,16 @@
     top: 0;
     z-index: 1;
     display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 10px;
-    padding: 16px 0 12px;
+    padding: 16px 0 4px;
     background: var(--bg);
+  }
+
+  .title {
+    margin: 0;
+    font-size: 17px;
   }
 
   .done {

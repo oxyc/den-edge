@@ -19,7 +19,8 @@ const film = (id) => ({
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
 const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
-const input = (page) => page.getByRole('searchbox', { name: 'Search movies, series and people' });
+const input = (page) =>
+  page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
 const TYPED = 'on genesis c'; // twelve characters, after "Ne"
 
 async function setup(page) {

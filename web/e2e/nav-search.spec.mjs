@@ -15,7 +15,8 @@ const film = (id, title = `Film ${id}`) => ({
 });
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
-const input = (page) => page.getByRole('searchbox', { name: 'Search movies, series and people' });
+const input = (page) =>
+  page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
 // The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
 // returning Home returns to the address the document was opened at.
 const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
@@ -365,9 +366,9 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
 
     // The typed text points at categories, offered above the results with their kind.
     await input(page).fill('heist');
-    const suggestions = active(page).getByRole('group', { name: 'Browse instead' });
-    await expect(suggestions.getByRole('button', { name: 'Heist · recipe' })).toBeVisible();
-    await suggestions.getByRole('button', { name: 'Heist · recipe' }).click();
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await expect(browse.getByRole('button', { name: 'Heist · recipe' })).toBeVisible();
+    await browse.getByRole('button', { name: 'Heist · recipe' }).click();
     await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
     await expect(heading('Explore')).toBeVisible();
 
@@ -415,14 +416,14 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const card = (id) => active(page).getByRole('link', { name: `Film ${id} 2026` });
 
-    // Sweden is found by the filter, and becomes a pill over the grid. The filter empties and keeps the cursor,
-    // so the next refinement starts from the sections.
-    const filter = rail.getByRole('searchbox', { name: 'Filter categories' });
-    await filter.fill('swe');
-    await rail.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    // Sweden is found by the search field, and picking it turns the query into a pill over the grid.
+    await input(page).fill('swe');
+    await active(page)
+      .getByRole('group', { name: 'Browse', exact: true })
+      .getByRole('button', { name: 'Sweden · country', exact: true })
+      .click();
     await expect(page).toHaveURL(/\/search\?c=country-SE$/);
-    await expect(filter).toHaveValue('');
-    await expect(filter).toBeFocused();
+    await expect(input(page)).toHaveValue('');
     await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
     const selected = active(page).getByRole('group', { name: 'Selected' });
     await expect(rail.getByRole('group', { name: 'Selected' })).toHaveCount(0);
@@ -476,25 +477,28 @@ test('atlas’s counts take out what would show nothing, and only in the kinds t
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
-    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('sweden');
-    await rail.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await input(page).fill('sweden');
+    await browse.getByRole('button', { name: 'Sweden · country', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?c=country-SE$/);
     await expect.poll(() => asked.at(-1)).toBe('/atlas/index/facets/movie.json?sel=country:SE');
-    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('');
     const genres = rail.getByRole('group', { name: 'Genres' });
     await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
     await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
     await expect(genres.getByRole('button', { name: 'Thriller', exact: true })).toBeVisible();
     // Languages weren't counted, so none of them is hidden.
-    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('english');
-    await expect(rail.getByRole('button', { name: 'English · language' })).toBeVisible();
+    await expect(
+      rail
+        .getByRole('group', { name: 'Languages' })
+        .getByRole('button', { name: 'English', exact: true }),
+    ).toBeVisible();
   } finally {
     await browser.close();
   }
 });
 
 for (const width of [1100, 1440])
-  test(`the rail's one filter finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
+  test(`the search field finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
     const browser = await chromium.launch({
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     });
@@ -515,22 +519,22 @@ for (const width of [1100, 1440])
         );
       await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
       expect(await sideways()).toEqual([0, 0]);
-      for (const name of ['Recipes', 'Genres'])
+      // Every kind is browsable without typing, each opened in place (the eight decades need no "Show all").
+      await expect(rail.getByRole('group', { name: 'Decades' })).toBeVisible();
+      for (const name of ['Recipes', 'Genres', 'Languages', 'Countries'])
         await rail
           .getByRole('group', { name })
           .getByRole('button', { name: /^Show all/ })
           .click();
       expect(await sideways()).toEqual([0, 0]);
 
-      // One filter across every kind, one ranked list, typos forgiven: "sweidsh" is Swedish.
-      const filter = rail.getByRole('searchbox', { name: 'Filter categories' });
-      await filter.fill('sweidsh');
-      const matches = rail.getByRole('group', { name: 'Matches' });
-      await expect(matches.getByRole('button').first()).toHaveText('Swedish · language');
-      await expect(rail.getByRole('group', { name: 'Recipes' })).toHaveCount(0);
+      // The one search field finds every kind, in one ranked row, typos forgiven: "sweidsh" is Swedish.
+      await input(page).fill('sweidsh');
+      const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+      await expect(browse.getByRole('button').first()).toHaveText('Swedish · language');
       expect(await sideways()).toEqual([0, 0]);
-      await filter.fill('90s');
-      await matches.getByRole('button', { name: '1990s · decade' }).click();
+      await input(page).fill('90s');
+      await browse.getByRole('button', { name: '1990s · decade' }).click();
       await expect(page).toHaveURL(/\/search\?c=decade-1990$/);
       await expect(
         active(page).getByRole('heading', { name: 'Explore', exact: true }),
@@ -557,13 +561,137 @@ test('on a phone, More… opens every category in a sheet', async () => {
     const sheet = page.getByRole('dialog', { name: 'All categories' });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole('heading', { name: 'Genres' })).toBeVisible();
-    await sheet.getByRole('searchbox', { name: 'Filter categories' }).fill('noir');
-    await expect(sheet.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
-    // A filter result names its kind beside it.
-    await sheet.getByRole('button', { name: 'Nordic Noir · recipe', exact: true }).click();
+    await expect(sheet.getByRole('heading', { name: 'Countries' })).toBeVisible();
+    // Nordic Noir is past the Recipes' first eight: "Show all" opens the rest in place.
+    const recipes = sheet.getByRole('group', { name: 'Recipes' });
+    await recipes.getByRole('button', { name: /^Show all/ }).click();
+    await recipes.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
     await expect(sheet).toBeHidden();
     await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the Browse row: the whole query first, fewer for long queries, a pick replaces the query', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    const heading = (name) => active(page).getByRole('heading', { name, exact: true });
+
+    // A short form counts in full: "uk" is the United Kingdom, first and drawn firmer.
+    await input(page).fill('uk');
+    const first = browse.getByRole('button').first();
+    await expect(first).toHaveText('United Kingdom · country');
+    await expect(first).toHaveClass(/exact/);
+    // Two letters already offer something, more than a handful.
+    await input(page).fill('dr');
+    await expect.poll(() => browse.getByRole('button').count()).toBeGreaterThan(6);
+    // Three words or more: likelier a title, so only the closest three.
+    await input(page).fill('slow burn bleak thriller');
+    await expect.poll(() => browse.getByRole('button').count()).toBeLessThanOrEqual(3);
+
+    // Enter searches the text; it never turns into a facet.
+    await input(page).fill('sweden');
+    await input(page).press('Enter');
+    await expect(page).toHaveURL(/\/search\?q=sweden$/);
+    await expect(heading('Search')).toBeVisible();
+
+    // Picking from the row turns the query into that pill, and Back brings the query back.
+    await browse.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(input(page)).toHaveValue('');
+    await expect(heading('Explore')).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?q=sweden$/);
+    await expect(input(page)).toHaveValue('sweden');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('while typing, picks that can’t apply stay shown, paused; results come before the rail', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE,genre-18')}`);
+    const picks = active(page).getByRole('group', { name: 'Selected' });
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await input(page).fill('drama');
+    await expect(page).toHaveURL(/\/search\?q=drama&c=country-SE,genre-18$/);
+    // Drama still narrows the results; Sweden waits, shown and said so.
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toHaveClass(/paused/);
+    await expect(picks.getByRole('button', { name: 'Remove Drama' })).not.toHaveClass(/paused/);
+    await expect(
+      picks.getByText('Paused while searching — clear search to apply', { exact: true }),
+    ).toBeVisible();
+
+    // The Browse row and the results come before the rail, and ArrowDown goes from the field into them.
+    const order = await page.evaluate(() => {
+      const page = document.querySelector('[data-route-page][data-active="true"]');
+      const row = page.querySelector('.browse');
+      const rail = page.querySelector('nav.rail');
+      return !!(row.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(order).toBe(true);
+    await input(page).focus();
+    await input(page).press('ArrowDown');
+    await expect(
+      active(page).getByRole('group', { name: 'Browse', exact: true }).getByRole('button').first(),
+    ).toBeFocused();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('on a phone, only the bar stays pinned, and the strip gives way to the Browse row while typing', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    // Scrolled into the grid, what stays on screen at the top is the bar alone.
+    const pinned = await page.evaluate(async () => {
+      scrollTo(0, 1200);
+      await new Promise((r) => setTimeout(r, 200));
+      let bottom = document.querySelector('.bar').getBoundingClientRect().bottom;
+      for (const el of document.querySelectorAll('main *')) {
+        if (!['fixed', 'sticky'].includes(getComputedStyle(el).position)) continue;
+        const box = el.getBoundingClientRect();
+        if (box.height > 0 && box.top < 200 && box.bottom > 0)
+          bottom = Math.max(bottom, box.bottom);
+      }
+      return bottom;
+    });
+    expect(pinned).toBeLessThanOrEqual(120);
+    // Typing: the strip steps aside, and its More… with it.
+    await input(page).fill('drama');
+    await expect(active(page).getByRole('group', { name: 'Browse', exact: true })).toBeVisible();
+    await expect(active(page).getByRole('button', { name: 'More…', exact: true })).toHaveCount(0);
   } finally {
     await browser.close();
   }

@@ -23,10 +23,7 @@ import type { MediaType, Title } from './library';
 
 export const FOR_YOU = 'for-you';
 
-/**
- * What a chip is. The first four are the rail's; a language, a country and a decade are there to be found by the
- * filter ("swedish", "90s") and are never listed on their own — there are too many, and they say little alone.
- */
+/** What a chip is: For You, or one of the six kinds the rail lists and the search field finds. */
 export type ChipGroup = 'for-you' | 'genre' | 'recipe' | 'mood' | 'language' | 'country' | 'decade';
 
 export interface Chip {
@@ -37,7 +34,7 @@ export interface Chip {
   aliases?: string[];
 }
 
-/** A chip's kind as a word, for the muted label beside a filter result: "Swedish · language". */
+/** A chip's kind as a word, for the muted label beside a Browse-row chip: "Swedish · language". */
 export const KIND: Record<ChipGroup, string> = {
   'for-you': '',
   mood: 'mood',
@@ -79,9 +76,20 @@ const DECADE_WORDS: Record<number, string> = {
 };
 
 /**
- * The languages, countries and decades the filter finds, feeding what the browse tail already offers: a country
- * and a decade are its rows (`categories()`), so they carry its vote floors and the year floor; a language is TMDB's
- * `with_original_language`.
+ * Other names a chip is found by beyond its label and its people's name: the short forms people type. An exact one
+ * counts at any length, so "uk" and "sf" find theirs though two letters find nothing else.
+ */
+const ALIASES: Record<string, string[]> = {
+  'country-GB': ['uk', 'england'],
+  'country-US': ['us', 'usa', 'america'],
+  'country-KR': ['korea'],
+  'genre-878': ['sf', 'sci-fi', 'scifi'],
+  'genre-10765': ['sf', 'sci-fi', 'scifi'],
+};
+
+/**
+ * The languages, countries and decades Explore offers beside the rail's own kinds: the browse tail's countries (and
+ * the US, which has no tail row), every decade it has, and the languages of those countries and a few more.
  */
 function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[] {
   const languages = LANGUAGES.map((code): Chip => ({
@@ -89,11 +97,11 @@ function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[
     label: named('language', code),
     group: 'language',
   }));
-  const countries = COUNTRIES.map(([code, demonym]): Chip => ({
+  const countries = [...COUNTRIES, ['US', 'American'] as const].map(([code, demonym]): Chip => ({
     id: `country-${code}`,
     label: named('region', code),
     group: 'country',
-    aliases: [demonym],
+    aliases: [demonym, ...(ALIASES[`country-${code}`] ?? [])],
   }));
   const decades = categories(type, year, { minYear }).flatMap((category): Chip[] => {
     const decade = /^decade-(\d{4})-/.exec(category.id)?.[1];
@@ -159,7 +167,7 @@ const same = (label: string) => fold(label).replace(/ /g, '').replace(/s$/, '');
  * The chips for `type`, in the order they are offered: For You; atlas's moods; the recipes (the TV's curated
  * ones first, then the rest of the catalogue, then atlas's subgenres that no recipe already names); and the
  * genres, the TV's Explore order first, less the hidden ones. Moods and subgenres only where atlas answers. Then
- * the languages, countries and decades only the filter shows.
+ * the languages, countries and decades.
  */
 export function exploreChips(
   type: MediaType,
@@ -187,6 +195,7 @@ export function exploreChips(
     id: `genre-${id}`,
     label: GENRES[type][id] ?? '',
     group: 'genre',
+    ...(ALIASES[`genre-${id}`] ? { aliases: ALIASES[`genre-${id}`] } : {}),
   }));
   return [
     { id: FOR_YOU, label: 'For You', group: 'for-you' },
@@ -327,9 +336,19 @@ export function matchChips(text: string, chips: Chip[], { minWord = 1 } = {}): C
     .map(({ chip }) => chip);
 }
 
-/** Categories a typed query points at, to open instead of searching: instant, local, a handful. */
-export const suggestChips = (query: string, chips: Chip[]) =>
-  matchChips(query, chips, { minWord: 3 }).slice(0, 6);
+/**
+ * The ways to browse a typed query points at, offered above its results: instant, local, from two letters, best
+ * match first — the whole query as a name ("uk", "sweden") before anything it merely begins.
+ */
+export function browseChips(query: string, chips: Chip[]): Chip[] {
+  const found = matchChips(query, chips, { minWord: 2 });
+  // A query of several words is more likely a title than a category: only the closest few.
+  return words(query).length >= 3 ? found.slice(0, 3) : found;
+}
+
+/** Whether `text` is this chip's whole name, or one of its other names. */
+export const namesExactly = (text: string, chip: Chip) =>
+  [chip.label, ...(chip.aliases ?? [])].map(fold).includes(fold(text));
 
 // Facets. What is picked stacks: Sweden, then + Action, is Swedish action films. A selection is a list of chip ids
 // in the order picked, For You being the empty one. Each kind fills one slot, which a second pick of that kind

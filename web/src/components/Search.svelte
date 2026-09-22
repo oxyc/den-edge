@@ -19,7 +19,8 @@
     PROMPTS,
     remapSet,
     slotOf,
-    suggestChips,
+    browseChips,
+    namesExactly,
   } from '../lib/explore';
   import type { MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
@@ -199,35 +200,34 @@
   );
 
   /**
-   * A chip picked, from the rail, a pill or a suggestion. It stacks onto the selection, or comes out if it was in it,
-   * and whatever it can't stand beside gives way, said in the status line. While a query is typed, a genre narrows
-   * its results and the query stays; anything else opens the selection's feed in the query's place — a new entry,
-   * so Back returns to the search.
+   * A chip picked, from the rail, a pill or the Browse row. It stacks onto the selection, or comes out if it was in
+   * it, and whatever it can't stand beside gives way, said in the status line. `keepQuery` says whether a typed query
+   * stays: a rail genre narrows it, a pill taken out leaves it; anything else opens the selection's feed in the
+   * query's place — a new entry, so Back returns to the search.
    */
-  function pick(id: string) {
+  function pick(id: string, keepQuery = typing && slotOf(id) === 'genre') {
     const { set, removed } = applyPick(selection, id, exploreType);
     const label = chips.find((c) => c.id === id)?.label ?? '';
     status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-    const keep = typing && slotOf(id) === 'genre';
-    go({ type: explore.type, chips: set }, keep ? query : '');
+    go({ type: explore.type, chips: set }, keepQuery ? query : '');
   }
 
-  /** What is shown as picked: everything, or while typing only the genres that narrow the results. */
+  /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
   const shownSelection = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
   );
-  const picked = $derived(chipsOf(shownSelection, chips));
+  /** Every pick, over the grid. While a query is typed, all but the genres wait: shown, but paused. */
+  const picked = $derived(
+    chipsOf(selection, chips).map((chip) => ({
+      chip,
+      paused: typing && slotOf(chip.id) !== 'genre',
+    })),
+  );
 
-  /** Every pick shown taken out at once. While typing that is the genres narrowing it; the query stays. */
+  /** Every pick taken out at once, the query left as it is. */
   function clearAll() {
     status = '';
-    go(
-      {
-        type: explore.type,
-        chips: typing ? selection.filter((id) => slotOf(id) !== 'genre') : [],
-      },
-      typing ? query : '',
-    );
+    go({ type: explore.type, chips: [] }, typing ? query : '');
   }
   /**
    * atlas's counts beside the selection (`facetCounts.ts`): one request per selection, a moment after it settles,
@@ -269,11 +269,29 @@
   );
   const hidden = (id: string) => !offered(shownSelection, id, exploreType) || empty.has(id);
 
-  /** The categories the typed text points at, offered above its results: local, instant. */
-  const suggestions = $derived(
-    typing ? suggestChips(query, chips).filter((c) => !hidden(c.id)) : [],
+  /** The ways to browse the typed text points at, offered above its results: local, instant, uncapped. */
+  const browse = $derived(
+    typing
+      ? browseChips(query, chips).filter((c) => !selection.includes(c.id) && !hidden(c.id))
+      : [],
   );
 </script>
+
+<!-- The type and the rail. While a query is typed the rail follows the results in the page, so they come first in
+     focus order; a wide screen still draws it down the side. -->
+{#snippet rail()}
+  <div class="rail" class:after={typing}>
+    {#if !typing}
+      <TypeFilter
+        value={exploreType}
+        onchange={chooseType}
+        label="Browse movies or series"
+        all={false}
+      />
+    {/if}
+    <ExploreChips {chips} selected={shownSelection} {hidden} {typing} onchange={(id) => pick(id)} />
+  </div>
+{/snippet}
 
 <section
   class="search"
@@ -282,49 +300,50 @@
 >
   <h1>{typing ? 'Search' : 'Explore'}</h1>
   <div class="explore">
-    <div class="rail">
-      {#if typing}
-        <TypeFilter
-          value={explore.type ?? null}
-          onchange={chooseType}
-          label="Show in search results"
-        />
-      {:else}
-        <TypeFilter
-          value={exploreType}
-          onchange={chooseType}
-          label="Browse movies or series"
-          all={false}
-        />
-      {/if}
-      <ExploreChips {chips} selected={shownSelection} {hidden} {typing} onchange={pick} />
-    </div>
+    {#if !typing}{@render rail()}{/if}
     <div class="feed">
+      {#if typing}
+        <div class="controls">
+          <TypeFilter
+            value={explore.type ?? null}
+            onchange={chooseType}
+            label="Show in search results"
+          />
+        </div>
+      {/if}
       <!-- The picks, over what they pick, at every width: quiet, since the grid is what they are about. -->
       {#if picked.length}
         <div class="picks" role="group" aria-label="Selected">
-          {#each picked as item (item.id)}
+          {#each picked as { chip, paused } (chip.id)}
             <button
               type="button"
               class="pick"
-              aria-label="Remove {item.label}"
-              data-chip={item.id}
-              onclick={() => pick(item.id)}
-              >{item.label}<span class="x" aria-hidden="true">✕</span></button
+              class:paused
+              aria-label="Remove {chip.label}"
+              data-chip={chip.id}
+              onclick={() => pick(chip.id, typing)}
+              >{chip.label}<span class="x" aria-hidden="true">✕</span></button
             >
           {/each}
           <button type="button" class="clear" onclick={clearAll}>Clear all</button>
+          {#if picked.some((p) => p.paused)}
+            <span class="paused-note">Paused while searching — clear search to apply</span>
+          {/if}
         </div>
       {/if}
       <p class="status" role="status">{status}</p>
       {#if typing}
-        {#if suggestions.length}
-          <div class="prompts" role="group" aria-label="Browse instead">
-            <span class="try">Browse</span>
-            {#each suggestions as suggestion (suggestion.id)}
-              <button type="button" onclick={() => pick(suggestion.id)}
-                >{suggestion.label}<span class="kind">{` · ${KIND[suggestion.group]}`}</span
-                ></button
+        {#if browse.length}
+          <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->
+          <div class="browse" role="group" aria-label="Browse">
+            {#each browse as chip, at (chip.id)}
+              <button
+                type="button"
+                class="facet"
+                class:exact={at === 0 && namesExactly(query, chip)}
+                data-chip={chip.id}
+                onclick={() => pick(chip.id, false)}
+                >{chip.label}<span class="kind">{` · ${KIND[chip.group]}`}</span></button
               >
             {/each}
           </div>
@@ -358,6 +377,7 @@
         {/if}
       {/if}
     </div>
+    {#if typing}{@render rail()}{/if}
   </div>
 </section>
 
@@ -452,18 +472,29 @@
     transition: opacity 120ms;
   }
 
-  /* A phone and a tablet: the type and one line of chips over the grid, held under the bar as it scrolls. */
+  /* A phone and a tablet: the type and one line of chips over the grid. Not pinned: only the bar stays on screen,
+     so a phone keeps its height for the grid, and nothing draws a band under the bar's glass. */
   .rail {
-    position: sticky;
-    top: calc(max(12px, env(safe-area-inset-top)) + 46px + 4px);
-    z-index: 3;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
-    margin: 0 calc(-1 * var(--gutter)) 16px;
-    padding: 8px var(--gutter) 4px;
-    background: var(--bg);
+    gap: 8px;
+    margin: 0 0 12px;
+  }
+
+  .controls {
+    display: flex;
+    margin: 0 0 12px;
+  }
+
+  .pick.paused {
+    border-style: dashed;
+    opacity: 0.55;
+  }
+
+  .paused-note {
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .prompts {
@@ -523,6 +554,58 @@
     outline-offset: -2px;
   }
 
+  /* The ways to browse a query points at: wrapped on a wide screen, one sideways line on a phone. */
+  .browse {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    margin: 0 0 16px;
+  }
+
+  .facet {
+    flex-shrink: 0;
+    min-height: 30px;
+    padding: 0 10px;
+    border: 1px dashed var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 14px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .facet:hover {
+    border-color: var(--muted);
+  }
+
+  /* The query is this one's whole name: the likeliest meaning, drawn a little firmer. */
+  .facet.exact {
+    border-style: solid;
+    border-color: var(--muted);
+    font-weight: 600;
+  }
+
+  .facet:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  @media (width <= 759px) {
+    .browse {
+      flex-wrap: nowrap;
+      margin-inline: calc(-1 * var(--gutter));
+      padding-inline: var(--gutter);
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .browse::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
   /* A wide screen: a rail down the side, as the TV's is, with the grid beside it. */
   @media (width >= 1100px) {
     .explore {
@@ -532,14 +615,24 @@
       align-items: start;
     }
 
+    /* The rail keeps its column whether it comes before the results in the page or after them. */
     .rail {
+      position: sticky;
       top: var(--bar-space);
+      grid-column: 1;
+      grid-row: 1;
       gap: 18px;
       max-height: calc(100vh - var(--bar-space) - 16px);
       margin: 0;
       padding: 0 4px 16px 0;
       overflow-y: auto;
+      overscroll-behavior: contain;
       scrollbar-width: thin;
+    }
+
+    .feed {
+      grid-column: 2;
+      grid-row: 1;
     }
   }
 </style>

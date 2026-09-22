@@ -2,12 +2,15 @@
   import icon from '../assets/den-mark.png';
   import DetailIcon from './DetailIcon.svelte';
   import { flushSync, onMount, tick, untrack } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack } from '../lib/navigation';
   import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
   let text = $state(untrack(() => query));
+  /** A phone's bar: the placeholder says less, to fit. */
+  const narrow = new MediaQuery('width <= 759px');
   /**
    * The letters typed but not yet in the address. Typing belongs to the field; the address — and with it every
    * page that reads the query — follows once typing pauses, or at once on Enter, blur, clearing or Esc.
@@ -102,6 +105,18 @@
     else navigate(searchHref(text, explore()));
     input?.blur();
   }
+  /**
+   * ArrowDown from the field: into what it found — the first of the Browse row, or the first result. What is typed
+   * reaches the address first, so what is found is for all of it.
+   */
+  async function intoResults() {
+    if (pending) commit(false);
+    await tick();
+    const page = '[data-route-page][data-active="true"]';
+    document
+      .querySelector<HTMLElement>(`${page} .browse button, ${page} .grid a`)
+      ?.focus({ preventScroll: false });
+  }
   /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
   function escaped() {
     if (!text.trim() || route.page !== 'search') {
@@ -162,8 +177,10 @@
         bind:this={input}
         bind:value={text}
         type="search"
-        aria-label="Search movies, series and people"
-        placeholder="Search movies, series and people"
+        aria-label="Search titles, people, moods, languages…"
+        placeholder={narrow.current
+          ? 'Titles, people, moods…'
+          : 'Search titles, people, moods, languages…'}
         autocomplete="off"
         enterkeyhint="search"
         onfocus={() => {
@@ -177,6 +194,9 @@
           if (event.key === 'Escape') {
             event.preventDefault();
             escaped();
+          } else if (event.key === 'ArrowDown' && route.page === 'search') {
+            event.preventDefault();
+            void intoResults();
           }
         }}
       />
@@ -296,6 +316,14 @@
 
   .search:focus-within {
     outline: 1px solid var(--muted);
+  }
+
+  /* On search, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
+  @media (width >= 1100px) {
+    .searching .search {
+      flex: 0 1 400px;
+      max-width: 420px;
+    }
   }
 
   .search-glyph {

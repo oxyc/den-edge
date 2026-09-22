@@ -15,7 +15,8 @@ import {
   offered,
   remapChip,
   remapSet,
-  suggestChips,
+  browseChips,
+  namesExactly,
 } from './explore';
 import type { MediaType, Title } from './library';
 
@@ -25,7 +26,7 @@ describe('Explore chips', () => {
   it('run For You, moods, recipes, then genres, each strongest first', () => {
     const chips = exploreChips('movie', { atlas: true });
     const groups = chips.map((c) => c.group);
-    // Each group in one run, in that order; the filter's own kinds last.
+    // Each group in one run, in that order; languages, countries and decades last.
     expect([...new Set(groups)]).toEqual([
       'for-you',
       'mood',
@@ -119,18 +120,41 @@ describe('matching typed text to chips', () => {
     expect(labels(matchChips('space', chips))).toEqual(['Set in Space', 'Science Fiction']);
   });
 
-  it('suggests from a whole query: named categories first, then synonyms, a handful at most', () => {
-    expect(labels(suggestChips('funny heist', chips))).toEqual([
+  it('offers what a query names, from two letters, named ones before synonyms, uncapped', () => {
+    expect(labels(browseChips('funny heist', chips))).toEqual([
       'Heist',
       'Feel-Good',
       'Dark Comedies',
       'Comedy',
     ]);
-    // Words under three letters and plain titles point at no category.
-    expect(suggestChips('up', chips)).toEqual([]);
-    expect(suggestChips('the matrix', chips)).toEqual([]);
-    expect(suggestChips('s', chips)).toEqual([]);
-    expect(suggestChips('dra', chips).length).toBeLessThanOrEqual(6);
+    // Two letters begin something; one begins nothing yet; a plain title names no category.
+    expect(browseChips('dr', chips).length).toBeGreaterThan(6);
+    expect(browseChips('s', chips)).toEqual([]);
+    expect(browseChips('the matrix', chips)).toEqual([]);
+  });
+
+  it('puts the whole query as a name first, short forms included', () => {
+    expect(labels(browseChips('uk', chips))[0]).toBe('United Kingdom');
+    expect(labels(browseChips('us', chips))[0]).toBe('United States');
+    expect(labels(browseChips('sf', chips))[0]).toBe('Science Fiction');
+    expect(labels(browseChips('sweden', chips))[0]).toBe('Sweden');
+    expect(
+      namesExactly(
+        'UK',
+        chips.find((c) => c.id === 'country-GB')!,
+      ),
+    ).toBe(true);
+    expect(
+      namesExactly(
+        'united',
+        chips.find((c) => c.id === 'country-GB')!,
+      ),
+    ).toBe(false);
+  });
+
+  it('offers only the closest three for a query of three words or more', () => {
+    expect(browseChips('slow burn bleak thriller', chips).length).toBeLessThanOrEqual(3);
+    expect(browseChips('action crime', chips).length).toBeGreaterThan(3);
   });
 
   it('forgives a typo or two, ranked below anything spelled right', () => {
@@ -151,7 +175,6 @@ describe('matching typed text to chips', () => {
     expect(found('nineties')[0]).toBe('1990s · decade');
     expect(found('1990')[0]).toBe('1990s · decade');
     expect(found('korean')).toContain('South Korea · country');
-    // The rail never lists them: they are the filter's alone.
     expect(exploreChips('movie').filter((c) => c.group === 'decade').length).toBeGreaterThan(3);
   });
 
@@ -162,7 +185,7 @@ describe('matching typed text to chips', () => {
 
   it('suggests only what this type has: no Horror genre under Series', () => {
     const series = exploreChips('tv', { atlas: true });
-    expect(labels(suggestChips('scary', series))).toEqual(['Supernatural Horror']);
+    expect(labels(browseChips('scary', series))).toEqual(['Supernatural Horror']);
   });
 });
 
