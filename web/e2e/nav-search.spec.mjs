@@ -157,6 +157,11 @@ for (const width of [320, 390, 1280])
         expect(geometry.scrollWidth).toBe(width);
       }
       await input(page).fill('Neon');
+      // Explore's grid shows the same fixture films, so wait for the search itself to answer.
+      await expect(page).toHaveURL(/\/search\?q=Neon$/);
+      await expect(
+        active(page).getByRole('heading', { name: 'Search', exact: true }),
+      ).toBeVisible();
       await expect(active(page).getByRole('link', { name: 'Film 108 2026' })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       if (width < 760) {

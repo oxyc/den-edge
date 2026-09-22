@@ -8,9 +8,30 @@
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
   let text = $state(untrack(() => query));
+  /**
+   * The letters typed but not yet in the address. Typing belongs to the field; the address — and with it every
+   * page that reads the query — follows once typing pauses, or at once on Enter, blur, clearing or Esc.
+   * Rewriting it on every letter cost a history write (Safari throttles those) and a pass through the router
+   * and every page per keystroke.
+   */
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  const SETTLE_MS = 180;
+  $effect(() => () => clearTimeout(pending));
   $effect(() => {
-    if (query !== untrack(() => text)) text = query;
+    if (query === untrack(() => text)) return;
+    // The address moved on its own — Back, a link, a chip — so a letter still waiting to reach it is stale.
+    clearTimeout(pending);
+    pending = undefined;
+    text = query;
   });
+  /** `top` returns to the top of the results; a blur must not, or a tap landing on a card loses it. */
+  function commit(top = true) {
+    clearTimeout(pending);
+    pending = undefined;
+    if (route.page !== 'search') return;
+    navigate(searchHref(text, explore()), true);
+    if (top) window.scrollTo({ top: 0, behavior: 'instant' });
+  }
   // eslint-disable-next-line svelte/prefer-writable-derived -- Focus must expand synchronously within the iPhone tap; route changes reconcile it after navigation.
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
@@ -42,15 +63,21 @@
   const explore = (): Explore =>
     route.page === 'search' ? { type: route.type, chip: route.chip } : {};
   function searchChanged() {
-    // Arriving at search is a navigation; every letter after that rewrites the same entry, or Back would walk
-    // the spelling of what was typed instead of returning to the page the search started from.
-    const searching = route.page === 'search';
-    navigate(searchHref(text, explore()), searching);
-    if (searching) window.scrollTo({ top: 0, behavior: 'instant' });
+    // Arriving at search is a navigation, and happens at once. Every letter after that rewrites the same entry,
+    // or Back would walk the spelling of what was typed instead of returning to the page it started from.
+    if (route.page !== 'search') {
+      navigate(searchHref(text));
+      return;
+    }
+    clearTimeout(pending);
+    // An emptied field is a decision, not a letter: back to Explore without waiting.
+    if (!text) commit();
+    else pending = setTimeout(() => commit(), SETTLE_MS);
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
-    navigate(searchHref(text, explore()), route.page === 'search');
+    if (route.page === 'search') commit();
+    else navigate(searchHref(text, explore()));
     input?.blur();
   }
   /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
@@ -60,7 +87,7 @@
       return;
     }
     text = '';
-    navigate(searchHref('', explore()), true);
+    commit();
   }
   /**
    * The strip, and what a phone does with it.
@@ -121,6 +148,9 @@
           if (route.page !== 'search') navigate(searchHref(text));
         }}
         oninput={searchChanged}
+        onblur={() => {
+          if (pending) commit(false);
+        }}
         onkeydown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault();
