@@ -65,7 +65,47 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
   });
 }
 
-export async function fetchSources(
+/**
+ * What scout says about its own list (its `den` object): whether an empty list means nothing exists (`empty`) or
+ * that it could not ask every source (`unknown`), whether a list may be short (`partial`), and whether it is a
+ * held list served because no source answered (`outage`, with the time it was built). Absent from an older scout.
+ */
+export interface SourceAnswer {
+  kind: 'live' | 'partial' | 'empty' | 'unknown' | 'stale';
+  /** Sources that could have been asked and did not answer. */
+  missing: number;
+  /** A held list served in an outage, and when it was built (ms). */
+  outage?: { builtAt: number };
+}
+
+const answerKinds = new Set(['live', 'partial', 'empty', 'unknown', 'stale']);
+// A source that answered, or that can never be asked, is not one the list is waiting on.
+const notMissing = new Set(['answered', 'skipped_misconfigured', 'quarantined']);
+
+export function parseAnswer(body: unknown): SourceAnswer | undefined {
+  const den = (body as { den?: unknown } | null)?.den as
+    | {
+        answerKind?: unknown;
+        degraded?: unknown;
+        generatedAt?: unknown;
+        coverage?: { sources?: unknown };
+      }
+    | undefined;
+  if (!den || typeof den !== 'object' || !answerKinds.has(den.answerKind as string))
+    return undefined;
+  const sources: unknown[] = Array.isArray(den.coverage?.sources) ? den.coverage.sources : [];
+  const builtAt = typeof den.generatedAt === 'string' ? Date.parse(den.generatedAt) : NaN;
+  return {
+    kind: den.answerKind as SourceAnswer['kind'],
+    missing: sources.filter(
+      (s) => !notMissing.has((s as { outcome?: unknown } | null)?.outcome as string),
+    ).length,
+    outage: den.degraded === 'stale_list' && Number.isFinite(builtAt) ? { builtAt } : undefined,
+  };
+}
+
+/** Scout's list for a title and what it says about it; `sources` is null when scout could not be reached. */
+export async function fetchSourceList(
   addon: Addon,
   imdb: string,
   routes: Routes,
@@ -73,7 +113,7 @@ export async function fetchSources(
   episode?: number,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = relayFetch,
-): Promise<TitleSource[] | null> {
+): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }> {
   try {
     const id =
       season !== undefined && episode !== undefined ? `${imdb}:${season}:${episode}` : imdb;
@@ -81,10 +121,26 @@ export async function fetchSources(
       `${addon.base}/stream/${season === undefined ? 'movie' : 'series'}/${encodeURIComponent(id)}.json`,
       { signal },
     );
-    return response.ok ? parseSources(await response.json(), addon, routes) : null;
+    if (!response.ok) return { sources: null };
+    const body: unknown = await response.json();
+    return { sources: parseSources(body, addon, routes), answer: parseAnswer(body) };
   } catch {
-    return null;
+    return { sources: null };
   }
+}
+
+export async function fetchSources(
+  ...args: Parameters<typeof fetchSourceList>
+): Promise<TitleSource[] | null> {
+  return (await fetchSourceList(...args)).sources;
+}
+
+/** "5 min", "3 h", "2 days": how long ago a held list was built. */
+export function ageOf(builtAt: number, now = Date.now()): string {
+  const minutes = Math.max(1, Math.round((now - builtAt) / 60000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
 }
 
 export type Preparation = {
