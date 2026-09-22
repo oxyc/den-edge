@@ -548,6 +548,40 @@ test('"More like this" on a poster adds a "Like" pill without opening the title,
   }
 });
 
+test('beside a "Like", a genre none of its titles has is not offered, in the rail or the Browse row', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    // Its similar titles are the fixture's: all dramas, none of them action. TMDB's tail never answers, so the feed
+    // is never loaded to its end: what is judged is what has loaded.
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300, 301] } }));
+    await page.route('**/recommendations**', () => {});
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=like-movie-949')}`);
+    await expect(active(page).getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    const genres = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    // Typed, the Browse row offers it no more than the rail does.
+    await input(page).fill('action');
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await expect(browse.getByRole('button', { name: 'Action · genre', exact: true })).toHaveCount(
+      0,
+    );
+    await input(page).fill('drama');
+    await expect(browse.getByRole('button', { name: 'Drama · genre', exact: true })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a "Like" from the address says "Like…" until its title is named', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

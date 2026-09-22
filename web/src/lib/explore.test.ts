@@ -403,9 +403,28 @@ describe('emptyOptions', () => {
     expect(empty.has('recipe-heist')).toBe(false);
     // A second language isn't offered beside Swedish at all (`taken`): nothing loaded is judged against it.
     expect(empty.has('lang-en')).toBe(false);
-    // Nor is a rating, which neither atlas's counts nor the feed can say anything about.
-    expect(empty.has('rating-8')).toBe(false);
+    // A rating is judged like a genre: nothing loaded here is rated at all.
+    expect(empty.has('rating-8')).toBe(true);
     expect(emptyOptions([], loaded, true, chips).size).toBe(0);
+  });
+
+  it('judges a "Like" or a mood by what has loaded so far, and gives an option back once a match loads', () => {
+    const like = ['like-movie-949'];
+    // Loading, nothing drawn yet: nothing is judged.
+    expect(emptyOptions(like, [], false, chips).size).toBe(0);
+    const first = [{ ...film(1), genreIds: [80, 18], originalLanguage: 'en', year: 1995 }];
+    const empty = emptyOptions(like, first, false, chips);
+    expect(empty.has('genre-28')).toBe(true);
+    expect(empty.has('genre-80')).toBe(false);
+    expect(empty.has('lang-sv')).toBe(true);
+    expect(empty.has('decade-1990')).toBe(false);
+    // A later page brings an action film: Action is back.
+    const more = [...first, { ...film(2), genreIds: [28], originalLanguage: 'en', year: 2001 }];
+    expect(emptyOptions(like, more, false, chips).has('genre-28')).toBe(false);
+    // A mood the same way.
+    expect(emptyOptions(['mood-cozy'], first, false, chips).has('genre-28')).toBe(true);
+    // A TMDB feed still waits for its end.
+    expect(emptyOptions(['country-SE'], first, false, chips).size).toBe(0);
   });
 });
 

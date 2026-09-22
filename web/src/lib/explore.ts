@@ -610,9 +610,12 @@ function atlasFilter(set: readonly string[]): (title: Title) => boolean {
  * The options that would show nothing beside `selection`. The one place the rail learns what is empty.
  *
  * Where atlas answered with its counts (`facetCounts.ts`), an option with none in a kind it counted is empty. And
- * once the selection's own feed is `complete` (every page loaded), what is loaded is all there is: a genre, or a
- * language or a decade where none is picked yet, that nothing in it matches is empty too. Without counts that is all
- * there is to go on.
+ * once the selection's own feed is `complete` (every page loaded), what is loaded is all there is: a genre, a rating,
+ * or a language or a decade where none is picked yet, that nothing in it matches is empty too.
+ *
+ * A feed narrowed here rather than by TMDB — a mood's row, a "Like" — is judged by what it has loaded so far,
+ * complete or not: nothing but its loaded titles says what it holds (atlas's similar list is ids alone), and an option
+ * none of them matches is a dead end more often than not. One comes back as soon as a title loaded later matches it.
  *
  * Neither judges an option of a kind already picked — another recipe, which takes over the one picked, or another
  * country, which isn't offered at all (`taken`) — since it would replace what they were counted beside.
@@ -626,6 +629,7 @@ export function emptyOptions(
 ): Set<string> {
   const empty = new Set<string>();
   const picked = new Set(selection.map(slotOf));
+  const judged = complete || ((picked.has('atlas') || picked.has('like')) && loaded.length > 0);
   for (const chip of chips) {
     const slot = slotOf(chip.id);
     if (!slot || selection.includes(chip.id)) continue;
@@ -635,8 +639,9 @@ export function emptyOptions(
       empty.add(chip.id);
       continue;
     }
-    const narrows = slot === 'genre' || slot === 'language' || slot === 'decade';
-    if (complete && selection.length && narrows && !loaded.some(atlasFilter([chip.id])))
+    const narrows =
+      slot === 'genre' || slot === 'language' || slot === 'decade' || slot === 'rating';
+    if (judged && selection.length && narrows && !loaded.some(atlasFilter([chip.id])))
       empty.add(chip.id);
   }
   return empty;

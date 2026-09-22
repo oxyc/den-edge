@@ -293,20 +293,17 @@
   });
   /**
    * Options not worth offering: any that can't stand beside the selection, and any that would show nothing beside
-   * it (`emptyOptions`: atlas's counts, and the feed once it has loaded to its end).
+   * it (`emptyOptions`: atlas's counts, and the feed's loaded titles). Judged while a query is typed too: a pick from
+   * the Browse row lands in the paused selection's feed, whose loaded titles are still here.
    */
   const empty = $derived(
-    typing
-      ? new Set<string>()
-      : emptyOptions(
-          selection,
-          feedHits
-            .map((hit) => (hit.kind === 'title' ? hit.title : null))
-            .filter((t) => t !== null),
-          feed.pager.exhausted,
-          chips,
-          { counts, type: exploreType },
-        ),
+    emptyOptions(
+      selection,
+      feedHits.map((hit) => (hit.kind === 'title' ? hit.title : null)).filter((t) => t !== null),
+      feed.pager.exhausted,
+      chips,
+      { counts, type: exploreType },
+    ),
   );
   /**
    * Hidden: what can't stand beside the selection, any other value of a one-value kind already picked — paused or not,
