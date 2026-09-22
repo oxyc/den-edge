@@ -263,17 +263,51 @@
     insecure:
       'Linking needs a secure connection. Open Den over https (not a plain http address) and try again.',
   };
+  /** Whether the code shown was put on the clipboard, so the page can say so. */
+  let codeCopied = $state(false);
+  /**
+   * Put `text` on the clipboard. Safari only allows a write that starts inside the tap, so a code that
+   * arrives later goes in as a promised item started now; a browser that refuses leaves the code on screen.
+   */
+  function copyCode(text: string | Promise<string>) {
+    const blob = Promise.resolve(text).then((t) => new Blob([t], { type: 'text/plain' }));
+    const write =
+      typeof ClipboardItem === 'function' && navigator.clipboard?.write
+        ? navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })])
+        : Promise.resolve(text).then((t) => navigator.clipboard?.writeText(t));
+    void write.then(
+      () => (codeCopied = true),
+      (error: unknown) => console.warn('link code not copied', error),
+    );
+  }
+  function selectCode(event: Event) {
+    const element = event.currentTarget as HTMLElement;
+    getSelection()?.selectAllChildren(element);
+    if (code) copyCode(formatCode(code).text);
+  }
   async function linkDevice() {
     // A browser's own library is kept only here, so another device given its key would find nothing on den-edge.
     if (!link) return;
     pairing = true;
     pairNotice = null;
+    codeCopied = false;
+    let shown: (text: string) => void = () => {};
+    let noCode: (reason: Error) => void = () => {};
+    copyCode(
+      new Promise<string>((resolve, reject) => {
+        shown = resolve;
+        noCode = reject;
+      }),
+    );
     const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
     const result = await host({
       libraryKey,
       label: thisDevice.name,
       deviceId: selfId,
-      onCode: (shown) => (code = shown),
+      onCode: (next) => {
+        code = next;
+        shown(formatCode(next).text);
+      },
       allow: (joiner) =>
         new Promise<boolean>((resolve) => {
           code = null;
@@ -285,6 +319,8 @@
           };
         }),
     });
+    // Settles the promised clipboard item when the pairing ended before any code was shown.
+    noCode(new Error('no code was shown'));
     code = null;
     pairing = false;
     if ('joiner' in result) {
@@ -791,8 +827,22 @@
       <div class="pair">
         {#if code}
           <p>On your phone or computer, open Den and type this code:</p>
-          <b class="code">{formatCode(code).text}</b>
-          <p class="status" role="status">Waiting for your device…</p>
+          <b
+            class="code"
+            role="button"
+            tabindex="0"
+            title="Copy the code"
+            data-no-swipe
+            onclick={selectCode}
+            onkeydown={(event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              selectCode(event);
+            }}>{formatCode(code).text}</b
+          >
+          <p class="status" role="status">
+            {codeCopied ? 'Copied. ' : ''}Waiting for your device…
+          </p>
         {:else if asking}
           <p role="alert">
             <b>Allow “{asking}”?</b> It will see your library, and can add to your watchlist, add plugins
@@ -902,6 +952,11 @@
       monospace;
     letter-spacing: 0.12em;
     overflow-wrap: anywhere;
+
+    /* One tap takes the whole code, not the word under the finger. */
+    user-select: all;
+    -webkit-user-select: all;
+    cursor: copy;
   }
 
   .wide {
