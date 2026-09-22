@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InviteDialog from './components/InviteDialog.svelte';
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
   import { onMount, untrack } from 'svelte';
@@ -112,6 +113,7 @@
 </svelte:head>
 
 <NavigationBar {route} {query} />
+<InviteDialog />
 
 <main>
   {#if tmdbLimited}

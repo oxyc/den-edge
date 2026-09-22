@@ -9,7 +9,6 @@
   import Select from './Select.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
-  import { rows } from './rows.svelte';
   import {
     cappedCodeExpiry,
     createGrant,
@@ -210,14 +209,6 @@
     throttled: 'Too many tries. Wait a minute and try again.',
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
   };
-
-  // An invite that arrived as a link is filled in, and its row opened; redeeming it is still the viewer's to do.
-  $effect(() => {
-    const code = guestGrants.invite;
-    if (!code) return;
-    pasted = code;
-    rows.open.add('shared-with-you');
-  });
 
   async function accept() {
     redeeming = true;
