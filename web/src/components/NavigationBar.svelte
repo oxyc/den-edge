@@ -1,7 +1,7 @@
 <script lang="ts">
   import icon from '../assets/den-mark.png';
   import DetailIcon from './DetailIcon.svelte';
-  import { flushSync, untrack } from 'svelte';
+  import { flushSync, onMount, tick, untrack } from 'svelte';
   import { navigate, navigateBack } from '../lib/navigation';
   import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
@@ -38,6 +38,28 @@
   let toggle = $state<HTMLButtonElement>();
   $effect(() => {
     expanded = route.page === 'search';
+  });
+  /**
+   * Search opened fresh — loaded, reloaded, or come back to from another tab — puts the cursor in the field, so it
+   * is plain where to type. Only with a mouse or trackpad: on a touch screen it would raise the keyboard over the
+   * grid (and iOS refuses it without a tap anyway), and the field is already drawn open there. Never when focus is
+   * already somewhere on the page, which is how Back from a title arrives: it keeps its place.
+   */
+  onMount(() => {
+    if (!matchMedia('(pointer: fine)').matches) return;
+    const focusIfIdle = () => {
+      if (route.page !== 'search') return;
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      input?.focus({ preventScroll: true });
+    };
+    // After the route has opened the field, where it is drawn only on /search.
+    void tick().then(focusIfIdle);
+    const shown = () => {
+      if (document.visibilityState === 'visible') focusIfIdle();
+    };
+    document.addEventListener('visibilitychange', shown);
+    return () => document.removeEventListener('visibilitychange', shown);
   });
   function openSearch() {
     // Focus during the tap itself so iPhone browsers open the keyboard.

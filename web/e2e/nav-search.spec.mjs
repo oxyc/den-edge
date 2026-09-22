@@ -524,6 +524,47 @@ test('on a phone, More… opens every category in a sheet', async () => {
   }
 });
 
+for (const [name, options, focused] of [
+  ['with a mouse', { viewport: { width: 1280, height: 800 } }, true],
+  [
+    'on a touch screen',
+    { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true },
+    false,
+  ],
+])
+  test(`a fresh load of search puts the cursor in the field only ${name}`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({ ...options, reducedMotion: 'reduce' });
+      await setup(page);
+      await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=genre-18')}`);
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+      if (focused) await expect(input(page)).toBeFocused();
+      else {
+        // Drawn open, but left alone: focus would raise the keyboard over the grid.
+        await expect(input(page)).toBeVisible();
+        await page.waitForTimeout(200);
+        await expect(input(page)).not.toBeFocused();
+      }
+      if (!focused) return;
+      // Coming back from a title keeps focus where it was, rather than jumping to the field.
+      const card = active(page).getByRole('link', { name: 'Film 100 2026' });
+      await card.click();
+      await expect(active(page).locator('h1')).toHaveText('Film 100');
+      await page.goBack();
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+      await expect(input(page)).not.toBeFocused();
+    } finally {
+      await browser.close();
+    }
+  });
+
 test('late discovery keeps the already visible billboard and selected slide', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
