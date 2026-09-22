@@ -53,6 +53,23 @@ pub(crate) const MAX_IN_FLIGHT: usize = 16;
 /// One playback is many requests, not one: a video element opens a range, seeks, and opens another. Charging
 /// those against a page's allowance would spend it on a single trailer and refuse the page around it.
 const MEDIA_PER_WINDOW: u32 = 600;
+/// Calls per address per minute to atlas's tuning playground (`/atlas/playground…`), counted apart from the
+/// relay budget above and in its place, so tuning never spends a visitor's browsing allowance and browsing never
+/// spends tuning's.
+///
+/// A tuned row is computed per request and never cached: ~7 ms and ~14 KB at the defaults, up to ~50 ms and
+/// ~0.7 MB at the knobs' limits. At the relay's 120 a minute one address could pull ~84 MB a minute of the
+/// household's upload through it; at 30 it is ~21 MB. The page ranks only when a person presses Rank or picks an
+/// anchor, so 30 — one every two seconds — is more than a person tuning by hand asks for. Members get no larger
+/// one: the page sends no membership header, so there would be nothing to earn it with.
+pub(crate) const PLAYGROUND_PER_WINDOW: u32 = 30;
+/// Playground calls in flight at once, across everyone, inside `MAX_IN_FLIGHT`. However many addresses call it,
+/// the other twelve relay slots stay for the web app. Four covers a person clicking anchors faster than the
+/// answers come back, and a second person tuning at the same time.
+pub(crate) const PLAYGROUND_IN_FLIGHT: usize = 4;
+/// What a caller refused a playground slot is told to wait: an answer takes tens of milliseconds, so a slot is
+/// back well within it.
+const PLAYGROUND_BUSY_RETRY_MS: u64 = 1_000;
 /// How long a request waits for one of those slots before giving up, so a queue can't grow without bound.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 const FAILED_SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -503,7 +520,15 @@ async fn relay_with(
     }
     // A grant's calls are counted against the grant (`guest`), not against the address they come from, so a
     // household's guests do not share one budget.
+    let playground = playground(req.uri().path());
     let visitor_wait = if grant.is_some() {
+        None
+    } else if playground {
+        if let Some(wait) =
+            crate::link::throttled_at(state, &format!("relay-playground:{ip}"), PLAYGROUND_PER_WINDOW)
+        {
+            return limited(wait);
+        }
         None
     } else {
         crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW)
@@ -518,6 +543,21 @@ async fn relay_with(
             return limited(wait);
         }
     }
+    // Taken before a relay slot and without waiting, so playground calls never queue for more than their share.
+    let _playground_slot = if playground {
+        match Arc::clone(&state.playground_slots).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("playground_busy"),
+                    PLAYGROUND_BUSY_RETRY_MS,
+                )
+            }
+        }
+    } else {
+        None
+    };
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let _slot = match slot {
@@ -688,7 +728,9 @@ async fn relay_with(
             resp.headers_mut().insert(name, value.clone());
         }
     }
-    if public_session {
+    // A tuned row answers one caller's knobs; atlas says `no-store`, and this holds to it whatever atlas says, so
+    // no cache in front of this origin keeps one.
+    if public_session || playground {
         resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
@@ -761,6 +803,13 @@ fn media(path: &str) -> bool {
         }
         false
     })
+}
+
+/// Is this relayed path atlas's tuning playground? Atlas serves it at `/playground` and under an install's config
+/// (`/<config>/playground…`), so the segment is looked for anywhere under atlas rather than positioned: a path
+/// wrongly counted here only meets the smaller budget, and one wrongly missed would be computed on the general one.
+fn playground(path: &str) -> bool {
+    path.strip_prefix("/atlas/").is_some_and(|rest| rest.split('/').any(|segment| segment == "playground"))
 }
 
 /// A master a bare `<video>` plays by itself (`?native=1`), which is not a stream through here.
@@ -1216,6 +1265,144 @@ mod tests {
         // The token is what earns it: a guessed id with the wrong token is a visitor, whose budget is now spent.
         let forged = format!("{LIB}:not-the-token");
         assert_eq!(ask(&h, &[("x-den-library-member", &forged)]).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Relaying `/atlas` at a port nothing listens on, as `harness` does `/scout`.
+    fn atlas() -> Harness {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays("/atlas=http://127.0.0.1:9");
+        h
+    }
+
+    const TUNED: &str = "/atlas/playground/similar/movie/1.json?pool_k=1000&limit=200";
+
+    /// A tuned row is computed per call and can be ~0.7 MB, so the playground is held to far fewer calls than
+    /// browsing — and spending them leaves the visitor's browsing allowance whole.
+    #[tokio::test]
+    async fn the_playground_has_its_own_smaller_allowance() {
+        let h = atlas();
+        for i in 0..super::PLAYGROUND_PER_WINDOW {
+            assert_eq!(h.send("GET", TUNED, None, &[]).await.status(), StatusCode::BAD_GATEWAY, "{i}");
+        }
+        let refused = h.send("GET", TUNED, None, &[]).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.headers().contains_key("retry-after"), "the refusal never said when to return");
+        // The page, its knobs and a path under an install's config are the same playground, on the same budget.
+        for path in [
+            "/atlas/playground",
+            "/atlas/playground/params.json",
+            "/atlas/us_8/playground/similar/movie/1.json",
+        ] {
+            assert_eq!(
+                h.send("GET", path, None, &[]).await.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{path}"
+            );
+        }
+
+        for i in 0..super::GUEST_PER_WINDOW {
+            let browsing = h.send("GET", "/atlas/recommend", None, &[]).await;
+            assert_eq!(browsing.status(), StatusCode::BAD_GATEWAY, "browsing refused at {i}");
+        }
+        assert_eq!(
+            h.send("GET", "/atlas/recommend", None, &[]).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    /// And the other way round: a visitor who has browsed their allowance away has not spent the playground's.
+    #[tokio::test]
+    async fn browsing_does_not_spend_the_playgrounds_allowance() {
+        let h = atlas();
+        for _ in 0..super::GUEST_PER_WINDOW {
+            h.send("GET", "/atlas/recommend", None, &[]).await;
+        }
+        assert_eq!(
+            h.send("GET", "/atlas/recommend", None, &[]).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(h.send("GET", TUNED, None, &[]).await.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// However many addresses call the playground, it holds at most its share of the relay's slots, and the web
+    /// app still gets through beside it.
+    #[tokio::test]
+    async fn the_playground_holds_only_its_share_of_the_relay() {
+        // An atlas whose tuned rows never finish, so every playground call that reaches it stays in flight.
+        let (arrived_tx, mut arrived) = tokio::sync::mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let arrived_tx = arrived_tx.clone();
+            async move {
+                if req.uri().path().starts_with("/playground/") {
+                    let _ = arrived_tx.send(());
+                    std::future::pending::<()>().await;
+                }
+                StatusCode::OK
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas=http://{addr}"));
+        let h = Arc::new(h);
+
+        let held: Vec<_> = (0..super::PLAYGROUND_IN_FLIGHT)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                tokio::spawn(async move { h.send("GET", TUNED, None, &[]).await.status() })
+            })
+            .collect();
+        for _ in 0..super::PLAYGROUND_IN_FLIGHT {
+            arrived.recv().await.unwrap();
+        }
+
+        let wait = std::time::Duration::from_secs(2);
+        let refused = tokio::time::timeout(wait, h.send("GET", TUNED, None, &[]))
+            .await
+            .expect("a playground call past its share was sent on to atlas");
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(refused.headers().contains_key("retry-after"), "the refusal never said when to return");
+        assert_eq!(crate::handler::tests::body_json(refused).await, json!({ "error": "playground_busy" }));
+
+        let browsing =
+            tokio::time::timeout(wait, h.send("GET", "/atlas/recommend", None, &[])).await.unwrap();
+        assert_eq!(browsing.status(), StatusCode::OK, "the web app waited on the playground");
+        for task in held {
+            task.abort();
+        }
+    }
+
+    /// A tuned row answers one caller's knobs, so nothing in front of this origin may keep it, even if atlas
+    /// ever forgot to say so.
+    #[tokio::test]
+    async fn a_tuned_row_is_never_caching_material() {
+        let addon = public_addon().await;
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas={addon}"));
+        let tuned = h.send("GET", TUNED, None, &[]).await;
+        assert_eq!(tuned.headers()["cache-control"], "no-store");
+        let browsing = h.send("GET", "/atlas/recommend", None, &[]).await;
+        assert_eq!(browsing.headers()["cache-control"], "public, max-age=300, stale-while-revalidate=60");
+    }
+
+    #[test]
+    fn only_atlas_playground_paths_are_the_playground() {
+        for path in [
+            "/atlas/playground",
+            "/atlas/playground/",
+            "/atlas/playground/params.json",
+            "/atlas/playground/similar/series/1438.json",
+            "/atlas/us_8/playground/similar/movie/1.json",
+            "/atlas//playground/similar/movie/1.json",
+        ] {
+            assert!(super::playground(path), "{path}");
+        }
+        for path in
+            ["/atlas/recommend", "/atlas/index/similar/movie/1.json", "/scout/playground", "/playground"]
+        {
+            assert!(!super::playground(path), "{path}");
+        }
     }
 
     /// Scout's `/configure` mints installs, and an install a stranger makes scrapes indexers from this
