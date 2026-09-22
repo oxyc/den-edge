@@ -308,6 +308,100 @@ test('Explore browses before typing, remaps across types, and comes back after a
   }
 });
 
+test('while typing, a genre narrows the results and a recipe opens in their place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const chip = (name) => rail.getByRole('button', { name, exact: true });
+    const heading = (name) => active(page).getByRole('heading', { name, exact: true });
+
+    await input(page).fill('Neon');
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(heading('Search')).toBeVisible();
+    // The rail stays, and nothing in it is open: the query is what's showing.
+    await expect(rail.getByRole('button', { pressed: true })).toHaveCount(0);
+
+    // A genre narrows the typed results and keeps the query; the fixture's films are all dramas.
+    await chip('Drama').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
+    await expect(chip('Drama')).toHaveAttribute('aria-pressed', 'true');
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    await chip('Comedy').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-35$/);
+    await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
+    // Picked again, it lets go.
+    await chip('Comedy').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+
+    // A recipe can't be combined with a query: it opens in its place, and Back returns to the search.
+    await chip('Heist').click();
+    await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
+    await expect(heading('Explore')).toBeVisible();
+    await expect(input(page)).toHaveValue('');
+    await expect(chip('Heist')).toHaveAttribute('aria-pressed', 'true');
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(input(page)).toHaveValue('Neon');
+    await expect(heading('Search')).toBeVisible();
+
+    // The typed text points at categories, offered above the results with their kind.
+    await input(page).fill('heist');
+    const suggestions = active(page).getByRole('group', { name: 'Browse instead' });
+    await expect(suggestions.getByRole('button', { name: 'Heist · recipe' })).toBeVisible();
+    await suggestions.getByRole('button', { name: 'Heist · recipe' }).click();
+    await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
+    await expect(heading('Explore')).toBeVisible();
+
+    // Each section shows its first few; "Show all" opens the rest in place, with a filter over them.
+    const recipes = rail.getByRole('group', { name: 'Recipes' });
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+    await recipes.getByRole('button', { name: /^Show all \d+$/ }).click();
+    await recipes.getByRole('searchbox', { name: 'Filter recipes' }).fill('zom');
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toBeVisible();
+    await expect(recipes.getByRole('button', { name: 'Heist', exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('on a phone, More… opens every category in a sheet', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 800 },
+      hasTouch: true,
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
+    await active(page).getByRole('button', { name: 'More…', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'All categories' });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByRole('heading', { name: 'Genres' })).toBeVisible();
+    await sheet.getByRole('searchbox', { name: 'Filter categories' }).fill('noir');
+    await expect(sheet.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    await sheet.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('late discovery keeps the already visible billboard and selected slide', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

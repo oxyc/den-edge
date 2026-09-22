@@ -7,8 +7,16 @@
   import Loading from './Loading.svelte';
   import SearchResults from './SearchResults.svelte';
   import TypeFilter from './TypeFilter.svelte';
-  import { tmdbPages } from '../lib/catalog';
-  import { exploreChips, exploreFeed, FOR_YOU, openChip, PROMPTS, remapChip } from '../lib/explore';
+  import { equivalentGenre, tmdbPages } from '../lib/catalog';
+  import {
+    exploreChips,
+    exploreFeed,
+    FOR_YOU,
+    openChip,
+    PROMPTS,
+    remapChip,
+    suggestChips,
+  } from '../lib/explore';
   import type { MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
@@ -151,13 +159,47 @@
     };
   });
 
-  /** Typed results of the chosen type; people only under All, as on the TV. */
+  /**
+   * A genre chip open while a query is typed narrows its results, as the type does. A mood or a recipe can't be
+   * combined with a query — atlas ranks a mood's row, not a search — so those open their own feed instead.
+   */
+  const narrowing = $derived(
+    typing && chip.group === 'genre' && explore.chip === chip.id
+      ? Number(chip.id.slice('genre-'.length))
+      : undefined,
+  );
+  /** A title in `genre` of the browsed type, or in its closest counterpart for a title of the other type. */
+  const inGenre = (title: Title, genre: number) => {
+    const ids = title.genreIds ?? [];
+    return ids.includes(equivalentGenre(genre, exploreType, title.type) ?? genre);
+  };
+  /** Typed results of the chosen type and genre; people only under All, as on the TV, and never in a genre. */
   const typedHits = $derived(
-    (hits ?? []).filter(
-      (hit) =>
-        explore.type === undefined || (hit.kind === 'title' && hit.title.type === explore.type),
+    (hits ?? []).filter((hit) =>
+      hit.kind === 'person'
+        ? explore.type === undefined && narrowing === undefined
+        : (explore.type === undefined || hit.title.type === explore.type) &&
+          (narrowing === undefined || inGenre(hit.title, narrowing)),
     ),
   );
+
+  /**
+   * A chip picked in the rail. Before anything is typed, it opens. While a query is typed, a genre narrows the
+   * results (picked again, it lets go), and anything else opens its own feed in place of the query — a new entry,
+   * so Back returns to the search.
+   */
+  function pick(id: string) {
+    const picked = chips.find((c) => c.id === id);
+    if (typing && picked?.group === 'genre') {
+      go({ type: explore.type, chip: explore.chip === id ? undefined : id });
+      return;
+    }
+    go({ type: explore.type, chip: id }, '');
+  }
+
+  /** The categories the typed text points at, offered above its results: local, instant. */
+  const suggestions = $derived(typing ? suggestChips(query, chips) : []);
+  const KIND: Record<string, string> = { mood: 'mood', recipe: 'recipe', genre: 'genre' };
 </script>
 
 <section
@@ -166,39 +208,53 @@
   aria-busy={typing ? pending : feed.pager.page === 0 && !feed.pager.done}
 >
   <h1>{typing ? 'Search' : 'Explore'}</h1>
-  {#if typing}
-    <div class="controls">
-      <TypeFilter
-        value={explore.type ?? null}
-        onchange={(type) => go({ type: type ?? undefined, chip: chip.id })}
-        label="Show in search results"
-      />
-    </div>
-    {#if hits === null}
-      <Loading label="Searching" />
-    {:else if typedHits.length}
-      <div class:stale={pending}><SearchResults hits={typedHits} /></div>
-    {:else if !pending}
-      <p class="note" role="status">
-        {failed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}
-      </p>
-    {/if}
-  {:else}
-    <div class="explore">
-      <div class="rail">
+  <div class="explore">
+    <div class="rail">
+      {#if typing}
+        <TypeFilter
+          value={explore.type ?? null}
+          onchange={chooseType}
+          label="Show in search results"
+        />
+      {:else}
         <TypeFilter
           value={exploreType}
           onchange={chooseType}
           label="Browse movies or series"
           all={false}
         />
-        <ExploreChips
-          {chips}
-          value={chip.id}
-          onchange={(id) => go({ type: explore.type, chip: id })}
-        />
-      </div>
-      <div class="feed">
+      {/if}
+      <!-- While typing, no chip is open unless a genre narrows the results: the rest open in place of them. -->
+      <ExploreChips
+        {chips}
+        value={typing ? (narrowing === undefined ? '' : chip.id) : chip.id}
+        onchange={pick}
+      />
+    </div>
+    <div class="feed">
+      {#if typing}
+        {#if suggestions.length}
+          <div class="prompts" role="group" aria-label="Browse instead">
+            <span class="try">Browse</span>
+            {#each suggestions as suggestion (suggestion.id)}
+              <button
+                type="button"
+                onclick={() => go({ type: explore.type, chip: suggestion.id }, '')}
+                >{suggestion.label} <span class="kind">· {KIND[suggestion.group]}</span></button
+              >
+            {/each}
+          </div>
+        {/if}
+        {#if hits === null}
+          <Loading label="Searching" />
+        {:else if typedHits.length}
+          <div class:stale={pending}><SearchResults hits={typedHits} /></div>
+        {:else if !pending}
+          <p class="note" role="status">
+            {failed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}
+          </p>
+        {/if}
+      {:else}
         {#if chip.id === FOR_YOU}
           <div class="prompts" role="group" aria-label="Try describing it">
             <span class="try">Try describing it</span>
@@ -217,9 +273,9 @@
         {:else}
           <Loading label="Loading {chip.label}" />
         {/if}
-      </div>
+      {/if}
     </div>
-  {/if}
+  </div>
 </section>
 
 <style>
@@ -228,9 +284,8 @@
     margin: 8px 0 16px;
   }
 
-  .controls {
-    display: flex;
-    margin: 0 0 20px;
+  .kind {
+    color: var(--muted);
   }
 
   .note {
@@ -243,8 +298,10 @@
     transition: opacity 120ms;
   }
 
-  /* A phone and a tablet: the type and the chips over the grid. */
+  /* A phone and a tablet: the type and one line of chips over the grid, held under the bar as it scrolls. */
   .rail {
+    position: sticky;
+    top: calc(max(12px, env(safe-area-inset-top)) + 46px + 4px);
     z-index: 3;
     display: flex;
     flex-direction: column;
@@ -270,14 +327,8 @@
     font-size: 14px;
   }
 
-  /* A phone: one line that scrolls sideways, so the grid starts on the first screen. The chips are one line
-     here, so they stay under the bar as the grid scrolls; a tablet's wrapped lines would cover half of it. */
+  /* A phone: the prompts are one line that scrolls sideways too, so the grid starts on the first screen. */
   @media (width <= 759px) {
-    .rail {
-      position: sticky;
-      top: calc(max(12px, env(safe-area-inset-top)) + 46px + 4px);
-    }
-
     .prompts {
       flex-wrap: nowrap;
       margin-inline: calc(-1 * var(--gutter));
@@ -327,7 +378,6 @@
     }
 
     .rail {
-      position: sticky;
       top: var(--bar-space);
       gap: 18px;
       max-height: calc(100vh - var(--bar-space) - 16px);
