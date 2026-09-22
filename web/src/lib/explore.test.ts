@@ -26,7 +26,7 @@ describe('Explore chips', () => {
   it('run For You, moods, recipes, then genres, each strongest first', () => {
     const chips = exploreChips('movie', { atlas: true });
     const groups = chips.map((c) => c.group);
-    // Each group in one run, in that order; languages, countries and decades last.
+    // Each group in one run, in that order; languages, countries, decades and ratings last.
     expect([...new Set(groups)]).toEqual([
       'for-you',
       'mood',
@@ -35,6 +35,7 @@ describe('Explore chips', () => {
       'language',
       'country',
       'decade',
+      'rating',
     ]);
     const of = (group: string) => chips.filter((c) => c.group === group).map((c) => c.id);
     // atlas's own order: its strongest rows lead, moods and plot facets together.
@@ -178,6 +179,13 @@ describe('matching typed text to chips', () => {
     expect(exploreChips('movie').filter((c) => c.group === 'decade').length).toBeGreaterThan(3);
   });
 
+  it('finds a rating floor by its number and by the words for one', () => {
+    expect(labels(browseChips('7+', chips))).toEqual(['★ 7+']);
+    expect(labels(browseChips('rated', chips))).toEqual(['★ 6+', '★ 7+', '★ 8+']);
+    expect(labels(browseChips('good', chips))[0]).toBe('★ 7+');
+    expect(labels(browseChips('great', chips))[0]).toBe('★ 8+');
+  });
+
   it('ranks an exact name over a prefix over a word over a synonym', () => {
     expect(labels(matchChips('action', chips)).slice(0, 2)).toEqual(['Action', 'Action Thriller']);
     expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
@@ -280,6 +288,57 @@ describe('facets', () => {
     expect(offered(['mood-cozy'], 'decade-1990', 'movie')).toBe(true);
   });
 
+  it('offer no second value of a one-value kind: it is removed before another is picked', () => {
+    const set = ['lang-sv', 'country-SE', 'decade-1990', 'rating-7', 'genre-35'];
+    for (const other of ['lang-en', 'country-DK', 'decade-2000', 'rating-8'])
+      expect(offered(set, other, 'movie')).toBe(false);
+    // Genres stack.
+    expect(offered(set, 'genre-18', 'movie')).toBe(true);
+    // One mood at a time, and one "Like".
+    expect(offered(['mood-cozy'], 'mood-dark', 'movie')).toBe(false);
+    expect(offered(['like-movie-949'], 'like-movie-680', 'movie')).toBe(false);
+    // Taken out, the kind is open again.
+    expect(offered(['genre-35'], 'lang-en', 'movie')).toBe(true);
+  });
+
+  it('take a "Like" as one feed: it replaces a mood or another "Like", and takes no country or recipe', () => {
+    expect(applyPick(['mood-cozy', 'genre-35'], 'like-movie-949', 'movie')).toEqual({
+      set: ['genre-35', 'like-movie-949'],
+      removed: ['mood-cozy'],
+    });
+    expect(applyPick(['like-movie-949'], 'like-movie-680', 'movie')).toEqual({
+      set: ['like-movie-680'],
+      removed: ['like-movie-949'],
+    });
+    expect(applyPick(['country-SE', 'recipe-heist'], 'like-movie-949', 'movie').set).toEqual([
+      'like-movie-949',
+    ]);
+    // Language, decade, genre and rating narrow it.
+    expect(
+      applyPick(['lang-sv', 'decade-1990', 'genre-35', 'rating-7'], 'like-movie-949', 'movie')
+        .removed,
+    ).toEqual([]);
+    expect(facetQuery(['like-movie-949', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('take a rating beside anything but a mood, whose titles carry none', () => {
+    expect(offered(['mood-cozy'], 'rating-7', 'movie')).toBe(false);
+    expect(offered(['like-movie-949'], 'rating-7', 'movie')).toBe(true);
+    expect(applyPick(['rating-7'], 'mood-cozy', 'movie').removed).toEqual(['rating-7']);
+  });
+
+  it('keep a "Like" across a type switch only for a title of that type', () => {
+    const chips = exploreChips('tv');
+    expect(remapSet(['like-tv-1396', 'genre-35'], 'tv', 'tv', chips).set).toEqual([
+      'like-tv-1396',
+      'genre-35',
+    ]);
+    expect(remapSet(['like-movie-949'], 'movie', 'tv', chips)).toEqual({
+      set: [],
+      dropped: ['like-movie-949'],
+    });
+  });
+
   it('merge into one discover query', () => {
     expect(discoverParams(facetQuery(['country-SE', 'genre-28'], 'movie')!)).toEqual({
       sort_by: 'popularity.desc',
@@ -300,6 +359,23 @@ describe('facets', () => {
     ).toBe('35,10749,18');
     // An atlas row can't be a discover query.
     expect(facetQuery(['mood-cozy', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('ask TMDB for a rating floor on the ★ posters show, on 10 votes in place of the usual floor', () => {
+    const rated = discoverParams(facetQuery(['genre-35', 'rating-7'], 'movie')!);
+    expect(rated['vote_average.gte']).toBe('7');
+    expect(rated.with_genres).toBe('35');
+    expect(rated['vote_count.gte']).toBe('10');
+    // A decade's floor of 50 would leave Swedish 2020s romantic comedies at ★ 6+ with one title; 10 leaves two.
+    const swedish = ['lang-sv', 'decade-2020', 'genre-35', 'genre-10749'];
+    expect(discoverParams(facetQuery(swedish, 'movie')!)['vote_count.gte']).toBe('50');
+    expect(discoverParams(facetQuery([...swedish, 'rating-6'], 'movie')!)['vote_count.gte']).toBe(
+      '10',
+    );
+    // A recipe's own, higher floor stays.
+    const heist = facetQuery(['recipe-heist', 'rating-8'], 'movie')!;
+    expect(heist.voteAverageGte).toBe(8);
+    expect(heist.voteCountGte).toBe(100);
   });
 });
 
@@ -325,8 +401,10 @@ describe('emptyOptions', () => {
     const empty = emptyOptions(['lang-sv'], loaded, true, chips);
     expect(empty.has('country-KR')).toBe(false);
     expect(empty.has('recipe-heist')).toBe(false);
-    // A second language replaces Swedish rather than narrowing it.
+    // A second language isn't offered beside Swedish at all (`taken`): nothing loaded is judged against it.
     expect(empty.has('lang-en')).toBe(false);
+    // Nor is a rating, which neither atlas's counts nor the feed can say anything about.
+    expect(empty.has('rating-8')).toBe(false);
     expect(emptyOptions([], loaded, true, chips).size).toBe(0);
   });
 });
@@ -446,6 +524,35 @@ describe('Explore feeds', () => {
       expect(titles.map((t) => t.posterPath)).toEqual(['/a.jpg', '/b.jpg', undefined]);
     } finally {
       globalThis.fetch = atlasFetch;
+    }
+  });
+
+  it('is the title page’s "More like this" for a "Like", as deep as atlas keeps, narrowed beside it', async () => {
+    const realFetch = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+    try {
+      const row = exploreFeed(['like-movie-949', 'genre-80', 'rating-7'], 'movie', {
+        ...sources(),
+        atlas: '/atlas',
+        key: 'k',
+      });
+      expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
+      await row.load(1);
+      expect(asked[0]).toBe('/atlas/index/similar/movie/949.json?limit=200');
+      // atlas has nothing for it: TMDB's recommendations, from their first page.
+      expect(asked.some((url) => url.includes('/movie/949/recommendations'))).toBe(true);
+      const title = { ...film(1), genreIds: [80, 18], rating: 7.6, votes: 4000 };
+      expect(row.filter?.(title)).toBe(true);
+      expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
+      expect(row.filter?.({ ...title, rating: 6.9 })).toBe(false);
+      // A rating on a handful of votes isn't one.
+      expect(row.filter?.({ ...title, votes: 3 })).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 });

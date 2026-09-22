@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   legacyPath,
+  likeId,
+  likeOf,
   parseRoute,
   personHref,
   routePath,
@@ -113,6 +115,23 @@ describe('routes', () => {
       query: '',
       chips: ['country-SE', 'genre-28'],
     });
+  });
+
+  it('carries a "Like" and a rating floor as facets like any other', () => {
+    const href = searchHref('', {
+      type: 'tv',
+      chips: [likeId({ type: 'tv', id: 1396 }), 'rating-7'],
+    });
+    expect(href).toBe('/search?type=tv&c=like-tv-1396,rating-7');
+    expect(parseRoute(href)).toStrictEqual({
+      page: 'search',
+      query: '',
+      type: 'tv',
+      chips: ['like-tv-1396', 'rating-7'],
+    });
+    expect(likeOf('like-tv-1396')).toEqual({ type: 'tv', id: 1396 });
+    expect(likeOf('like-person-1')).toBeUndefined();
+    expect(likeOf('mood-cozy')).toBeUndefined();
   });
 
   it('names a title in its link without letting the name identify it', () => {

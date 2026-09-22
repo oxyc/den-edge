@@ -20,11 +20,14 @@ import {
 import { atlasRows } from './atlasRows';
 import { countedEmpty, type FacetCounts } from './facetCounts';
 import type { MediaType, Title } from './library';
+import { moreLikeThisRow } from './relatedRows';
+import { likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
 
 /** What a chip is: For You, or one of the six kinds the rail lists and the search field finds. */
-export type ChipGroup = 'for-you' | 'genre' | 'recipe' | 'mood' | 'language' | 'country' | 'decade';
+export type ChipGroup =
+  'for-you' | 'genre' | 'recipe' | 'mood' | 'language' | 'country' | 'decade' | 'rating' | 'like';
 
 export interface Chip {
   id: string;
@@ -43,7 +46,41 @@ export const KIND: Record<ChipGroup, string> = {
   language: 'language',
   country: 'country',
   decade: 'decade',
+  rating: 'rating',
+  like: 'like',
 };
+
+/** The rating floors offered, as the posters' ★ reads (TMDB's vote average), each with the words people use for it. */
+const RATINGS: [floor: number, words: string[]][] = [
+  [6, ['6+', 'decent', 'rated', 'rating']],
+  [7, ['7+', 'good', 'rated', 'rating']],
+  [8, ['8+', 'great', 'rated', 'rating']],
+];
+/**
+ * The votes a rating must rest on to count toward a floor. Enough to keep out the single-vote 10/10s, low enough not
+ * to empty a niche selection: Swedish 2020s romantic comedies at ★ 6+ are none at 100 votes, two at 10. With a
+ * rating picked it takes the place of the feed's own vote floor (30, or 50 for a decade), which is there to stand in
+ * for a quality floor that the rating now states.
+ */
+const RATING_VOTES = 10;
+
+const ratingChips = (): Chip[] =>
+  RATINGS.map(([floor, words]) => ({
+    id: `rating-${floor}`,
+    label: `★ ${floor}+`,
+    group: 'rating',
+    aliases: words,
+  }));
+
+/**
+ * A "Like" as a chip, for the pill that shows it: it is picked from a poster, never listed, so no type's chips hold
+ * it. `name` is the title's, once known.
+ */
+export const likeChip = (id: string, name?: string): Chip => ({
+  id,
+  label: name ? `Like ${name}` : 'Like…',
+  group: 'like',
+});
 
 /** Languages a filter can find: those of the country rows, and a few catalogues rich enough to browse by. */
 const LANGUAGES = [
@@ -204,6 +241,7 @@ export function exploreChips(
     ...subgenres,
     ...genres,
     ...vocabularyChips(type, year, minYear),
+    ...ratingChips(),
   ];
 }
 
@@ -306,7 +344,9 @@ const FUZZY = 5;
  */
 export function matchChips(text: string, chips: Chip[], { minWord = 1 } = {}): Chip[] {
   const phrase = fold(text);
-  if (phrase.length < minWord) return [];
+  if (!phrase) return [];
+  // Too short to match any other way, a phrase can still be a whole name: "7+" is "★ 7+".
+  const short = phrase.length < minWord;
   const typed = words(text).filter((word) => word.length >= minWord);
   const synonym = new Set(typed.flatMap((word) => SYNONYMS[word] ?? []));
   const nearSynonym = new Set(
@@ -317,6 +357,7 @@ export function matchChips(text: string, chips: Chip[], { minWord = 1 } = {}): C
   const rank = (chip: Chip): number | undefined => {
     const names = [chip.label, ...(chip.aliases ?? [])].map(fold);
     if (names.includes(phrase)) return EXACT;
+    if (short) return undefined;
     if (names.some((name) => name.startsWith(phrase))) return PREFIX;
     const nameWords = names.flatMap((name) => words(name));
     if (nameWords.some((word) => typed.some((t) => word.startsWith(t)))) return WORD;
@@ -351,24 +392,41 @@ export const namesExactly = (text: string, chip: Chip) =>
   [chip.label, ...(chip.aliases ?? [])].map(fold).includes(fold(text));
 
 // Facets. What is picked stacks: Sweden, then + Action, is Swedish action films. A selection is a list of chip ids
-// in the order picked, For You being the empty one. Each kind fills one slot, which a second pick of that kind
-// takes over — but the genres, which all apply together.
+// in the order picked, For You being the empty one. Each kind fills one slot but the genres, which all apply together.
+// A recipe picked over another takes its slot; the other kinds hold one value, and offer no other until it is removed.
 
-/** Which slot a facet fills. A mood, a plot facet and a subgenre are all atlas's rows, and fill one slot. */
-export type Slot = 'genre' | 'language' | 'country' | 'decade' | 'recipe' | 'atlas';
+/**
+ * Which slot a facet fills. A mood, a plot facet and a subgenre are all atlas's rows, and fill one slot. A "Like" —
+ * the titles closest to one title — is atlas's too, and can't share a feed with a mood, but is its own kind.
+ */
+export type Slot =
+  'genre' | 'language' | 'country' | 'decade' | 'rating' | 'recipe' | 'atlas' | 'like';
+
+/** The slots that hold one value: once it is picked, no other of its kind is offered until it is removed. */
+const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
+  'language',
+  'country',
+  'decade',
+  'rating',
+  'atlas',
+  'like',
+]);
 
 export function slotOf(id: string): Slot | undefined {
   if (id === FOR_YOU) return undefined;
+  if (likeOf(id)) return 'like';
   if (id.startsWith('genre-')) return 'genre';
   if (id.startsWith('lang-')) return 'language';
   if (id.startsWith('country-')) return 'country';
   if (id.startsWith('decade-')) return 'decade';
+  if (id.startsWith('rating-')) return 'rating';
   if (id.startsWith('recipe-')) return 'recipe';
   return 'atlas';
 }
 
 const genreOf = (id: string) => Number(id.slice('genre-'.length));
 const decadeOf = (id: string) => Number(id.slice('decade-'.length));
+const ratingOf = (id: string) => Number(id.slice('rating-'.length));
 /** `sv` from `lang-sv`, `SE` from `country-SE`. */
 const codeOf = (id: string) => id.slice(id.indexOf('-') + 1);
 const recipeQuery = (id: string, type: MediaType) => {
@@ -379,14 +437,22 @@ const recipeQuery = (id: string, type: MediaType) => {
 /**
  * Whether two facets can't stand together. Two of one slot can't — the newer takes it — but genres can. An atlas row
  * says which genres, language and year each title has, and nothing about its country or a recipe's keywords, so a
- * mood takes neither. A recipe can't take a language, a country or a genre its own query rules out.
+ * mood or a "Like" takes neither — nor each other, since each is a whole feed. A mood's titles carry no rating
+ * either, where a "Like"'s, drawn from TMDB, do. A recipe can't take a language, a country or a genre its own query
+ * rules out.
  */
 function clash(a: string, b: string, type: MediaType): boolean {
   const [sa, sb] = [slotOf(a), slotOf(b)];
   if (sa === sb) return sa !== 'genre';
-  if (sa === 'atlas' || sb === 'atlas') {
-    const other = sa === 'atlas' ? sb : sa;
-    return other === 'country' || other === 'recipe';
+  const fromAtlas = (slot: Slot | undefined) => slot === 'atlas' || slot === 'like';
+  if (fromAtlas(sa) || fromAtlas(sb)) {
+    const [feed, other] = fromAtlas(sa) ? [sa, sb] : [sb, sa];
+    return (
+      other === 'country' ||
+      other === 'recipe' ||
+      fromAtlas(other) ||
+      (other === 'rating' && feed === 'atlas')
+    );
   }
   if (sa !== 'recipe' && sb !== 'recipe') return false;
   const [recipe, other] = sa === 'recipe' ? [a, b] : [b, a];
@@ -419,20 +485,27 @@ export function applyPick(
   return { set: [...set.filter((x) => !removed.includes(x)), id], removed };
 }
 
+/** Whether `id`'s kind holds one value and the selection already has another: it can't be picked until that goes. */
+export function taken(set: readonly string[], id: string): boolean {
+  const slot = slotOf(id);
+  return SINGLE.has(slot) && set.some((x) => x !== id && slotOf(x) === slot);
+}
+
 /**
- * Whether a chip is worth offering beside the selection: not one already picked, and not one that would throw out a
- * pick of another kind. One that takes over its own kind's slot — another country, another decade — still is.
+ * Whether a chip is worth offering beside the selection: not one already picked, not another of a one-value kind
+ * already picked (`taken`), and not one that would throw out a pick of another kind. Another recipe still is: it
+ * takes over the one picked.
  */
 export function offered(set: readonly string[], id: string, type: MediaType): boolean {
   if (id === FOR_YOU) return true;
-  if (set.includes(id)) return false;
+  if (set.includes(id) || taken(set, id)) return false;
   return !set.some((x) => slotOf(x) !== slotOf(id) && clash(x, id, type));
 }
 
 /**
  * The selection under the other type (SearchModel.setScope, for every facet): a genre moves to its closest
- * counterpart, and anything the new type has no chip for — a recipe with no series form, a mood only films carry —
- * is `dropped`.
+ * counterpart, and anything the new type has no chip for — a recipe with no series form, a mood only films carry, a
+ * "Like" for a title of the other type — is `dropped`.
  */
 export function remapSet(
   set: readonly string[],
@@ -441,6 +514,7 @@ export function remapSet(
   chips: Chip[],
 ): { set: string[]; dropped: string[] } {
   const known = new Set(chips.map((chip) => chip.id));
+  for (const id of set) if (likeOf(id)?.type === to) known.add(id);
   const next: string[] = [];
   const dropped: string[] = [];
   for (const id of set) {
@@ -472,12 +546,14 @@ export function facetQuery(
   type: MediaType,
   minYear?: number,
 ): DiscoverQuery | undefined {
-  if (!set.length || set.some((id) => slotOf(id) === 'atlas')) return undefined;
+  if (!set.length || set.some((id) => slotOf(id) === 'atlas' || slotOf(id) === 'like'))
+    return undefined;
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
   const recipe = set.find((id) => slotOf(id) === 'recipe');
   const language = set.find((id) => slotOf(id) === 'language');
   const country = set.find((id) => slotOf(id) === 'country');
   const decade = set.find((id) => slotOf(id) === 'decade');
+  const rating = set.find((id) => slotOf(id) === 'rating');
   const preset = recipe ? recipeQuery(recipe, type) : undefined;
   const query: DiscoverQuery = {
     ...preset,
@@ -503,24 +579,31 @@ export function facetQuery(
   } else if (minYear) {
     query.releaseDateGte = `${minYear}-01-01`;
   }
+  if (rating) {
+    query.voteAverageGte = ratingOf(rating);
+    query.voteCountGte = Math.max(preset?.voteCountGte ?? 0, RATING_VOTES);
+  }
   return query;
 }
 
 /**
  * What an atlas row keeps once the rest of the selection applies to it, on the fields its titles carry: every genre,
- * the language, the decade. (A country and a recipe never share a selection with it: `clash`.)
+ * the language, the decade, and — for a "Like", whose titles TMDB draws — the rating, on the votes TMDB's own floor
+ * asks for. (A country and a recipe never share a selection with it, nor a rating a mood: `clash`.)
  */
 function atlasFilter(set: readonly string[]): (title: Title) => boolean {
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
   const language = set.find((id) => slotOf(id) === 'language');
   const decade = set.find((id) => slotOf(id) === 'decade');
+  const rating = set.find((id) => slotOf(id) === 'rating');
   return (title) =>
     genres.every((genre) => title.genreIds?.includes(genre)) &&
     (!language || title.originalLanguage === codeOf(language)) &&
     (!decade ||
       (title.year !== undefined &&
         title.year >= decadeOf(decade) &&
-        title.year <= decadeOf(decade) + 9));
+        title.year <= decadeOf(decade) + 9)) &&
+    (!rating || ((title.rating ?? 0) >= ratingOf(rating) && (title.votes ?? 0) >= RATING_VOTES));
 }
 
 /**
@@ -531,8 +614,8 @@ function atlasFilter(set: readonly string[]): (title: Title) => boolean {
  * language or a decade where none is picked yet, that nothing in it matches is empty too. Without counts that is all
  * there is to go on.
  *
- * Neither judges an option that takes over a pick's slot — another country, another mood — since it replaces what
- * the counts and the feed were counted beside rather than narrowing it.
+ * Neither judges an option of a kind already picked — another recipe, which takes over the one picked, or another
+ * country, which isn't offered at all (`taken`) — since it would replace what they were counted beside.
  */
 export function emptyOptions(
   selection: readonly string[],
@@ -575,7 +658,12 @@ export interface FeedSources {
   minYear?: number;
   /** A title as TMDB draws it (`SearchSources.title`), for an atlas title with no poster. */
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
+  /** TMDB's key, or the empty string where den-edge lends its own: a "Like" draws its titles with it. */
+  key?: string;
 }
+
+/** How many of atlas's closest titles a "Like" asks for: all it keeps for one title. */
+const LIKE_DEPTH = 200;
 
 /**
  * atlas lists a title by id and name, and its poster only where some browser has already told den-edge
@@ -642,12 +730,23 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
 }
 
 /**
- * What a selection shows for `type`, a page at a time: For You when it is empty; an atlas row, filtered here by the
- * facets beside it, when it holds one; otherwise the one discover query its facets are.
+ * What a selection shows for `type`, a page at a time: For You when it is empty; an atlas row or a "Like", filtered
+ * here by the facets beside it, when it holds one; otherwise the one discover query its facets are.
+ *
+ * A "Like" is the title page's "More like this" (`moreLikeThisRow`) as a whole feed: atlas's closest titles, then its
+ * plot neighbours, then TMDB's recommendations for as many pages as TMDB has.
  */
 export function exploreFeed(set: readonly string[], type: MediaType, sources: FeedSources): RowDef {
   if (!set.length) return forYou(type, sources);
   const key = [...set].sort().join('+');
+  const like = set.map(likeOf).find((ref) => ref !== undefined);
+  if (like) {
+    const row = moreLikeThisRow({ title: { ...like, title: '' } }, sources.atlas, {
+      key: sources.key ?? '',
+      similarLimit: LIKE_DEPTH,
+    });
+    return { ...row, id: `facets-${key}-${type}`, filter: atlasFilter(set) };
+  }
   const atlasId = set.find((id) => slotOf(id) === 'atlas');
   if (atlasId) {
     const row = sources.atlas

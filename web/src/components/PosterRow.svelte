@@ -6,23 +6,29 @@
   let {
     heading,
     headingLink,
+    aside,
     children,
   }: {
     heading: string;
     headingLink?: { before: string; label: string; after: string; href: string };
+    /** A quiet link beside the heading, to where the row goes on. */
+    aside?: { label: string; href: string };
     children: Snippet;
   } = $props();
 </script>
 
 <section class="row" aria-label={heading}>
-  <h2>
-    {#if headingLink}
-      {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
-      >{headingLink.after}
-    {:else}
-      {heading}
-    {/if}
-  </h2>
+  <div class="head">
+    <h2>
+      {#if headingLink}
+        {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
+        >{headingLink.after}
+      {:else}
+        {heading}
+      {/if}
+    </h2>
+    {#if aside}<a class="aside" href={aside.href}>{aside.label} ›</a>{/if}
+  </div>
   <div class="track">
     {@render children()}
   </div>
@@ -36,9 +42,30 @@
     margin-bottom: 32px;
   }
 
-  h2 {
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
     margin: 0 0 12px;
+  }
+
+  h2 {
+    margin: 0;
     font-size: 20px;
+  }
+
+  .aside {
+    color: var(--muted);
+    font-size: 14px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .aside:hover,
+  .aside:focus-visible {
+    color: var(--fg);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   .heading-link {

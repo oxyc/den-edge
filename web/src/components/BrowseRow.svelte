@@ -42,7 +42,7 @@
 </script>
 
 <div bind:this={wrapper} class:gone={done && visible.length === 0}>
-  <PosterRow heading={row.title} headingLink={row.headingLink}>
+  <PosterRow heading={row.title} headingLink={row.headingLink} aside={row.aside}>
     {#each visible as title (key(title))}
       <PosterCard
         {title}

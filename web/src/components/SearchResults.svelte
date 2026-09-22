@@ -6,7 +6,18 @@
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
 
-  let { hits, onend }: { hits: Hit[]; onend?: () => void } = $props();
+  import type { Title } from '../lib/library';
+
+  let {
+    hits,
+    onend,
+    onlike,
+  }: {
+    hits: Hit[];
+    onend?: () => void;
+    /** Given, each poster offers "More like <title>", which calls it instead of opening the title. */
+    onlike?: (title: Title) => void;
+  } = $props();
   let end = $state<HTMLElement>();
 
   $effect(() => {
@@ -34,6 +45,11 @@
         title={hit.title}
         caption={hit.title.year ? String(hit.title.year) : undefined}
         href={titleHref(hit.title)}
+        action={onlike && {
+          label: `More like ${hit.title.title}`,
+          icon: '≈',
+          onclick: () => onlike(hit.title),
+        }}
       />
     {:else}
       <PersonCard id={hit.person.id} name={hit.person.name} profilePath={hit.person.profilePath} />

@@ -24,6 +24,8 @@ export interface DiscoverQuery {
   /** OR-joined. */
   originCountry?: string[];
   voteCountGte?: number;
+  /** TMDB's vote average floor: the ★ a poster shows. */
+  voteAverageGte?: number;
   releaseDateGte?: string;
   releaseDateLte?: string;
   sortBy?: string;
@@ -46,6 +48,7 @@ export function discoverParams(q: DiscoverQuery): Record<string, string> {
   if (q.originalLanguage) params.with_original_language = q.originalLanguage;
   if (q.originCountry?.length) params.with_origin_country = q.originCountry.join('|');
   if (q.voteCountGte !== undefined) params['vote_count.gte'] = String(q.voteCountGte);
+  if (q.voteAverageGte !== undefined) params['vote_average.gte'] = String(q.voteAverageGte);
   const date = q.mediaType === 'tv' ? 'first_air_date' : 'primary_release_date';
   if (q.releaseDateGte) params[`${date}.gte`] = q.releaseDateGte;
   if (q.releaseDateLte) params[`${date}.lte`] = q.releaseDateLte;
@@ -711,6 +714,8 @@ export interface RowDef {
   title: string;
   /** The named title/person within a contextual heading, and its destination. */
   headingLink?: { before: string; label: string; after: string; href: string };
+  /** A quiet link beside the heading, to where the row's titles go on: "Explore similar". */
+  aside?: { label: string; href: string };
   load: (page: number) => Promise<Title[]>;
   /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
   filter?: (title: Title) => boolean;

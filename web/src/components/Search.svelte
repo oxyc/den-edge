@@ -15,7 +15,9 @@
     exploreChips,
     exploreFeed,
     KIND,
+    likeChip,
     offered,
+    taken,
     PROMPTS,
     remapSet,
     slotOf,
@@ -26,7 +28,7 @@
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import { searchHref, type Explore } from '../lib/route';
+  import { likeId, likeOf, searchHref, type Explore } from '../lib/route';
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
   import { fetchFacetCounts, type FacetCounts } from '../lib/facetCounts';
@@ -73,12 +75,36 @@
       atlas: atlas !== null,
       minYear: prefs.minReleaseYear,
     });
-  const chips = $derived(chipsFor(exploreType));
   /** The facets picked, as the address holds them; a string, so an identical list is not a new one. */
   const selectionKey = $derived((explore.chips ?? []).join(','));
   const selection = $derived(selectionKey ? selectionKey.split(',') : []);
+
+  /**
+   * The names of the titles a "Like" is for, by facet id: set as one is picked, and looked up for one the address
+   * brought, its pill saying "Like…" until then.
+   */
+  let likeNames = $state<Record<string, string>>({});
+  const like = $derived(selection.find((id) => likeOf(id)));
+  $effect(() => {
+    const id = like;
+    const ref = id && likeOf(id);
+    if (!id || !ref || untrack(() => likeNames[id])) return;
+    let current = true;
+    sources
+      .title(ref)
+      .then((title) => {
+        if (current && title) likeNames[id] = title.title;
+      })
+      .catch((error: unknown) => console.warn('search: no name for', id, error));
+    return () => {
+      current = false;
+    };
+  });
+  /** The rail's chips for the type, and the picked "Like", which no list holds, for its pill. */
+  const chips = $derived(chipsFor(exploreType));
+  const known = $derived(like ? [...chips, likeChip(like, likeNames[like])] : chips);
   const names = (ids: string[]) =>
-    chipsOf(ids, chips)
+    chipsOf(ids, known)
       .map((c) => c.label)
       .join(', ');
   /** What gave way to the last pick, said once: "Nordic Noir replaced Korean." */
@@ -110,6 +136,7 @@
       owned: untrack(() => owned),
       minYear: prefs.minReleaseYear,
       title: sources.title,
+      key: tmdbKey,
     });
     const admitted = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
     return { pager: new Pager(row.load, admitted), admitted };
@@ -207,9 +234,23 @@
    */
   function pick(id: string, keepQuery = typing && slotOf(id) === 'genre') {
     const { set, removed } = applyPick(selection, id, exploreType);
-    const label = chips.find((c) => c.id === id)?.label ?? '';
+    const label = known.find((c) => c.id === id)?.label ?? '';
     status = removed.length ? `${label} replaced ${names(removed)}.` : '';
     go({ type: explore.type, chips: set }, keepQuery ? query : '');
+  }
+
+  /**
+   * "More like" a poster's title: its "Like" joins the selection, in the query's place. A title of the other type (a
+   * typed result under All) takes Explore to its type, the other picks moving with it as `chooseType` moves them.
+   */
+  function likeTitle(title: Title) {
+    const id = likeId(title);
+    likeNames[id] = title.title;
+    const moved = remapSet(selection, exploreType, title.type, chipsFor(title.type));
+    const { set, removed } = applyPick(moved.set, id, title.type);
+    const gone = [...moved.dropped, ...removed];
+    status = gone.length ? `Like ${title.title} replaced ${names(gone)}.` : '';
+    go({ type: title.type === 'tv' ? 'tv' : undefined, chips: set }, '');
   }
 
   /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
@@ -218,7 +259,7 @@
   );
   /** Every pick, over the grid. While a query is typed, all but the genres wait: shown, but paused. */
   const picked = $derived(
-    chipsOf(selection, chips).map((chip) => ({
+    chipsOf(selection, known).map((chip) => ({
       chip,
       paused: typing && slotOf(chip.id) !== 'genre',
     })),
@@ -267,7 +308,20 @@
           { counts, type: exploreType },
         ),
   );
-  const hidden = (id: string) => !offered(shownSelection, id, exploreType) || empty.has(id);
+  /**
+   * Hidden: what can't stand beside the selection, any other value of a one-value kind already picked — paused or not,
+   * so a paused language still keeps the Browse row from offering a second — and what would show nothing.
+   */
+  const hidden = (id: string) =>
+    !offered(shownSelection, id, exploreType) || taken(selection, id) || empty.has(id);
+  /**
+   * The pick to take out when the selection shows nothing: the latest, since it is what emptied a feed that had
+   * titles before it. (atlas's counts say what adding an option leaves, not what removing a pick would bring back,
+   * and asking TMDB once per pick to find out is more than an empty page is worth.)
+   */
+  const culprit = $derived(chipsOf(selection.slice(-1), known)[0]);
+  /** "More like this" on the posters, while no "Like" is picked: one at a time, removed before another. */
+  const onlike = $derived(like ? undefined : likeTitle);
 
   /** The ways to browse the typed text points at, offered above its results: local, instant, uncapped. */
   const browse = $derived(
@@ -351,7 +405,7 @@
         {#if hits === null}
           <Loading label="Searching" />
         {:else if typedHits.length}
-          <div class:stale={pending}><SearchResults hits={typedHits} /></div>
+          <div class:stale={pending}><SearchResults hits={typedHits} {onlike} /></div>
         {:else if !pending}
           <p class="note" role="status">
             {failed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}
@@ -369,7 +423,14 @@
           </div>
         {/if}
         {#if feedHits.length}
-          <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
+          <SearchResults hits={feedHits} onend={() => void feed.pager.more()} {onlike} />
+        {:else if feed.pager.done && culprit}
+          <p class="note empty" role="status">
+            No results with {culprit.label}.
+            <button type="button" class="clear" onclick={() => pick(culprit.id, false)}
+              >Remove {culprit.label}</button
+            >
+          </p>
         {:else if feed.pager.done}
           <p class="note">Nothing here yet. Try taking a pick out.</p>
         {:else}
@@ -454,6 +515,11 @@
 
   .clear:hover {
     color: var(--fg);
+  }
+
+  /* In the empty state's sentence, the way out reads at the sentence's size. */
+  .empty .clear {
+    font-size: inherit;
   }
 
   .pick:focus-visible,

@@ -272,7 +272,10 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
     const chip = (name) => active(page).getByRole('button', { name, exact: true });
-    const pill = (name) => chip(`Remove ${name}`);
+    const pill = (name) =>
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: `Remove ${name}`, exact: true });
     // Empty query: For You, filled from the popular tail since the fixture library holds nothing.
     await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
     await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
@@ -497,6 +500,206 @@ test('atlas’s counts take out what would show nothing, and only in the kinds t
   }
 });
 
+test('"More like this" on a poster adds a "Like" pill without opening the title, and feeds atlas’s similar', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const similar = [];
+    await page.route('**/atlas/index/similar/**', (r) => {
+      similar.push(new URL(r.request().url()).pathname + new URL(r.request().url()).search);
+      return r.fulfill({ json: { ids: [300, 301] } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const grid = active(page).locator('.grid');
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+
+    // The control sits on the poster, beside its link: pressing it keeps Search open.
+    await grid.getByRole('link', { name: 'Film 101 2026' }).hover();
+    await grid.getByRole('button', { name: 'More like Film 101', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
+    await expect(selected.getByRole('button', { name: 'Remove Like Film 101' })).toBeVisible();
+    await expect(grid.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    expect(similar[0]).toBe('/atlas/index/similar/movie/101.json?limit=200');
+
+    // One "Like" at a time: while it is picked no poster offers another, and a mood can't join it.
+    await expect(grid.getByRole('button', { name: /^More like / })).toHaveCount(0);
+    await expect(
+      active(page)
+        .getByRole('navigation', { name: 'Browse by category' })
+        .getByRole('group', { name: 'Moods' }),
+    ).toHaveCount(0);
+
+    // Back takes it out, and the posters offer it again.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(selected).toHaveCount(0);
+    await expect(grid.getByRole('button', { name: 'More like Film 101', exact: true })).toHaveCount(
+      1,
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a "Like" from the address says "Like…" until its title is named', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300] } }));
+    let name;
+    const named = new Promise((resolve) => (name = resolve));
+    // The title's own lookup waits; the feed's titles don't.
+    await page.route(/\/movie\/949(\?|$)/, async (r) => {
+      await named;
+      return r.fulfill({ json: { ...film(949, 'Heat'), genres: [], credits: { cast: [] } } });
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=like-movie-949')}`);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Like…' })).toBeVisible();
+    name();
+    await expect(selected.getByRole('button', { name: 'Remove Like Heat' })).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a rating floor is picked from the Browse row, and asks TMDB for it', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    const asked = [];
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      asked.push(new URL(r.request().url()).searchParams);
+      return r.fulfill({ json: { results: films, total_pages: 1 } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    await input(page).fill('7+');
+    await active(page)
+      .getByRole('group', { name: 'Browse', exact: true })
+      .getByRole('button', { name: '★ 7+ · rating', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=rating-7$/);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove ★ 7+' })).toBeVisible();
+    await expect.poll(() => asked.at(-1)?.get('vote_average.gte')).toBe('7');
+    expect(asked.at(-1)?.get('vote_count.gte')).toBe('10');
+    // One floor at a time: the others leave the rail until it is removed.
+    const ratings = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Rating' });
+    await expect(ratings).toHaveCount(0);
+    await selected.getByRole('button', { name: 'Remove ★ 7+' }).click();
+    await expect(ratings.getByRole('button', { name: '★ 8+', exact: true })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a selection that shows nothing names the pick to take out, and takes it out in one tap', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    // Nothing at ★ 6+; Swedish comedies otherwise.
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      const url = new URL(r.request().url());
+      const results =
+        url.searchParams.get('vote_average.gte') || url.searchParams.get('page') !== '1'
+          ? []
+          : films;
+      return r.fulfill({ json: { results, total_pages: 1 } });
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=lang-sv,genre-35,rating-6')}`);
+    const feed = active(page);
+    await expect(feed.getByText('No results with ★ 6+.')).toBeVisible();
+    await feed.getByRole('button', { name: 'Remove ★ 6+' }).last().click();
+    await expect(page).toHaveURL(/\/search\?c=lang-sv,genre-35$/);
+    await expect(feed.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a language, country or decade picked offers no other of its kind until it is removed', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=lang-sv,decade-1990')}`);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+    await expect(rail.getByRole('group', { name: 'Languages' })).toHaveCount(0);
+    await expect(rail.getByRole('group', { name: 'Decades' })).toHaveCount(0);
+    await expect(rail.getByRole('group', { name: 'Countries' })).toBeVisible();
+    // The Browse row too, though the picks are paused while a query is typed.
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await input(page).fill('english');
+    await expect(browse.getByRole('button', { name: 'England · country' })).toHaveCount(0);
+    await expect(browse.getByRole('button', { name: 'English · language' })).toHaveCount(0);
+    await input(page).fill('british');
+    await expect(browse.getByRole('button', { name: 'United Kingdom · country' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a title’s "More like this" row links to Search with its "Like"', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300, 301] } }));
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
+    const row = active(page).getByRole('region', { name: 'More like this' });
+    await expect(row.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    await row.getByRole('link', { name: 'Explore similar ›' }).click();
+    await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Like Film 101' }),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [1100, 1440])
   test(`the search field finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
     const browser = await chromium.launch({
@@ -557,18 +760,36 @@ test('on a phone, More… opens every category in a sheet', async () => {
     await setup(page);
     await page.goto(FIXTURE);
     await openSearch(page, 390);
-    await active(page).getByRole('button', { name: 'More…', exact: true }).click();
+    const more = active(page).getByRole('button', { name: 'More…', exact: true });
     const sheet = page.getByRole('dialog', { name: 'All categories' });
+
+    // Back closes it without picking, and leaves Search where it was.
+    await more.click();
     await expect(sheet).toBeVisible();
-    await expect(sheet.getByRole('heading', { name: 'Genres' })).toBeVisible();
-    await expect(sheet.getByRole('heading', { name: 'Countries' })).toBeVisible();
-    // Nordic Noir is past the Recipes' first eight: "Show all" opens the rest in place.
+    await page.goBack();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search$/);
+    // So does its ✕.
+    await more.click();
+    await sheet.getByRole('button', { name: 'Close' }).click();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search$/);
+
+    await more.click();
+    for (const name of ['For You', 'Genres', 'Countries', 'Rating'])
+      await expect(sheet.getByRole('heading', { name, exact: true })).toBeVisible();
+    // Each section is one row; "All ›" opens it out in place.
     const recipes = sheet.getByRole('group', { name: 'Recipes' });
-    await recipes.getByRole('button', { name: /^Show all/ }).click();
+    await recipes.getByRole('button', { name: 'All Recipes' }).click();
+    await expect(recipes.getByRole('button', { name: 'All Recipes' })).toHaveCount(0);
     await recipes.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
     await expect(sheet).toBeHidden();
     await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    // The pick is one entry: Back returns to Search as it was before the sheet opened.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(sheet).toBeHidden();
   } finally {
     await browser.close();
   }

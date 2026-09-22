@@ -1,5 +1,5 @@
 <!-- Search's Explore categories (the TV's Explore rail): For You, then atlas's moods, the recipes, the genres, and the
-     languages, countries and decades — the first two say what a genre can't, so they lead. Each shows its strongest
+     languages, countries, decades and rating floors — the first two say what a genre can't, so they lead. Each shows its strongest
      few, and "Show all" the rest, so every kind can be browsed without typing; typed into, the nav field finds them
      too (Search's Browse row).
 
@@ -38,6 +38,7 @@
     ['language', 'Languages'],
     ['country', 'Countries'],
     ['decade', 'Decades'],
+    ['rating', 'Rating'],
   ];
   /** The kinds the phone strip samples: the rest wait in the sheet. */
   const STRIP_KINDS: ChipGroup[] = ['mood', 'recipe', 'genre'];
@@ -54,6 +55,13 @@
       return inGroup.length ? [{ group, heading, chips: inGroup }] : [];
     }),
   );
+  /** The sheet's sections: For You under a heading of its own, then the rail's. */
+  const sheetSections = $derived([
+    ...(forYou.length
+      ? [{ group: 'for-you' as ChipGroup, heading: 'For You', chips: forYou }]
+      : []),
+    ...sections,
+  ]);
   let expanded = $state<Partial<Record<ChipGroup, boolean>>>({});
   /** Each section unfiltered: its first few, or all of them once "Show all" is picked. */
   const listed = () =>
@@ -64,11 +72,90 @@
     }));
 
   let sheet = $state<HTMLDialogElement>();
+  /** The sheet's sections opened out of their one sideways row into a wrapped grid, by "All ›". */
+  let spread = $state<Partial<Record<ChipGroup, boolean>>>({});
+  /**
+   * The sheet holds a history entry of its own while open, so Back closes it as it would any sheet on a phone. It
+   * copies the entry under it, which is what the Router reads, so the Router sees the same page either side of it.
+   */
+  let entry = false;
+  /** What to do once the sheet's entry is gone: a pick navigates only then, so no stale entry is left behind it. */
+  let afterClose: (() => void) | undefined;
+
+  function openSheet() {
+    spread = {};
+    sheet?.showModal();
+    // The sheet itself, not its first control: focus there would scroll a phone's sheet past its top.
+    sheet?.focus();
+    history.pushState(history.state, '');
+    entry = true;
+  }
+
+  function closeSheet(then?: () => void) {
+    if (entry) {
+      afterClose = then;
+      history.back();
+    } else {
+      sheet?.close();
+      then?.();
+    }
+  }
+
+  $effect(() => {
+    const left = () => {
+      if (!entry) return;
+      entry = false;
+      sheet?.close();
+      const then = afterClose;
+      afterClose = undefined;
+      then?.();
+    };
+    window.addEventListener('popstate', left);
+    return () => window.removeEventListener('popstate', left);
+  });
+
+  /** Escape closes the dialog itself; its entry goes with it. */
+  function closed() {
+    if (entry) closeSheet();
+  }
 
   function choose(id: string) {
-    sheet?.close();
-    onchange(id);
+    if (sheet?.open) closeSheet(() => onchange(id));
+    else onchange(id);
   }
+
+  /**
+   * Dragged down by its handle or header, the sheet follows the finger, and far enough closes it. A gesture rather
+   * than a control — ✕, Escape and Back close it too — so it is listened for here, not given a role.
+   */
+  let grab = $state<HTMLElement>();
+  let drag = $state(0);
+  const DRAG_CLOSE = 80;
+  $effect(() => {
+    const area = grab;
+    if (!area) return;
+    let from: number | undefined;
+    const start = (event: TouchEvent) => (from = event.touches[0]?.clientY);
+    const move = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY;
+      if (from !== undefined && y !== undefined) drag = Math.max(0, y - from);
+    };
+    const end = () => {
+      if (drag > DRAG_CLOSE) closeSheet();
+      from = undefined;
+      drag = 0;
+    };
+    area.addEventListener('touchstart', start, { passive: true });
+    area.addEventListener('touchmove', move, { passive: true });
+    area.addEventListener('touchend', end);
+    area.addEventListener('touchcancel', end);
+    return () => {
+      area.removeEventListener('touchstart', start);
+      area.removeEventListener('touchmove', move);
+      area.removeEventListener('touchend', end);
+      area.removeEventListener('touchcancel', end);
+    };
+  });
 </script>
 
 {#snippet chip(item: Chip)}
@@ -88,15 +175,7 @@
         .flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
       {@render chip(item)}
     {/each}
-    <button
-      type="button"
-      class="chip more"
-      aria-haspopup="dialog"
-      onclick={() => {
-        sheet?.showModal();
-        // The sheet itself, not its first control: focus there would scroll a phone's sheet past its top.
-        sheet?.focus();
-      }}>More…</button
+    <button type="button" class="chip more" aria-haspopup="dialog" onclick={openSheet}>More…</button
     >
   </nav>
 {/if}
@@ -126,13 +205,39 @@
   {@render sectioned()}
 </nav>
 
-<dialog class="sheet" bind:this={sheet} aria-label="All categories" tabindex="-1">
-  <div class="sheet-body">
+<!-- The sheet: every section, each one sideways row that "All ›" opens into a grid in place, under a pinned header. -->
+<dialog
+  class="sheet"
+  bind:this={sheet}
+  aria-label="All categories"
+  tabindex="-1"
+  onclose={closed}
+  style:translate={drag ? `0 ${drag}px` : undefined}
+>
+  <div class="grab" bind:this={grab}>
+    <span class="handle" aria-hidden="true"></span>
     <header>
       <h2 class="title">Browse</h2>
-      <button type="button" class="done" onclick={() => sheet?.close()}>Done</button>
+      <button type="button" class="close" aria-label="Close" onclick={() => closeSheet()}>✕</button>
     </header>
-    {@render sectioned()}
+  </div>
+  <div class="sheet-body">
+    {#each sheetSections as section (section.group)}
+      <div class="sheet-section" role="group" aria-label={section.heading}>
+        <h3 class="heading">{section.heading}</h3>
+        <div class="row" class:spread={spread[section.group]}>
+          {#each section.chips as item (item.id)}{@render chip(item)}{/each}
+          {#if section.chips.length > STRIP_FIRST && !spread[section.group]}
+            <button
+              type="button"
+              class="chip all"
+              aria-label="All {section.heading}"
+              onclick={() => (spread[section.group] = true)}>All ›</button
+            >
+          {/if}
+        </div>
+      </div>
+    {/each}
   </div>
 </dialog>
 
@@ -282,37 +387,53 @@
     }
   }
 
-  /* The sheet: from the bottom on a phone, where the thumb is; a panel in the middle from 760px. */
+  /* The sheet: from the bottom on a phone, where the thumb is, to 85% of its height; a panel in the middle from
+     760px. The handle and header stay put while the sections scroll under them. */
   .sheet {
     width: 100%;
     max-width: 100%;
+    height: 85dvh;
     max-height: 85dvh;
     margin: auto 0 0;
     padding: 0;
+    overflow: hidden;
     border: 1px solid var(--line);
-    border-radius: 18px 18px 0 0;
+    border-bottom: 0;
+    border-radius: 20px 20px 0 0;
     background: var(--bg);
     color: var(--fg);
+  }
+
+  .sheet[open] {
+    display: flex;
+    flex-direction: column;
   }
 
   .sheet::backdrop {
     background: rgb(0 0 0 / 0.6);
   }
 
-  .sheet-body {
-    padding: 0 16px calc(16px + env(safe-area-inset-bottom));
+  .grab {
+    flex-shrink: 0;
+    padding: 8px 16px 0;
+    touch-action: none;
+  }
+
+  .handle {
+    display: block;
+    width: 36px;
+    height: 5px;
+    margin: 0 auto 6px;
+    border-radius: 3px;
+    background: var(--line);
   }
 
   .sheet header {
-    position: sticky;
-    top: 0;
-    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 16px 0 4px;
-    background: var(--bg);
+    padding-bottom: 6px;
   }
 
   .title {
@@ -320,23 +441,86 @@
     font-size: 17px;
   }
 
-  .done {
+  .close {
+    display: grid;
     flex-shrink: 0;
-    padding: 0 6px;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    padding: 0;
     border: 0;
-    background: none;
-    color: var(--accent);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.08);
+    color: var(--muted);
     font: inherit;
-    font-weight: 600;
+    font-size: 13px;
     cursor: pointer;
+  }
+
+  .close:hover {
+    color: var(--fg);
+  }
+
+  .sheet-body {
+    flex: 1;
+    min-height: 0;
+    padding: 0 0 calc(16px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .sheet-section .heading {
+    margin: 14px 16px 8px;
+  }
+
+  /* One sideways row a section, fading at its right edge to say it goes on; "All ›" lays it out in full. */
+  .row {
+    display: flex;
+    gap: 8px;
+    padding: 0 40px 0 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  }
+
+  .row::-webkit-scrollbar {
+    display: none;
+  }
+
+  .row.spread {
+    flex-wrap: wrap;
+    padding-right: 16px;
+    overflow-x: visible;
+    mask-image: none;
+  }
+
+  /* The rail's quiet chips: no outline, a faint fill, muted until pointed at. */
+  .sheet .chip {
+    min-height: 34px;
+    padding: 0 12px;
+    border: 0;
+    background: rgb(255 255 255 / 0.06);
+    font-weight: 500;
+  }
+
+  .sheet .chip[aria-pressed='true'] {
+    background: rgb(255 255 255 / 0.16);
+    color: var(--fg);
+  }
+
+  .sheet .all {
+    background: transparent;
+    color: var(--muted);
   }
 
   @media (width >= 760px) {
     .sheet {
       width: min(640px, 100% - 48px);
+      height: auto;
       max-height: 80dvh;
       margin: auto;
-      border-radius: 18px;
+      border-bottom: 1px solid var(--line);
+      border-radius: 20px;
     }
   }
 </style>

@@ -34,6 +34,15 @@ export interface Explore {
 /** A facet id is lowercase words, digits, a country code and dashes: nothing that needs escaping in `c=`. */
 const FACET = /^[a-z0-9]+(?:-[A-Za-z0-9]+)*$/;
 
+/** The facet "More like <title>": `like-movie-949`, `like-tv-1396`. */
+export const likeId = (title: { type: MediaType; id: number }) => `like-${title.type}-${title.id}`;
+
+/** The title a "Like" facet is for; undefined for any other facet. */
+export function likeOf(id: string): { type: MediaType; id: number } | undefined {
+  const match = /^like-(movie|tv)-(\d+)$/.exec(id);
+  return match ? { type: match[1] as MediaType, id: Number(match[2]) } : undefined;
+}
+
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
 
