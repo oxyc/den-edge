@@ -1,31 +1,62 @@
 import { describe, expect, it } from 'vitest';
 import type { Pages } from './catalog';
-import { exploreChips, exploreFeed, FOR_YOU, openChip, remapChip } from './explore';
+import {
+  exploreChips,
+  exploreFeed,
+  FOR_YOU,
+  matchChips,
+  openChip,
+  remapChip,
+  suggestChips,
+} from './explore';
 import type { MediaType, Title } from './library';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
 
 describe('Explore chips', () => {
-  it('lead with For You, then the TV’s genre order, recipes with a form here, and moods', () => {
-    const movies = exploreChips('movie', { atlas: true }).map((c) => c.id);
-    expect(movies[0]).toBe(FOR_YOU);
-    expect(movies.slice(1, 4)).toEqual(['genre-28', 'genre-35', 'genre-18']);
-    expect(movies).toContain('recipe-sci-fi-horror');
-    expect(movies).toContain('mood-cozy');
+  it('run For You, moods, recipes, then genres, each strongest first', () => {
+    const chips = exploreChips('movie', { atlas: true });
+    const groups = chips.map((c) => c.group);
+    // Each group in one run, in that order.
+    expect([...new Set(groups)]).toEqual(['for-you', 'mood', 'recipe', 'genre']);
+    const of = (group: string) => chips.filter((c) => c.group === group).map((c) => c.id);
+    // atlas's own order: its strongest rows lead, moods and plot facets together.
+    expect(of('mood').slice(0, 3)).toEqual([
+      'mood-mind-bending',
+      'plot-bittersweet',
+      'mood-feel-good',
+    ]);
+    // The TV's curated recipes first, then the rest of the catalogue, then atlas's subgenres.
+    expect(of('recipe').slice(0, 3)).toEqual([
+      'recipe-romantic-comedy',
+      'recipe-crime-thriller',
+      'recipe-action-thriller',
+    ]);
+    expect(of('recipe')).toContain('recipe-biopic');
+    expect(of('recipe').at(-1)).toMatch(/^subgenre-/);
+    // The TV's Explore genres first, then every other genre of the type.
+    expect(of('genre').slice(0, 3)).toEqual(['genre-28', 'genre-35', 'genre-18']);
+    expect(of('genre')).toContain('genre-37');
+    // Labels drop the type the toggle already names.
+    expect(chips.find((c) => c.id === 'mood-feel-good')?.label).toBe('Feel-Good');
+  });
 
-    const series = exploreChips('tv', { atlas: true }).map((c) => c.id);
-    expect(series.slice(1, 3)).toEqual(['genre-10759', 'genre-35']);
-    // Recipes with no series form are not offered under Series.
-    expect(series).not.toContain('recipe-sci-fi-horror');
-    expect(series).not.toContain('recipe-romantic-comedy');
-    expect(series).toContain('recipe-heist');
-    expect(series).toContain('mood-bingeable');
+  it('offer under Series only what has a series form, and no subgenre a recipe already names', () => {
+    const series = exploreChips('tv', { atlas: true });
+    const ids = series.map((c) => c.id);
+    expect(ids).not.toContain('recipe-sci-fi-horror');
+    expect(ids).not.toContain('recipe-romantic-comedy');
+    expect(ids).toContain('recipe-heist');
+    expect(ids).toContain('mood-bingeable');
+    // atlas's "Serial Killers" is the recipe "Serial Killer"; "Whodunits" has no recipe and stays.
+    expect(ids).not.toContain('subgenre-serial-killer');
+    expect(ids).toContain('subgenre-whodunit');
   });
 
   it('leave out hidden genres, and the moods where atlas can’t be reached', () => {
     const ids = exploreChips('movie', { hiddenGenres: new Set([27]) }).map((c) => c.id);
     expect(ids).not.toContain('genre-27');
-    expect(ids.some((id) => id.startsWith('mood-'))).toBe(false);
+    expect(ids.some((id) => /^(mood|plot|subgenre)-/.test(id))).toBe(false);
   });
 
   it('fall back to For You for an id that names no chip', () => {
@@ -33,6 +64,52 @@ describe('Explore chips', () => {
     expect(openChip('genre-27', chips).id).toBe('genre-27');
     expect(openChip('genre-999', chips).id).toBe(FOR_YOU);
     expect(openChip(undefined, chips).id).toBe(FOR_YOU);
+  });
+});
+
+describe('matching typed text to chips', () => {
+  const chips = exploreChips('movie', { atlas: true });
+  const labels = (found: { label: string }[]) => found.map((c) => c.label);
+
+  it('matches a label’s start or any word’s start, ignoring case, accents and punctuation', () => {
+    expect(labels(matchChips('hei', chips))).toEqual(['Heist']);
+    expect(labels(matchChips('HÉIST', chips))).toEqual(['Heist']);
+    // A word inside the label: "noir" finds Nordic Noir and Neo-Noir.
+    expect(labels(matchChips('noir', chips))).toEqual(['Nordic Noir', 'Neo-Noir']);
+    // Punctuation and "&" fold away: "sci fi" is "Sci-Fi", "spy and" is "Spy & Espionage".
+    expect(labels(matchChips('sci fi', chips))).toContain('Sci-Fi Horror');
+    expect(labels(matchChips('spy and esp', chips))).toEqual(['Spy & Espionage']);
+    expect(matchChips('', chips)).toEqual([]);
+  });
+
+  it('never offers For You, and ignores words that name nothing', () => {
+    expect(labels(matchChips('for you', chips))).toEqual([]);
+    expect(labels(matchChips('the', chips, { minWord: 3 }))).toEqual([]);
+  });
+
+  it('reads a synonym as the categories it means', () => {
+    expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
+    expect(labels(matchChips('scary', chips))).toContain('Horror');
+    expect(labels(matchChips('space', chips))).toEqual(['Set in Space', 'Science Fiction']);
+  });
+
+  it('suggests from a whole query: named categories first, then synonyms, a handful at most', () => {
+    expect(labels(suggestChips('funny heist', chips))).toEqual([
+      'Heist',
+      'Feel-Good',
+      'Dark Comedies',
+      'Comedy',
+    ]);
+    // Words under three letters and plain titles point at no category.
+    expect(suggestChips('up', chips)).toEqual([]);
+    expect(suggestChips('the matrix', chips)).toEqual([]);
+    expect(suggestChips('s', chips)).toEqual([]);
+    expect(suggestChips('dra', chips).length).toBeLessThanOrEqual(6);
+  });
+
+  it('suggests only what this type has: no Horror genre under Series', () => {
+    const series = exploreChips('tv', { atlas: true });
+    expect(labels(suggestChips('scary', series))).toEqual(['Supernatural Horror']);
   });
 });
 
@@ -53,7 +130,7 @@ describe('switching Movies and Series', () => {
     expect(remapChip('genre-10764', 'tv', 'movie', movie)).toBe('genre-99');
     // A recipe with no series form, and a mood only films carry, fall back to For You.
     expect(remapChip('recipe-sci-fi-horror', 'movie', 'tv', tv)).toBe(FOR_YOU);
-    expect(remapChip('mood-cozy', 'movie', 'tv', tv)).toBe(FOR_YOU);
+    expect(remapChip('plot-bittersweet', 'movie', 'tv', tv)).toBe(FOR_YOU);
     // A recipe and a mood both types have stay open.
     expect(remapChip('recipe-heist', 'movie', 'tv', tv)).toBe('recipe-heist');
     expect(remapChip('mood-feel-good', 'movie', 'tv', tv)).toBe('mood-feel-good');
