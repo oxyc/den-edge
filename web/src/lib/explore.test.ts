@@ -3,7 +3,10 @@ import type { Pages } from './catalog';
 import {
   exploreChips,
   exploreFeed,
+  editDistance,
+  fold,
   FOR_YOU,
+  KIND,
   matchChips,
   openChip,
   remapChip,
@@ -17,8 +20,16 @@ describe('Explore chips', () => {
   it('run For You, moods, recipes, then genres, each strongest first', () => {
     const chips = exploreChips('movie', { atlas: true });
     const groups = chips.map((c) => c.group);
-    // Each group in one run, in that order.
-    expect([...new Set(groups)]).toEqual(['for-you', 'mood', 'recipe', 'genre']);
+    // Each group in one run, in that order; the filter's own kinds last.
+    expect([...new Set(groups)]).toEqual([
+      'for-you',
+      'mood',
+      'recipe',
+      'genre',
+      'language',
+      'country',
+      'decade',
+    ]);
     const of = (group: string) => chips.filter((c) => c.group === group).map((c) => c.id);
     // atlas's own order: its strongest rows lead, moods and plot facets together.
     expect(of('mood').slice(0, 3)).toEqual([
@@ -67,6 +78,15 @@ describe('Explore chips', () => {
   });
 });
 
+describe('editDistance', () => {
+  it('counts a swap as one edit, and stops counting past the limit', () => {
+    expect(editDistance('sweidsh', 'swedish', 2)).toBe(1);
+    expect(editDistance('acton', 'action', 2)).toBe(1);
+    expect(editDistance('same', 'same', 1)).toBe(0);
+    expect(editDistance('heist', 'horror', 1)).toBe(2);
+  });
+});
+
 describe('matching typed text to chips', () => {
   const chips = exploreChips('movie', { atlas: true });
   const labels = (found: { label: string }[]) => found.map((c) => c.label);
@@ -105,6 +125,33 @@ describe('matching typed text to chips', () => {
     expect(suggestChips('the matrix', chips)).toEqual([]);
     expect(suggestChips('s', chips)).toEqual([]);
     expect(suggestChips('dra', chips).length).toBeLessThanOrEqual(6);
+  });
+
+  it('forgives a typo or two, ranked below anything spelled right', () => {
+    // A swapped pair is one edit; a missing letter is one.
+    expect(labels(matchChips('sweidsh', chips)).slice(0, 2)).toEqual(['Swedish', 'Sweden']);
+    expect(labels(matchChips('acton', chips))[0]).toBe('Action');
+    // Nothing is a near miss under three letters: every "ac" match really begins with it.
+    for (const chip of matchChips('ac', chips))
+      expect(fold(`${chip.label} ${chip.aliases?.join(' ') ?? ''}`)).toMatch(/(^| )ac/);
+    expect(matchChips('xq', chips)).toEqual([]);
+  });
+
+  it('finds a language, a country by its people, and a decade by its nicknames', () => {
+    const found = (text: string) =>
+      matchChips(text, chips).map((c) => `${c.label} · ${KIND[c.group]}`);
+    expect(found('swedish').slice(0, 2)).toEqual(['Swedish · language', 'Sweden · country']);
+    expect(found('90s')[0]).toBe('1990s · decade');
+    expect(found('nineties')[0]).toBe('1990s · decade');
+    expect(found('1990')[0]).toBe('1990s · decade');
+    expect(found('korean')).toContain('South Korea · country');
+    // The rail never lists them: they are the filter's alone.
+    expect(exploreChips('movie').filter((c) => c.group === 'decade').length).toBeGreaterThan(3);
+  });
+
+  it('ranks an exact name over a prefix over a word over a synonym', () => {
+    expect(labels(matchChips('action', chips)).slice(0, 2)).toEqual(['Action', 'Action Thriller']);
+    expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
   });
 
   it('suggests only what this type has: no Horror genre under Series', () => {
@@ -166,6 +213,20 @@ describe('Explore feeds', () => {
     expect(calls[0]?.params['first_air_date.gte']).toBe('1990-01-01');
     expect(calls[0]?.page).toBe(2);
     expect(row.filter?.({ ...film(1, 'tv'), genreIds: [10765] })).toBe(true);
+  });
+
+  it('browses a language, a country and a decade as TMDB discover', async () => {
+    const chips = exploreChips('tv');
+    const asked = async (id: string) => {
+      calls.length = 0;
+      await exploreFeed(openChip(id, chips), 'tv', sources()).load(1);
+      return calls[0]?.params ?? {};
+    };
+    expect((await asked('lang-sv')).with_original_language).toBe('sv');
+    expect((await asked('country-SE')).with_origin_country).toBe('SE');
+    const decade = await asked('decade-1990');
+    expect(decade['first_air_date.gte']).toBe('1990-01-01');
+    expect(decade['first_air_date.lte']).toBe('1999-12-31');
   });
 
   it('browses a movie recipe as series under Series', async () => {

@@ -4,6 +4,8 @@
 
 import {
   appendUniqueTitles,
+  categories,
+  COUNTRIES,
   discoverRow,
   equivalentGenre,
   EXPLORE,
@@ -19,12 +21,93 @@ import type { MediaType, Title } from './library';
 
 export const FOR_YOU = 'for-you';
 
-export type ChipGroup = 'for-you' | 'genre' | 'recipe' | 'mood';
+/**
+ * What a chip is. The first four are the rail's; a language, a country and a decade are there to be found by the
+ * filter ("swedish", "90s") and are never listed on their own — there are too many, and they say little alone.
+ */
+export type ChipGroup = 'for-you' | 'genre' | 'recipe' | 'mood' | 'language' | 'country' | 'decade';
 
 export interface Chip {
   id: string;
   label: string;
   group: ChipGroup;
+  /** Other names it is found by: a country by its people's name, a decade by "90s" and "nineties". */
+  aliases?: string[];
+}
+
+/** A chip's kind as a word, for the muted label beside a filter result: "Swedish · language". */
+export const KIND: Record<ChipGroup, string> = {
+  'for-you': '',
+  mood: 'mood',
+  recipe: 'recipe',
+  genre: 'genre',
+  language: 'language',
+  country: 'country',
+  decade: 'decade',
+};
+
+/** Languages a filter can find: those of the country rows, and a few catalogues rich enough to browse by. */
+const LANGUAGES = [
+  ...new Set([
+    ...COUNTRIES.flatMap(([, , language]) => language ?? []),
+    'hi',
+    'no',
+    'fi',
+    'nl',
+    'pl',
+  ]),
+];
+
+const named = (type: 'language' | 'region', code: string) => {
+  try {
+    return new Intl.DisplayNames(['en'], { type }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+};
+
+/** A decade's other names: "90s", and "nineties" for the ones people say. */
+const DECADE_WORDS: Record<number, string> = {
+  1950: 'fifties',
+  1960: 'sixties',
+  1970: 'seventies',
+  1980: 'eighties',
+  1990: 'nineties',
+  2000: 'noughties',
+};
+
+/**
+ * The languages, countries and decades the filter finds, feeding what the browse tail already offers: a country
+ * and a decade are its rows (`categories()`), so they carry its vote floors and the year floor; a language is TMDB's
+ * `with_original_language`.
+ */
+function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[] {
+  const languages = LANGUAGES.map((code): Chip => ({
+    id: `lang-${code}`,
+    label: named('language', code),
+    group: 'language',
+  }));
+  const countries = COUNTRIES.map(([code, demonym]): Chip => ({
+    id: `country-${code}`,
+    label: named('region', code),
+    group: 'country',
+    aliases: [demonym],
+  }));
+  const decades = categories(type, year, { minYear }).flatMap((category): Chip[] => {
+    const decade = /^decade-(\d{4})-/.exec(category.id)?.[1];
+    if (!decade) return [];
+    const start = Number(decade);
+    const aliases = [`${String(start % 100).padStart(2, '0')}s`, DECADE_WORDS[start] ?? ''];
+    return [
+      {
+        id: `decade-${start}`,
+        label: `${start}s`,
+        group: 'decade',
+        aliases: aliases.filter(Boolean),
+      },
+    ];
+  });
+  return [...languages, ...countries, ...decades];
 }
 
 /** The TV's curated recipe chips (RecipeCatalog.exploreChips), in its order. */
@@ -73,11 +156,17 @@ const same = (label: string) => fold(label).replace(/ /g, '').replace(/s$/, '');
 /**
  * The chips for `type`, in the order they are offered: For You; atlas's moods; the recipes (the TV's curated
  * ones first, then the rest of the catalogue, then atlas's subgenres that no recipe already names); and the
- * genres, the TV's Explore order first, less the hidden ones. Moods and subgenres only where atlas answers.
+ * genres, the TV's Explore order first, less the hidden ones. Moods and subgenres only where atlas answers. Then
+ * the languages, countries and decades only the filter shows.
  */
 export function exploreChips(
   type: MediaType,
-  { hiddenGenres = new Set<number>(), atlas = false } = {},
+  {
+    hiddenGenres = new Set<number>(),
+    atlas = false,
+    year = new Date().getFullYear(),
+    minYear = undefined as number | undefined,
+  } = {},
 ): Chip[] {
   const recipeIds = [...new Set([...RECIPE_CHIPS, ...RECIPES.map((r) => r.id)])];
   const recipes = recipeIds.flatMap((id): Chip[] => {
@@ -103,6 +192,7 @@ export function exploreChips(
     ...recipes,
     ...subgenres,
     ...genres,
+    ...vocabularyChips(type, year, minYear),
   ];
 }
 
@@ -156,24 +246,83 @@ const SYNONYMS: Record<string, string[]> = {
 };
 
 /**
- * The chips `text` names: a label it begins, then labels with a word it begins, then its synonyms — each once, in
- * that order, For You never. `minWord` leaves out words too short to mean anything, which a filter being typed
- * into wants (1) and a suggestion drawn from a whole query does not (3).
+ * The Damerau–Levenshtein distance (optimal string alignment) between two words, or `limit + 1` once it is clear
+ * it exceeds `limit`: a swapped pair of letters ("sweidsh") costs one edit, as a typo does.
+ */
+export function editDistance(a: string, b: string, limit: number): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let before: number[] = [];
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let d = Math.min(previous[j]! + 1, row[j - 1]! + 1, previous[j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1])
+        d = Math.min(d, before[j - 2]! + 1);
+      row.push(d);
+      best = Math.min(best, d);
+    }
+    if (best > limit) return limit + 1;
+    before = previous;
+    previous = row;
+  }
+  return previous[b.length]!;
+}
+
+/** How far a typed word may be from a name and still be taken for it: none under three letters. */
+const tolerance = (word: string) => (word.length < 3 ? 0 : word.length < 6 ? 1 : 2);
+const near = (typed: string, word: string) =>
+  tolerance(typed) > 0 && editDistance(typed, word, tolerance(typed)) <= tolerance(typed);
+
+/**
+ * How well a chip matches, best first: the whole name, its start, a word's start, a synonym, then a near miss —
+ * the whole name ("acton" for Action) before one of its words (Action Thriller).
+ */
+const EXACT = 0;
+const PREFIX = 1;
+const WORD = 2;
+const SYNONYM = 3;
+const FUZZY_NAME = 4;
+const FUZZY = 5;
+
+/**
+ * The chips `text` names, as one list ranked by how well each matches — the whole name, then its start, then a
+ * word's start, then a synonym, then a name one or two typos away — and in the chips' own order within a rank. A
+ * name is a chip's label or one of its aliases, and For You is never one. `minWord` leaves out words too short to
+ * mean anything, which a filter being typed into wants (1) and a suggestion drawn from a whole query does not (3).
  */
 export function matchChips(text: string, chips: Chip[], { minWord = 1 } = {}): Chip[] {
   const phrase = fold(text);
   if (phrase.length < minWord) return [];
   const typed = words(text).filter((word) => word.length >= minWord);
-  const offered = chips.filter((chip) => chip.group !== 'for-you');
-  const synonyms = new Set(typed.flatMap((word) => SYNONYMS[word] ?? []));
-  const found = [
-    ...offered.filter((chip) => fold(chip.label).startsWith(phrase)),
-    ...offered.filter((chip) =>
-      words(chip.label).some((word) => typed.some((t) => word.startsWith(t))),
+  const synonym = new Set(typed.flatMap((word) => SYNONYMS[word] ?? []));
+  const nearSynonym = new Set(
+    typed.flatMap((word) =>
+      Object.entries(SYNONYMS).flatMap(([key, ids]) => (near(word, key) ? ids : [])),
     ),
-    ...offered.filter((chip) => synonyms.has(chip.id)),
-  ];
-  return [...new Set(found)];
+  );
+  const rank = (chip: Chip): number | undefined => {
+    const names = [chip.label, ...(chip.aliases ?? [])].map(fold);
+    if (names.includes(phrase)) return EXACT;
+    if (names.some((name) => name.startsWith(phrase))) return PREFIX;
+    const nameWords = names.flatMap((name) => words(name));
+    if (nameWords.some((word) => typed.some((t) => word.startsWith(t)))) return WORD;
+    if (synonym.has(chip.id)) return SYNONYM;
+    if (names.some((name) => near(phrase, name))) return FUZZY_NAME;
+    if (nameWords.some((word) => typed.some((t) => near(t, word)))) return FUZZY;
+    if (nearSynonym.has(chip.id)) return FUZZY;
+    return undefined;
+  };
+  return chips
+    .filter((chip) => chip.group !== 'for-you')
+    .flatMap((chip, at) => {
+      const score = rank(chip);
+      return score === undefined ? [] : [{ chip, score, at }];
+    })
+    .sort((a, b) => a.score - b.score || a.at - b.at)
+    .map(({ chip }) => chip);
 }
 
 /** Categories a typed query points at, to open instead of searching: instant, local, a handful. */
@@ -288,11 +437,26 @@ export function exploreFeed(chip: Chip, type: MediaType, sources: FeedSources): 
       releaseDateGte: sources.minYear ? `${sources.minYear}-01-01` : undefined,
     });
   }
+  const language = /^lang-([a-z]{2})$/.exec(chip.id)?.[1];
+  if (language)
+    return discoverRow(sources.pages, `${chip.id}-${type}`, chip.label, {
+      mediaType: type,
+      originalLanguage: language,
+      voteCountGte: 30,
+      releaseDateGte: sources.minYear ? `${sources.minYear}-01-01` : undefined,
+    });
+  // A country or a decade is the browse tail's own row, with its vote floor and the year floor.
+  if (chip.id.startsWith('country-') || chip.id.startsWith('decade-')) {
+    const row = categories(type, new Date().getFullYear(), { minYear: sources.minYear }).find(
+      (category) => category.id === `${chip.id}-${type}`,
+    );
+    if (row) return discoverRow(sources.pages, row.id, chip.label, row.query);
+  }
   if (chip.id.startsWith('recipe-')) {
     const recipe = recipeOf(chip.id.slice('recipe-'.length));
     const query = recipe && retargeted(recipe.query, type);
     if (query) return discoverRow(sources.pages, `${chip.id}-${type}`, chip.label, query);
-  } else if (chip.group !== 'for-you' && sources.atlas) {
+  } else if ((chip.group === 'mood' || chip.group === 'recipe') && sources.atlas) {
     const row = atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${chip.id}-${type}`);
     if (row) return drawn(row, sources.title);
   }

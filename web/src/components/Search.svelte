@@ -12,6 +12,7 @@
     exploreChips,
     exploreFeed,
     FOR_YOU,
+    KIND,
     openChip,
     PROMPTS,
     remapChip,
@@ -62,7 +63,11 @@
   // Explore browses one type at a time, Movies until another is chosen. Typed results show every type until one is.
   const exploreType = $derived<MediaType>(explore.type ?? 'movie');
   const chipsFor = (type: MediaType) =>
-    exploreChips(type, { hiddenGenres: prefs.excludedGenres, atlas: atlas !== null });
+    exploreChips(type, {
+      hiddenGenres: prefs.excludedGenres,
+      atlas: atlas !== null,
+      minYear: prefs.minReleaseYear,
+    });
   const chips = $derived(chipsFor(exploreType));
   const chip = $derived(openChip(explore.chip, chips));
 
@@ -199,7 +204,6 @@
 
   /** The categories the typed text points at, offered above its results: local, instant. */
   const suggestions = $derived(typing ? suggestChips(query, chips) : []);
-  const KIND: Record<string, string> = { mood: 'mood', recipe: 'recipe', genre: 'genre' };
 </script>
 
 <section
@@ -363,9 +367,10 @@
     border-color: var(--muted);
   }
 
+  /* Inset: on a phone this row scrolls sideways, and would clip a ring drawn outside it. */
   .prompts button:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
 
   /* A wide screen: a rail down the side, as the TV's is, with the grid beside it. */

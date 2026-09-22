@@ -362,17 +362,64 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
     await expect(heading('Explore')).toBeVisible();
 
-    // Each section shows its first few; "Show all" opens the rest in place, with a filter over them.
+    // Each section shows its first few; "Show all" opens the rest in place.
     const recipes = rail.getByRole('group', { name: 'Recipes' });
     await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
-    await recipes.getByRole('button', { name: /^Show all \d+$/ }).click();
-    await recipes.getByRole('searchbox', { name: 'Filter recipes' }).fill('zom');
+    await recipes.getByRole('button', { name: /^Show all \d+ ›$/ }).click();
     await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toBeVisible();
-    await expect(recipes.getByRole('button', { name: 'Heist', exact: true })).toHaveCount(0);
+    await recipes.getByRole('button', { name: 'Show fewer' }).click();
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
   } finally {
     await browser.close();
   }
 });
+
+for (const width of [1100, 1440])
+  test(`the rail's one filter finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({
+        viewport: { width, height: 900 },
+        reducedMotion: 'reduce',
+      });
+      await setup(page);
+      await page.goto(FIXTURE);
+      await openSearch(page, width);
+      const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+      const sideways = () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll('[data-route-page][data-active="true"] .rail')].map(
+            (el) => el.scrollWidth - el.clientWidth,
+          ),
+        );
+      await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+      expect(await sideways()).toEqual([0, 0]);
+      for (const name of ['Recipes', 'Genres'])
+        await rail
+          .getByRole('group', { name })
+          .getByRole('button', { name: /^Show all/ })
+          .click();
+      expect(await sideways()).toEqual([0, 0]);
+
+      // One filter across every kind, one ranked list, typos forgiven: "sweidsh" is Swedish.
+      const filter = rail.getByRole('searchbox', { name: 'Filter categories' });
+      await filter.fill('sweidsh');
+      const matches = rail.getByRole('group', { name: 'Matches' });
+      await expect(matches.getByRole('button').first()).toHaveText('Swedish · language');
+      await expect(rail.getByRole('group', { name: 'Recipes' })).toHaveCount(0);
+      expect(await sideways()).toEqual([0, 0]);
+      await filter.fill('90s');
+      await matches.getByRole('button', { name: '1990s · decade' }).click();
+      await expect(page).toHaveURL(/\/search\?c=decade-1990$/);
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+    } finally {
+      await browser.close();
+    }
+  });
 
 test('on a phone, More… opens every category in a sheet', async () => {
   const browser = await chromium.launch({
@@ -393,7 +440,8 @@ test('on a phone, More… opens every category in a sheet', async () => {
     await expect(sheet.getByRole('heading', { name: 'Genres' })).toBeVisible();
     await sheet.getByRole('searchbox', { name: 'Filter categories' }).fill('noir');
     await expect(sheet.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
-    await sheet.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
+    // A filter result names its kind beside it.
+    await sheet.getByRole('button', { name: 'Nordic Noir · recipe', exact: true }).click();
     await expect(sheet).toBeHidden();
     await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);

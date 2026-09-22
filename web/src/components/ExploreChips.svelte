@@ -1,14 +1,14 @@
 <!-- Search's Explore categories (the TV's Explore rail): For You, then atlas's moods, the recipes and the genres — the
-     first two say what a genre can't, so they lead. There are far too many to list, so each shows its strongest few:
+     first two say what a genre can't, so they lead. There are far too many to list, so each shows its strongest few,
+     and one filter reaches the rest: typed into, it shows every match across all three.
 
-     - under 1100px, one strip that scrolls sideways and ends in "More…", which opens everything, grouped and
-       filterable, in a sheet. One line on a tablet too: wrapped, the lines covered half its screen.
-     - from 1100px, a rail down the side, as the TV's is: eight of each, and "Show all" opens the rest in place with
-       a filter over them.
+     - under 1100px, one strip that scrolls sideways and ends in "More…", which opens a sheet with the filter over
+       the same short lists. One line on a tablet too: wrapped, the lines covered half its screen.
+     - from 1100px, a rail down the side, as the TV's is, with the filter at its top.
 
      The open chip is always one of those shown, wherever it sits in its list. -->
 <script lang="ts">
-  import { matchChips, type Chip, type ChipGroup } from '../lib/explore';
+  import { KIND, matchChips, type Chip, type ChipGroup } from '../lib/explore';
 
   let {
     chips,
@@ -26,8 +26,8 @@
     ['recipe', 'Recipes'],
     ['genre', 'Genres'],
   ];
-  /** How many of each a section shows before "Show all": the rail's, and the phone strip's. */
-  const RAIL_FIRST = 8;
+  /** How many of each a section shows unfiltered: the rail's and the sheet's, and the phone strip's. */
+  const LIST_FIRST = 8;
   const STRIP_FIRST = 3;
 
   const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
@@ -43,11 +43,16 @@
     const open = list.find((chip) => chip.id === value);
     return open && !head.includes(open) ? [...head, open] : head;
   };
-  /** All of `list`, or what `text` matches in it. */
-  const filtered = (list: Chip[], text: string) => (text.trim() ? matchChips(text, list) : list);
-
   let expanded = $state<Partial<Record<ChipGroup, boolean>>>({});
-  let filters = $state<Partial<Record<ChipGroup, string>>>({});
+  /** Each section unfiltered: its first few, or all of them once "Show all" is picked. */
+  const listed = () =>
+    sections.map((section) => ({
+      ...section,
+      shown: expanded[section.group] ? section.chips : first(section.chips, LIST_FIRST),
+      more: section.chips.length > LIST_FIRST,
+    }));
+
+  let railFilter = $state('');
   let sheet = $state<HTMLDialogElement>();
   let sheetFilter = $state('');
   let strip = $state<HTMLElement>();
@@ -69,13 +74,15 @@
   });
 </script>
 
-{#snippet chip(item: Chip)}
+{#snippet chip(item: Chip, kind = false)}
   <button
     type="button"
     class="chip"
     aria-pressed={item.id === value}
     data-chip={item.id}
-    onclick={() => choose(item.id)}>{item.label}</button
+    onclick={() => choose(item.id)}
+    >{item.label}{#if kind && KIND[item.group]}<span class="kind">{` · ${KIND[item.group]}`}</span
+      >{/if}</button
   >
 {/snippet}
 
@@ -94,40 +101,55 @@
   >
 </nav>
 
-<nav class="rail" aria-label="Browse by category">
-  {#each forYou as item (item.id)}{@render chip(item)}{/each}
-  {#each sections as section (section.group)}
+{#snippet lists(text: string)}
+  {#if text.trim()}
+    <!-- Typed into, the filter shows one list across every kind — mood, recipe, genre, language, country, decade —
+         ranked by how well each matches, so nobody has to know which kind "Swedish" is. The kind is a label only. -->
+    {@const found = matchChips(text, chips)}
+    {#if found.length}
+      <div class="section" role="group" aria-label="Matches">
+        <div class="list results">
+          {#each found as item (item.id)}{@render chip(item, true)}{/each}
+        </div>
+      </div>
+    {:else}
+      <p class="none">Nothing to browse matches “{text.trim()}”.</p>
+    {/if}
+  {:else}
+    {@render sectioned()}
+  {/if}
+{/snippet}
+
+{#snippet sectioned()}
+  {#each listed() as section (section.group)}
     <div class="section" role="group" aria-label={section.heading}>
-      <span class="heading">{section.heading}</span>
-      {#if expanded[section.group]}
-        <input
-          class="filter"
-          type="search"
-          placeholder="Filter {section.heading.toLowerCase()}"
-          aria-label="Filter {section.heading.toLowerCase()}"
-          bind:value={filters[section.group]}
-        />
-        {#each filtered(section.chips, filters[section.group] ?? '') as item (item.id)}
-          {@render chip(item)}
-        {/each}
+      <h2 class="heading">{section.heading}</h2>
+      <div class="list">
+        {#each section.shown as item (item.id)}{@render chip(item)}{/each}
+      </div>
+      {#if section.more}
         <button
           type="button"
           class="toggle"
-          onclick={() => {
-            expanded[section.group] = false;
-            filters[section.group] = '';
-          }}>Show fewer</button
+          aria-expanded={!!expanded[section.group]}
+          onclick={() => (expanded[section.group] = !expanded[section.group])}
+          >{expanded[section.group] ? 'Show fewer' : `Show all ${section.chips.length} ›`}</button
         >
-      {:else}
-        {#each first(section.chips, RAIL_FIRST) as item (item.id)}{@render chip(item)}{/each}
-        {#if section.chips.length > RAIL_FIRST}
-          <button type="button" class="toggle" onclick={() => (expanded[section.group] = true)}
-            >Show all {section.chips.length}</button
-          >
-        {/if}
       {/if}
     </div>
   {/each}
+{/snippet}
+
+<nav class="rail" aria-label="Browse by category">
+  <input
+    class="filter"
+    type="search"
+    placeholder="Mood, genre, language, decade…"
+    aria-label="Filter categories"
+    bind:value={railFilter}
+  />
+  {#if !railFilter.trim()}{#each forYou as item (item.id)}{@render chip(item)}{/each}{/if}
+  {@render lists(railFilter)}
 </nav>
 
 <dialog class="sheet" bind:this={sheet} aria-label="All categories">
@@ -136,23 +158,13 @@
       <input
         class="filter"
         type="search"
-        placeholder="Filter moods, recipes and genres"
+        placeholder="Mood, genre, language, decade…"
         aria-label="Filter categories"
         bind:value={sheetFilter}
       />
       <button type="button" class="done" onclick={() => sheet?.close()}>Done</button>
     </header>
-    {#each sections as section (section.group)}
-      {@const list = filtered(section.chips, sheetFilter)}
-      {#if list.length}
-        <section aria-label={section.heading}>
-          <h2>{section.heading}</h2>
-          <div class="wrap">
-            {#each list as item (item.id)}{@render chip(item)}{/each}
-          </div>
-        </section>
-      {/if}
-    {/each}
+    {@render lists(sheetFilter)}
   </div>
 </dialog>
 
@@ -199,10 +211,20 @@
     font-size: 16px;
   }
 
+  /* Inset, so no scrolling parent — the rail, the strip, the sheet — clips the ring. */
   button:focus-visible,
   .filter:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    outline-offset: -2px;
+  }
+
+  .kind {
+    color: var(--muted);
+    font-weight: 400;
+  }
+
+  .chip[aria-pressed='true'] .kind {
+    color: inherit;
   }
 
   /* Under 1100px: one line, sideways, as wide as the column it sits in rather than as its chips. */
@@ -225,7 +247,48 @@
     display: none;
   }
 
-  /* From 1100px: the rail, grouped under headings, each group its first eight until it is opened. */
+  /* A section, in the rail and in the sheet: its heading, then its chips. */
+  .heading {
+    margin: 12px 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .none {
+    margin: 12px 0;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  /* "Show all": a quiet line of text in the list's own colour, not a control competing with the chips. */
+  .toggle {
+    align-self: flex-start;
+    min-height: 32px;
+    margin-top: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .toggle:hover {
+    color: var(--fg);
+  }
+
+  /* From 1100px: the rail, grouped under headings. It fills its column and no wider: stretched rather than sized
+     to its longest label, and a label too long for it ends in an ellipsis rather than pushing it sideways. */
   @media (width >= 1100px) {
     .strip {
       display: none;
@@ -234,37 +297,38 @@
     .rail {
       display: flex;
       flex-direction: column;
+      align-self: stretch;
+      min-width: 0;
       gap: 18px;
     }
 
-    .section {
+    .section,
+    .rail .list {
       display: flex;
       flex-direction: column;
       align-items: stretch;
       gap: 2px;
+      min-width: 0;
     }
 
-    .heading {
+    .rail .heading {
       margin: 0 0 4px 12px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
     }
 
     .rail .filter {
-      margin-bottom: 4px;
       font-size: 14px;
     }
 
     .rail .chip {
+      min-width: 0;
       min-height: 32px;
       padding: 0 12px;
+      overflow: hidden;
       border: 0;
       border-radius: 8px;
       background: transparent;
       text-align: left;
+      text-overflow: ellipsis;
     }
 
     .rail .chip:hover {
@@ -276,17 +340,13 @@
       color: var(--fg);
     }
 
-    .toggle {
-      align-self: flex-start;
-      min-height: 28px;
+    .rail .none {
+      margin: 0 12px;
+    }
+
+    .rail .toggle {
+      margin: 0;
       padding: 0 12px;
-      border: 0;
-      background: none;
-      color: var(--accent);
-      font: inherit;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
     }
   }
 
@@ -330,21 +390,6 @@
     font: inherit;
     font-weight: 600;
     cursor: pointer;
-  }
-
-  .sheet h2 {
-    margin: 12px 0 8px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
   }
 
   @media (width >= 760px) {

@@ -280,7 +280,7 @@ export function retargeted(query: DiscoverQuery, to: MediaType): DiscoverQuery |
  * India is deliberately left without one: excluding Hindi is not excluding Indian film, and there is no single
  * language that row is about.
  */
-const COUNTRIES: [code: string, demonym: string, language?: string][] = [
+export const COUNTRIES: [code: string, demonym: string, language?: string][] = [
   ['KR', 'Korean', 'ko'],
   ['JP', 'Japanese', 'ja'],
   ['ES', 'Spanish', 'es'],
