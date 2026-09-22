@@ -61,6 +61,10 @@
   /* A phone: one line, sideways. The groups flow on as one strip, their headings left out. */
   .chips {
     display: flex;
+
+    /* As wide as the column it sits in, not as its chips: only then does the strip scroll. */
+    align-self: stretch;
+    min-width: 0;
     gap: 8px;
     margin-inline: calc(-1 * var(--gutter));
     padding: 4px var(--gutter) 8px;

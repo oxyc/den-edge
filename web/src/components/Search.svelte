@@ -84,6 +84,7 @@
       seeds: untrack(() => seeds),
       owned: untrack(() => owned),
       minYear: prefs.minReleaseYear,
+      title: sources.title,
     });
     const admitted = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
     return { pager: new Pager(row.load, admitted), admitted };
@@ -242,10 +243,8 @@
     transition: opacity 120ms;
   }
 
-  /* A phone and a tablet: the type and the chips over the grid, held under the bar as the grid scrolls. */
+  /* A phone and a tablet: the type and the chips over the grid. */
   .rail {
-    position: sticky;
-    top: calc(max(12px, env(safe-area-inset-top)) + 46px + 4px);
     z-index: 3;
     display: flex;
     flex-direction: column;
@@ -271,8 +270,14 @@
     font-size: 14px;
   }
 
-  /* A phone: one line that scrolls sideways, so the grid starts on the first screen. */
+  /* A phone: one line that scrolls sideways, so the grid starts on the first screen. The chips are one line
+     here, so they stay under the bar as the grid scrolls; a tablet's wrapped lines would cover half of it. */
   @media (width <= 759px) {
+    .rail {
+      position: sticky;
+      top: calc(max(12px, env(safe-area-inset-top)) + 46px + 4px);
+    }
+
     .prompts {
       flex-wrap: nowrap;
       margin-inline: calc(-1 * var(--gutter));
@@ -322,6 +327,7 @@
     }
 
     .rail {
+      position: sticky;
       top: var(--bar-space);
       gap: 18px;
       max-height: calc(100vh - var(--bar-space) - 16px);

@@ -15,7 +15,7 @@ export class Pager {
   /** The source has run out, or failed. */
   done = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
-  page = 0;
+  page = $state(0);
   #loading = false;
   readonly #load: (page: number) => Promise<Title[]>;
   readonly #admitted: (title: Title) => boolean;

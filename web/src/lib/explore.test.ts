@@ -129,4 +129,37 @@ describe('Explore feeds', () => {
     );
     expect(exploreFeed(chip, 'movie', sources()).id).toBe(`${FOR_YOU}-movie`);
   });
+
+  it('names a mood’s posterless titles from TMDB, so the hide rules don’t empty it', async () => {
+    const atlasFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) =>
+      String(input).includes('/index/row/')
+        ? new Response(
+            JSON.stringify({
+              titles: [
+                { type: 'movie', id: 1, title: 'Drawn', posterPath: '/a.jpg' },
+                { type: 'movie', id: 2, title: 'Blank' },
+                { type: 'movie', id: 3, title: 'Unknown' },
+              ],
+            }),
+          )
+        : new Response('', { status: 404 })) as typeof fetch;
+    try {
+      const looked: number[] = [];
+      const chip = openChip('mood-cozy', exploreChips('movie', { atlas: true }));
+      const row = exploreFeed(chip, 'movie', {
+        ...sources(),
+        atlas: '/atlas',
+        title: async (ref) => {
+          looked.push(ref.id);
+          return ref.id === 2 ? { ...film(2), posterPath: '/b.jpg' } : null;
+        },
+      });
+      const titles = await row.load(1);
+      expect(looked).toEqual([2, 3]);
+      expect(titles.map((t) => t.posterPath)).toEqual(['/a.jpg', '/b.jpg', undefined]);
+    } finally {
+      globalThis.fetch = atlasFetch;
+    }
+  });
 });
