@@ -8,7 +8,18 @@ import { probe } from './scripts/probe.ts';
 const edge = process.env.DEN_EDGE ?? 'http://192.168.86.193:8094';
 // `/tmdb` is den-edge lending its TMDB key to a browser that has none, so it has to be proxied too — without
 // it this server answers the app's own index.html to a request for a title and nothing is ever named here.
-const api = ['/pair', '/inbox', '/lib', '/config', '/health', '/routes', '/scout', '/tmdb'];
+// `/metadata` names the titles atlas lists without a poster; without it every atlas row is empty here.
+const api = [
+  '/pair',
+  '/inbox',
+  '/lib',
+  '/config',
+  '/health',
+  '/routes',
+  '/scout',
+  '/tmdb',
+  '/metadata',
+];
 // atlas sits beside den-edge on the tailnet origin at /atlas; tailscale serve strips the prefix, so this does too.
 const atlas = process.env.DEN_ATLAS ?? 'http://192.168.86.193:8081';
 // reel the same way, for the billboard's trailers: its JSON is asked under this origin, its MP4s straight from it.
