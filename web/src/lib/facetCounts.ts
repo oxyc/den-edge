@@ -2,17 +2,43 @@
 // Explore stops offering what would show nothing. Counts are over atlas's corpus, not TMDB's whole catalogue: an
 // option with none there is one Den would show nothing for.
 //
-// A kind the answer names is complete, and a value missing from it is 0. A kind it doesn't name is unknown, and
-// nothing of it is judged. Where atlas has no such route, or doesn't answer, there are no counts at all and
-// `emptyOptions` keeps to what it can tell from the feed alone.
+// A value missing from a kind the answer lists completely is 0: a plain value → titles map is complete, the per-kind
+// shape only where it says `complete: true`. Any other kind is unknown, and nothing of it is judged. Where atlas has
+// no such route, or doesn't answer, there are no counts at all and `emptyOptions` keeps to what it can tell from the
+// feed alone. Every address here is atlas's canonical one: through den-edge's relay a redirect arrives with no
+// Location, so an address atlas would redirect is one that silently answers nothing.
 
 import { atlasWhere } from './atlasRows';
 import { RECIPES, retargeted } from './catalog';
 import type { MediaType } from './library';
 import { relayFetch } from './relayFetch';
 
-/** Kind → value → titles. */
-export type FacetCounts = Record<string, Record<string, number>>;
+/**
+ * A kind's counts: value → titles, or — the shape atlas is moving to — the same under `values`, saying whether the
+ * kind is `complete` (every value it holds is listed) and its `mode` (`single` for a kind that holds one pick).
+ */
+export interface KindCounts {
+  mode?: string;
+  complete?: boolean;
+  values?: Record<string, number>;
+}
+/** Kind → its counts. */
+export type FacetCounts = Record<string, Record<string, number> | KindCounts>;
+
+/**
+ * A kind's values, and whether a value missing from them means none: always for the plain value → titles map, only
+ * when `complete` for the newer shape. Undefined where the answer says nothing usable about the kind.
+ */
+function countsOf(kind: FacetCounts[string] | undefined) {
+  if (!kind || typeof kind !== 'object') return undefined;
+  if ('values' in kind || 'complete' in kind || 'mode' in kind) {
+    const { values, complete } = kind as KindCounts;
+    return values && typeof values === 'object'
+      ? { values, complete: complete === true }
+      : undefined;
+  }
+  return { values: kind as Record<string, number>, complete: true };
+}
 
 /** A selection's worth of `sel`: more than this and atlas refuses it, so none is asked. */
 const MAX_VALUES = 16;
@@ -93,11 +119,12 @@ export async function fetchFacetCounts(
 
 /**
  * Whether an option leaves nothing beside the selection, by the counts: one of its parts is 0 in a kind the answer
- * names. An option with no part atlas knows, or none in a named kind, is never judged.
+ * lists completely. An option with no part atlas knows, or none in such a kind, is never judged. (A one-pick kind
+ * that already has its pick is never asked about here: `emptyOptions` leaves it out first.)
  */
 export function countedEmpty(id: string, type: MediaType, counts: FacetCounts): boolean {
   return facetParts(id, type).some(([kind, value]) => {
-    const values = counts[kind];
-    return values !== undefined && !(values[value] ?? 0);
+    const known = countsOf(counts[kind]);
+    return !!known?.complete && !(known.values[value] ?? 0);
   });
 }

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { exploreChips, emptyOptions } from './explore';
-import { countedEmpty, facetCountsUrl, facetParts, fetchFacetCounts } from './facetCounts';
+import {
+  countedEmpty,
+  facetCountsUrl,
+  facetParts,
+  fetchFacetCounts,
+  type FacetCounts,
+} from './facetCounts';
 
 describe('facetCountsUrl', () => {
   it('is the bare route for no selection, and the series path for series', () => {
@@ -75,6 +81,23 @@ describe('countedEmpty', () => {
   it('hides a recipe when one of its parts has none', () => {
     // Romantic Comedy needs Comedy, which has none here.
     expect(countedEmpty('recipe-romantic-comedy', 'movie', counts)).toBe(true);
+  });
+
+  it('reads the per-kind shape, hiding only in a kind listed completely', () => {
+    const shaped = {
+      total: 40,
+      genre: { mode: 'multi', complete: true, values: { '28': 12 } },
+      language: { mode: 'single', complete: false, values: { sv: 4 } },
+    } as unknown as FacetCounts;
+    expect(countedEmpty('genre-35', 'movie', shaped)).toBe(true);
+    expect(countedEmpty('genre-28', 'movie', shaped)).toBe(false);
+    // An incomplete kind's missing value may simply not be listed.
+    expect(countedEmpty('lang-en', 'movie', shaped)).toBe(false);
+  });
+
+  it('asks for a plot row by atlas’s own axes, never the old `structure` it redirects from', () => {
+    expect(facetParts('plot-nonlinear', 'movie')).toEqual([['chronology', 'nonlinear']]);
+    expect(facetParts('plot-single-day', 'movie')).toEqual([['timespan', 'single-day']]);
   });
 });
 
