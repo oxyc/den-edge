@@ -173,6 +173,38 @@ describe('detail presentation', () => {
     expect(d.providers.map((p) => p.name)).toEqual(['Netflix']);
     expect(d.directors).toHaveLength(1);
   });
+  it('reads writers from the crew and creators from created_by, once per person and none unnamed', () => {
+    const film = parseDetail(
+      { type: 'movie', id: 550 },
+      {
+        title: 'Fight Club',
+        credits: {
+          crew: [
+            { id: 7, name: 'Jim Uhls', job: 'Screenplay' },
+            { id: 7, name: 'Jim Uhls', job: 'Writer' },
+            { id: 8, name: 'Chuck Palahniuk', job: 'Novel' },
+            { id: 9, name: '', job: 'Story' },
+          ],
+        },
+      },
+    )!;
+    expect(film.writers.map((w) => w.name)).toEqual(['Jim Uhls']);
+    expect(film.creators).toEqual([]);
+    const series = parseDetail(
+      { type: 'tv', id: 1396 },
+      {
+        name: 'Breaking Bad',
+        created_by: [
+          { id: 66633, name: 'Vince Gilligan' },
+          { id: 66633, name: 'Vince Gilligan' },
+          { name: 'No id' },
+        ],
+        aggregate_credits: { crew: [{ id: 5, name: 'Peter Gould', jobs: [{ job: 'Writer' }] }] },
+      },
+    )!;
+    expect(series.creators.map((c) => c.name)).toEqual(['Vince Gilligan']);
+    expect(series.writers.map((w) => w.name)).toEqual(['Peter Gould']);
+  });
   it('reads ratings without turning N/A into zero and respects intentionally disabled sources', () => {
     expect(parseRatings({ Response: 'False' })).toBeNull();
     expect(

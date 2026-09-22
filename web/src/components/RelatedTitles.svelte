@@ -1,10 +1,17 @@
-<!-- The rows under a title's cast: its franchise, More like this, and what its director and leads have done. A row
-     appears once it has something to show, and goes on loading as it is scrolled to its end (`BrowseRow`). -->
+<!-- The rows under a title's cast: its franchise, More like this, and what its director, creator, writer and leads
+     have done. A row appears once it has something to show, and goes on loading as it is scrolled to its end
+     (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
   import type { Title } from '../lib/library';
-  import { collectionRow, firstScreen, moreLikeThisRow, personRow } from '../lib/relatedRows';
+  import {
+    collectionRow,
+    firstScreen,
+    moreLikeThisRow,
+    personRow,
+    personRows,
+  } from '../lib/relatedRows';
   import BrowseRow from './BrowseRow.svelte';
 
   let {
@@ -45,8 +52,7 @@
     const defined = [
       ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
       moreLikeThisRow(detail, atlas, options),
-      ...detail.directors.slice(0, 1).map((p) => personRow(p, 'Directing', self, options)),
-      ...detail.cast.slice(0, 3).map((p) => personRow(p, 'Acting', self, options)),
+      ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
     ];
     let live = true;
     void Promise.all(defined.map((row) => firstScreen(row, shown))).then((found) => {

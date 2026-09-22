@@ -62,6 +62,10 @@ export interface TitleDetail {
   revenue?: number;
   collection?: { id: number; name: string };
   directors: Credit[];
+  /** Credited with the screenplay, the writing or the story. */
+  writers: Credit[];
+  /** A series' creators (`created_by`); empty for a movie. */
+  creators: Credit[];
   /** In order, Specials last; a season without episodes is left out. */
   seasons: Season[];
   cast: Credit[];
@@ -115,17 +119,28 @@ export function parseDetail(
       ];
     },
   );
-  const directors = list(obj(body.credits ?? body.aggregate_credits).crew)
+  // The crew credited with any of `jobs`, in TMDB's order, once per person and none unnamed.
+  const crew = (jobs: readonly string[], role: string) =>
+    list(obj(body.credits ?? body.aggregate_credits).crew)
+      .flatMap((c): Credit[] => {
+        const id = num(c.id),
+          name = text(c.name);
+        const held = (job: unknown) => jobs.includes(String(job));
+        if (id === undefined || !name || (!held(c.job) && !list(c.jobs).some((j) => held(j.job))))
+          return [];
+        return [{ id, name, role, profilePath: text(c.profile_path) }];
+      })
+      .filter((c, i, all) => all.findIndex((other) => other.id === c.id) === i);
+  const directors = crew(['Director'], 'Director');
+  const writers = crew(['Screenplay', 'Writer', 'Story'], 'Writer');
+  // A series' `created_by`: usually its only auteur credit, since series-level crew rarely names a director.
+  const creators = list(body.created_by)
     .flatMap((c): Credit[] => {
       const id = num(c.id),
         name = text(c.name);
-      if (
-        id === undefined ||
-        !name ||
-        (c.job !== 'Director' && !list(c.jobs).some((j) => j.job === 'Director'))
-      )
-        return [];
-      return [{ id, name, role: 'Director', profilePath: text(c.profile_path) }];
+      return id === undefined || !name
+        ? []
+        : [{ id, name, role: 'Creator', profilePath: text(c.profile_path) }];
     })
     .filter((c, i, all) => all.findIndex((other) => other.id === c.id) === i);
   const providers = obj(obj(obj(body['watch/providers']).results)[region]);
@@ -232,6 +247,8 @@ export function parseDetail(
         ? { id: Number(collection.id), name: String(collection.name) }
         : undefined,
     directors,
+    writers,
+    creators,
     genres: list(body.genres).flatMap((g) => text(g.name) ?? []),
     seasons,
     cast,

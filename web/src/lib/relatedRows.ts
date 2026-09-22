@@ -175,17 +175,55 @@ export function collectionRow(
   };
 }
 
+type Department = 'Directing' | 'Writing' | 'Acting';
+
+/** The most filmography rows one title page shows, and the most of them that are "Starring". */
+const MAX_PERSON_ROWS = 5;
+const MAX_LEAD_ROWS = 3;
+
 /**
- * What a person did in one department ("More from <director>", "Starring <lead>"), the whole of it: the filmography
- * is one fetch, cut into pages so the row keeps going as far as they have worked.
+ * The filmography rows a title gets, in display order: its director, creator and writer (one row each), then its
+ * leads. Each person gets one row, under their first role in that order, so an auteur who wrote and directed is
+ * "More from", not also "Written by". Stops at MAX_PERSON_ROWS, so the leads are what a fully credited title gives
+ * up. The TV builds the same rows (DetailModel.personRows).
+ */
+export function personRows(
+  detail: Pick<TitleDetail, 'directors' | 'creators' | 'writers' | 'cast'>,
+): { person: { id: number; name: string }; department: Department; before: string }[] {
+  const seen = new Set<number>();
+  const fresh = (people: { id: number; name: string }[]) => people.filter((p) => !seen.has(p.id));
+  const rows: ReturnType<typeof personRows> = [];
+  const add = (
+    person: { id: number; name: string } | undefined,
+    department: Department,
+    before: string,
+  ) => {
+    if (!person || rows.length >= MAX_PERSON_ROWS || seen.has(person.id)) return;
+    seen.add(person.id);
+    rows.push({ person, department, before });
+  };
+  add(detail.directors[0], 'Directing', 'More from ');
+  add(fresh(detail.creators)[0], 'Writing', 'Created by ');
+  add(fresh(detail.writers)[0], 'Writing', 'Written by ');
+  for (const lead of fresh(detail.cast).slice(0, MAX_LEAD_ROWS)) add(lead, 'Acting', 'Starring ');
+  return rows;
+}
+
+/**
+ * What a person did in one department ("More from <director>", "Written by <writer>", "Starring <lead>"), the whole
+ * of it: the filmography is one fetch, cut into pages so the row keeps going as far as they have worked.
  */
 export function personRow(
   person: { id: number; name: string },
-  department: 'Directing' | 'Acting',
+  department: Department,
   self: Title,
   { key, fetchImpl = tmdbFetch }: RelatedOptions,
+  before = department === 'Directing'
+    ? 'More from '
+    : department === 'Writing'
+      ? 'Written by '
+      : 'Starring ',
 ): RowDef {
-  const before = department === 'Directing' ? 'More from ' : 'Starring ';
   let films: Promise<Title[]> | undefined;
   return {
     id: `${department.toLowerCase()}-${person.id}`,
