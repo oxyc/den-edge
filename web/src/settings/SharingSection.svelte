@@ -33,7 +33,7 @@
   import type { Link } from '../lib/links.svelte';
   import { libraryCredentialId } from '../lib/relayFetch';
   import type { Routes } from '../lib/routes';
-  import { hostedInstalls } from '../lib/scout';
+  import { hostedInstalls, installsOf } from '../lib/scout';
 
   let {
     link,
@@ -77,6 +77,9 @@
   let codes = $state<Record<string, string>>({});
 
   const offered = $derived(GRANT_ADDONS.filter((addon) => installs[addon]));
+  // Installed but not lendable: an install with no settings of its own (a bare Den Atlas) gives a guest nothing to hold.
+  const installed = (addon: GrantAddon) =>
+    installsOf(plugins, routes, addon === 'subtitles' ? 'subs' : addon).length > 0;
   const chosen = $derived(offered.filter((addon) => picked.has(addon)));
   const clamp = (n: number, low: number, high: number) =>
     Math.min(high, Math.max(low, Math.round(Number.isFinite(n) ? n : low)));
@@ -298,7 +301,9 @@
             options={GRANT_ADDONS.map((addon) => ({
               value: addon,
               label: NAMES[addon].label,
-              note: installs[addon] ? NAMES[addon].role : `${NAMES[addon].role} · not installed`,
+              note: installs[addon]
+                ? NAMES[addon].role
+                : `${NAMES[addon].role} · ${installed(addon) ? 'no settings to lend' : 'not installed'}`,
               disabled: !installs[addon],
             }))}
             checked={(addon) => picked.has(addon) && !!installs[addon]}
