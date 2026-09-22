@@ -13,6 +13,7 @@ import {
   interleave,
   RECIPES,
   retargeted,
+  type DiscoverQuery,
   type Pages,
   type RowDef,
 } from './catalog';
@@ -329,22 +330,210 @@ export function matchChips(text: string, chips: Chip[], { minWord = 1 } = {}): C
 export const suggestChips = (query: string, chips: Chip[]) =>
   matchChips(query, chips, { minWord: 3 }).slice(0, 6);
 
-/**
- * The chip that is open once the type changes (SearchModel.setScope): a genre moves to its closest counterpart, a
- * recipe and a mood stay where the new type has them, and anything else falls back to For You rather than
- * leaving a chip open that can show nothing.
- */
-export function remapChip(chip: string, from: MediaType, to: MediaType, chips: Chip[]): string {
-  if (from === to) return chip;
-  const genre = /^genre-(\d+)$/.exec(chip)?.[1];
-  const next =
-    genre === undefined ? chip : `genre-${equivalentGenre(Number(genre), from, to) ?? ''}`;
-  return chips.some((c) => c.id === next) ? next : FOR_YOU;
+// Facets. What is picked stacks: Sweden, then + Action, is Swedish action films. A selection is a list of chip ids
+// in the order picked, For You being the empty one. Each kind fills one slot, which a second pick of that kind
+// takes over — but the genres, which all apply together.
+
+/** Which slot a facet fills. A mood, a plot facet and a subgenre are all atlas's rows, and fill one slot. */
+export type Slot = 'genre' | 'language' | 'country' | 'decade' | 'recipe' | 'atlas';
+
+export function slotOf(id: string): Slot | undefined {
+  if (id === FOR_YOU) return undefined;
+  if (id.startsWith('genre-')) return 'genre';
+  if (id.startsWith('lang-')) return 'language';
+  if (id.startsWith('country-')) return 'country';
+  if (id.startsWith('decade-')) return 'decade';
+  if (id.startsWith('recipe-')) return 'recipe';
+  return 'atlas';
 }
 
-/** The chip `id` names among `chips`, or For You when it names none of them. */
-export const openChip = (id: string | undefined, chips: Chip[]): Chip =>
-  chips.find((chip) => chip.id === id) ?? chips[0]!;
+const genreOf = (id: string) => Number(id.slice('genre-'.length));
+const decadeOf = (id: string) => Number(id.slice('decade-'.length));
+/** `sv` from `lang-sv`, `SE` from `country-SE`. */
+const codeOf = (id: string) => id.slice(id.indexOf('-') + 1);
+const recipeQuery = (id: string, type: MediaType) => {
+  const recipe = recipeOf(id.slice('recipe-'.length));
+  return recipe && retargeted(recipe.query, type);
+};
+
+/**
+ * Whether two facets can't stand together. Two of one slot can't — the newer takes it — but genres can. An atlas row
+ * says which genres, language and year each title has, and nothing about its country or a recipe's keywords, so a
+ * mood takes neither. A recipe can't take a language, a country or a genre its own query rules out.
+ */
+function clash(a: string, b: string, type: MediaType): boolean {
+  const [sa, sb] = [slotOf(a), slotOf(b)];
+  if (sa === sb) return sa !== 'genre';
+  if (sa === 'atlas' || sb === 'atlas') {
+    const other = sa === 'atlas' ? sb : sa;
+    return other === 'country' || other === 'recipe';
+  }
+  if (sa !== 'recipe' && sb !== 'recipe') return false;
+  const [recipe, other] = sa === 'recipe' ? [a, b] : [b, a];
+  const query = recipeQuery(recipe, type);
+  if (!query) return true;
+  switch (slotOf(other)) {
+    case 'language':
+      return !!query.originalLanguage && !query.originalLanguage.split('|').includes(codeOf(other));
+    case 'country':
+      return !!query.originCountry?.length && !query.originCountry.includes(codeOf(other));
+    case 'genre':
+      return (query.withoutGenres ?? []).includes(genreOf(other));
+    default:
+      return false;
+  }
+}
+
+/**
+ * The selection once `id` is picked: For You empties it, a facet already in it comes out, and anything else goes in
+ * last — taking out whatever it can't stand beside, which is `removed`: the newer pick wins.
+ */
+export function applyPick(
+  set: readonly string[],
+  id: string,
+  type: MediaType,
+): { set: string[]; removed: string[] } {
+  if (id === FOR_YOU) return { set: [], removed: [] };
+  if (set.includes(id)) return { set: set.filter((x) => x !== id), removed: [] };
+  const removed = set.filter((x) => clash(x, id, type));
+  return { set: [...set.filter((x) => !removed.includes(x)), id], removed };
+}
+
+/**
+ * Whether a chip is worth offering beside the selection: not one already picked, and not one that would throw out a
+ * pick of another kind. One that takes over its own kind's slot — another country, another decade — still is.
+ */
+export function offered(set: readonly string[], id: string, type: MediaType): boolean {
+  if (id === FOR_YOU) return true;
+  if (set.includes(id)) return false;
+  return !set.some((x) => slotOf(x) !== slotOf(id) && clash(x, id, type));
+}
+
+/**
+ * The selection under the other type (SearchModel.setScope, for every facet): a genre moves to its closest
+ * counterpart, and anything the new type has no chip for — a recipe with no series form, a mood only films carry —
+ * is `dropped`.
+ */
+export function remapSet(
+  set: readonly string[],
+  from: MediaType,
+  to: MediaType,
+  chips: Chip[],
+): { set: string[]; dropped: string[] } {
+  const known = new Set(chips.map((chip) => chip.id));
+  const next: string[] = [];
+  const dropped: string[] = [];
+  for (const id of set) {
+    const moved =
+      from !== to && slotOf(id) === 'genre'
+        ? `genre-${equivalentGenre(genreOf(id), from, to) ?? ''}`
+        : id;
+    if (known.has(moved) && !next.includes(moved)) next.push(moved);
+    else if (!known.has(moved)) dropped.push(id);
+  }
+  return { set: next, dropped };
+}
+
+/** The genre `chip` is for `from`, remapped: what `remapSet` does for one chip, For You where nothing fits. */
+export function remapChip(chip: string, from: MediaType, to: MediaType, chips: Chip[]): string {
+  return remapSet([chip], from, to, chips).set[0] ?? FOR_YOU;
+}
+
+/**
+ * The one TMDB discover query a selection of TMDB facets is — undefined for none, or for one with an atlas row in it.
+ *
+ * A recipe is a preset: its own query goes in first, and the other facets add to it. Genres AND together, with a
+ * recipe's own where it joins them the same way; an OR-joined recipe (Heist is Crime or Thriller, with its keyword)
+ * can't be ANDed with more in TMDB's one genre parameter, so its keyword carries it and its genres give way. A
+ * genre alone is its browse row's shelf, kept to titles that are that genre first (`primaryGenre`).
+ */
+export function facetQuery(
+  set: readonly string[],
+  type: MediaType,
+  minYear?: number,
+): DiscoverQuery | undefined {
+  if (!set.length || set.some((id) => slotOf(id) === 'atlas')) return undefined;
+  const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
+  const recipe = set.find((id) => slotOf(id) === 'recipe');
+  const language = set.find((id) => slotOf(id) === 'language');
+  const country = set.find((id) => slotOf(id) === 'country');
+  const decade = set.find((id) => slotOf(id) === 'decade');
+  const preset = recipe ? recipeQuery(recipe, type) : undefined;
+  const query: DiscoverQuery = {
+    ...preset,
+    mediaType: type,
+    primaryGenre: undefined,
+    voteCountGte: Math.max(decade ? 50 : 30, preset?.voteCountGte ?? 0),
+  };
+  if (genres.length) {
+    const own = preset && preset.genreJoin !== 'or' ? (preset.genres ?? []) : [];
+    query.genres = [...new Set([...own, ...genres])];
+    query.genreJoin = 'and';
+  }
+  if (set.length === 1 && genres.length === 1) {
+    query.primaryGenre = genres[0];
+    query.voteCountGte = 50;
+  }
+  if (language) query.originalLanguage = codeOf(language);
+  if (country) query.originCountry = [codeOf(country)];
+  if (decade) {
+    const start = decadeOf(decade);
+    query.releaseDateGte = `${Math.max(start, minYear ?? start)}-01-01`;
+    query.releaseDateLte = `${start + 9}-12-31`;
+  } else if (minYear) {
+    query.releaseDateGte = `${minYear}-01-01`;
+  }
+  return query;
+}
+
+/**
+ * What an atlas row keeps once the rest of the selection applies to it, on the fields its titles carry: every genre,
+ * the language, the decade. (A country and a recipe never share a selection with it: `clash`.)
+ */
+function atlasFilter(set: readonly string[]): (title: Title) => boolean {
+  const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
+  const language = set.find((id) => slotOf(id) === 'language');
+  const decade = set.find((id) => slotOf(id) === 'decade');
+  return (title) =>
+    genres.every((genre) => title.genreIds?.includes(genre)) &&
+    (!language || title.originalLanguage === codeOf(language)) &&
+    (!decade ||
+      (title.year !== undefined &&
+        title.year >= decadeOf(decade) &&
+        title.year <= decadeOf(decade) + 9));
+}
+
+/**
+ * The options that would show nothing beside `selection`, judged from its feed alone — no request. Only once that
+ * feed is `complete` (every page loaded) is what is loaded all there is, and only an option that narrows it can be
+ * judged by it: a genre, or a language or a decade where none is picked yet, on the fields every discover item has.
+ * A country, a recipe, a mood and anything replacing a pick are never hidden this way: nothing loaded says.
+ *
+ * The one place the rail learns what is empty, so a real count can take its place.
+ */
+export function emptyOptions(
+  selection: readonly string[],
+  loaded: readonly Title[],
+  complete: boolean,
+  chips: Chip[],
+): Set<string> {
+  const empty = new Set<string>();
+  if (!complete || !selection.length) return empty;
+  const picked = new Set(selection.map(slotOf));
+  for (const chip of chips) {
+    const slot = slotOf(chip.id);
+    const narrows =
+      slot === 'genre' || ((slot === 'language' || slot === 'decade') && !picked.has(slot));
+    if (!narrows || selection.includes(chip.id)) continue;
+    const keep = atlasFilter([chip.id]);
+    if (!loaded.some(keep)) empty.add(chip.id);
+  }
+  return empty;
+}
+
+/** The chips of `ids`, in that order, less any this type doesn't have. */
+export const chipsOf = (ids: readonly string[], chips: Chip[]) =>
+  ids.flatMap((id) => chips.find((chip) => chip.id === id) ?? []);
 
 export interface FeedSources {
   pages: Pages;
@@ -424,43 +613,25 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
   };
 }
 
-/** What `chip` shows for `type`, a page at a time. */
-export function exploreFeed(chip: Chip, type: MediaType, sources: FeedSources): RowDef {
-  // Where a chip's titles come from is in its id: a subgenre sits with the recipes but is atlas's.
-  if (chip.id.startsWith('genre-')) {
-    const genre = Number(chip.id.slice('genre-'.length));
-    return discoverRow(sources.pages, `${chip.id}-${type}`, chip.label, {
-      mediaType: type,
-      genres: [genre],
-      primaryGenre: genre,
-      voteCountGte: 50,
-      releaseDateGte: sources.minYear ? `${sources.minYear}-01-01` : undefined,
-    });
+/**
+ * What a selection shows for `type`, a page at a time: For You when it is empty; an atlas row, filtered here by the
+ * facets beside it, when it holds one; otherwise the one discover query its facets are.
+ */
+export function exploreFeed(set: readonly string[], type: MediaType, sources: FeedSources): RowDef {
+  if (!set.length) return forYou(type, sources);
+  const key = [...set].sort().join('+');
+  const atlasId = set.find((id) => slotOf(id) === 'atlas');
+  if (atlasId) {
+    const row = sources.atlas
+      ? atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
+      : undefined;
+    if (!row) return forYou(type, sources);
+    return { ...drawn(row, sources.title), id: `facets-${key}-${type}`, filter: atlasFilter(set) };
   }
-  const language = /^lang-([a-z]{2})$/.exec(chip.id)?.[1];
-  if (language)
-    return discoverRow(sources.pages, `${chip.id}-${type}`, chip.label, {
-      mediaType: type,
-      originalLanguage: language,
-      voteCountGte: 30,
-      releaseDateGte: sources.minYear ? `${sources.minYear}-01-01` : undefined,
-    });
-  // A country or a decade is the browse tail's own row, with its vote floor and the year floor.
-  if (chip.id.startsWith('country-') || chip.id.startsWith('decade-')) {
-    const row = categories(type, new Date().getFullYear(), { minYear: sources.minYear }).find(
-      (category) => category.id === `${chip.id}-${type}`,
-    );
-    if (row) return discoverRow(sources.pages, row.id, chip.label, row.query);
-  }
-  if (chip.id.startsWith('recipe-')) {
-    const recipe = recipeOf(chip.id.slice('recipe-'.length));
-    const query = recipe && retargeted(recipe.query, type);
-    if (query) return discoverRow(sources.pages, `${chip.id}-${type}`, chip.label, query);
-  } else if ((chip.group === 'mood' || chip.group === 'recipe') && sources.atlas) {
-    const row = atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${chip.id}-${type}`);
-    if (row) return drawn(row, sources.title);
-  }
-  return forYou(type, sources);
+  const query = facetQuery(set, type, sources.minYear);
+  return query
+    ? discoverRow(sources.pages, `facets-${key}-${type}`, '', query)
+    : forYou(type, sources);
 }
 
 /**

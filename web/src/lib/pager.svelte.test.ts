@@ -42,14 +42,17 @@ describe('Pager', () => {
     await ends.more();
     await ends.more();
     expect(ends.done).toBe(true);
+    expect(ends.exhausted).toBe(true);
     expect(ends.titles).toHaveLength(20);
 
+    // Given up on is done, but not everything there is: more pages remain.
     const hidden = new Pager(
       async (page) => pageOf(page * 100),
       () => false,
     );
     await hidden.more();
     expect(hidden.done).toBe(true);
+    expect(hidden.exhausted).toBe(false);
   });
 
   it('stops at a failed page rather than asking again', async () => {

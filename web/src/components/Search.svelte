@@ -9,13 +9,16 @@
   import TypeFilter from './TypeFilter.svelte';
   import { equivalentGenre, tmdbPages } from '../lib/catalog';
   import {
+    applyPick,
+    chipsOf,
+    emptyOptions,
     exploreChips,
     exploreFeed,
-    FOR_YOU,
     KIND,
-    openChip,
+    offered,
     PROMPTS,
-    remapChip,
+    remapSet,
+    slotOf,
     suggestChips,
   } from '../lib/explore';
   import type { MediaType, Title } from '../lib/library';
@@ -69,29 +72,36 @@
       minYear: prefs.minReleaseYear,
     });
   const chips = $derived(chipsFor(exploreType));
-  const chip = $derived(openChip(explore.chip, chips));
+  /** The facets picked, as the address holds them; a string, so an identical list is not a new one. */
+  const selectionKey = $derived((explore.chips ?? []).join(','));
+  const selection = $derived(selectionKey ? selectionKey.split(',') : []);
+  const names = (ids: string[]) =>
+    chipsOf(ids, chips)
+      .map((c) => c.label)
+      .join(', ');
+  /** What gave way to the last pick, said once: "Nordic Noir replaced Korean." */
+  let status = $state('');
 
-  /** Each chip and type is somewhere a person went, so each gets its own history entry. */
+  /** Each pick and type is somewhere a person went, so each gets its own history entry. */
   function go(next: Explore, text = query) {
-    navigate(
-      searchHref(text, {
-        type: next.type,
-        chip: next.chip === FOR_YOU ? undefined : next.chip,
-      }),
-    );
+    navigate(searchHref(text, next));
   }
 
-  /** A genre open under one type stays open as its closest counterpart under the other (SearchModel.setScope). */
+  /** The selection moves with the type, genres to their closest counterparts (SearchModel.setScope). */
   function chooseType(type: MediaType | null) {
     const to = type ?? 'movie';
-    go({ type: type ?? undefined, chip: remapChip(chip.id, exploreType, to, chipsFor(to)) });
+    const { set, dropped } = remapSet(selection, exploreType, to, chipsFor(to));
+    status = dropped.length
+      ? `${names(dropped)}: nothing like it in ${to === 'tv' ? 'series' : 'movies'}.`
+      : '';
+    go({ type: type ?? undefined, chips: set });
   }
 
-  // The open chip's feed. Only the chip, and what reaches TMDB and atlas, start it again: a new seed or a write
+  // The selection's feed. Only the selection, and what reaches TMDB and atlas, start it again: a new seed or a write
   // elsewhere must not empty a grid someone is scrolling. It waits while a query is typed, and is still where it
   // was once the query is cleared.
   const feed = $derived.by(() => {
-    const row = exploreFeed(chip, exploreType, {
+    const row = exploreFeed(selectionKey ? selectionKey.split(',') : [], exploreType, {
       pages: tmdbPages(tmdbKey),
       atlas,
       seeds: untrack(() => seeds),
@@ -165,45 +175,68 @@
   });
 
   /**
-   * A genre chip open while a query is typed narrows its results, as the type does. A mood or a recipe can't be
-   * combined with a query — atlas ranks a mood's row, not a search — so those open their own feed instead.
+   * The genres picked narrow typed results, as the type does. The other facets can't be combined with a query —
+   * atlas ranks a mood's row, and TMDB's search takes no genre or country — so while a query is typed they wait,
+   * unapplied and out of the Selected group, until it is cleared.
    */
   const narrowing = $derived(
-    typing && chip.group === 'genre' && explore.chip === chip.id
-      ? Number(chip.id.slice('genre-'.length))
-      : undefined,
+    typing ? selection.filter((id) => slotOf(id) === 'genre').map((id) => Number(id.slice(6))) : [],
   );
   /** A title in `genre` of the browsed type, or in its closest counterpart for a title of the other type. */
   const inGenre = (title: Title, genre: number) => {
     const ids = title.genreIds ?? [];
     return ids.includes(equivalentGenre(genre, exploreType, title.type) ?? genre);
   };
-  /** Typed results of the chosen type and genre; people only under All, as on the TV, and never in a genre. */
+  /** Typed results of the chosen type and genres; people only under All, as on the TV, and never in a genre. */
   const typedHits = $derived(
     (hits ?? []).filter((hit) =>
       hit.kind === 'person'
-        ? explore.type === undefined && narrowing === undefined
+        ? explore.type === undefined && narrowing.length === 0
         : (explore.type === undefined || hit.title.type === explore.type) &&
-          (narrowing === undefined || inGenre(hit.title, narrowing)),
+          narrowing.every((genre) => inGenre(hit.title, genre)),
     ),
   );
 
   /**
-   * A chip picked in the rail. Before anything is typed, it opens. While a query is typed, a genre narrows the
-   * results (picked again, it lets go), and anything else opens its own feed in place of the query — a new entry,
+   * A chip picked, from the rail, a pill or a suggestion. It stacks onto the selection, or comes out if it was in it,
+   * and whatever it can't stand beside gives way, said in the status line. While a query is typed, a genre narrows
+   * its results and the query stays; anything else opens the selection's feed in the query's place — a new entry,
    * so Back returns to the search.
    */
   function pick(id: string) {
-    const picked = chips.find((c) => c.id === id);
-    if (typing && picked?.group === 'genre') {
-      go({ type: explore.type, chip: explore.chip === id ? undefined : id });
-      return;
-    }
-    go({ type: explore.type, chip: id }, '');
+    const { set, removed } = applyPick(selection, id, exploreType);
+    const label = chips.find((c) => c.id === id)?.label ?? '';
+    status = removed.length ? `${label} replaced ${names(removed)}.` : '';
+    const keep = typing && slotOf(id) === 'genre';
+    go({ type: explore.type, chips: set }, keep ? query : '');
   }
 
+  /** What the rail shows as picked: everything, or while typing only the genres that narrow the results. */
+  const shownSelection = $derived(
+    typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
+  );
+  /**
+   * Options not worth offering: any that can't stand beside the selection, and — once the feed is loaded to its
+   * end — any that nothing in it matches (`emptyOptions`, no request).
+   */
+  const empty = $derived(
+    typing
+      ? new Set<string>()
+      : emptyOptions(
+          selection,
+          feedHits
+            .map((hit) => (hit.kind === 'title' ? hit.title : null))
+            .filter((t) => t !== null),
+          feed.pager.exhausted,
+          chips,
+        ),
+  );
+  const hidden = (id: string) => !offered(shownSelection, id, exploreType) || empty.has(id);
+
   /** The categories the typed text points at, offered above its results: local, instant. */
-  const suggestions = $derived(typing ? suggestChips(query, chips) : []);
+  const suggestions = $derived(
+    typing ? suggestChips(query, chips).filter((c) => !hidden(c.id)) : [],
+  );
 </script>
 
 <section
@@ -228,23 +261,18 @@
           all={false}
         />
       {/if}
-      <!-- While typing, no chip is open unless a genre narrows the results: the rest open in place of them. -->
-      <ExploreChips
-        {chips}
-        value={typing ? (narrowing === undefined ? '' : chip.id) : chip.id}
-        onchange={pick}
-      />
+      <ExploreChips {chips} selected={shownSelection} {hidden} {typing} onchange={pick} />
     </div>
     <div class="feed">
+      <p class="status" role="status">{status}</p>
       {#if typing}
         {#if suggestions.length}
           <div class="prompts" role="group" aria-label="Browse instead">
             <span class="try">Browse</span>
             {#each suggestions as suggestion (suggestion.id)}
-              <button
-                type="button"
-                onclick={() => go({ type: explore.type, chip: suggestion.id }, '')}
-                >{suggestion.label} <span class="kind">· {KIND[suggestion.group]}</span></button
+              <button type="button" onclick={() => pick(suggestion.id)}
+                >{suggestion.label}<span class="kind">{` · ${KIND[suggestion.group]}`}</span
+                ></button
               >
             {/each}
           </div>
@@ -259,13 +287,12 @@
           </p>
         {/if}
       {:else}
-        {#if chip.id === FOR_YOU}
+        {#if !selection.length}
           <div class="prompts" role="group" aria-label="Try describing it">
             <span class="try">Try describing it</span>
             {#each PROMPTS as prompt (prompt)}
-              <button
-                type="button"
-                onclick={() => go({ type: explore.type, chip: chip.id }, prompt)}>“{prompt}”</button
+              <button type="button" onclick={() => go({ type: explore.type }, prompt)}
+                >“{prompt}”</button
               >
             {/each}
           </div>
@@ -273,9 +300,9 @@
         {#if feedHits.length}
           <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
         {:else if feed.pager.done}
-          <p class="note" role="status">Nothing here yet. Try another category.</p>
+          <p class="note">Nothing here yet. Try taking a pick out.</p>
         {:else}
-          <Loading label="Loading {chip.label}" />
+          <Loading label="Loading" />
         {/if}
       {/if}
     </div>
@@ -294,6 +321,16 @@
 
   .note {
     color: var(--muted);
+  }
+
+  .status {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .status:not(:empty) {
+    margin-bottom: 12px;
   }
 
   /* The last results, while the next ones load. */

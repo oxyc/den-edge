@@ -61,7 +61,7 @@
     route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
   /** What Explore is browsing: a query is typed over it, and clearing the query returns to it. */
   const explore = (): Explore =>
-    route.page === 'search' ? { type: route.type, chip: route.chip } : {};
+    route.page === 'search' ? { type: route.type, chips: route.chips } : {};
   function searchChanged() {
     // Arriving at search is a navigation, and happens at once. Every letter after that rewrites the same entry,
     // or Back would walk the spelling of what was typed instead of returning to the page it started from.

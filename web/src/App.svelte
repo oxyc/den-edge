@@ -97,12 +97,12 @@
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
   // What Explore is browsing travels the same way, for the same reason.
   let explore = $state<Explore>(
-    untrack(() => (route.page === 'search' ? { type: route.type, chip: route.chip } : {})),
+    untrack(() => (route.page === 'search' ? { type: route.type, chips: route.chips } : {})),
   );
   $effect(() => {
     if (route.page !== 'search') return;
     query = route.query;
-    explore = { type: route.type, chip: route.chip };
+    explore = { type: route.type, chips: route.chips };
   });
   // A title's and a person's page name themselves once they know what they are showing, so this sets what can
   // be known from the address and leaves those two to overwrite it.

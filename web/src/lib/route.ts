@@ -22,14 +22,17 @@ export type Route =
   | { page: 'service'; id: number; country: string };
 
 /**
- * What Search is browsing, beside the query: the type it is showing and the chip that is open (`explore.ts`). In the
- * address with the query, so an Explore view can be linked and Back walks through the chips that were opened. Both
- * are absent for the defaults: Movies, and For You.
+ * What Search is browsing, beside the query: the type it is showing and the facets picked, in the order they were
+ * picked (`explore.ts`). In the address with the query — `c=country-SE,genre-28` — so an Explore view can be linked
+ * and Back takes back the last pick. Both are absent for the defaults: Movies, and For You (no facets).
  */
 export interface Explore {
   type?: MediaType;
-  chip?: string;
+  chips?: string[];
 }
+
+/** A facet id is lowercase words, digits, a country code and dashes: nothing that needs escaping in `c=`. */
+const FACET = /^[a-z0-9]+(?:-[A-Za-z0-9]+)*$/;
 
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
@@ -75,12 +78,12 @@ export function parseRoute(url: string): Route {
   const [, first, second] = path.split('/');
   if (first === 'search') {
     const type = params.get('type');
-    const chip = params.get('c');
+    const chips = [...new Set((params.get('c') ?? '').split(',').filter((id) => FACET.test(id)))];
     return {
       page: 'search',
       query: params.get('q') ?? '',
       ...(type === 'movie' || type === 'tv' ? { type } : {}),
-      ...(chip ? { chip } : {}),
+      ...(chips.length ? { chips } : {}),
     };
   }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
@@ -141,11 +144,12 @@ export const personHref = (id: number, name?: string) => {
  * Search carries its query and what it is browsing, so a result page or an Explore view can be linked, kept, or
  * reloaded and still be the same.
  */
-export function searchHref(query: string, { type, chip }: Explore = {}): string {
+export function searchHref(query: string, { type, chips = [] }: Explore = {}): string {
+  const facets = chips.filter((id) => FACET.test(id));
   const params = [
     query.trim() ? `q=${encodeURIComponent(query)}` : '',
     type ? `type=${type}` : '',
-    chip ? `c=${encodeURIComponent(chip)}` : '',
+    facets.length ? `c=${facets.join(',')}` : '',
   ].filter(Boolean);
   return params.length ? `/search?${params.join('&')}` : '/search';
 }

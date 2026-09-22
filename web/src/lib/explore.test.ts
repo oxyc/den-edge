@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import type { Pages } from './catalog';
+import { discoverParams, type Pages } from './catalog';
 import {
+  applyPick,
+  chipsOf,
+  emptyOptions,
   exploreChips,
   exploreFeed,
   editDistance,
+  facetQuery,
   fold,
   FOR_YOU,
   KIND,
   matchChips,
-  openChip,
+  offered,
   remapChip,
+  remapSet,
   suggestChips,
 } from './explore';
 import type { MediaType, Title } from './library';
@@ -70,11 +75,12 @@ describe('Explore chips', () => {
     expect(ids.some((id) => /^(mood|plot|subgenre)-/.test(id))).toBe(false);
   });
 
-  it('fall back to For You for an id that names no chip', () => {
+  it('name a selection’s chips, leaving out an id the type has none for', () => {
     const chips = exploreChips('movie');
-    expect(openChip('genre-27', chips).id).toBe('genre-27');
-    expect(openChip('genre-999', chips).id).toBe(FOR_YOU);
-    expect(openChip(undefined, chips).id).toBe(FOR_YOU);
+    expect(chipsOf(['genre-27', 'genre-999', 'country-SE'], chips).map((c) => c.label)).toEqual([
+      'Horror',
+      'Sweden',
+    ]);
   });
 });
 
@@ -187,6 +193,119 @@ describe('switching Movies and Series', () => {
     const hidden = exploreChips('tv', { hiddenGenres: new Set([10759]) });
     expect(remapChip('genre-28', 'movie', 'tv', hidden)).toBe(FOR_YOU);
   });
+
+  it('moves a whole selection, and says what couldn’t come', () => {
+    expect(
+      remapSet(
+        ['country-SE', 'genre-28', 'recipe-sci-fi-horror', 'decade-1990'],
+        'movie',
+        'tv',
+        tv,
+      ),
+    ).toEqual({
+      set: ['country-SE', 'genre-10759', 'decade-1990'],
+      dropped: ['recipe-sci-fi-horror'],
+    });
+    // Two genres that fold into one are one.
+    expect(remapSet(['genre-28', 'genre-12'], 'movie', 'tv', tv).set).toEqual(['genre-10759']);
+  });
+});
+
+describe('facets', () => {
+  it('stack, one of each kind but genres, which all apply', () => {
+    let set: string[] = [];
+    set = applyPick(set, 'country-SE', 'movie').set;
+    set = applyPick(set, 'genre-28', 'movie').set;
+    set = applyPick(set, 'genre-35', 'movie').set;
+    expect(set).toEqual(['country-SE', 'genre-28', 'genre-35']);
+    // A second country takes the first one's place.
+    expect(applyPick(set, 'country-DK', 'movie')).toEqual({
+      set: ['genre-28', 'genre-35', 'country-DK'],
+      removed: ['country-SE'],
+    });
+    // Picked again, a facet comes out; For You empties the lot.
+    expect(applyPick(set, 'genre-28', 'movie').set).toEqual(['country-SE', 'genre-35']);
+    expect(applyPick(set, FOR_YOU, 'movie').set).toEqual([]);
+  });
+
+  it('let the newer pick win where a recipe contradicts a facet', () => {
+    // K-Drama is Korean; picking it throws out Swedish.
+    expect(applyPick(['lang-sv', 'genre-18'], 'recipe-k-drama', 'tv')).toEqual({
+      set: ['genre-18', 'recipe-k-drama'],
+      removed: ['lang-sv'],
+    });
+    // Pure Drama rules out Crime; picking Crime after it throws the recipe out.
+    expect(applyPick(['recipe-pure-drama'], 'genre-80', 'movie')).toEqual({
+      set: ['genre-80'],
+      removed: ['recipe-pure-drama'],
+    });
+    // A mood can't take a country or a recipe: atlas's rows don't say.
+    expect(applyPick(['country-SE', 'genre-28'], 'mood-cozy', 'movie')).toEqual({
+      set: ['genre-28', 'mood-cozy'],
+      removed: ['country-SE'],
+    });
+  });
+
+  it('offer beside a selection only what won’t throw a pick of another kind out', () => {
+    const set = ['recipe-k-drama'];
+    expect(offered(set, 'lang-ko', 'tv')).toBe(true);
+    expect(offered(set, 'lang-sv', 'tv')).toBe(false);
+    expect(offered(set, 'recipe-k-drama', 'tv')).toBe(false);
+    // Another recipe takes this one's place, which is a pick like any other.
+    expect(offered(set, 'recipe-heist', 'tv')).toBe(true);
+    expect(offered(['mood-cozy'], 'country-SE', 'movie')).toBe(false);
+    expect(offered(['mood-cozy'], 'decade-1990', 'movie')).toBe(true);
+  });
+
+  it('merge into one discover query', () => {
+    expect(discoverParams(facetQuery(['country-SE', 'genre-28'], 'movie')!)).toEqual({
+      sort_by: 'popularity.desc',
+      include_adult: 'false',
+      with_genres: '28',
+      with_origin_country: 'SE',
+      'vote_count.gte': '30',
+    });
+    // A recipe is a preset the rest add to: Heist's keyword stays, its OR-joined genres give way to Action.
+    const heist = discoverParams(facetQuery(['recipe-heist', 'genre-28', 'decade-1990'], 'movie')!);
+    expect(heist.with_keywords).toBe('10051');
+    expect(heist.with_genres).toBe('28');
+    expect(heist['primary_release_date.gte']).toBe('1990-01-01');
+    expect(heist['vote_count.gte']).toBe('100');
+    // An AND-joined recipe's genres join the picked ones.
+    expect(
+      discoverParams(facetQuery(['recipe-romantic-comedy', 'genre-18'], 'movie')!).with_genres,
+    ).toBe('35,10749,18');
+    // An atlas row can't be a discover query.
+    expect(facetQuery(['mood-cozy', 'genre-35'], 'movie')).toBeUndefined();
+  });
+});
+
+describe('emptyOptions', () => {
+  const chips = exploreChips('movie');
+  const loaded = [
+    { ...film(1), genreIds: [28, 18], originalLanguage: 'sv', year: 1994 },
+    { ...film(2), genreIds: [28], originalLanguage: 'sv', year: 2001 },
+  ];
+
+  it('hides what nothing in a fully loaded feed matches, and nothing before it is fully loaded', () => {
+    const empty = emptyOptions(['country-SE', 'genre-28'], loaded, true, chips);
+    expect(empty.has('genre-35')).toBe(true);
+    expect(empty.has('genre-18')).toBe(false);
+    expect(empty.has('lang-en')).toBe(true);
+    expect(empty.has('lang-sv')).toBe(false);
+    expect(empty.has('decade-1980')).toBe(true);
+    expect(empty.has('decade-1990')).toBe(false);
+    expect(emptyOptions(['country-SE', 'genre-28'], loaded, false, chips).size).toBe(0);
+  });
+
+  it('never judges what nothing loaded can say: a country, a recipe, or a replacement', () => {
+    const empty = emptyOptions(['lang-sv'], loaded, true, chips);
+    expect(empty.has('country-KR')).toBe(false);
+    expect(empty.has('recipe-heist')).toBe(false);
+    // A second language replaces Swedish rather than narrowing it.
+    expect(empty.has('lang-en')).toBe(false);
+    expect(emptyOptions([], loaded, true, chips).size).toBe(0);
+  });
 });
 
 describe('Explore feeds', () => {
@@ -205,8 +324,7 @@ describe('Explore feeds', () => {
 
   it('browses a genre as its primary-genre shelf, retargeted for the type', async () => {
     calls.length = 0;
-    const chip = openChip('genre-10765', exploreChips('tv'));
-    const row = exploreFeed(chip, 'tv', { ...sources(), minYear: 1990 });
+    const row = exploreFeed(['genre-10765'], 'tv', { ...sources(), minYear: 1990 });
     await row.load(2);
     expect(calls[0]?.path).toBe('/discover/tv');
     expect(calls[0]?.params.with_genres).toBe('10765');
@@ -216,10 +334,9 @@ describe('Explore feeds', () => {
   });
 
   it('browses a language, a country and a decade as TMDB discover', async () => {
-    const chips = exploreChips('tv');
     const asked = async (id: string) => {
       calls.length = 0;
-      await exploreFeed(openChip(id, chips), 'tv', sources()).load(1);
+      await exploreFeed([id], 'tv', sources()).load(1);
       return calls[0]?.params ?? {};
     };
     expect((await asked('lang-sv')).with_original_language).toBe('sv');
@@ -231,8 +348,7 @@ describe('Explore feeds', () => {
 
   it('browses a movie recipe as series under Series', async () => {
     calls.length = 0;
-    const chip = openChip('recipe-heist', exploreChips('tv'));
-    await exploreFeed(chip, 'tv', sources()).load(1);
+    await exploreFeed(['recipe-heist'], 'tv', sources()).load(1);
     expect(calls[0]?.path).toBe('/discover/tv');
     expect(calls[0]?.params.with_genres).toBe('80');
     expect(calls[0]?.params.with_keywords).toBe('10051');
@@ -241,7 +357,7 @@ describe('Explore feeds', () => {
   it('is For You: recommendations for the latest titles of this type, then the popular tail', async () => {
     calls.length = 0;
     const seeds = [film(1), film(2, 'tv'), film(3), film(4), film(5)];
-    const row = exploreFeed(openChip(FOR_YOU, exploreChips('movie')), 'movie', sources(seeds));
+    const row = exploreFeed([], 'movie', sources(seeds));
     const first = await row.load(1);
     // Three movie seeds asked (not the series, not a fourth), and what the library holds is left out.
     expect(calls.map((c) => c.path)).toEqual([
@@ -256,16 +372,26 @@ describe('Explore feeds', () => {
 
   it('is the tail alone for a guest, top-rated for series', async () => {
     calls.length = 0;
-    await exploreFeed(openChip(FOR_YOU, exploreChips('tv')), 'tv', sources()).load(1);
+    await exploreFeed([], 'tv', sources()).load(1);
     expect(calls).toEqual([{ path: '/tv/top_rated', params: {}, page: 1 }]);
   });
 
   it('is atlas’s own row for a mood, and For You where atlas can’t be reached', () => {
-    const chip = openChip('mood-cozy', exploreChips('movie', { atlas: true }));
-    expect(exploreFeed(chip, 'movie', { ...sources(), atlas: '/atlas' }).id).toBe(
-      'atlas-mood-cozy-movie',
-    );
-    expect(exploreFeed(chip, 'movie', sources()).id).toBe(`${FOR_YOU}-movie`);
+    const row = exploreFeed(['mood-cozy'], 'movie', { ...sources(), atlas: '/atlas' });
+    expect(row.id).toBe('facets-mood-cozy-movie');
+    expect(exploreFeed(['mood-cozy'], 'movie', sources()).id).toBe(`${FOR_YOU}-movie`);
+  });
+
+  it('narrows a mood by the genre, language and decade beside it, on what its titles carry', () => {
+    const row = exploreFeed(['mood-cozy', 'genre-35', 'lang-sv', 'decade-1990'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+    });
+    const title = { ...film(1), genreIds: [35, 18], originalLanguage: 'sv', year: 1994 };
+    expect(row.filter?.(title)).toBe(true);
+    expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
+    expect(row.filter?.({ ...title, originalLanguage: 'en' })).toBe(false);
+    expect(row.filter?.({ ...title, year: 2001 })).toBe(false);
   });
 
   it('names a mood’s posterless titles from TMDB, so the hide rules don’t empty it', async () => {
@@ -284,8 +410,7 @@ describe('Explore feeds', () => {
         : new Response('', { status: 404 })) as typeof fetch;
     try {
       const looked: number[] = [];
-      const chip = openChip('mood-cozy', exploreChips('movie', { atlas: true }));
-      const row = exploreFeed(chip, 'movie', {
+      const row = exploreFeed(['mood-cozy'], 'movie', {
         ...sources(),
         atlas: '/atlas',
         title: async (ref) => {

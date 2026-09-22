@@ -6,18 +6,27 @@
        the same short lists. One line on a tablet too: wrapped, the lines covered half its screen.
      - from 1100px, a rail down the side, as the TV's is, with the filter at its top.
 
-     The open chip is always one of those shown, wherever it sits in its list. -->
+     What is picked stacks, and leaves its section for a Selected group at the top — above the rail's filter, above
+     the phone strip, at the top of the sheet — as pills that take it back out. The sections then offer only what
+     can still be added: `hidden` says which options can't. -->
 <script lang="ts">
-  import { KIND, matchChips, type Chip, type ChipGroup } from '../lib/explore';
+  import { KIND, chipsOf, matchChips, type Chip, type ChipGroup } from '../lib/explore';
 
   let {
     chips,
-    value,
+    selected,
+    hidden = () => false,
+    typing = false,
     onchange,
   }: {
     chips: Chip[];
-    /** The open chip's id; empty for none, as while a query is typed. */
-    value: string;
+    /** The picked chips' ids, in the order picked. None is For You — unless a query is what's showing. */
+    selected: string[];
+    /** A query is typed: For You isn't open, though nothing is picked. */
+    typing?: boolean;
+    /** An option that can't be added to the selection, or would show nothing beside it. */
+    hidden?: (id: string) => boolean;
+    /** A chip picked or taken out: its id either way. */
     onchange: (id: string) => void;
   } = $props();
 
@@ -31,54 +40,39 @@
   const STRIP_FIRST = 3;
 
   const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
+  const picked = $derived(chipsOf(selected, chips));
+  /** What can still be added: not picked, not hidden. */
+  const open = (chip: Chip) => !selected.includes(chip.id) && !hidden(chip.id);
   const sections = $derived(
     SECTIONS.flatMap(([group, heading]) => {
-      const inGroup = chips.filter((chip) => chip.group === group);
+      const inGroup = chips.filter((chip) => chip.group === group && open(chip));
       return inGroup.length ? [{ group, heading, chips: inGroup }] : [];
     }),
   );
-  /** The first `n`, and the open chip if it sits further down. */
-  const first = (list: Chip[], n: number) => {
-    const head = list.slice(0, n);
-    const open = list.find((chip) => chip.id === value);
-    return open && !head.includes(open) ? [...head, open] : head;
-  };
   let expanded = $state<Partial<Record<ChipGroup, boolean>>>({});
   /** Each section unfiltered: its first few, or all of them once "Show all" is picked. */
   const listed = () =>
     sections.map((section) => ({
       ...section,
-      shown: expanded[section.group] ? section.chips : first(section.chips, LIST_FIRST),
+      shown: expanded[section.group] ? section.chips : section.chips.slice(0, LIST_FIRST),
       more: section.chips.length > LIST_FIRST,
     }));
 
   let railFilter = $state('');
   let sheet = $state<HTMLDialogElement>();
   let sheetFilter = $state('');
-  let strip = $state<HTMLElement>();
 
   function choose(id: string) {
     sheet?.close();
     onchange(id);
   }
-
-  // The open chip stays in view on the sideways strip — one opened from a link, or kept across a type switch,
-  // can otherwise sit off its edge with nothing saying which is open.
-  $effect(() => {
-    const open = strip?.querySelector<HTMLElement>('[aria-pressed="true"]');
-    if (open && strip && strip.scrollWidth > strip.clientWidth) {
-      const left = open.offsetLeft - strip.clientWidth / 2 + open.offsetWidth / 2;
-      strip.scrollTo({ left, behavior: 'instant' });
-    }
-    void value;
-  });
 </script>
 
 {#snippet chip(item: Chip, kind = false)}
   <button
     type="button"
     class="chip"
-    aria-pressed={item.id === value}
+    aria-pressed={item.group === 'for-you' && !typing && selected.length === 0}
     data-chip={item.id}
     onclick={() => choose(item.id)}
     >{item.label}{#if kind && KIND[item.group]}<span class="kind">{` · ${KIND[item.group]}`}</span
@@ -86,8 +80,34 @@
   >
 {/snippet}
 
-<nav class="strip" aria-label="Browse by category" bind:this={strip}>
-  {#each [...forYou, ...sections.flatMap((s) => first(s.chips, STRIP_FIRST))] as item (item.id)}
+<!-- The picks, each a pill that takes it back out. -->
+{#snippet selection()}
+  {#if picked.length}
+    <div class="selected" role="group" aria-label="Selected">
+      <h2 class="heading">Selected</h2>
+      <div class="pills">
+        {#each picked as item (item.id)}
+          <button
+            type="button"
+            class="pill"
+            aria-label="Remove {item.label}"
+            data-chip={item.id}
+            onclick={() => onchange(item.id)}
+            >{item.label}<span class="kind">{` · ${KIND[item.group]}`}</span><span
+              class="x"
+              aria-hidden="true">✕</span
+            ></button
+          >
+        {/each}
+      </div>
+    </div>
+  {/if}
+{/snippet}
+
+<div class="strip-selection">{@render selection()}</div>
+
+<nav class="strip" aria-label="Browse by category">
+  {#each [...forYou, ...sections.flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
     {@render chip(item)}
   {/each}
   <button
@@ -105,7 +125,7 @@
   {#if text.trim()}
     <!-- Typed into, the filter shows one list across every kind — mood, recipe, genre, language, country, decade —
          ranked by how well each matches, so nobody has to know which kind "Swedish" is. The kind is a label only. -->
-    {@const found = matchChips(text, chips)}
+    {@const found = matchChips(text, chips).filter(open)}
     {#if found.length}
       <div class="section" role="group" aria-label="Matches">
         <div class="list results">
@@ -141,6 +161,7 @@
 {/snippet}
 
 <nav class="rail" aria-label="Browse by category">
+  {@render selection()}
   <input
     class="filter"
     type="search"
@@ -164,6 +185,7 @@
       />
       <button type="button" class="done" onclick={() => sheet?.close()}>Done</button>
     </header>
+    {@render selection()}
     {@render lists(sheetFilter)}
   </div>
 </dialog>
@@ -223,10 +245,6 @@
     font-weight: 400;
   }
 
-  .chip[aria-pressed='true'] .kind {
-    color: inherit;
-  }
-
   /* Under 1100px: one line, sideways, as wide as the column it sits in rather than as its chips. */
   .strip {
     display: flex;
@@ -269,6 +287,67 @@
     font-size: 14px;
   }
 
+  /* The picks: filled pills, each with the ✕ that takes it out. */
+  .selected {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    min-height: 32px;
+    padding: 0 10px 0 12px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 999px;
+    background: var(--fg);
+    color: var(--bg);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+
+  .pill .kind {
+    color: inherit;
+    opacity: 0.6;
+  }
+
+  .chip[aria-pressed='true'] .kind {
+    color: inherit;
+  }
+
+  .x {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+
+  .pill:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .strip-selection .heading {
+    display: none;
+  }
+
+  .strip-selection {
+    align-self: stretch;
+    min-width: 0;
+  }
+
   /* "Show all": a quiet line of text in the list's own colour, not a control competing with the chips. */
   .toggle {
     align-self: flex-start;
@@ -290,8 +369,13 @@
   /* From 1100px: the rail, grouped under headings. It fills its column and no wider: stretched rather than sized
      to its longest label, and a label too long for it ends in an ellipsis rather than pushing it sideways. */
   @media (width >= 1100px) {
-    .strip {
+    .strip,
+    .strip-selection {
       display: none;
+    }
+
+    .rail .pills {
+      margin: 0 0 0 4px;
     }
 
     .rail {

@@ -12,8 +12,10 @@ const MAX_BURST = 3;
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
   titles = $state<Title[]>([]);
-  /** The source has run out, or failed. */
+  /** The source has run out, failed, or been given up on. */
   done = $state(false);
+  /** The source ran out: every title there is has been loaded, not merely as many as it was worth asking for. */
+  exhausted = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
   #loading = false;
@@ -34,7 +36,7 @@ export class Pager {
         const next = await this.#load(this.page + 1);
         this.page++;
         this.titles = appendUniqueTitles(this.titles, next);
-        if (next.length === 0) this.done = true;
+        if (next.length === 0) this.done = this.exhausted = true;
       } catch {
         this.done = true;
       }

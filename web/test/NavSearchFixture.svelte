@@ -13,12 +13,12 @@
   // back, which rebuilds the results and loses where the page was scrolled to.
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
   let explore = $state<Explore>(
-    untrack(() => (route.page === 'search' ? { type: route.type, chip: route.chip } : {})),
+    untrack(() => (route.page === 'search' ? { type: route.type, chips: route.chips } : {})),
   );
   $effect(() => {
     if (route.page !== 'search') return;
     query = route.query;
-    explore = { type: route.type, chip: route.chip };
+    explore = { type: route.type, chips: route.chips };
   });
   const log = {
     settings: (group: string) =>

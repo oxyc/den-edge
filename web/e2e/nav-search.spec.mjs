@@ -271,21 +271,24 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
     const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    const pill = (name) => chip(`Remove ${name}`);
     // Empty query: For You, filled from the popular tail since the fixture library holds nothing.
     await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
     await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
     expect(discovered).toContain('/tmdb/3/movie/popular?');
 
-    // A genre is its own history entry and its own feed.
+    // A genre is its own history entry and its own feed, and leaves its section for the Selected pills.
     await chip('Action').click();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
     await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/movie?28');
+    await expect(pill('Action')).toBeVisible();
+    await expect(chip('Action')).toHaveCount(0);
 
     // Series keeps a related genre open rather than one with nothing in it.
     await chip('Series').click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
-    await expect(chip('Action & Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await expect(pill('Action & Adventure')).toBeVisible();
     await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/tv?10759');
 
     // Typing searches over it; Esc clears the query back to the same view, then leaves.
@@ -294,12 +297,12 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await expect(active(page).getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
     await input(page).press('Escape');
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
-    await expect(chip('Action & Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await expect(pill('Action & Adventure')).toBeVisible();
 
-    // Back walks the chips that were opened, on the same page.
+    // Back walks the picks that were made, on the same page.
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
-    await expect(chip('Action')).toHaveAttribute('aria-pressed', 'true');
+    await expect(pill('Action')).toBeVisible();
     await expect(chip('Movies')).toHaveAttribute('aria-pressed', 'true');
     await page.goBack();
     await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
@@ -333,13 +336,15 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     // A genre narrows the typed results and keeps the query; the fixture's films are all dramas.
     await chip('Drama').click();
     await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
-    await expect(chip('Drama')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('Remove Drama')).toBeVisible();
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    // Genres stack, all applying: no drama here is also a comedy.
     await chip('Comedy').click();
-    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-35$/);
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18,genre-35$/);
     await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
-    // Picked again, it lets go.
-    await chip('Comedy').click();
+    // A pill takes its pick back out.
+    await chip('Remove Comedy').click();
+    await chip('Remove Drama').click();
     await expect(page).toHaveURL(/\/search\?q=Neon$/);
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
 
@@ -348,7 +353,7 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
     await expect(heading('Explore')).toBeVisible();
     await expect(input(page)).toHaveValue('');
-    await expect(chip('Heist')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('Remove Heist')).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?q=Neon$/);
     await expect(input(page)).toHaveValue('Neon');
@@ -369,6 +374,75 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
     await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toBeVisible();
     await recipes.getByRole('button', { name: 'Show fewer' }).click();
     await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action out', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    // Swedish films: 200–203 are action, 204–207 drama. One page each, then the end — so each feed loads whole.
+    const swedish = (id, genres) => ({ ...film(id), genre_ids: genres, original_language: 'sv' });
+    const catalogue = [
+      ...[200, 201, 202, 203].map((id) => swedish(id, [28, 18])),
+      ...[204, 205, 206, 207].map((id) => swedish(id, [18])),
+    ];
+    const asked = [];
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      const url = new URL(r.request().url());
+      asked.push(url.search);
+      const genres = (url.searchParams.get('with_genres') ?? '').split(',').filter(Boolean);
+      const results =
+        url.searchParams.get('page') !== '1'
+          ? []
+          : catalogue.filter((f) => genres.every((g) => f.genre_ids.includes(Number(g))));
+      return r.fulfill({ json: { results, total_pages: 1, total_results: results.length } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const card = (id) => active(page).getByRole('link', { name: `Film ${id} 2026` });
+
+    // Sweden is found by the filter, and becomes a pill at the top.
+    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('swe');
+    await rail.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    const selected = rail.getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await expect(card(205)).toBeVisible();
+
+    // + Action: both apply, in one discover query.
+    await rail.getByRole('searchbox', { name: 'Filter categories' }).fill('');
+    await rail
+      .getByRole('group', { name: 'Genres' })
+      .getByRole('button', { name: 'Action', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE,genre-28$/);
+    await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await expect(selected.getByRole('button', { name: 'Remove Action' })).toBeVisible();
+    await expect(card(200)).toBeVisible();
+    await expect(card(205)).toHaveCount(0);
+    expect(asked.at(-2)).toContain('with_genres=28');
+    expect(asked.at(-2)).toContain('with_origin_country=SE');
+    // Action left its section. The feed is loaded whole, and nothing in it is a comedy: no Comedy on offer.
+    const genres = rail.getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+
+    // Back takes the last pick out.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(selected.getByRole('button', { name: 'Remove Action' })).toHaveCount(0);
+    await expect(card(205)).toBeVisible();
   } finally {
     await browser.close();
   }

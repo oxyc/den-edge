@@ -79,14 +79,14 @@ describe('routes', () => {
       page: 'search',
       query: '',
       type: 'tv',
-      chip: 'genre-10765',
+      chips: ['genre-10765'],
     });
     // An unknown type is the default one, not a third kind of search.
     expect(parseRoute('/search?type=person&c=')).toStrictEqual({ page: 'search', query: '' });
-    expect(searchHref('', { type: 'tv', chip: 'recipe-heist' })).toBe(
+    expect(searchHref('', { type: 'tv', chips: ['recipe-heist'] })).toBe(
       '/search?type=tv&c=recipe-heist',
     );
-    expect(searchHref('heist', { chip: 'genre-28' })).toBe('/search?q=heist&c=genre-28');
+    expect(searchHref('heist', { chips: ['genre-28'] })).toBe('/search?q=heist&c=genre-28');
     // Clearing the query keeps the Explore view it was typed over.
     const typed = parseRoute('/search?q=heist&type=tv&c=genre-80');
     if (typed.page !== 'search') throw new Error('not a search');
@@ -94,9 +94,25 @@ describe('routes', () => {
       page: 'search',
       query: '',
       type: 'tv',
-      chip: 'genre-80',
+      chips: ['genre-80'],
     });
     expect(routePath(typed)).toBe('/search?q=heist&type=tv&c=genre-80');
+  });
+
+  it('carries several facets in the order picked, readable as written and each once', () => {
+    const href = searchHref('', { chips: ['country-SE', 'genre-28'] });
+    expect(href).toBe('/search?c=country-SE,genre-28');
+    expect(parseRoute(href)).toStrictEqual({
+      page: 'search',
+      query: '',
+      chips: ['country-SE', 'genre-28'],
+    });
+    // A comma the browser escaped reads the same; a repeat and anything unreadable are dropped.
+    expect(parseRoute('/search?c=country-SE%2Cgenre-28,genre-28,<b>,')).toStrictEqual({
+      page: 'search',
+      query: '',
+      chips: ['country-SE', 'genre-28'],
+    });
   });
 
   it('names a title in its link without letting the name identify it', () => {
