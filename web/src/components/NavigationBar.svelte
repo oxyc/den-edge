@@ -313,6 +313,29 @@
     outline-offset: 2px;
   }
 
+  /* Between the phone layout and a wide window, five tabs of text at desktop spacing need about 450px. At 820px
+     that left the search field at its 140px floor and, with Back showing, ran the strip off the bar's right
+     edge. Here the tabs take the phone's economies — no `Home` (the mark is that link), `Settings` as its
+     mark — and a tighter gap, which gives the field about 280px on every page. */
+  @media (760px <= width <= 1099px) {
+    nav {
+      gap: 16px;
+    }
+
+    nav a.home {
+      display: none;
+    }
+
+    .label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
   @media (width <= 759px) {
     /* A focused input must not remain under `position: fixed` on iOS: WebKit can paint its caret at the
        document-space coordinate after the keyboard changes the visual viewport. A zero-height sticky anchor
