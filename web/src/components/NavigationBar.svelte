@@ -3,7 +3,7 @@
   import DetailIcon from './DetailIcon.svelte';
   import { flushSync, untrack } from 'svelte';
   import { navigate, navigateBack } from '../lib/navigation';
-  import { parseRoute, searchHref, type Route } from '../lib/route';
+  import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
@@ -38,17 +38,29 @@
   }
   const searching = () =>
     route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
+  /** What Explore is browsing: a query is typed over it, and clearing the query returns to it. */
+  const explore = (): Explore =>
+    route.page === 'search' ? { type: route.type, chip: route.chip } : {};
   function searchChanged() {
     // Arriving at search is a navigation; every letter after that rewrites the same entry, or Back would walk
     // the spelling of what was typed instead of returning to the page the search started from.
     const searching = route.page === 'search';
-    navigate(searchHref(text), searching);
+    navigate(searchHref(text, explore()), searching);
     if (searching) window.scrollTo({ top: 0, behavior: 'instant' });
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
-    navigate(searchHref(text), route.page === 'search');
+    navigate(searchHref(text, explore()), route.page === 'search');
     input?.blur();
+  }
+  /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
+  function escaped() {
+    if (!text.trim() || route.page !== 'search') {
+      closeSearch();
+      return;
+    }
+    text = '';
+    navigate(searchHref('', explore()), true);
   }
   /**
    * The strip, and what a phone does with it.
@@ -112,7 +124,7 @@
         onkeydown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault();
-            closeSearch();
+            escaped();
           }
         }}
       />

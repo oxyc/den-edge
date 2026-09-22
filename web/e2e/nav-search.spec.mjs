@@ -206,7 +206,7 @@ for (const width of [320, 390, 1280])
       await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
       await input(page).fill('');
       await expect(
-        active(page).getByText('Search movies, series and people.', { exact: true }),
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
       ).toBeVisible();
       expect(errors).toEqual([]);
       expect(documents).toBe(1);
@@ -242,6 +242,62 @@ test('a late search cannot replace a newer query', async () => {
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page).toHaveURL(HOME);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Explore browses before typing, remaps across types, and comes back after a query', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const discovered = [];
+    page.on('request', (r) => {
+      const url = new URL(r.url());
+      if (url.pathname.includes('/discover/') || url.pathname.endsWith('/popular'))
+        discovered.push(url.pathname + '?' + (url.searchParams.get('with_genres') ?? ''));
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    // Empty query: For You, filled from the popular tail since the fixture library holds nothing.
+    await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
+    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    expect(discovered).toContain('/tmdb/3/movie/popular?');
+
+    // A genre is its own history entry and its own feed.
+    await chip('Action').click();
+    await expect(page).toHaveURL(/\/search\?c=genre-28$/);
+    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/movie?28');
+
+    // Series keeps a related genre open rather than one with nothing in it.
+    await chip('Series').click();
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
+    await expect(chip('Action & Adventure')).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/tv?10759');
+
+    // Typing searches over it; Esc clears the query back to the same view, then leaves.
+    await input(page).fill('Neon');
+    await expect(page).toHaveURL(/\/search\?q=Neon&type=tv&c=genre-10759$/);
+    await expect(active(page).getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
+    await input(page).press('Escape');
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
+    await expect(chip('Action & Adventure')).toHaveAttribute('aria-pressed', 'true');
+
+    // Back walks the chips that were opened, on the same page.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?c=genre-28$/);
+    await expect(chip('Action')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('Movies')).toHaveAttribute('aria-pressed', 'true');
+    await page.goBack();
+    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
   } finally {
     await browser.close();
   }

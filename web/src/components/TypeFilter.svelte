@@ -7,12 +7,15 @@
     value,
     onchange,
     label,
+    all = true,
   }: {
     /** The type shown, or null for all of them. */
     value: MediaType | null;
     onchange: (value: MediaType | null) => void;
     /** What this filters, for a screen reader: "Show in Watchlist". */
     label: string;
+    /** Whether "All" is one of the choices: Search's Explore browses one type at a time. */
+    all?: boolean;
   } = $props();
 
   const FILTERS: { value: MediaType | null; label: string }[] = [
@@ -20,10 +23,11 @@
     { value: 'movie', label: 'Movies' },
     { value: 'tv', label: 'Series' },
   ];
+  const offered = $derived(all ? FILTERS : FILTERS.slice(1));
 </script>
 
 <div class="filter" role="group" aria-label={label}>
-  {#each FILTERS as filter (filter.label)}
+  {#each offered as filter (filter.label)}
     <button
       type="button"
       aria-pressed={value === filter.value}

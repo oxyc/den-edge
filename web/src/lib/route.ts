@@ -15,11 +15,21 @@ export type Route =
   | { page: 'series' }
   | { page: 'watchlist' }
   | { page: 'settings' }
-  | { page: 'search'; query: string }
+  | ({ page: 'search'; query: string } & Explore)
   | { page: 'title'; type: MediaType; id: number }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
   | { page: 'service'; id: number; country: string };
+
+/**
+ * What Search is browsing, beside the query: the type it is showing and the chip that is open (`explore.ts`). In the
+ * address with the query, so an Explore view can be linked and Back walks through the chips that were opened. Both
+ * are absent for the defaults: Movies, and For You.
+ */
+export interface Explore {
+  type?: MediaType;
+  chip?: string;
+}
 
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
@@ -63,7 +73,16 @@ export function parseRoute(url: string): Route {
     return { page: 'library' };
   }
   const [, first, second] = path.split('/');
-  if (first === 'search') return { page: 'search', query: params.get('q') ?? '' };
+  if (first === 'search') {
+    const type = params.get('type');
+    const chip = params.get('c');
+    return {
+      page: 'search',
+      query: params.get('q') ?? '',
+      ...(type === 'movie' || type === 'tv' ? { type } : {}),
+      ...(chip ? { chip } : {}),
+    };
+  }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
   if ((first === 'movie' || first === 'tv') && id)
@@ -84,7 +103,7 @@ export function routePath(route: Route): string {
     case 'library':
       return '/';
     case 'search':
-      return searchHref(route.query);
+      return searchHref(route.query, route);
     case 'title':
       return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
     case 'person':
@@ -118,9 +137,18 @@ export const personHref = (id: number, name?: string) => {
   return `/person/${id}${slugged ? `-${slugged}` : ''}`;
 };
 
-/** Search carries its query, so a result page can be linked, kept, or reloaded and still be the same search. */
-export const searchHref = (query: string) =>
-  query.trim() ? `/search?q=${encodeURIComponent(query)}` : '/search';
+/**
+ * Search carries its query and what it is browsing, so a result page or an Explore view can be linked, kept, or
+ * reloaded and still be the same.
+ */
+export function searchHref(query: string, { type, chip }: Explore = {}): string {
+  const params = [
+    query.trim() ? `q=${encodeURIComponent(query)}` : '',
+    type ? `type=${type}` : '',
+    chip ? `c=${encodeURIComponent(chip)}` : '',
+  ].filter(Boolean);
+  return params.length ? `/search?${params.join('&')}` : '/search';
+}
 
 /**
  * The path an old `#…` link means, or null if it isn't one.

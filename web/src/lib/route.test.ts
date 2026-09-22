@@ -74,6 +74,31 @@ describe('routes', () => {
     expect(parseRoute(searchHref('fight club'))).toEqual({ page: 'search', query: 'fight club' });
   });
 
+  it('carries what Explore is browsing beside the query, and drops what it cannot read', () => {
+    expect(parseRoute('/search?type=tv&c=genre-10765')).toStrictEqual({
+      page: 'search',
+      query: '',
+      type: 'tv',
+      chip: 'genre-10765',
+    });
+    // An unknown type is the default one, not a third kind of search.
+    expect(parseRoute('/search?type=person&c=')).toStrictEqual({ page: 'search', query: '' });
+    expect(searchHref('', { type: 'tv', chip: 'recipe-heist' })).toBe(
+      '/search?type=tv&c=recipe-heist',
+    );
+    expect(searchHref('heist', { chip: 'genre-28' })).toBe('/search?q=heist&c=genre-28');
+    // Clearing the query keeps the Explore view it was typed over.
+    const typed = parseRoute('/search?q=heist&type=tv&c=genre-80');
+    if (typed.page !== 'search') throw new Error('not a search');
+    expect(parseRoute(searchHref('', typed))).toStrictEqual({
+      page: 'search',
+      query: '',
+      type: 'tv',
+      chip: 'genre-80',
+    });
+    expect(routePath(typed)).toBe('/search?q=heist&type=tv&c=genre-80');
+  });
+
   it('names a title in its link without letting the name identify it', () => {
     expect(titleHref({ type: 'movie', id: 550, title: 'Fight Club' })).toBe(
       '/movie/550-fight-club',
