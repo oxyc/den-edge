@@ -4,12 +4,16 @@ import {
   browseRows,
   categories,
   discoverParams,
+  equivalentGenre,
+  EXPLORE,
+  GENRES,
   homeRows,
   interleave,
   matchesPrimaryGenre,
   personalRows,
   primaryGenre,
   RECIPES,
+  retargeted,
   shelfGenre,
   tmdbPages,
   type Pages,
@@ -281,5 +285,112 @@ describe('rows about a language the viewer has excluded', () => {
     expect(
       categories(type, 2026, { excludedLanguages: new Set(['sv']) }).map((c) => c.id),
     ).toContain(`recipe-${many.id}-${type}`);
+  });
+});
+
+describe('Movies ⇄ Series, as the TV switches them', () => {
+  it('keeps a shared genre, folds a split one, and finds nothing only where there is nothing', () => {
+    // Ids both types carry pass straight through.
+    for (const id of [16, 18, 35, 37, 80, 99, 9648, 10751]) {
+      expect(equivalentGenre(id, 'movie', 'tv')).toBe(id);
+      expect(equivalentGenre(id, 'tv', 'movie')).toBe(id);
+    }
+    // GenreCatalog.movieToTV.
+    expect(equivalentGenre(28, 'movie', 'tv')).toBe(10759);
+    expect(equivalentGenre(12, 'movie', 'tv')).toBe(10759);
+    expect(equivalentGenre(878, 'movie', 'tv')).toBe(10765);
+    expect(equivalentGenre(27, 'movie', 'tv')).toBe(10765);
+    expect(equivalentGenre(53, 'movie', 'tv')).toBe(9648);
+    expect(equivalentGenre(10749, 'movie', 'tv')).toBe(18);
+    expect(equivalentGenre(10752, 'movie', 'tv')).toBe(10768);
+    // GenreCatalog.tvToMovie.
+    expect(equivalentGenre(10759, 'tv', 'movie')).toBe(28);
+    expect(equivalentGenre(10765, 'tv', 'movie')).toBe(878);
+    expect(equivalentGenre(10762, 'tv', 'movie')).toBe(10751);
+    expect(equivalentGenre(10764, 'tv', 'movie')).toBe(99);
+    // Same type is a no-op; an id neither table knows has no counterpart.
+    expect(equivalentGenre(27, 'movie', 'movie')).toBe(27);
+    expect(equivalentGenre(1, 'movie', 'tv')).toBeUndefined();
+  });
+
+  it('lands every Explore genre of one type on an Explore-able genre of the other', () => {
+    for (const [from, to] of [
+      ['movie', 'tv'],
+      ['tv', 'movie'],
+    ] as const) {
+      for (const id of EXPLORE[from]) {
+        const mapped = equivalentGenre(id, from, to);
+        expect(mapped, `${from} ${id}`).toBeDefined();
+        expect(GENRES[to][mapped!], `${from} ${id} → ${mapped}`).toBeDefined();
+      }
+    }
+  });
+
+  // DiscoverRecipeTests.test_retargeted_movieToTV.
+  it('retargets movie recipes to series and refuses the ones with no series form', () => {
+    // Heist: OR [Crime, Thriller] + keyword → series drops Thriller, keeps Crime and the keyword.
+    const heist = retargeted(
+      { mediaType: 'movie', genres: [80, 53], genreJoin: 'or', keywords: [10051] },
+      'tv',
+    );
+    expect(heist?.mediaType).toBe('tv');
+    expect(heist?.genres).toEqual([80]);
+    expect(heist?.keywords).toEqual([10051]);
+    expect(heist?.primaryGenre, 'recipe rows keep their inclusive semantics').toBeUndefined();
+
+    // Superhero: OR [Action, Adventure, Sci-Fi] folds to [Action & Adventure, Sci-Fi & Fantasy].
+    const supes = retargeted(
+      { mediaType: 'movie', genres: [28, 12, 878], genreJoin: 'or', keywords: [9715] },
+      'tv',
+    );
+    expect(supes?.genres).toEqual([10759, 10765]);
+
+    // A plain genre shelf carries its primary-genre constraint through the same mapping.
+    const action = retargeted({ mediaType: 'movie', genres: [28], primaryGenre: 28 }, 'tv');
+    expect(action?.genres).toEqual([10759]);
+    expect(action?.primaryGenre).toBe(10759);
+
+    // AND genres with a member that has no series form: Sci-Fi Horror, Romantic Comedy.
+    expect(retargeted({ mediaType: 'movie', genres: [878, 27] }, 'tv')).toBeUndefined();
+    expect(retargeted({ mediaType: 'movie', genres: [35, 10749] }, 'tv')).toBeUndefined();
+
+    // Same type is a no-op.
+    const romcom = { mediaType: 'movie' as const, genres: [35, 10749] };
+    expect(retargeted(romcom, 'movie')).toBe(romcom);
+  });
+
+  it('keeps a service query when its genres all drop, since the providers still narrow it', () => {
+    // WatchServiceTests: "everything on HBO Max" must survive the switch.
+    const series = retargeted(
+      {
+        mediaType: 'movie',
+        genres: [27],
+        genreJoin: 'or',
+        watchProviders: [1899],
+        watchRegion: 'US',
+      },
+      'tv',
+    );
+    expect(series?.mediaType).toBe('tv');
+    expect(series?.genres).toEqual([]);
+    expect(series?.watchProviders).toEqual([1899]);
+    expect(retargeted({ mediaType: 'movie', genres: [27], genreJoin: 'or' }, 'tv')).toBeUndefined();
+  });
+
+  it('offers under Series only the TV Explore recipes that have a series form', () => {
+    const ids = [
+      'romantic-comedy',
+      'crime-thriller',
+      'sci-fi-horror',
+      'horror-comedy',
+      'heist',
+      'superhero',
+      'k-drama',
+    ];
+    const series = ids.filter((id) => {
+      const recipe = RECIPES.find((r) => r.id === id);
+      return recipe && retargeted(recipe.query, 'tv');
+    });
+    expect(series).toEqual(['heist', 'superhero', 'k-drama']);
   });
 });
