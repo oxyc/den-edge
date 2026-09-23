@@ -25,6 +25,16 @@ export function swapNotice(
   return `${cannot} — playing ${session.release.label} instead.`;
 }
 
+/**
+ * What the session restarted once the link is measured names, if anything: the release the viewer chose, and never
+ * one den-remux picked before it knew the link. A named release is kept however far it is over the link, so naming
+ * den-remux's own first pick would keep a 4K copy on a link that carries a quarter of it; named nothing, it picks again
+ * under the measured limit.
+ */
+export function releaseAfterMeasure(chosen: string | undefined): { filename: string } | undefined {
+  return chosen ? { filename: chosen } : undefined;
+}
+
 /** The releases this browser can't play, by filename, each with den-remux's reason (empty when it gave none). */
 export function unplayable(releases: readonly Release[] | null | undefined): Map<string, string> {
   const refused = new Map<string, string>();

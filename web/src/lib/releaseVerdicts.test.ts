@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Release, Session } from './remux';
-import { optionLabel, swapNotice, unplayable } from './releaseVerdicts';
+import { optionLabel, releaseAfterMeasure, swapNotice, unplayable } from './releaseVerdicts';
+
+describe('releaseAfterMeasure', () => {
+  it('names nothing when den-remux picked, so it picks again under the measured link', () => {
+    expect(releaseAfterMeasure(undefined)).toBeUndefined();
+  });
+  it("keeps the viewer's own choice, however big", () => {
+    expect(releaseAfterMeasure('4k.mkv')).toEqual({ filename: '4k.mkv' });
+  });
+});
 
 const session = (release: Partial<Session['release']> = {}): Session => ({
   playlist: '/remux/s/sid/sig/master.m3u8',
