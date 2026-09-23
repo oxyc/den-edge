@@ -23,7 +23,7 @@ describe('signed public link measurement', () => {
       fetchImpl,
       () => times.shift() ?? 400,
     );
-    expect(asked).toEqual(['https://203.0.113.7/remux/s/a/b/speed?bytes=2097152']);
+    expect(asked).toEqual(['https://203.0.113.7/remux/s/a/b/speed?bytes=8388608']);
     expect(result).toBe(2_800_000);
   });
 

@@ -9,6 +9,7 @@ import {
   forgetSubtitles,
   guestLimits,
   linkLimit,
+  linkRate,
   LINK_MEMORY_MS,
   LINK_TTL_MS,
   premeasureLink,
@@ -491,8 +492,8 @@ describe('linkLimit', () => {
     return { clock, asked, fetchImpl, now: () => clock.now };
   };
 
-  it('asks for 70% of the link, timed past the first 150 ms after the first byte', async () => {
-    // 100 KB inside the skipped start, then 1.25 MB over the next second: 10 Mbit/s.
+  it('asks for 70% of the link, timed past the first megabyte, as much as den-remux sends', async () => {
+    // The first MiB is passed by the 8th 125 KB chunk (1.9 s); after it, 250 KB in 200 ms: 10 Mbit/s.
     const measured = link([
       [1_000, 50_000],
       [1_100, 50_000],
@@ -500,6 +501,7 @@ describe('linkLimit', () => {
     ]);
     expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(7_000_000);
     expect(measured.asked).toEqual([`${tailnet}/speed?bytes=${SPEED_PROBE_BYTES}`]);
+    expect(SPEED_PROBE_BYTES, 'den-remux sends 8 MiB at most').toBe(8 * 1024 * 1024);
   });
 
   it('measures once, and again once the link is ten minutes old', async () => {
@@ -515,13 +517,13 @@ describe('linkLimit', () => {
     expect(measured.asked).toHaveLength(2);
   });
 
-  it('measures a link faster than the skipped start over the whole transfer', async () => {
+  it('measures a transfer too short to pass the skipped start over the whole of it', async () => {
     const measured = link([
-      [0, 1_000_000],
-      [100, 1_000_000],
+      [0, 500_000],
+      [100, 500_000],
     ]);
-    // 2 MB in 100 ms: 160 Mbit/s.
-    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(112_000_000);
+    // The second 500 KB in the 100 ms after the first arrived: 40 Mbit/s.
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now)).toBe(28_000_000);
   });
 
   it('asks for nothing at home, or where the link can’t be timed', async () => {
@@ -571,6 +573,45 @@ describe('linkLimit', () => {
     expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, refusing)).toBe(700_000);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('linkRate', () => {
+  /** Slow start on a 250 ms path: the window doubles each round trip from 16 KB until it is past 1 MB. */
+  const slowStart: [number, number][] = [16, 32, 64, 128, 256, 512].map((kb, i) => [
+    i * 250,
+    kb * 1024,
+  ]);
+
+  it('passes over slow start on a long path and times the link after it', () => {
+    // A 20 Mbit/s link: 625 KB a round trip once the window is open.
+    const steady = Array.from({ length: 5 }, (_, i): [number, number] => [
+      1_500 + i * 250,
+      625_000,
+    ]);
+    expect(linkRate([...slowStart, ...steady])).toBe(20_000_000);
+  });
+
+  it('takes the best second of the tail, not its average over a pause', () => {
+    const tail: [number, number][] = [
+      ...Array.from({ length: 5 }, (_, i): [number, number] => [1_500 + i * 250, 625_000]),
+      // Nothing for a second — another tab, the radio — then the link again.
+      ...Array.from({ length: 5 }, (_, i): [number, number] => [3_500 + i * 250, 625_000]),
+    ];
+    expect(linkRate([...slowStart, ...tail])).toBe(20_000_000);
+  });
+
+  it('times a tail shorter than a window whole, and nothing from one chunk', () => {
+    expect(linkRate([...slowStart, [1_500, 625_000], [1_750, 625_000]])).toBe(20_000_000);
+    expect(linkRate([[0, 1]])).toBeNull();
+    expect(linkRate([])).toBeNull();
+    expect(
+      linkRate([
+        [5, 1],
+        [5, 100],
+      ]),
+      'no time passed',
+    ).toBeNull();
   });
 });
 

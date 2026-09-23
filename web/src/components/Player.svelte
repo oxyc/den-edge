@@ -52,6 +52,7 @@
     swapNotice,
   } from '../lib/releaseVerdicts';
   import { reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
+  import { stuckWatch } from '../lib/stuckWatch';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -360,8 +361,9 @@
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
     // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
-    // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that.
-    const stuck = setTimeout(() => {
+    // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that — a
+    // while with nothing arriving, since a slow link shows no picture either but keeps delivering (`stuckWatch`).
+    const stuck = stuckWatch(STUCK_MS, () => {
       const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
       if (
         noSource ||
@@ -369,11 +371,17 @@
       ) {
         void broke(
           element.error?.code ?? 0,
-          `no picture after ${STUCK_MS / 1000} s (readyState ${element.readyState}, networkState ${element.networkState})`,
+          `no picture after ${STUCK_MS / 1000} s with nothing arriving (readyState ${element.readyState}, networkState ${element.networkState})`,
         );
       }
-    }, STUCK_MS);
-    const cleanup = () => clearTimeout(stuck);
+    });
+    // Bytes arriving: the element's own fetches, and hls.js's fragments (below).
+    const arriving = () => stuck.progress();
+    element.addEventListener('progress', arriving);
+    const cleanup = () => {
+      stuck.stop();
+      element.removeEventListener('progress', arriving);
+    };
     element.addEventListener('loadeddata', cleanup, { once: true });
     element.addEventListener(
       'loadeddata',
@@ -400,6 +408,8 @@
         return;
       }
       hls = new Hls(hlsConfig(started));
+      hls.on(Hls.Events.FRAG_LOADING, arriving);
+      hls.on(Hls.Events.FRAG_LOADED, arriving);
       watcher = watchPlayback({ video: element, hls: { instance: hls, Hls }, reportUrl });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so

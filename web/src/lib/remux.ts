@@ -5,6 +5,7 @@
 
 import { sharedInstallOf } from './grants';
 import { ipv4Hint } from './ipv4';
+import { linkRate, SPEED_PROBE_BYTES } from './linkRate';
 import type { Playable } from './playable';
 import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
@@ -207,10 +208,7 @@ export async function localNetworkRefused(): Promise<boolean> {
   }
 }
 
-/** The bytes a link is timed over: past a connection's slow start, and a moment of the home upload. */
-export const SPEED_PROBE_BYTES = 2 * 1024 * 1024;
-/** The first of the transfer, after its first byte, that isn't counted: slow start, not the link. */
-const SPEED_SKIP_MS = 150;
+export { linkRate, SPEED_PROBE_BYTES };
 /** Time enough to measure a slow link by what arrived, rather than wait out all of it before playing. */
 const SPEED_READ_MS = 4_000;
 /** A probe that hasn't finished by then is given up on: playback goes ahead unmeasured. */
@@ -379,9 +377,8 @@ export function onLan(
 }
 
 /**
- * The bits a second den-remux at `base` gets to this browser: its `/speed` timed from the first byte, less the first
- * SPEED_SKIP_MS, until the end or SPEED_READ_MS. Asked once per LINK_TTL_MS, sessions in between sharing the answer;
- * null when it couldn't be timed.
+ * The bits a second den-remux at `base` gets to this browser: its `/speed` timed by `linkRate`, until the end or
+ * SPEED_READ_MS. Asked once per LINK_TTL_MS, sessions in between sharing the answer; null when it couldn't be timed.
  */
 export function measureLink(
   base: string,
@@ -414,11 +411,7 @@ async function timeTransferUrl(
   const timer = setTimeout(() => controller.abort(), SPEED_DEADLINE_MS);
   const giveUp = () => controller.abort();
   signal?.addEventListener('abort', giveUp, { once: true });
-  let first: number | undefined;
-  let mark: number | undefined;
-  let last: number | undefined;
-  let total = 0;
-  let counted = 0;
+  const chunks: [number, number][] = [];
   try {
     const separator = url.includes('?') ? '&' : '?';
     const speedUrl = url.includes('bytes=') ? url : `${url}${separator}bytes=${SPEED_PROBE_BYTES}`;
@@ -432,12 +425,8 @@ async function timeTransferUrl(
       const { done, value } = await reader.read();
       if (done) break;
       const at = now();
-      first ??= at;
-      last = at;
-      total += value.byteLength;
-      if (at - first <= SPEED_SKIP_MS) mark = at;
-      else counted += value.byteLength;
-      if (at - first >= SPEED_READ_MS) {
+      chunks.push([at, value.byteLength]);
+      if (at - chunks[0]![0] >= SPEED_READ_MS) {
         void reader.cancel();
         break;
       }
@@ -448,10 +437,8 @@ async function timeTransferUrl(
     clearTimeout(timer);
     signal?.removeEventListener('abort', giveUp);
   }
-  if (signal?.aborted || first === undefined || last === undefined) return null;
-  // Past the skipped start where the transfer lasted that long; over the whole of it where it was faster than that.
-  if (counted > 0 && mark !== undefined) return (counted * 8000) / (last - mark);
-  return last > first ? (total * 8000) / (last - first) : null;
+  if (signal?.aborted) return null;
+  return linkRate(chunks);
 }
 
 /**

@@ -10,6 +10,8 @@ import {
   ReportSchedule,
   reportUrlOf,
   sendReport,
+  watchPlayback,
+  type PlaybackStats,
   type ReportEvent,
 } from './playbackStats';
 
@@ -21,6 +23,63 @@ const ranges = (...spans: [number, number][]) =>
     start: (i: number) => spans[i]![0],
     end: (i: number) => spans[i]![1],
   }) as TimeRanges;
+
+describe('watchPlayback', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /**
+   * The native player with 30 s buffered, played on in quarter seconds of media, its decoded-frame count moving only
+   * while `decoding(time)` says so and then in `batch`-second steps, as iOS Safari's does. The end report's stalls.
+   */
+  function play(
+    until: number,
+    decoding: (time: number) => boolean,
+    batch = 2,
+  ): PlaybackStats['stalls'] {
+    vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
+    vi.stubGlobal('HTMLMediaElement', { HAVE_FUTURE_DATA: 3 });
+    let frames = 0;
+    const video = Object.assign(new EventTarget(), {
+      currentTime: 0,
+      paused: false,
+      seeking: false,
+      readyState: 4,
+      duration: 600,
+      error: null,
+      buffered: ranges([0, 30]),
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: frames, droppedVideoFrames: 0 }),
+    }) as unknown as HTMLVideoElement & { currentTime: number };
+    let clock = 0;
+    const sent: string[] = [];
+    const watcher = watchPlayback({
+      video,
+      reportUrl: '/r',
+      send: (_url, body) => sent.push(body),
+      now: () => clock,
+    });
+    video.dispatchEvent(new Event('playing'));
+    for (let t = 0; t <= until; t += 0.25) {
+      video.currentTime = t;
+      clock = t * 1000;
+      if (decoding(t) && t % batch === 0) frames += 48;
+      video.dispatchEvent(new Event('timeupdate'));
+    }
+    watcher.stop();
+    return (JSON.parse(sent.at(-1)!) as { stats: PlaybackStats }).stats.stalls;
+  }
+
+  it('does not take a frame count that moves every two seconds for a frozen picture', () => {
+    expect(play(20, () => true)).toEqual([]);
+  });
+
+  it('counts a picture that stops for longer, with the buffer where it stopped', () => {
+    const stalls = play(20, (t) => t <= 8 || t >= 14);
+    expect(stalls).toHaveLength(1);
+    // The count last moved at 8 s, with 22 s of the 30 buffered ahead then; it was noticed at 11 s.
+    expect(stalls[0]).toMatchObject({ at: 8, kind: 'frozen', videoAhead: 22, audioAhead: 22 });
+    expect(stalls[0]!.ms).toBe(3_000);
+  });
+});
 
 describe('percentile', () => {
   it('ranks to the nearest value', () => {

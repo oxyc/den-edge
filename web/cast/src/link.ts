@@ -1,5 +1,5 @@
-const BYTES = 2 * 1024 * 1024;
-const SKIP_MS = 150;
+import { linkRate, SPEED_PROBE_BYTES } from '../../src/lib/linkRate';
+
 const READ_MS = 4_000;
 const DEADLINE_MS = 10_000;
 const HEADROOM = 0.7;
@@ -17,15 +17,11 @@ export async function signedLinkLimit(
 ): Promise<number | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEADLINE_MS);
-  let first: number | undefined;
-  let mark: number | undefined;
-  let last: number | undefined;
-  let total = 0;
-  let counted = 0;
+  const chunks: [number, number][] = [];
   try {
     const separator = url.includes('?') ? '&' : '?';
     const response = await fetchImpl(
-      url.includes('bytes=') ? url : `${url}${separator}bytes=${BYTES}`,
+      url.includes('bytes=') ? url : `${url}${separator}bytes=${SPEED_PROBE_BYTES}`,
       { cache: 'no-store', signal: controller.signal },
     );
     if (!response.ok || !response.body) return undefined;
@@ -34,12 +30,8 @@ export async function signedLinkLimit(
       const { done, value } = await reader.read();
       if (done) break;
       const at = now();
-      first ??= at;
-      last = at;
-      total += value.byteLength;
-      if (at - first <= SKIP_MS) mark = at;
-      else counted += value.byteLength;
-      if (at - first >= READ_MS) {
+      chunks.push([at, value.byteLength]);
+      if (at - chunks[0]![0] >= READ_MS) {
         void reader.cancel();
         break;
       }
@@ -49,13 +41,7 @@ export async function signedLinkLimit(
   } finally {
     clearTimeout(timer);
   }
-  if (first === undefined || last === undefined) return undefined;
-  const rate =
-    counted > 0 && mark !== undefined
-      ? (counted * 8000) / (last - mark)
-      : last > first
-        ? (total * 8000) / (last - first)
-        : 0;
+  const rate = linkRate(chunks) ?? 0;
   if (!Number.isFinite(rate) || rate <= 0) return undefined;
   return Math.min(1_000_000_000, Math.round(rate * HEADROOM));
 }
