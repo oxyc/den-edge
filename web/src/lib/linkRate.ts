@@ -12,15 +12,16 @@ export const SPEED_PROBE_BYTES = 8 * 1024 * 1024;
  * about its first megabyte.
  */
 const SPEED_SKIP_BYTES = 1024 * 1024;
-/** The span each rate in the counted tail is taken over; the link is the best of them. */
-const SPEED_WINDOW_MS = 1_000;
+/** The span each rate in the counted tail is taken over; the link is their median. */
+const SPEED_WINDOW_MS = 2_000;
 
 /**
  * The bits a second a transfer shows the link carries, from its chunks as they arrived (`[ms, bytes]`). The first
- * SPEED_SKIP_BYTES are slow start and aren't counted; past them it is the most any SPEED_WINDOW_MS delivered — a
- * window, not the whole tail, because a pause in the tail (another tab, the radio) is not what the link can do. A tail
- * shorter than a window counts whole, and a transfer that never got past the skip is timed over all of it. Each rate
- * counts the bytes after the chunk it is timed from, whose own arrival is the start. Null for less than two chunks.
+ * SPEED_SKIP_BYTES are slow start and aren't counted; past them it is the median of the rates over every
+ * SPEED_WINDOW_MS of the tail — not the best of them, which on a bursty delivery reads a burst as the link, and admission
+ * trusts this number; not the whole tail, which a pause (another tab, the radio) drags down. A tail shorter than a window
+ * counts whole, and a transfer that never got past the skip is timed over all of it. Each rate counts the bytes after
+ * the chunk it is timed from, whose own arrival is the start. Null for less than two chunks.
  */
 export function linkRate(chunks: readonly (readonly [ms: number, bytes: number])[]): number | null {
   const rate = (from: number, to: number) => {
@@ -35,12 +36,15 @@ export function linkRate(chunks: readonly (readonly [ms: number, bytes: number])
   let mark = 0;
   while (mark < last && (skipped += chunks[mark]![1]) < SPEED_SKIP_BYTES) mark++;
   if (mark >= last) return rate(0, last);
-  let best: number | null = null;
+  const rates: number[] = [];
   for (let from = mark, to = mark; from < last; from++) {
     while (to < last && chunks[to]![0] - chunks[from]![0] < SPEED_WINDOW_MS) to++;
     if (chunks[to]![0] - chunks[from]![0] < SPEED_WINDOW_MS) break;
     const r = rate(from, to);
-    if (r !== null && (best === null || r > best)) best = r;
+    if (r !== null) rates.push(r);
   }
-  return best ?? rate(mark, last);
+  if (!rates.length) return rate(mark, last);
+  rates.sort((a, b) => a - b);
+  const mid = rates.length >> 1;
+  return rates.length % 2 ? rates[mid]! : (rates[mid - 1]! + rates[mid]!) / 2;
 }

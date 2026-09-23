@@ -592,13 +592,25 @@ describe('linkRate', () => {
     expect(linkRate([...slowStart, ...steady])).toBe(20_000_000);
   });
 
-  it('takes the best second of the tail, not its average over a pause', () => {
+  it('reads a burst as a burst, not as the link', () => {
+    // 10 Mbit/s for ten seconds — 312.5 KB every 250 ms — with five chunks bunched up at 6 s: the best second of it
+    // runs at 22.5 Mbit/s, which admission would then have trusted.
+    const tail: [number, number][] = Array.from({ length: 41 }, (_, i): [number, number] => [
+      1_500 + i * 250,
+      312_500,
+    ]);
+    const burst = Array.from({ length: 5 }, (_, i): [number, number] => [6_010 + i * 10, 312_500]);
+    const chunks = [...slowStart, ...tail, ...burst].sort((a, b) => a[0] - b[0]);
+    expect(linkRate(chunks)).toBe(10_000_000);
+  });
+
+  it('is not dragged down by a pause in the tail', () => {
     const tail: [number, number][] = [
-      ...Array.from({ length: 5 }, (_, i): [number, number] => [1_500 + i * 250, 625_000]),
+      ...Array.from({ length: 20 }, (_, i): [number, number] => [1_500 + i * 250, 312_500]),
       // Nothing for a second — another tab, the radio — then the link again.
-      ...Array.from({ length: 5 }, (_, i): [number, number] => [3_500 + i * 250, 625_000]),
+      ...Array.from({ length: 20 }, (_, i): [number, number] => [7_500 + i * 250, 312_500]),
     ];
-    expect(linkRate([...slowStart, ...tail])).toBe(20_000_000);
+    expect(linkRate([...slowStart, ...tail])).toBe(10_000_000);
   });
 
   it('times a tail shorter than a window whole, and nothing from one chunk', () => {
