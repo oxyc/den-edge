@@ -7,7 +7,16 @@
   import type Hls from 'hls.js';
   import { untrack } from 'svelte';
   import { WATCHED } from '../lib/actions';
-  import { canOfferCast, CAST_DISCOVERY_MS } from '../lib/castOffer';
+  import {
+    canOfferCast,
+    CAST_DISCOVERY_MS,
+    CAST_PLAY_MS,
+    castLook,
+    fetchCastOrigin,
+    returnsFromCast,
+    type CastLook,
+    type CastOffer,
+  } from '../lib/castOffer';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
   import { retryWithoutHint } from '../lib/ipv4';
@@ -165,11 +174,13 @@
    */
   let route = $state(untrack(() => remux));
   let routeBeforeCast = untrack(() => remux);
-  /**
-   * `waiting` once Cast was asked for and the cast page has not yet said whether a receiver is on the network;
-   * `none` when it said no (or did not answer in time, or the relay has no public route); `idle` otherwise.
-   */
-  let castOffer = $state<'idle' | 'waiting' | 'none'>('idle');
+  /** Where a press of Cast stands (`castLook`): playback moves to the relay only once a receiver was seen. */
+  let castOffer = $state<CastOffer>('idle');
+  /** The cast page, loaded unseen beside the playing video to look for a receiver; unset while not looking. */
+  let lookOrigin = $state<string>();
+  let lookFrame = $state<HTMLIFrameElement>();
+  /** Set while playback was moved to the relay to cast: a failure there goes back to the player it left. */
+  let castOffered = false;
   let publicMaxBitrate: number | undefined;
   /** The `maxBitrate` the playing session was asked with. */
   let askedMaxBitrate: number | undefined;
@@ -313,8 +324,13 @@
     askedMaxBitrate = maxBitrate;
     played = false;
     session = result;
-    // Asked to cast, but the relay's session has no public address or cast page: nothing can be cast from here.
-    if (castOffer === 'waiting' && !(result.castOrigin && result.publicBase)) castOffer = 'none';
+    // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
+    // it would not play here either. Back to the player that was playing.
+    if (castOffered && !(result.castOrigin && result.publicBase)) {
+      castOffer = 'none';
+      leaveCast();
+      return;
+    }
     swapped = swapNotice(
       pick?.filename,
       result,
@@ -436,6 +452,14 @@
   }
 
   function castMessage(event: MessageEvent<unknown>): void {
+    const looking = lookFrame?.contentWindow;
+    if (lookOrigin && looking && event.origin === lookOrigin && event.source === looking) {
+      const message = event.data as { type?: string; available?: unknown };
+      if (message.type === 'den-ready') looking.postMessage({ type: 'den-discover' }, lookOrigin);
+      else if (message.type === 'den-cast-availability' && typeof message.available === 'boolean')
+        look({ kind: 'availability', available: message.available });
+      return;
+    }
     const current = session;
     const frame = castFrame?.contentWindow;
     if (!current?.castOrigin || event.origin !== current.castOrigin || event.source !== frame)
@@ -494,11 +518,6 @@
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
       if (askedMaxBitrate !== undefined) restart(releaseAfterMeasure(chosenRelease));
-    } else if (message.type === 'den-cast-availability') {
-      // Whether a Chromecast is on the network. A receiver appearing late clears the notice; "none" only matters
-      // to a viewer who asked to cast.
-      if (message.available) castOffer = 'idle';
-      else if (castOffer === 'waiting') castOffer = 'none';
     } else if (message.type === 'den-cast-request') {
       const profile = message.profile ?? 'legacy';
       if (!castMode || castProfile !== profile) {
@@ -511,7 +530,9 @@
     } else if (message.type === 'den-cast' && message.state === 'stopped') {
       casting = false;
       castMode = false;
-      restart({ filename: current.release.filename });
+      // Moved here to cast: casting over, the viewer is back in the player they left, where it had got to.
+      if (castOffered) leaveCast();
+      else restart({ filename: current.release.filename });
     } else if (message.type === 'den-ended') {
       casting = false;
       finished();
@@ -519,6 +540,13 @@
       casting = false;
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
       if (degraded || current.video?.transcoded || castProfile === 'legacy') castMode = false;
+      if (returnsFromCast(castOffered, castMode)) {
+        // The cast page could not play what was moved to it — at home it may reach neither address. Not a verdict on
+        // the release: the player that was playing it goes on from the same second.
+        reportFailure(current, 0, message.message ?? 'cast player failed');
+        leaveCast();
+        return;
+      }
       void broke(0, message.message ?? 'cast player failed');
     }
   }
@@ -527,20 +555,37 @@
   const castable = canOfferCast();
 
   /**
-   * The Cast button for a plain in-page player: move to the relay, whose sessions carry the public address and the
-   * cast page, and restart at the same second. Google's own button then shows in that page, when it finds a receiver.
+   * The Cast button for a plain in-page player. The cast page is loaded unseen beside the video, which plays on, to
+   * look for a receiver (`look`); only once it sees one does playback move to the relay, whose sessions carry the
+   * public address and the cast page, and Google's own button shows there.
    */
-  function offerCast() {
-    if (!session) return;
+  async function offerCast() {
+    if (!session || castOffer === 'looking') return;
+    castOffer = 'looking';
+    const origin = await fetchCastOrigin();
+    if (castOffer !== 'looking' || ended) return;
+    if (origin) lookOrigin = origin;
+    else look({ kind: 'no-cast-page' });
+  }
+
+  /** A step of the look for a receiver; one seen moves playback to the relay at the second the video is at. */
+  function look(event: CastLook) {
+    const next = castLook(castOffer, event);
+    castOffer = next.offer;
+    if (next.offer !== 'looking') lookOrigin = undefined;
+    if (!next.move || !session) return;
+    castOffered = true;
     routeBeforeCast = route;
     route = RELAY;
-    castOffer = 'waiting';
+    // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
+    remoteTime = 0;
     restart({ filename: session.release.filename });
   }
 
-  /** Nothing to cast to: back to the route this page started on, at the same second. */
+  /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
   function leaveCast() {
-    castOffer = 'idle';
+    castOffered = false;
+    casting = false;
     route = routeBeforeCast;
     castMode = false;
     if (session) restart({ filename: session.release.filename });
@@ -548,10 +593,22 @@
 
   // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
   $effect(() => {
-    if (castOffer !== 'waiting' || !session?.castOrigin) return;
+    if (castOffer !== 'looking') return;
+    const wait = setTimeout(() => look({ kind: 'deadline' }), CAST_DISCOVERY_MS);
+    return () => clearTimeout(wait);
+  });
+
+  // A session moved to the cast page that shows nothing — no error either, as when neither of its addresses answers
+  // and hls.js is still retrying — goes back to the player it left, rather than sitting at 00:00.
+  $effect(() => {
+    const current = session;
+    if (!current?.castOrigin || casting) return;
     const wait = setTimeout(() => {
-      if (castOffer === 'waiting') castOffer = 'none';
-    }, CAST_DISCOVERY_MS);
+      if (session !== current || played || casting || !returnsFromCast(castOffered, castMode))
+        return;
+      reportFailure(current, 0, `nothing played in the cast page after ${CAST_PLAY_MS / 1000} s`);
+      leaveCast();
+    }, CAST_PLAY_MS);
     return () => clearTimeout(wait);
   });
 
@@ -966,7 +1023,13 @@
   <header>
     <b>{heading}</b>
     {#if castable && session && !session.castOrigin && route !== RELAY}
-      <button class="close cast" aria-label="Cast to a TV" title="Cast to a TV" onclick={offerCast}>
+      <button
+        class="close cast"
+        aria-label="Cast to a TV"
+        title="Cast to a TV"
+        disabled={castOffer === 'looking'}
+        onclick={offerCast}
+      >
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
           <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
           <path d="M2 12a9 9 0 0 1 8 8" />
@@ -1012,11 +1075,13 @@
       <p class="note">Finding a release this browser can play…</p>
     {:else}
       {#if session.castOrigin && session.publicBase}
+        <!-- `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
+             and Chrome lets a cross-origin frame reach a private address only when the page delegates it. -->
         <iframe
           bind:this={castFrame}
           title="Den Cast player"
           src={session.castOrigin}
-          allow="autoplay; encrypted-media; fullscreen; presentation"
+          allow="autoplay; encrypted-media; fullscreen; presentation; local-network-access"
           sandbox="allow-scripts allow-same-origin allow-presentation"
           onload={sendToCastFrame}
         ></iframe>
@@ -1041,18 +1106,32 @@
         ></video>
       {/if}
     {/if}
+    {#if lookOrigin}
+      <!-- The cast page, unseen, asked only whether a receiver is on the network: nothing is loaded into it. -->
+      <iframe
+        class="cast-look"
+        bind:this={lookFrame}
+        title="Looking for a Chromecast"
+        aria-hidden="true"
+        tabindex="-1"
+        src={lookOrigin}
+        sandbox="allow-scripts allow-same-origin allow-presentation"
+      ></iframe>
+    {/if}
   </div>
   {#if session}
     {@const parts = releaseParts(session)}
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
-      {#if castOffer === 'none'}
+      {#if castOffer === 'looking'}
+        <p class="swap" role="status"><span>Looking for a Chromecast…</span></p>
+      {:else if castOffer === 'none'}
         <p class="swap" role="status">
           <span
             >No Chromecast found. Check that it is awake and on the same network as this device.</span
           >
-          <button onclick={leaveCast}>Back to the normal player</button>
+          <button onclick={() => (castOffer = 'idle')}>Dismiss</button>
         </p>
       {/if}
       {#if swapped}
@@ -1295,6 +1374,15 @@
     height: 100%;
     object-fit: contain;
     border: 0;
+  }
+
+  /* Out of sight and out of the way of the video's controls, but rendered, so the Cast SDK in it runs as usual. */
+  iframe.cast-look {
+    inset: auto;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
   }
 
   form {

@@ -32,6 +32,11 @@ fn config(state: &AppState) -> String {
     if let Some(oauth) = &state.oauth {
         config["mcpUrl"] = Value::String(oauth.resource.clone());
     }
+    // The cast page's origin, so the player can ask it whether a Chromecast is on the network while its own video
+    // keeps playing, before moving playback anywhere. Absent while casting is off.
+    if let Some(origin) = &state.cast_origin {
+        config["castOrigin"] = Value::String(origin.clone());
+    }
     config.to_string()
 }
 
@@ -1136,15 +1141,18 @@ pub mod tests {
     async fn config_carries_public_client_configuration() {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().simkl_client_id = Some("simkl-public-id".to_owned());
+        Arc::get_mut(&mut h.state).unwrap().cast_origin = Some("https://cast.example".to_owned());
         let answer = h.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(answer.status(), StatusCode::OK);
         let config = body_json(answer).await;
         assert_eq!(config["simklClientId"], "simkl-public-id");
+        assert_eq!(config["castOrigin"], "https://cast.example");
         assert_eq!(config["minSupportedVersion"], "0.1.0", "the kill-switch is untouched");
 
         let plain = split_harness();
         let without = body_json(plain.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await).await;
         assert!(without.get("simklClientId").is_none(), "unset is absent, not empty");
+        assert!(without.get("castOrigin").is_none(), "unset is absent, not empty");
     }
 
     /// Both are read on every start. Always asked again, so a kill-switch or a moved address lands at once, and

@@ -180,9 +180,16 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
 }
 
-/** Tell the player whether a Chromecast is discoverable, so it can say so when Cast was asked for and there is none. */
+/**
+ * Tell the player whether a Chromecast is discoverable. Also before anything is loaded here: the player asks
+ * (`den-discover`) while its own video plays on, and moves playback here only once one is.
+ */
 function announceDevices(): void {
-  if (castDevices !== undefined) tell('den-cast-availability', { available: castDevices });
+  if (castDevices === undefined || !parentOrigin) return;
+  window.parent.postMessage(
+    { type: 'den-cast-availability', id: current?.id, available: castDevices },
+    parentOrigin,
+  );
 }
 
 async function loadLocal(media: Media, url: string): Promise<void> {
@@ -518,6 +525,14 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   castSubtitleAppliedId = undefined;
   if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
     castSubtitleAppliedId = current.id;
+});
+
+/** The player asks whether a receiver is on the network, with nothing to load yet. */
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  if ((event.data as { type?: string }).type !== 'den-discover') return;
+  parentOrigin = event.origin;
+  announceDevices();
 });
 
 /** The player kept the measured session: play it. */
