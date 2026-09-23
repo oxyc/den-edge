@@ -1,4 +1,5 @@
-<!-- A person, round, as the TV's PersonCard: cast on a title's page, people in search. A link to their page. -->
+<!-- A person, round, as the TV's PersonCard: cast on a title's page, people in search and on People. A link to their
+     page. -->
 <script lang="ts">
   import { personHref } from '../lib/route';
 
@@ -7,7 +8,15 @@
     name,
     role,
     profilePath,
-  }: { id: number; name: string; role?: string; profilePath?: string } = $props();
+    knownFor = [],
+  }: {
+    id: number;
+    name: string;
+    role?: string;
+    profilePath?: string;
+    /** Titles they are known for, named under their name. */
+    knownFor?: string[];
+  } = $props();
 </script>
 
 <a class="person" href={personHref(id)}>
@@ -23,6 +32,7 @@
   </span>
   <span class="name">{name}</span>
   {#if role}<span class="role">{role}</span>{/if}
+  {#if knownFor.length}<span class="known">{knownFor.join(', ')}</span>{/if}
 </a>
 
 <style>
@@ -66,5 +76,16 @@
     color: var(--muted);
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Two lines at most: a grid of people stays a grid of faces. */
+  .known {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 13px;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 </style>

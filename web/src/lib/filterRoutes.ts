@@ -1,7 +1,9 @@
 // atlas's stackable filters (`/index/filter/<movie|series|all>/…`, `all` being films and series together): for a
 // selection of values from many kinds, how many titles each further value would leave (`counts.json`), the titles
 // themselves (`titles.json`), and one kind's values by a typed prefix (`values/<kind>.json`, the people and
-// characters typeahead).
+// characters typeahead). And the people credited on those titles, narrowed by what Wikidata says about them
+// (`traits`): the people themselves (`people.json`), their traits' counts (`people/counts.json`), and one trait's
+// values by a typed prefix (`people/values/<trait>.json`).
 //
 // The URL is atlas's cache key, and through den-edge's relay a redirect arrives with no Location, so every address
 // here is built in atlas's one canonical spelling (`canonicalQuery`), which `filterRoutes.test.ts` holds to atlas's
@@ -11,6 +13,7 @@
 import { titlesOf } from './atlasRows';
 import type { ExploreType, MediaType, Title } from './library';
 import { relayFetch } from './relayFetch';
+import { PEOPLE_ORDERS } from './route';
 import { withSharedTitleMetadata } from './titleMetadata';
 
 /** How a kind's values combine: several apply together (`and`), or a title has one and a pick takes it (`single`). */
@@ -65,6 +68,18 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   like: { mode: 'single', id: 'like' },
 };
 
+/** Every person trait the people routes read in `traits` (atlas's `filter.traits` in `/index/schema.json`). */
+export const TRAIT_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = {
+  gender: { mode: 'single', id: 'qid' },
+  born: { mode: 'single', id: 'decade' },
+  citizenship: { mode: 'and', id: 'qid' },
+  occupation: { mode: 'and', id: 'qid' },
+  role: { mode: 'and', id: 'lower' },
+};
+
+/** The traits `people/values/<trait>.json` answers: those whose values are Wikidata items. */
+const TRAIT_VALUES = ['gender', 'citizenship', 'occupation'];
+
 /**
  * A "Like"'s value in atlas's filter: the title's id under its own type's route; under `all`, which holds both types'
  * ids, the id with its type (`movie-550`, `series-1396`). The one place that form is decided.
@@ -90,7 +105,8 @@ export interface FilterItem {
   exclude?: boolean;
 }
 
-export type FilterRoute = 'counts' | 'titles' | { values: string };
+export type FilterRoute =
+  'counts' | 'titles' | 'people' | 'peopleCounts' | { values: string } | { peopleValues: string };
 
 /** Text folded as atlas folds names: accents off, lowercase, runs of anything but letters and digits one space. */
 function fold(text: string): string {
@@ -110,12 +126,18 @@ function fold(text: string): string {
  * A character is folded as atlas folds one; atlas also drops honorifics and numbers ("Guard #2"), which the ids
  * this app sends — atlas's own, from its typeahead — never carry.
  */
-function normalise(rawKind: string, rawId: string): [string, string] | undefined {
+function normalise(
+  rawKind: string,
+  rawId: string,
+  kinds = FILTER_KINDS,
+  type?: ExploreType,
+): [string, string] | undefined {
   let kind = rawKind.trim().toLowerCase();
   const id = rawId.trim();
   if (!id) return undefined;
-  if (kind === 'structure') kind = STRUCTURE_ALIAS[id.toLowerCase()] ?? 'chronology';
-  const spec = FILTER_KINDS[kind];
+  if (kind === 'structure' && kinds === FILTER_KINDS)
+    kind = STRUCTURE_ALIAS[id.toLowerCase()] ?? 'chronology';
+  const spec = kinds[kind];
   if (!spec) return [kind, id];
   const number = /^\d+$/.test(id) ? Number(id) : undefined;
   switch (spec.id) {
@@ -137,10 +159,13 @@ function normalise(rawKind: string, rawId: string): [string, string] | undefined
       const name = fold(id);
       return name ? [kind, name.replace(/ /g, '-')] : undefined;
     }
+    // A bare id under one type's route, a typed one under `all` (`likeValue`); either where the type isn't known.
     case 'like': {
-      if (number !== undefined) return [kind, String(number)];
+      if (number !== undefined) return type === 'all' ? undefined : [kind, String(number)];
       const typed = /^(movie|series)-(\d+)$/i.exec(id);
-      return typed ? [kind, `${typed[1]!.toLowerCase()}-${Number(typed[2])}`] : undefined;
+      return typed && (type === undefined || type === 'all')
+        ? [kind, `${typed[1]!.toLowerCase()}-${Number(typed[2])}`]
+        : undefined;
     }
   }
 }
@@ -148,22 +173,17 @@ function normalise(rawKind: string, rawId: string): [string, string] | undefined
 const byString = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * A route's query in atlas's canonical spelling, with its `?`, or '' for none; undefined for a question atlas
- * refuses. `sel`: each item normalised, sorted by kind, then positive before excluded, then id, once each; then
- * `skip` and `limit` (titles) or `q` and `limit` (values), each only when not its default.
+ * Items in atlas's spelling — each normalised by `kinds`, sorted by kind, then positive before excluded, then id,
+ * once each — or undefined where one can't be read or there are too many.
  */
-export function canonicalQuery(
-  route: FilterRoute,
-  {
-    items = [],
-    skip = 0,
-    limit,
-    q,
-  }: { items?: FilterItem[]; skip?: number; limit?: number; q?: string } = {},
-): string | undefined {
+function spelled(
+  items: FilterItem[],
+  kinds = FILTER_KINDS,
+  type?: ExploreType,
+): string[] | undefined {
   const normal: Required<FilterItem>[] = [];
   for (const item of items) {
-    const pair = normalise(item.kind, item.id);
+    const pair = normalise(item.kind, item.id, kinds, type);
     if (!pair) return undefined;
     normal.push({ kind: pair[0], id: pair[1], exclude: !!item.exclude });
   }
@@ -171,17 +191,61 @@ export function canonicalQuery(
     (a, b) =>
       byString(a.kind, b.kind) || Number(a.exclude) - Number(b.exclude) || byString(a.id, b.id),
   );
-  const sel = normal
+  const list = normal
     .map((item) => `${item.exclude ? '-' : ''}${item.kind}:${encodeURIComponent(item.id)}`)
     .filter((item, at, all) => all.indexOf(item) === at);
-  if (sel.length > MAX_SELECTION) return undefined;
+  return list.length > MAX_SELECTION ? undefined : list;
+}
 
-  const values = typeof route === 'object' ? route.values : undefined;
-  const character = values === 'character';
+/**
+ * A route's query in atlas's canonical spelling, with its `?`, or '' for none; undefined for a question atlas
+ * refuses. `sel`, then (the people routes) `traits`, each `spelled`; then (people) `order`; then `skip` and `limit`
+ * (titles, people) or `q` and `limit` (values, people values), each only when not its default.
+ */
+export function canonicalQuery(
+  route: FilterRoute,
+  {
+    items = [],
+    traits = [],
+    order,
+    skip = 0,
+    limit,
+    q,
+    type,
+  }: {
+    items?: FilterItem[];
+    traits?: FilterItem[];
+    order?: string;
+    skip?: number;
+    limit?: number;
+    q?: string;
+    /** The route's type, which decides how a "Like" is written. */
+    type?: ExploreType;
+  } = {},
+): string | undefined {
+  const sel = spelled(items, FILTER_KINDS, type);
+  if (!sel) return undefined;
+  const people =
+    route === 'people' ||
+    route === 'peopleCounts' ||
+    (typeof route === 'object' && 'peopleValues' in route);
+  const traitList = people ? spelled(traits, TRAIT_KINDS) : [];
+  if (!traitList) return undefined;
+  let orderName: string | undefined;
+  if (route === 'people' && order !== undefined && order.trim()) {
+    orderName = order.trim().toLowerCase();
+    if (!(PEOPLE_ORDERS as readonly string[]).includes(orderName)) return undefined;
+    if (orderName === PEOPLE_ORDERS[0]) orderName = undefined;
+  }
+
+  const values =
+    typeof route === 'object' ? ('values' in route ? route.values : route.peopleValues) : undefined;
+  const character = typeof route === 'object' && 'values' in route && values === 'character';
+  const paged = route === 'titles' || route === 'people';
   const [fallback, most] =
-    route === 'counts'
+    route === 'counts' || route === 'peopleCounts'
       ? [0, 0]
-      : route === 'titles'
+      : paged
         ? [TITLES_PAGE, MAX_TITLES_PAGE]
         : character
           ? [5, 5]
@@ -201,9 +265,11 @@ export function canonicalQuery(
 
   const parts: string[] = [];
   if (sel.length) parts.push(`sel=${sel.join(',')}`);
-  if (route === 'titles' && skip) parts.push(`skip=${skip}`);
+  if (traitList.length) parts.push(`traits=${traitList.join(',')}`);
+  if (orderName) parts.push(`order=${orderName}`);
+  if (paged && skip) parts.push(`skip=${skip}`);
   if (prefix !== undefined) parts.push(`q=${encodeURIComponent(prefix)}`);
-  if (route !== 'counts' && size !== fallback) parts.push(`limit=${size}`);
+  if (fallback > 0 && size !== fallback) parts.push(`limit=${size}`);
   return parts.length ? `?${parts.join('&')}` : '';
 }
 
@@ -212,7 +278,13 @@ const routePath = (route: FilterRoute) =>
     ? 'counts.json'
     : route === 'titles'
       ? 'titles.json'
-      : `values/${route.values}.json`;
+      : route === 'people'
+        ? 'people.json'
+        : route === 'peopleCounts'
+          ? 'people/counts.json'
+          : 'values' in route
+            ? `values/${route.values}.json`
+            : `people/values/${route.peopleValues}.json`;
 
 /** A filter route's canonical address under `base`, or undefined for a question atlas refuses. */
 export function filterUrl(
@@ -221,7 +293,7 @@ export function filterUrl(
   route: FilterRoute,
   options: Parameters<typeof canonicalQuery>[1] = {},
 ): string | undefined {
-  const query = canonicalQuery(route, options);
+  const query = canonicalQuery(route, { ...options, type });
   if (query === undefined) return undefined;
   const segment = type === 'tv' ? 'series' : type;
   return `${base}/index/filter/${segment}/${routePath(route)}${query}`;
@@ -244,36 +316,63 @@ function decode(value: string): string {
 export function canonicalFilterPath(path: string): string | undefined {
   const [pathname, query = ''] = path.split('?', 2) as [string, string?];
   const match =
-    /^\/index\/filter\/(movie|series|all)\/(counts|titles|values\/([a-z]+))\.json$/.exec(pathname);
+    /^\/index\/filter\/(movie|series|all)\/(counts|titles|people|people\/counts|values\/([a-z]+)|people\/values\/([a-z]+))\.json$/.exec(
+      pathname,
+    );
   if (!match) return undefined;
+  if (match[4] !== undefined && !TRAIT_VALUES.includes(match[4])) return undefined;
   const route: FilterRoute =
-    match[2] === 'counts' ? 'counts' : match[2] === 'titles' ? 'titles' : { values: match[3]! };
+    match[3] !== undefined
+      ? { values: match[3] }
+      : match[4] !== undefined
+        ? { peopleValues: match[4] }
+        : match[2] === 'people/counts'
+          ? 'peopleCounts'
+          : (match[2] as 'counts' | 'titles' | 'people');
   const params = new Map<string, string>();
   for (const pair of query.split('&').filter(Boolean)) {
     const at = pair.indexOf('=');
     const [name, value] = at < 0 ? [pair, ''] : [pair.slice(0, at), pair.slice(at + 1)];
     if (!params.has(name)) params.set(name, value);
   }
-  const items: FilterItem[] = [];
-  for (const raw of decode(params.get('sel') ?? '')
-    .split(',')
-    .filter(Boolean)) {
-    const exclude = raw.startsWith('-');
-    const body = exclude ? raw.slice(1) : raw;
-    const colon = body.indexOf(':');
-    if (colon < 0) return undefined;
-    items.push({ kind: body.slice(0, colon), id: body.slice(colon + 1), exclude });
-  }
+  const read = (name: string): FilterItem[] | undefined => {
+    const items: FilterItem[] = [];
+    for (const raw of decode(params.get(name) ?? '')
+      .split(',')
+      .filter(Boolean)) {
+      const exclude = raw.startsWith('-');
+      const body = exclude ? raw.slice(1) : raw;
+      const colon = body.indexOf(':');
+      if (colon < 0) return undefined;
+      items.push({ kind: body.slice(0, colon), id: body.slice(colon + 1), exclude });
+    }
+    return items;
+  };
+  const people = route === 'people' || route === 'peopleCounts' || match[4] !== undefined;
+  const items = read('sel');
+  const traits = people ? read('traits') : [];
+  if (!items || !traits) return undefined;
   const count = (name: string) => {
     const value = params.get(name);
-    if (value === undefined || route === 'counts') return { ok: true, n: undefined };
-    if (name === 'skip' && route !== 'titles') return { ok: true, n: undefined };
+    if (value === undefined || route === 'counts' || route === 'peopleCounts')
+      return { ok: true, n: undefined };
+    if (name === 'skip' && route !== 'titles' && route !== 'people')
+      return { ok: true, n: undefined };
     return /^\d+$/.test(value) ? { ok: true, n: Number(value) } : { ok: false, n: undefined };
   };
   const [skip, limit] = [count('skip'), count('limit')];
   if (!skip.ok || !limit.ok) return undefined;
   const q = typeof route === 'object' && params.has('q') ? decode(params.get('q')!) : undefined;
-  const canonical = canonicalQuery(route, { items, skip: skip.n, limit: limit.n, q });
+  const order = route === 'people' ? decode(params.get('order') ?? '') : undefined;
+  const canonical = canonicalQuery(route, {
+    items,
+    traits,
+    order,
+    skip: skip.n,
+    limit: limit.n,
+    q,
+    type: match[1] === 'series' ? 'tv' : (match[1] as ExploreType),
+  });
   return canonical === undefined ? undefined : `${pathname}${canonical}`;
 }
 
@@ -433,7 +532,28 @@ export async function searchFilterValues(
   { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
 ): Promise<FilterValue[] | null> {
   const url = filterUrl(base, type, { values: kind }, { items, q });
-  if (!url) return [];
+  return url ? readValues(url, signal, fetchImpl) : [];
+}
+
+/** A person trait's values starting with `q` (`people/values/<trait>.json`), as `searchFilterValues` answers. */
+export async function searchTraitValues(
+  base: string,
+  type: ExploreType,
+  trait: string,
+  q: string,
+  items: FilterItem[] = [],
+  traits: FilterItem[] = [],
+  { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
+): Promise<FilterValue[] | null> {
+  const url = filterUrl(base, type, { peopleValues: trait }, { items, traits, q });
+  return url ? readValues(url, signal, fetchImpl) : [];
+}
+
+async function readValues(
+  url: string,
+  signal: AbortSignal | undefined,
+  fetchImpl: typeof fetch,
+): Promise<FilterValue[] | null> {
   try {
     const res = await fetchImpl(url, { signal });
     if (!res.ok) {
@@ -467,4 +587,132 @@ export function mergeFilterValues(lists: readonly (FilterValue[] | null)[]): Fil
     merged.set(value.id, known ? { ...known, count: known.count + value.count } : value);
   }
   return [...merged.values()].sort((a, b) => b.count - a.count);
+}
+
+/** The traits' counts beside a selection and the traits picked (`people/counts.json`). */
+export interface PeopleCounts {
+  /** The people credited under the selection and holding every trait. */
+  total: number;
+  /** Trait → its counts, shaped as `counts.json`'s kinds: the Wikidata kinds labelled. */
+  traits: Record<string, FilterKindCounts>;
+}
+
+/** atlas's trait counts; null where the route isn't there, fails, or the question is refused. */
+export async function fetchPeopleCounts(
+  base: string,
+  type: ExploreType,
+  items: FilterItem[],
+  traits: FilterItem[],
+  { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
+): Promise<PeopleCounts | null> {
+  const url = filterUrl(base, type, 'peopleCounts', { items, traits });
+  if (!url) return null;
+  try {
+    const res = await fetchImpl(url, { signal });
+    if (!res.ok) {
+      unanswered(url, res);
+      return null;
+    }
+    const body = (await res.json()) as Record<string, unknown> | null;
+    const kinds = body?.traits;
+    if (!body || !kinds || typeof kinds !== 'object') {
+      unanswered(url, new Error('people counts without traits'));
+      return null;
+    }
+    return {
+      total: typeof body.total === 'number' ? body.total : 0,
+      traits: kinds as Record<string, FilterKindCounts>,
+    };
+  } catch (error) {
+    unanswered(url, error);
+    return null;
+  }
+}
+
+/** One title a person is known for: among their biggest under the selection, as atlas's cards name it. */
+export interface KnownFor {
+  type: MediaType;
+  id: number;
+  title: string;
+  year?: number;
+}
+
+/** One person as `people.json` lists them, less what Den doesn't show. */
+export interface FilterPerson {
+  /** Their Wikidata id. */
+  id: string;
+  name: string;
+  /** Their TMDB id: what their page is addressed by. */
+  tmdbId?: number;
+  knownFor: KnownFor[];
+}
+
+function knownFor(value: unknown): KnownFor[] {
+  if (!Array.isArray(value)) return [];
+  return (value as Record<string, unknown>[]).flatMap((t): KnownFor[] => {
+    const type = t.type === 'series' ? 'tv' : t.type === 'movie' ? 'movie' : undefined;
+    return type && typeof t.id === 'number' && typeof t.title === 'string'
+      ? [
+          {
+            type,
+            id: t.id,
+            title: t.title,
+            ...(typeof t.year === 'number' ? { year: t.year } : {}),
+          },
+        ]
+      : [];
+  });
+}
+
+/**
+ * The people credited under a selection and holding every trait, a page at a time, in `order`: each page's people
+ * and the total there are. Throws `FilterUnavailable` for a 404, and for an answer that left a picked title kind or
+ * trait out, or named one of their values unknown — its people would not be the selection's.
+ */
+export function filterPeople(
+  base: string,
+  type: ExploreType,
+  items: FilterItem[],
+  traits: FilterItem[],
+  order?: string,
+  { fetchImpl = relayFetch }: { fetchImpl?: typeof fetch } = {},
+): (page: number) => Promise<{ people: FilterPerson[]; total: number }> {
+  const picked = new Set([...items, ...traits].map((item) => item.kind.toLowerCase()));
+  return async (page) => {
+    const url = filterUrl(base, type, 'people', {
+      items,
+      traits,
+      order,
+      skip: (page - 1) * TITLES_PAGE,
+    });
+    if (!url) throw new FilterUnavailable('atlas refuses this selection');
+    const res = await fetchImpl(url);
+    if (res.status === 404) throw new FilterUnavailable('atlas has no people route', false);
+    if (!res.ok) throw new Error(`atlas answered ${res.status}`);
+    const body = (await res.json()) as Record<string, unknown>;
+    const missing = [
+      ...strings(body.ignored),
+      ...strings(body.kindsUnavailable),
+      ...strings(body.ignoredTraits),
+      ...strings(body.traitsUnavailable),
+    ].filter((kind) => picked.has(kind));
+    if (missing.length) throw new FilterUnavailable(`atlas can't apply ${missing.join(', ')}`);
+    const unknown = [...strings(body.unknownValues), ...strings(body.unknownTraits)];
+    if (unknown.length) throw new FilterUnavailable(`atlas has no ${unknown.join(', ')}`);
+    const people = (
+      Array.isArray(body.people) ? (body.people as Record<string, unknown>[]) : []
+    ).flatMap((p): FilterPerson[] =>
+      typeof p.id === 'string' && typeof p.name === 'string'
+        ? [
+            {
+              id: p.id,
+              name: p.name,
+              ...(typeof p.tmdbId === 'number' ? { tmdbId: p.tmdbId } : {}),
+              knownFor: knownFor(p.knownFor),
+            },
+          ]
+        : [],
+    );
+    return { people, total: typeof body.total === 'number' ? body.total : people.length };
+  };
 }

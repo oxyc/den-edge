@@ -132,8 +132,9 @@
       if (key === requestedKey && (push || entries.get(position)?.pageKey === requestedPageKey)) {
         // Search is one page at many addresses. Opening a chip or switching Movies and Series is somewhere
         // a person went, so it gets its own entry, and Back returns to the chip before it — on the same
-        // page, which keeps its scroll and its state as it does while a query is typed.
-        if (key !== 'search') return;
+        // page, which keeps its scroll and its state as it does while a query is typed. People is browsed the
+        // same way.
+        if (key !== 'search' && key !== 'people') return;
         if (push) {
           if (address() === path) return;
           position++;

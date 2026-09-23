@@ -17,6 +17,7 @@ export type Route =
   | { page: 'watchlist' }
   | { page: 'settings' }
   | ({ page: 'search'; query: string } & Explore)
+  | ({ page: 'people' } & PeopleView)
   | { page: 'title'; type: MediaType; id: number }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
@@ -32,6 +33,23 @@ export interface Explore {
   type?: MediaType;
   chips?: string[];
 }
+
+/**
+ * What People is browsing: the type, the title facets that scope which credits count (Explore's ids, `c=`), the
+ * person traits picked (`t=`: `role-director`, `gender-Q6581072`, `born-1970`, `citizenship-Q34`,
+ * `occupation-Q33999`) and the order. Each absent for its default: All, no facets, no traits, prominence.
+ */
+export interface PeopleView {
+  type?: MediaType;
+  chips?: string[];
+  traits?: string[];
+  order?: string;
+}
+
+/** atlas's `people.json` orders; the first, prominence, is the default and stays out of an address. */
+export const PEOPLE_ORDERS = ['prominence', 'credits', 'name', 'born_asc', 'born_desc'] as const;
+const namedOrder = (order: string) =>
+  order !== PEOPLE_ORDERS[0] && (PEOPLE_ORDERS as readonly string[]).includes(order);
 
 /**
  * A facet id is lowercase words, digits, a country code or a Wikidata id, underscores (atlas's `live_action`) and
@@ -100,6 +118,21 @@ export function parseRoute(url: string): Route {
       ...(chips.length ? { chips } : {}),
     };
   }
+  if (first === 'people' && !second) {
+    const type = params.get('type');
+    const list = (name: string) => [
+      ...new Set((params.get(name) ?? '').split(',').filter((id) => FACET.test(id))),
+    ];
+    const [chips, traits] = [list('c'), list('t')];
+    const order = params.get('order') ?? '';
+    return {
+      page: 'people',
+      ...(type === 'movie' || type === 'tv' ? { type } : {}),
+      ...(chips.length ? { chips } : {}),
+      ...(traits.length ? { traits } : {}),
+      ...(namedOrder(order) ? { order } : {}),
+    };
+  }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
   if ((first === 'movie' || first === 'tv') && id)
@@ -121,6 +154,8 @@ export function routePath(route: Route): string {
       return '/';
     case 'search':
       return searchHref(route.query, route);
+    case 'people':
+      return peopleHref(route);
     case 'title':
       return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
     case 'person':
@@ -166,6 +201,19 @@ export function searchHref(query: string, { type, chips = [] }: Explore = {}): s
     facets.length ? `c=${facets.join(',')}` : '',
   ].filter(Boolean);
   return params.length ? `/search?${params.join('&')}` : '/search';
+}
+
+/** People's address: what it is browsing, so a view of it can be linked and Back takes back the last pick. */
+export function peopleHref({ type, chips = [], traits = [], order }: PeopleView = {}): string {
+  const valid = (ids: string[]) => ids.filter((id) => FACET.test(id));
+  const [facets, picked] = [valid(chips), valid(traits)];
+  const params = [
+    type ? `type=${type}` : '',
+    facets.length ? `c=${facets.join(',')}` : '',
+    picked.length ? `t=${picked.join(',')}` : '',
+    order && namedOrder(order) ? `order=${order}` : '',
+  ].filter(Boolean);
+  return params.length ? `/people?${params.join('&')}` : '/people';
 }
 
 /**

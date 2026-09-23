@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 38e3fd3): both ends hold to the same pairs.
+// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 4cd3e09): both ends hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
   canonicalFilterPath,
   fetchFilterCounts,
+  fetchPeopleCounts,
+  filterPeople,
   filterTitles,
   FilterUnavailable,
   filterUrl,
   likeValue,
   mergeFilterValues,
   searchFilterValues,
+  searchTraitValues,
 } from './filterRoutes';
 
 describe('canonical filter addresses', () => {
@@ -64,6 +67,45 @@ describe('canonical filter addresses', () => {
     );
     expect(canonicalFilterPath('/index/filter/all/counts.json?sel=like:person-1')).toBeUndefined();
     expect(canonicalFilterPath('/index/filter/both/counts.json')).toBeUndefined();
+  });
+
+  it('asks the people routes with the traits after the selection, then the order, then the page', () => {
+    expect(
+      filterUrl('/atlas', 'tv', 'people', {
+        items: [{ kind: 'genre', id: '18' }],
+        traits: [
+          { kind: 'role', id: 'Director' },
+          { kind: 'citizenship', id: 'q34' },
+        ],
+        order: 'Born_Desc',
+        skip: 48,
+      }),
+    ).toBe(
+      '/atlas/index/filter/series/people.json?sel=genre:18&traits=citizenship:Q34,role:director&order=born_desc&skip=48',
+    );
+    // The default order, and a counts route, say nothing of it.
+    expect(filterUrl('/atlas', 'all', 'people', { order: 'prominence' })).toBe(
+      '/atlas/index/filter/all/people.json',
+    );
+    expect(
+      filterUrl('/atlas', 'movie', 'peopleCounts', {
+        traits: [{ kind: 'born', id: '1974' }],
+        order: 'name',
+        skip: 24,
+      }),
+    ).toBe('/atlas/index/filter/movie/people/counts.json?traits=born:1970');
+    expect(filterUrl('/atlas', 'all', { peopleValues: 'occupation' }, { q: 'Film Dir' })).toBe(
+      '/atlas/index/filter/all/people/values/occupation.json?q=film%20dir',
+    );
+    // Traits mean nothing to a title route; a trait atlas can't read is refused.
+    expect(filterUrl('/atlas', 'movie', 'titles', { traits: [{ kind: 'role', id: 'cast' }] })).toBe(
+      '/atlas/index/filter/movie/titles.json',
+    );
+    expect(
+      filterUrl('/atlas', 'movie', 'people', { traits: [{ kind: 'gender', id: 'male' }] }),
+    ).toBeUndefined();
+    expect(filterUrl('/atlas', 'movie', 'people', { order: 'popularity' })).toBeUndefined();
+    expect(canonicalFilterPath('/index/filter/movie/people/values/role.json')).toBeUndefined();
   });
 });
 
@@ -209,6 +251,122 @@ describe('fetching', () => {
       '/atlas/index/filter/movie/titles.json?sel=decade:1990&skip=48',
       '/atlas/index/filter/movie/titles.json?sel=decade:1990&skip=72',
     ]);
+  });
+
+  it('pages people by skip, with the titles they are known for and nothing TMDB scores', async () => {
+    const asked: string[] = [];
+    const load = filterPeople(
+      '/atlas',
+      'all',
+      [{ kind: 'genre', id: '27' }],
+      [{ kind: 'role', id: 'director' }],
+      'credits',
+      {
+        fetchImpl: (async (input: RequestInfo | URL) => {
+          asked.push(String(input));
+          return answer({
+            people: [
+              {
+                id: 'Q1',
+                name: 'Ann',
+                tmdbId: 7,
+                credits: 3,
+                roles: ['director'],
+                knownFor: [
+                  { type: 'series', id: 5, title: 'A Show', year: 2020 },
+                  { type: 'movie', id: 6, title: 'A Film' },
+                ],
+              },
+              { id: 'Q2', name: 'Bob' },
+            ],
+            total: 50,
+            order: 'credits',
+            ignored: [],
+          });
+        }) as typeof fetch,
+      },
+    );
+    expect(await load(1)).toEqual({
+      people: [
+        {
+          id: 'Q1',
+          name: 'Ann',
+          tmdbId: 7,
+          knownFor: [
+            { type: 'tv', id: 5, title: 'A Show', year: 2020 },
+            { type: 'movie', id: 6, title: 'A Film' },
+          ],
+        },
+        { id: 'Q2', name: 'Bob', knownFor: [] },
+      ],
+      total: 50,
+    });
+    await load(2);
+    expect(asked).toEqual([
+      '/atlas/index/filter/all/people.json?sel=genre:27&traits=role:director&order=credits',
+      '/atlas/index/filter/all/people.json?sel=genre:27&traits=role:director&order=credits&skip=24',
+    ]);
+  });
+
+  it('gives way where atlas has no people route, or left a picked trait out', async () => {
+    const missing = filterPeople('/atlas', 'movie', [], [], undefined, {
+      fetchImpl: async () => answer({}, 404),
+    });
+    await expect(missing(1)).rejects.toBeInstanceOf(FilterUnavailable);
+    const ignored = filterPeople(
+      '/atlas',
+      'movie',
+      [],
+      [{ kind: 'gender', id: 'Q6581072' }],
+      undefined,
+      {
+        fetchImpl: async () =>
+          answer({
+            people: [],
+            total: 0,
+            ignoredTraits: ['gender'],
+            traitsUnavailable: ['gender'],
+          }),
+      },
+    );
+    await expect(ignored(1)).rejects.toBeInstanceOf(FilterUnavailable);
+    const unknown = filterPeople('/atlas', 'movie', [], [{ kind: 'role', id: 'grip' }], undefined, {
+      fetchImpl: async () => answer({ people: [], total: 0, unknownTraits: ['role:grip'] }),
+    });
+    await expect(unknown(1)).rejects.toBeInstanceOf(FilterUnavailable);
+  });
+
+  it('reads the traits’ counts, and finds a trait’s values by name', async () => {
+    const asked: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      asked.push(url);
+      return url.includes('/values/')
+        ? answer({ values: [{ id: 'Q189', name: 'Iceland', count: 4 }] })
+        : answer({
+            total: 5,
+            traits: { role: { mode: 'and', complete: true, values: { cast: 5 } } },
+          });
+    }) as typeof fetch;
+    const counts = await fetchPeopleCounts('/atlas', 'movie', [], [{ kind: 'role', id: 'cast' }], {
+      fetchImpl,
+    });
+    expect(counts).toEqual({
+      total: 5,
+      traits: { role: { mode: 'and', complete: true, values: { cast: 5 } } },
+    });
+    expect(
+      await searchTraitValues('/atlas', 'movie', 'citizenship', 'Ice', [], [], { fetchImpl }),
+    ).toEqual([{ id: 'Q189', name: 'Iceland', count: 4 }]);
+    expect(asked).toEqual([
+      '/atlas/index/filter/movie/people/counts.json?traits=role:cast',
+      '/atlas/index/filter/movie/people/values/citizenship.json?q=ice',
+    ]);
+    expect(
+      await fetchPeopleCounts('/atlas', 'movie', [], [], {
+        fetchImpl: async () => answer({}, 404),
+      }),
+    ).toBeNull();
   });
 
   it('finds people by a typed prefix, and asks nothing for too short a one', async () => {

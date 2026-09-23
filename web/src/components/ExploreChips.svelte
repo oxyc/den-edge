@@ -10,26 +10,8 @@
 
      What is picked stacks, and leaves its section: the picks are shown above the grid (Search), and these offer only
      what can still be added — `hidden` says which options can't. -->
-<script lang="ts">
+<script lang="ts" module>
   import type { Chip, ChipGroup } from '../lib/explore';
-
-  let {
-    chips,
-    selected,
-    hidden = () => false,
-    typing = false,
-    onchange,
-  }: {
-    chips: Chip[];
-    /** The picked chips' ids, in the order picked. None is For You — unless a query is what's showing. */
-    selected: string[];
-    /** A query is typed: For You isn't open, though nothing is picked. */
-    typing?: boolean;
-    /** An option that can't be added to the selection, or would show nothing beside it. */
-    hidden?: (id: string) => boolean;
-    /** A chip picked or taken out: its id either way. */
-    onchange: (id: string) => void;
-  } = $props();
 
   const SECTIONS: [ChipGroup, string][] = [
     ['mood', 'Moods'],
@@ -59,12 +41,38 @@
   /** How many of each a section shows unfiltered: the rail's and the sheet's, and the phone strip's. */
   const LIST_FIRST = 8;
   const STRIP_FIRST = 3;
+</script>
+
+<script lang="ts">
+  let {
+    chips,
+    selected,
+    hidden = () => false,
+    typing = false,
+    onchange,
+    sections: order = SECTIONS,
+    strip = STRIP_KINDS,
+  }: {
+    chips: Chip[];
+    /** The picked chips' ids, in the order picked. None is For You — unless a query is what's showing. */
+    selected: string[];
+    /** A query is typed: For You isn't open, though nothing is picked. */
+    typing?: boolean;
+    /** An option that can't be added to the selection, or would show nothing beside it. */
+    hidden?: (id: string) => boolean;
+    /** A chip picked or taken out: its id either way. */
+    onchange: (id: string) => void;
+    /** The sections, in order, with their headings: Explore's by default. */
+    sections?: [ChipGroup, string][];
+    /** The kinds the phone strip samples. */
+    strip?: ChipGroup[];
+  } = $props();
 
   const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
   /** What can still be added: not picked, not hidden. */
   const open = (chip: Chip) => !selected.includes(chip.id) && !hidden(chip.id);
   const sections = $derived(
-    SECTIONS.flatMap(([group, heading]) => {
+    order.flatMap(([group, heading]) => {
       const inGroup = chips.filter((chip) => chip.group === group && open(chip));
       return inGroup.length ? [{ group, heading, chips: inGroup }] : [];
     }),
@@ -185,7 +193,7 @@
 {#if !typing}
   <nav class="strip" aria-label="Browse by category">
     {#each [...forYou, ...sections
-        .filter((s) => STRIP_KINDS.includes(s.group))
+        .filter((s) => strip.includes(s.group))
         .flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
       {@render chip(item)}
     {/each}

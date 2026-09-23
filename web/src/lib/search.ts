@@ -19,6 +19,8 @@ export interface Person {
   id: number;
   name: string;
   profilePath?: string;
+  /** The titles they are known for, by name, where a list of people says (People's grid). */
+  knownFor?: string[];
 }
 
 export type Hit = { kind: 'title'; title: Title } | { kind: 'person'; person: Person };

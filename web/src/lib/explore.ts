@@ -77,7 +77,13 @@ export type ChipGroup =
   | 'critique'
   | 'runtime'
   | 'animated'
-  | 'character';
+  | 'character'
+  // People's person traits (`people.ts`).
+  | 'role'
+  | 'gender'
+  | 'born'
+  | 'citizenship'
+  | 'occupation';
 
 export interface Chip {
   id: string;
@@ -114,6 +120,11 @@ export const KIND: Record<ChipGroup, string> = {
   runtime: 'runtime',
   animated: 'animation',
   character: 'character',
+  role: 'role',
+  gender: 'gender',
+  born: 'born',
+  citizenship: 'nationality',
+  occupation: 'occupation',
 };
 
 /** The rating floors offered, as the posters' ★ reads (TMDB's vote average), each with the words people use for it. */

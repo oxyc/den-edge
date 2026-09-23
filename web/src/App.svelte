@@ -9,7 +9,7 @@
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
-  import { parseRoute, type Explore } from './lib/route';
+  import { parseRoute, type Explore, type PeopleView } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
   import { onTmdbThrottle } from './lib/tmdbCache';
@@ -105,6 +105,13 @@
     query = route.query;
     explore = { type: route.type, chips: route.chips };
   });
+  // And what People is browsing.
+  const peopleOf = (r: typeof route): PeopleView =>
+    r.page === 'people' ? { type: r.type, chips: r.chips, traits: r.traits, order: r.order } : {};
+  let people = $state<PeopleView>(untrack(() => peopleOf(route)));
+  $effect(() => {
+    if (route.page === 'people') people = peopleOf(route);
+  });
   // A title's and a person's page name themselves once they know what they are showing, so this sets what can
   // be known from the address and leaves those two to overwrite it.
   $effect(() => {
@@ -132,12 +139,18 @@
   {/if}
   {#if links.current}
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
-      <RoutedLibrary link={links.current} {query} {explore} onchange={(next) => (route = next)} />
+      <RoutedLibrary
+        link={links.current}
+        {query}
+        {explore}
+        {people}
+        onchange={(next) => (route = next)}
+      />
     {/key}
   {:else if links.browsing}
     <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
          absent case the components already model. -->
-    <RoutedLibrary link={null} {query} {explore} onchange={(next) => (route = next)} />
+    <RoutedLibrary link={null} {query} {explore} {people} onchange={(next) => (route = next)} />
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {/if}

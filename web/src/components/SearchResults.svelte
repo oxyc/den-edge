@@ -1,5 +1,5 @@
 <!-- Search results as the TV's grid: posters for titles, a round portrait for a person. Endless where it is given
-     `onend`: Explore's feed asks for its next page as the last row nears the screen. -->
+     `onend`: Explore's feed and People's grid ask for their next page as the last row nears the screen. -->
 <script lang="ts">
   import { hitKey, type Hit } from '../lib/search';
   import PersonCard from './PersonCard.svelte';
@@ -52,7 +52,12 @@
         }}
       />
     {:else}
-      <PersonCard id={hit.person.id} name={hit.person.name} profilePath={hit.person.profilePath} />
+      <PersonCard
+        id={hit.person.id}
+        name={hit.person.name}
+        profilePath={hit.person.profilePath}
+        knownFor={hit.person.knownFor}
+      />
     {/if}
   {/each}
 </div>
