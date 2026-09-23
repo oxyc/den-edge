@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Release, Session } from './remux';
-import { optionLabel, releaseAfterMeasure, swapNotice, unplayable } from './releaseVerdicts';
+import {
+  optionLabel,
+  releaseAfterMeasure,
+  restartAfterMeasure,
+  swapNotice,
+  unplayable,
+} from './releaseVerdicts';
 
 describe('releaseAfterMeasure', () => {
   it('names nothing when den-remux picked, so it picks again under the measured link', () => {
@@ -8,6 +14,31 @@ describe('releaseAfterMeasure', () => {
   });
   it("keeps the viewer's own choice, however big", () => {
     expect(releaseAfterMeasure('4k.mkv')).toEqual({ filename: '4k.mkv' });
+  });
+});
+
+describe('restartAfterMeasure', () => {
+  // The guest's 1080p WEB-DL: 2.88 GB over two hours averages 3.2 Mbit/s.
+  const web = {
+    duration: 7_200,
+    release: { label: '1080p', filename: 'web.mkv', size: 2_880_000_000 },
+  };
+
+  it('keeps a copy that fits the link, and starts again for one that needs more', () => {
+    expect(restartAfterMeasure(web, 3_780_000), '70% of a 5.4 Mbit/s link').toBe(false);
+    expect(restartAfterMeasure(web, 3_200_000), 'exactly its average fits').toBe(false);
+    expect(restartAfterMeasure(web, 3_199_999)).toBe(true);
+  });
+
+  it('starts a conversion again only where the link won’t take its 1080p preset', () => {
+    const converted = { ...web, video: { codec: 'h264', transcoded: true } };
+    expect(restartAfterMeasure(converted, 3_780_000)).toBe(true);
+    expect(restartAfterMeasure(converted, 8_384_000)).toBe(false);
+  });
+
+  it('starts again, as before, when the session doesn’t say enough to judge', () => {
+    expect(restartAfterMeasure({ ...web, duration: 0 }, 100_000_000)).toBe(true);
+    expect(restartAfterMeasure({ ...web, release: { ...web.release, size: 0 } }, 1e9)).toBe(true);
   });
 });
 

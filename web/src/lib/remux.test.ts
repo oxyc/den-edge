@@ -8,7 +8,12 @@ import {
   forgetLinks,
   forgetSubtitles,
   linkLimit,
+  LINK_MEMORY_MS,
   LINK_TTL_MS,
+  premeasureLink,
+  relayLimit,
+  rememberedLink,
+  rememberLink,
   listReleases,
   localNetworkRefused,
   login,
@@ -430,6 +435,215 @@ describe('linkLimit', () => {
     expect(onLan(tailnet)).toBe(false);
     expect(onLan('/remux', 'http://192.168.86.193:8094/'), 'its own origin, at home').toBe(true);
     expect(onLan('/remux', 'https://d.example/')).toBe(false);
+  });
+
+  it('takes a remembered link without measuring, and remembers one it measured', async () => {
+    const storage = memoryStorage();
+    rememberLink(tailnet, 3_780_000, Date.now(), storage);
+    const measured = link([
+      [0, 1],
+      [1_000, 125_000],
+    ]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, storage)).toBe(3_780_000);
+    expect(measured.asked, 'no probe for a remembered link').toEqual([]);
+
+    const fresh = memoryStorage();
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, fresh)).toBe(700_000);
+    expect(rememberedLink(tailnet, Date.now(), fresh)?.maxBitrate).toBe(700_000);
+  });
+
+  it('measures as before where the browser refuses storage', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const measured = link([
+      [0, 1],
+      [1_000, 125_000],
+    ]);
+    expect(await linkLimit(tailnet, measured.fetchImpl, measured.now, refusing)).toBe(700_000);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+/** Storage as a browser keeps it, in memory. */
+function memoryStorage(): Storage {
+  const kept = new Map<string, string>();
+  return {
+    getItem: (key: string) => kept.get(key) ?? null,
+    setItem: (key: string, value: string) => void kept.set(key, value),
+    removeItem: (key: string) => void kept.delete(key),
+    clear: () => kept.clear(),
+    key: (n: number) => [...kept.keys()][n] ?? null,
+    get length() {
+      return kept.size;
+    },
+  };
+}
+
+/** A private or blocked window's storage: every access throws. */
+const refusing = {
+  getItem() {
+    throw new DOMException('The operation is insecure.', 'SecurityError');
+  },
+  setItem() {
+    throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+  },
+} as unknown as Storage;
+
+describe('rememberedLink', () => {
+  const tailnet = 'https://pve.example.ts.net:8443/remux';
+
+  it('keeps a route’s link for six hours, and only that route’s', () => {
+    const storage = memoryStorage();
+    rememberLink(tailnet, 3_780_000, 1_000, storage);
+    expect(rememberedLink(tailnet, 1_000 + LINK_MEMORY_MS - 1, storage)).toEqual({
+      at: 1_000,
+      maxBitrate: 3_780_000,
+    });
+    expect(rememberedLink(tailnet, 1_000 + LINK_MEMORY_MS, storage)).toBeUndefined();
+    expect(rememberedLink('/remux', 1_000, storage)).toBeUndefined();
+  });
+
+  it('remembers the home network as a link with no limit', () => {
+    const storage = memoryStorage();
+    rememberLink('/remux', undefined, 1_000, storage);
+    expect(rememberedLink('/remux', 2_000, storage)).toEqual({ at: 1_000 });
+  });
+
+  it('starts a relayed session under a remembered link, so it is never measured inside and replaced', () => {
+    const storage = memoryStorage();
+    expect(relayLimit('/remux', undefined, storage), 'nothing known: measured inside').toBe(
+      undefined,
+    );
+    rememberLink('/remux', 3_780_000, Date.now(), storage);
+    expect(relayLimit('/remux', undefined, storage)).toBe(3_780_000);
+    expect(relayLimit('/remux', 2_000_000, storage), 'this player’s own measure first').toBe(
+      2_000_000,
+    );
+    rememberLink('/remux', undefined, Date.now(), storage);
+    expect(relayLimit('/remux', undefined, storage), 'at home: no limit').toBeUndefined();
+  });
+
+  it('reads nothing, and throws nothing, where storage throws or holds something else', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(() => rememberLink(tailnet, 1, 0, refusing)).not.toThrow();
+    expect(rememberedLink(tailnet, 0, refusing)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(2);
+    const storage = memoryStorage();
+    storage.setItem(`den.remux.link:${tailnet}`, 'not json');
+    expect(rememberedLink(tailnet, 0, storage)).toBeUndefined();
+    warn.mockRestore();
+  });
+});
+
+describe('premeasureLink', () => {
+  beforeEach(forgetLinks);
+
+  /** An idle callback run when the test says. */
+  const idleness = () => {
+    let pending: (() => void) | undefined;
+    return {
+      idle: (run: () => void) => {
+        pending = run;
+        return () => (pending = undefined);
+      },
+      run: () => pending?.(),
+      get waiting() {
+        return pending !== undefined;
+      },
+    };
+  };
+  const speed =
+    (asked: string[]): typeof fetch =>
+    async (input) => {
+      asked.push(String(input));
+      const chunks = [1, 125_000];
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const size = chunks.shift();
+          if (size === undefined) return controller.close();
+          controller.enqueue(new Uint8Array(size));
+        },
+      });
+      return { ok: true, status: 200, body } as Response;
+    };
+
+  it('times the relay’s link once the page is idle, and remembers it', async () => {
+    const storage = memoryStorage();
+    const asked: string[] = [];
+    const idle = idleness();
+    let clock = 0;
+    premeasureLink('/remux', {
+      fetchImpl: speed(asked),
+      now: () => (clock += 500),
+      storage,
+      idle: idle.idle,
+    });
+    expect(asked, 'nothing before the page is idle').toEqual([]);
+    idle.run();
+    await vi.waitFor(() => expect(rememberedLink('/remux', Date.now(), storage)).toBeDefined());
+    expect(asked).toEqual([`/remux/speed?bytes=${SPEED_PROBE_BYTES}`]);
+    expect(rememberedLink('/remux', Date.now(), storage)?.maxBitrate).toBeGreaterThan(0);
+
+    const again = idleness();
+    premeasureLink('/remux', { fetchImpl: speed(asked), storage, idle: again.idle });
+    expect(again.waiting, 'remembered: not timed again').toBe(false);
+  });
+
+  it('times a route once per page even when it could not be timed, and never at home', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const storage = memoryStorage();
+    const idle = idleness();
+    let asked = 0;
+    const refused: typeof fetch = async () => {
+      asked += 1;
+      return new Response(null, { status: 429 });
+    };
+    premeasureLink('/remux', { fetchImpl: refused, storage, idle: idle.idle });
+    idle.run();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    const again = idleness();
+    premeasureLink('/remux', { fetchImpl: refused, storage, idle: again.idle });
+    expect(again.waiting).toBe(false);
+    expect(asked).toBe(1);
+
+    const home = idleness();
+    premeasureLink('http://192.168.86.193:8095/remux', { storage, idle: home.idle });
+    expect(home.waiting).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('gives up when Play is pressed, remembers nothing, and may time the route again later', async () => {
+    const storage = memoryStorage();
+    const idle = idleness();
+    const cancel = premeasureLink('/remux', { storage, idle: idle.idle });
+    cancel();
+    expect(idle.waiting, 'not yet idle: never started').toBe(false);
+
+    let aborted = false;
+    const hanging: typeof fetch = async (_input, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(1_000));
+          init?.signal?.addEventListener('abort', () => {
+            aborted = true;
+            controller.error(new DOMException('aborted', 'AbortError'));
+          });
+        },
+      });
+      return { ok: true, status: 200, body } as Response;
+    };
+    const midway = idleness();
+    const stop = premeasureLink('/remux', { fetchImpl: hanging, storage, idle: midway.idle });
+    midway.run();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    stop();
+    await vi.waitFor(() => expect(aborted).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rememberedLink('/remux', Date.now(), storage)).toBeUndefined();
+
+    const later = idleness();
+    premeasureLink('/remux', { fetchImpl: hanging, storage, idle: later.idle });
+    expect(later.waiting).toBe(true);
   });
 });
 

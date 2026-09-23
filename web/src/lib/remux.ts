@@ -206,6 +206,139 @@ const links = new Map<string, { at: number; rate: Promise<number | null> }>();
 /** Forget the measured links (tests). */
 export function forgetLinks(): void {
   links.clear();
+  premeasured.clear();
+}
+
+/**
+ * How long this browser remembers a route's link: a later play asks for a session that fits it on its first request,
+ * rather than starting one, measuring, and starting another.
+ */
+export const LINK_MEMORY_MS = 6 * 60 * 60_000;
+const LINK_KEY = 'den.remux.link:';
+
+/** A route's link as remembered: when, and the `maxBitrate` it allows — none where den-remux was on the home network. */
+export interface RememberedLink {
+  at: number;
+  maxBitrate?: number;
+}
+
+/** This page's storage, or undefined where the browser refuses it (a blocked or private window). */
+function linkStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage ?? undefined;
+  } catch (error) {
+    console.warn('No local storage: the link is measured on every play.', error);
+    return undefined;
+  }
+}
+
+/** The link remembered for den-remux at `base`, when it is younger than LINK_MEMORY_MS. */
+export function rememberedLink(
+  base: string,
+  now = Date.now(),
+  storage = linkStorage(),
+): RememberedLink | undefined {
+  if (!storage) return undefined;
+  try {
+    const raw = storage.getItem(LINK_KEY + browserBase(base));
+    if (!raw) return undefined;
+    const kept = JSON.parse(raw) as Partial<RememberedLink> | null;
+    if (typeof kept?.at !== 'number' || now - kept.at >= LINK_MEMORY_MS) return undefined;
+    return typeof kept.maxBitrate === 'number' && kept.maxBitrate > 0
+      ? { at: kept.at, maxBitrate: kept.maxBitrate }
+      : { at: kept.at };
+  } catch (error) {
+    console.warn('The remembered link could not be read.', error);
+    return undefined;
+  }
+}
+
+/** Remember den-remux at `base` allows `maxBitrate` from here; undefined: it answered on the home network. */
+export function rememberLink(
+  base: string,
+  maxBitrate: number | undefined,
+  now = Date.now(),
+  storage = linkStorage(),
+): void {
+  try {
+    storage?.setItem(
+      LINK_KEY + browserBase(base),
+      JSON.stringify(maxBitrate === undefined ? { at: now } : { at: now, maxBitrate }),
+    );
+  } catch (error) {
+    console.warn('The measured link could not be remembered.', error);
+  }
+}
+
+/**
+ * The `maxBitrate` a session through the public relay asks with: the one this player already measured, else the one
+ * this browser remembers. Undefined only with neither — and only then is the session's link measured inside it and the
+ * session perhaps replaced (`restartAfterMeasure`).
+ */
+export function relayLimit(
+  route: string,
+  measured: number | undefined,
+  storage = linkStorage(),
+): number | undefined {
+  return measured ?? rememberedLink(route, Date.now(), storage)?.maxBitrate;
+}
+
+/** Routes whose link this page has set out to time ahead of a play (`premeasureLink`). */
+const premeasured = new Set<string>();
+
+function whenIdle(run: () => void): () => void {
+  if (typeof globalThis.requestIdleCallback === 'function') {
+    const id = requestIdleCallback(run, { timeout: 5_000 });
+    return () => cancelIdleCallback(id);
+  }
+  const id = setTimeout(run, 1_000);
+  return () => clearTimeout(id);
+}
+
+/**
+ * Time the link to den-remux at `base` once the page is idle and remember it (`rememberLink`), so the first play asks
+ * for a session that fits. Nothing at home, nothing where a link is remembered, and once per route per page. The
+ * returned function gives up on it — Play does, which then measures inside its session as it always could.
+ */
+export function premeasureLink(
+  base: string,
+  {
+    fetchImpl = relayFetch,
+    now = () => performance.now(),
+    storage = linkStorage(),
+    idle = whenIdle,
+  }: {
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+    storage?: Storage;
+    idle?: (run: () => void) => () => void;
+  } = {},
+): () => void {
+  const key = base && browserBase(base);
+  if (!key || onLan(base) || premeasured.has(key) || rememberedLink(base, Date.now(), storage))
+    return () => undefined;
+  premeasured.add(key);
+  const controller = new AbortController();
+  let done = false;
+  const cancelIdle = idle(() => {
+    void timeTransferUrl(
+      `${base}/speed?bytes=${SPEED_PROBE_BYTES}`,
+      fetchImpl,
+      now,
+      controller.signal,
+    ).then((rate) => {
+      done = true;
+      if (controller.signal.aborted) return;
+      if (rate) rememberLink(base, Math.round(rate * LINK_HEADROOM), Date.now(), storage);
+      else console.warn(`The link to ${base} could not be timed ahead of play.`);
+    });
+  });
+  return () => {
+    if (done) return;
+    cancelIdle();
+    controller.abort();
+    premeasured.delete(key);
+  };
 }
 
 /**
@@ -250,13 +383,17 @@ async function timeTransfer(
   return timeTransferUrl(`${base}/speed?bytes=${SPEED_PROBE_BYTES}`, fetchImpl, now);
 }
 
+/** The rate `url` delivers at; null when it couldn't be timed, or `signal` gave up on it. */
 async function timeTransferUrl(
   url: string,
   fetchImpl: typeof fetch,
   now: () => number,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SPEED_DEADLINE_MS);
+  const giveUp = () => controller.abort();
+  signal?.addEventListener('abort', giveUp, { once: true });
   let first: number | undefined;
   let mark: number | undefined;
   let last: number | undefined;
@@ -289,8 +426,9 @@ async function timeTransferUrl(
     // Given up on, or cut off: what arrived before still says something.
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', giveUp);
   }
-  if (first === undefined || last === undefined) return null;
+  if (signal?.aborted || first === undefined || last === undefined) return null;
   // Past the skipped start where the transfer lasted that long; over the whole of it where it was faster than that.
   if (counted > 0 && mark !== undefined) return (counted * 8000) / (last - mark);
   return last > first ? (total * 8000) / (last - first) : null;
@@ -298,16 +436,22 @@ async function timeTransferUrl(
 
 /**
  * The `maxBitrate` a session at `base` asks for: LINK_HEADROOM of the measured link, away from home; undefined at home,
- * and wherever the link couldn't be measured — den-remux then picks as it always has.
+ * and wherever the link couldn't be measured — den-remux then picks as it always has. A link remembered in this browser
+ * (`rememberedLink`) is taken as it is.
  */
 export async function linkLimit(
   base: string,
   fetchImpl: typeof fetch = fetch,
   now?: () => number,
+  storage = linkStorage(),
 ): Promise<number | undefined> {
   if (onLan(base)) return undefined;
+  const kept = rememberedLink(base, Date.now(), storage);
+  if (kept) return kept.maxBitrate;
   const rate = await measureLink(base, fetchImpl, now);
-  return rate ? Math.round(rate * LINK_HEADROOM) : undefined;
+  const limit = rate ? Math.round(rate * LINK_HEADROOM) : undefined;
+  if (limit !== undefined) rememberLink(base, limit, Date.now(), storage);
+  return limit;
 }
 
 /** Let this browser in with its key: true, false for a key den-remux doesn't know, null when it can't be reached. */

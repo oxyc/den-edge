@@ -20,7 +20,9 @@
     linkLimit,
     listReleases,
     login,
+    relayLimit,
     releaseParts,
+    rememberLink,
     reportFailure,
     sourceFailed,
     startSession,
@@ -32,7 +34,13 @@
     type Want,
     videoCodecsOf,
   } from '../lib/remux';
-  import { optionLabel, releaseAfterMeasure, swapNotice } from '../lib/releaseVerdicts';
+  import {
+    optionLabel,
+    releaseAfterMeasure,
+    restartAfterMeasure,
+    swapNotice,
+  } from '../lib/releaseVerdicts';
+  import { reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -152,6 +160,10 @@
    */
   let castOffer = $state<'idle' | 'waiting' | 'none'>('idle');
   let publicMaxBitrate: number | undefined;
+  /** The `maxBitrate` the playing session was asked with. */
+  let askedMaxBitrate: number | undefined;
+  /** What this page's own video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
+  let watcher: Watcher | undefined;
   /** The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick. */
   let chosenRelease: string | undefined = untrack(() => filename);
   let session = $state<Session | null>(null);
@@ -235,9 +247,12 @@
         ? withoutRefused(claimed)
         : claimed;
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
-    // A direct remote origin can be measured before creation. The public control relay cannot: its speed path
-    // appears only inside a signed session, so that first session is measured and replaced just below.
-    const maxBitrate = /^https?:/.test(route) ? await linkLimit(route) : publicMaxBitrate;
+    // A direct remote origin can be measured before creation. Through the public control relay the link is what this
+    // browser remembers (timed on the title's page, or at an earlier play); with nothing remembered, the first session
+    // is measured inside and replaced only when what it chose needs more than the link carries (`castMessage`).
+    const maxBitrate = /^https?:/.test(route)
+      ? await linkLimit(route)
+      : (publicMaxBitrate = relayLimit(route, publicMaxBitrate));
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -275,6 +290,7 @@
       return;
     }
     started = at;
+    askedMaxBitrate = maxBitrate;
     session = result;
     // Asked to cast, but the relay's session has no public address or cast page: nothing can be cast from here.
     if (castOffer === 'waiting' && !(result.castOrigin && result.publicBase)) castOffer = 'none';
@@ -322,9 +338,16 @@
     }, STUCK_MS);
     const cleanup = () => clearTimeout(stuck);
     element.addEventListener('loadeddata', cleanup, { once: true });
+    const reportUrl = reportUrlOf(current.playlist);
+    const stopWatching = () => {
+      cleanup();
+      watcher?.stop();
+      watcher = undefined;
+    };
     if (nativeHls(element)) {
       element.src = current.playlist;
-      return cleanup;
+      watcher = watchPlayback({ video: element, reportUrl });
+      return stopWatching;
     }
     void import('hls.js').then(({ default: Hls }) => {
       if (ended || session !== current) return;
@@ -333,6 +356,7 @@
         return;
       }
       hls = new Hls(hlsConfig(started));
+      watcher = watchPlayback({ video: element, hls: { instance: hls, Hls }, reportUrl });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
       // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so
       // the release is still asked for again as a player that takes none of what it just refused.
@@ -351,7 +375,7 @@
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
     });
-    return cleanup;
+    return stopWatching;
   });
 
   function sendToCastFrame(): void {
@@ -427,8 +451,19 @@
         measured <= 1_000_000_000
       ) {
         publicMaxBitrate = Math.round(measured);
-        restart(releaseAfterMeasure(chosenRelease));
+        rememberLink(route, publicMaxBitrate);
+        // The cast page holds playback until told: started again only when what den-remux chose needs more than
+        // the link carries, so a release it can't open is not probed a second time for nothing.
+        if (restartAfterMeasure(current, publicMaxBitrate))
+          restart(releaseAfterMeasure(chosenRelease));
+        else frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
       }
+    } else if (message.type === 'den-lan') {
+      // den-remux answered on the home network, where there is no upload link to fit: a limit remembered from away
+      // does not apply here, and a session asked under one is asked again without it.
+      rememberLink(route, undefined);
+      publicMaxBitrate = undefined;
+      if (askedMaxBitrate !== undefined) restart(releaseAfterMeasure(chosenRelease));
     } else if (message.type === 'den-cast-availability') {
       // Whether a Chromecast is on the network. A receiver appearing late clears the notice; "none" only matters
       // to a viewer who asked to cast.
@@ -534,6 +569,7 @@
   async function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
     if (!session || failure) return;
     const current = session;
+    watcher?.spent();
     reportFailure(current, code, message);
     // A dead release looks exactly like this too — `MediaError 3`, and on the native path this page never
     // sees the segment responses that would say otherwise. Ask den-remux for the segment playback stalled
@@ -781,6 +817,8 @@
     // forward would throw away where the library says this was left.
     const at = video?.currentTime ?? remoteTime;
     if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
+    watcher?.stop();
+    watcher = undefined;
     hls?.destroy();
     hls = undefined;
     endSession(session);
@@ -806,6 +844,8 @@
     clearInterval(countdown);
     clearTimeout(retry);
     report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
+    watcher?.stop();
+    watcher = undefined;
     hls?.destroy();
     // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
     if (session && !casting) endSession(session);

@@ -93,6 +93,30 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
     })
 }
 
+/// The den-remux routes this relay passes: its control JSON, and `/speed` — random bytes a player away from home times
+/// its link by before it starts a session, so the first session it asks for already fits. Never its video.
+fn remux_control(path: &str) -> bool {
+    matches!(path, "/remux/health" | "/remux/session" | "/remux/releases" | "/remux/speed")
+}
+
+/// Most bytes a relayed `/remux/speed` asks den-remux for: what the web app times a link over. Every byte leaves over
+/// the home upload, so nobody gets more through here.
+pub(crate) const SPEED_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A `/remux/speed` target with its `bytes` held to SPEED_MAX_BYTES and nothing else in its query; `None` for a count
+/// that isn't one.
+fn speed_target(target: &str) -> Option<String> {
+    let mut url = url::Url::parse(target).ok()?;
+    let named = url.query_pairs().find(|(k, _)| k == "bytes").map(|(_, v)| v.parse::<u64>());
+    let bytes = match named {
+        None => SPEED_MAX_BYTES,
+        Some(Ok(n)) => n.min(SPEED_MAX_BYTES),
+        Some(Err(_)) => return None,
+    };
+    url.set_query(Some(&format!("bytes={bytes}")));
+    Some(url.to_string())
+}
+
 fn session_end_url(target: &str, body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let playlist = value.get("playlist")?.as_str()?;
@@ -378,7 +402,7 @@ pub async fn guest(
         _ => {
             // Without the shared secret remux would count a guest's sessions as the host's own, and unless
             // strangers cannot start libraries a grant is not a gate at all (`relay_with` asks the same of members).
-            let control = matches!(path.as_str(), "/remux/health" | "/remux/session" | "/remux/releases");
+            let control = remux_control(&path);
             if state.remux_edge_secret.is_none()
                 || !control
                 || !crate::grants::libraries_are_members_only(state)
@@ -463,9 +487,12 @@ async fn relay_with(
     // A refusal is the 404 an unknown route gets, so the gate never advertises what it is hiding. The
     // LAN and tailnet faces are untouched — a TV reaches scout directly, never through here.
     let remux = req.uri().path().starts_with("/remux/");
-    if remux && !matches!(req.uri().path(), "/remux/health" | "/remux/session" | "/remux/releases") {
+    if remux && !remux_control(req.uri().path()) {
         return json(StatusCode::NOT_FOUND, "not_found");
     }
+    let speed = req.uri().path() == "/remux/speed";
+    let target = if speed { speed_target(&target) } else { Some(target) };
+    let Some(target) = target else { return json(StatusCode::BAD_REQUEST, "bad_request") };
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
     let member_only = grant.is_none()
         && face == crate::handler::Face::Web
@@ -730,7 +757,7 @@ async fn relay_with(
     }
     // A tuned row answers one caller's knobs; atlas says `no-store`, and this holds to it whatever atlas says, so
     // no cache in front of this origin keeps one.
-    if public_session || playground {
+    if public_session || playground || speed {
         resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
