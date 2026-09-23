@@ -116,11 +116,14 @@ async fn drain_many(state: &AppState, req: Request) -> Response {
 /// Queues drained per address per minute, a queue each whether asked one at a time or together. A drain is a read
 /// and a delete under the store's write lock, and the route answers on the public names: without a budget one
 /// address could keep every other writer waiting. A TV polling seven linked devices every ten seconds spends 42.
+///
+/// Fixed minute windows, not `throttled_by`'s window that moves on with every request allowed: a TV polls without
+/// pause, so a moving window would never close and a steady poller would add up to the limit within minutes.
 const DRAINS_PER_WINDOW: u32 = 240;
 
 fn drain_budget(state: &AppState, ip: &str, queues: usize) -> Option<u64> {
     let cost = u32::try_from(queues).unwrap_or(u32::MAX);
-    crate::link::throttled_by(state, &format!("inbox-drain:{ip}"), DRAINS_PER_WINDOW, cost)
+    crate::link::throttled_per_minute_by(state, &format!("inbox-drain:{ip}"), DRAINS_PER_WINDOW, cost)
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
@@ -297,6 +300,20 @@ mod tests {
 
         h.advance(60_000);
         assert_eq!(drain(&h).await, Vec::<Value>::new(), "the window clears");
+    }
+
+    /// A TV polls without pause: seven single drains every ten seconds, for an hour, stay inside the budget. A
+    /// window that moved on with every allowed request would never close and refuse it within minutes.
+    #[tokio::test]
+    async fn a_steady_poller_is_never_refused() {
+        let h = Harness::new();
+        for poll in 0..360 {
+            for _ in 0..7 {
+                let status = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await.status();
+                assert_eq!(status, StatusCode::OK, "poll {poll}");
+            }
+            h.advance(10_000);
+        }
     }
 
     #[tokio::test]

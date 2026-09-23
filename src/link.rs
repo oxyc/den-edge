@@ -88,6 +88,12 @@ pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32
 /// in it. For a steady caller — an assistant's MCP calls — where `throttled_at`, whose window moves on with every
 /// request allowed, would never close and refuse it for good once it passed the limit.
 pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -> Option<u64> {
+    throttled_per_minute_by(state, bucket, limit, 1)
+}
+
+/// `throttled_per_minute` for an act that costs `cost` of the budget at once. Refused whole when it does not fit,
+/// and then it spends nothing.
+pub(crate) fn throttled_per_minute_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
     if claims.len() > 1024 {
@@ -98,10 +104,10 @@ pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -
         t.count = 0;
         t.until = now + CLAIM_WINDOW_MS;
     }
-    if t.count >= limit {
+    if t.count.saturating_add(cost) > limit {
         return Some(t.until.saturating_sub(now));
     }
-    t.count += 1;
+    t.count += cost;
     None
 }
 
