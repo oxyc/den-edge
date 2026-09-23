@@ -63,7 +63,50 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let status = resp.status().as_u16();
     state.metrics.record(route, status);
     if state.log_requests {
-        eprintln!("{method} {route} {status} {}ms rid={rid}", started.elapsed().as_millis());
+        let code = resp.extensions().get::<ErrorCode>().map(|c| c.0.as_str());
+        let scope = resp.extensions().get::<ListenerScope>().map(|s| s.0);
+        let ms = started.elapsed().as_millis();
+        eprintln!("{}", log_line(&method, route, status, ms, &rid, code, scope));
+    }
+    resp
+}
+
+/// An error answer's `error` code, carried on the response for the request log. An extension, not a header: it
+/// never leaves this server.
+#[derive(Clone)]
+pub struct ErrorCode(pub String);
+
+/// The media listener grant a public remux session asked for (`browser`, `wide:cast`, `wide:ipv6`), carried on
+/// the response for the request log like `ErrorCode`.
+#[derive(Clone, Copy)]
+pub struct ListenerScope(pub &'static str);
+
+/// The one line each request is logged as. An error answer's code goes on the end, so a refusal can be told
+/// from another with the same status, and so does a public session's listener scope; nothing of the request's
+/// body or address does.
+fn log_line(
+    method: &Method,
+    route: &str,
+    status: u16,
+    ms: u128,
+    rid: &str,
+    code: Option<&str>,
+    scope: Option<&str>,
+) -> String {
+    let mut line = format!("{method} {route} {status} {ms}ms rid={rid}");
+    if let Some(code) = code {
+        line.push_str(&format!(" err={code}"));
+    }
+    if let Some(scope) = scope {
+        line.push_str(&format!(" scope={scope}"));
+    }
+    line
+}
+
+/// Tags a JSON answer with its `error` code, when it has one, for the request log.
+fn with_error_code(mut resp: Response, body: &Value) -> Response {
+    if let Some(code) = body.get("error").and_then(Value::as_str) {
+        resp.extensions_mut().insert(ErrorCode(code.to_owned()));
     }
     resp
 }
@@ -470,7 +513,7 @@ pub fn error(msg: &str) -> Value {
 /// A route handler's answer: JSON, never cached — pairing slots, drains and backups are real-time, and a
 /// cached one replays stale state.
 pub fn json_reply(status: StatusCode, body: &Value) -> Response {
-    raw_json(status, Body::from(body.to_string()), true)
+    with_error_code(raw_json(status, Body::from(body.to_string()), true), body)
 }
 
 /// `/config` and `/routes`: asked again every time, and a 304 while unchanged. A client reads both on every start,
@@ -484,7 +527,7 @@ fn revalidated(body: String, request: &HeaderMap) -> Response {
 
 /// Router answers must not pin health, a credential refusal, or an error in an intermediary cache.
 fn bare_json(status: StatusCode, body: &Value) -> Response {
-    raw_json(status, Body::from(body.to_string()), true)
+    with_error_code(raw_json(status, Body::from(body.to_string()), true), body)
 }
 
 /// A refusal that says when to come back: the same JSON, plus `Retry-After` in seconds.
@@ -641,6 +684,48 @@ pub mod tests {
         assert_eq!(route_label("/scout/cfg/manifest.json"), "/scout");
         assert_eq!(route_label("/atlas/recommend"), "/atlas");
         assert_eq!(route_label("/nope"), "other");
+    }
+
+    /// A 503 is refused for several reasons, and the request log is where the box's operator has to tell them
+    /// apart: the code goes on the line, and stays off the wire.
+    #[test]
+    fn an_error_answers_code_goes_on_its_log_line_and_nowhere_else() {
+        let code = |resp: &Response| resp.extensions().get::<ErrorCode>().map(|c| c.0.clone());
+        let refused = json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("public_media_ipv6"));
+        assert_eq!(code(&refused).as_deref(), Some("public_media_ipv6"));
+        assert!(
+            refused.headers().values().all(|v| !v.as_bytes().ends_with(b"public_media_ipv6")),
+            "the code is not a header"
+        );
+        let busy = retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("relay_busy"), 1);
+        assert_eq!(code(&busy).as_deref(), Some("relay_busy"));
+        assert_eq!(code(&internal("test", std::io::Error::other("x"))).as_deref(), Some("internal_error"));
+        assert_eq!(code(&json_reply(StatusCode::OK, &json!({ "ok": true }))), None);
+
+        assert_eq!(
+            log_line(&Method::POST, "/remux", 503, 0, "ab12", Some("public_media_ipv6"), None),
+            "POST /remux 503 0ms rid=ab12 err=public_media_ipv6"
+        );
+        assert_eq!(
+            log_line(&Method::GET, "/health", 200, 3, "ab12", None, None),
+            "GET /health 200 3ms rid=ab12"
+        );
+        assert_eq!(
+            log_line(&Method::POST, "/remux", 201, 40, "ab12", None, Some("wide:ipv6")),
+            "POST /remux 201 40ms rid=ab12 scope=wide:ipv6"
+        );
+        assert_eq!(
+            log_line(
+                &Method::POST,
+                "/remux",
+                503,
+                9,
+                "ab12",
+                Some("public_listener_unavailable"),
+                Some("wide:cast")
+            ),
+            "POST /remux 503 9ms rid=ab12 err=public_listener_unavailable scope=wide:cast"
+        );
     }
 
     /// A residential IPv6 customer gets a /64 — 18 quintillion addresses — so a limit keyed on the full

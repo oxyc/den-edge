@@ -17,6 +17,7 @@
     downmixLabel,
     nativeHls,
     endSession,
+    guestLimits,
     linkLimit,
     listReleases,
     login,
@@ -119,10 +120,19 @@
   /** The step of the lock screen's and a headset's skip buttons, where they don't name one. */
   const SKIP_SECS = 10;
   const messages: Record<
-    'none' | 'unreachable' | 'imdb' | 'unsupported' | 'playback' | 'source' | 'public',
+    | 'none'
+    | 'unreachable'
+    | 'imdb'
+    | 'unsupported'
+    | 'playback'
+    | 'source'
+    | 'public'
+    | 'ipv6'
+    | 'cast',
     string
   > = {
     public: 'Playback isn’t available from this network yet.',
+    ...guestLimits,
     none: 'No release of this that plays in a browser is ready right now. Try again later, or play it on your TV.',
     unreachable: 'Couldn’t reach Den’s player. Check that this device is on your network.',
     imdb: 'TMDB has no IMDb id for this, which Den’s sources need.',

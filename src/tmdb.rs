@@ -694,7 +694,7 @@ fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, as
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
-    raw_json(status, Body::from(error(code).to_string()), true)
+    crate::handler::json_reply(status, &error(code))
 }
 
 /// The same refusal, boxed for `fetch`'s error variant.

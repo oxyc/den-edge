@@ -286,7 +286,7 @@ pub async fn sweep_forever(state: Arc<AppState>) {
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
-    raw_json(status, Body::from(error(code).to_string()), true)
+    crate::handler::json_reply(status, &error(code))
 }
 
 fn refused(status: StatusCode, code: &str) -> Box<Response> {
