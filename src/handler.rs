@@ -72,10 +72,17 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let status = resp.status().as_u16();
     state.metrics.record(route, status);
     if state.log_requests {
-        let code = resp.extensions().get::<ErrorCode>().map(|c| c.0.as_str());
-        let scope = resp.extensions().get::<ListenerScope>().map(|s| s.0);
+        let tags: Vec<(&str, &str)> = [
+            ("err", resp.extensions().get::<ErrorCode>().map(|c| c.0.as_str())),
+            ("scope", resp.extensions().get::<ListenerScope>().map(|s| s.0)),
+            ("tmdb", resp.headers().get("x-den-tmdb").and_then(|v| v.to_str().ok())),
+            ("file", resp.extensions().get::<crate::web::Served>().map(|s| s.0)),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| Some((name, value?)))
+        .collect();
         let ms = started.elapsed().as_millis();
-        eprintln!("{}", log_line(&method, route, status, ms, &rid, code, scope));
+        eprintln!("{}", log_line(&method, route, status, ms, &rid, &tags));
     }
     resp
 }
@@ -90,24 +97,14 @@ pub struct ErrorCode(pub String);
 #[derive(Clone, Copy)]
 pub struct ListenerScope(pub &'static str);
 
-/// The one line each request is logged as. An error answer's code goes on the end, so a refusal can be told
-/// from another with the same status, and so does a public session's listener scope; nothing of the request's
-/// body or address does.
-fn log_line(
-    method: &Method,
-    route: &str,
-    status: u16,
-    ms: u128,
-    rid: &str,
-    code: Option<&str>,
-    scope: Option<&str>,
-) -> String {
+/// The one line each request is logged as. Tags go on the end as `name=value`: an error answer's code, so a
+/// refusal can be told from another with the same status; a public session's listener scope; whether a TMDB
+/// answer came from the cache (`x-den-tmdb`); and which kind of web-app file was served. Nothing of the
+/// request's body or address does.
+fn log_line(method: &Method, route: &str, status: u16, ms: u128, rid: &str, tags: &[(&str, &str)]) -> String {
     let mut line = format!("{method} {route} {status} {ms}ms rid={rid}");
-    if let Some(code) = code {
-        line.push_str(&format!(" err={code}"));
-    }
-    if let Some(scope) = scope {
-        line.push_str(&format!(" scope={scope}"));
+    for (name, value) in tags {
+        line.push_str(&format!(" {name}={value}"));
     }
     line
 }
@@ -729,15 +726,12 @@ pub mod tests {
         assert_eq!(code(&json_reply(StatusCode::OK, &json!({ "ok": true }))), None);
 
         assert_eq!(
-            log_line(&Method::POST, "/remux", 503, 0, "ab12", Some("public_media_ipv6"), None),
+            log_line(&Method::POST, "/remux", 503, 0, "ab12", &[("err", "public_media_ipv6")]),
             "POST /remux 503 0ms rid=ab12 err=public_media_ipv6"
         );
+        assert_eq!(log_line(&Method::GET, "/health", 200, 3, "ab12", &[]), "GET /health 200 3ms rid=ab12");
         assert_eq!(
-            log_line(&Method::GET, "/health", 200, 3, "ab12", None, None),
-            "GET /health 200 3ms rid=ab12"
-        );
-        assert_eq!(
-            log_line(&Method::POST, "/remux", 201, 40, "ab12", None, Some("wide:ipv6")),
+            log_line(&Method::POST, "/remux", 201, 40, "ab12", &[("scope", "wide:ipv6")]),
             "POST /remux 201 40ms rid=ab12 scope=wide:ipv6"
         );
         assert_eq!(
@@ -747,10 +741,48 @@ pub mod tests {
                 503,
                 9,
                 "ab12",
-                Some("public_listener_unavailable"),
-                Some("wide:cast")
+                &[("err", "public_listener_unavailable"), ("scope", "wide:cast")]
             ),
             "POST /remux 503 9ms rid=ab12 err=public_listener_unavailable scope=wide:cast"
+        );
+    }
+
+    /// The TMDB cache's verdict and the kind of web-app file served are what tell a slow page's cost apart on
+    /// the box: a cold TMDB miss, or a shell rewritten for a link preview.
+    #[tokio::test]
+    async fn a_tmdb_answer_and_a_web_file_say_what_they_were() {
+        let dir = temp_dir();
+        let cache = dir.join("tmdb");
+        let web = dir.join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(
+            web.join("index.html"),
+            "<head><!--den:meta--><title>Den</title><!--/den:meta--></head>",
+        )
+        .unwrap();
+        std::fs::write(web.join("assets/app-abc.js"), "1").unwrap();
+        let h = Harness::in_dir_with(dir, |state| {
+            state.tmdb_key = Some("household".into());
+            state.tmdb_cache_dir = Some(cache.clone());
+            state.web_dir = Some(web.clone());
+        });
+        let kept = cache
+            .join(format!("{}.json", crate::hex(&<sha2::Sha256 as sha2::Digest>::digest(b"/3/movie/550?"))));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(kept, "{\"id\":550}").unwrap();
+        let hit = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        assert_eq!(hit.headers()["x-den-tmdb"], "hit");
+
+        let served = |resp: &Response| resp.extensions().get::<crate::web::Served>().map(|s| s.0);
+        assert_eq!(served(&h.send("GET", "/", None, &[]).await), Some("shell"));
+        assert_eq!(served(&h.send("GET", "/movies/603", None, &[]).await), Some("shell"));
+        let tab = h.send("GET", "/watchlist", None, &[("host", "den.example")]).await;
+        assert_eq!(served(&tab), Some("preview"));
+        assert_eq!(served(&h.send("GET", "/assets/app-abc.js", None, &[]).await), Some("asset"));
+        assert_eq!(served(&h.send("GET", "/assets/gone.js", None, &[]).await), Some("404"));
+        assert_eq!(
+            log_line(&Method::GET, "/tmdb", 200, 1, "ab12", &[("tmdb", "hit")]),
+            "GET /tmdb 200 1ms rid=ab12 tmdb=hit"
         );
     }
 
