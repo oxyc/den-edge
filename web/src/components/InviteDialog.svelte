@@ -15,27 +15,27 @@
   let dialog = $state<HTMLDialogElement>();
   let code = $state<string | null>(null);
   let working = $state(false);
-  let outcome = $state<{ text: string; ok: boolean } | null>(null);
+  let failure = $state<string | null>(null);
 
   // Taken once: the code leaves the shared state as soon as it is shown, so Settings doesn't ask the same question.
   $effect(() => {
     const invited = guestGrants.invite;
     if (!invited) return;
     code = invited;
-    outcome = null;
+    failure = null;
     guestGrants.invite = null;
     if (!dialog?.open) dialog?.showModal();
   });
 
+  // An accepted invite just closes the dialog: the addons it lends are what shows it worked. Only a failure stays
+  // open, to say why and offer another try.
   async function accept() {
     if (!code) return;
     working = true;
     const result = await guestGrants.redeem(code);
     working = false;
-    outcome =
-      typeof result === 'string'
-        ? { text: failures[result], ok: false }
-        : { text: `You can now use ${result.name}’s addons in this browser.`, ok: true };
+    if (typeof result === 'string') failure = failures[result];
+    else close();
   }
 
   function close() {
@@ -45,17 +45,13 @@
 
 <dialog bind:this={dialog} aria-labelledby="invite-title" onclose={() => (code = null)}>
   <h2 id="invite-title">Accept this invite?</h2>
-  {#if outcome}
-    <p role="status" class:bad={!outcome.ok}>{outcome.text}</p>
+  {#if failure}
+    <p role="status" class="bad">{failure}</p>
     <div class="actions">
-      {#if !outcome.ok}
-        <button type="button" class="primary" disabled={working} onclick={() => void accept()}
-          >{working ? 'Checking…' : 'Try again'}</button
-        >
-      {/if}
-      <button type="button" class={outcome.ok ? 'primary' : 'quiet'} onclick={close}
-        >{outcome.ok ? 'Done' : 'Close'}</button
+      <button type="button" class="primary" disabled={working} onclick={() => void accept()}
+        >{working ? 'Checking…' : 'Try again'}</button
       >
+      <button type="button" class="quiet" onclick={close}>Close</button>
     </div>
   {:else}
     <p>

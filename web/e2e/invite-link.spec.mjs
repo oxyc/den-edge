@@ -37,17 +37,14 @@ test('an invite link asks to accept where it lands, and a guest who accepts hold
     expect(new URL(page.url()).pathname).toBe('/');
 
     await dialog.getByRole('button', { name: 'Accept' }).click();
-    await expect(dialog.getByRole('status')).toHaveText(
-      'You can now use Oskar’s addons in this browser.',
-    );
+    // Accepting closes the dialog straight away: no second "done" step.
+    await expect(dialog).toBeHidden();
     expect(redeemed).toEqual([CODE]);
     await expect
       .poll(() =>
         page.evaluate(() => JSON.parse(localStorage.getItem('den.grants') ?? '[]')[0]?.gid),
       )
       .toBe('a1b2c3d4');
-    await dialog.getByRole('button', { name: 'Done' }).click();
-    await expect(dialog).toBeHidden();
   } finally {
     await browser.close();
   }
