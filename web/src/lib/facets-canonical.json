@@ -31,6 +31,18 @@
       "canonical": "/index/filter/movie/counts.json?sel=country:SE,decade:1990,language:sv"
     },
     {
+      "url": "/index/filter/movie/counts.json?sel=region:Nordic,country:se",
+      "canonical": "/index/filter/movie/counts.json?sel=country:SE,region:nordic"
+    },
+    {
+      "url": "/index/filter/movie/counts.json?sel=region:east-asian,genre:18",
+      "canonical": "/index/filter/movie/counts.json?sel=genre:18,region:east-asian"
+    },
+    {
+      "url": "/index/filter/series/titles.json?sel=-region:NORTH-AMERICAN",
+      "canonical": "/index/filter/series/titles.json?sel=-region:north-american"
+    },
+    {
       "url": "/index/filter/movie/counts.json?sel=genre:028,rating:08",
       "canonical": "/index/filter/movie/counts.json?sel=genre:28,rating:8"
     },
@@ -109,6 +121,10 @@
     {
       "url": "/index/filter/movie/values/person.json?limit=10&q=Nolan&sel=genre:18",
       "canonical": "/index/filter/movie/values/person.json?sel=genre:18&q=nolan"
+    },
+    {
+      "url": "/index/filter/movie/values/region.json?q=Scandi",
+      "canonical": "/index/filter/movie/values/region.json?q=scandi"
     },
     {
       "url": "/index/filter/movie/values/company.json?limit=3",

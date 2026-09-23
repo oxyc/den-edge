@@ -112,6 +112,16 @@ describe('countedEmpty', () => {
     // An incomplete kind's missing value may simply not be in its top.
     expect(countedEmpty('person-Q2', 'movie', shaped)).toBe(false);
   });
+
+  it('hides a region atlas lists no titles for, and none where it has no regions yet', () => {
+    const regions = {
+      region: { mode: 'single', complete: true, values: { nordic: 4 } },
+    } as FacetCounts;
+    expect(facetParts('region-east-asian', 'movie')).toEqual([['region', 'east-asian']]);
+    expect(countedEmpty('region-nordic', 'movie', regions)).toBe(false);
+    expect(countedEmpty('region-slavic', 'movie', regions)).toBe(true);
+    expect(countedEmpty('region-slavic', 'movie', { genre: { '28': 1 } })).toBe(false);
+  });
 });
 
 describe('emptyOptions with counts', () => {

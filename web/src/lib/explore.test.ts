@@ -37,6 +37,7 @@ describe('Explore chips', () => {
       'genre',
       'language',
       'country',
+      'region',
       'decade',
       'rating',
     ]);
@@ -176,6 +177,18 @@ describe('matching typed text to chips', () => {
     expect(found('1990')[0]).toBe('1990s · decade');
     expect(found('korean')).toContain('South Korea · country');
     expect(exploreChips('movie').filter((c) => c.group === 'decade').length).toBeGreaterThan(3);
+  });
+
+  it('finds a region by its label and the names people use for it', () => {
+    const first = (text: string) =>
+      browseChips(text, chips).map((c) => `${c.label} · ${KIND[c.group]}`)[0];
+    expect(first('nordic')).toBe('Nordic · region');
+    expect(first('scandi')).toBe('Scandinavian · region');
+    expect(first('latin')).toBe('Latin American · region');
+    expect(first('nollywood')).toBe('African · region');
+    expect(labels(matchChips('asian', chips))).toEqual(
+      expect.arrayContaining(['East Asian', 'Southeast Asian', 'South Asian']),
+    );
   });
 
   it('finds a rating floor by its number and by the words for one', () => {
@@ -359,6 +372,29 @@ describe('facets', () => {
     ).toBe('35,10749,18');
     // An atlas row can't be a discover query.
     expect(facetQuery(['mood-cozy', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('ask TMDB for any of a region’s countries, or for the country alone where one is picked too', () => {
+    expect(discoverParams(facetQuery(['region-nordic', 'genre-28'], 'movie')!)).toEqual({
+      sort_by: 'popularity.desc',
+      include_adult: 'false',
+      with_genres: '28',
+      with_origin_country: 'SE|NO|DK|FI|IS',
+      'vote_count.gte': '30',
+    });
+    const both = discoverParams(facetQuery(['region-nordic', 'country-SE'], 'movie')!);
+    expect(both.with_origin_country).toBe('SE');
+    // One region at a time, beside a country; without atlas's filter a mood takes no region.
+    expect(applyPick(['region-nordic'], 'region-slavic', 'movie').removed).toEqual([
+      'region-nordic',
+    ]);
+    expect(offered(['region-nordic'], 'region-slavic', 'movie')).toBe(false);
+    expect(applyPick(['region-nordic'], 'country-SE', 'movie').removed).toEqual([]);
+    expect(applyPick(['mood-cozy'], 'region-nordic', 'movie').removed).toEqual(['mood-cozy']);
+    expect(applyPick(['mood-cozy'], 'region-nordic', 'movie', true).removed).toEqual([]);
+    // A recipe's own countries rule out a region that names none of them.
+    expect(offered(['recipe-k-drama'], 'region-east-asian', 'tv')).toBe(true);
+    expect(offered(['recipe-k-drama'], 'region-nordic', 'tv')).toBe(false);
   });
 
   it('ask TMDB for a rating floor on the ★ posters show, on 10 votes in place of the usual floor', () => {

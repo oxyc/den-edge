@@ -44,6 +44,7 @@ export type ChipGroup =
   | 'mood'
   | 'language'
   | 'country'
+  | 'region'
   | 'decade'
   | 'rating'
   | 'like'
@@ -79,6 +80,7 @@ export const KIND: Record<ChipGroup, string> = {
   genre: 'genre',
   language: 'language',
   country: 'country',
+  region: 'region',
   decade: 'decade',
   rating: 'rating',
   like: 'like',
@@ -172,8 +174,180 @@ const ALIASES: Record<string, string[]> = {
 };
 
 /**
- * The languages, countries and decades Explore offers beside the rail's own kinds: the browse tail's countries (and
- * the US, which has no tail row), every decade it has, and the languages of those countries and a few more.
+ * Notable regions, each picked as `region-<slug>`: a label, the other names it is found by, and its countries of
+ * origin (ISO 3166-1, as TMDB and atlas spell them). The same table as den-atlas's `crates/den-index/src/regions.rs`,
+ * which its filter answers `region:<slug>` from; here it is what TMDB is asked for where atlas's filter isn't there.
+ */
+export const REGIONS: { slug: string; label: string; aliases: string[]; countries: string[] }[] = [
+  {
+    slug: 'nordic',
+    label: 'Nordic',
+    aliases: ['nordic', 'nordics'],
+    countries: ['SE', 'NO', 'DK', 'FI', 'IS'],
+  },
+  {
+    slug: 'scandinavian',
+    label: 'Scandinavian',
+    aliases: ['scandinavian', 'scandinavia', 'scandi'],
+    countries: ['SE', 'NO', 'DK'],
+  },
+  {
+    slug: 'british-irish',
+    label: 'British & Irish',
+    aliases: ['british isles', 'uk and ireland'],
+    countries: ['GB', 'IE'],
+  },
+  {
+    slug: 'slavic',
+    label: 'Slavic',
+    aliases: ['slavic', 'eastern european'],
+    countries: ['RU', 'UA', 'BY', 'PL', 'CZ', 'SK', 'SI', 'HR', 'RS', 'BA', 'ME', 'MK', 'BG'],
+  },
+  { slug: 'north-american', label: 'North American', aliases: [], countries: ['US', 'CA'] },
+  {
+    slug: 'latin-american',
+    label: 'Latin American',
+    aliases: ['latin', 'latino', 'latin america', 'south american'],
+    countries: [
+      'MX',
+      'GT',
+      'BZ',
+      'HN',
+      'SV',
+      'NI',
+      'CR',
+      'PA',
+      'CU',
+      'DO',
+      'PR',
+      'CO',
+      'VE',
+      'EC',
+      'PE',
+      'BO',
+      'BR',
+      'PY',
+      'UY',
+      'AR',
+      'CL',
+    ],
+  },
+  {
+    slug: 'east-asian',
+    label: 'East Asian',
+    aliases: ['east asian', 'asian'],
+    countries: ['JP', 'KR', 'CN', 'TW', 'HK'],
+  },
+  {
+    slug: 'southeast-asian',
+    label: 'Southeast Asian',
+    aliases: [],
+    countries: ['TH', 'VN', 'PH', 'ID', 'MY', 'SG', 'KH', 'LA', 'MM'],
+  },
+  {
+    slug: 'south-asian',
+    label: 'South Asian',
+    aliases: ['indian subcontinent', 'desi'],
+    countries: ['IN', 'PK', 'BD', 'LK', 'NP'],
+  },
+  {
+    slug: 'middle-eastern',
+    label: 'Middle Eastern',
+    aliases: ['middle east', 'arab'],
+    countries: [
+      'TR',
+      'IR',
+      'IL',
+      'SA',
+      'AE',
+      'QA',
+      'KW',
+      'BH',
+      'OM',
+      'JO',
+      'LB',
+      'SY',
+      'IQ',
+      'YE',
+      'PS',
+      'EG',
+    ],
+  },
+  {
+    slug: 'african',
+    label: 'African',
+    aliases: ['africa', 'nollywood'],
+    countries: [
+      'DZ',
+      'AO',
+      'BJ',
+      'BW',
+      'BF',
+      'BI',
+      'CM',
+      'CV',
+      'CF',
+      'TD',
+      'KM',
+      'CG',
+      'CD',
+      'CI',
+      'DJ',
+      'EG',
+      'GQ',
+      'ER',
+      'SZ',
+      'ET',
+      'GA',
+      'GM',
+      'GH',
+      'GN',
+      'GW',
+      'KE',
+      'LS',
+      'LR',
+      'LY',
+      'MG',
+      'MW',
+      'ML',
+      'MR',
+      'MU',
+      'MA',
+      'MZ',
+      'NA',
+      'NE',
+      'NG',
+      'RW',
+      'ST',
+      'SN',
+      'SC',
+      'SL',
+      'SO',
+      'ZA',
+      'SS',
+      'SD',
+      'TZ',
+      'TG',
+      'TN',
+      'UG',
+      'ZM',
+      'ZW',
+    ],
+  },
+  {
+    slug: 'oceanian',
+    label: 'Oceanian',
+    aliases: ['australian', 'new zealand', 'oceania', 'aussie'],
+    countries: ['AU', 'NZ'],
+  },
+];
+
+const regionOf = (id: string) => REGIONS.find((r) => `region-${r.slug}` === id);
+
+/**
+ * The languages, countries, regions and decades Explore offers beside the rail's own kinds: the browse tail's
+ * countries (and the US, which has no tail row), the regions, every decade it has, and the languages of those
+ * countries and a few more.
  */
 function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[] {
   const languages = LANGUAGES.map((code): Chip => ({
@@ -186,6 +360,12 @@ function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[
     label: named('region', code),
     group: 'country',
     aliases: [demonym, ...(ALIASES[`country-${code}`] ?? [])],
+  }));
+  const regions = REGIONS.map(({ slug, label, aliases }): Chip => ({
+    id: `region-${slug}`,
+    label,
+    group: 'region',
+    aliases,
   }));
   const decades = categories(type, year, { minYear }).flatMap((category): Chip[] => {
     const decade = /^decade-(\d{4})-/.exec(category.id)?.[1];
@@ -201,7 +381,7 @@ function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[
       },
     ];
   });
-  return [...languages, ...countries, ...decades];
+  return [...languages, ...countries, ...regions, ...decades];
 }
 
 /** The TV's curated recipe chips (RecipeCatalog.exploreChips), in its order. */
@@ -452,6 +632,7 @@ export type Slot =
   | 'genre'
   | 'language'
   | 'country'
+  | 'region'
   | 'decade'
   | 'rating'
   | 'recipe'
@@ -465,6 +646,7 @@ export type Slot =
 const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
   'language',
   'country',
+  'region',
   'decade',
   'rating',
   'atlas',
@@ -484,6 +666,7 @@ export function slotOf(id: string): Slot | undefined {
   if (id.startsWith('genre-')) return 'genre';
   if (id.startsWith('lang-')) return 'language';
   if (id.startsWith('country-')) return 'country';
+  if (id.startsWith('region-')) return 'region';
   if (id.startsWith('decade-')) return 'decade';
   if (id.startsWith('rating-')) return 'rating';
   if (id.startsWith('recipe-')) return 'recipe';
@@ -527,6 +710,7 @@ function clash(a: string, b: string, type: MediaType, filtered = false): boolean
     const [feed, other] = fromAtlas(sa) ? [sa, sb] : [sb, sa];
     return (
       other === 'country' ||
+      other === 'region' ||
       other === 'recipe' ||
       fromAtlas(other) ||
       (other === 'rating' && feed === 'atlas')
@@ -541,6 +725,11 @@ function clash(a: string, b: string, type: MediaType, filtered = false): boolean
       return !!query.originalLanguage && !query.originalLanguage.split('|').includes(codeOf(other));
     case 'country':
       return !!query.originCountry?.length && !query.originCountry.includes(codeOf(other));
+    case 'region':
+      return (
+        !!query.originCountry?.length &&
+        !regionOf(other)?.countries.some((code) => query.originCountry!.includes(code))
+      );
     case 'genre':
       return (query.withoutGenres ?? []).includes(genreOf(other));
     default:
@@ -642,6 +831,7 @@ export function facetQuery(
   const recipe = set.find((id) => slotOf(id) === 'recipe');
   const language = set.find((id) => slotOf(id) === 'language');
   const country = set.find((id) => slotOf(id) === 'country');
+  const region = set.find((id) => slotOf(id) === 'region');
   const decade = set.find((id) => slotOf(id) === 'decade');
   const rating = set.find((id) => slotOf(id) === 'rating');
   const preset = recipe ? recipeQuery(recipe, type) : undefined;
@@ -661,7 +851,9 @@ export function facetQuery(
     query.voteCountGte = 50;
   }
   if (language) query.originalLanguage = codeOf(language);
+  // A region is any of its countries (TMDB ORs them); a country picked beside it is narrower, and is all that's asked.
   if (country) query.originCountry = [codeOf(country)];
+  else if (region) query.originCountry = [...(regionOf(region)?.countries ?? [])];
   if (decade) {
     const start = decadeOf(decade);
     query.releaseDateGte = `${Math.max(start, minYear ?? start)}-01-01`;

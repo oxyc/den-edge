@@ -37,6 +37,7 @@
     ['genre', 'Genres'],
     ['language', 'Languages'],
     ['country', 'Countries'],
+    ['region', 'Regions'],
     ['decade', 'Decades'],
     ['rating', 'Rating'],
     // Listed only where atlas's filter answers, from its counts: a quiet tail, each its strongest few.

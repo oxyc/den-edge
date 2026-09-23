@@ -38,6 +38,7 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   genre: { mode: 'and', id: 'integer' },
   language: { mode: 'and', id: 'lower' },
   country: { mode: 'and', id: 'upper' },
+  region: { mode: 'single', id: 'lower' },
   decade: { mode: 'single', id: 'decade' },
   mood: { mode: 'and', id: 'label' },
   subgenre: { mode: 'and', id: 'label' },
