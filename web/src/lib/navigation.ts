@@ -98,3 +98,12 @@ export function navigate(path: string, replace = false) {
 export function navigateBack() {
   document.dispatchEvent(new Event('den:back'));
 }
+
+/**
+ * Back past every entry of the current page, to the one before it. Search gives each chip and Movies/Series
+ * switch its own entry, so a plain Back from its Cancel walked through every pick one tap at a time before it
+ * ever left Search.
+ */
+export function navigateOut() {
+  document.dispatchEvent(new Event('den:back-out'));
+}

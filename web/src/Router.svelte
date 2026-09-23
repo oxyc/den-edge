@@ -231,6 +231,14 @@
       if (inScope() && position > 0) history.back();
       else void follow('/', true);
     };
+    // Back to the entry before this page's run of entries, in one traversal.
+    const outRequested = () => {
+      const here = entries.get(position)?.routeKey;
+      let first = position;
+      while (first > 0 && entries.get(first - 1)?.routeKey === here) first--;
+      if (inScope() && first > 0) history.go(first - 1 - position);
+      else void follow('/', true);
+    };
     const requested = (event: Event) => {
       const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
       void follow(path, true, replace);
@@ -261,6 +269,7 @@
     document.addEventListener('click', clicked);
     document.addEventListener('den:navigate', requested);
     document.addEventListener('den:back', backRequested);
+    document.addEventListener('den:back-out', outRequested);
     window.addEventListener('popstate', traversed);
     return () => {
       transition?.skipTransition();
@@ -273,6 +282,7 @@
       document.removeEventListener('click', clicked);
       document.removeEventListener('den:navigate', requested);
       document.removeEventListener('den:back', backRequested);
+      document.removeEventListener('den:back-out', outRequested);
       window.removeEventListener('popstate', traversed);
     };
   });
