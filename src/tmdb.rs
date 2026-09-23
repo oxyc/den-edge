@@ -454,8 +454,8 @@ impl Detail {
         read(&self.oversize_mark()).await.is_some_and(|(_, age, _)| age < OVERSIZE_TTL)
     }
 
-    /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — keep it, and answer this question
-    /// from it: the body, whether it was a `miss` or `revalidated`, and how long it is fresh for.
+    /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — and keep it: the whole body, which
+    /// `narrowed` cuts to this question, whether it was a `miss` or `revalidated`, and how long it is fresh for.
     ///
     /// When the whole cannot be had for any reason but "no such title" or a spent day, the question is asked exactly
     /// as it was, as it was before the whole existed: one title's failure must not fail every question about it.
@@ -488,7 +488,7 @@ impl Detail {
             }
         };
         let fresh = fresh_for_answer(&self.path, &body);
-        Ok((self.narrowed(body), how, fresh))
+        Ok((body, how, fresh))
     }
 }
 
@@ -604,12 +604,14 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
                         Ok(Fetched::Answer(new, etag)) => {
                             keep(file, &new, etag.as_deref()).await;
+                            crate::title_metadata::observe_tmdb(state, &path, &new);
                             // The series may have ended since it was last asked for, which gives it its months back.
                             let fresh = fresh_for_answer(&path, &new);
                             answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
                         Ok(Fetched::Unchanged) => {
                             renew(file).await;
+                            crate::title_metadata::observe_tmdb(state, &path, &body);
                             answer(body, &fresh_policy(fresh, fresh), "revalidated", SystemTime::now(), asked)
                         }
                         Err(response) => *response,
@@ -629,6 +631,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             if let Some(file) = &file {
                 keep(file, &body, etag.as_deref()).await;
             }
+            crate::title_metadata::observe_tmdb(state, &path, &body);
             let fresh = fresh_for_answer(&path, &body);
             answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
         }
@@ -691,7 +694,11 @@ async fn detail_answer(
         }
     }
     match detail.ask(state, key, rid).await {
-        Ok((body, how, fresh)) => answer(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked),
+        Ok((whole, how, fresh)) => {
+            // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
+            crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
+            answer(detail.narrowed(whole), &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
+        }
         Err(response) => *response,
     }
 }
@@ -710,7 +717,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
         let body = match detail.kept().await {
             Kept::Hit(body, ..) => body,
             Kept::Absent => return None,
-            Kept::Stale(..) | Kept::Nothing => detail.ask(state, key, "meta").await.ok()?.0,
+            Kept::Stale(..) | Kept::Nothing => detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0),
         };
         return serde_json::from_slice(&body).ok();
     }
@@ -1010,8 +1017,16 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
         // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
         let (path, query, key) = (&asking.path, asking.query.as_deref(), &asking.key);
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
-            Ok(Fetched::Answer(body, etag)) => keep(&asking.file, &body, etag.as_deref()).await,
-            Ok(Fetched::Unchanged) => renew(&asking.file).await,
+            Ok(Fetched::Answer(body, etag)) => {
+                keep(&asking.file, &body, etag.as_deref()).await;
+                crate::title_metadata::observe_tmdb(&state, path, &body);
+            }
+            Ok(Fetched::Unchanged) => {
+                renew(&asking.file).await;
+                if let Some((body, _, _)) = read(&asking.file).await {
+                    crate::title_metadata::observe_tmdb(&state, path, &body);
+                }
+            }
             // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
             Err(response)
                 if response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.as_str())
@@ -1580,6 +1595,83 @@ mod tests {
         aged(&ended, LIST_TTL + Duration::from_secs(60));
         assert_eq!(detail(&h, "/tmdb/3/tv/1396").await.0, "hit");
         assert_eq!(crate::lock(&asked).len(), 2);
+    }
+
+    /// What a browser used to `PUT` after each TMDB answer is kept here as the answer is fetched: a miss is
+    /// recorded with no client asking, a hit is not recorded again, and an answer about no title records nothing.
+    #[tokio::test]
+    async fn a_fetched_answer_is_kept_as_title_metadata_and_a_hit_is_not_observed_again() {
+        let (cache, metadata) = (temp_dir(), temp_dir());
+        let (kept_in, meta) = (cache.clone(), metadata.clone());
+        let h = Harness::in_dir_with(temp_dir(), move |state| {
+            state.tmdb_key = Some("observed".into());
+            state.tmdb_cache_dir = Some(kept_in);
+            state.title_metadata_cache_dir = Some(meta);
+        });
+        let asked = tmdb_answering("observed", "Ended");
+        let record = metadata.join("movie-550-tmdb.json");
+        let recorded = || async {
+            for _ in 0..200 {
+                if record.exists() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        };
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "miss");
+        assert!(recorded().await, "the miss was recorded");
+        let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(kept["fields"]["rating"]["value"], 7.5);
+
+        std::fs::remove_file(&record).unwrap();
+        assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "hit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!record.exists(), "a hit is not recorded again");
+
+        // A season's own id and rating are not a title's.
+        h.send("GET", "/tmdb/3/tv/1399/season/1", None, &[]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            std::fs::read_dir(&metadata).map(|d| d.count()).unwrap_or(0),
+            0,
+            "nothing else was recorded"
+        );
+        assert_eq!(crate::lock(&asked).len(), 2);
+    }
+
+    /// A title seen only through a kept detail would otherwise age out of the shared metadata after its 180 days:
+    /// TMDB confirming the kept answer (a 304) records it again.
+    #[tokio::test]
+    async fn a_confirmed_answer_is_recorded_again() {
+        let (cache, metadata) = (temp_dir(), temp_dir());
+        let (kept_in, meta) = (cache.clone(), metadata.clone());
+        let h = Harness::in_dir_with(temp_dir(), move |state| {
+            state.tmdb_key = Some("confirmed".into());
+            state.tmdb_cache_dir = Some(kept_in);
+            state.title_metadata_cache_dir = Some(meta);
+        });
+        crate::lock(&UPSTREAMS)
+            .push(("confirmed".to_owned(), Arc::new(|_: &str| Ok(Fetched::Unchanged)) as Upstream));
+        let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
+        keep(
+            &whole,
+            &Bytes::from_static(br#"{"id":550,"title":"Fight Club","vote_average":8.4}"#),
+            Some("W/\"a\""),
+        )
+        .await;
+        aged(&whole, DETAILS_TTL + Duration::from_secs(60));
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "revalidated");
+        let record = metadata.join("movie-550-tmdb.json");
+        for _ in 0..200 {
+            if record.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(record.exists(), "the confirmed answer was recorded");
     }
 
     #[tokio::test]

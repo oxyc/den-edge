@@ -277,7 +277,7 @@ fn media_allowance_left(state: &AppState) -> bool {
 }
 
 pub async fn relay(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     target: String,
     rid: &str,
@@ -339,7 +339,7 @@ impl Guest {
 /// before it can make anything read a file) and before anything a member would pass, and a guest is never
 /// treated as a member — whatever `x-den-library-member` it sends is not read.
 pub async fn guest(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     rid: &str,
     face: crate::handler::Face,
@@ -470,7 +470,7 @@ fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: 
 }
 
 async fn relay_with(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     target: String,
     rid: &str,
@@ -769,6 +769,14 @@ async fn relay_with(
             None => return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable"),
         }
     }
+    // atlas's catalog charts carry each title's JustWatch IMDb score. It is kept here for every client, as the TMDB
+    // proxy keeps what it fetches (`title_metadata.rs`), and the answer says so — only when it was taken on — so a
+    // browser sends nothing back.
+    let encoding = parts.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes());
+    let observed = parts.status == StatusCode::OK
+        && atlas_catalog(&control)
+        && matches!(encoding, None | Some(b"identity" | b"gzip"))
+        && crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
     let mut scope = None;
     if public_session && parts.status == StatusCode::CREATED {
         if let (Some(base), Some(socket), Some(address)) =
@@ -853,7 +861,21 @@ async fn relay_with(
     if let Some(scope) = scope {
         resp.extensions_mut().insert(scope);
     }
+    if observed {
+        resp.headers_mut().insert(TITLE_METADATA, axum::http::HeaderValue::from_static("kept"));
+    }
     resp
+}
+
+/// On a relayed atlas chart: den-edge keeps what it says about its titles (`title_metadata::observe_atlas`), so the
+/// web app does not send it back. An atlas reached directly — the tailnet's `/atlas`, which `tailscale serve` hands
+/// straight to atlas — answers without it, and the web app still sends those.
+const TITLE_METADATA: header::HeaderName = header::HeaderName::from_static("x-den-title-metadata");
+
+/// Is this relayed path one of atlas's catalog charts (`/atlas/catalog/movie/<id>/…json`, under an install's config
+/// or a grant's `~<gid>` too)?
+fn atlas_catalog(path: &str) -> bool {
+    path.strip_prefix("/atlas/").is_some_and(|rest| rest.split('/').any(|segment| segment == "catalog"))
 }
 
 /// Which listener grant a public session needs, as the request log names it: `browser` for the visitor's own
