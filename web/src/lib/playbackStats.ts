@@ -15,6 +15,8 @@ export const REPORT_INTERVAL_MS = 30_000;
 export const MAX_REPORTS = 3;
 /** Seconds the clock may run on with no new video frame before the picture counts as frozen. */
 const FROZEN_SECS = 1.5;
+/** Video seconds ahead below which a player that fetches nothing is counted as idling on a low buffer. */
+export const LOW_BUFFER_SECS = 10;
 /** hls.js's own names for playback stopping on the buffer, or jumping a hole in it. */
 const STALL_DETAILS = new Set(['bufferStalledError', 'bufferSeekOverHole', 'bufferNudgeOnStall']);
 
@@ -31,6 +33,13 @@ export interface Stall {
   /** Seconds buffered ahead of the play head in each track, then (`PlaybackStats.buffers` says how measured). */
   videoAhead: number | null;
   audioAhead: number | null;
+  /**
+   * Whether a fragment was being fetched when playback stopped: a request under way is a slow delivery, none is a
+   * player that had stopped asking. Null where the page can't see requests (the native player).
+   */
+  loading: boolean | null;
+  /** With nothing being fetched, how long since the last fragment arrived; null otherwise. */
+  idleMs: number | null;
 }
 
 export interface PlaybackStats {
@@ -53,6 +62,11 @@ export interface PlaybackStats {
     /** Each fragment's first byte to last byte, as kbit/s: the slowest tenth, and the middle. */
     kbpsP10: number | null;
     kbpsMedian: number | null;
+    /**
+     * Playing time spent with less than LOW_BUFFER_SECS of video ahead and no fragment being fetched: a player
+     * idling while its buffer runs down, which no server log can tell from a slow link.
+     */
+    idleLowMs: number;
   };
   bandwidthEstimateKbps: number | null;
   droppedFrames: number | null;
@@ -98,6 +112,7 @@ export class PlaybackRecorder {
   private stalledMs = 0;
   private open: { stall: Stall; since: number } | undefined;
   private errors: PlaybackStats['errors'] = [];
+  private idleLowMs = 0;
 
   constructor(
     readonly engine: PlaybackStats['engine'],
@@ -139,6 +154,11 @@ export class PlaybackRecorder {
     this.open = undefined;
   }
 
+  /** `ms` of playing with little video ahead and nothing being fetched. */
+  idleLow(ms: number) {
+    if (ms > 0) this.idleLowMs += ms;
+  }
+
   error(details: string, fatal: boolean) {
     const name = details.slice(0, 80);
     const seen = this.errors.find((e) => e.details === name && e.fatal === fatal);
@@ -163,6 +183,7 @@ export class PlaybackRecorder {
         slowestMs: Math.round(this.slowestMs),
         kbpsP10: percentile(this.rates, 10),
         kbpsMedian: percentile(this.rates, 50),
+        idleLowMs: Math.round(this.idleLowMs),
       },
       ...live,
       stallCount: this.stallCount,
@@ -338,6 +359,17 @@ export function watchPlayback(options: WatchOptions): Watcher {
   let sources: { video?: SourceBuffer; audio?: SourceBuffer } = {};
   /** The last time the decoded frame count moved, and where the play head was. */
   let frames = { count: -1, at: 0 };
+  /** The fragment hls.js is fetching, by its sequence number, and when the last one arrived. */
+  let fetching: number | 'initSegment' | undefined;
+  let arrived: number | undefined;
+  /** When the last `timeupdate` came, to count playing time between two of them. */
+  let lastTick: number | undefined;
+  const requests = (): Pick<Stall, 'loading' | 'idleMs'> =>
+    !hls
+      ? { loading: null, idleMs: null }
+      : fetching !== undefined
+        ? { loading: true, idleMs: null }
+        : { loading: false, idleMs: arrived === undefined ? null : Math.round(now() - arrived) };
 
   const live = () => {
     const quality = video.getVideoPlaybackQuality?.();
@@ -375,8 +407,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
 
   const stall = (kind: Stall['kind'], at = video.currentTime) => {
     if (stopped || !started || video.seeking) return;
-    if (recorder.stalled(now(), { at: tenth(at), kind, ...ahead(video.currentTime) }))
-      schedule.stall();
+    const stalled = { at: tenth(at), kind, ...ahead(video.currentTime), ...requests() };
+    if (recorder.stalled(now(), stalled)) schedule.stall();
   };
 
   const on = <K extends keyof HTMLMediaElementEventMap>(type: K, listener: () => void) =>
@@ -397,6 +429,16 @@ export function watchPlayback(options: WatchOptions): Watcher {
   });
   on('timeupdate', () => {
     const time = video.currentTime;
+    const tick = now();
+    const since = lastTick === undefined ? 0 : tick - lastTick;
+    lastTick = tick;
+    // Playing on a low buffer with nothing asked for — not at the end of the film, where there is nothing left to ask.
+    if (hls && started && !video.paused && fetching === undefined) {
+      const { videoAhead } = ahead(time);
+      const end = Number.isFinite(video.duration) ? video.duration : Infinity;
+      if (videoAhead !== null && videoAhead < LOW_BUFFER_SECS && time + videoAhead < end - 0.5)
+        recorder.idleLow(since);
+    }
     const open = recorder.stalling;
     if (open?.kind === 'wait' && !video.paused && time > open.at + 0.2) recorder.resumed(now());
     const count = video.getVideoPlaybackQuality?.().totalVideoFrames;
@@ -423,8 +465,13 @@ export function watchPlayback(options: WatchOptions): Watcher {
 
   if (hls) {
     const { instance, Hls: HlsClass } = hls;
+    instance.on(HlsClass.Events.FRAG_LOADING, (_event, data) => {
+      if (data.frag.type !== 'subtitle') fetching = data.frag.sn;
+    });
     instance.on(HlsClass.Events.FRAG_LOADED, (_event, data) => {
       if (stopped || data.frag.type === 'subtitle') return;
+      if (data.frag.sn === fetching) fetching = undefined;
+      arrived = now();
       const stats = (data.part ?? data.frag).stats;
       recorder.fragment(stats.loaded || stats.total, stats.loading);
     });
@@ -434,6 +481,8 @@ export function watchPlayback(options: WatchOptions): Watcher {
     });
     instance.on(HlsClass.Events.ERROR, (_event, data) => {
       if (stopped) return;
+      // A failed fetch is no longer under way; a retry is another FRAG_LOADING.
+      if (data.frag && data.frag.sn === fetching) fetching = undefined;
       recorder.error(data.details, data.fatal);
       if (STALL_DETAILS.has(data.details) && !video.paused) stall('wait');
     });

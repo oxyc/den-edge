@@ -728,8 +728,21 @@ export async function listReleases(
   }
 }
 
-/** End the session, so it stops counting against den-remux's cap — sent even as the page goes away. */
+/**
+ * Whether the cast page plays this session, and so owns its report and its end. It is on the public media address,
+ * which this page's `connect-src` does not name: a report or a DELETE from here is refused before it leaves the
+ * browser. The cast page may connect there, and sends both itself (web/cast/src/main.ts).
+ */
+export function playedInCastPage(session: Session): boolean {
+  return Boolean(session.castOrigin && session.publicBase);
+}
+
+/**
+ * End the session, so it stops counting against den-remux's cap — sent even as the page goes away. Not one the cast
+ * page plays: that page ends it as its frame is removed.
+ */
 export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
+  if (playedInCastPage(session)) return;
   void fetchImpl(session.playlist.replace(/\/master\.m3u8$/, ''), {
     method: 'DELETE',
     keepalive: true,
@@ -740,7 +753,8 @@ export function endSession(session: Session, fetchImpl: typeof fetch = fetch): v
 
 /**
  * Tell den-remux this browser couldn't play the session — its MediaError code (0 for hls.js) and message — for its
- * log: the browser's verdict is otherwise seen by nobody. A beacon, so it goes even as the page closes.
+ * log: the browser's verdict is otherwise seen by nobody. A beacon, so it goes even as the page closes. Not for a
+ * session the cast page plays, which reports its own failures and its stats.
  */
 export function reportFailure(
   session: Session,
@@ -748,6 +762,7 @@ export function reportFailure(
   message: string,
   fetchImpl: typeof fetch = fetch,
 ): void {
+  if (playedInCastPage(session)) return;
   const url = session.playlist.replace(/\/master\.m3u8$/, '/report');
   const body = JSON.stringify({ code, message: message.slice(0, 200) });
   if (globalThis.navigator?.sendBeacon?.(url, body)) return;
