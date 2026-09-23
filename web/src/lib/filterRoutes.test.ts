@@ -7,6 +7,8 @@ import {
   filterTitles,
   FilterUnavailable,
   filterUrl,
+  likeValue,
+  mergeFilterValues,
   searchFilterValues,
 } from './filterRoutes';
 
@@ -38,6 +40,48 @@ describe('canonical filter addresses', () => {
         ],
       }),
     ).toBe('/atlas/index/filter/movie/titles.json?sel=genre:28,region:nordic');
+  });
+
+  it('asks for films and series together at `all`, a "Like" there by its typed id', () => {
+    expect(likeValue({ type: 'tv', id: 1396 }, 'all')).toBe('series-1396');
+    expect(likeValue({ type: 'movie', id: 550 }, 'all')).toBe('movie-550');
+    expect(likeValue({ type: 'tv', id: 1396 }, 'tv')).toBe('1396');
+    expect(
+      filterUrl('/atlas', 'all', 'titles', {
+        items: [
+          { kind: 'like', id: likeValue({ type: 'tv', id: 1396 }, 'all') },
+          { kind: 'genre', id: '35' },
+        ],
+        skip: 24,
+      }),
+    ).toBe('/atlas/index/filter/all/titles.json?sel=genre:35,like:series-1396&skip=24');
+    // The same builder reads an `all` address back, as it reads either type's.
+    expect(
+      canonicalFilterPath('/index/filter/all/counts.json?sel=like:SERIES-01396,genre:35'),
+    ).toBe('/index/filter/all/counts.json?sel=genre:35,like:series-1396');
+    expect(canonicalFilterPath('/index/filter/all/values/person.json?q=Nolan')).toBe(
+      '/index/filter/all/values/person.json?q=nolan',
+    );
+    expect(canonicalFilterPath('/index/filter/all/counts.json?sel=like:person-1')).toBeUndefined();
+    expect(canonicalFilterPath('/index/filter/both/counts.json')).toBeUndefined();
+  });
+});
+
+describe('merging values from more than one answer', () => {
+  it('lists a value once, its counts added, most titles first', () => {
+    expect(
+      mergeFilterValues([
+        [
+          { id: 'Q1', name: 'Ann', count: 2 },
+          { id: 'Q2', name: 'Bob', count: 3 },
+        ],
+        null,
+        [{ id: 'Q1', name: 'Ann', count: 4 }],
+      ]),
+    ).toEqual([
+      { id: 'Q1', name: 'Ann', count: 6 },
+      { id: 'Q2', name: 'Bob', count: 3 },
+    ]);
   });
 });
 
@@ -181,5 +225,11 @@ describe('fetching', () => {
       [],
     );
     expect(asked).toHaveLength(1);
+    // No such route is no answer, not an empty one: the caller may ask elsewhere.
+    expect(
+      await searchFilterValues('/atlas', 'all', 'person', 'nolan', [], {
+        fetchImpl: async () => answer({}, 404),
+      }),
+    ).toBeNull();
   });
 });

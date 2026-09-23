@@ -1,6 +1,7 @@
-// atlas's stackable filters (`/index/filter/<movie|series>/…`): for a selection of values from many kinds, how many
-// titles each further value would leave (`counts.json`), the titles themselves (`titles.json`), and one kind's values
-// by a typed prefix (`values/<kind>.json`, the people and characters typeahead).
+// atlas's stackable filters (`/index/filter/<movie|series|all>/…`, `all` being films and series together): for a
+// selection of values from many kinds, how many titles each further value would leave (`counts.json`), the titles
+// themselves (`titles.json`), and one kind's values by a typed prefix (`values/<kind>.json`, the people and
+// characters typeahead).
 //
 // The URL is atlas's cache key, and through den-edge's relay a redirect arrives with no Location, so every address
 // here is built in atlas's one canonical spelling (`canonicalQuery`), which `filterRoutes.test.ts` holds to atlas's
@@ -8,7 +9,7 @@
 // before them: TMDB discover, atlas's rows, the feed's own titles.
 
 import { titlesOf } from './atlasRows';
-import type { MediaType, Title } from './library';
+import type { ExploreType, MediaType, Title } from './library';
 import { relayFetch } from './relayFetch';
 import { withSharedTitleMetadata } from './titleMetadata';
 
@@ -31,7 +32,7 @@ export const PLOT_AXES = [
   'tone',
 ] as const;
 
-type IdFormat = 'integer' | 'decade' | 'lower' | 'upper' | 'label' | 'qid' | 'character';
+type IdFormat = 'integer' | 'decade' | 'lower' | 'upper' | 'label' | 'qid' | 'character' | 'like';
 
 /** Every kind atlas's filter reads, with how it combines and how its ids are written (its `/index/schema.json`). */
 export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = {
@@ -61,8 +62,15 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   place: { mode: 'and', id: 'qid' },
   format: { mode: 'and', id: 'qid' },
   character: { mode: 'and', id: 'character' },
-  like: { mode: 'single', id: 'integer' },
+  like: { mode: 'single', id: 'like' },
 };
+
+/**
+ * A "Like"'s value in atlas's filter: the title's id under its own type's route; under `all`, which holds both types'
+ * ids, the id with its type (`movie-550`, `series-1396`). The one place that form is decided.
+ */
+export const likeValue = (title: { type: MediaType; id: number }, route: ExploreType): string =>
+  route === 'all' ? `${title.type === 'tv' ? 'series' : 'movie'}-${title.id}` : String(title.id);
 
 /** The old `structure` axis, as the axes atlas answers it with. */
 const STRUCTURE_ALIAS: Record<string, string> = {
@@ -128,6 +136,11 @@ function normalise(rawKind: string, rawId: string): [string, string] | undefined
     case 'character': {
       const name = fold(id);
       return name ? [kind, name.replace(/ /g, '-')] : undefined;
+    }
+    case 'like': {
+      if (number !== undefined) return [kind, String(number)];
+      const typed = /^(movie|series)-(\d+)$/i.exec(id);
+      return typed ? [kind, `${typed[1]!.toLowerCase()}-${Number(typed[2])}`] : undefined;
     }
   }
 }
@@ -204,13 +217,14 @@ const routePath = (route: FilterRoute) =>
 /** A filter route's canonical address under `base`, or undefined for a question atlas refuses. */
 export function filterUrl(
   base: string,
-  type: MediaType,
+  type: ExploreType,
   route: FilterRoute,
   options: Parameters<typeof canonicalQuery>[1] = {},
 ): string | undefined {
   const query = canonicalQuery(route, options);
   if (query === undefined) return undefined;
-  return `${base}/index/filter/${type === 'tv' ? 'series' : 'movie'}/${routePath(route)}${query}`;
+  const segment = type === 'tv' ? 'series' : type;
+  return `${base}/index/filter/${segment}/${routePath(route)}${query}`;
 }
 
 /** Decoded as atlas decodes a query value: `+` a space, then percent escapes. */
@@ -229,9 +243,8 @@ function decode(value: string): string {
  */
 export function canonicalFilterPath(path: string): string | undefined {
   const [pathname, query = ''] = path.split('?', 2) as [string, string?];
-  const match = /^\/index\/filter\/(movie|series)\/(counts|titles|values\/([a-z]+))\.json$/.exec(
-    pathname,
-  );
+  const match =
+    /^\/index\/filter\/(movie|series|all)\/(counts|titles|values\/([a-z]+))\.json$/.exec(pathname);
   if (!match) return undefined;
   const route: FilterRoute =
     match[2] === 'counts' ? 'counts' : match[2] === 'titles' ? 'titles' : { values: match[3]! };
@@ -300,7 +313,7 @@ function unanswered(url: string, why: unknown) {
 /** atlas's counts beside a selection; null where the route isn't there, fails, or the question is refused. */
 export async function fetchFilterCounts(
   base: string,
-  type: MediaType,
+  type: ExploreType,
   items: FilterItem[],
   { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
 ): Promise<FilterCounts | null> {
@@ -353,7 +366,7 @@ export class FilterUnavailable extends Error {
  */
 export function filterTitles(
   base: string,
-  type: MediaType,
+  type: ExploreType,
   items: FilterItem[],
   { fetchImpl = relayFetch }: { fetchImpl?: typeof fetch } = {},
 ): (page: number) => Promise<Title[]> {
@@ -407,27 +420,30 @@ export interface FilterValue {
   count: number;
 }
 
-/** A kind's values starting with `q`, beside a selection; none where atlas has no such route or `q` is too short. */
+/**
+ * A kind's values starting with `q`, beside a selection: none where `q` is too short, and null where atlas didn't
+ * answer (no such route, a failure), so a caller can ask elsewhere.
+ */
 export async function searchFilterValues(
   base: string,
-  type: MediaType,
+  type: ExploreType,
   kind: string,
   q: string,
   items: FilterItem[] = [],
   { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
-): Promise<FilterValue[]> {
+): Promise<FilterValue[] | null> {
   const url = filterUrl(base, type, { values: kind }, { items, q });
   if (!url) return [];
   try {
     const res = await fetchImpl(url, { signal });
     if (!res.ok) {
       unanswered(url, res);
-      return [];
+      return null;
     }
     const values = ((await res.json()) as { values?: unknown }).values;
     if (!Array.isArray(values)) {
       unanswered(url, new Error('values without a list'));
-      return [];
+      return null;
     }
     return (values as Record<string, unknown>[]).flatMap((v): FilterValue[] =>
       typeof v.id === 'string' && typeof v.name === 'string'
@@ -436,6 +452,19 @@ export async function searchFilterValues(
     );
   } catch (error) {
     unanswered(url, error);
-    return [];
+    return null;
   }
+}
+
+/**
+ * Several answers' values as one list, most titles first: a value in more than one (a person in films and series)
+ * once, its counts added.
+ */
+export function mergeFilterValues(lists: readonly (FilterValue[] | null)[]): FilterValue[] {
+  const merged = new Map<string, FilterValue>();
+  for (const value of lists.flatMap((list) => list ?? [])) {
+    const known = merged.get(value.id);
+    merged.set(value.id, known ? { ...known, count: known.count + value.count } : value);
+  }
+  return [...merged.values()].sort((a, b) => b.count - a.count);
 }

@@ -71,6 +71,18 @@ describe('filterItems', () => {
     ]);
   });
 
+  it('under All, names genres by the films’ ids, a "Like" of either type by its typed id, a mood of either', () => {
+    expect(filterItems(['genre-28', 'like-tv-1396', 'recipe-k-drama'], 'all')).toEqual([
+      { kind: 'genre', id: '28' },
+      { kind: 'like', id: 'series-1396' },
+      { kind: 'genre', id: '18' },
+      { kind: 'language', id: 'ko' },
+      { kind: 'country', id: 'KR' },
+    ]);
+    expect(facetParts('mood-bingeable', 'all')).toEqual([['mood', 'Bingeable']]);
+    expect(facetParts('plot-nonlinear', 'all')).toEqual([['chronology', 'nonlinear']]);
+  });
+
   it('is nothing where one pick has no form there', () => {
     expect(filterItems(['genre-80', 'recipe-nordic-noir'], 'movie')).toBeUndefined();
     expect(filterItems(['like-tv-1396'], 'movie')).toBeUndefined();

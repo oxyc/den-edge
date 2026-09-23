@@ -9,8 +9,8 @@
 
 import { atlasWhere } from './atlasRows';
 import { RECIPES, recipeParts, retargeted } from './catalog';
-import type { FilterItem } from './filterRoutes';
-import type { MediaType } from './library';
+import { likeValue, type FilterItem } from './filterRoutes';
+import type { ExploreType } from './library';
 import { likeOf } from './route';
 
 /** A kind's counts: value → titles, and whether a value missing from them has none (`complete`). */
@@ -69,9 +69,10 @@ export function filterOnlyKind(id: string): FilterOnlyKind | undefined {
 /**
  * What a facet id is in atlas's terms: `[kind, value]` pairs, several for a plot row that pairs two axes or a recipe
  * made of parts. A recipe atlas has no form of gives what it can — AND-joined genres, one language, one country —
- * which, counted, can only hide less. A "Like" for a title of the other type is nothing of this type's.
+ * which, counted, can only hide less. A "Like" for a title of the other type is nothing of this type's; under All,
+ * where genres are the films' ids, a "Like" of either type is one, and a recipe is its film form.
  */
-export function facetParts(id: string, type: MediaType): [kind: string, value: string][] {
+export function facetParts(id: string, type: ExploreType): [kind: string, value: string][] {
   const genre = /^genre-(\d+)$/.exec(id)?.[1];
   if (genre) return [['genre', genre]];
   const language = /^lang-([a-z]{2})$/.exec(id)?.[1];
@@ -85,15 +86,16 @@ export function facetParts(id: string, type: MediaType): [kind: string, value: s
   const rating = /^rating-(\d+)$/.exec(id)?.[1];
   if (rating) return [['rating', rating]];
   const like = likeOf(id);
-  if (like) return like.type === type ? [['like', String(like.id)]] : [];
+  if (like) return like.type === type || type === 'all' ? [['like', likeValue(like, type)]] : [];
   const only = filterOnlyKind(id);
   if (only) return [[only, id.slice(only.length + 1)]];
   if (id.startsWith('recipe-')) {
     const recipeId = id.slice('recipe-'.length);
-    const whole = recipeParts(recipeId, type);
+    const space = type === 'tv' ? 'tv' : 'movie';
+    const whole = recipeParts(recipeId, space);
     if (whole) return whole;
     const recipe = RECIPES.find((r) => r.id === recipeId);
-    const query = recipe && retargeted(recipe.query, type);
+    const query = recipe && retargeted(recipe.query, space);
     if (!query) return [];
     const parts: [string, string][] = [];
     if (query.genreJoin !== 'or')
@@ -112,7 +114,7 @@ export function facetParts(id: string, type: MediaType): [kind: string, value: s
 }
 
 /** A selection's parts as atlas's filter items: what its counts are asked beside (`facetParts`). */
-export const countItems = (selection: readonly string[], type: MediaType): FilterItem[] =>
+export const countItems = (selection: readonly string[], type: ExploreType): FilterItem[] =>
   selection.flatMap((id) => facetParts(id, type).map(([kind, id]) => ({ kind, id })));
 
 /**
@@ -121,12 +123,12 @@ export const countItems = (selection: readonly string[], type: MediaType): Filte
  */
 export function filterItems(
   selection: readonly string[],
-  type: MediaType,
+  type: ExploreType,
 ): FilterItem[] | undefined {
   const items: FilterItem[] = [];
   for (const id of selection) {
     const parts = id.startsWith('recipe-')
-      ? recipeParts(id.slice('recipe-'.length), type)
+      ? recipeParts(id.slice('recipe-'.length), type === 'tv' ? 'tv' : 'movie')
       : facetParts(id, type);
     if (!parts?.length) return undefined;
     items.push(...parts.map(([kind, value]) => ({ kind, id: value })));
@@ -139,7 +141,7 @@ export function filterItems(
  * lists completely. An option with no part atlas knows, or none in such a kind, is never judged. (A one-pick kind
  * that already has its pick is never asked about here: `emptyOptions` leaves it out first.)
  */
-export function countedEmpty(id: string, type: MediaType, counts: FacetCounts): boolean {
+export function countedEmpty(id: string, type: ExploreType, counts: FacetCounts): boolean {
   return facetParts(id, type).some(([kind, value]) => {
     const known = countsOf(counts[kind]);
     return !!known?.complete && !(known.values[value] ?? 0);

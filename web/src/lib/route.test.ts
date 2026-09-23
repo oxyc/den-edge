@@ -101,6 +101,23 @@ describe('routes', () => {
     expect(routePath(typed)).toBe('/search?q=heist&type=tv&c=genre-80');
   });
 
+  it('reads no type as All, and writes All as no type, so a bare /search is films and series together', () => {
+    expect(parseRoute('/search')).toStrictEqual({ page: 'search', query: '' });
+    expect(searchHref('', {})).toBe('/search');
+    expect(searchHref('', { chips: ['genre-28'] })).toBe('/search?c=genre-28');
+    // Movies is a choice like Series now, so it is written out.
+    for (const type of ['movie', 'tv'] as const) {
+      const href = searchHref('', { type, chips: ['genre-35'] });
+      expect(href).toBe(`/search?type=${type}&c=genre-35`);
+      expect(parseRoute(href)).toStrictEqual({
+        page: 'search',
+        query: '',
+        type,
+        chips: ['genre-35'],
+      });
+    }
+  });
+
   it('carries several facets in the order picked, readable as written and each once', () => {
     const href = searchHref('', { chips: ['country-SE', 'genre-28'] });
     expect(href).toBe('/search?c=country-SE,genre-28');

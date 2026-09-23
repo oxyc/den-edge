@@ -24,7 +24,8 @@ export type Route =
 /**
  * What Search is browsing, beside the query: the type it is showing and the facets picked, in the order they were
  * picked (`explore.ts`). In the address with the query — `c=country-SE,genre-28` — so an Explore view can be linked
- * and Back takes back the last pick. Both are absent for the defaults: Movies, and For You (no facets).
+ * and Back takes back the last pick. Both are absent for the defaults: All (films and series together), and For You
+ * (no facets).
  */
 export interface Explore {
   type?: MediaType;

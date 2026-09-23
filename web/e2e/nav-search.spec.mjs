@@ -14,6 +14,19 @@ const film = (id, title = `Film ${id}`) => ({
   popularity: 100,
 });
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
+// TMDB's series lists: Explore's default, All, shows them beside the films.
+const show = (id, name = `Series ${id}`) => ({
+  id,
+  name,
+  media_type: 'tv',
+  first_air_date: '2025-01-01',
+  poster_path: '/poster.jpg',
+  genre_ids: [18],
+  vote_average: 8,
+  vote_count: 1000,
+  popularity: 100,
+});
+const shows = Array.from({ length: 30 }, (_, i) => show(700 + i));
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
 const input = (page) =>
   page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
@@ -74,14 +87,15 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
     if (match)
       return r.fulfill({
         json: {
-          ...film(Number(match[2])),
+          ...(match[1] === 'tv' ? show(Number(match[2])) : film(Number(match[2]))),
           overview: 'A movie description.',
           genres: [{ id: 18, name: 'Drama' }],
           credits: { cast: [] },
           recommendations: { results: [] },
         },
       });
-    return r.fulfill({ json: { results: films, total_pages: 1 } });
+    const series = /\/tv(\/|$)/.test(url.pathname);
+    return r.fulfill({ json: { results: series ? shows : films, total_pages: 1 } });
   });
   return queries;
 }
@@ -307,16 +321,29 @@ test('Explore browses before typing, remaps across types, and comes back after a
       active(page)
         .getByRole('group', { name: 'Selected' })
         .getByRole('button', { name: `Remove ${name}`, exact: true });
-    // Empty query: For You, filled from the popular tail since the fixture library holds nothing.
+    // Empty query: All, and For You of both types, filled from the popular films and top series since the fixture
+    // library holds nothing. Each card opens its own type's page.
     await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
+    await expect(chip('All')).toHaveAttribute('aria-pressed', 'true');
     await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
-    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    const grid = active(page).locator('.grid');
+    await expect(grid.getByRole('link', { name: 'Film 100 2026' })).toHaveAttribute(
+      'href',
+      '/movie/100-film-100',
+    );
+    await expect(grid.getByRole('link', { name: 'Series 700 2025' })).toHaveAttribute(
+      'href',
+      '/tv/700-series-700',
+    );
     expect(discovered).toContain('/tmdb/3/movie/popular?');
 
-    // A genre is its own history entry and its own feed, and leaves its section for the Selected pills.
+    // A genre is its own history entry and its own feed, and leaves its section for the Selected pills. Under All it
+    // is the films' Action and the series' Action & Adventure.
     await chip('Action').click();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
-    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/movie?28');
+    await expect
+      .poll(() => discovered)
+      .toEqual(expect.arrayContaining(['/tmdb/3/discover/movie?28', '/tmdb/3/discover/tv?10759']));
     await expect(pill('Action')).toBeVisible();
     await expect(chip('Action')).toHaveCount(0);
 
@@ -324,7 +351,7 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await chip('Series').click();
     await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
     await expect(pill('Action & Adventure')).toBeVisible();
-    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/tv?10759');
+    await expect(chip('Series')).toHaveAttribute('aria-pressed', 'true');
 
     // Typing searches over it; Esc clears the query back to the same view, then leaves.
     await input(page).fill('Neon');
@@ -338,7 +365,7 @@ test('Explore browses before typing, remaps across types, and comes back after a
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?c=genre-28$/);
     await expect(pill('Action')).toBeVisible();
-    await expect(chip('Movies')).toHaveAttribute('aria-pressed', 'true');
+    await expect(chip('All')).toHaveAttribute('aria-pressed', 'true');
     await page.goBack();
     await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
   } finally {
@@ -437,6 +464,9 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     const asked = [];
     await page.route('**/tmdb/3/discover/**', (r) => {
       const url = new URL(r.request().url());
+      // No Swedish series: under All the grid is these films alone.
+      if (url.pathname.endsWith('/tv'))
+        return r.fulfill({ json: { results: [], total_pages: 1, total_results: 0 } });
       asked.push(url.search);
       const genres = (url.searchParams.get('with_genres') ?? '').split(',').filter(Boolean);
       const results =
@@ -579,8 +609,9 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
     const grid = active(page).locator('.grid');
     await expect(grid.getByRole('link', { name: 'Atlas 500 2020' })).toBeVisible();
-    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
-    await expect.poll(() => asked).toContain('/index/filter/movie/counts.json?sel=country:SE');
+    // All, the default: both types in one question.
+    expect(asked).toContain('/index/filter/all/titles.json?sel=country:SE');
+    await expect.poll(() => asked).toContain('/index/filter/all/counts.json?sel=country:SE');
 
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const genres = rail.getByRole('group', { name: 'Genres' });
@@ -607,7 +638,7 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
     ).toBeVisible();
     await expect
       .poll(() => asked)
-      .toContain('/index/filter/movie/titles.json?sel=country:SE,person:Q2');
+      .toContain('/index/filter/all/titles.json?sel=country:SE,person:Q2');
     // Nothing of this went to TMDB discover.
     expect(discovered).toEqual([]);
   } finally {
@@ -643,7 +674,7 @@ test('a region is picked from the rail’s Regions, one at a time, and asks atla
         name: 'Remove Nordic',
       }),
     ).toBeVisible();
-    await expect.poll(() => asked).toContain('/index/filter/movie/titles.json?sel=region:nordic');
+    await expect.poll(() => asked).toContain('/index/filter/all/titles.json?sel=region:nordic');
     // One region at a time: the others leave the rail until it is taken out.
     await expect(rail.getByRole('group', { name: 'Regions' })).toHaveCount(0);
   } finally {
@@ -693,8 +724,8 @@ test('the search field finds people and characters through atlas, and a person p
     ).toBeVisible();
     await expect(browse.getByRole('button', { name: 'Nolan North · actor' })).toBeVisible();
     await expect(browse.getByRole('button', { name: 'Nolan Shaw · character' })).toBeVisible();
-    expect(asked).toContain('/index/filter/movie/values/made.json?q=nol');
-    expect(asked).toContain('/index/filter/movie/values/character.json?q=nol');
+    expect(asked).toContain('/index/filter/all/values/made.json?q=nol');
+    expect(asked).toContain('/index/filter/all/values/character.json?q=nol');
     await browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }).click();
     await expect(page).toHaveURL(/\/search\?c=person-Q25191$/);
     await expect(input(page)).toHaveValue('');
@@ -708,7 +739,7 @@ test('the search field finds people and characters through atlas, and a person p
   }
 });
 
-test('where atlas’s filter has no titles route, the grid is TMDB discover as before', async () => {
+test('where atlas’s filter has no titles route, All is each type’s TMDB discover, interleaved', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -724,9 +755,25 @@ test('where atlas’s filter has no titles route, the grid is TMDB discover as b
       if (r.url().includes('/discover/')) discovered.push(r.url());
     });
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
-    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
-    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
-    expect(discovered.some((url) => url.includes('with_origin_country=SE'))).toBe(true);
+    const cards = active(page).locator('.grid').getByRole('link');
+    await expect(cards.first()).toHaveAttribute('href', '/movie/100-film-100');
+    // A film, then a series, then a film: each type's page in turn, each card opening its own type's page.
+    await expect(cards.nth(1)).toHaveAttribute('href', '/tv/700-series-700');
+    await expect(cards.nth(2)).toHaveAttribute('href', '/movie/101-film-101');
+    // atlas asked for both types at once first, then each type alone; then TMDB, each type's.
+    expect(asked).toEqual(
+      expect.arrayContaining([
+        '/index/filter/all/titles.json?sel=country:SE',
+        '/index/filter/movie/titles.json?sel=country:SE',
+        '/index/filter/series/titles.json?sel=country:SE',
+      ]),
+    );
+    for (const type of ['movie', 'tv'])
+      expect(
+        discovered.some(
+          (url) => url.includes(`/discover/${type}?`) && url.includes('with_origin_country=SE'),
+        ),
+      ).toBe(true);
   } finally {
     await browser.close();
   }
@@ -781,7 +828,16 @@ test('"More like this" on a poster adds a "Like" pill without opening the title,
     const similar = [];
     await page.route('**/atlas/index/similar/**', (r) => {
       similar.push(new URL(r.request().url()).pathname + new URL(r.request().url()).search);
-      return r.fulfill({ json: { ids: [300, 301] } });
+      return r.fulfill({
+        json: {
+          ids: [300, 301],
+          mixed: [
+            { type: 'movie', id: 300 },
+            { type: 'series', id: 701 },
+            { type: 'movie', id: 301 },
+          ],
+        },
+      });
     });
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
@@ -795,6 +851,11 @@ test('"More like this" on a poster adds a "Like" pill without opening the title,
     await expect(selected.getByRole('button', { name: 'Remove Like Film 101' })).toBeVisible();
     await expect(grid.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
     expect(similar[0]).toBe('/atlas/index/similar/movie/101.json?limit=200');
+    // Under All, atlas's similar titles of both types: a series among them opens as a series.
+    await expect(grid.getByRole('link', { name: 'Series 701 2025' })).toHaveAttribute(
+      'href',
+      '/tv/701-series-701',
+    );
 
     // One "Like" at a time: while it is picked no poster offers another, and a mood can't join it.
     await expect(grid.getByRole('button', { name: /^More like / })).toHaveCount(0);
@@ -934,7 +995,9 @@ test('a selection that shows nothing names the pick to take out, and takes it ou
       const results =
         url.searchParams.get('vote_average.gte') || url.searchParams.get('page') !== '1'
           ? []
-          : films;
+          : url.pathname.endsWith('/tv')
+            ? shows
+            : films;
       return r.fulfill({ json: { results, total_pages: 1 } });
     });
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=lang-sv,genre-35,rating-6')}`);
@@ -943,6 +1006,33 @@ test('a selection that shows nothing names the pick to take out, and takes it ou
     await feed.getByRole('button', { name: 'Remove ★ 6+' }).last().click();
     await expect(page).toHaveURL(/\/search\?c=lang-sv,genre-35$/);
     await expect(feed.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('under All, a pick series have no form of shows films alone and says so', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(new URL(r.url()).pathname);
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=recipe-romantic-comedy')}`);
+    await expect(active(page).getByText('Romantic Comedy: movies only.')).toBeVisible();
+    await expect.poll(() => discovered).toContain('/tmdb/3/discover/movie');
+    expect(discovered).not.toContain('/tmdb/3/discover/tv');
+    // Under Movies there is nothing to say.
+    await active(page).getByRole('button', { name: 'Movies', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?type=movie&c=recipe-romantic-comedy$/);
+    await expect(active(page).getByText('Romantic Comedy: movies only.')).toHaveCount(0);
   } finally {
     await browser.close();
   }

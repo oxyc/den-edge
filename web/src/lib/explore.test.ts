@@ -1,12 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { discoverParams, type Pages } from './catalog';
+import type { FacetCounts } from './facetCounts';
 import {
   applyPick,
   chipsOf,
+  countedEmptyAcross,
   emptyOptions,
   exploreChips,
   exploreFeed,
   editDistance,
+  interleaveFeeds,
+  perType,
   facetQuery,
   filterChips,
   fold,
@@ -714,5 +718,236 @@ describe('Explore feeds', () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe('All: films and series together', () => {
+  const all = exploreChips('all', { atlas: true });
+  const tv = exploreChips('tv', { atlas: true });
+  const movie = exploreChips('movie', { atlas: true });
+  const ids = (chips: { id: string; group: string }[], group: string) =>
+    chips.filter((c) => c.group === group).map((c) => c.id);
+
+  it('offers the films’ genres by their names, series-only ones under Series alone, and either type’s recipes and moods', () => {
+    expect(ids(all, 'genre')).toEqual(ids(movie, 'genre'));
+    expect(all.find((c) => c.id === 'genre-878')?.label).toBe('Science Fiction');
+    for (const kids of ['genre-10762', 'genre-10763', 'genre-10764', 'genre-10766', 'genre-10767'])
+      expect(ids(all, 'genre')).not.toContain(kids);
+    expect(ids(tv, 'genre')).toContain('genre-10762');
+    // A film-only recipe and a series-native one; a film-only mood and a series-only one.
+    expect(ids(all, 'recipe')).toEqual(
+      expect.arrayContaining(['recipe-romantic-comedy', 'recipe-k-drama']),
+    );
+    expect(ids(all, 'mood')).toEqual(expect.arrayContaining(['plot-nonlinear', 'mood-bingeable']));
+    expect(all.filter((c) => c.id === 'mood-feel-good')).toHaveLength(1);
+  });
+
+  it('moves the selection across the toggle by the closest counterparts, saying what couldn’t come', () => {
+    // All to Series: a genre to its series counterpart, a film-only recipe dropped.
+    expect(remapSet(['genre-28', 'genre-27', 'recipe-sci-fi-horror'], 'all', 'tv', tv)).toEqual({
+      set: ['genre-10759', 'genre-10765'],
+      dropped: ['recipe-sci-fi-horror'],
+    });
+    // Series to All: a series-only genre comes as its film counterpart; a series mood stays.
+    expect(remapSet(['genre-10762', 'mood-bingeable'], 'tv', 'all', all)).toEqual({
+      set: ['genre-10751', 'mood-bingeable'],
+      dropped: [],
+    });
+    // All and Movies share the genres; a series "Like" and a series mood don't go to Movies.
+    expect(remapSet(['genre-28', 'like-tv-1396', 'mood-bingeable'], 'all', 'movie', movie)).toEqual(
+      { set: ['genre-28'], dropped: ['like-tv-1396', 'mood-bingeable'] },
+    );
+    // Under All a "Like" of either type stays.
+    expect(remapSet(['like-tv-1396'], 'tv', 'all', all).set).toEqual(['like-tv-1396']);
+    expect(remapChip('genre-10765', 'tv', 'all', all)).toBe('genre-878');
+  });
+
+  it('asks each type for the selection as its own feed would, leaving out a type with no form of a pick', () => {
+    const [films, series] = perType(['genre-28', 'genre-12', 'country-SE']);
+    expect(films).toEqual({
+      type: 'movie',
+      set: ['genre-28', 'genre-12', 'country-SE'],
+      dropped: [],
+    });
+    expect(series).toEqual({ type: 'tv', set: ['genre-10759', 'country-SE'], dropped: [] });
+    // Horror has no series form, a network no film one, Romantic Comedy no series one.
+    expect(perType(['genre-27'])[1]?.dropped).toEqual(['genre-27']);
+    expect(perType(['network-Q1'])[0]?.dropped).toEqual(['network-Q1']);
+    expect(perType(['network-Q1'])[1]?.set).toEqual(['network-Q1']);
+    expect(perType(['recipe-romantic-comedy'])[1]?.dropped).toEqual(['recipe-romantic-comedy']);
+  });
+
+  it('interleaves two feeds page by page, each title once, each narrowed by its own type’s filter', async () => {
+    const m = (id: number) => film(id);
+    const t = (id: number) => film(id, 'tv');
+    const films: Title[][] = [[m(1), m(2)], [m(2), m(3)], [m(4)], []];
+    const series: Title[][] = [[t(1)], []];
+    const row = interleaveFeeds('mixed', [
+      {
+        type: 'movie',
+        row: {
+          id: 'm',
+          title: '',
+          load: async (p) => films[p - 1] ?? [],
+          filter: (x) => x.id !== 3,
+        },
+      },
+      { type: 'tv', row: { id: 't', title: '', load: async (p) => series[p - 1] ?? [] } },
+    ]);
+    const keys = (titles: Title[]) => titles.map((x) => `${x.type}:${x.id}`);
+    // A film and a series with one id are two titles.
+    expect(keys(await row.load(1))).toEqual(['movie:1', 'tv:1', 'movie:2']);
+    // Series ran out; films go on, the repeat given once.
+    expect(keys(await row.load(2))).toEqual(['movie:3']);
+    expect(keys(await row.load(3))).toEqual(['movie:4']);
+    expect(await row.load(4)).toEqual([]);
+    // The films' filter judges films only.
+    expect(row.filter?.(m(3))).toBe(false);
+    expect(row.filter?.(t(3))).toBe(true);
+  });
+
+  it('goes on with one type when the other fails, and fails only when both do', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const broken = {
+        id: 'b',
+        title: '',
+        load: async () => {
+          throw new Error('down');
+        },
+      };
+      const half = interleaveFeeds('half', [
+        { type: 'movie', row: broken },
+        { type: 'tv', row: { id: 't', title: '', load: async () => [film(7, 'tv')] } },
+      ]);
+      expect((await half.load(1)).map((x) => x.type)).toEqual(['tv']);
+      const none = interleaveFeeds('none', [
+        { type: 'movie', row: broken },
+        { type: 'tv', row: { ...broken, id: 'b2' } },
+      ]);
+      await expect(none.load(1)).rejects.toThrow('down');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  const answering = (asked: string[], body: (url: string) => unknown) =>
+    (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/metadata')) return new Response(JSON.stringify({ titles: [] }));
+      asked.push(url);
+      const answer = body(url);
+      return answer === undefined
+        ? new Response('', { status: 404 })
+        : new Response(JSON.stringify(answer));
+    }) as typeof fetch;
+  const pages: Pages = async (path, type, _params, page) =>
+    path.includes('recommendations') ? [] : [film(page * 100, type)];
+  const base = { pages, seeds: [], owned: new Set<string>() };
+
+  it('asks atlas for both types at once, a series card staying a series', async () => {
+    const asked: string[] = [];
+    const row = exploreFeed(['genre-35'], 'all', {
+      ...base,
+      atlas: '/atlas',
+      fetchImpl: answering(asked, () => ({
+        titles: [
+          { type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' },
+          { type: 'series', id: 6, title: 'Six', posterPath: '/6.jpg' },
+        ],
+        order: 'o',
+        ignored: [],
+      })),
+    });
+    expect((await row.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:5', 'tv:6']);
+    expect(asked).toEqual(['/atlas/index/filter/all/titles.json?sel=genre:35']);
+  });
+
+  it('where atlas has no `all` route, is each type’s own feed interleaved', async () => {
+    const asked: string[] = [];
+    const discovered: string[] = [];
+    const row = exploreFeed(['genre-28'], 'all', {
+      ...base,
+      pages: async (path, type, params, page) => {
+        discovered.push(`${path}?${params.with_genres}`);
+        return pages(path, type, params, page);
+      },
+      atlas: '/atlas',
+      fetchImpl: answering(asked, () => undefined),
+    });
+    expect((await row.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:100', 'tv:100']);
+    expect(asked).toEqual([
+      '/atlas/index/filter/all/titles.json?sel=genre:28',
+      '/atlas/index/filter/movie/titles.json?sel=genre:28',
+      '/atlas/index/filter/series/titles.json?sel=genre:10759',
+    ]);
+    // Each type's own discover, the series' by its own genre.
+    expect(discovered).toEqual(['/discover/movie?28', '/discover/tv?10759']);
+    expect((await row.load(2)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:200', 'tv:200']);
+  });
+
+  it('is For You of both types, and one type alone for a pick the other has no form of', async () => {
+    const asked: string[] = [];
+    const forYou = exploreFeed([], 'all', { ...base, atlas: null });
+    expect(forYou.id).toBe(`${FOR_YOU}-all`);
+    expect((await forYou.load(1)).map((x) => `${x.type}:${x.id}`)).toEqual(['movie:100', 'tv:100']);
+    const horror = exploreFeed(['genre-27'], 'all', {
+      ...base,
+      atlas: '/atlas',
+      fetchImpl: answering(asked, () => undefined),
+    });
+    expect((await horror.load(1)).map((x) => x.type)).toEqual(['movie']);
+    // Not asked of both at once: atlas's `all` would count series it can't be.
+    expect(asked).toEqual(['/atlas/index/filter/movie/titles.json?sel=genre:27']);
+  });
+
+  it('is a "Like"’s similar titles of both types, each judged by its own type’s genres', async () => {
+    const realFetch = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = answering(asked, () => undefined);
+    try {
+      const row = exploreFeed(['like-movie-949', 'genre-28'], 'all', {
+        ...base,
+        atlas: '/atlas',
+        key: 'k',
+        fetchImpl: globalThis.fetch,
+      });
+      await row.load(1);
+      expect(asked[0]).toBe('/atlas/index/filter/all/titles.json?sel=genre:28,like:movie-949');
+      expect(asked[1]).toBe('/atlas/index/similar/movie/949.json?limit=200');
+      // Action, for a series, is Action & Adventure.
+      expect(row.filter?.({ ...film(1, 'tv'), genreIds: [10759] })).toBe(true);
+      expect(row.filter?.({ ...film(1, 'tv'), genreIds: [18] })).toBe(false);
+      expect(row.filter?.({ ...film(1), genreIds: [28] })).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('hides an option only where both types’ counts say none, or a type has no form of it', () => {
+    const films = { genre: { mode: 'and', complete: true, values: { '28': 3 } } } as FacetCounts;
+    const series = {
+      genre: { mode: 'and', complete: true, values: { '80': 2 } },
+      language: { mode: 'and', complete: false, values: {} },
+    } as FacetCounts;
+    const both = [
+      { type: 'movie' as const, counts: films },
+      { type: 'tv' as const, counts: series },
+    ];
+    expect(countedEmptyAcross('genre-35', both)).toBe(true);
+    expect(countedEmptyAcross('genre-28', both)).toBe(false);
+    expect(countedEmptyAcross('genre-80', both)).toBe(false);
+    // Horror: no series form, and no films of it counted.
+    expect(countedEmptyAcross('genre-27', both)).toBe(true);
+    // A kind listed incompletely, or a type that didn't answer, judges nothing.
+    expect(countedEmptyAcross('lang-sv', both)).toBe(false);
+    expect(countedEmptyAcross('genre-35', [both[0]!, { type: 'tv', counts: null }])).toBe(false);
+    // emptyOptions takes the judgement as it takes one answer's counts.
+    const empty = emptyOptions(['country-SE'], [], false, all, {
+      counted: (id) => countedEmptyAcross(id, both),
+      type: 'all',
+    });
+    expect(empty.has('genre-35')).toBe(true);
+    expect(empty.has('genre-80')).toBe(false);
   });
 });
