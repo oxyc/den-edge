@@ -2,7 +2,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { stuckWatch } from './stuckWatch';
 
 describe('stuckWatch', () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('calls the timers the way a browser allows', () => {
+    // A browser's setTimeout throws "Illegal invocation" when called as a method of anything but the window; fake
+    // timers don't care, so this stands in for the browser's rule.
+    const set = setTimeout;
+    const clear = clearTimeout;
+    const strict = <T extends (...args: never[]) => unknown>(fn: T) =>
+      function (this: unknown, ...args: Parameters<T>) {
+        if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+        return fn(...args);
+      };
+    vi.stubGlobal('setTimeout', strict(set));
+    vi.stubGlobal('clearTimeout', strict(clear));
+    const watch = stuckWatch(30_000, () => {});
+    watch.progress();
+    watch.stop();
+  });
 
   it('does not call a slow load that keeps arriving stuck', () => {
     vi.useFakeTimers();

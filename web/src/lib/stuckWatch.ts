@@ -9,10 +9,6 @@ export function stuckWatch(
   ms: number,
   onStuck: () => void,
   arrived: () => number = () => 0,
-  timers: { set: typeof setTimeout; clear: typeof clearTimeout } = {
-    set: setTimeout,
-    clear: clearTimeout,
-  },
 ): { progress(): void; stop(): void } {
   let stopped = false;
   let seen = arrived();
@@ -20,22 +16,22 @@ export function stuckWatch(
     const now = arrived();
     if (now > seen) {
       seen = now;
-      timer = timers.set(due, ms);
+      timer = setTimeout(due, ms);
       return;
     }
     onStuck();
   };
-  let timer = timers.set(due, ms);
+  let timer = setTimeout(due, ms);
   return {
     progress() {
       if (stopped) return;
       seen = arrived();
-      timers.clear(timer);
-      timer = timers.set(due, ms);
+      clearTimeout(timer);
+      timer = setTimeout(due, ms);
     },
     stop() {
       stopped = true;
-      timers.clear(timer);
+      clearTimeout(timer);
     },
   };
 }
