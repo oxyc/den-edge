@@ -297,7 +297,12 @@ impl Face {
     /// `/health`, `/version`, `/routes` and `/config` answer on every name; the device routes and `/metrics`
     /// only where devices call; the web app's files only where browsers load it. The web app is a device too:
     /// the routes it calls on its own origin — pairing, the library log, sending to the TV — answer on its name
-    /// as well, where they sit behind Access. What only a TV does (draining its inbox, unlinking) stays off it.
+    /// as well, where they sit behind Access. What only a TV does (unlinking) stays off it.
+    ///
+    /// That includes draining an inbox: a browser that hosts a pairing drains it to learn the joiner's name. Off
+    /// this name every drain was a 404, so Settings › Connections never learned the name and retried each unnamed
+    /// link eight times every thirty seconds for as long as it was open. The inbox key is the drain's only
+    /// credential, the same on d-api, where the route is already public, so answering here opens nothing new.
     ///
     /// `/config` was a TV's alone until the web app needed the same public client configuration — the SIMKL
     /// client id it must have to offer a sign-in. It carries no secret and never has.
@@ -308,7 +313,8 @@ impl Face {
         let web_app_calls = path.starts_with("/pair/")
             || path.starts_with("/lib/")
             || path.starts_with("/grant/")
-            || path == "/inbox/append";
+            || path == "/inbox/append"
+            || path == "/inbox/drain";
         // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
         // on the public one, and a TV on the LAN or the device API. They lend a key and read nothing of this box, so
         // neither half owns them.
@@ -986,9 +992,9 @@ pub mod tests {
         };
         // The web app's name: the app and the routes it calls, and nothing only a TV does.
         assert_eq!(status("d.oxy.fi", "GET", "/").await, StatusCode::OK);
-        for path in ["/inbox/drain", "/metrics"] {
-            assert_eq!(status("d.oxy.fi", "GET", path).await, StatusCode::NOT_FOUND, "{path} on d");
-        }
+        assert_eq!(status("d.oxy.fi", "GET", "/metrics").await, StatusCode::NOT_FOUND, "/metrics on d");
+        // A browser hosting a pairing drains that pairing's inbox to learn who joined.
+        assert_ne!(status("d.oxy.fi", "GET", "/inbox/drain").await, StatusCode::NOT_FOUND, "drain on d");
         // The public client configuration, which the web app needs as much as a TV does and which carries no
         // secret: without it here, a browser on this name could not tell what this box lets it offer.
         assert_eq!(status("d.oxy.fi", "GET", "/config").await, StatusCode::OK);
