@@ -4,7 +4,7 @@
 import { tmdbPages, type RowDef } from './catalog';
 import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
 import type { Title } from './library';
-import { personHref } from './route';
+import { likeId, personHref, searchHref } from './route';
 import { fetchTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 
@@ -19,6 +19,11 @@ export interface RelatedOptions {
   /** TMDB's key, or the empty string where den-edge lends its own (`/tmdb`). */
   key: string;
   fetchImpl?: typeof fetch;
+  /**
+   * How many of atlas's closest titles to ask for at once. Its first screenful (20) is what a detail page's row
+   * needs; a whole feed of them — Search's "Like" — asks for as many as atlas keeps (200).
+   */
+  similarLimit?: number;
 }
 
 /**
@@ -32,18 +37,20 @@ export interface RelatedOptions {
  *
  * `load` ignores its page number and walks the sources in order: a page that would hold only titles already offered
  * moves on to the next source rather than coming back empty, because an empty page is what ends a row.
+ *
+ * `more`, TMDB's first page of recommendations, is what a title's page already has; without it, it is fetched.
  */
 export function moreLikeThisRow(
-  detail: Pick<TitleDetail, 'title' | 'more'>,
+  detail: Pick<TitleDetail, 'title'> & { more?: Title[] },
   atlas: string | null,
-  { key, fetchImpl = tmdbFetch }: RelatedOptions,
+  { key, fetchImpl = tmdbFetch, similarLimit }: RelatedOptions,
 ): RowDef {
   const self = detail.title;
   const kind = self.type === 'tv' ? 'series' : 'movie';
   const seen = new Set<string>([keyOf(self)]);
   const recommendations = tmdbPages(key, fetchImpl);
 
-  const similarPath = `/index/similar/${kind}/${self.id}.json`;
+  const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
   const neighboursPath = `/index/neighbours/${kind}/${self.id}.json?k=${NEIGHBOURS}`;
 
   /** `unknown` is atlas not yet asked; whether it has anything for this title decides which way the row goes. */
@@ -94,7 +101,7 @@ export function moreLikeThisRow(
       source = 'recommended'; // atlas is exhausted: TMDB pads the end
     }
     if (source === 'recommended') {
-      if (recommendedPage === 1) {
+      if (recommendedPage === 1 && detail.more) {
         recommendedPage = 2;
         return detail.more;
       }
@@ -117,6 +124,14 @@ export function moreLikeThisRow(
   return {
     id: 'more-like-this',
     title: 'More like this',
+    // The same titles as a whole page to browse and narrow: Search with this title as its "Like".
+    aside: {
+      label: 'Explore similar',
+      href: searchHref('', {
+        type: self.type === 'tv' ? 'tv' : undefined,
+        chips: [likeId(self)],
+      }),
+    },
     load: async () => {
       while (source !== 'done') {
         const fresh = (await step()).filter((t) => {

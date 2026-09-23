@@ -1,22 +1,68 @@
 <script lang="ts">
   import icon from '../assets/den-mark.png';
   import DetailIcon from './DetailIcon.svelte';
-  import { flushSync, untrack } from 'svelte';
+  import { flushSync, onMount, tick, untrack } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack } from '../lib/navigation';
-  import { parseRoute, searchHref, type Route } from '../lib/route';
+  import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
   let text = $state(untrack(() => query));
+  /** A phone's bar: the placeholder says less, to fit. */
+  const narrow = new MediaQuery('width <= 759px');
+  /**
+   * The letters typed but not yet in the address. Typing belongs to the field; the address — and with it every
+   * page that reads the query — follows once typing pauses, or at once on Enter, blur, clearing or Esc.
+   * Rewriting it on every letter cost a history write (Safari throttles those) and a pass through the router
+   * and every page per keystroke.
+   */
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  const SETTLE_MS = 180;
+  $effect(() => () => clearTimeout(pending));
   $effect(() => {
-    if (query !== untrack(() => text)) text = query;
+    if (query === untrack(() => text)) return;
+    // The address moved on its own — Back, a link, a chip — so a letter still waiting to reach it is stale.
+    clearTimeout(pending);
+    pending = undefined;
+    text = query;
   });
+  /** `top` returns to the top of the results; a blur must not, or a tap landing on a card loses it. */
+  function commit(top = true) {
+    clearTimeout(pending);
+    pending = undefined;
+    if (route.page !== 'search') return;
+    navigate(searchHref(text, explore()), true);
+    if (top) window.scrollTo({ top: 0, behavior: 'instant' });
+  }
   // eslint-disable-next-line svelte/prefer-writable-derived -- Focus must expand synchronously within the iPhone tap; route changes reconcile it after navigation.
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
   $effect(() => {
     expanded = route.page === 'search';
+  });
+  /**
+   * Search opened fresh — loaded, reloaded, or come back to from another tab — puts the cursor in the field, so it
+   * is plain where to type. Only with a mouse or trackpad: on a touch screen it would raise the keyboard over the
+   * grid (and iOS refuses it without a tap anyway), and the field is already drawn open there. Never when focus is
+   * already somewhere on the page, which is how Back from a title arrives: it keeps its place.
+   */
+  onMount(() => {
+    if (!matchMedia('(pointer: fine)').matches) return;
+    const focusIfIdle = () => {
+      if (route.page !== 'search') return;
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      input?.focus({ preventScroll: true });
+    };
+    // After the route has opened the field, where it is drawn only on /search.
+    void tick().then(focusIfIdle);
+    const shown = () => {
+      if (document.visibilityState === 'visible') focusIfIdle();
+    };
+    document.addEventListener('visibilitychange', shown);
+    return () => document.removeEventListener('visibilitychange', shown);
   });
   function openSearch() {
     // Focus during the tap itself so iPhone browsers open the keyboard.
@@ -38,17 +84,47 @@
   }
   const searching = () =>
     route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
+  /** What Explore is browsing: a query is typed over it, and clearing the query returns to it. */
+  const explore = (): Explore =>
+    route.page === 'search' ? { type: route.type, chips: route.chips } : {};
   function searchChanged() {
-    // Arriving at search is a navigation; every letter after that rewrites the same entry, or Back would walk
-    // the spelling of what was typed instead of returning to the page the search started from.
-    const searching = route.page === 'search';
-    navigate(searchHref(text), searching);
-    if (searching) window.scrollTo({ top: 0, behavior: 'instant' });
+    // Arriving at search is a navigation, and happens at once. Every letter after that rewrites the same entry,
+    // or Back would walk the spelling of what was typed instead of returning to the page it started from.
+    if (route.page !== 'search') {
+      navigate(searchHref(text));
+      return;
+    }
+    clearTimeout(pending);
+    // An emptied field is a decision, not a letter: back to Explore without waiting.
+    if (!text) commit();
+    else pending = setTimeout(() => commit(), SETTLE_MS);
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
-    navigate(searchHref(text), route.page === 'search');
+    if (route.page === 'search') commit();
+    else navigate(searchHref(text, explore()));
     input?.blur();
+  }
+  /**
+   * ArrowDown from the field: into what it found — the first of the Browse row, or the first result. What is typed
+   * reaches the address first, so what is found is for all of it.
+   */
+  async function intoResults() {
+    if (pending) commit(false);
+    await tick();
+    const page = '[data-route-page][data-active="true"]';
+    document
+      .querySelector<HTMLElement>(`${page} .browse button, ${page} .grid a`)
+      ?.focus({ preventScroll: false });
+  }
+  /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
+  function escaped() {
+    if (!text.trim() || route.page !== 'search') {
+      closeSearch();
+      return;
+    }
+    text = '';
+    commit();
   }
   /**
    * The strip, and what a phone does with it.
@@ -101,18 +177,26 @@
         bind:this={input}
         bind:value={text}
         type="search"
-        aria-label="Search movies, series and people"
-        placeholder="Search movies, series and people"
+        aria-label="Search titles, people, moods, languages…"
+        placeholder={narrow.current
+          ? 'Titles, people, moods…'
+          : 'Search titles, people, moods, languages…'}
         autocomplete="off"
         enterkeyhint="search"
         onfocus={() => {
           if (route.page !== 'search') navigate(searchHref(text));
         }}
         oninput={searchChanged}
+        onblur={() => {
+          if (pending) commit(false);
+        }}
         onkeydown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault();
-            closeSearch();
+            escaped();
+          } else if (event.key === 'ArrowDown' && route.page === 'search') {
+            event.preventDefault();
+            void intoResults();
           }
         }}
       />
@@ -232,6 +316,14 @@
 
   .search:focus-within {
     outline: 1px solid var(--muted);
+  }
+
+  /* On search, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
+  @media (width >= 1100px) {
+    .searching .search {
+      flex: 0 1 400px;
+      max-width: 420px;
+    }
   }
 
   .search-glyph {

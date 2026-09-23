@@ -13,12 +13,18 @@
     caption,
     progress,
     href,
+    action,
   }: {
     title: Title;
     caption?: string;
     progress?: number;
     /** Where the card leads. Without one it is not a link: a card that shows a title and opens nothing. */
     href?: string;
+    /**
+     * A small button in the poster's corner, beside the link rather than in it, so it never opens the title: Search's
+     * "More like this". Shown under the pointer and on focus; always, but quiet, where there is no pointer to hover.
+     */
+    action?: { label: string; icon: string; onclick: () => void };
   } = $props();
   // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
   // title TMDB's own path is missing here, so a row is not half placeholder.
@@ -71,10 +77,28 @@
   </span>
 {/snippet}
 
-{#if href}
-  <a class="card pick" class:faded {href}>{@render body()}</a>
+{#snippet card()}
+  {#if href}
+    <a class="card pick" class:faded {href}>{@render body()}</a>
+  {:else}
+    <figure class="card" class:faded>{@render body()}</figure>
+  {/if}
+{/snippet}
+
+{#if action}
+  <div class="holder">
+    {@render card()}
+    <button
+      type="button"
+      class="action"
+      class:below={release}
+      aria-label={action.label}
+      title={action.label}
+      onclick={action.onclick}>{action.icon}</button
+    >
+  </div>
 {:else}
-  <figure class="card" class:faded>{@render body()}</figure>
+  {@render card()}
 {/if}
 
 <style>
@@ -171,6 +195,65 @@
       var(--fg) calc(var(--p) * 100%),
       rgb(255 255 255 / 0.3) 0
     );
+  }
+
+  .holder {
+    position: relative;
+    width: var(--card-w);
+  }
+
+  .holder .card {
+    width: auto;
+  }
+
+  .action {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid rgb(255 255 255 / 0.25);
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.72);
+    color: var(--fg);
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+
+  /* Under the release badge, which has the corner. */
+  .action.below {
+    top: 38px;
+  }
+
+  .action:hover {
+    background: rgb(0 0 0 / 0.9);
+  }
+
+  .action:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    opacity: 1;
+  }
+
+  .holder:hover .action {
+    opacity: 1;
+  }
+
+  /* Touch: nothing to hover, so it is always there — smaller, and quiet enough not to cover the art. */
+  @media (hover: none) {
+    .action {
+      width: 28px;
+      height: 28px;
+      font-size: 14px;
+      opacity: 0.8;
+    }
   }
 
   .meta {

@@ -15,11 +15,36 @@ export type Route =
   | { page: 'series' }
   | { page: 'watchlist' }
   | { page: 'settings' }
-  | { page: 'search'; query: string }
+  | ({ page: 'search'; query: string } & Explore)
   | { page: 'title'; type: MediaType; id: number }
   | { page: 'person'; id: number }
   /** One streaming service in one country: the same service in two countries carries two catalogues. */
   | { page: 'service'; id: number; country: string };
+
+/**
+ * What Search is browsing, beside the query: the type it is showing and the facets picked, in the order they were
+ * picked (`explore.ts`). In the address with the query — `c=country-SE,genre-28` — so an Explore view can be linked
+ * and Back takes back the last pick. Both are absent for the defaults: Movies, and For You (no facets).
+ */
+export interface Explore {
+  type?: MediaType;
+  chips?: string[];
+}
+
+/**
+ * A facet id is lowercase words, digits, a country code or a Wikidata id, underscores (atlas's `live_action`) and
+ * dashes: nothing that needs escaping in `c=`.
+ */
+export const FACET = /^[a-z0-9]+(?:-[A-Za-z0-9_]+)*$/;
+
+/** The facet "More like <title>": `like-movie-949`, `like-tv-1396`. */
+export const likeId = (title: { type: MediaType; id: number }) => `like-${title.type}-${title.id}`;
+
+/** The title a "Like" facet is for; undefined for any other facet. */
+export function likeOf(id: string): { type: MediaType; id: number } | undefined {
+  const match = /^like-(movie|tv)-(\d+)$/.exec(id);
+  return match ? { type: match[1] as MediaType, id: Number(match[2]) } : undefined;
+}
 
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
@@ -63,7 +88,16 @@ export function parseRoute(url: string): Route {
     return { page: 'library' };
   }
   const [, first, second] = path.split('/');
-  if (first === 'search') return { page: 'search', query: params.get('q') ?? '' };
+  if (first === 'search') {
+    const type = params.get('type');
+    const chips = [...new Set((params.get('c') ?? '').split(',').filter((id) => FACET.test(id)))];
+    return {
+      page: 'search',
+      query: params.get('q') ?? '',
+      ...(type === 'movie' || type === 'tv' ? { type } : {}),
+      ...(chips.length ? { chips } : {}),
+    };
+  }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
   if ((first === 'movie' || first === 'tv') && id)
@@ -84,7 +118,7 @@ export function routePath(route: Route): string {
     case 'library':
       return '/';
     case 'search':
-      return searchHref(route.query);
+      return searchHref(route.query, route);
     case 'title':
       return `/${route.type === 'tv' ? 'tv' : 'movie'}/${route.id}`;
     case 'person':
@@ -118,9 +152,19 @@ export const personHref = (id: number, name?: string) => {
   return `/person/${id}${slugged ? `-${slugged}` : ''}`;
 };
 
-/** Search carries its query, so a result page can be linked, kept, or reloaded and still be the same search. */
-export const searchHref = (query: string) =>
-  query.trim() ? `/search?q=${encodeURIComponent(query)}` : '/search';
+/**
+ * Search carries its query and what it is browsing, so a result page or an Explore view can be linked, kept, or
+ * reloaded and still be the same.
+ */
+export function searchHref(query: string, { type, chips = [] }: Explore = {}): string {
+  const facets = chips.filter((id) => FACET.test(id));
+  const params = [
+    query.trim() ? `q=${encodeURIComponent(query)}` : '',
+    type ? `type=${type}` : '',
+    facets.length ? `c=${facets.join(',')}` : '',
+  ].filter(Boolean);
+  return params.length ? `/search?${params.join('&')}` : '/search';
+}
 
 /**
  * The path an old `#…` link means, or null if it isn't one.

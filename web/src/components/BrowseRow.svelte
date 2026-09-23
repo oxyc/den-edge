@@ -2,61 +2,35 @@
      first page loads when the row nears the screen, and the next when you scroll to its end. A row that turns out
      empty hides itself. -->
 <script lang="ts">
-  import { appendUniqueTitles, type RowDef } from '../lib/catalog';
+  import type { RowDef } from '../lib/catalog';
   import type { Title } from '../lib/library';
+  import { Pager } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
   import PosterRow from './PosterRow.svelte';
 
   let { row, shown }: { row: RowDef; shown: (title: Title) => boolean } = $props();
 
-  /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
-  const FILL = 8;
-  const MAX_BURST = 3;
-
-  let titles = $state<Title[]>([]);
-  let done = $state(false);
-  let page = 0;
-  let loading = false;
   let wrapper: HTMLElement;
   let end: HTMLElement;
 
   const visibleHere = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
-  const visible = $derived(titles.filter(visibleHere));
+  const pager = new Pager((page) => row.load(page), visibleHere);
+  const visible = $derived(pager.titles.filter(visibleHere));
+  const done = $derived(pager.done);
   const key = (t: Title) => `${t.type}:${t.id}`;
-
-  async function more() {
-    if (loading || done) return;
-    loading = true;
-    for (let burst = 0; burst < MAX_BURST && !done; burst++) {
-      try {
-        const next = await row.load(page + 1);
-        page++;
-        titles = appendUniqueTitles(titles, next);
-        if (next.length === 0) done = true;
-      } catch {
-        done = true;
-      }
-      if (titles.filter(visibleHere).length >= FILL * page) break;
-    }
-    // With no admitted card the tail marker never moves, so IntersectionObserver cannot trigger another
-    // burst. Resolve the row after the same bounded three-page search as native instead of leaving skeletons
-    // on screen forever.
-    if (!titles.some(visibleHere)) done = true;
-    loading = false;
-  }
 
   $effect(() => {
     const near = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         near.disconnect();
-        void more();
+        void pager.more();
       },
       { rootMargin: '400px 0px' },
     );
     const tail = new IntersectionObserver((entries) => {
-      if (page > 0 && entries.some((e) => e.isIntersecting)) void more();
+      if (pager.page > 0 && entries.some((e) => e.isIntersecting)) void pager.more();
     });
     near.observe(wrapper);
     tail.observe(end);
@@ -68,7 +42,7 @@
 </script>
 
 <div bind:this={wrapper} class:gone={done && visible.length === 0}>
-  <PosterRow heading={row.title} headingLink={row.headingLink}>
+  <PosterRow heading={row.title} headingLink={row.headingLink} aside={row.aside}>
     {#each visible as title (key(title))}
       <PosterCard
         {title}

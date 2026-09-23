@@ -129,8 +129,22 @@
           history.replaceState({ ...history.state, denNavigation: { scope, position } }, '');
         }
       }
-      if (key === requestedKey && (push || entries.get(position)?.pageKey === requestedPageKey))
+      if (key === requestedKey && (push || entries.get(position)?.pageKey === requestedPageKey)) {
+        // Search is one page at many addresses. Opening a chip or switching Movies and Series is somewhere
+        // a person went, so it gets its own entry, and Back returns to the chip before it — on the same
+        // page, which keeps its scroll and its state as it does while a query is typed.
+        if (key !== 'search') return;
+        if (push) {
+          if (address() === path) return;
+          position++;
+          for (const at of entries.keys()) if (at >= position) entries.delete(at);
+          entries.set(position, { routeKey: key, pageKey: requestedPageKey });
+          history.pushState({ denNavigation: { scope, position } }, '', path);
+        }
+        current.route = parseRoute(path);
+        onchange(current.route);
         return;
+      }
       requestedKey = key;
       if (push || !swiping) {
         // The preview belongs to the history position where the gesture began. A competing

@@ -8,7 +8,7 @@
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
-  import { parseRoute } from './lib/route';
+  import { parseRoute, type Explore } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
   import { onTmdbThrottle } from './lib/tmdbCache';
@@ -95,8 +95,14 @@
   // would otherwise empty the query and fill it again, which re-runs the search and loses where it was
   // scrolled to. The field keeps what was typed until another search replaces it.
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
+  // What Explore is browsing travels the same way, for the same reason.
+  let explore = $state<Explore>(
+    untrack(() => (route.page === 'search' ? { type: route.type, chips: route.chips } : {})),
+  );
   $effect(() => {
-    if (route.page === 'search') query = route.query;
+    if (route.page !== 'search') return;
+    query = route.query;
+    explore = { type: route.type, chips: route.chips };
   });
   // A title's and a person's page name themselves once they know what they are showing, so this sets what can
   // be known from the address and leaves those two to overwrite it.
@@ -124,12 +130,12 @@
   {/if}
   {#if links.current}
     {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
-      <RoutedLibrary link={links.current} {query} onchange={(next) => (route = next)} />
+      <RoutedLibrary link={links.current} {query} {explore} onchange={(next) => (route = next)} />
     {/key}
   {:else if links.browsing}
     <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
          absent case the components already model. -->
-    <RoutedLibrary link={null} {query} onchange={(next) => (route = next)} />
+    <RoutedLibrary link={null} {query} {explore} onchange={(next) => (route = next)} />
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {/if}

@@ -3,7 +3,7 @@
   import Router from '../src/Router.svelte';
   import Library from '../src/Library.svelte';
   import NavigationBar from '../src/components/NavigationBar.svelte';
-  import { parseRoute } from '../src/lib/route';
+  import { parseRoute, type Explore } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import '../src/app.css';
@@ -12,8 +12,13 @@
   // Deriving it from the current page instead empties it on the way to a title and fills it again on the way
   // back, which rebuilds the results and loses where the page was scrolled to.
   let query = $state(untrack(() => (route.page === 'search' ? route.query : '')));
+  let explore = $state<Explore>(
+    untrack(() => (route.page === 'search' ? { type: route.type, chips: route.chips } : {})),
+  );
   $effect(() => {
-    if (route.page === 'search') query = route.query;
+    if (route.page !== 'search') return;
+    query = route.query;
+    explore = { type: route.type, chips: route.chips };
   });
   const log = {
     settings: (group: string) =>
@@ -45,7 +50,7 @@
   <Router onchange={(next) => (route = next)}>
     {#snippet children(route, active)}
       {#if route.page === 'settings'}<h1>Settings</h1>
-      {:else}<Library {link} {session} {route} {active} {query} />{/if}
+      {:else}<Library {link} {session} {route} {active} {query} {explore} />{/if}
     {/snippet}
   </Router>
 </main>

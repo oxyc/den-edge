@@ -41,7 +41,8 @@ const FILM_ROWS: AtlasRow[] = [
     where: subgenre('Psychological Thriller'),
   },
   { id: 'mood-twist-ending', title: 'Twist Endings', where: mood('Twist-ending') },
-  { id: 'plot-nonlinear', title: 'Told Out of Order', where: { structure: 'nonlinear' } },
+  // atlas's own axes, not the old `structure` it resolves them from: the counts' canonical address names these.
+  { id: 'plot-nonlinear', title: 'Told Out of Order', where: { chronology: 'nonlinear' } },
   { id: 'mood-tearjerker', title: 'Tearjerkers', where: mood('Tearjerker') },
   {
     id: 'subgenre-supernatural-horror',
@@ -51,7 +52,7 @@ const FILM_ROWS: AtlasRow[] = [
   { id: 'plot-ambiguous', title: 'Endings Left for You to Decide', where: { ending: 'ambiguous' } },
   { id: 'mood-quirky', title: 'Quirky and Offbeat', where: mood('Quirky/Offbeat') },
   { id: 'subgenre-dark-comedy', title: 'Dark Comedies', where: subgenre('Dark Comedy') },
-  { id: 'plot-framed', title: 'Stories Within Stories', where: { structure: 'framed' } },
+  { id: 'plot-framed', title: 'Stories Within Stories', where: { chronology: 'framed' } },
   { id: 'mood-visually-stunning', title: 'Visually Stunning', where: mood('Visually-stunning') },
   { id: 'subgenre-whodunit', title: 'Whodunits', where: subgenre('Whodunit/Murder Mystery') },
   {
@@ -60,7 +61,7 @@ const FILM_ROWS: AtlasRow[] = [
     where: { pacing: 'slow-burn', tone: 'melancholy' },
   },
   { id: 'subgenre-art-house', title: 'Art House', where: subgenre('Art House') },
-  { id: 'plot-single-day', title: 'Over a Single Day', where: { structure: 'single-day' } },
+  { id: 'plot-single-day', title: 'Over a Single Day', where: { timespan: 'single-day' } },
   { id: 'mood-thought-provoking', title: 'Thought-Provoking', where: mood('Thought-provoking') },
   { id: 'plot-person-vs-nature', title: 'Against Nature', where: { conflict: 'person-vs-nature' } },
   { id: 'plot-tragic', title: 'Tragic Endings', where: { ending: 'tragic' } },
@@ -133,8 +134,8 @@ const SERIES_ROWS: AtlasRow[] = [
   { id: 'subgenre-mockumentary', title: 'Mockumentaries', where: subgenre('Mockumentary') },
 ];
 
-/** One of atlas's rows as titles. */
-function titlesOf(body: unknown): Title[] {
+/** One of atlas's rows as titles; also the cards its filter's `titles.json` answers with. */
+export function titlesOf(body: unknown): Title[] {
   const titles = (body as { titles?: unknown } | null)?.titles;
   if (!Array.isArray(titles)) return [];
   return (titles as Record<string, unknown>[]).flatMap((t): Title[] => {
@@ -158,6 +159,10 @@ function titlesOf(body: unknown): Title[] {
     ];
   });
 }
+
+/** What atlas row `id` (its own id, `mood-feel-good`) asks atlas for: `{ mood: 'Feel-good' }`. */
+export const atlasWhere = (type: MediaType, id: string): Where | undefined =>
+  (type === 'tv' ? SERIES_ROWS : FILM_ROWS).find((row) => row.id === id)?.where;
 
 /** atlas's rows for a browse screen of `type`, from atlas at `base`. */
 export function atlasRows(

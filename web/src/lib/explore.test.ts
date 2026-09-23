@@ -1,0 +1,685 @@
+import { describe, expect, it } from 'vitest';
+import { discoverParams, type Pages } from './catalog';
+import {
+  applyPick,
+  chipsOf,
+  emptyOptions,
+  exploreChips,
+  exploreFeed,
+  editDistance,
+  facetQuery,
+  filterChips,
+  fold,
+  FOR_YOU,
+  KIND,
+  matchChips,
+  offered,
+  pendingChip,
+  remapChip,
+  remapSet,
+  browseChips,
+  namesExactly,
+} from './explore';
+import type { FilterCounts } from './filterRoutes';
+import type { MediaType, Title } from './library';
+
+const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
+
+describe('Explore chips', () => {
+  it('run For You, moods, recipes, then genres, each strongest first', () => {
+    const chips = exploreChips('movie', { atlas: true });
+    const groups = chips.map((c) => c.group);
+    // Each group in one run, in that order; languages, countries, decades and ratings last.
+    expect([...new Set(groups)]).toEqual([
+      'for-you',
+      'mood',
+      'recipe',
+      'genre',
+      'language',
+      'country',
+      'decade',
+      'rating',
+    ]);
+    const of = (group: string) => chips.filter((c) => c.group === group).map((c) => c.id);
+    // atlas's own order: its strongest rows lead, moods and plot facets together.
+    expect(of('mood').slice(0, 3)).toEqual([
+      'mood-mind-bending',
+      'plot-bittersweet',
+      'mood-feel-good',
+    ]);
+    // The TV's curated recipes first, then the rest of the catalogue, then atlas's subgenres.
+    expect(of('recipe').slice(0, 3)).toEqual([
+      'recipe-romantic-comedy',
+      'recipe-crime-thriller',
+      'recipe-action-thriller',
+    ]);
+    expect(of('recipe')).toContain('recipe-biopic');
+    expect(of('recipe').at(-1)).toMatch(/^subgenre-/);
+    // The TV's Explore genres first, then every other genre of the type.
+    expect(of('genre').slice(0, 3)).toEqual(['genre-28', 'genre-35', 'genre-18']);
+    expect(of('genre')).toContain('genre-37');
+    // Labels drop the type the toggle already names.
+    expect(chips.find((c) => c.id === 'mood-feel-good')?.label).toBe('Feel-Good');
+  });
+
+  it('offer under Series only what has a series form, and no subgenre a recipe already names', () => {
+    const series = exploreChips('tv', { atlas: true });
+    const ids = series.map((c) => c.id);
+    expect(ids).not.toContain('recipe-sci-fi-horror');
+    expect(ids).not.toContain('recipe-romantic-comedy');
+    expect(ids).toContain('recipe-heist');
+    expect(ids).toContain('mood-bingeable');
+    // atlas's "Serial Killers" is the recipe "Serial Killer"; "Whodunits" has no recipe and stays.
+    expect(ids).not.toContain('subgenre-serial-killer');
+    expect(ids).toContain('subgenre-whodunit');
+  });
+
+  it('leave out hidden genres, and the moods where atlas can’t be reached', () => {
+    const ids = exploreChips('movie', { hiddenGenres: new Set([27]) }).map((c) => c.id);
+    expect(ids).not.toContain('genre-27');
+    expect(ids.some((id) => /^(mood|plot|subgenre)-/.test(id))).toBe(false);
+  });
+
+  it('name a selection’s chips, leaving out an id the type has none for', () => {
+    const chips = exploreChips('movie');
+    expect(chipsOf(['genre-27', 'genre-999', 'country-SE'], chips).map((c) => c.label)).toEqual([
+      'Horror',
+      'Sweden',
+    ]);
+  });
+});
+
+describe('editDistance', () => {
+  it('counts a swap as one edit, and stops counting past the limit', () => {
+    expect(editDistance('sweidsh', 'swedish', 2)).toBe(1);
+    expect(editDistance('acton', 'action', 2)).toBe(1);
+    expect(editDistance('same', 'same', 1)).toBe(0);
+    expect(editDistance('heist', 'horror', 1)).toBe(2);
+  });
+});
+
+describe('matching typed text to chips', () => {
+  const chips = exploreChips('movie', { atlas: true });
+  const labels = (found: { label: string }[]) => found.map((c) => c.label);
+
+  it('matches a label’s start or any word’s start, ignoring case, accents and punctuation', () => {
+    expect(labels(matchChips('hei', chips))).toEqual(['Heist']);
+    expect(labels(matchChips('HÉIST', chips))).toEqual(['Heist']);
+    // A word inside the label: "noir" finds Nordic Noir and Neo-Noir.
+    expect(labels(matchChips('noir', chips))).toEqual(['Nordic Noir', 'Neo-Noir']);
+    // Punctuation and "&" fold away: "sci fi" is "Sci-Fi", "spy and" is "Spy & Espionage".
+    expect(labels(matchChips('sci fi', chips))).toContain('Sci-Fi Horror');
+    expect(labels(matchChips('spy and esp', chips))).toEqual(['Spy & Espionage']);
+    expect(matchChips('', chips)).toEqual([]);
+  });
+
+  it('never offers For You, and ignores words that name nothing', () => {
+    expect(labels(matchChips('for you', chips))).toEqual([]);
+    expect(labels(matchChips('the', chips, { minWord: 3 }))).toEqual([]);
+  });
+
+  it('reads a synonym as the categories it means', () => {
+    expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
+    expect(labels(matchChips('scary', chips))).toContain('Horror');
+    expect(labels(matchChips('space', chips))).toEqual(['Set in Space', 'Science Fiction']);
+  });
+
+  it('offers what a query names, from two letters, named ones before synonyms, uncapped', () => {
+    expect(labels(browseChips('funny heist', chips))).toEqual([
+      'Heist',
+      'Feel-Good',
+      'Dark Comedies',
+      'Comedy',
+    ]);
+    // Two letters begin something; one begins nothing yet; a plain title names no category.
+    expect(browseChips('dr', chips).length).toBeGreaterThan(6);
+    expect(browseChips('s', chips)).toEqual([]);
+    expect(browseChips('the matrix', chips)).toEqual([]);
+  });
+
+  it('puts the whole query as a name first, short forms included', () => {
+    expect(labels(browseChips('uk', chips))[0]).toBe('United Kingdom');
+    expect(labels(browseChips('us', chips))[0]).toBe('United States');
+    expect(labels(browseChips('sf', chips))[0]).toBe('Science Fiction');
+    expect(labels(browseChips('sweden', chips))[0]).toBe('Sweden');
+    expect(
+      namesExactly(
+        'UK',
+        chips.find((c) => c.id === 'country-GB')!,
+      ),
+    ).toBe(true);
+    expect(
+      namesExactly(
+        'united',
+        chips.find((c) => c.id === 'country-GB')!,
+      ),
+    ).toBe(false);
+  });
+
+  it('offers only the closest three for a query of three words or more', () => {
+    expect(browseChips('slow burn bleak thriller', chips).length).toBeLessThanOrEqual(3);
+    expect(browseChips('action crime', chips).length).toBeGreaterThan(3);
+  });
+
+  it('forgives a typo or two, ranked below anything spelled right', () => {
+    // A swapped pair is one edit; a missing letter is one.
+    expect(labels(matchChips('sweidsh', chips)).slice(0, 2)).toEqual(['Swedish', 'Sweden']);
+    expect(labels(matchChips('acton', chips))[0]).toBe('Action');
+    // Nothing is a near miss under three letters: every "ac" match really begins with it.
+    for (const chip of matchChips('ac', chips))
+      expect(fold(`${chip.label} ${chip.aliases?.join(' ') ?? ''}`)).toMatch(/(^| )ac/);
+    expect(matchChips('xq', chips)).toEqual([]);
+  });
+
+  it('finds a language, a country by its people, and a decade by its nicknames', () => {
+    const found = (text: string) =>
+      matchChips(text, chips).map((c) => `${c.label} · ${KIND[c.group]}`);
+    expect(found('swedish').slice(0, 2)).toEqual(['Swedish · language', 'Sweden · country']);
+    expect(found('90s')[0]).toBe('1990s · decade');
+    expect(found('nineties')[0]).toBe('1990s · decade');
+    expect(found('1990')[0]).toBe('1990s · decade');
+    expect(found('korean')).toContain('South Korea · country');
+    expect(exploreChips('movie').filter((c) => c.group === 'decade').length).toBeGreaterThan(3);
+  });
+
+  it('finds a rating floor by its number and by the words for one', () => {
+    expect(labels(browseChips('7+', chips))).toEqual(['★ 7+']);
+    expect(labels(browseChips('rated', chips))).toEqual(['★ 6+', '★ 7+', '★ 8+']);
+    expect(labels(browseChips('good', chips))[0]).toBe('★ 7+');
+    expect(labels(browseChips('great', chips))[0]).toBe('★ 8+');
+  });
+
+  it('ranks an exact name over a prefix over a word over a synonym', () => {
+    expect(labels(matchChips('action', chips)).slice(0, 2)).toEqual(['Action', 'Action Thriller']);
+    expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
+  });
+
+  it('suggests only what this type has: no Horror genre under Series', () => {
+    const series = exploreChips('tv', { atlas: true });
+    expect(labels(browseChips('scary', series))).toEqual(['Supernatural Horror']);
+  });
+});
+
+describe('switching Movies and Series', () => {
+  const movie = exploreChips('movie', { atlas: true });
+  const tv = exploreChips('tv', { atlas: true });
+
+  it('keeps a genre open as its closest counterpart', () => {
+    expect(remapChip('genre-28', 'movie', 'tv', tv)).toBe('genre-10759');
+    expect(remapChip('genre-27', 'movie', 'tv', tv)).toBe('genre-10765');
+    expect(remapChip('genre-35', 'movie', 'tv', tv)).toBe('genre-35');
+    expect(remapChip('genre-10765', 'tv', 'movie', movie)).toBe('genre-878');
+  });
+
+  it('never leaves a chip open the new type has no titles for', () => {
+    // Romance folds into Drama; Reality into Documentary.
+    expect(remapChip('genre-10749', 'movie', 'tv', tv)).toBe('genre-18');
+    expect(remapChip('genre-10764', 'tv', 'movie', movie)).toBe('genre-99');
+    // A recipe with no series form, and a mood only films carry, fall back to For You.
+    expect(remapChip('recipe-sci-fi-horror', 'movie', 'tv', tv)).toBe(FOR_YOU);
+    expect(remapChip('plot-bittersweet', 'movie', 'tv', tv)).toBe(FOR_YOU);
+    // A recipe and a mood both types have stay open.
+    expect(remapChip('recipe-heist', 'movie', 'tv', tv)).toBe('recipe-heist');
+    expect(remapChip('mood-feel-good', 'movie', 'tv', tv)).toBe('mood-feel-good');
+  });
+
+  it('keeps a hidden genre’s counterpart closed too', () => {
+    const hidden = exploreChips('tv', { hiddenGenres: new Set([10759]) });
+    expect(remapChip('genre-28', 'movie', 'tv', hidden)).toBe(FOR_YOU);
+  });
+
+  it('moves a whole selection, and says what couldn’t come', () => {
+    expect(
+      remapSet(
+        ['country-SE', 'genre-28', 'recipe-sci-fi-horror', 'decade-1990'],
+        'movie',
+        'tv',
+        tv,
+      ),
+    ).toEqual({
+      set: ['country-SE', 'genre-10759', 'decade-1990'],
+      dropped: ['recipe-sci-fi-horror'],
+    });
+    // Two genres that fold into one are one.
+    expect(remapSet(['genre-28', 'genre-12'], 'movie', 'tv', tv).set).toEqual(['genre-10759']);
+  });
+});
+
+describe('facets', () => {
+  it('stack, one of each kind but genres, which all apply', () => {
+    let set: string[] = [];
+    set = applyPick(set, 'country-SE', 'movie').set;
+    set = applyPick(set, 'genre-28', 'movie').set;
+    set = applyPick(set, 'genre-35', 'movie').set;
+    expect(set).toEqual(['country-SE', 'genre-28', 'genre-35']);
+    // A second country takes the first one's place.
+    expect(applyPick(set, 'country-DK', 'movie')).toEqual({
+      set: ['genre-28', 'genre-35', 'country-DK'],
+      removed: ['country-SE'],
+    });
+    // Picked again, a facet comes out; For You empties the lot.
+    expect(applyPick(set, 'genre-28', 'movie').set).toEqual(['country-SE', 'genre-35']);
+    expect(applyPick(set, FOR_YOU, 'movie').set).toEqual([]);
+  });
+
+  it('let the newer pick win where a recipe contradicts a facet', () => {
+    // K-Drama is Korean; picking it throws out Swedish.
+    expect(applyPick(['lang-sv', 'genre-18'], 'recipe-k-drama', 'tv')).toEqual({
+      set: ['genre-18', 'recipe-k-drama'],
+      removed: ['lang-sv'],
+    });
+    // Pure Drama rules out Crime; picking Crime after it throws the recipe out.
+    expect(applyPick(['recipe-pure-drama'], 'genre-80', 'movie')).toEqual({
+      set: ['genre-80'],
+      removed: ['recipe-pure-drama'],
+    });
+    // A mood can't take a country or a recipe: atlas's rows don't say.
+    expect(applyPick(['country-SE', 'genre-28'], 'mood-cozy', 'movie')).toEqual({
+      set: ['genre-28', 'mood-cozy'],
+      removed: ['country-SE'],
+    });
+  });
+
+  it('offer beside a selection only what won’t throw a pick of another kind out', () => {
+    const set = ['recipe-k-drama'];
+    expect(offered(set, 'lang-ko', 'tv')).toBe(true);
+    expect(offered(set, 'lang-sv', 'tv')).toBe(false);
+    expect(offered(set, 'recipe-k-drama', 'tv')).toBe(false);
+    // Another recipe takes this one's place, which is a pick like any other.
+    expect(offered(set, 'recipe-heist', 'tv')).toBe(true);
+    expect(offered(['mood-cozy'], 'country-SE', 'movie')).toBe(false);
+    expect(offered(['mood-cozy'], 'decade-1990', 'movie')).toBe(true);
+  });
+
+  it('offer no second value of a one-value kind: it is removed before another is picked', () => {
+    const set = ['lang-sv', 'country-SE', 'decade-1990', 'rating-7', 'genre-35'];
+    for (const other of ['lang-en', 'country-DK', 'decade-2000', 'rating-8'])
+      expect(offered(set, other, 'movie')).toBe(false);
+    // Genres stack.
+    expect(offered(set, 'genre-18', 'movie')).toBe(true);
+    // One mood at a time, and one "Like".
+    expect(offered(['mood-cozy'], 'mood-dark', 'movie')).toBe(false);
+    expect(offered(['like-movie-949'], 'like-movie-680', 'movie')).toBe(false);
+    // Taken out, the kind is open again.
+    expect(offered(['genre-35'], 'lang-en', 'movie')).toBe(true);
+  });
+
+  it('take a "Like" as one feed: it replaces a mood or another "Like", and takes no country or recipe', () => {
+    expect(applyPick(['mood-cozy', 'genre-35'], 'like-movie-949', 'movie')).toEqual({
+      set: ['genre-35', 'like-movie-949'],
+      removed: ['mood-cozy'],
+    });
+    expect(applyPick(['like-movie-949'], 'like-movie-680', 'movie')).toEqual({
+      set: ['like-movie-680'],
+      removed: ['like-movie-949'],
+    });
+    expect(applyPick(['country-SE', 'recipe-heist'], 'like-movie-949', 'movie').set).toEqual([
+      'like-movie-949',
+    ]);
+    // Language, decade, genre and rating narrow it.
+    expect(
+      applyPick(['lang-sv', 'decade-1990', 'genre-35', 'rating-7'], 'like-movie-949', 'movie')
+        .removed,
+    ).toEqual([]);
+    expect(facetQuery(['like-movie-949', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('take a rating beside anything but a mood, whose titles carry none', () => {
+    expect(offered(['mood-cozy'], 'rating-7', 'movie')).toBe(false);
+    expect(offered(['like-movie-949'], 'rating-7', 'movie')).toBe(true);
+    expect(applyPick(['rating-7'], 'mood-cozy', 'movie').removed).toEqual(['rating-7']);
+  });
+
+  it('keep a "Like" across a type switch only for a title of that type', () => {
+    const chips = exploreChips('tv');
+    expect(remapSet(['like-tv-1396', 'genre-35'], 'tv', 'tv', chips).set).toEqual([
+      'like-tv-1396',
+      'genre-35',
+    ]);
+    expect(remapSet(['like-movie-949'], 'movie', 'tv', chips)).toEqual({
+      set: [],
+      dropped: ['like-movie-949'],
+    });
+  });
+
+  it('merge into one discover query', () => {
+    expect(discoverParams(facetQuery(['country-SE', 'genre-28'], 'movie')!)).toEqual({
+      sort_by: 'popularity.desc',
+      include_adult: 'false',
+      with_genres: '28',
+      with_origin_country: 'SE',
+      'vote_count.gte': '30',
+    });
+    // A recipe is a preset the rest add to: Heist's keyword stays, its OR-joined genres give way to Action.
+    const heist = discoverParams(facetQuery(['recipe-heist', 'genre-28', 'decade-1990'], 'movie')!);
+    expect(heist.with_keywords).toBe('10051');
+    expect(heist.with_genres).toBe('28');
+    expect(heist['primary_release_date.gte']).toBe('1990-01-01');
+    expect(heist['vote_count.gte']).toBe('100');
+    // An AND-joined recipe's genres join the picked ones.
+    expect(
+      discoverParams(facetQuery(['recipe-romantic-comedy', 'genre-18'], 'movie')!).with_genres,
+    ).toBe('35,10749,18');
+    // An atlas row can't be a discover query.
+    expect(facetQuery(['mood-cozy', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('ask TMDB for a rating floor on the ★ posters show, on 10 votes in place of the usual floor', () => {
+    const rated = discoverParams(facetQuery(['genre-35', 'rating-7'], 'movie')!);
+    expect(rated['vote_average.gte']).toBe('7');
+    expect(rated.with_genres).toBe('35');
+    expect(rated['vote_count.gte']).toBe('10');
+    // A decade's floor of 50 would leave Swedish 2020s romantic comedies at ★ 6+ with one title; 10 leaves two.
+    const swedish = ['lang-sv', 'decade-2020', 'genre-35', 'genre-10749'];
+    expect(discoverParams(facetQuery(swedish, 'movie')!)['vote_count.gte']).toBe('50');
+    expect(discoverParams(facetQuery([...swedish, 'rating-6'], 'movie')!)['vote_count.gte']).toBe(
+      '10',
+    );
+    // A recipe's own, higher floor stays.
+    const heist = facetQuery(['recipe-heist', 'rating-8'], 'movie')!;
+    expect(heist.voteAverageGte).toBe(8);
+    expect(heist.voteCountGte).toBe(100);
+  });
+});
+
+describe('emptyOptions', () => {
+  const chips = exploreChips('movie');
+  const loaded = [
+    { ...film(1), genreIds: [28, 18], originalLanguage: 'sv', year: 1994 },
+    { ...film(2), genreIds: [28], originalLanguage: 'sv', year: 2001 },
+  ];
+
+  it('hides what nothing in a fully loaded feed matches, and nothing before it is fully loaded', () => {
+    const empty = emptyOptions(['country-SE', 'genre-28'], loaded, true, chips);
+    expect(empty.has('genre-35')).toBe(true);
+    expect(empty.has('genre-18')).toBe(false);
+    expect(empty.has('lang-en')).toBe(true);
+    expect(empty.has('lang-sv')).toBe(false);
+    expect(empty.has('decade-1980')).toBe(true);
+    expect(empty.has('decade-1990')).toBe(false);
+    expect(emptyOptions(['country-SE', 'genre-28'], loaded, false, chips).size).toBe(0);
+  });
+
+  it('never judges what nothing loaded can say: a country, a recipe, or a replacement', () => {
+    const empty = emptyOptions(['lang-sv'], loaded, true, chips);
+    expect(empty.has('country-KR')).toBe(false);
+    expect(empty.has('recipe-heist')).toBe(false);
+    // A second language isn't offered beside Swedish at all (`taken`): nothing loaded is judged against it.
+    expect(empty.has('lang-en')).toBe(false);
+    // A rating is judged like a genre: nothing loaded here is rated at all.
+    expect(empty.has('rating-8')).toBe(true);
+    expect(emptyOptions([], loaded, true, chips).size).toBe(0);
+  });
+
+  it('judges a "Like" or a mood by what has loaded so far, and gives an option back once a match loads', () => {
+    const like = ['like-movie-949'];
+    // Loading, nothing drawn yet: nothing is judged.
+    expect(emptyOptions(like, [], false, chips).size).toBe(0);
+    const first = [{ ...film(1), genreIds: [80, 18], originalLanguage: 'en', year: 1995 }];
+    const empty = emptyOptions(like, first, false, chips);
+    expect(empty.has('genre-28')).toBe(true);
+    expect(empty.has('genre-80')).toBe(false);
+    expect(empty.has('lang-sv')).toBe(true);
+    expect(empty.has('decade-1990')).toBe(false);
+    // A later page brings an action film: Action is back.
+    const more = [...first, { ...film(2), genreIds: [28], originalLanguage: 'en', year: 2001 }];
+    expect(emptyOptions(like, more, false, chips).has('genre-28')).toBe(false);
+    // A mood the same way.
+    expect(emptyOptions(['mood-cozy'], first, false, chips).has('genre-28')).toBe(true);
+    // A TMDB feed still waits for its end.
+    expect(emptyOptions(['country-SE'], first, false, chips).size).toBe(0);
+  });
+});
+
+describe('the kinds only atlas’s filter knows', () => {
+  const counts: FilterCounts = {
+    total: 9,
+    ignored: [],
+    kindsUnavailable: ['warning'],
+    kinds: {
+      person: {
+        mode: 'and',
+        complete: false,
+        values: { Q1: 2, Q2: 7 },
+        labels: { Q1: 'Ann', Q2: 'Bob' },
+      },
+      technique: { mode: 'and', complete: true, values: { live_action: 9, 'hand drawn': 1 } },
+      runtime: { mode: 'single', complete: true, values: { 'under-90': 3 } },
+      cast: {
+        mode: 'and',
+        complete: false,
+        values: { Q3: 1 },
+        labels: { Q3: 'Cy' },
+        selected: ['Q3'],
+      },
+    },
+  };
+
+  it('lists each kind’s values from the counts, most titles first, named by atlas where it names them', () => {
+    const chips = filterChips(counts);
+    expect(chips.filter((c) => c.group === 'people').map((c) => [c.id, c.label])).toEqual([
+      ['person-Q2', 'Bob'],
+      ['person-Q1', 'Ann'],
+      // A cast member is listed only because it is picked: its pill's name.
+      ['cast-Q3', 'Cy'],
+    ]);
+    expect(chips.find((c) => c.id === 'technique-live_action')?.label).toBe('Live action');
+    // An id the address can't carry isn't offered.
+    expect(chips.some((c) => c.id.includes('hand'))).toBe(false);
+    expect(chips.find((c) => c.id === 'runtime-under-90')?.label).toBe('Under 90 min');
+  });
+
+  it('names a pick before the counts do', () => {
+    expect(pendingChip('person-Q9')?.label).toBe('Person…');
+    expect(pendingChip('runtime-over-150')?.label).toBe('Over 150 min');
+    expect(pendingChip('genre-28')).toBeUndefined();
+  });
+
+  it('stacks people, holds one runtime, and lets atlas’s filter mix what it knows', () => {
+    expect(applyPick(['person-Q1'], 'person-Q2', 'movie').set).toEqual(['person-Q1', 'person-Q2']);
+    expect(applyPick(['runtime-under-90'], 'runtime-over-150', 'movie').removed).toEqual([
+      'runtime-under-90',
+    ]);
+    // Without the filter a mood takes no country; with it, they stand together.
+    expect(applyPick(['mood-cozy'], 'country-SE', 'movie').removed).toEqual(['mood-cozy']);
+    expect(applyPick(['mood-cozy'], 'country-SE', 'movie', true).removed).toEqual([]);
+    // A recipe atlas has no form of still can't stand beside a kind only atlas knows.
+    expect(applyPick(['person-Q1'], 'recipe-nordic-noir', 'movie', true).removed).toEqual([
+      'person-Q1',
+    ]);
+  });
+});
+
+describe('Explore feeds', () => {
+  const calls: { path: string; params: Record<string, string>; page: number }[] = [];
+  const pages: Pages = async (path, type, params, page) => {
+    calls.push({ path, params, page });
+    if (path.endsWith('/recommendations')) return [film(1000 + page, type), film(50, type)];
+    return [film(page * 100, type)];
+  };
+  const sources = (seeds: Title[] = []) => ({
+    pages,
+    atlas: null,
+    seeds,
+    owned: new Set(['movie:50']),
+  });
+
+  it('browses a genre as its primary-genre shelf, retargeted for the type', async () => {
+    calls.length = 0;
+    const row = exploreFeed(['genre-10765'], 'tv', { ...sources(), minYear: 1990 });
+    await row.load(2);
+    expect(calls[0]?.path).toBe('/discover/tv');
+    expect(calls[0]?.params.with_genres).toBe('10765');
+    expect(calls[0]?.params['first_air_date.gte']).toBe('1990-01-01');
+    expect(calls[0]?.page).toBe(2);
+    expect(row.filter?.({ ...film(1, 'tv'), genreIds: [10765] })).toBe(true);
+  });
+
+  it('browses a language, a country and a decade as TMDB discover', async () => {
+    const asked = async (id: string) => {
+      calls.length = 0;
+      await exploreFeed([id], 'tv', sources()).load(1);
+      return calls[0]?.params ?? {};
+    };
+    expect((await asked('lang-sv')).with_original_language).toBe('sv');
+    expect((await asked('country-SE')).with_origin_country).toBe('SE');
+    const decade = await asked('decade-1990');
+    expect(decade['first_air_date.gte']).toBe('1990-01-01');
+    expect(decade['first_air_date.lte']).toBe('1999-12-31');
+  });
+
+  it('browses a movie recipe as series under Series', async () => {
+    calls.length = 0;
+    await exploreFeed(['recipe-heist'], 'tv', sources()).load(1);
+    expect(calls[0]?.path).toBe('/discover/tv');
+    expect(calls[0]?.params.with_genres).toBe('80');
+    expect(calls[0]?.params.with_keywords).toBe('10051');
+  });
+
+  it('is For You: recommendations for the latest titles of this type, then the popular tail', async () => {
+    calls.length = 0;
+    const seeds = [film(1), film(2, 'tv'), film(3), film(4), film(5)];
+    const row = exploreFeed([], 'movie', sources(seeds));
+    const first = await row.load(1);
+    // Three movie seeds asked (not the series, not a fourth), and what the library holds is left out.
+    expect(calls.map((c) => c.path)).toEqual([
+      '/movie/1/recommendations',
+      '/movie/3/recommendations',
+      '/movie/4/recommendations',
+    ]);
+    expect(first.map((t) => t.id)).toEqual([1001]);
+    await row.load(2);
+    expect(calls.at(-1)).toMatchObject({ path: '/movie/popular', page: 1 });
+  });
+
+  it('is the tail alone for a guest, top-rated for series', async () => {
+    calls.length = 0;
+    await exploreFeed([], 'tv', sources()).load(1);
+    expect(calls).toEqual([{ path: '/tv/top_rated', params: {}, page: 1 }]);
+  });
+
+  it('is atlas’s own row for a mood, and For You where atlas can’t be reached', () => {
+    const row = exploreFeed(['mood-cozy'], 'movie', { ...sources(), atlas: '/atlas' });
+    expect(row.id).toBe('facets-mood-cozy-movie');
+    expect(exploreFeed(['mood-cozy'], 'movie', sources()).id).toBe(`${FOR_YOU}-movie`);
+  });
+
+  it('asks atlas’s filter for the whole selection, and narrows nothing more itself', async () => {
+    const asked: string[] = [];
+    const row = exploreFeed(['mood-cozy', 'genre-35', 'country-SE', 'rating-7'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response(
+          JSON.stringify(
+            String(input).includes('/metadata')
+              ? { titles: [] }
+              : {
+                  titles: [{ type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' }],
+                  order: 'o',
+                },
+          ),
+        );
+      }) as typeof fetch,
+    });
+    expect((await row.load(1)).map((t) => t.id)).toEqual([5]);
+    expect(asked[0]).toBe(
+      '/atlas/index/filter/movie/titles.json?sel=country:SE,genre:35,mood:Cozy,rating:7',
+    );
+    expect(row.filter?.({ ...film(9), genreIds: [18] })).toBe(true);
+  });
+
+  it('narrows a mood by the genre, language and decade beside it, where atlas has no filter', async () => {
+    const row = exploreFeed(['mood-cozy', 'genre-35', 'lang-sv', 'decade-1990'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async () => new Response('', { status: 404 })) as unknown as typeof fetch,
+    });
+    // The filter's 404 hands over to atlas's row (unreachable here too).
+    await row.load(1).catch(() => {});
+    const title = { ...film(1), genreIds: [35, 18], originalLanguage: 'sv', year: 1994 };
+    expect(row.filter?.(title)).toBe(true);
+    expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
+    expect(row.filter?.({ ...title, originalLanguage: 'en' })).toBe(false);
+    expect(row.filter?.({ ...title, year: 2001 })).toBe(false);
+  });
+
+  it('keeps a recipe atlas has no form of on TMDB, asking atlas nothing', async () => {
+    calls.length = 0;
+    const asked: string[] = [];
+    await exploreFeed(['recipe-nordic-noir'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response('', { status: 404 });
+      }) as typeof fetch,
+    }).load(1);
+    expect(asked).toEqual([]);
+    expect(calls[0]?.path).toBe('/discover/movie');
+  });
+
+  it('names a mood’s posterless titles from TMDB, so the hide rules don’t empty it', async () => {
+    const atlasFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) =>
+      String(input).includes('/index/row/')
+        ? new Response(
+            JSON.stringify({
+              titles: [
+                { type: 'movie', id: 1, title: 'Drawn', posterPath: '/a.jpg' },
+                { type: 'movie', id: 2, title: 'Blank' },
+                { type: 'movie', id: 3, title: 'Unknown' },
+              ],
+            }),
+          )
+        : new Response('', { status: 404 })) as typeof fetch;
+    try {
+      const looked: number[] = [];
+      const row = exploreFeed(['mood-cozy'], 'movie', {
+        ...sources(),
+        atlas: '/atlas',
+        title: async (ref) => {
+          looked.push(ref.id);
+          return ref.id === 2 ? { ...film(2), posterPath: '/b.jpg' } : null;
+        },
+      });
+      const titles = await row.load(1);
+      expect(looked).toEqual([2, 3]);
+      expect(titles.map((t) => t.posterPath)).toEqual(['/a.jpg', '/b.jpg', undefined]);
+    } finally {
+      globalThis.fetch = atlasFetch;
+    }
+  });
+
+  it('is the title page’s "More like this" for a "Like", as deep as atlas keeps, narrowed beside it', async () => {
+    const realFetch = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+    try {
+      const row = exploreFeed(['like-movie-949', 'genre-80', 'rating-7'], 'movie', {
+        ...sources(),
+        atlas: '/atlas',
+        key: 'k',
+      });
+      expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
+      await row.load(1);
+      // atlas's filter first; with no such route, the title page's own "More like this".
+      expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:80,like:949,rating:7');
+      expect(asked[1]).toBe('/atlas/index/similar/movie/949.json?limit=200');
+      // atlas has nothing for it: TMDB's recommendations, from their first page.
+      expect(asked.some((url) => url.includes('/movie/949/recommendations'))).toBe(true);
+      const title = { ...film(1), genreIds: [80, 18], rating: 7.6, votes: 4000 };
+      expect(row.filter?.(title)).toBe(true);
+      expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
+      expect(row.filter?.({ ...title, rating: 6.9 })).toBe(false);
+      // A rating on a handful of votes isn't one.
+      expect(row.filter?.({ ...title, votes: 3 })).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

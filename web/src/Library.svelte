@@ -56,7 +56,7 @@
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
   import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
-  import { titleHref, type Route } from './lib/route';
+  import { titleHref, type Explore, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
   import {
@@ -85,6 +85,7 @@
     active,
     session,
     query = '',
+    explore = {},
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -92,6 +93,8 @@
     active: boolean;
     session: LibrarySession;
     query?: string;
+    /** What Search's Explore state is browsing, from the address as `query` is. */
+    explore?: Explore;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -1195,7 +1198,16 @@
     shown={browseShown}
   />
 {:else if route.page === 'search'}
-  <SearchScreen.current {query} {tmdbKey} {atlas} {prefs} />
+  <SearchScreen.current
+    {query}
+    {explore}
+    {tmdbKey}
+    {atlas}
+    {prefs}
+    shown={browseShown}
+    seeds={[...seeds.watched, ...seeds.watchlisted]}
+    owned={seeds.owned}
+  />
 {:else if route.page === 'watchlist'}
   {#if !library}
     <p class="note">

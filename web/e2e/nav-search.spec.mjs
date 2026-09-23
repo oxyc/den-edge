@@ -15,7 +15,8 @@ const film = (id, title = `Film ${id}`) => ({
 });
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
-const input = (page) => page.getByRole('searchbox', { name: 'Search movies, series and people' });
+const input = (page) =>
+  page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
 // The fixture is a file on the dev server, so its own path is where Home lives: the app reads the path, and
 // returning Home returns to the address the document was opened at.
 const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
@@ -44,6 +45,8 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
       json: r.request().url().includes('suggest') ? { perSeed: [], pooled: [] } : { labels: [] },
     }),
   );
+  // atlas's stackable filters aren't deployed: a 404, as live, unless a test serves them.
+  await page.route('**/atlas/index/filter/**', (r) => r.fulfill({ status: 404, body: '' }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',
@@ -157,6 +160,11 @@ for (const width of [320, 390, 1280])
         expect(geometry.scrollWidth).toBe(width);
       }
       await input(page).fill('Neon');
+      // Explore's grid shows the same fixture films, so wait for the search itself to answer.
+      await expect(page).toHaveURL(/\/search\?q=Neon$/);
+      await expect(
+        active(page).getByRole('heading', { name: 'Search', exact: true }),
+      ).toBeVisible();
       await expect(active(page).getByRole('link', { name: 'Film 108 2026' })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       if (width < 760) {
@@ -206,7 +214,7 @@ for (const width of [320, 390, 1280])
       await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
       await input(page).fill('');
       await expect(
-        active(page).getByText('Search movies, series and people.', { exact: true }),
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
       ).toBeVisible();
       expect(errors).toEqual([]);
       expect(documents).toBe(1);
@@ -246,6 +254,904 @@ test('a late search cannot replace a newer query', async () => {
     await browser.close();
   }
 });
+
+test('Explore browses before typing, remaps across types, and comes back after a query', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const discovered = [];
+    page.on('request', (r) => {
+      const url = new URL(r.url());
+      if (url.pathname.includes('/discover/') || url.pathname.endsWith('/popular'))
+        discovered.push(url.pathname + '?' + (url.searchParams.get('with_genres') ?? ''));
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    const pill = (name) =>
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: `Remove ${name}`, exact: true });
+    // Empty query: For You, filled from the popular tail since the fixture library holds nothing.
+    await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
+    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    expect(discovered).toContain('/tmdb/3/movie/popular?');
+
+    // A genre is its own history entry and its own feed, and leaves its section for the Selected pills.
+    await chip('Action').click();
+    await expect(page).toHaveURL(/\/search\?c=genre-28$/);
+    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/movie?28');
+    await expect(pill('Action')).toBeVisible();
+    await expect(chip('Action')).toHaveCount(0);
+
+    // Series keeps a related genre open rather than one with nothing in it.
+    await chip('Series').click();
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
+    await expect(pill('Action & Adventure')).toBeVisible();
+    await expect.poll(() => discovered.at(-1)).toBe('/tmdb/3/discover/tv?10759');
+
+    // Typing searches over it; Esc clears the query back to the same view, then leaves.
+    await input(page).fill('Neon');
+    await expect(page).toHaveURL(/\/search\?q=Neon&type=tv&c=genre-10759$/);
+    await expect(active(page).getByRole('heading', { name: 'Search', exact: true })).toBeVisible();
+    await input(page).press('Escape');
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
+    await expect(pill('Action & Adventure')).toBeVisible();
+
+    // Back walks the picks that were made, on the same page.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?c=genre-28$/);
+    await expect(pill('Action')).toBeVisible();
+    await expect(chip('Movies')).toHaveAttribute('aria-pressed', 'true');
+    await page.goBack();
+    await expect(chip('For You')).toHaveAttribute('aria-pressed', 'true');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('while typing, a genre narrows the results and a recipe opens in their place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const chip = (name) => rail.getByRole('button', { name, exact: true });
+    const picks = active(page).getByRole('group', { name: 'Selected' });
+    const pill = (name) => picks.getByRole('button', { name: `Remove ${name}`, exact: true });
+    const heading = (name) => active(page).getByRole('heading', { name, exact: true });
+
+    await input(page).fill('Neon');
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(heading('Search')).toBeVisible();
+    // The rail stays, and nothing in it is open: the query is what's showing.
+    await expect(rail.getByRole('button', { pressed: true })).toHaveCount(0);
+
+    // A genre narrows the typed results and keeps the query; the fixture's films are all dramas.
+    await chip('Drama').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
+    await expect(pill('Drama')).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    // Genres stack, all applying: no drama here is also a comedy.
+    await chip('Comedy').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18,genre-35$/);
+    await expect(active(page).getByText('No matches.', { exact: true })).toBeVisible();
+    // A pill takes its pick back out; Clear all takes the rest, and the query stays.
+    await pill('Comedy').click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=genre-18$/);
+    await picks.getByRole('button', { name: 'Clear all' }).click();
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(picks).toHaveCount(0);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+
+    // A recipe can't be combined with a query: it opens in its place, and Back returns to the search.
+    await chip('Heist').click();
+    await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
+    await expect(heading('Explore')).toBeVisible();
+    await expect(input(page)).toHaveValue('');
+    await expect(pill('Heist')).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?q=Neon$/);
+    await expect(input(page)).toHaveValue('Neon');
+    await expect(heading('Search')).toBeVisible();
+
+    // The typed text points at categories, offered above the results with their kind.
+    await input(page).fill('heist');
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await expect(browse.getByRole('button', { name: 'Heist · recipe' })).toBeVisible();
+    await browse.getByRole('button', { name: 'Heist · recipe' }).click();
+    await expect(page).toHaveURL(/\/search\?c=recipe-heist$/);
+    await expect(heading('Explore')).toBeVisible();
+
+    // Each section shows its first few; "Show all" opens the rest in place.
+    const recipes = rail.getByRole('group', { name: 'Recipes' });
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+    await recipes.getByRole('button', { name: /^Show all \d+ ›$/ }).click();
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toBeVisible();
+    await recipes.getByRole('button', { name: 'Show fewer' }).click();
+    await expect(recipes.getByRole('button', { name: 'Zombie', exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action out', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    // Swedish films: 200–203 are action, 204–207 drama. One page each, then the end — so each feed loads whole.
+    const swedish = (id, genres) => ({ ...film(id), genre_ids: genres, original_language: 'sv' });
+    const catalogue = [
+      ...[200, 201, 202, 203].map((id) => swedish(id, [28, 18])),
+      ...[204, 205, 206, 207].map((id) => swedish(id, [18])),
+    ];
+    const asked = [];
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      const url = new URL(r.request().url());
+      asked.push(url.search);
+      const genres = (url.searchParams.get('with_genres') ?? '').split(',').filter(Boolean);
+      const results =
+        url.searchParams.get('page') !== '1'
+          ? []
+          : catalogue.filter((f) => genres.every((g) => f.genre_ids.includes(Number(g))));
+      return r.fulfill({ json: { results, total_pages: 1, total_results: results.length } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const card = (id) => active(page).getByRole('link', { name: `Film ${id} 2026` });
+
+    // Sweden is found by the search field, and picking it turns the query into a pill over the grid.
+    await input(page).fill('swe');
+    await active(page)
+      .getByRole('group', { name: 'Browse', exact: true })
+      .getByRole('button', { name: 'Sweden · country', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(input(page)).toHaveValue('');
+    await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(rail.getByRole('group', { name: 'Selected' })).toHaveCount(0);
+    await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await expect(card(205)).toBeVisible();
+
+    // + Action: both apply, in one discover query.
+    await rail
+      .getByRole('group', { name: 'Genres' })
+      .getByRole('button', { name: 'Action', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE,genre-28$/);
+    await expect(selected.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await expect(selected.getByRole('button', { name: 'Remove Action' })).toBeVisible();
+    await expect(card(200)).toBeVisible();
+    await expect(card(205)).toHaveCount(0);
+    expect(asked.at(-2)).toContain('with_genres=28');
+    expect(asked.at(-2)).toContain('with_origin_country=SE');
+    // Action left its section. The feed is loaded whole, and nothing in it is a comedy: no Comedy on offer.
+    const genres = rail.getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+
+    // Back takes the last pick out.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(selected.getByRole('button', { name: 'Remove Action' })).toHaveCount(0);
+    await expect(card(205)).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+/**
+ * atlas's stackable filters, mocked: counts beside any selection (dramas and thrillers; two people; one runtime),
+ * a page of four titles, and the typeahead's people and characters. Each address asked is recorded as sent.
+ */
+async function serveFilter(page, { titles = true, countsGate } = {}) {
+  const asked = [];
+  const card = (id) => ({
+    type: 'movie',
+    id,
+    title: `Atlas ${id}`,
+    year: 2020,
+    posterPath: '/p.jpg',
+  });
+  // atlas's cards ask den-edge what other browsers know of them (ratings); nothing, here.
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ json: { titles: [] } }));
+  await page.route('**/atlas/index/filter/**', async (r) => {
+    const url = new URL(r.request().url());
+    const path = url.pathname.replace(/^.*\/atlas/, '') + url.search;
+    asked.push(path);
+    const sel = url.searchParams.get('sel') ?? '';
+    if (url.pathname.endsWith('/counts.json')) {
+      await countsGate;
+      const person = /person:(Q\d+)/.exec(sel)?.[1];
+      return r.fulfill({
+        json: {
+          total: 12,
+          kinds: {
+            genre: { mode: 'and', complete: true, values: { 18: 7, 53: 2 } },
+            language: { mode: 'and', complete: false, values: { sv: 3 } },
+            person: {
+              mode: 'and',
+              complete: false,
+              values: { Q2: 5, Q1: 2 },
+              labels: { Q1: 'Ann Director', Q2: 'Bob Actor' },
+              ...(person ? { selected: [person] } : {}),
+            },
+            runtime: { mode: 'single', complete: true, values: { 'under-90': 4 } },
+          },
+          ignored: [],
+        },
+      });
+    }
+    if (url.pathname.endsWith('/titles.json')) {
+      if (!titles) return r.fulfill({ status: 404, body: '' });
+      return r.fulfill({
+        json: { titles: [500, 501, 502, 503].map(card), total: 4, order: 'o', ignored: [] },
+      });
+    }
+    const kind = /values\/([a-z]+)\.json$/.exec(url.pathname)?.[1];
+    const values = {
+      made: [{ id: 'Q25191', name: 'Christopher Nolan', count: 12 }],
+      cast: [
+        { id: 'Q25191', name: 'Christopher Nolan', count: 1 },
+        { id: 'Q7', name: 'Nolan North', count: 3 },
+      ],
+      character: [{ id: 'nolan-shaw', name: 'Nolan Shaw', count: 1 }],
+    }[kind];
+    return r.fulfill({ json: { kind, values: values ?? [], complete: true } });
+  });
+  return asked;
+}
+
+test('atlas’s filter feeds the grid, judges the options and lists its people, at its canonical addresses', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page);
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(r.url());
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    const grid = active(page).locator('.grid');
+    await expect(grid.getByRole('link', { name: 'Atlas 500 2020' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
+    await expect.poll(() => asked).toContain('/index/filter/movie/counts.json?sel=country:SE');
+
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const genres = rail.getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    // Languages are listed incompletely: none is judged by its absence.
+    await expect(
+      rail.getByRole('group', { name: 'Languages' }).getByRole('button', { name: 'English' }),
+    ).toBeVisible();
+    await expect(
+      rail.getByRole('group', { name: 'Runtime' }).getByRole('button', { name: 'Under 90 min' }),
+    ).toBeVisible();
+
+    // A person from the People section stacks onto the selection, named by atlas.
+    await rail
+      .getByRole('group', { name: 'People' })
+      .getByRole('button', { name: 'Bob Actor', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE,person-Q2$/);
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Bob Actor' }),
+    ).toBeVisible();
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/movie/titles.json?sel=country:SE,person:Q2');
+    // Nothing of this went to TMDB discover.
+    expect(discovered).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a fresh address names a person “Person…” until atlas’s counts name them', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    let counted;
+    await serveFilter(page, { countsGate: new Promise((resolve) => (counted = resolve)) });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=person-Q2')}`);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Person…' })).toBeVisible();
+    counted();
+    await expect(selected.getByRole('button', { name: 'Remove Bob Actor' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the search field finds people and characters through atlas, and a person picked is a pill', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    await input(page).fill('nol');
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await expect(
+      browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }),
+    ).toBeVisible();
+    await expect(browse.getByRole('button', { name: 'Nolan North · actor' })).toBeVisible();
+    await expect(browse.getByRole('button', { name: 'Nolan Shaw · character' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/values/made.json?q=nol');
+    expect(asked).toContain('/index/filter/movie/values/character.json?q=nol');
+    await browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }).click();
+    await expect(page).toHaveURL(/\/search\?c=person-Q25191$/);
+    await expect(input(page)).toHaveValue('');
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Christopher Nolan' }),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('where atlas’s filter has no titles route, the grid is TMDB discover as before', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page, { titles: false });
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(r.url());
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
+    expect(discovered.some((url) => url.includes('with_origin_country=SE'))).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('"More like this" on a poster adds a "Like" pill without opening the title, and feeds atlas’s similar', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const similar = [];
+    await page.route('**/atlas/index/similar/**', (r) => {
+      similar.push(new URL(r.request().url()).pathname + new URL(r.request().url()).search);
+      return r.fulfill({ json: { ids: [300, 301] } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const grid = active(page).locator('.grid');
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+
+    // The control sits on the poster, beside its link: pressing it keeps Search open.
+    await grid.getByRole('link', { name: 'Film 101 2026' }).hover();
+    await grid.getByRole('button', { name: 'More like Film 101', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
+    await expect(selected.getByRole('button', { name: 'Remove Like Film 101' })).toBeVisible();
+    await expect(grid.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    expect(similar[0]).toBe('/atlas/index/similar/movie/101.json?limit=200');
+
+    // One "Like" at a time: while it is picked no poster offers another, and a mood can't join it.
+    await expect(grid.getByRole('button', { name: /^More like / })).toHaveCount(0);
+    await expect(
+      active(page)
+        .getByRole('navigation', { name: 'Browse by category' })
+        .getByRole('group', { name: 'Moods' }),
+    ).toHaveCount(0);
+
+    // Back takes it out, and the posters offer it again.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(selected).toHaveCount(0);
+    await expect(grid.getByRole('button', { name: 'More like Film 101', exact: true })).toHaveCount(
+      1,
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test('beside a "Like", a genre none of its titles has is not offered, in the rail or the Browse row', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    // Its similar titles are the fixture's: all dramas, none of them action. TMDB's tail never answers, so the feed
+    // is never loaded to its end: what is judged is what has loaded.
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300, 301] } }));
+    await page.route('**/recommendations**', () => {});
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=like-movie-949')}`);
+    await expect(active(page).getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    const genres = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
+    // Typed, the Browse row offers it no more than the rail does.
+    await input(page).fill('action');
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await expect(browse.getByRole('button', { name: 'Action · genre', exact: true })).toHaveCount(
+      0,
+    );
+    await input(page).fill('drama');
+    await expect(browse.getByRole('button', { name: 'Drama · genre', exact: true })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a "Like" from the address says "Like…" until its title is named', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300] } }));
+    let name;
+    const named = new Promise((resolve) => (name = resolve));
+    // The title's own lookup waits; the feed's titles don't.
+    await page.route(/\/movie\/949(\?|$)/, async (r) => {
+      await named;
+      return r.fulfill({ json: { ...film(949, 'Heat'), genres: [], credits: { cast: [] } } });
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=like-movie-949')}`);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Like…' })).toBeVisible();
+    name();
+    await expect(selected.getByRole('button', { name: 'Remove Like Heat' })).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a rating floor is picked from the Browse row, and asks TMDB for it', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    const asked = [];
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      asked.push(new URL(r.request().url()).searchParams);
+      return r.fulfill({ json: { results: films, total_pages: 1 } });
+    });
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    await input(page).fill('7+');
+    await active(page)
+      .getByRole('group', { name: 'Browse', exact: true })
+      .getByRole('button', { name: '★ 7+ · rating', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=rating-7$/);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove ★ 7+' })).toBeVisible();
+    await expect.poll(() => asked.at(-1)?.get('vote_average.gte')).toBe('7');
+    expect(asked.at(-1)?.get('vote_count.gte')).toBe('10');
+    // One floor at a time: the others leave the rail until it is removed.
+    const ratings = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Rating' });
+    await expect(ratings).toHaveCount(0);
+    await selected.getByRole('button', { name: 'Remove ★ 7+' }).click();
+    await expect(ratings.getByRole('button', { name: '★ 8+', exact: true })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a selection that shows nothing names the pick to take out, and takes it out in one tap', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    // Nothing at ★ 6+; Swedish comedies otherwise.
+    await page.route('**/tmdb/3/discover/**', (r) => {
+      const url = new URL(r.request().url());
+      const results =
+        url.searchParams.get('vote_average.gte') || url.searchParams.get('page') !== '1'
+          ? []
+          : films;
+      return r.fulfill({ json: { results, total_pages: 1 } });
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=lang-sv,genre-35,rating-6')}`);
+    const feed = active(page);
+    await expect(feed.getByText('No results with ★ 6+.')).toBeVisible();
+    await feed.getByRole('button', { name: 'Remove ★ 6+' }).last().click();
+    await expect(page).toHaveURL(/\/search\?c=lang-sv,genre-35$/);
+    await expect(feed.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a language, country or decade picked offers no other of its kind until it is removed', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=lang-sv,decade-1990')}`);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+    await expect(rail.getByRole('group', { name: 'Languages' })).toHaveCount(0);
+    await expect(rail.getByRole('group', { name: 'Decades' })).toHaveCount(0);
+    await expect(rail.getByRole('group', { name: 'Countries' })).toBeVisible();
+    // The Browse row too, though the picks are paused while a query is typed.
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    await input(page).fill('english');
+    await expect(browse.getByRole('button', { name: 'England · country' })).toHaveCount(0);
+    await expect(browse.getByRole('button', { name: 'English · language' })).toHaveCount(0);
+    await input(page).fill('british');
+    await expect(browse.getByRole('button', { name: 'United Kingdom · country' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a title’s "More like this" row links to Search with its "Like"', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [300, 301] } }));
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
+    const row = active(page).getByRole('region', { name: 'More like this' });
+    await expect(row.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    await row.getByRole('link', { name: 'Explore similar ›' }).click();
+    await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Like Film 101' }),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const width of [1100, 1440])
+  test(`the search field finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({
+        viewport: { width, height: 900 },
+        reducedMotion: 'reduce',
+      });
+      await setup(page);
+      await page.goto(FIXTURE);
+      await openSearch(page, width);
+      const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+      const sideways = () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll('[data-route-page][data-active="true"] .rail')].map(
+            (el) => el.scrollWidth - el.clientWidth,
+          ),
+        );
+      await expect(rail.getByRole('group', { name: 'Genres' })).toBeVisible();
+      expect(await sideways()).toEqual([0, 0]);
+      // Every kind is browsable without typing, each opened in place (the eight decades need no "Show all").
+      await expect(rail.getByRole('group', { name: 'Decades' })).toBeVisible();
+      for (const name of ['Recipes', 'Genres', 'Languages', 'Countries'])
+        await rail
+          .getByRole('group', { name })
+          .getByRole('button', { name: /^Show all/ })
+          .click();
+      expect(await sideways()).toEqual([0, 0]);
+
+      // The one search field finds every kind, in one ranked row, typos forgiven: "sweidsh" is Swedish.
+      await input(page).fill('sweidsh');
+      const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+      await expect(browse.getByRole('button').first()).toHaveText('Swedish · language');
+      expect(await sideways()).toEqual([0, 0]);
+      await input(page).fill('90s');
+      await browse.getByRole('button', { name: '1990s · decade' }).click();
+      await expect(page).toHaveURL(/\/search\?c=decade-1990$/);
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+    } finally {
+      await browser.close();
+    }
+  });
+
+test('on a phone, More… opens every category in a sheet', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 800 },
+      hasTouch: true,
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
+    const more = active(page).getByRole('button', { name: 'More…', exact: true });
+    const sheet = page.getByRole('dialog', { name: 'All categories' });
+
+    // Back closes it without picking, and leaves Search where it was.
+    await more.click();
+    await expect(sheet).toBeVisible();
+    await page.goBack();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search$/);
+    // So does its ✕.
+    await more.click();
+    await sheet.getByRole('button', { name: 'Close' }).click();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search$/);
+
+    await more.click();
+    for (const name of ['For You', 'Genres', 'Countries', 'Rating'])
+      await expect(sheet.getByRole('heading', { name, exact: true })).toBeVisible();
+    // Each section is one row; "All ›" opens it out in place.
+    const recipes = sheet.getByRole('group', { name: 'Recipes' });
+    await recipes.getByRole('button', { name: 'All Recipes' }).click();
+    await expect(recipes.getByRole('button', { name: 'All Recipes' })).toHaveCount(0);
+    await recipes.getByRole('button', { name: 'Nordic Noir', exact: true }).click();
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/\/search\?c=recipe-nordic-noir$/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    // The pick is one entry: Back returns to Search as it was before the sheet opened.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(sheet).toBeHidden();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the Browse row: the whole query first, fewer for long queries, a pick replaces the query', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    const heading = (name) => active(page).getByRole('heading', { name, exact: true });
+
+    // A short form counts in full: "uk" is the United Kingdom, first and drawn firmer.
+    await input(page).fill('uk');
+    const first = browse.getByRole('button').first();
+    await expect(first).toHaveText('United Kingdom · country');
+    await expect(first).toHaveClass(/exact/);
+    // Two letters already offer something, more than a handful.
+    await input(page).fill('dr');
+    await expect.poll(() => browse.getByRole('button').count()).toBeGreaterThan(6);
+    // Three words or more: likelier a title, so only the closest three.
+    await input(page).fill('slow burn bleak thriller');
+    await expect.poll(() => browse.getByRole('button').count()).toBeLessThanOrEqual(3);
+
+    // Enter searches the text; it never turns into a facet.
+    await input(page).fill('sweden');
+    await input(page).press('Enter');
+    await expect(page).toHaveURL(/\/search\?q=sweden$/);
+    await expect(heading('Search')).toBeVisible();
+
+    // Picking from the row turns the query into that pill, and Back brings the query back.
+    await browse.getByRole('button', { name: 'Sweden · country', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(input(page)).toHaveValue('');
+    await expect(heading('Explore')).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search\?q=sweden$/);
+    await expect(input(page)).toHaveValue('sweden');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('while typing, picks that can’t apply stay shown, paused; results come before the rail', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE,genre-18')}`);
+    const picks = active(page).getByRole('group', { name: 'Selected' });
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await input(page).fill('drama');
+    await expect(page).toHaveURL(/\/search\?q=drama&c=country-SE,genre-18$/);
+    // Drama still narrows the results; Sweden waits, shown and said so.
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toHaveClass(/paused/);
+    await expect(picks.getByRole('button', { name: 'Remove Drama' })).not.toHaveClass(/paused/);
+    await expect(
+      picks.getByText('Paused while searching — clear search to apply', { exact: true }),
+    ).toBeVisible();
+
+    // The Browse row and the results come before the rail, and ArrowDown goes from the field into them.
+    const order = await page.evaluate(() => {
+      const page = document.querySelector('[data-route-page][data-active="true"]');
+      const row = page.querySelector('.browse');
+      const rail = page.querySelector('nav.rail');
+      return !!(row.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(order).toBe(true);
+    await input(page).focus();
+    await input(page).press('ArrowDown');
+    await expect(
+      active(page).getByRole('group', { name: 'Browse', exact: true }).getByRole('button').first(),
+    ).toBeFocused();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('on a phone, only the bar stays pinned, and the strip gives way to the Browse row while typing', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    // Scrolled into the grid, what stays on screen at the top is the bar alone.
+    const pinned = await page.evaluate(async () => {
+      scrollTo(0, 1200);
+      await new Promise((r) => setTimeout(r, 200));
+      let bottom = document.querySelector('.bar').getBoundingClientRect().bottom;
+      for (const el of document.querySelectorAll('main *')) {
+        if (!['fixed', 'sticky'].includes(getComputedStyle(el).position)) continue;
+        const box = el.getBoundingClientRect();
+        if (box.height > 0 && box.top < 200 && box.bottom > 0)
+          bottom = Math.max(bottom, box.bottom);
+      }
+      return bottom;
+    });
+    expect(pinned).toBeLessThanOrEqual(120);
+    // Typing: the strip steps aside, and its More… with it.
+    await input(page).fill('drama');
+    await expect(active(page).getByRole('group', { name: 'Browse', exact: true })).toBeVisible();
+    await expect(active(page).getByRole('button', { name: 'More…', exact: true })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+for (const [name, options, focused] of [
+  ['with a mouse', { viewport: { width: 1280, height: 800 } }, true],
+  [
+    'on a touch screen',
+    { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true },
+    false,
+  ],
+])
+  test(`a fresh load of search puts the cursor in the field only ${name}`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({ ...options, reducedMotion: 'reduce' });
+      await setup(page);
+      await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=genre-18')}`);
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+      if (focused) await expect(input(page)).toBeFocused();
+      else {
+        // Drawn open, but left alone: focus would raise the keyboard over the grid.
+        await expect(input(page)).toBeVisible();
+        await page.waitForTimeout(200);
+        await expect(input(page)).not.toBeFocused();
+      }
+      if (!focused) return;
+      // Coming back from a title keeps focus where it was, rather than jumping to the field.
+      const card = active(page).getByRole('link', { name: 'Film 100 2026' });
+      await card.click();
+      await expect(active(page).locator('h1')).toHaveText('Film 100');
+      await page.goBack();
+      await expect(
+        active(page).getByRole('heading', { name: 'Explore', exact: true }),
+      ).toBeVisible();
+      await expect(input(page)).not.toBeFocused();
+    } finally {
+      await browser.close();
+    }
+  });
 
 test('late discovery keeps the already visible billboard and selected slide', async () => {
   const browser = await chromium.launch({

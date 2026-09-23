@@ -24,6 +24,8 @@ export interface DiscoverQuery {
   /** OR-joined. */
   originCountry?: string[];
   voteCountGte?: number;
+  /** TMDB's vote average floor: the ★ a poster shows. */
+  voteAverageGte?: number;
   releaseDateGte?: string;
   releaseDateLte?: string;
   sortBy?: string;
@@ -46,6 +48,7 @@ export function discoverParams(q: DiscoverQuery): Record<string, string> {
   if (q.originalLanguage) params.with_original_language = q.originalLanguage;
   if (q.originCountry?.length) params.with_origin_country = q.originCountry.join('|');
   if (q.voteCountGte !== undefined) params['vote_count.gte'] = String(q.voteCountGte);
+  if (q.voteAverageGte !== undefined) params['vote_average.gte'] = String(q.voteAverageGte);
   const date = q.mediaType === 'tv' ? 'first_air_date' : 'primary_release_date';
   if (q.releaseDateGte) params[`${date}.gte`] = q.releaseDateGte;
   if (q.releaseDateLte) params[`${date}.lte`] = q.releaseDateLte;
@@ -185,10 +188,88 @@ export function appendUniqueTitles(existing: readonly Title[], next: readonly Ti
 }
 
 /** The TV's Explore order per type (GenreCatalog.exploreChips). */
-const EXPLORE: Record<MediaType, number[]> = {
+export const EXPLORE: Record<MediaType, number[]> = {
   movie: [28, 35, 18, 27, 878, 10749, 53, 12, 16, 80, 14, 9648, 99],
   tv: [10759, 35, 18, 80, 10765, 16, 9648, 99, 10764, 10751],
 };
+
+/**
+ * The closest genre across types for the genres TMDB splits differently (GenreCatalog.movieToTV / tvToMovie).
+ * Ids both types share — Comedy, Drama, Crime, Animation, Family, Mystery, Documentary, Western — pass through.
+ */
+const GENRE_MOVIE_TO_TV: Record<number, number> = {
+  28: 10759, // Action → Action & Adventure
+  12: 10759, // Adventure → Action & Adventure
+  14: 10765, // Fantasy → Sci-Fi & Fantasy
+  878: 10765, // Science Fiction → Sci-Fi & Fantasy
+  27: 10765, // Horror → Sci-Fi & Fantasy: there is no TV horror genre, and the supernatural lives here
+  53: 9648, // Thriller → Mystery
+  36: 99, // History → Documentary
+  10749: 18, // Romance → Drama
+  10402: 10764, // Music → Reality
+  10752: 10768, // War → War & Politics
+  10770: 18, // TV Movie → Drama
+};
+const GENRE_TV_TO_MOVIE: Record<number, number> = {
+  10759: 28, // Action & Adventure → Action
+  10762: 10751, // Kids → Family
+  10763: 99, // News → Documentary
+  10764: 99, // Reality → Documentary
+  10765: 878, // Sci-Fi & Fantasy → Science Fiction
+  10766: 10749, // Soap → Romance
+  10767: 99, // Talk → Documentary
+  10768: 10752, // War & Politics → War
+};
+
+/**
+ * The genre in `to` closest to genre `id` of `from` (GenreCatalog.equivalent), so switching Movies and Series keeps
+ * a related category open instead of one that type has no titles for. Undefined when nothing sensible matches.
+ */
+export function equivalentGenre(id: number, from: MediaType, to: MediaType): number | undefined {
+  if (from === to || GENRES[to][id] !== undefined) return id;
+  return (from === 'movie' ? GENRE_MOVIE_TO_TV : GENRE_TV_TO_MOVIE)[id];
+}
+
+/** Genre ids that are the same genre on `/discover/movie` and `/discover/tv` (DiscoverQuery.sharedGenres). */
+const SHARED_GENRES = new Set([16, 18, 35, 37, 80, 99, 9648, 10751]);
+/** The movie genres a TV discover query can fold into (DiscoverQuery.movieToTV); the rest have no TV form. */
+const DISCOVER_MOVIE_TO_TV: Record<number, number> = {
+  28: 10759,
+  12: 10759,
+  878: 10765,
+  14: 10765,
+  10752: 10768,
+};
+
+/**
+ * This query for another type (DiscoverQuery.retargeted), so a movie recipe such as Heist browses as series, or
+ * undefined where it can't be said faithfully — Sci-Fi Horror has no series form, since TV has no Horror genre.
+ * AND-joined genres are strict: one with no counterpart changes the meaning, so the whole query is refused.
+ * OR-joined genres drop only the branches that have none. Series to movies maps only the shared ids.
+ */
+export function retargeted(query: DiscoverQuery, to: MediaType): DiscoverQuery | undefined {
+  if (query.mediaType === to) return query;
+  const map = (genre: number) =>
+    SHARED_GENRES.has(genre) ? genre : to === 'tv' ? DISCOVER_MOVIE_TO_TV[genre] : undefined;
+  const genres: number[] = [];
+  for (const genre of query.genres ?? []) {
+    const mapped = map(genre);
+    if (mapped === undefined) {
+      if (query.genreJoin !== 'or') return undefined;
+    } else if (!genres.includes(mapped)) genres.push(mapped);
+  }
+  // Nothing left to narrow by. A service query narrows by itself: its providers are a real filter.
+  if (!genres.length && !query.keywords?.length && !query.watchProviders?.length) return undefined;
+  const primaryGenre = query.primaryGenre === undefined ? undefined : map(query.primaryGenre);
+  const withoutGenres = (query.withoutGenres ?? []).flatMap((genre) => map(genre) ?? []);
+  return {
+    ...query,
+    mediaType: to,
+    genres,
+    primaryGenre,
+    ...(query.withoutGenres ? { withoutGenres } : {}),
+  };
+}
 
 /**
  * Film and TV origins, most catalog-rich first (DiscoveryCatalog.countries), each with the language its row is
@@ -202,7 +283,7 @@ const EXPLORE: Record<MediaType, number[]> = {
  * India is deliberately left without one: excluding Hindi is not excluding Indian film, and there is no single
  * language that row is about.
  */
-const COUNTRIES: [code: string, demonym: string, language?: string][] = [
+export const COUNTRIES: [code: string, demonym: string, language?: string][] = [
   ['KR', 'Korean', 'ko'],
   ['JP', 'Japanese', 'ja'],
   ['ES', 'Spanish', 'es'],
@@ -633,6 +714,8 @@ export interface RowDef {
   title: string;
   /** The named title/person within a contextual heading, and its destination. */
   headingLink?: { before: string; label: string; after: string; href: string };
+  /** A quiet link beside the heading, to where the row's titles go on: "Explore similar". */
+  aside?: { label: string; href: string };
   load: (page: number) => Promise<Title[]>;
   /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
   filter?: (title: Title) => boolean;
@@ -667,7 +750,12 @@ export function tmdbPages(key: string, fetchImpl: typeof fetch = tmdbFetch): Pag
   };
 }
 
-const discoverRow = (pages: Pages, id: string, title: string, query: DiscoverQuery): RowDef => ({
+export const discoverRow = (
+  pages: Pages,
+  id: string,
+  title: string,
+  query: DiscoverQuery,
+): RowDef => ({
   id,
   title,
   filter:
