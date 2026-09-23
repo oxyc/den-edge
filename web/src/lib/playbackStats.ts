@@ -13,8 +13,12 @@ export const MAX_REPORT_BYTES = 8 * 1024;
 export const REPORT_INTERVAL_MS = 30_000;
 /** den-remux logs at most this many reports for a session; the last is kept for the end. */
 export const MAX_REPORTS = 3;
-/** Seconds the clock may run on with no new video frame before the picture counts as frozen. */
-const FROZEN_SECS = 1.5;
+/**
+ * Seconds the clock may run on with no new video frame before the picture counts as frozen. Above the ~2 s batches in
+ * which iOS Safari's native player moves `totalVideoFrames`: at 1.5 s every batch read as a 0.5 s frozen stall, every
+ * 2 s, while the picture played on.
+ */
+export const FROZEN_SECS = 3;
 /** Video seconds ahead below which a player that fetches nothing is counted as idling on a low buffer. */
 export const LOW_BUFFER_SECS = 10;
 /** hls.js's own names for playback stopping on the buffer, or jumping a hole in it. */
@@ -357,8 +361,14 @@ export function watchPlayback(options: WatchOptions): Watcher {
   let stopped = false;
   let started = false;
   let sources: { video?: SourceBuffer; audio?: SourceBuffer } = {};
-  /** The last time the decoded frame count moved, and where the play head was. */
-  let frames = { count: -1, at: 0 };
+  /**
+   * The last time the decoded frame count moved: where the play head was, and what was buffered ahead of it then — a
+   * frozen stall is placed there, so its buffer is read there too, not seconds later when it is noticed.
+   */
+  let frames: { count: number; at: number; buffered?: Pick<Stall, 'videoAhead' | 'audioAhead'> } = {
+    count: -1,
+    at: 0,
+  };
   /** The fragment hls.js is fetching, by its sequence number, and when the last one arrived. */
   let fetching: number | 'initSegment' | undefined;
   let arrived: number | undefined;
@@ -405,9 +415,13 @@ export function watchPlayback(options: WatchOptions): Watcher {
     return { videoAhead: both, audioAhead: both };
   };
 
-  const stall = (kind: Stall['kind'], at = video.currentTime) => {
+  const stall = (
+    kind: Stall['kind'],
+    at = video.currentTime,
+    buffered = ahead(video.currentTime),
+  ) => {
     if (stopped || !started || video.seeking) return;
-    const stalled = { at: tenth(at), kind, ...ahead(video.currentTime), ...requests() };
+    const stalled = { at: tenth(at), kind, ...buffered, ...requests() };
     if (recorder.stalled(now(), stalled)) schedule.stall();
   };
 
@@ -425,6 +439,7 @@ export function watchPlayback(options: WatchOptions): Watcher {
     frames = {
       count: video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1,
       at: video.currentTime,
+      buffered: ahead(video.currentTime),
     };
   });
   on('timeupdate', () => {
@@ -444,13 +459,13 @@ export function watchPlayback(options: WatchOptions): Watcher {
     const count = video.getVideoPlaybackQuality?.().totalVideoFrames;
     if (count === undefined) return;
     if (count !== frames.count) {
-      frames = { count, at: time };
+      frames = { count, at: time, buffered: ahead(time) };
       if (open?.kind === 'frozen') recorder.resumed(now());
       return;
     }
     // A hidden page decodes no video in some browsers, and that is not a frozen picture.
     if (!video.paused && document.visibilityState === 'visible' && time - frames.at >= FROZEN_SECS)
-      stall('frozen', frames.at);
+      stall('frozen', frames.at, frames.buffered);
   });
   on('error', () => {
     if (video.error) recorder.error(`MediaError ${video.error.code}`, true);
