@@ -121,7 +121,7 @@ pub async fn serve(
         None => return not_found(),
     };
     let cast_origin = state.cast_origin.as_deref();
-    let modified = opened.1.modified().ok();
+    let modified = opened.2;
     let identity = if file.file_name().is_some_and(|name| name == "index.html") {
         let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else { return not_found() };
         // The shell says which page this is before any of it has run, for whatever is about to build a link
@@ -142,15 +142,15 @@ pub async fn serve(
     encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await
 }
 
-/// A regular file, opened, with what `fstat` says of it. The length and the time come from the handle that is
-/// then read, so an answer's `Content-Length`, `ETag` and bytes all describe the same file even if a new one
-/// is renamed into its place meanwhile.
-type Opened = (tokio::fs::File, std::fs::Metadata);
+/// A regular file, opened, with the length and modification time `fstat` gives for it. Both come from the
+/// handle that is then read, so an answer's `Content-Length`, `ETag` and bytes all describe the same file even
+/// if a new one is renamed into its place meanwhile.
+type Opened = (tokio::fs::File, u64, Option<SystemTime>);
 
 async fn open(path: &Path) -> Option<Opened> {
     let file = tokio::fs::File::open(path).await.ok()?;
     let meta = file.metadata().await.ok()?;
-    meta.is_file().then_some((file, meta))
+    meta.is_file().then(|| (file, meta.len(), meta.modified().ok()))
 }
 
 /// The uncompressed representation: the shell from memory, anything else streamed from disk.
@@ -168,8 +168,8 @@ const CHUNK: usize = 64 * 1024;
 /// A file's length and modification time: when both are unchanged, so is what was worked out from its bytes.
 type Stamp = (u64, SystemTime);
 
-fn stamp(meta: &std::fs::Metadata) -> Option<Stamp> {
-    meta.modified().ok().map(|modified| (meta.len(), modified))
+fn stamp(len: u64, modified: Option<SystemTime>) -> Option<Stamp> {
+    modified.map(|modified| (len, modified))
 }
 
 /// What is kept of the web app between requests: each file's ETag, and the shell's bytes, which `meta.rs`
@@ -195,8 +195,8 @@ impl Files {
 
     /// The file's strong ETag: from the cache while its `Stamp` holds, otherwise hashed from the open handle,
     /// which is then rewound for the body.
-    async fn etag(&self, path: &Path, (file, meta): &mut Opened) -> io::Result<HeaderValue> {
-        let stamp = stamp(meta);
+    async fn etag(&self, path: &Path, (file, len, modified): &mut Opened) -> io::Result<HeaderValue> {
+        let stamp = stamp(*len, *modified);
         if let Some((kept, etag)) = crate::lock(&self.etags).get(path) {
             if Some(*kept) == stamp {
                 return Ok(etag.clone());
@@ -225,15 +225,19 @@ impl Files {
     }
 
     /// The shell's bytes and ETag: from memory while its `Stamp` holds, otherwise read from the open handle.
-    async fn shell(&self, path: &Path, (file, meta): &mut Opened) -> io::Result<(Bytes, HeaderValue)> {
-        let stamp = stamp(meta);
+    async fn shell(
+        &self,
+        path: &Path,
+        (file, len, modified): &mut Opened,
+    ) -> io::Result<(Bytes, HeaderValue)> {
+        let stamp = stamp(*len, *modified);
         if let Some((kept_path, kept, bytes, etag)) = crate::lock(&self.shell).as_ref() {
             if kept_path == path && Some(*kept) == stamp {
                 return Ok((bytes.clone(), etag.clone()));
             }
         }
         self.count_read();
-        let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+        let mut bytes = Vec::with_capacity(usize::try_from(*len).unwrap_or(0));
         file.read_to_end(&mut bytes).await?;
         let bytes = Bytes::from(bytes);
         let etag = digest(&bytes);
@@ -254,8 +258,7 @@ struct FileBody {
 }
 
 impl FileBody {
-    fn new((file, meta): Opened) -> Self {
-        let left = meta.len();
+    fn new((file, left, _): Opened) -> Self {
         let buf = vec![0; usize::try_from(left).unwrap_or(CHUNK).min(CHUNK)].into_boxed_slice();
         FileBody { file, left, buf }
     }
@@ -357,13 +360,13 @@ async fn encoded(
         sidecar.push(".gz");
         let sidecar = PathBuf::from(sidecar);
         // A hand-updated WEB_DIR must never serve a stale sidecar after its original changed.
-        let fresh = |compressed: &Opened| match (modified, compressed.1.modified()) {
-            (Some(original), Ok(compressed)) => compressed >= original,
+        let fresh = |compressed: &Opened| match (modified, compressed.2) {
+            (Some(original), Some(compressed)) => compressed >= original,
             _ => false,
         };
         if let Some(mut compressed) = open(&sidecar).await.filter(fresh) {
             if let Ok(etag) = files.etag(&sidecar, &mut compressed).await {
-                let length = compressed.1.len();
+                let length = compressed.1;
                 let body = Body::new(FileBody::new(compressed));
                 let mut response = respond(body, length, etag, file, immutable, media, cast_origin);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
@@ -381,7 +384,7 @@ async fn encoded(
     let (length, body, etag) = match plain {
         Identity::Shell(bytes, etag) => (bytes.len() as u64, Body::from(bytes), etag),
         Identity::Disk(mut opened) => match files.etag(file, &mut opened).await {
-            Ok(etag) => (opened.1.len(), Body::new(FileBody::new(opened)), etag),
+            Ok(etag) => (opened.1, Body::new(FileBody::new(opened)), etag),
             Err(_) => return not_found(),
         },
     };
