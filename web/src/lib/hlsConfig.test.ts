@@ -23,6 +23,14 @@ describe('hlsConfig', () => {
     expect(config.backBufferLength).toBe(60);
   });
 
+  it('asks a Cast receiver for a buffer its memory holds', () => {
+    const receiver = hlsConfig(undefined, 'receiver');
+    expect(receiver.maxBufferLength).toBe(60);
+    expect(receiver.maxBufferSize).toBe(50 * 1000 * 1000);
+    expect(receiver.backBufferLength).toBe(10);
+    expect(receiver.fragLoadPolicy).toEqual(hlsConfig().fragLoadPolicy);
+  });
+
   it('keeps hls.js off a worker, which the player and the cast page both rely on', () => {
     expect(hlsConfig().enableWorker).toBe(false);
   });

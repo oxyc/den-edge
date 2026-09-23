@@ -179,6 +179,8 @@ describe('startSession', () => {
     expect(await failing(404, 'no_playable_release')).toEqual({ failure: 'none' });
     expect(await failing(429, 'too_many_sessions')).toEqual({ failure: 'busy' });
     expect(await failing(503, 'transcode_unavailable')).toEqual({ failure: 'transcode' });
+    expect(await failing(404, 'no_copy')).toEqual({ failure: 'noCopy' });
+    expect(await failing(404, 'no_fitting_copy')).toEqual({ failure: 'noFit' });
     expect(await failing(502, 'scout_unavailable')).toEqual({ failure: 'unreachable' });
     expect(await startSession(plain, async () => Promise.reject(new TypeError('offline')))).toEqual(
       { failure: 'unreachable' },
@@ -197,6 +199,8 @@ describe('startSession', () => {
         startSession(wanted, async () => answer(status, { error }));
       expect(await failing(guest, 404, 'not_found')).toEqual({ failure: 'ended' });
       expect(await failing(guest, 404, 'no_playable_release')).toEqual({ failure: 'none' });
+      // Up front, and final: a guest's session is never converted, so no retry loop waits for a free GPU.
+      expect(await failing(guest, 404, 'no_copy')).toEqual({ failure: 'noCopy' });
       expect(await failing(guest, 503, 'public_media_unavailable')).toEqual({ failure: 'public' });
       // The guest limits are known ones, and each says what to do instead.
       expect(await failing(guest, 503, 'public_media_ipv6')).toEqual({ failure: 'ipv6' });
