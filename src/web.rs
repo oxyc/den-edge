@@ -90,6 +90,11 @@ fn public_media(media: &[String]) -> Vec<String> {
     media.iter().filter(|origin| !tailnet(origin)).cloned().collect()
 }
 
+/// Which kind of file an answer was, carried on the response for the request log (`file=`): the app's shell, the
+/// shell rewritten for a link preview (`meta.rs`), any other file, or nothing there. An extension, not a header.
+#[derive(Clone, Copy)]
+pub struct Served(pub &'static str);
+
 pub async fn serve(
     state: &crate::AppState,
     path: &str,
@@ -97,7 +102,19 @@ pub async fn serve(
     headers: &HeaderMap,
     face: crate::handler::Face,
 ) -> Response {
-    let Some(dir) = state.web_dir.as_deref() else { return not_found() };
+    let (kind, mut resp) = serve_file(state, path, query, headers, face).await;
+    resp.extensions_mut().insert(Served(kind));
+    resp
+}
+
+async fn serve_file(
+    state: &crate::AppState,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    face: crate::handler::Face,
+) -> (&'static str, Response) {
+    let Some(dir) = state.web_dir.as_deref() else { return ("404", not_found()) };
     let kept: Vec<String>;
     let media: &[String] = match face {
         crate::handler::Face::Web => {
@@ -106,7 +123,7 @@ pub async fn serve(
         }
         _ => &state.media_origins,
     };
-    let Some(relative) = relative(path) else { return not_found() };
+    let Some(relative) = relative(path) else { return ("404", not_found()) };
     let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
     let (mut opened, file, immutable) = match open(&asked).await {
         Some(opened) => (opened, asked, path.starts_with("/assets/")),
@@ -115,31 +132,39 @@ pub async fn serve(
             let index = dir.join("index.html");
             match open(&index).await {
                 Some(opened) => (opened, index, false),
-                None => return not_found(),
+                None => return ("404", not_found()),
             }
         }
-        None => return not_found(),
+        None => return ("404", not_found()),
     };
     let cast_origin = state.cast_origin.as_deref();
     let modified = opened.2;
-    let identity = if file.file_name().is_some_and(|name| name == "index.html") {
-        let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else { return not_found() };
+    let shell = file.file_name().is_some_and(|name| name == "index.html");
+    let identity = if shell {
+        let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else {
+            return ("404", not_found());
+        };
         // The shell says which page this is before any of it has run, for whatever is about to build a link
         // preview from it (`meta.rs`). Injected bytes are served as they are: the gzip sidecar on disk is of
         // the file, not of this answer, and serving it would hand out the generic block to everything that
         // asks for gzip — which is everything.
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
             let (etag, length) = (digest(html.as_bytes()), html.len() as u64);
-            return crate::cache::revalidate(
-                respond(Body::from(html), length, etag, &file, false, media, cast_origin),
-                headers,
+            return (
+                "preview",
+                crate::cache::revalidate(
+                    respond(Body::from(html), length, etag, &file, false, media, cast_origin),
+                    headers,
+                ),
             );
         }
         Identity::Shell(bytes, etag)
     } else {
         Identity::Disk(opened)
     };
-    encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await
+    let resp =
+        encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await;
+    (if shell { "shell" } else { "asset" }, resp)
 }
 
 /// A regular file, opened, with the length and modification time `fstat` gives for it. Both come from the
