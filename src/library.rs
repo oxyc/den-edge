@@ -180,7 +180,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_LIMIT)
                 .clamp(1, MAX_LIMIT);
-            let (gzip, identity) = crate::web::encodings(req.headers());
+            let (_, gzip, identity) = crate::web::encodings(req.headers());
             changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity).await
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,

@@ -326,10 +326,13 @@ fn digest(bytes: &[u8]) -> HeaderValue {
     quoted(&Sha256::digest(bytes))
 }
 
+/// The weights, in thousandths, of brotli, gzip and identity in `Accept-Encoding`.
+///
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
 /// Missing/empty headers conservatively get identity; malformed weights are never permission to encode.
-pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16) {
-    let (mut gzip, mut identity, mut wildcard): (Option<u16>, Option<u16>, Option<u16>) = (None, None, None);
+pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16, u16) {
+    let (mut br, mut gzip, mut identity, mut wildcard): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) =
+        (None, None, None, None);
     for value in headers.get_all(header::ACCEPT_ENCODING) {
         let Ok(value) = value.to_str() else { continue };
         for coding in value.split(',') {
@@ -353,7 +356,9 @@ pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16) {
                 }
                 fraction.parse::<u16>().unwrap_or(0) * 10_u16.pow(3 - fraction.len() as u32)
             });
-            let slot = if name.eq_ignore_ascii_case("gzip") {
+            let slot = if name.eq_ignore_ascii_case("br") {
+                &mut br
+            } else if name.eq_ignore_ascii_case("gzip") {
                 &mut gzip
             } else if name.eq_ignore_ascii_case("identity") {
                 &mut identity
@@ -365,7 +370,11 @@ pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16) {
             *slot = Some(slot.map_or(weight, |prior| prior.min(weight)));
         }
     }
-    (gzip.or(wildcard).unwrap_or(0), identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 }))
+    (
+        br.or(wildcard).unwrap_or(0),
+        gzip.or(wildcard).unwrap_or(0),
+        identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,10 +388,17 @@ async fn encoded(
     cast_origin: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
-    let (gzip, identity) = encodings(headers);
-    if gzip > 0 && gzip >= identity {
+    let (br, gzip, identity) = encodings(headers);
+    // The browser's preference first; brotli ahead of gzip when it weighs them the same, as it is the smaller of
+    // the two for the same file. A missing or stale sidecar falls through to the next.
+    let mut offered = [("br", ".br", br), ("gzip", ".gz", gzip)];
+    offered.sort_by_key(|&(_, _, weight)| std::cmp::Reverse(weight));
+    for (coding, extension, weight) in offered {
+        if weight == 0 || weight < identity {
+            continue;
+        }
         let mut sidecar = file.as_os_str().to_os_string();
-        sidecar.push(".gz");
+        sidecar.push(extension);
         let sidecar = PathBuf::from(sidecar);
         // A hand-updated WEB_DIR must never serve a stale sidecar after its original changed.
         let fresh = |compressed: &Opened| match (modified, compressed.2) {
@@ -394,7 +410,7 @@ async fn encoded(
                 let length = compressed.1;
                 let body = Body::new(FileBody::new(compressed));
                 let mut response = respond(body, length, etag, file, immutable, media, cast_origin);
-                response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static(coding));
                 return crate::cache::revalidate(response, headers);
             }
         }
@@ -571,20 +587,24 @@ mod tests {
     #[test]
     fn encoding_negotiation_respects_weights_refusals_and_multiple_fields() {
         for (value, expected) in [
-            ("", (0, 1000)),
-            ("gzip, br", (1000, 1000)),
-            ("GZip; Q=0.8", (800, 1000)),
-            ("*", (1000, 1000)),
-            ("gzip;q=0, *", (0, 1000)),
-            ("*;q=0", (0, 0)),
-            ("gzip, *;q=0", (1000, 0)),
-            ("identity;q=0.5, gzip;q=0.9", (900, 500)),
-            ("identity, *;q=0", (0, 1000)),
-            ("gzip;q=garbage", (0, 1000)),
-            ("gzip;q=1.001", (0, 1000)),
-            ("gzip;q=0.0001", (0, 1000)),
-            ("gzip;q=0.001", (1, 1000)),
-            ("gzip;q=1.000", (1000, 1000)),
+            ("", (0, 0, 1000)),
+            ("gzip, br", (1000, 1000, 1000)),
+            ("gzip, deflate, br, zstd", (1000, 1000, 1000)),
+            ("GZip; Q=0.8", (0, 800, 1000)),
+            ("BR;q=0.5, gzip", (500, 1000, 1000)),
+            ("*", (1000, 1000, 1000)),
+            ("gzip;q=0, *", (1000, 0, 1000)),
+            ("br;q=0, *", (0, 1000, 1000)),
+            ("*;q=0", (0, 0, 0)),
+            ("gzip, *;q=0", (0, 1000, 0)),
+            ("identity;q=0.5, gzip;q=0.9", (0, 900, 500)),
+            ("identity, *;q=0", (0, 0, 1000)),
+            ("gzip;q=garbage", (0, 0, 1000)),
+            ("br;q=garbage", (0, 0, 1000)),
+            ("gzip;q=1.001", (0, 0, 1000)),
+            ("gzip;q=0.0001", (0, 0, 1000)),
+            ("gzip;q=0.001", (0, 1, 1000)),
+            ("gzip;q=1.000", (0, 1000, 1000)),
         ] {
             let mut headers = axum::http::HeaderMap::new();
             headers.insert(header::ACCEPT_ENCODING, value.parse().unwrap());
@@ -593,7 +613,68 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.append(header::ACCEPT_ENCODING, "*".parse().unwrap());
         headers.append(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
-        assert_eq!(super::encodings(&headers), (0, 1000));
+        headers.append(header::ACCEPT_ENCODING, "br;q=0".parse().unwrap());
+        assert_eq!(super::encodings(&headers), (0, 0, 1000));
+    }
+
+    /// Brotli is chosen over gzip when the browser takes both, and by weight when it says which it prefers. Each
+    /// representation carries its own ETag, a 304 only for its own, and a missing or stale `.br` falls back to
+    /// the `.gz` beside it and then to the file itself.
+    #[tokio::test]
+    async fn brotli_is_preferred_negotiated_by_weight_and_validated_on_its_own() {
+        let h = with_app();
+        let asset = "/assets/index-abc123.js";
+        std::fs::write(h.dir.join("web/assets/index-abc123.js.gz"), b"gzip representation").unwrap();
+        std::fs::write(h.dir.join("web/assets/index-abc123.js.br"), b"br").unwrap();
+        async fn get(h: &Harness, accept: &str) -> axum::response::Response {
+            h.send("GET", "/assets/index-abc123.js", None, &[("accept-encoding", accept)]).await
+        }
+        let coding = |resp: &axum::response::Response| {
+            resp.headers().get(header::CONTENT_ENCODING).map(|v| v.to_str().unwrap().to_owned())
+        };
+
+        let br = get(&h, "gzip, deflate, br").await;
+        assert_eq!(coding(&br).as_deref(), Some("br"));
+        assert_eq!(br.headers()[header::VARY], "accept-encoding");
+        assert_eq!(br.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
+        assert_eq!(br.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+        assert_eq!(br.headers()[header::CONTENT_LENGTH], "2");
+        let br_etag = br.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(body_text(br).await, "br");
+        let head = h.send("HEAD", asset, None, &[("accept-encoding", "br")]).await;
+        assert_eq!(coding(&head).as_deref(), Some("br"));
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], "2");
+        assert!(body_text(head).await.is_empty());
+
+        assert_eq!(coding(&get(&h, "br;q=0.5, gzip").await).as_deref(), Some("gzip"));
+        assert_eq!(coding(&get(&h, "gzip").await).as_deref(), Some("gzip"));
+        assert_eq!(coding(&get(&h, "br;q=0, gzip;q=0").await), None);
+        assert_eq!(coding(&get(&h, "br;q=0.4, identity;q=0.5").await), None);
+
+        let gzip_etag = get(&h, "gzip").await.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_ne!(br_etag, gzip_etag);
+        let revalidated =
+            h.send("GET", asset, None, &[("accept-encoding", "br"), ("if-none-match", &br_etag)]).await;
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(revalidated.headers()[header::CONTENT_ENCODING], "br");
+        let other =
+            h.send("GET", asset, None, &[("accept-encoding", "gzip"), ("if-none-match", &br_etag)]).await;
+        assert_eq!(other.status(), StatusCode::OK, "a gzip answer is not the brotli one the tag names");
+
+        // The original changes after its sidecars were written: neither is served.
+        let original = std::fs::File::open(h.dir.join("web/assets/index-abc123.js")).unwrap();
+        original.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(coding(&get(&h, "br, gzip").await), None);
+        std::fs::write(h.dir.join("web/assets/index-abc123.js.gz"), b"fresh gzip").unwrap();
+        let gz = std::fs::File::open(h.dir.join("web/assets/index-abc123.js.gz")).unwrap();
+        gz.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(20)).unwrap();
+        assert_eq!(
+            coding(&get(&h, "br, gzip").await).as_deref(),
+            Some("gzip"),
+            "a stale .br falls back to .gz"
+        );
+        std::fs::remove_file(h.dir.join("web/assets/index-abc123.js.br")).unwrap();
+        assert_eq!(coding(&get(&h, "br").await), None, "no .br and no gzip taken: the file itself");
     }
 
     #[tokio::test]
