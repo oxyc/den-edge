@@ -1,5 +1,6 @@
 import Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
+import { reportUrlOf, watchPlayback, type Watcher } from '../../src/lib/playbackStats';
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
@@ -138,6 +139,12 @@ let castDevices: boolean | undefined;
 let replacingCast = false;
 let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
+/** What this page's video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
+let watcher: Watcher | undefined;
+/** How long a measured load waits for the player to say play on, before it plays on regardless. */
+const CONTINUE_WAIT_MS = 5_000;
+/** The measured load waiting for the player's `den-continue`. */
+let waiting: { id: string; resolve: () => void } | undefined;
 /** The loads whose home-network address answered: they play from it, in this browser and on a Cast receiver alike. */
 const onLan = new Set<string>();
 
@@ -179,12 +186,15 @@ function announceDevices(): void {
 }
 
 async function loadLocal(media: Media, url: string): Promise<void> {
+  watcher?.stop();
+  watcher = undefined;
   hls?.destroy();
   hls = undefined;
   video.removeAttribute('src');
   const start = Math.max(0, media.currentTime ?? 0);
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url;
+    watcher = watchPlayback({ video, reportUrl: reportUrlOf(url) });
     // A native player takes a start position once it knows the stream; set before that it is ignored.
     video.addEventListener(
       'loadedmetadata',
@@ -197,6 +207,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   } else if (Hls.isSupported()) {
     // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
     hls = new Hls(hlsConfig(start > 0 ? start : undefined));
+    watcher = watchPlayback({ video, hls: { instance: hls, Hls }, reportUrl: reportUrlOf(url) });
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (!data.fatal) return;
@@ -341,14 +352,36 @@ async function loadCast(): Promise<void> {
   }
 }
 
+/**
+ * Wait for the player to say play on after a measure (`den-continue`), or to replace this load with a session that
+ * fits the link. A player that says neither within CONTINUE_WAIT_MS is played on regardless.
+ */
+function continued(id: string): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, CONTINUE_WAIT_MS);
+    waiting = {
+      id,
+      resolve: () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    };
+  });
+}
+
 async function open(message: LoadMessage): Promise<void> {
   // Home first: on home Wi-Fi the router never loops a request for the public address back in, so only the
   // home-network address can play. Anywhere else this fails fast and the public address is used as before.
-  if (await lanReachable(message.media.lanUrl)) onLan.add(message.id);
+  if (await lanReachable(message.media.lanUrl)) {
+    onLan.add(message.id);
+    // A link limit the player remembered from away doesn't belong here.
+    if (current?.id === message.id) tell('den-lan');
+  }
   if (current?.id !== message.id) return;
   // No home upload sits between this browser and den-remux on the LAN, so there is no link to measure.
   const measured = onLan.has(message.id) ? false : await measure(message.media, message.id);
-  if (current?.id !== message.id || measured) return;
+  if (measured) await continued(message.id);
+  if (current?.id !== message.id) return;
   if (message.media.mode === 'cast') await loadCast();
   else await loadLocal(message.media, playUrl(message.id, message.media));
   if (current?.id === message.id) applySubtitle(message.media.subtitleLanguage);
@@ -485,6 +518,21 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   castSubtitleAppliedId = undefined;
   if (castStarted && applyCastSubtitle(current.media.subtitleLanguage))
     castSubtitleAppliedId = current.id;
+});
+
+/** The player kept the measured session: play it. */
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (!parents.has(event.origin) || event.source !== window.parent) return;
+  const message = event.data as { type?: string; id?: string };
+  const held = waiting;
+  if (message.type !== 'den-continue' || !held || message.id !== held.id) return;
+  waiting = undefined;
+  held.resolve();
+});
+
+window.addEventListener('pagehide', () => {
+  watcher?.stop();
+  watcher = undefined;
 });
 
 /** The outside player's Skip button: move this page's video, or the receiver it is casting to, to `time`. */

@@ -16,7 +16,12 @@ import type { LibraryKeys } from './wire';
  * the allowance or permits spending a household key. Anything else is somebody else's server.
  */
 const RELAYED = ['/scout/', '/atlas/', '/reel/', '/warnings/', '/ratings/', '/metadata/', '/tmdb/'];
-const REMUX_CONTROL = new Set(['/remux/health', '/remux/session', '/remux/releases']);
+const REMUX_CONTROL = new Set([
+  '/remux/health',
+  '/remux/session',
+  '/remux/releases',
+  '/remux/speed',
+]);
 const MEMBER_HEADER = 'x-den-library-member';
 /** A shared library's own credential (`x-den-grant: <gid>:<secret>`): a guest is never a member. */
 const GRANT_HEADER = 'x-den-grant';

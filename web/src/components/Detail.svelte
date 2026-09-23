@@ -30,6 +30,7 @@
   import { isBlocked } from '../lib/parental';
   import Trailer from './Trailer.svelte';
   import { sharedInstallOf } from '../lib/grants';
+  import { premeasureLink } from '../lib/remux';
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
   import { named } from '../lib/pageTitle';
@@ -172,6 +173,13 @@
    * the release list and downloads are not offered: a guest plays through den-remux alone.
    */
   const guestScout = $derived(!!scout && !!sharedInstallOf(scout.install));
+  // Away from home a play asks den-remux for a session that fits the link. Timing it while this page is read lets the
+  // first play's request carry it, rather than start a session only to measure and start another. Given up on when
+  // the page stops being the active one — which pressing Play does.
+  $effect(() => {
+    if (!active || !onplayhere || !remux) return;
+    return premeasureLink(remux);
+  });
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();

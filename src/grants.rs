@@ -1962,6 +1962,80 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A player away from home times its link before it starts a session. Through the relay that is `/remux/speed`,
+    /// for a member and a guest alike: never more bytes than the web app's probe, never cached, and nothing for anyone
+    /// else.
+    #[tokio::test]
+    async fn the_relay_passes_a_capped_speed_test_to_members_and_guests() {
+        let (mut h, seen) = relaying(remux_reply, Some("edge-secret")).await;
+        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        let (gid, grant) = redeemed(&h, json!({})).await;
+        let cap = crate::relay::SPEED_MAX_BYTES;
+        for (asked, sent) in [
+            ("/remux/speed?bytes=999999999&other=1", format!("/remux/speed?bytes={cap}")),
+            ("/remux/speed?bytes=4096", "/remux/speed?bytes=4096".to_owned()),
+            ("/remux/speed", format!("/remux/speed?bytes={cap}")),
+        ] {
+            let resp = h.send("GET", asked, None, &[("host", "d.example"), (HEADER, &grant)]).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{asked}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+            let (path, headers, _) = seen.lock().unwrap().pop().unwrap();
+            assert_eq!(path, sent);
+            assert_eq!(headers["x-den-owner"], format!("grant:{gid}"), "counted as the guest's");
+        }
+
+        let claim = member();
+        let member_speed = |path: &'static str| {
+            let claim = claim.clone();
+            let h = &h;
+            async move {
+                h.send("GET", path, None, &[("host", "d.example"), ("x-den-library-member", &claim)])
+                    .await
+                    .status()
+            }
+        };
+        assert_eq!(member_speed("/remux/speed?bytes=999999999").await, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().pop().unwrap().0, format!("/remux/speed?bytes={cap}"));
+        assert_eq!(member_speed("/remux/speed?bytes=lots").await, StatusCode::BAD_REQUEST);
+        let stranger = h.send("GET", "/remux/speed", None, &[("host", "d.example")]).await;
+        assert_eq!(stranger.status(), StatusCode::NOT_FOUND, "neither a member nor a guest");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// Each relayed speed test is a relayed call like any other: it spends the guest's grant budget, and the member's
+    /// address budget.
+    #[tokio::test]
+    async fn a_relayed_speed_test_spends_the_callers_budget() {
+        let (mut h, _) = relaying(remux_reply, Some("edge-secret")).await;
+        Arc::get_mut(&mut h.state).unwrap().web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        let (gid, grant) = redeemed(&h, json!({})).await;
+        for _ in 0..crate::relay::GRANT_PER_WINDOW {
+            crate::link::throttled_at(
+                &h.state,
+                &format!("relay-grant:{gid}"),
+                crate::relay::GRANT_PER_WINDOW,
+            );
+        }
+        let guest = h.send("GET", "/remux/speed", None, &[("host", "d.example"), (HEADER, &grant)]).await;
+        assert_eq!(guest.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let claim = member();
+        let mut answered = 0;
+        loop {
+            let status = h
+                .send("GET", "/remux/speed", None, &[("host", "d.example"), ("x-den-library-member", &claim)])
+                .await
+                .status();
+            if status != StatusCode::OK {
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+                break;
+            }
+            answered += 1;
+            assert!(answered <= 1_000, "a member's speed tests were never counted");
+        }
+        assert!(answered >= crate::relay::GUEST_PER_WINDOW, "{answered}");
+    }
+
     /// A second grant, sharing scout only, for a second guest.
     async fn redeemed_second(h: &Harness) -> (String, String) {
         let (gid, code) = invited(h, json!({ "name": "Kim", "addons": ["scout"] })).await;
