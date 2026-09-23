@@ -5,7 +5,7 @@
 // recipe rows already show (Heist, Zombie, Spy…) aren't repeated here.
 
 import type { RowDef } from './catalog';
-import type { MediaType, Title } from './library';
+import type { ExploreType, MediaType, Title } from './library';
 import { relayFetch } from './relayFetch';
 import { withSharedTitleMetadata } from './titleMetadata';
 
@@ -164,9 +164,14 @@ export function titlesOf(body: unknown): Title[] {
   });
 }
 
-/** What atlas row `id` (its own id, `mood-feel-good`) asks atlas for: `{ mood: 'Feel-good' }`. */
-export const atlasWhere = (type: MediaType, id: string): Where | undefined =>
-  (type === 'tv' ? SERIES_ROWS : FILM_ROWS).find((row) => row.id === id)?.where;
+/**
+ * What atlas row `id` (its own id, `mood-feel-good`) asks atlas for: `{ mood: 'Feel-good' }`. Under All, a film row's
+ * or else a series row's: one id asks the same of both.
+ */
+export const atlasWhere = (type: ExploreType, id: string): Where | undefined =>
+  type === 'all'
+    ? (atlasWhere('movie', id) ?? atlasWhere('tv', id))
+    : (type === 'tv' ? SERIES_ROWS : FILM_ROWS).find((row) => row.id === id)?.where;
 
 /** atlas's rows for a browse screen of `type`, from atlas at `base`. */
 export function atlasRows(

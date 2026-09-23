@@ -7,6 +7,8 @@ import { syncPolicy } from './syncCore';
 import type { Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
+/** What Explore browses and atlas's filter answers for: one type, or films and series together. */
+export type ExploreType = MediaType | 'all';
 export type PosterRatingSource = 'tmdb' | 'justwatch-imdb';
 
 export interface Title {

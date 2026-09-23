@@ -65,6 +65,39 @@ describe('moreLikeThisRow', () => {
     expect(asked.filter((p) => p === '/3/movie/12')).toHaveLength(1);
   });
 
+  it('mixed, is atlas’s films and series together, each drawn as its own type', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        '/atlas/index/similar/movie/550.json': {
+          ids: [11],
+          mixed: [
+            { type: 'movie', id: 11 },
+            { type: 'series', id: 11 },
+            { type: 'series', id: 1396 },
+          ],
+        },
+        ...Object.fromEntries([movie(11)]),
+        '/3/tv/11': { id: 11, name: 'S11' },
+        '/3/tv/1396': { id: 1396, name: 'Breaking Bad' },
+      },
+      asked,
+    );
+    const row = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      key: 'k',
+      fetchImpl,
+      mixed: true,
+    });
+    const first = await row.load(1);
+    // A film and a series may share an id: each is its own title, and a series card is a series.
+    expect(first.map((t) => `${t.type}:${t.id}`)).toEqual(['movie:11', 'tv:11', 'tv:1396']);
+    // Without `mixed` the same answer is the seed's type alone.
+    const plain = moreLikeThisRow({ title: self, more: [] }, '/atlas', { key: 'k', fetchImpl });
+    expect((await plain.load(1)).map((t) => `${t.type}:${t.id}`)).toEqual(['movie:11']);
+    // The detail page's "Explore similar" opens Search's All, where the mixed row is.
+    expect(plain.aside?.href).toBe('/search?c=like-movie-550');
+  });
+
   it('is more than the one page of recommendations it used to be', async () => {
     const fetchImpl = answering({
       '/3/movie/550/recommendations?page=2': results([21, 22]),

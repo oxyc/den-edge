@@ -1,6 +1,6 @@
-<!-- Search, browse-first (the TV's Explore, oxyc/den#69). Before anything is typed: Movies or Series, one chip open —
-     For You, a genre, a recipe or a mood — and the endless grid it fills. Typing searches instead, and clearing the
-     query returns to the chip that was open, since the address still names it. -->
+<!-- Search, browse-first (the TV's Explore, oxyc/den#69). Before anything is typed: All, Movies or Series — All by
+     default — one chip open — For You, a genre, a recipe or a mood — and the endless grid it fills. Typing searches
+     instead, and clearing the query returns to the chip that was open, since the address still names it. -->
 <script lang="ts">
   import { untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
@@ -19,17 +19,24 @@
     likeChip,
     offered,
     pendingChip,
+    perType,
     taken,
     PROMPTS,
     remapSet,
     slotOf,
     browseChips,
+    countedEmptyAcross,
     namesExactly,
     type Chip,
   } from '../lib/explore';
   import { countItems, filterItems } from '../lib/facetCounts';
-  import { fetchFilterCounts, searchFilterValues, type FilterCounts } from '../lib/filterRoutes';
-  import type { MediaType, Title } from '../lib/library';
+  import {
+    fetchFilterCounts,
+    mergeFilterValues,
+    searchFilterValues,
+    type FilterCounts,
+  } from '../lib/filterRoutes';
+  import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
   import { isHidden, type Prefs } from '../lib/prefs';
@@ -71,9 +78,9 @@
   );
   const typing = $derived(query.trim().length >= 2);
 
-  // Explore browses one type at a time, Movies until another is chosen. Typed results show every type until one is.
-  const exploreType = $derived<MediaType>(explore.type ?? 'movie');
-  const chipsFor = (type: MediaType) =>
+  // Explore and typed results both show every type until one is chosen: one `type` in the address for both.
+  const exploreType = $derived<ExploreType>(explore.type ?? 'all');
+  const chipsFor = (type: ExploreType) =>
     exploreChips(type, {
       hiddenGenres: prefs.excludedGenres,
       atlas: atlas !== null,
@@ -109,8 +116,15 @@
    * arrive after each pick, so this holds from the first answer rather than flickering with each.
    */
   let filtered = $state(false);
-  /** atlas's last counts, and the type and selection they were counted for (the effect further down). */
-  let filterAnswer = $state<{ key: string; counts: FilterCounts } | null>(null);
+  /**
+   * atlas's last counts, and the type and selection they were counted for (the effect further down): one answer, or
+   * under All without atlas's `all` route, each type's (`sides`), which only judge an option together.
+   */
+  let filterAnswer = $state<{
+    key: string;
+    answers: FilterCounts[];
+    sides?: { type: MediaType; counts: FilterCounts | null }[];
+  } | null>(null);
   /** People and characters picked from the search field, by facet id: their names, for their pills. */
   let named = $state<Record<string, Chip>>({});
   /**
@@ -118,7 +132,11 @@
    * can be for — a picked "Like", a typeahead's pick, and a pick of atlas's not yet named ("Person…").
    */
   const chips = $derived(chipsFor(exploreType));
-  const listed = $derived([...chips, ...(filterAnswer ? filterChips(filterAnswer.counts) : [])]);
+  const listed = $derived(
+    [...chips, ...(filterAnswer?.answers.flatMap(filterChips) ?? [])].filter(
+      (chip, at, all) => all.findIndex((other) => other.id === chip.id) === at,
+    ),
+  );
   const known = $derived.by(() => {
     const all = [...listed, ...Object.values(named)];
     if (like) all.push(likeChip(like, likeNames[like]));
@@ -142,13 +160,30 @@
 
   /** The selection moves with the type, genres to their closest counterparts (SearchModel.setScope). */
   function chooseType(type: MediaType | null) {
-    const to = type ?? 'movie';
+    const to = type ?? 'all';
     const { set, dropped } = remapSet(selection, exploreType, to, chipsFor(to));
-    status = dropped.length
-      ? `${names(dropped)}: nothing like it in ${to === 'tv' ? 'series' : 'movies'}.`
-      : '';
+    status = dropped.length ? `${names(dropped)}: nothing like it in ${NOUN[to]}.` : '';
     go({ type: type ?? undefined, chips: set });
   }
+  const NOUN: Record<ExploreType, string> = {
+    all: 'films or series',
+    movie: 'movies',
+    tv: 'series',
+  };
+
+  /**
+   * Under All, the picks one type has no form of, said as a standing note beside the status: "Horror: movies only."
+   * Their type's feed is the grid (`perType`). A "Like" is both types' already.
+   */
+  const scope = $derived.by(() => {
+    if (exploreType !== 'all' || typing || !selection.length || like) return '';
+    return perType(selection)
+      .map(({ type, dropped }) =>
+        dropped.length ? `${names(dropped)}: ${type === 'tv' ? 'movies' : 'series'} only.` : '',
+      )
+      .filter(Boolean)
+      .join(' ');
+  });
 
   // The selection's feed. Only the selection, and what reaches TMDB and atlas, start it again: a new seed or a write
   // elsewhere must not empty a grid someone is scrolling. It waits while a query is typed, and is still where it
@@ -236,10 +271,14 @@
   const narrowing = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre').map((id) => Number(id.slice(6))) : [],
   );
-  /** A title in `genre` of the browsed type, or in its closest counterpart for a title of the other type. */
+  /**
+   * A title in `genre` of the browsed type (All's are the films'), or in its closest counterpart for a title of the
+   * other type.
+   */
   const inGenre = (title: Title, genre: number) => {
     const ids = title.genreIds ?? [];
-    return ids.includes(equivalentGenre(genre, exploreType, title.type) ?? genre);
+    const space = exploreType === 'tv' ? 'tv' : 'movie';
+    return ids.includes(equivalentGenre(genre, space, title.type) ?? genre);
   };
   /** Typed results of the chosen type and genres; people only under All, as on the TV, and never in a genre. */
   const typedHits = $derived(
@@ -265,17 +304,19 @@
   }
 
   /**
-   * "More like" a poster's title: its "Like" joins the selection, in the query's place. A title of the other type (a
-   * typed result under All) takes Explore to its type, the other picks moving with it as `chooseType` moves them.
+   * "More like" a poster's title: its "Like" joins the selection, in the query's place. Under All it stays All, its
+   * similar titles of both types; a title of the other type than the one browsed (a typed result) takes Explore to its
+   * type, the other picks moving with it as `chooseType` moves them.
    */
   function likeTitle(title: Title) {
     const id = likeId(title);
     likeNames[id] = title.title;
-    const moved = remapSet(selection, exploreType, title.type, chipsFor(title.type));
-    const { set, removed } = applyPick(moved.set, id, title.type, filtered);
+    const to: ExploreType = exploreType === 'all' ? 'all' : title.type;
+    const moved = remapSet(selection, exploreType, to, chipsFor(to));
+    const { set, removed } = applyPick(moved.set, id, to, filtered);
     const gone = [...moved.dropped, ...removed];
     status = gone.length ? `Like ${title.title} replaced ${names(gone)}.` : '';
-    go({ type: title.type === 'tv' ? 'tv' : undefined, chips: set }, '');
+    go({ type: to === 'all' ? undefined : to, chips: set }, '');
   }
 
   /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
@@ -299,6 +340,9 @@
    * atlas's counts beside the selection (`filterRoutes.ts`): one request per selection, a moment after it settles,
    * the last one dropped when the next begins. They judge what would show nothing only beside the selection they were
    * counted for; the options they list, and the pills' names, stay from the last answer until the next.
+   *
+   * Under All, where atlas has no `all` route, each type the grid shows is counted beside the selection as that type
+   * asks it (`perType`), and an option is judged empty only where both say so (`countedEmptyAcross`).
    */
   $effect(() => {
     const here = atlas;
@@ -307,43 +351,92 @@
     const set = selectionKey ? selectionKey.split(',') : [];
     if (!here || typing) return;
     const ask = new AbortController();
+    const signal = ask.signal;
     const timer = setTimeout(async () => {
-      const answer = await fetchFilterCounts(here, type, countItems(set, type), {
-        signal: ask.signal,
-      });
-      if (ask.signal.aborted) return;
-      filterAnswer = answer ? { key, counts: answer } : null;
-      if (answer) filtered = true;
+      const answer = await fetchFilterCounts(here, type, countItems(set, type), { signal });
+      let next: typeof filterAnswer = answer ? { key, answers: [answer] } : null;
+      if (!answer && type === 'all' && !signal.aborted) {
+        const sides = await Promise.all(
+          perType(set)
+            .filter((side) => !side.dropped.length)
+            .map(async (side) => ({
+              type: side.type,
+              counts: await fetchFilterCounts(here, side.type, countItems(side.set, side.type), {
+                signal,
+              }),
+            })),
+        );
+        const answers = sides.flatMap((side) => side.counts ?? []);
+        next = answers.length ? { key, answers, sides } : null;
+      }
+      if (signal.aborted) return;
+      filterAnswer = next;
+      if (next) filtered = true;
     }, 150);
     return () => {
       clearTimeout(timer);
       ask.abort();
     };
   });
-  const counts = $derived(
-    filterAnswer?.key === `${exploreType}|${selectionKey}` ? filterAnswer.counts.kinds : null,
+  const current = $derived(
+    filterAnswer?.key === `${exploreType}|${selectionKey}` ? filterAnswer : null,
   );
+  const counts = $derived(current && !current.sides ? (current.answers[0]?.kinds ?? null) : null);
+  const counted = $derived.by(() => {
+    const sides = current?.sides?.map((side) => ({
+      type: side.type,
+      counts: side.counts?.kinds ?? null,
+    }));
+    return sides ? (id: string) => countedEmptyAcross(id, sides) : null;
+  });
 
   /**
    * People and characters the typed text names, from atlas's filter, beside the selection: a person by name as a
    * maker ("director/writer") or else as cast ("actor"), a character from three letters. Asked a moment after
-   * typing settles; none where atlas has no such route.
+   * typing settles; none where atlas has no such route. Under All, where atlas has no `all` route, each type's
+   * answers together.
    */
   let found = $state<Chip[]>([]);
   $effect(() => {
     const text = query.trim();
     const here = atlas;
     const type = exploreType;
-    const items = filterItems(selectionKey ? selectionKey.split(',') : [], type) ?? [];
+    const set = selectionKey ? selectionKey.split(',') : [];
     found = [];
     if (!here || text.length < 2) return;
     const ask = new AbortController();
     const timer = setTimeout(async () => {
       const options = { signal: ask.signal };
+      const values = async (kind: string) => {
+        const answer = await searchFilterValues(
+          here,
+          type,
+          kind,
+          text,
+          filterItems(set, type) ?? [],
+          options,
+        );
+        if (answer || type !== 'all') return answer ?? [];
+        const sides = perType(set).filter((side) => !side.dropped.length);
+        return mergeFilterValues(
+          await Promise.all(
+            sides.map((side) =>
+              searchFilterValues(
+                here,
+                side.type,
+                kind,
+                text,
+                filterItems(side.set, side.type) ?? [],
+                options,
+              ),
+            ),
+          ),
+        );
+      };
       const [made, cast, characters] = await Promise.all([
-        searchFilterValues(here, type, 'made', text, items, options),
-        searchFilterValues(here, type, 'cast', text, items, options),
-        searchFilterValues(here, type, 'character', text, items, options),
+        values('made'),
+        values('cast'),
+        values('character'),
       ]);
       if (ask.signal.aborted) return;
       const makers = new Set(made.map((value) => value.id));
@@ -386,7 +479,7 @@
       feedHits.map((hit) => (hit.kind === 'title' ? hit.title : null)).filter((t) => t !== null),
       feed.pager.exhausted,
       listed,
-      { counts, type: exploreType },
+      { counts, counted, type: exploreType },
     ),
   );
   /**
@@ -426,10 +519,9 @@
   <div class="rail" class:after={typing}>
     {#if !typing}
       <TypeFilter
-        value={exploreType}
+        value={explore.type ?? null}
         onchange={chooseType}
-        label="Browse movies or series"
-        all={false}
+        label="Browse movies, series or both"
       />
     {/if}
     <ExploreChips
@@ -480,7 +572,7 @@
           {/if}
         </div>
       {/if}
-      <p class="status" role="status">{status}</p>
+      <p class="status" role="status">{[status, scope].filter(Boolean).join(' ')}</p>
       {#if typing}
         {#if browse.length}
           <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->

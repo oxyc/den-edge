@@ -1,6 +1,11 @@
-// Search before anything is typed: the TV's Explore (SearchModel). A Movies/Series choice, then one chip open at a
-// time — For You, a genre, a recipe or one of atlas's moods — and the one endless grid it fills. A chip is named by
-// an id that lives in the address (`?c=`), so a view can be linked and Back returns to the chip before it.
+// Search before anything is typed: the TV's Explore (SearchModel). All, Movies or Series — All, films and series
+// together, by default — then one chip open at a time — For You, a genre, a recipe or one of atlas's moods — and the
+// one endless grid it fills. A chip is named by an id that lives in the address (`?c=`), so a view can be linked and
+// Back returns to the chip before it.
+//
+// Under All a genre is named by the films' id and name (Series-only genres such as Kids are Series' alone), and a
+// pick one type has no form of — a Horror genre, a network, a keyword recipe with no series form — applies to the
+// other type alone (`perType`).
 
 import {
   appendUniqueTitles,
@@ -27,12 +32,23 @@ import {
   type FacetCounts,
   type FilterOnlyKind,
 } from './facetCounts';
-import { filterTitles, FilterUnavailable, type FilterCounts } from './filterRoutes';
-import type { MediaType, Title } from './library';
+import {
+  filterTitles,
+  FilterUnavailable,
+  type FilterCounts,
+  type FilterItem,
+} from './filterRoutes';
+import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
 import { FACET, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
+
+/** The two types, films first: the order All interleaves them in. */
+export const TYPES: readonly MediaType[] = ['movie', 'tv'];
+
+/** The type whose genre ids and names a type's chips use: All's are the films'. */
+const genreType = (type: ExploreType): MediaType => (type === 'tv' ? 'tv' : 'movie');
 
 /**
  * What a chip is: For You, one of the kinds the rail lists and the search field finds, or — where atlas's filter
@@ -411,9 +427,14 @@ const recipeOf = (id: string) => RECIPES.find((recipe) => recipe.id === id);
  * atlas's rows (`atlasRows.ts`) as chips, in its own order — strongest first. A mood or a plot facet ("Bittersweet
  * Endings") is a mood here; a subgenre ("Neo-Noir") sits with the recipes, which it is to a viewer. Named by the
  * row's own id, so one both types carry stays open across a switch. The label drops the "Movies"/"Series" the
- * heading ends with, since the toggle beside it already says.
+ * heading ends with, since the toggle beside it already says. Under All, the film rows and then the series rows
+ * films don't have.
  */
-function atlasChips(type: MediaType): Chip[] {
+function atlasChips(type: ExploreType): Chip[] {
+  if (type === 'all') {
+    const films = atlasChips('movie');
+    return [...films, ...atlasChips('tv').filter((c) => !films.some((f) => f.id === c.id))];
+  }
   const suffix = `-${type}`;
   return atlasRows('', type).map((row) => {
     const id = row.id.slice('atlas-'.length, -suffix.length);
@@ -432,10 +453,10 @@ const same = (label: string) => fold(label).replace(/ /g, '').replace(/s$/, '');
  * The chips for `type`, in the order they are offered: For You; atlas's moods; the recipes (the TV's curated
  * ones first, then the rest of the catalogue, then atlas's subgenres that no recipe already names); and the
  * genres, the TV's Explore order first, less the hidden ones. Moods and subgenres only where atlas answers. Then
- * the languages, countries and decades.
+ * the languages, countries and decades. Under All: every recipe either type has a form of, and the films' genres.
  */
 export function exploreChips(
-  type: MediaType,
+  type: ExploreType,
   {
     hiddenGenres = new Set<number>(),
     atlas = false,
@@ -446,19 +467,21 @@ export function exploreChips(
   const recipeIds = [...new Set([...RECIPE_CHIPS, ...RECIPES.map((r) => r.id)])];
   const recipes = recipeIds.flatMap((id): Chip[] => {
     const recipe = recipeOf(id);
-    return recipe && retargeted(recipe.query, type)
+    const has = (t: MediaType) => !!recipe && !!retargeted(recipe.query, t);
+    return recipe && (type === 'all' ? TYPES.some(has) : has(type))
       ? [{ id: `recipe-${id}`, label: recipe.title, group: 'recipe' }]
       : [];
   });
   const fromAtlas = atlas ? atlasChips(type) : [];
   const named = new Set(recipes.map((r) => same(r.label)));
   const subgenres = fromAtlas.filter((c) => c.group === 'recipe' && !named.has(same(c.label)));
+  const space = genreType(type);
   const genreIds = [
-    ...new Set([...EXPLORE[type], ...Object.keys(GENRES[type]).map(Number)]),
+    ...new Set([...EXPLORE[space], ...Object.keys(GENRES[space]).map(Number)]),
   ].filter((id) => !hiddenGenres.has(id));
   const genres = genreIds.map((id): Chip => ({
     id: `genre-${id}`,
-    label: GENRES[type][id] ?? '',
+    label: GENRES[space][id] ?? '',
     group: 'genre',
     ...(ALIASES[`genre-${id}`] ? { aliases: ALIASES[`genre-${id}`] } : {}),
   }));
@@ -468,7 +491,7 @@ export function exploreChips(
     ...recipes,
     ...subgenres,
     ...genres,
-    ...vocabularyChips(type, year, minYear),
+    ...vocabularyChips(space, year, minYear),
     ...ratingChips(),
   ];
 }
@@ -679,9 +702,13 @@ const decadeOf = (id: string) => Number(id.slice('decade-'.length));
 const ratingOf = (id: string) => Number(id.slice('rating-'.length));
 /** `sv` from `lang-sv`, `SE` from `country-SE`. */
 const codeOf = (id: string) => id.slice(id.indexOf('-') + 1);
-const recipeQuery = (id: string, type: MediaType) => {
+/** A recipe's discover query for `type`; under All its film form, or its own where it has none. */
+const recipeQuery = (id: string, type: ExploreType) => {
   const recipe = recipeOf(id.slice('recipe-'.length));
-  return recipe && retargeted(recipe.query, type);
+  if (!recipe) return undefined;
+  return type === 'all'
+    ? (retargeted(recipe.query, 'movie') ?? recipe.query)
+    : retargeted(recipe.query, type);
 };
 
 /**
@@ -694,7 +721,7 @@ const recipeQuery = (id: string, type: MediaType) => {
  * Where atlas's filter answers (`filtered`), it takes any mix of what it knows, so all that is lifted: what it can't
  * take is a recipe it has no form of (`recipeParts`) beside a kind only it knows.
  */
-function clash(a: string, b: string, type: MediaType, filtered = false): boolean {
+function clash(a: string, b: string, type: ExploreType, filtered = false): boolean {
   const [sa, sb] = [slotOf(a), slotOf(b)];
   if (sa === sb) return !stacks(sa);
   const fromAtlas = (slot: Slot | undefined) =>
@@ -704,7 +731,7 @@ function clash(a: string, b: string, type: MediaType, filtered = false): boolean
     slot === 'runtime' ||
     slot === 'animated';
   const tmdbOnly = (id: string) =>
-    slotOf(id) === 'recipe' && !recipeParts(id.slice('recipe-'.length), type);
+    slotOf(id) === 'recipe' && !recipeParts(id.slice('recipe-'.length), genreType(type));
   if (filtered) {
     if ((tmdbOnly(a) && fromAtlas(sb)) || (tmdbOnly(b) && fromAtlas(sa))) return true;
   } else if (fromAtlas(sa) || fromAtlas(sb)) {
@@ -745,7 +772,7 @@ function clash(a: string, b: string, type: MediaType, filtered = false): boolean
 export function applyPick(
   set: readonly string[],
   id: string,
-  type: MediaType,
+  type: ExploreType,
   filtered = false,
 ): { set: string[]; removed: string[] } {
   if (id === FOR_YOU) return { set: [], removed: [] };
@@ -768,7 +795,7 @@ export function taken(set: readonly string[], id: string): boolean {
 export function offered(
   set: readonly string[],
   id: string,
-  type: MediaType,
+  type: ExploreType,
   filtered = false,
 ): boolean {
   if (id === FOR_YOU) return true;
@@ -779,26 +806,31 @@ export function offered(
 /**
  * The selection under the other type (SearchModel.setScope, for every facet): a genre moves to its closest
  * counterpart, and anything the new type has no chip for — a recipe with no series form, a mood only films carry, a
- * "Like" for a title of the other type — is `dropped`.
+ * "Like" for a title of the other type — is `dropped`. All holds a "Like" of either type, and its genres are the
+ * films': Kids comes to All as Family, and Horror goes to Series as Sci-Fi & Fantasy.
+ *
+ * `moveGenre` replaces that closest counterpart with another rule (`perType`'s); undefined drops the genre.
  */
 export function remapSet(
   set: readonly string[],
-  from: MediaType,
-  to: MediaType,
+  from: ExploreType,
+  to: ExploreType,
   chips: Chip[],
+  moveGenre: (genre: number) => number | undefined = (genre) =>
+    equivalentGenre(genre, genreType(from), genreType(to)),
 ): { set: string[]; dropped: string[] } {
   const known = new Set(chips.map((chip) => chip.id));
-  for (const id of set) if (likeOf(id)?.type === to) known.add(id);
+  for (const id of set) {
+    const like = likeOf(id);
+    if (like && (to === 'all' || like.type === to)) known.add(id);
+  }
   // A person, a studio, a subject… is the same for either type; a network only a series has.
   for (const id of set)
     if (filterOnlyKind(id) && !(to === 'movie' && filterOnlyKind(id) === 'network')) known.add(id);
   const next: string[] = [];
   const dropped: string[] = [];
   for (const id of set) {
-    const moved =
-      from !== to && slotOf(id) === 'genre'
-        ? `genre-${equivalentGenre(genreOf(id), from, to) ?? ''}`
-        : id;
+    const moved = slotOf(id) === 'genre' ? `genre-${moveGenre(genreOf(id)) ?? ''}` : id;
     if (known.has(moved) && !next.includes(moved)) next.push(moved);
     else if (!known.has(moved)) dropped.push(id);
   }
@@ -806,8 +838,31 @@ export function remapSet(
 }
 
 /** The genre `chip` is for `from`, remapped: what `remapSet` does for one chip, For You where nothing fits. */
-export function remapChip(chip: string, from: MediaType, to: MediaType, chips: Chip[]): string {
+export function remapChip(chip: string, from: ExploreType, to: ExploreType, chips: Chip[]): string {
   return remapSet([chip], from, to, chips).set[0] ?? FOR_YOU;
+}
+
+/** Each type's chips, as `perType` judges a pick by: every mood atlas has, no genre hidden. */
+const typeChips: Partial<Record<MediaType, Chip[]>> = {};
+const chipsOfType = (type: MediaType) => (typeChips[type] ??= exploreChips(type, { atlas: true }));
+
+/** A film genre as a series discover query asks it (`retargeted`), or undefined where series have no such genre. */
+const seriesGenre = (genre: number) =>
+  retargeted({ mediaType: 'movie', genres: [genre] }, 'tv')?.genres?.[0];
+
+/**
+ * An All selection as each type's own feed asks it: a genre as that type's discover form (`retargeted`, stricter than
+ * the toggle's closest counterpart — Horror has no series form, where the toggle takes it to Sci-Fi & Fantasy), and
+ * everything else as `remapSet` moves it. What a type has no form of is `dropped`: that type's feed is left out, and
+ * its titles with it, so a series-only pick (a network, a series mood) shows series alone.
+ */
+export function perType(
+  set: readonly string[],
+): { type: MediaType; set: string[]; dropped: string[] }[] {
+  return TYPES.map((type) => ({
+    type,
+    ...remapSet(set, 'all', type, chipsOfType(type), type === 'tv' ? seriesGenre : (g) => g),
+  }));
 }
 
 /**
@@ -872,15 +927,18 @@ export function facetQuery(
 /**
  * What an atlas row keeps once the rest of the selection applies to it, on the fields its titles carry: every genre,
  * the language, the decade, and — for a "Like", whose titles TMDB draws — the rating, on the votes TMDB's own floor
- * asks for. (A country and a recipe never share a selection with it, nor a rating a mood: `clash`.)
+ * asks for. (A country and a recipe never share a selection with it, nor a rating a mood: `clash`.) A title of the
+ * other type than the genres were picked for (a series under All) is judged by their closest counterparts.
  */
-function atlasFilter(set: readonly string[]): (title: Title) => boolean {
+function atlasFilter(set: readonly string[], type: ExploreType): (title: Title) => boolean {
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
   const language = set.find((id) => slotOf(id) === 'language');
   const decade = set.find((id) => slotOf(id) === 'decade');
   const rating = set.find((id) => slotOf(id) === 'rating');
+  const inGenre = (title: Title, genre: number) =>
+    !!title.genreIds?.includes(equivalentGenre(genre, genreType(type), title.type) ?? genre);
   return (title) =>
-    genres.every((genre) => title.genreIds?.includes(genre)) &&
+    genres.every((genre) => inGenre(title, genre)) &&
     (!language || title.originalLanguage === codeOf(language)) &&
     (!decade ||
       (title.year !== undefined &&
@@ -903,13 +961,24 @@ function atlasFilter(set: readonly string[]): (title: Title) => boolean {
  *
  * Neither judges an option of a kind already picked — another recipe, which takes over the one picked, or another
  * country, which isn't offered at all (`taken`) — since it would replace what they were counted beside.
+ *
+ * `counted` stands in for `counts` where there is no one answer to read: All's two per-type answers
+ * (`countedEmptyAcross`).
  */
 export function emptyOptions(
   selection: readonly string[],
   loaded: readonly Title[],
   complete: boolean,
   chips: Chip[],
-  { counts, type = 'movie' }: { counts?: FacetCounts | null; type?: MediaType } = {},
+  {
+    counts,
+    counted,
+    type = 'movie',
+  }: {
+    counts?: FacetCounts | null;
+    counted?: ((id: string) => boolean) | null;
+    type?: ExploreType;
+  } = {},
 ): Set<string> {
   const empty = new Set<string>();
   const picked = new Set(selection.map(slotOf));
@@ -921,16 +990,35 @@ export function emptyOptions(
     const replaces = !stacks(slot) && picked.has(slot);
     if (replaces) continue;
     // atlas's counts, where it answered, are the whole judgement: the feed's loaded titles are the fallback.
-    if (counts) {
-      if (countedEmpty(chip.id, type, counts)) empty.add(chip.id);
+    const judge = counts ? (id: string) => countedEmpty(id, type, counts) : counted;
+    if (judge) {
+      if (judge(chip.id)) empty.add(chip.id);
       continue;
     }
     const narrows =
       slot === 'genre' || slot === 'language' || slot === 'decade' || slot === 'rating';
-    if (judged && selection.length && narrows && !loaded.some(atlasFilter([chip.id])))
+    if (judged && selection.length && narrows && !loaded.some(atlasFilter([chip.id], type)))
       empty.add(chip.id);
   }
   return empty;
+}
+
+/**
+ * Whether an All option leaves nothing, by each type's own counts where atlas has no `all` answer: only where every
+ * type answered and none has it — as that type asks it (`perType`), none in a kind listed completely, or no form of
+ * it at all. A type whose counts didn't come back judges nothing, so nothing is hidden on half an answer.
+ */
+export function countedEmptyAcross(
+  id: string,
+  answers: readonly { type: MediaType; counts: FacetCounts | null }[],
+): boolean {
+  if (!answers.length) return false;
+  const forms = perType([id]);
+  return answers.every(({ type, counts }) => {
+    if (!counts) return false;
+    const form = forms.find((f) => f.type === type)?.set[0];
+    return form === undefined || countedEmpty(form, type, counts);
+  });
 }
 
 /** The chips of `ids`, in that order, less any this type doesn't have. */
@@ -1013,19 +1101,121 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
  *
  * A "Like" is the title page's "More like this" (`moreLikeThisRow`) as a whole feed: atlas's closest titles, then its
  * plot neighbours, then TMDB's recommendations for as many pages as TMDB has.
+ *
+ * All (`allFeed`) asks atlas's filter for both types at once, and otherwise shows each type's own feed, interleaved.
  */
-export function exploreFeed(set: readonly string[], type: MediaType, sources: FeedSources): RowDef {
+export function exploreFeed(
+  set: readonly string[],
+  type: ExploreType,
+  sources: FeedSources,
+): RowDef {
+  if (type === 'all') return allFeed(set, sources);
   if (!set.length) return forYou(type, sources);
   const id = `facets-${[...set].sort().join('+')}-${type}`;
   const local = localFeed(set, type, sources, id);
   const items = sources.atlas ? filterItems(set, type) : undefined;
   if (!sources.atlas || !items) return local;
+  return filterFirst(sources.atlas, type, items, local, sources, id);
+}
+
+/**
+ * All: films and series together. Where atlas's filter answers for both types at once (`/index/filter/all/…`), its
+ * titles, in its one order; otherwise — the route not there, or a pick only one type has — each type's own feed as
+ * it would be under that type (`perType`), interleaved a page at a time (`interleaveFeeds`). A pick one type has no
+ * form of leaves that type out. For You is each type's For You, interleaved; a "Like" is atlas's similar titles of
+ * both types (`mixed`).
+ */
+function allFeed(set: readonly string[], sources: FeedSources): RowDef {
+  if (!set.length)
+    return interleaveFeeds(
+      `${FOR_YOU}-all`,
+      TYPES.map((type) => ({ type, row: forYou(type, sources) })),
+    );
+  const id = `facets-${[...set].sort().join('+')}-all`;
+  const like = set.some((pick) => likeOf(pick));
+  const sides = perType(set).filter((side) => !side.dropped.length);
+  const local: RowDef = like
+    ? localFeed(set, 'all', sources, id)
+    : sides.length === 2
+      ? interleaveFeeds(
+          id,
+          sides.map(({ type, set }) => ({ type, row: exploreFeed(set, type, sources) })),
+        )
+      : sides[0]
+        ? { ...exploreFeed(sides[0].set, sides[0].type, sources), id }
+        : nothing(id);
+  // One type's pick can't be asked of both at once: its type's feed alone is the answer.
+  const items = sources.atlas && (like || sides.length === 2) ? filterItems(set, 'all') : undefined;
+  if (!sources.atlas || !items) return local;
+  return filterFirst(sources.atlas, 'all', items, local, sources, id);
+}
+
+/**
+ * Films and series as one feed: each type's own feed, a page of each in turn, interleaved title by title and each
+ * title once. A side that runs out or fails leaves the other to go on, and the feed ends when both have. Each card is
+ * narrowed by its own type's feed (`filter`): a series by the series feed's shelf, never the films'.
+ */
+export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDef }[]): RowDef {
+  const ended = sides.map(() => false);
+  const given = new Set<string>();
+  let page = 0;
+  return {
+    id,
+    title: '',
+    filter: (title) => sides.find((side) => side.type === title.type)?.row.filter?.(title) ?? true,
+    // Pages are the sides' own: a page that holds only titles already given reads on rather than ending the feed.
+    load: async () => {
+      let failure: unknown;
+      while (ended.includes(false)) {
+        page++;
+        const pages = await Promise.all(
+          sides.map(async ({ row }, at) => {
+            if (ended[at]) return [];
+            try {
+              const titles = await row.load(page);
+              if (!titles.length) ended[at] = true;
+              return titles;
+            } catch (error) {
+              console.warn('explore: one side of All failed, the other goes on:', row.id, error);
+              ended[at] = true;
+              failure = error;
+              return [];
+            }
+          }),
+        );
+        const fresh = interleave(pages).filter((title) => {
+          const key = `${title.type}:${title.id}`;
+          if (given.has(key)) return false;
+          given.add(key);
+          return true;
+        });
+        if (fresh.length) return fresh;
+      }
+      // Both sides failed before giving anything: the feed failed, as one side alone would have.
+      if (failure !== undefined && !given.size) throw failure;
+      return [];
+    },
+  };
+}
+
+/**
+ * atlas's filter's titles for `items`, then — where its route isn't there or can't apply a pick — `local` from the
+ * page it had reached.
+ */
+function filterFirst(
+  atlas: string,
+  type: ExploreType,
+  items: FilterItem[],
+  local: RowDef,
+  sources: FeedSources,
+  id: string,
+): RowDef {
   // atlas's cards, like its rows', are drawn where no poster is known yet; the fallback's rows draw their own.
   const titles = drawn(
     {
       id,
       title: '',
-      load: filterTitles(sources.atlas, type, items, { fetchImpl: sources.fetchImpl }),
+      load: filterTitles(atlas, type, items, { fetchImpl: sources.fetchImpl }),
     },
     sources.title,
   );
@@ -1054,10 +1244,13 @@ export function exploreFeed(set: readonly string[], type: MediaType, sources: Fe
 /** A feed with nothing in it: a pick only atlas's filter can answer, where it doesn't. */
 const nothing = (id: string): RowDef => ({ id, title: '', load: async () => [] });
 
-/** What a selection shows without atlas's filter: a "Like", an atlas row, or a TMDB discover query. */
+/**
+ * What a selection shows without atlas's filter: a "Like", an atlas row, or a TMDB discover query. Under All only a
+ * "Like" comes here, as atlas's similar titles of both types; the rest is each type's own (`allFeed`).
+ */
 function localFeed(
   set: readonly string[],
-  type: MediaType,
+  type: ExploreType,
   sources: FeedSources,
   id: string,
 ): RowDef {
@@ -1067,16 +1260,18 @@ function localFeed(
     const row = moreLikeThisRow({ title: { ...like, title: '' } }, sources.atlas, {
       key: sources.key ?? '',
       similarLimit: LIKE_DEPTH,
+      mixed: type === 'all',
     });
-    return { ...row, id, filter: atlasFilter(set) };
+    return { ...row, id, filter: atlasFilter(set, type) };
   }
+  if (type === 'all') return nothing(id);
   const atlasId = set.find((pick) => slotOf(pick) === 'atlas');
   if (atlasId) {
     const row = sources.atlas
       ? atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
       : undefined;
     if (!row) return forYou(type, sources);
-    return { ...drawn(row, sources.title), id, filter: atlasFilter(set) };
+    return { ...drawn(row, sources.title), id, filter: atlasFilter(set, type) };
   }
   const query = facetQuery(set, type, sources.minYear);
   return query ? discoverRow(sources.pages, id, '', query) : forYou(type, sources);

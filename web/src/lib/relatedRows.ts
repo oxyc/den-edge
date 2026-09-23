@@ -3,7 +3,7 @@
 
 import { tmdbPages, type RowDef } from './catalog';
 import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
-import type { Title } from './library';
+import type { MediaType, Title } from './library';
 import { likeId, personHref, searchHref } from './route';
 import { fetchTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
@@ -15,6 +15,8 @@ const NEIGHBOURS = 50;
 
 const keyOf = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 
+type Ref = { type: MediaType; id: number };
+
 export interface RelatedOptions {
   /** TMDB's key, or the empty string where den-edge lends its own (`/tmdb`). */
   key: string;
@@ -24,6 +26,11 @@ export interface RelatedOptions {
    * needs; a whole feed of them — Search's "Like" — asks for as many as atlas keeps (200).
    */
   similarLimit?: number;
+  /**
+   * Films and series together: atlas's closest titles as its `mixed` list, of either type, where it has one. Search's
+   * "Like" under All.
+   */
+  mixed?: boolean;
 }
 
 /**
@@ -43,7 +50,7 @@ export interface RelatedOptions {
 export function moreLikeThisRow(
   detail: Pick<TitleDetail, 'title'> & { more?: Title[] },
   atlas: string | null,
-  { key, fetchImpl = tmdbFetch, similarLimit }: RelatedOptions,
+  { key, fetchImpl = tmdbFetch, similarLimit, mixed = false }: RelatedOptions,
 ): RowDef {
   const self = detail.title;
   const kind = self.type === 'tv' ? 'series' : 'movie';
@@ -58,14 +65,28 @@ export function moreLikeThisRow(
   let source: Source = atlas === null ? 'recommended' : 'unknown';
   /** The TMDB page the detail already carried (page 1) is served first, then page 2 on. */
   let recommendedPage = 1;
-  let queue: number[] | undefined;
+  let queue: Ref[] | undefined;
 
-  async function idsFrom(path: string): Promise<number[]> {
+  /**
+   * The titles an atlas list names: its `ids`, of the seed's type, or — for a mixed row, where the answer has one —
+   * its `mixed` list, each with its own type.
+   */
+  async function idsFrom(path: string): Promise<Ref[]> {
     try {
       const res = await fetchImpl(`${atlas}${path}`);
       if (!res.ok) return [];
-      const ids = ((await res.json()) as { ids?: unknown }).ids;
-      return Array.isArray(ids) ? ids.filter((id): id is number => Number.isInteger(id)) : [];
+      const body = (await res.json()) as { ids?: unknown; mixed?: unknown };
+      if (mixed && Array.isArray(body.mixed))
+        return (body.mixed as Record<string, unknown>[]).flatMap((t): Ref[] => {
+          const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
+          return type && Number.isInteger(t.id) ? [{ type, id: t.id as number }] : [];
+        });
+      const ids = body.ids;
+      return Array.isArray(ids)
+        ? ids
+            .filter((id): id is number => Number.isInteger(id))
+            .map((id) => ({ type: self.type, id }))
+        : [];
     } catch {
       return [];
     }
@@ -74,12 +95,11 @@ export function moreLikeThisRow(
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
   async function drawQueued(path: string): Promise<Title[] | undefined> {
     queue ??= await idsFrom(path);
-    const wanted = queue.filter((id) => !seen.has(keyOf({ type: self.type, id }))).slice(0, CHUNK);
-    queue = queue.slice(queue.indexOf(wanted[wanted.length - 1] ?? -1) + 1);
+    const wanted = queue.filter((ref) => !seen.has(keyOf(ref))).slice(0, CHUNK);
+    const last = wanted[wanted.length - 1];
+    queue = last ? queue.slice(queue.indexOf(last) + 1) : [];
     if (wanted.length === 0) return undefined;
-    const drawn = await Promise.all(
-      wanted.map((id) => fetchTitle({ type: self.type, id }, key, fetchImpl)),
-    );
+    const drawn = await Promise.all(wanted.map((ref) => fetchTitle(ref, key, fetchImpl)));
     return drawn.filter((t): t is Title => t !== null);
   }
 
@@ -124,14 +144,9 @@ export function moreLikeThisRow(
   return {
     id: 'more-like-this',
     title: 'More like this',
-    // The same titles as a whole page to browse and narrow: Search with this title as its "Like".
-    aside: {
-      label: 'Explore similar',
-      href: searchHref('', {
-        type: self.type === 'tv' ? 'tv' : undefined,
-        chips: [likeId(self)],
-      }),
-    },
+    // The same titles as a whole page to browse and narrow: Search with this title as its "Like", under All, where
+    // they are films and series together.
+    aside: { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },
     load: async () => {
       while (source !== 'done') {
         const fresh = (await step()).filter((t) => {
