@@ -1,6 +1,6 @@
 # den-edge — a static musl binary built on Alpine, copied into `scratch`, like every den Rust service, with
 # the Den web app's built files beside it.
-FROM node:24-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 # No install scripts: nothing here needs one (Vite's native bundler ships as optional packages), and a
