@@ -182,9 +182,18 @@ fn allowed(path: &str) -> bool {
         Some("search" | "discover" | "trending" | "find" | "genre" | "watch" | "configuration") => true,
         Some(kind @ ("movie" | "tv" | "person" | "collection")) => {
             let Some(id) = parts.next() else { return false };
-            // TMDB's own named lists sit where an id goes.
-            const LISTS: [&str; 7] =
-                ["popular", "top_rated", "now_playing", "upcoming", "airing_today", "on_the_air", "latest"];
+            // TMDB's own named lists sit where an id goes. `changes` is the ids edited in a date range, which
+            // den-atlas reads to know whose credits to ask for again.
+            const LISTS: [&str; 8] = [
+                "popular",
+                "top_rated",
+                "now_playing",
+                "upcoming",
+                "airing_today",
+                "on_the_air",
+                "latest",
+                "changes",
+            ];
             let named_list = kind != "collection" && LISTS.contains(&id);
             if !(numeric(id) || named_list) {
                 return false;
@@ -777,9 +786,15 @@ mod tests {
             "/3/collection/230",
             "/3/watch/providers/regions",
             "/3/movie/550/watch/providers",
+            // den-atlas's refresh: which titles were edited, and a series' credits across its seasons.
+            "/3/movie/changes",
+            "/3/tv/changes",
+            "/3/tv/1399/aggregate_credits",
         ] {
             assert!(allowed(path), "{path}");
         }
+        assert!(!allowed("/3/collection/changes"), "a collection has no changes list");
+        assert_eq!(fresh_for("/3/movie/changes"), LIST_TTL, "a list, not a settled record");
         // A lent key must not reach anything that writes, or that names the account it belongs to.
         for path in [
             "/3/account/1/watchlist",
