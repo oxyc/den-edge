@@ -35,7 +35,7 @@ the rest is small JSON it validates and bounds.
 | `GET /oauth/request/{id}`, `POST /oauth/request/{id}/approve\|deny` | the consent page: `{client, redirectHost}`, then the answer → `{redirect}`, back to the client with a code or `access_denied`. Approving takes `x-den-library-member` (a member) or `x-den-grant` (a guest with a live grant); anyone else is `403` |
 | `POST /oauth/token` | `authorization_code` (with the PKCE verifier) or `refresh_token` → `{access_token, refresh_token, expires_in}`. The access token is an EdDSA JWS (`at+jwt`) for `<resource>/mcp`, 15 minutes, never past a guest's end of access; the refresh token rotates, and a replaced one presented again ends the session |
 | `POST /oauth/revoke` | RFC 7009 |
-| `GET /oauth/connections`, `DELETE /oauth/connections/{sid}` | Settings › Connections › Assistants: a member sees its library's connections, its guests' included; a guest its own |
+| `GET /oauth/connections`, `DELETE /oauth/connections/{sid}` | Settings › Assistants: `{connections: [{sid, client, redirectHost, kind, guest, createdAt, usedAt}]}`; a member sees its library's connections, its guests' included; a guest its own |
 | `* /mcp`, `GET /.well-known/oauth-protected-resource[/mcp]` | relayed to den-mcp (the `/mcp` entry of `ADDON_RELAY`), streamed. `/mcp` only for a token whose session still exists and whose member or grant still stands, checked on every call — so a revocation, a revoked or expired grant, or a library key reset stops the next call |
 
 `POST /pair/open` allows 20 tries a minute from one address (`429` past that).

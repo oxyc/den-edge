@@ -5,7 +5,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import AssistantsRow from './AssistantsRow.svelte';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -910,8 +909,6 @@
       {/if}
     </p>
   </SettingRow>
-
-  <AssistantsRow />
 </SettingsSection>
 
 <style>

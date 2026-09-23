@@ -8,9 +8,17 @@
   let {
     id,
     title,
+    subtitle,
     footer,
     children,
-  }: { id: string; title: string; footer?: string; children: Snippet } = $props();
+  }: {
+    id: string;
+    title: string;
+    /** A quieter line under the title, saying what the section is for. */
+    subtitle?: string;
+    footer?: string;
+    children: Snippet;
+  } = $props();
 
   // A section's id doesn't change for the life of the section.
   // svelte-ignore state_referenced_locally
@@ -19,7 +27,9 @@
 
 <section {id} aria-labelledby="{id}-heading">
   <div class="heading">
-    <h2 id="{id}-heading">{title}</h2>
+    <h2 id="{id}-heading">
+      {title}{#if subtitle}<small>{subtitle}</small>{/if}
+    </h2>
     <ExpandAll section={id} label={title} />
   </div>
   <div class="plate">{@render children()}</div>
@@ -43,6 +53,13 @@
   h2 {
     margin: 0;
     font-size: 20px;
+  }
+
+  h2 small {
+    display: block;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 400;
   }
 
   .plate {

@@ -28,7 +28,7 @@ fn config(state: &AppState) -> String {
     if let Some(id) = &state.simkl_client_id {
         config["simklClientId"] = Value::String(id.clone());
     }
-    // The address an assistant is connected with (Settings › Connections › Assistants); absent while it is off.
+    // The address an assistant is connected with (Settings › Assistants); absent while it is off.
     if let Some(oauth) = &state.oauth {
         config["mcpUrl"] = Value::String(oauth.resource.clone());
     }

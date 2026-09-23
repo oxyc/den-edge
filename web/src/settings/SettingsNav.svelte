@@ -4,6 +4,7 @@
   const SECTIONS = [
     { id: 'connections', label: 'Connections' },
     { id: 'sharing', label: 'Sharing' },
+    { id: 'assistants', label: 'Assistants' },
     { id: 'playback', label: 'Playback' },
     { id: 'content', label: 'Content' },
     { id: 'advanced', label: 'Advanced' },

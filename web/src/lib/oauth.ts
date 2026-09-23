@@ -1,7 +1,7 @@
 // Connecting an assistant (Claude, ChatGPT) to Den's MCP server (oxyc/den#25). den-edge is the authorization server:
 // an assistant sends its person to `/connect?request=<id>`, this browser shows who is asking and says yes or no, and
 // den-edge sends the person back to the assistant. Only a library member or a guest with a live invite can say yes;
-// `relayFetch` attaches that proof to these calls and to nothing else. Settings › Connections lists what is
+// `relayFetch` attaches that proof to these calls and to nothing else. Settings › Assistants lists what is
 // connected and revokes it.
 
 import { relayFetch } from './relayFetch';
@@ -17,6 +17,8 @@ export interface ConsentRequest {
 export interface Connection {
   sid: string;
   client: string;
+  /** The host its approval went back to, which is who really holds it. */
+  redirectHost: string | null;
   kind: 'member' | 'guest';
   /** The guest it was connected by, for a member looking at their guests' connections. */
   guest: string | null;
@@ -26,15 +28,20 @@ export interface Connection {
 
 export type Reply<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
 
-/** The address an assistant connects to (den-edge's `/config` `mcpUrl`); null while the connector is off. */
-export async function fetchMcpUrl(fetchImpl: typeof fetch = fetch): Promise<string | null> {
+/**
+ * The address an assistant connects to (den-edge's `/config` `mcpUrl`): null while the connector is off on this
+ * server, undefined when Den couldn't be asked.
+ */
+export async function fetchMcpUrl(
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null | undefined> {
   try {
     const res = await fetchImpl('/config', { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return null;
+    if (!res.ok) return undefined;
     const url = ((await res.json()) as { mcpUrl?: unknown }).mcpUrl;
     return typeof url === 'string' && safeRedirect(url) ? url : null;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
@@ -121,6 +128,7 @@ function readConnection(raw: unknown): Connection | null {
   return {
     sid: c.sid,
     client: c.client,
+    redirectHost: typeof c.redirectHost === 'string' ? c.redirectHost : null,
     kind: c.kind === 'guest' ? 'guest' : 'member',
     guest: typeof c.guest === 'string' ? c.guest : null,
     createdAt: typeof c.createdAt === 'number' ? c.createdAt : 0,

@@ -116,7 +116,15 @@ test('connections are listed as den-edge describes them, and revoked', async () 
   const listed = await listConnections(
     reply(200, {
       connections: [
-        { sid: 's1', client: 'Claude', kind: 'member', guest: null, createdAt: 1, usedAt: 2 },
+        {
+          sid: 's1',
+          client: 'Claude',
+          redirectHost: 'claude.ai',
+          kind: 'member',
+          guest: null,
+          createdAt: 1,
+          usedAt: 2,
+        },
         { sid: 's2', client: 'ChatGPT', kind: 'guest', guest: 'Sam', createdAt: 3, usedAt: 4 },
         { nope: true },
       ],
@@ -125,8 +133,24 @@ test('connections are listed as den-edge describes them, and revoked', async () 
   expect(listed).toEqual({
     ok: true,
     value: [
-      { sid: 's1', client: 'Claude', kind: 'member', guest: null, createdAt: 1, usedAt: 2 },
-      { sid: 's2', client: 'ChatGPT', kind: 'guest', guest: 'Sam', createdAt: 3, usedAt: 4 },
+      {
+        sid: 's1',
+        client: 'Claude',
+        redirectHost: 'claude.ai',
+        kind: 'member',
+        guest: null,
+        createdAt: 1,
+        usedAt: 2,
+      },
+      {
+        sid: 's2',
+        client: 'ChatGPT',
+        redirectHost: null,
+        kind: 'guest',
+        guest: 'Sam',
+        createdAt: 3,
+        usedAt: 4,
+      },
     ],
   });
   const gone = vi.fn(async () => new Response(null, { status: 204 }));
@@ -140,4 +164,6 @@ test('the connector address comes from /config, and only an https one', async ()
   );
   expect(await fetchMcpUrl(reply(200, {}))).toBeNull();
   expect(await fetchMcpUrl(reply(200, { mcpUrl: 'http://den.example/mcp' }))).toBeNull();
+  // Off is null; a Den that couldn't be asked is undefined, so the page doesn't call it off.
+  expect(await fetchMcpUrl(reply(503, {}))).toBeUndefined();
 });

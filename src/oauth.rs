@@ -185,6 +185,9 @@ struct Session {
     sid: String,
     client_id: String,
     client_name: String,
+    /// The host its approval was sent back to, which is who really holds it; Settings shows it beside the name.
+    #[serde(default)]
+    redirect_host: Option<String>,
     who: Who,
     /// Hex SHA-256 of the refresh secret now valid, and of the one it replaced (reuse detection).
     refresh_hash: String,
@@ -571,6 +574,10 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     redirect(&format!("{}/connect?request={id}", oauth.consent_origin))
 }
 
+fn redirect_host(uri: &str) -> Option<String> {
+    url::Url::parse(uri).ok().and_then(|u| u.host_str().map(str::to_owned))
+}
+
 fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, format!("oauth-consent:{ip}"), CONSENT_PER_WINDOW * 2) {
@@ -579,13 +586,10 @@ fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Resp
     let now = state.now();
     let pending = crate::lock(&oauth.pending);
     match pending.get(id).filter(|p| p.until > now) {
-        Some(p) => {
-            let host = url::Url::parse(&p.redirect_uri).ok().and_then(|u| u.host_str().map(str::to_owned));
-            json_reply(
-                StatusCode::OK,
-                &json!({ "client": p.client_name, "redirectHost": host, "scope": SCOPE }),
-            )
-        }
+        Some(p) => json_reply(
+            StatusCode::OK,
+            &json!({ "client": p.client_name, "redirectHost": redirect_host(&p.redirect_uri), "scope": SCOPE }),
+        ),
         None => json_reply(StatusCode::NOT_FOUND, &error("request_expired")),
     }
 }
@@ -812,6 +816,7 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
         sid: random_id(),
         client_id: code.client_id,
         client_name,
+        redirect_host: redirect_host(&code.redirect_uri),
         who: code.who,
         refresh_hash: sha(secret.as_bytes()),
         previous_hash: None,
@@ -925,7 +930,7 @@ async fn revoke(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     json_reply(StatusCode::OK, &json!({}))
 }
 
-// ---- Settings › Connections
+// ---- Settings › Assistants
 
 /// The connections a request's proof may see and end: a member sees its library's, its guests' included; a guest
 /// sees those made in its grant's name.
@@ -954,6 +959,7 @@ async fn connections(state: &AppState, req: Request) -> Response {
             Ok(Some(s)) => listed.push(json!({
                 "sid": s.sid,
                 "client": s.client_name,
+                "redirectHost": s.redirect_host,
                 "kind": s.who.kind(),
                 "guest": match &s.who { Who::Guest { name, .. } => Some(name.clone()), Who::Member { .. } => None },
                 "createdAt": s.created_at,
@@ -1697,6 +1703,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let sid = listed["connections"][0]["sid"].as_str().unwrap().to_owned();
         assert_eq!(listed["connections"][0]["client"], "Claude");
+        assert_eq!(listed["connections"][0]["redirectHost"], "assistant.example");
         assert_eq!(send_json(&h, "GET", "/oauth/connections", &[]).await.0, StatusCode::FORBIDDEN);
         let path = format!("/oauth/connections/{sid}");
         // Another library's member, or a stranger, cannot end it.
@@ -1723,6 +1730,7 @@ mod tests {
             sid: "0".repeat(32),
             client_id: "c".into(),
             client_name: "c".into(),
+            redirect_host: None,
             who: Who::Member { library: LIB.into(), member_hash: sha(TOKEN.as_bytes()) },
             refresh_hash: String::new(),
             previous_hash: None,
@@ -1750,6 +1758,7 @@ mod tests {
             sid: "0123456789abcdef0123456789abcdef".into(),
             client_id: "c1".into(),
             client_name: "Claude".into(),
+            redirect_host: None,
             who: Who::Guest { gid: "0a1b2c3d".into(), host: LIB.into(), name: "Sam".into() },
             refresh_hash: String::new(),
             previous_hash: None,
