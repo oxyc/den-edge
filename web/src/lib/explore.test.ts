@@ -42,11 +42,7 @@ describe('Explore chips', () => {
     ]);
     const of = (group: string) => chips.filter((c) => c.group === group).map((c) => c.id);
     // atlas's own order: its strongest rows lead, moods and plot facets together.
-    expect(of('mood').slice(0, 3)).toEqual([
-      'mood-mind-bending',
-      'plot-bittersweet',
-      'mood-feel-good',
-    ]);
+    expect(of('mood').slice(0, 3)).toEqual(['mood-mind-bending', 'plot-unhappy', 'mood-feel-good']);
     // The TV's curated recipes first, then the rest of the catalogue, then atlas's subgenres.
     expect(of('recipe').slice(0, 3)).toEqual([
       'recipe-romantic-comedy',
@@ -217,10 +213,11 @@ describe('switching Movies and Series', () => {
     expect(remapChip('genre-10764', 'tv', 'movie', movie)).toBe('genre-99');
     // A recipe with no series form, and a mood only films carry, fall back to For You.
     expect(remapChip('recipe-sci-fi-horror', 'movie', 'tv', tv)).toBe(FOR_YOU);
-    expect(remapChip('plot-bittersweet', 'movie', 'tv', tv)).toBe(FOR_YOU);
+    expect(remapChip('plot-nonlinear', 'movie', 'tv', tv)).toBe(FOR_YOU);
     // A recipe and a mood both types have stay open.
     expect(remapChip('recipe-heist', 'movie', 'tv', tv)).toBe('recipe-heist');
     expect(remapChip('mood-feel-good', 'movie', 'tv', tv)).toBe('mood-feel-good');
+    expect(remapChip('plot-unhappy', 'movie', 'tv', tv)).toBe('plot-unhappy');
   });
 
   it('keeps a hidden genre’s counterpart closed too', () => {

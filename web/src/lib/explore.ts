@@ -332,7 +332,7 @@ const SYNONYMS: Record<string, string[]> = {
   scary: ['genre-27', 'subgenre-supernatural-horror', 'subgenre-folk-horror'],
   creepy: ['genre-27', 'subgenre-supernatural-horror', 'subgenre-folk-horror'],
   space: ['plot-space', 'genre-878', 'genre-10765'],
-  sad: ['mood-tearjerker', 'plot-tragic', 'plot-bittersweet'],
+  sad: ['mood-tearjerker', 'plot-unhappy'],
   love: ['genre-10749', 'recipe-romantic-comedy', 'recipe-romantic-drama'],
   murder: ['subgenre-whodunit', 'recipe-serial-killer', 'recipe-police-procedural'],
   detective: ['subgenre-whodunit', 'recipe-police-procedural'],
