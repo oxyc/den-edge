@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64.00 64.00">
+  <style>.plate{fill:#17191b}.ink{fill:#f2efe9}.l0{stop-color:#fffaf0;stop-opacity:0.75}.l1{stop-color:#fffaf0;stop-opacity:0.1}@media (prefers-color-scheme:light){.plate{fill:#f2efe9}.ink{fill:#17191b}.l0{stop-color:#c98a3a;stop-opacity:0.6}.l1{stop-color:#c98a3a;stop-opacity:0.08}}</style>
+  <defs>
+    <clipPath id="plate"><rect width="64.00" height="64.00" rx="14.08"/></clipPath>
+    <linearGradient id="light" x1="0" y1="1" x2="0" y2="0"><stop offset="0" class="l0"/><stop offset="1" class="l1"/></linearGradient>
+  </defs>
+  <g clip-path="url(#plate)">
+    <rect class="plate" width="64.00" height="64.00"/>
+    <path d="M16.19 64.00V33.51A15.81 15.81 0 0 1 47.81 33.51V64.00Z" fill="url(#light)"/>
+    <path class="ink" d="M4.89 64.00V33.51A27.11 27.11 0 0 1 59.11 33.51V64.00ZM16.19 64.00V33.51A15.81 15.81 0 0 1 47.81 33.51V64.00Z" fill-rule="evenodd"/>
+  </g>
+</svg>
