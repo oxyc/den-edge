@@ -31,8 +31,11 @@ export interface Explore {
   chips?: string[];
 }
 
-/** A facet id is lowercase words, digits, a country code and dashes: nothing that needs escaping in `c=`. */
-const FACET = /^[a-z0-9]+(?:-[A-Za-z0-9]+)*$/;
+/**
+ * A facet id is lowercase words, digits, a country code or a Wikidata id, underscores (atlas's `live_action`) and
+ * dashes: nothing that needs escaping in `c=`.
+ */
+export const FACET = /^[a-z0-9]+(?:-[A-Za-z0-9_]+)*$/;
 
 /** The facet "More like <title>": `like-movie-949`, `like-tv-1396`. */
 export const likeId = (title: { type: MediaType; id: number }) => `like-${title.type}-${title.id}`;

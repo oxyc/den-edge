@@ -18,16 +18,48 @@ import {
   type RowDef,
 } from './catalog';
 import { atlasRows } from './atlasRows';
-import { countedEmpty, type FacetCounts } from './facetCounts';
+import {
+  countedEmpty,
+  filterItems,
+  filterOnlyKind,
+  recipeParts,
+  type FacetCounts,
+  type FilterOnlyKind,
+} from './facetCounts';
+import { filterTitles, FilterUnavailable, type FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
-import { likeOf } from './route';
+import { FACET, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
 
-/** What a chip is: For You, or one of the six kinds the rail lists and the search field finds. */
+/**
+ * What a chip is: For You, one of the kinds the rail lists and the search field finds, or — where atlas's filter
+ * answers (`filterRoutes.ts`) — one of the kinds only it knows, listed from its counts (`filterChips`).
+ */
 export type ChipGroup =
-  'for-you' | 'genre' | 'recipe' | 'mood' | 'language' | 'country' | 'decade' | 'rating' | 'like';
+  | 'for-you'
+  | 'genre'
+  | 'recipe'
+  | 'mood'
+  | 'language'
+  | 'country'
+  | 'decade'
+  | 'rating'
+  | 'like'
+  | 'people'
+  | 'company'
+  | 'network'
+  | 'subject'
+  | 'place'
+  | 'format'
+  | 'source'
+  | 'technique'
+  | 'audience'
+  | 'critique'
+  | 'runtime'
+  | 'animated'
+  | 'character';
 
 export interface Chip {
   id: string;
@@ -35,6 +67,8 @@ export interface Chip {
   group: ChipGroup;
   /** Other names it is found by: a country by its people's name, a decade by "90s" and "nineties". */
   aliases?: string[];
+  /** Its kind in words where the group's (`KIND`) says less: a person's "actor" or "director/writer". */
+  kind?: string;
 }
 
 /** A chip's kind as a word, for the muted label beside a Browse-row chip: "Swedish · language". */
@@ -48,6 +82,19 @@ export const KIND: Record<ChipGroup, string> = {
   decade: 'decade',
   rating: 'rating',
   like: 'like',
+  people: 'person',
+  company: 'studio',
+  network: 'network',
+  subject: 'subject',
+  place: 'place',
+  format: 'format',
+  source: 'based on',
+  technique: 'technique',
+  audience: 'audience',
+  critique: 'critique',
+  runtime: 'runtime',
+  animated: 'animation',
+  character: 'character',
 };
 
 /** The rating floors offered, as the posters' ★ reads (TMDB's vote average), each with the words people use for it. */
@@ -397,10 +444,22 @@ export const namesExactly = (text: string, chip: Chip) =>
 
 /**
  * Which slot a facet fills. A mood, a plot facet and a subgenre are all atlas's rows, and fill one slot. A "Like" —
- * the titles closest to one title — is atlas's too, and can't share a feed with a mood, but is its own kind.
+ * the titles closest to one title — is atlas's too, and can't share a feed with a mood, but is its own kind. The
+ * kinds only atlas's filter knows stack as genres do (`more`: people, studios, subjects…), but a runtime and whether
+ * it is animated, which a title has one of.
  */
 export type Slot =
-  'genre' | 'language' | 'country' | 'decade' | 'rating' | 'recipe' | 'atlas' | 'like';
+  | 'genre'
+  | 'language'
+  | 'country'
+  | 'decade'
+  | 'rating'
+  | 'recipe'
+  | 'atlas'
+  | 'like'
+  | 'runtime'
+  | 'animated'
+  | 'more';
 
 /** The slots that hold one value: once it is picked, no other of its kind is offered until it is removed. */
 const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
@@ -410,11 +469,18 @@ const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
   'rating',
   'atlas',
   'like',
+  'runtime',
+  'animated',
 ]);
+
+/** The slots whose values all apply together. */
+const stacks = (slot: Slot | undefined) => slot === 'genre' || slot === 'more';
 
 export function slotOf(id: string): Slot | undefined {
   if (id === FOR_YOU) return undefined;
   if (likeOf(id)) return 'like';
+  const only = filterOnlyKind(id);
+  if (only) return only === 'runtime' || only === 'animated' ? only : 'more';
   if (id.startsWith('genre-')) return 'genre';
   if (id.startsWith('lang-')) return 'language';
   if (id.startsWith('country-')) return 'country';
@@ -440,12 +506,24 @@ const recipeQuery = (id: string, type: MediaType) => {
  * mood or a "Like" takes neither — nor each other, since each is a whole feed. A mood's titles carry no rating
  * either, where a "Like"'s, drawn from TMDB, do. A recipe can't take a language, a country or a genre its own query
  * rules out.
+ *
+ * Where atlas's filter answers (`filtered`), it takes any mix of what it knows, so all that is lifted: what it can't
+ * take is a recipe it has no form of (`recipeParts`) beside a kind only it knows.
  */
-function clash(a: string, b: string, type: MediaType): boolean {
+function clash(a: string, b: string, type: MediaType, filtered = false): boolean {
   const [sa, sb] = [slotOf(a), slotOf(b)];
-  if (sa === sb) return sa !== 'genre';
-  const fromAtlas = (slot: Slot | undefined) => slot === 'atlas' || slot === 'like';
-  if (fromAtlas(sa) || fromAtlas(sb)) {
+  if (sa === sb) return !stacks(sa);
+  const fromAtlas = (slot: Slot | undefined) =>
+    slot === 'atlas' ||
+    slot === 'like' ||
+    slot === 'more' ||
+    slot === 'runtime' ||
+    slot === 'animated';
+  const tmdbOnly = (id: string) =>
+    slotOf(id) === 'recipe' && !recipeParts(id.slice('recipe-'.length), type);
+  if (filtered) {
+    if ((tmdbOnly(a) && fromAtlas(sb)) || (tmdbOnly(b) && fromAtlas(sa))) return true;
+  } else if (fromAtlas(sa) || fromAtlas(sb)) {
     const [feed, other] = fromAtlas(sa) ? [sa, sb] : [sb, sa];
     return (
       other === 'country' ||
@@ -478,10 +556,11 @@ export function applyPick(
   set: readonly string[],
   id: string,
   type: MediaType,
+  filtered = false,
 ): { set: string[]; removed: string[] } {
   if (id === FOR_YOU) return { set: [], removed: [] };
   if (set.includes(id)) return { set: set.filter((x) => x !== id), removed: [] };
-  const removed = set.filter((x) => clash(x, id, type));
+  const removed = set.filter((x) => clash(x, id, type, filtered));
   return { set: [...set.filter((x) => !removed.includes(x)), id], removed };
 }
 
@@ -496,10 +575,15 @@ export function taken(set: readonly string[], id: string): boolean {
  * already picked (`taken`), and not one that would throw out a pick of another kind. Another recipe still is: it
  * takes over the one picked.
  */
-export function offered(set: readonly string[], id: string, type: MediaType): boolean {
+export function offered(
+  set: readonly string[],
+  id: string,
+  type: MediaType,
+  filtered = false,
+): boolean {
   if (id === FOR_YOU) return true;
   if (set.includes(id) || taken(set, id)) return false;
-  return !set.some((x) => slotOf(x) !== slotOf(id) && clash(x, id, type));
+  return !set.some((x) => slotOf(x) !== slotOf(id) && clash(x, id, type, filtered));
 }
 
 /**
@@ -515,6 +599,9 @@ export function remapSet(
 ): { set: string[]; dropped: string[] } {
   const known = new Set(chips.map((chip) => chip.id));
   for (const id of set) if (likeOf(id)?.type === to) known.add(id);
+  // A person, a studio, a subject… is the same for either type; a network only a series has.
+  for (const id of set)
+    if (filterOnlyKind(id) && !(to === 'movie' && filterOnlyKind(id) === 'network')) known.add(id);
   const next: string[] = [];
   const dropped: string[] = [];
   for (const id of set) {
@@ -546,8 +633,11 @@ export function facetQuery(
   type: MediaType,
   minYear?: number,
 ): DiscoverQuery | undefined {
-  if (!set.length || set.some((id) => slotOf(id) === 'atlas' || slotOf(id) === 'like'))
-    return undefined;
+  const tmdb = (id: string) => {
+    const slot = slotOf(id);
+    return !(slot === 'atlas' || slot === 'like' || filterOnlyKind(id));
+  };
+  if (!set.length || !set.every(tmdb)) return undefined;
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
   const recipe = set.find((id) => slotOf(id) === 'recipe');
   const language = set.find((id) => slotOf(id) === 'language');
@@ -609,7 +699,8 @@ function atlasFilter(set: readonly string[]): (title: Title) => boolean {
 /**
  * The options that would show nothing beside `selection`. The one place the rail learns what is empty.
  *
- * Where atlas answered with its counts (`facetCounts.ts`), an option with none in a kind it counted is empty. And
+ * Where atlas answered with its counts (`filterRoutes.ts`), an option with none in a kind it lists completely is
+ * empty. And
  * once the selection's own feed is `complete` (every page loaded), what is loaded is all there is: a genre, a rating,
  * or a language or a decade where none is picked yet, that nothing in it matches is empty too.
  *
@@ -633,10 +724,12 @@ export function emptyOptions(
   for (const chip of chips) {
     const slot = slotOf(chip.id);
     if (!slot || selection.includes(chip.id)) continue;
-    const replaces = slot !== 'genre' && picked.has(slot);
+    // A one-value kind's other values are the alternative pick, never judged beside the pick itself.
+    const replaces = !stacks(slot) && picked.has(slot);
     if (replaces) continue;
-    if (counts && countedEmpty(chip.id, type, counts)) {
-      empty.add(chip.id);
+    // atlas's counts, where it answered, are the whole judgement: the feed's loaded titles are the fallback.
+    if (counts) {
+      if (countedEmpty(chip.id, type, counts)) empty.add(chip.id);
       continue;
     }
     const narrows =
@@ -665,6 +758,8 @@ export interface FeedSources {
   title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
   /** TMDB's key, or the empty string where den-edge lends its own: a "Like" draws its titles with it. */
   key?: string;
+  /** How atlas's filter is asked (den-edge's relay by default). */
+  fetchImpl?: typeof fetch;
 }
 
 /** How many of atlas's closest titles a "Like" asks for: all it keeps for one title. */
@@ -738,32 +833,162 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
  * What a selection shows for `type`, a page at a time: For You when it is empty; an atlas row or a "Like", filtered
  * here by the facets beside it, when it holds one; otherwise the one discover query its facets are.
  *
+ * Where every pick has a form in atlas's filter (`filterItems`), the feed is its `titles.json`: one question, answered
+ * in full, whatever the mix. Where atlas has no such route, or leaves a picked kind out, the feed goes on as it did
+ * before it, from the page it had reached:
+ *
  * A "Like" is the title page's "More like this" (`moreLikeThisRow`) as a whole feed: atlas's closest titles, then its
  * plot neighbours, then TMDB's recommendations for as many pages as TMDB has.
  */
 export function exploreFeed(set: readonly string[], type: MediaType, sources: FeedSources): RowDef {
   if (!set.length) return forYou(type, sources);
-  const key = [...set].sort().join('+');
+  const id = `facets-${[...set].sort().join('+')}-${type}`;
+  const local = localFeed(set, type, sources, id);
+  const items = sources.atlas ? filterItems(set, type) : undefined;
+  if (!sources.atlas || !items) return local;
+  // atlas's cards, like its rows', are drawn where no poster is known yet; the fallback's rows draw their own.
+  const titles = drawn(
+    {
+      id,
+      title: '',
+      load: filterTitles(sources.atlas, type, items, { fetchImpl: sources.fetchImpl }),
+    },
+    sources.title,
+  );
+  /** The page the fallback took over after; undefined while atlas's filter answers. */
+  let from: number | undefined;
+  return {
+    id,
+    title: '',
+    // atlas's answer is the selection already; the fallback's needs its own narrowing.
+    filter: (title) => from === undefined || (local.filter?.(title) ?? true),
+    load: async (page) => {
+      if (from === undefined) {
+        try {
+          return await titles.load(page);
+        } catch (error) {
+          if (!(error instanceof FilterUnavailable)) throw error;
+          from = page - 1;
+        }
+      }
+      return local.load(page - from);
+    },
+  };
+}
+
+/** A feed with nothing in it: a pick only atlas's filter can answer, where it doesn't. */
+const nothing = (id: string): RowDef => ({ id, title: '', load: async () => [] });
+
+/** What a selection shows without atlas's filter: a "Like", an atlas row, or a TMDB discover query. */
+function localFeed(
+  set: readonly string[],
+  type: MediaType,
+  sources: FeedSources,
+  id: string,
+): RowDef {
+  if (set.some((pick) => filterOnlyKind(pick))) return nothing(id);
   const like = set.map(likeOf).find((ref) => ref !== undefined);
   if (like) {
     const row = moreLikeThisRow({ title: { ...like, title: '' } }, sources.atlas, {
       key: sources.key ?? '',
       similarLimit: LIKE_DEPTH,
     });
-    return { ...row, id: `facets-${key}-${type}`, filter: atlasFilter(set) };
+    return { ...row, id, filter: atlasFilter(set) };
   }
-  const atlasId = set.find((id) => slotOf(id) === 'atlas');
+  const atlasId = set.find((pick) => slotOf(pick) === 'atlas');
   if (atlasId) {
     const row = sources.atlas
       ? atlasRows(sources.atlas, type).find((r) => r.id === `atlas-${atlasId}-${type}`)
       : undefined;
     if (!row) return forYou(type, sources);
-    return { ...drawn(row, sources.title), id: `facets-${key}-${type}`, filter: atlasFilter(set) };
+    return { ...drawn(row, sources.title), id, filter: atlasFilter(set) };
   }
   const query = facetQuery(set, type, sources.minYear);
-  return query
-    ? discoverRow(sources.pages, `facets-${key}-${type}`, '', query)
-    : forYou(type, sources);
+  return query ? discoverRow(sources.pages, id, '', query) : forYou(type, sources);
+}
+
+/** A runtime bucket's or an animation value's words; any other id of atlas's, as words. */
+function valueLabel(kind: string, id: string): string {
+  const runtime: Record<string, string> = {
+    'under-90': 'Under 90 min',
+    '90-120': '90–120 min',
+    '120-150': '120–150 min',
+    'over-150': 'Over 150 min',
+  };
+  if (kind === 'runtime' && runtime[id]) return runtime[id];
+  if (kind === 'animated') return id === 'yes' ? 'Animated' : 'Not animated';
+  const words = id.replace(/[_-]+/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** The groups the filter-only kinds are listed under, in the rail's order. */
+const FILTER_GROUPS: [FilterOnlyKind, ChipGroup][] = [
+  ['person', 'people'],
+  ['company', 'company'],
+  ['network', 'network'],
+  ['subject', 'subject'],
+  ['place', 'place'],
+  ['format', 'format'],
+  ['source', 'source'],
+  ['technique', 'technique'],
+  ['audience', 'audience'],
+  ['critique', 'critique'],
+  ['runtime', 'runtime'],
+  ['animated', 'animated'],
+];
+
+/** An id that can travel in the address (`route.ts`'s `c=`). */
+const addressable = (id: string) => FACET.test(id);
+
+/**
+ * The options only atlas's filter knows, from its counts beside the selection: its top people, studios, subjects and
+ * the rest, most titles first, named by its labels. Every one listed has titles beside the selection — atlas leaves
+ * out a value with none — and the picked ones are there too, which is where their pills find their names.
+ */
+export function filterChips(counts: FilterCounts): Chip[] {
+  const unavailable = new Set(counts.kindsUnavailable);
+  const chips: Chip[] = [];
+  // A maker, a cast member and a character are picked from the search field, never listed: only their names are
+  // wanted here, for the pills.
+  const namedOnly: [FilterOnlyKind, ChipGroup][] = [
+    ['made', 'people'],
+    ['cast', 'people'],
+    ['character', 'character'],
+  ];
+  for (const [kind, group] of [...FILTER_GROUPS, ...namedOnly]) {
+    const answer = counts.kinds[kind];
+    if (!answer || unavailable.has(kind)) continue;
+    const listed = !namedOnly.some(([k]) => k === kind);
+    const ids = [
+      ...new Set([
+        ...(listed
+          ? Object.entries(answer.values ?? {})
+              .sort(([, a], [, b]) => b - a)
+              .map(([value]) => value)
+          : []),
+        ...(answer.selected ?? []),
+      ]),
+    ];
+    for (const value of ids) {
+      const id = `${kind}-${value}`;
+      if (!addressable(id)) continue;
+      chips.push({ id, label: answer.labels?.[value] ?? valueLabel(kind, value), group });
+    }
+  }
+  return chips;
+}
+
+/** A pick of a kind only atlas's filter knows, before its counts have named it: "Person…". */
+export function pendingChip(id: string): Chip | undefined {
+  const kind = filterOnlyKind(id);
+  if (!kind) return undefined;
+  const group =
+    FILTER_GROUPS.find(([k]) => k === kind)?.[1] ?? (kind === 'character' ? 'character' : 'people');
+  if (kind === 'runtime' || kind === 'animated') {
+    return { id, label: valueLabel(kind, id.slice(kind.length + 1)), group };
+  }
+  const word = KIND[group];
+  return { id, label: `${word.charAt(0).toUpperCase()}${word.slice(1)}…`, group };
 }
 
 /**

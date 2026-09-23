@@ -1,33 +1,30 @@
-// How many of atlas's titles each option would leave, beside a selection (`GET <atlas>/index/facets/<type>.json`), so
-// Explore stops offering what would show nothing. Counts are over atlas's corpus, not TMDB's whole catalogue: an
-// option with none there is one Den would show nothing for.
+// Explore's picks in atlas's terms (`filterRoutes.ts`): the `[kind, value]` pairs each chip is, the selection as one
+// atlas filter where every pick has an atlas form, and whether atlas's counts say an option would leave nothing.
+// Counts are over atlas's corpus, not TMDB's whole catalogue: an option with none there is one Den would show
+// nothing for.
 //
-// A value missing from a kind the answer lists completely is 0: a plain value → titles map is complete, the per-kind
-// shape only where it says `complete: true`. Any other kind is unknown, and nothing of it is judged. Where atlas has
-// no such route, or doesn't answer, there are no counts at all and `emptyOptions` keeps to what it can tell from the
-// feed alone. Every address here is atlas's canonical one: through den-edge's relay a redirect arrives with no
-// Location, so an address atlas would redirect is one that silently answers nothing.
+// A value missing from a kind the counts list completely is 0; any other kind is unknown, and nothing of it is
+// judged. Where atlas has no filter routes, there are no counts at all and `emptyOptions` keeps to what it can tell
+// from the feed alone.
 
 import { atlasWhere } from './atlasRows';
 import { RECIPES, retargeted } from './catalog';
+import type { FilterItem } from './filterRoutes';
 import type { MediaType } from './library';
-import { relayFetch } from './relayFetch';
+import { likeOf } from './route';
 
-/**
- * A kind's counts: value → titles, or — the shape atlas is moving to — the same under `values`, saying whether the
- * kind is `complete` (every value it holds is listed) and its `mode` (`single` for a kind that holds one pick).
- */
+/** A kind's counts: value → titles, and whether a value missing from them has none (`complete`). */
 export interface KindCounts {
   mode?: string;
   complete?: boolean;
   values?: Record<string, number>;
 }
-/** Kind → its counts. */
+/** Kind → its counts, as atlas's `counts.json` gives them under `kinds`. */
 export type FacetCounts = Record<string, Record<string, number> | KindCounts>;
 
 /**
- * A kind's values, and whether a value missing from them means none: always for the plain value → titles map, only
- * when `complete` for the newer shape. Undefined where the answer says nothing usable about the kind.
+ * A kind's values, and whether a value missing from them means none: only when `complete` for the per-kind shape; a
+ * plain value → titles map is complete. Undefined where the answer says nothing usable about the kind.
  */
 function countsOf(kind: FacetCounts[string] | undefined) {
   if (!kind || typeof kind !== 'object') return undefined;
@@ -40,13 +37,100 @@ function countsOf(kind: FacetCounts[string] | undefined) {
   return { values: kind as Record<string, number>, complete: true };
 }
 
-/** A selection's worth of `sel`: more than this and atlas refuses it, so none is asked. */
-const MAX_VALUES = 16;
+/**
+ * The kinds only atlas's filter answers, each picked as `<kind>-<atlas's id>` (`person-Q25191`, `runtime-under-90`,
+ * `technique-live_action`): people, studios, subjects and the rest. TMDB discover and atlas's rows know none of them.
+ */
+export const FILTER_ONLY = [
+  'person',
+  'made',
+  'cast',
+  'company',
+  'network',
+  'subject',
+  'place',
+  'format',
+  'source',
+  'technique',
+  'audience',
+  'critique',
+  'runtime',
+  'animated',
+  'character',
+] as const;
+export type FilterOnlyKind = (typeof FILTER_ONLY)[number];
+
+/** The filter-only kind a facet id picks, if any. */
+export function filterOnlyKind(id: string): FilterOnlyKind | undefined {
+  const kind = id.slice(0, id.indexOf('-'));
+  return (FILTER_ONLY as readonly string[]).includes(kind) ? (kind as FilterOnlyKind) : undefined;
+}
+
+/**
+ * The recipes that are one of atlas's subgenres. A subgenre is atlas's own judgement of what a title is, where the
+ * recipe's TMDB form is a keyword or a pair of genres standing in for it.
+ */
+const RECIPE_SUBGENRES: Record<string, string> = {
+  'romantic-comedy': 'Romantic Comedy',
+  'action-comedy': 'Action Comedy',
+  'horror-comedy': 'Horror Comedy',
+  'sci-fi-horror': 'Sci-Fi Horror',
+  'sci-fi-action': 'Sci-Fi Action',
+  'crime-thriller': 'Crime Thriller',
+  'action-thriller': 'Action Thriller',
+  'romantic-drama': 'Romantic Drama',
+  'war-drama': 'War Drama',
+  'historical-drama': 'Historical/Period Drama',
+  'fantasy-adventure': 'Fantasy Adventure',
+  'crime-comedy': 'Crime Comedy',
+  'police-procedural': 'Police Procedural',
+  heist: 'Heist',
+  'serial-killer': 'Serial Killer',
+  'spy-espionage': 'Spy/Espionage',
+  'assassin-hitman': 'Assassin/Hitman',
+  'time-travel': 'Time Travel',
+  cyberpunk: 'Cyberpunk',
+  zombie: 'Zombie',
+  slasher: 'Slasher',
+  superhero: 'Superhero',
+  'post-apocalyptic': 'Dystopian/Post-Apocalyptic',
+  'coming-of-age': 'Coming-of-Age',
+  'courtroom-legal': 'Legal/Courtroom Drama',
+  'martial-arts': 'Martial Arts',
+  biopic: 'Biopic',
+  mockumentary: 'Mockumentary',
+};
+
+/**
+ * A recipe as atlas's filter, or undefined where atlas has no form of it. One of atlas's subgenres where there is one;
+ * otherwise its TMDB query, where that is all AND-ed genres, one language and one country (K-Drama is
+ * `country:KR,genre:18,language:ko`). Keywords, OR-ed genres, several languages or countries, or genres left out have
+ * no form there: Nordic Noir, Korean Thriller, Latin American and Pure Drama stay TMDB's.
+ */
+export function recipeParts(recipeId: string, type: MediaType): [string, string][] | undefined {
+  const label = RECIPE_SUBGENRES[recipeId];
+  if (label) return [['subgenre', label]];
+  const recipe = RECIPES.find((r) => r.id === recipeId);
+  const query = recipe && retargeted(recipe.query, type);
+  if (!query) return undefined;
+  if (
+    query.keywords?.length ||
+    query.withoutGenres?.length ||
+    (query.genreJoin === 'or' && (query.genres?.length ?? 0) > 1) ||
+    query.originalLanguage?.includes('|') ||
+    (query.originCountry?.length ?? 0) > 1
+  )
+    return undefined;
+  const parts: [string, string][] = (query.genres ?? []).map((g) => ['genre', String(g)]);
+  if (query.originalLanguage) parts.push(['language', query.originalLanguage]);
+  if (query.originCountry?.[0]) parts.push(['country', query.originCountry[0]]);
+  return parts;
+}
 
 /**
  * What a facet id is in atlas's terms: `[kind, value]` pairs, several for a plot row that pairs two axes or a recipe
- * made of parts. A recipe gives only what atlas knows — AND-joined genres, one language, one country; its keywords
- * and OR-joined genres have no kind there, so it asks for less, which can only hide less.
+ * made of parts. A recipe atlas has no form of gives what it can — AND-joined genres, one language, one country —
+ * which, counted, can only hide less. A "Like" for a title of the other type is nothing of this type's.
  */
 export function facetParts(id: string, type: MediaType): [kind: string, value: string][] {
   const genre = /^genre-(\d+)$/.exec(id)?.[1];
@@ -57,8 +141,17 @@ export function facetParts(id: string, type: MediaType): [kind: string, value: s
   if (country) return [['country', country]];
   const decade = /^decade-(\d{4})$/.exec(id)?.[1];
   if (decade) return [['decade', String(Math.floor(Number(decade) / 10) * 10)]];
+  const rating = /^rating-(\d+)$/.exec(id)?.[1];
+  if (rating) return [['rating', rating]];
+  const like = likeOf(id);
+  if (like) return like.type === type ? [['like', String(like.id)]] : [];
+  const only = filterOnlyKind(id);
+  if (only) return [[only, id.slice(only.length + 1)]];
   if (id.startsWith('recipe-')) {
-    const recipe = RECIPES.find((r) => r.id === id.slice('recipe-'.length));
+    const recipeId = id.slice('recipe-'.length);
+    const whole = recipeParts(recipeId, type);
+    if (whole) return whole;
+    const recipe = RECIPES.find((r) => r.id === recipeId);
     const query = recipe && retargeted(recipe.query, type);
     if (!query) return [];
     const parts: [string, string][] = [];
@@ -77,44 +170,27 @@ export function facetParts(id: string, type: MediaType): [kind: string, value: s
   );
 }
 
-/**
- * The one address atlas answers a selection at without redirecting: `sel` alone, its values sorted by kind and then
- * value as strings (so `genre:10759` comes before `genre:18`), once each; none for an empty selection. Undefined
- * where the selection is more than atlas takes.
- */
-export function facetCountsUrl(
-  base: string,
-  type: MediaType,
-  selection: readonly string[],
-): string | undefined {
-  const path = `${base}/index/facets/${type === 'tv' ? 'series' : 'movie'}.json`;
-  const byOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-  const parts = selection
-    .flatMap((id) => facetParts(id, type))
-    .sort(([ka, va], [kb, vb]) => byOrder(ka, kb) || byOrder(va, vb))
-    .map(([kind, value]) => `${kind}:${encodeURIComponent(value)}`)
-    .filter((part, at, all) => all.indexOf(part) === at);
-  if (parts.length > MAX_VALUES) return undefined;
-  return parts.length ? `${path}?sel=${parts.join(',')}` : path;
-}
+/** A selection's parts as atlas's filter items: what its counts are asked beside (`facetParts`). */
+export const countItems = (selection: readonly string[], type: MediaType): FilterItem[] =>
+  selection.flatMap((id) => facetParts(id, type).map(([kind, id]) => ({ kind, id })));
 
-/** atlas's counts for a selection, or null where it has none to give (no route, an error, too many values). */
-export async function fetchFacetCounts(
-  base: string,
-  type: MediaType,
+/**
+ * The selection as one atlas filter, or undefined where a pick has no form there: a recipe atlas doesn't know, a
+ * "Like" for the other type, an id nothing reads.
+ */
+export function filterItems(
   selection: readonly string[],
-  { signal, fetchImpl = relayFetch }: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
-): Promise<FacetCounts | null> {
-  const url = facetCountsUrl(base, type, selection);
-  if (!url) return null;
-  try {
-    const res = await fetchImpl(url, { signal });
-    if (!res.ok) return null;
-    const body = (await res.json()) as unknown;
-    return body && typeof body === 'object' && !Array.isArray(body) ? (body as FacetCounts) : null;
-  } catch {
-    return null;
+  type: MediaType,
+): FilterItem[] | undefined {
+  const items: FilterItem[] = [];
+  for (const id of selection) {
+    const parts = id.startsWith('recipe-')
+      ? recipeParts(id.slice('recipe-'.length), type)
+      : facetParts(id, type);
+    if (!parts?.length) return undefined;
+    items.push(...parts.map(([kind, value]) => ({ kind, id: value })));
   }
+  return items;
 }
 
 /**

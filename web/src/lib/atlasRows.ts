@@ -134,8 +134,8 @@ const SERIES_ROWS: AtlasRow[] = [
   { id: 'subgenre-mockumentary', title: 'Mockumentaries', where: subgenre('Mockumentary') },
 ];
 
-/** One of atlas's rows as titles. */
-function titlesOf(body: unknown): Title[] {
+/** One of atlas's rows as titles; also the cards its filter's `titles.json` answers with. */
+export function titlesOf(body: unknown): Title[] {
   const titles = (body as { titles?: unknown } | null)?.titles;
   if (!Array.isArray(titles)) return [];
   return (titles as Record<string, unknown>[]).flatMap((t): Title[] => {

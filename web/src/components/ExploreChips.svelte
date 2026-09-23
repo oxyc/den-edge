@@ -39,6 +39,19 @@
     ['country', 'Countries'],
     ['decade', 'Decades'],
     ['rating', 'Rating'],
+    // Listed only where atlas's filter answers, from its counts: a quiet tail, each its strongest few.
+    ['people', 'People'],
+    ['company', 'Studios'],
+    ['network', 'Networks'],
+    ['subject', 'Subjects'],
+    ['place', 'Places'],
+    ['format', 'Formats'],
+    ['source', 'Based on'],
+    ['technique', 'Made with'],
+    ['audience', 'Audience'],
+    ['critique', 'Critiques'],
+    ['runtime', 'Runtime'],
+    ['animated', 'Animation'],
   ];
   /** The kinds the phone strip samples: the rest wait in the sheet. */
   const STRIP_KINDS: ChipGroup[] = ['mood', 'recipe', 'genre'];

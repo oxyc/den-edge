@@ -45,6 +45,8 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
       json: r.request().url().includes('suggest') ? { perSeed: [], pooled: [] } : { labels: [] },
     }),
   );
+  // atlas's stackable filters aren't deployed: a 404, as live, unless a test serves them.
+  await page.route('**/atlas/index/filter/**', (r) => r.fulfill({ status: 404, body: '' }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',
@@ -461,7 +463,69 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
   }
 });
 
-test('atlas’s counts take out what would show nothing, and only in the kinds they count', async () => {
+/**
+ * atlas's stackable filters, mocked: counts beside any selection (dramas and thrillers; two people; one runtime),
+ * a page of four titles, and the typeahead's people and characters. Each address asked is recorded as sent.
+ */
+async function serveFilter(page, { titles = true, countsGate } = {}) {
+  const asked = [];
+  const card = (id) => ({
+    type: 'movie',
+    id,
+    title: `Atlas ${id}`,
+    year: 2020,
+    posterPath: '/p.jpg',
+  });
+  // atlas's cards ask den-edge what other browsers know of them (ratings); nothing, here.
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ json: { titles: [] } }));
+  await page.route('**/atlas/index/filter/**', async (r) => {
+    const url = new URL(r.request().url());
+    const path = url.pathname.replace(/^.*\/atlas/, '') + url.search;
+    asked.push(path);
+    const sel = url.searchParams.get('sel') ?? '';
+    if (url.pathname.endsWith('/counts.json')) {
+      await countsGate;
+      const person = /person:(Q\d+)/.exec(sel)?.[1];
+      return r.fulfill({
+        json: {
+          total: 12,
+          kinds: {
+            genre: { mode: 'and', complete: true, values: { 18: 7, 53: 2 } },
+            language: { mode: 'and', complete: false, values: { sv: 3 } },
+            person: {
+              mode: 'and',
+              complete: false,
+              values: { Q2: 5, Q1: 2 },
+              labels: { Q1: 'Ann Director', Q2: 'Bob Actor' },
+              ...(person ? { selected: [person] } : {}),
+            },
+            runtime: { mode: 'single', complete: true, values: { 'under-90': 4 } },
+          },
+          ignored: [],
+        },
+      });
+    }
+    if (url.pathname.endsWith('/titles.json')) {
+      if (!titles) return r.fulfill({ status: 404, body: '' });
+      return r.fulfill({
+        json: { titles: [500, 501, 502, 503].map(card), total: 4, order: 'o', ignored: [] },
+      });
+    }
+    const kind = /values\/([a-z]+)\.json$/.exec(url.pathname)?.[1];
+    const values = {
+      made: [{ id: 'Q25191', name: 'Christopher Nolan', count: 12 }],
+      cast: [
+        { id: 'Q25191', name: 'Christopher Nolan', count: 1 },
+        { id: 'Q7', name: 'Nolan North', count: 3 },
+      ],
+      character: [{ id: 'nolan-shaw', name: 'Nolan Shaw', count: 1 }],
+    }[kind];
+    return r.fulfill({ json: { kind, values: values ?? [], complete: true } });
+  });
+  return asked;
+}
+
+test('atlas’s filter feeds the grid, judges the options and lists its people, at its canonical addresses', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -471,30 +535,126 @@ test('atlas’s counts take out what would show nothing, and only in the kinds t
       reducedMotion: 'reduce',
     });
     await setup(page, { atlasGate: Promise.resolve() });
-    const asked = [];
-    // Beside Sweden: dramas and thrillers only. Languages go uncounted.
-    await page.route('**/atlas/index/facets/**', (r) => {
-      asked.push(new URL(r.request().url()).pathname + new URL(r.request().url()).search);
-      return r.fulfill({ json: { genre: { 18: 7, 53: 2 } } });
+    const asked = await serveFilter(page);
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(r.url());
     });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    const grid = active(page).locator('.grid');
+    await expect(grid.getByRole('link', { name: 'Atlas 500 2020' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
+    await expect.poll(() => asked).toContain('/index/filter/movie/counts.json?sel=country:SE');
+
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const genres = rail.getByRole('group', { name: 'Genres' });
+    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
+    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
+    // Languages are listed incompletely: none is judged by its absence.
+    await expect(
+      rail.getByRole('group', { name: 'Languages' }).getByRole('button', { name: 'English' }),
+    ).toBeVisible();
+    await expect(
+      rail.getByRole('group', { name: 'Runtime' }).getByRole('button', { name: 'Under 90 min' }),
+    ).toBeVisible();
+
+    // A person from the People section stacks onto the selection, named by atlas.
+    await rail
+      .getByRole('group', { name: 'People' })
+      .getByRole('button', { name: 'Bob Actor', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE,person-Q2$/);
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Bob Actor' }),
+    ).toBeVisible();
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/movie/titles.json?sel=country:SE,person:Q2');
+    // Nothing of this went to TMDB discover.
+    expect(discovered).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a fresh address names a person “Person…” until atlas’s counts name them', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    let counted;
+    await serveFilter(page, { countsGate: new Promise((resolve) => (counted = resolve)) });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=person-Q2')}`);
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Person…' })).toBeVisible();
+    counted();
+    await expect(selected.getByRole('button', { name: 'Remove Bob Actor' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the search field finds people and characters through atlas, and a person picked is a pill', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page);
     await page.goto(FIXTURE);
     await openSearch(page, 1280);
-    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    await input(page).fill('nol');
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
-    await input(page).fill('sweden');
-    await browse.getByRole('button', { name: 'Sweden · country', exact: true }).click();
-    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
-    await expect.poll(() => asked.at(-1)).toBe('/atlas/index/facets/movie.json?sel=country:SE');
-    const genres = rail.getByRole('group', { name: 'Genres' });
-    await expect(genres.getByRole('button', { name: 'Comedy', exact: true })).toHaveCount(0);
-    await expect(genres.getByRole('button', { name: 'Drama', exact: true })).toBeVisible();
-    await expect(genres.getByRole('button', { name: 'Thriller', exact: true })).toBeVisible();
-    // Languages weren't counted, so none of them is hidden.
     await expect(
-      rail
-        .getByRole('group', { name: 'Languages' })
-        .getByRole('button', { name: 'English', exact: true }),
+      browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }),
     ).toBeVisible();
+    await expect(browse.getByRole('button', { name: 'Nolan North · actor' })).toBeVisible();
+    await expect(browse.getByRole('button', { name: 'Nolan Shaw · character' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/values/made.json?q=nol');
+    expect(asked).toContain('/index/filter/movie/values/character.json?q=nol');
+    await browse.getByRole('button', { name: 'Christopher Nolan · director/writer' }).click();
+    await expect(page).toHaveURL(/\/search\?c=person-Q25191$/);
+    await expect(input(page)).toHaveValue('');
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Christopher Nolan' }),
+    ).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('where atlas’s filter has no titles route, the grid is TMDB discover as before', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page, { titles: false });
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(r.url());
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    expect(asked).toContain('/index/filter/movie/titles.json?sel=country:SE');
+    expect(discovered.some((url) => url.includes('with_origin_country=SE'))).toBe(true);
   } finally {
     await browser.close();
   }

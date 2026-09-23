@@ -14,24 +14,28 @@
     emptyOptions,
     exploreChips,
     exploreFeed,
+    filterChips,
     KIND,
     likeChip,
     offered,
+    pendingChip,
     taken,
     PROMPTS,
     remapSet,
     slotOf,
     browseChips,
     namesExactly,
+    type Chip,
   } from '../lib/explore';
+  import { countItems, filterItems } from '../lib/facetCounts';
+  import { fetchFilterCounts, searchFilterValues, type FilterCounts } from '../lib/filterRoutes';
   import type { MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import { likeId, likeOf, searchHref, type Explore } from '../lib/route';
+  import { FACET, likeId, likeOf, searchHref, type Explore } from '../lib/route';
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
-  import { fetchFacetCounts, type FacetCounts } from '../lib/facetCounts';
 
   let {
     query,
@@ -100,9 +104,30 @@
       current = false;
     };
   });
-  /** The rail's chips for the type, and the picked "Like", which no list holds, for its pill. */
+  /**
+   * Whether atlas's filter has answered here: from then on, picks it can mix stand together (`clash`). Its counts
+   * arrive after each pick, so this holds from the first answer rather than flickering with each.
+   */
+  let filtered = $state(false);
+  /** atlas's last counts, and the type and selection they were counted for (the effect further down). */
+  let filterAnswer = $state<{ key: string; counts: FilterCounts } | null>(null);
+  /** People and characters picked from the search field, by facet id: their names, for their pills. */
+  let named = $state<Record<string, Chip>>({});
+  /**
+   * The rail's chips for the type, with those only atlas's filter knows from its last counts; and every chip a pill
+   * can be for — a picked "Like", a typeahead's pick, and a pick of atlas's not yet named ("Person…").
+   */
   const chips = $derived(chipsFor(exploreType));
-  const known = $derived(like ? [...chips, likeChip(like, likeNames[like])] : chips);
+  const listed = $derived([...chips, ...(filterAnswer ? filterChips(filterAnswer.counts) : [])]);
+  const known = $derived.by(() => {
+    const all = [...listed, ...Object.values(named)];
+    if (like) all.push(likeChip(like, likeNames[like]));
+    for (const id of selection) {
+      const pending = !all.some((chip) => chip.id === id) && pendingChip(id);
+      if (pending) all.push(pending);
+    }
+    return all;
+  });
   const names = (ids: string[]) =>
     chipsOf(ids, known)
       .map((c) => c.label)
@@ -233,7 +258,7 @@
    * query's place — a new entry, so Back returns to the search.
    */
   function pick(id: string, keepQuery = typing && slotOf(id) === 'genre') {
-    const { set, removed } = applyPick(selection, id, exploreType);
+    const { set, removed } = applyPick(selection, id, exploreType, filtered);
     const label = known.find((c) => c.id === id)?.label ?? '';
     status = removed.length ? `${label} replaced ${names(removed)}.` : '';
     go({ type: explore.type, chips: set }, keepQuery ? query : '');
@@ -247,7 +272,7 @@
     const id = likeId(title);
     likeNames[id] = title.title;
     const moved = remapSet(selection, exploreType, title.type, chipsFor(title.type));
-    const { set, removed } = applyPick(moved.set, id, title.type);
+    const { set, removed } = applyPick(moved.set, id, title.type, filtered);
     const gone = [...moved.dropped, ...removed];
     status = gone.length ? `Like ${title.title} replaced ${names(gone)}.` : '';
     go({ type: title.type === 'tv' ? 'tv' : undefined, chips: set }, '');
@@ -271,26 +296,85 @@
     go({ type: explore.type, chips: [] }, typing ? query : '');
   }
   /**
-   * atlas's counts beside the selection (`facetCounts.ts`): one request per selection, a moment after it settles,
-   * the last one dropped when the next begins. Null where atlas has none to give, which leaves the feed to judge.
+   * atlas's counts beside the selection (`filterRoutes.ts`): one request per selection, a moment after it settles,
+   * the last one dropped when the next begins. They judge what would show nothing only beside the selection they were
+   * counted for; the options they list, and the pills' names, stay from the last answer until the next.
    */
-  let counts = $state<FacetCounts | null>(null);
   $effect(() => {
     const here = atlas;
     const type = exploreType;
+    const key = `${type}|${selectionKey}`;
     const set = selectionKey ? selectionKey.split(',') : [];
-    counts = null;
     if (!here || typing) return;
     const ask = new AbortController();
     const timer = setTimeout(async () => {
-      const answer = await fetchFacetCounts(here, type, set, { signal: ask.signal });
-      if (!ask.signal.aborted) counts = answer;
+      const answer = await fetchFilterCounts(here, type, countItems(set, type), {
+        signal: ask.signal,
+      });
+      if (ask.signal.aborted) return;
+      filterAnswer = answer ? { key, counts: answer } : null;
+      if (answer) filtered = true;
     }, 150);
     return () => {
       clearTimeout(timer);
       ask.abort();
     };
   });
+  const counts = $derived(
+    filterAnswer?.key === `${exploreType}|${selectionKey}` ? filterAnswer.counts.kinds : null,
+  );
+
+  /**
+   * People and characters the typed text names, from atlas's filter, beside the selection: a person by name as a
+   * maker ("director/writer") or else as cast ("actor"), a character from three letters. Asked a moment after
+   * typing settles; none where atlas has no such route.
+   */
+  let found = $state<Chip[]>([]);
+  $effect(() => {
+    const text = query.trim();
+    const here = atlas;
+    const type = exploreType;
+    const items = filterItems(selectionKey ? selectionKey.split(',') : [], type) ?? [];
+    found = [];
+    if (!here || text.length < 2) return;
+    const ask = new AbortController();
+    const timer = setTimeout(async () => {
+      const options = { signal: ask.signal };
+      const [made, cast, characters] = await Promise.all([
+        searchFilterValues(here, type, 'made', text, items, options),
+        searchFilterValues(here, type, 'cast', text, items, options),
+        searchFilterValues(here, type, 'character', text, items, options),
+      ]);
+      if (ask.signal.aborted) return;
+      const makers = new Set(made.map((value) => value.id));
+      const people = [...made, ...cast.filter((value) => !makers.has(value.id))].map(
+        (value): Chip => ({
+          id: `person-${value.id}`,
+          label: value.name,
+          group: 'people',
+          kind: makers.has(value.id) ? 'director/writer' : 'actor',
+        }),
+      );
+      found = [
+        ...people,
+        ...characters.map((value): Chip => ({
+          id: `character-${value.id}`,
+          label: value.name,
+          group: 'character',
+        })),
+      ].filter((chip) => FACET.test(chip.id));
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      ask.abort();
+    };
+  });
+
+  /** A typeahead's pick: its name is kept, for its pill, as a "Like"'s is. */
+  function pickFound(chip: Chip) {
+    if (chip.group === 'people' || chip.group === 'character') named[chip.id] = chip;
+    pick(chip.id, false);
+  }
   /**
    * Options not worth offering: any that can't stand beside the selection, and any that would show nothing beside
    * it (`emptyOptions`: atlas's counts, and the feed's loaded titles). Judged while a query is typed too: a pick from
@@ -301,7 +385,7 @@
       selection,
       feedHits.map((hit) => (hit.kind === 'title' ? hit.title : null)).filter((t) => t !== null),
       feed.pager.exhausted,
-      chips,
+      listed,
       { counts, type: exploreType },
     ),
   );
@@ -310,7 +394,7 @@
    * so a paused language still keeps the Browse row from offering a second — and what would show nothing.
    */
   const hidden = (id: string) =>
-    !offered(shownSelection, id, exploreType) || taken(selection, id) || empty.has(id);
+    !offered(shownSelection, id, exploreType, filtered) || taken(selection, id) || empty.has(id);
   /**
    * The pick to take out when the selection shows nothing: the latest, since it is what emptied a feed that had
    * titles before it. (atlas's counts say what adding an option leaves, not what removing a pick would bring back,
@@ -320,10 +404,18 @@
   /** "More like this" on the posters, while no "Like" is picked: one at a time, removed before another. */
   const onlike = $derived(like ? undefined : likeTitle);
 
-  /** The ways to browse the typed text points at, offered above its results: local, instant, uncapped. */
+  /**
+   * The ways to browse the typed text points at, offered above its results: the categories it names, local, instant
+   * and uncapped; then the people and characters atlas finds by it.
+   */
   const browse = $derived(
     typing
-      ? browseChips(query, chips).filter((c) => !selection.includes(c.id) && !hidden(c.id))
+      ? [...browseChips(query, listed), ...found].filter(
+          (c, at, all) =>
+            !selection.includes(c.id) &&
+            !hidden(c.id) &&
+            all.findIndex((other) => other.id === c.id) === at,
+        )
       : [],
   );
 </script>
@@ -340,7 +432,13 @@
         all={false}
       />
     {/if}
-    <ExploreChips {chips} selected={shownSelection} {hidden} {typing} onchange={(id) => pick(id)} />
+    <ExploreChips
+      chips={listed}
+      selected={shownSelection}
+      {hidden}
+      {typing}
+      onchange={(id) => pick(id)}
+    />
   </div>
 {/snippet}
 
@@ -393,8 +491,9 @@
                 class="facet"
                 class:exact={at === 0 && namesExactly(query, chip)}
                 data-chip={chip.id}
-                onclick={() => pick(chip.id, false)}
-                >{chip.label}<span class="kind">{` · ${KIND[chip.group]}`}</span></button
+                onclick={() => pickFound(chip)}
+                >{chip.label}<span class="kind">{` · ${chip.kind ?? KIND[chip.group]}`}</span
+                ></button
               >
             {/each}
           </div>

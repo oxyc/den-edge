@@ -2,28 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { exploreChips, emptyOptions } from './explore';
 import {
   countedEmpty,
-  facetCountsUrl,
+  countItems,
   facetParts,
-  fetchFacetCounts,
+  filterItems,
+  recipeParts,
   type FacetCounts,
 } from './facetCounts';
+import { filterUrl } from './filterRoutes';
 
-describe('facetCountsUrl', () => {
-  it('is the bare route for no selection, and the series path for series', () => {
-    expect(facetCountsUrl('/atlas', 'movie', [])).toBe('/atlas/index/facets/movie.json');
-    expect(facetCountsUrl('/atlas', 'tv', [])).toBe('/atlas/index/facets/series.json');
-  });
-
-  it('sorts by kind, then by value as a string, once each', () => {
-    expect(
-      facetCountsUrl('/atlas', 'tv', ['genre-18', 'country-SE', 'genre-10759', 'genre-18']),
-    ).toBe('/atlas/index/facets/series.json?sel=country:SE,genre:10759,genre:18');
-  });
-
+describe('facetParts', () => {
   it('writes each kind as atlas does: a decade by its first year, a language lower, a country upper', () => {
-    expect(facetCountsUrl('/atlas', 'movie', ['decade-1990', 'lang-sv', 'country-KR'])).toBe(
-      '/atlas/index/facets/movie.json?sel=country:KR,decade:1990,language:sv',
-    );
+    expect(
+      filterUrl('/atlas', 'movie', 'counts', {
+        items: countItems(['decade-1990', 'lang-sv', 'country-KR'], 'movie'),
+      }),
+    ).toBe('/atlas/index/filter/movie/counts.json?sel=country:KR,decade:1990,language:sv');
     expect(facetParts('decade-1995', 'movie')).toEqual([['decade', '1990']]);
   });
 
@@ -36,30 +29,57 @@ describe('facetCountsUrl', () => {
       ['pacing', 'slow-burn'],
       ['tone', 'bleak'],
     ]);
-    expect(facetCountsUrl('/atlas', 'movie', ['subgenre-psychological-thriller'])).toBe(
-      '/atlas/index/facets/movie.json?sel=subgenre:Psychological%20Thriller',
-    );
   });
 
-  it('asks for a recipe by the parts atlas knows, and nothing for the rest', () => {
-    // Romantic Comedy is Comedy and Romance.
-    expect(facetParts('recipe-romantic-comedy', 'movie')).toEqual([
-      ['genre', '35'],
-      ['genre', '10749'],
-    ]);
-    // K-Drama: Drama, Korean, from Korea.
-    expect(facetParts('recipe-k-drama', 'tv')).toEqual([
+  it('asks for a plot row by atlas’s own axes, never the old `structure` it redirects from', () => {
+    expect(facetParts('plot-nonlinear', 'movie')).toEqual([['chronology', 'nonlinear']]);
+    expect(facetParts('plot-single-day', 'movie')).toEqual([['timespan', 'single-day']]);
+  });
+
+  it('asks for a rating, a "Like" of this type, and the kinds only atlas knows by their ids', () => {
+    expect(facetParts('rating-7', 'movie')).toEqual([['rating', '7']]);
+    expect(facetParts('like-movie-949', 'movie')).toEqual([['like', '949']]);
+    expect(facetParts('like-tv-1396', 'movie')).toEqual([]);
+    expect(facetParts('person-Q25191', 'movie')).toEqual([['person', 'Q25191']]);
+    expect(facetParts('runtime-under-90', 'movie')).toEqual([['runtime', 'under-90']]);
+    expect(facetParts('technique-live_action', 'movie')).toEqual([['technique', 'live_action']]);
+  });
+});
+
+describe('recipes in atlas’s terms', () => {
+  it('are a subgenre where atlas has one, and their genres, language and country where that is all they are', () => {
+    expect(recipeParts('heist', 'movie')).toEqual([['subgenre', 'Heist']]);
+    expect(recipeParts('romantic-comedy', 'movie')).toEqual([['subgenre', 'Romantic Comedy']]);
+    expect(recipeParts('k-drama', 'tv')).toEqual([
       ['genre', '18'],
       ['language', 'ko'],
       ['country', 'KR'],
     ]);
-    // Heist is Crime or Thriller, and a keyword: nothing atlas can count.
-    expect(facetParts('recipe-heist', 'movie')).toEqual([]);
   });
 
-  it('asks nothing for a selection bigger than atlas takes', () => {
-    const genres = Array.from({ length: 17 }, (_, i) => `genre-${i + 1}`);
-    expect(facetCountsUrl('/atlas', 'movie', genres)).toBeUndefined();
+  it('have no form there when they need keywords, several languages or countries, or genres left out', () => {
+    for (const id of ['nordic-noir', 'korean-thriller', 'latin-american', 'pure-drama'])
+      expect(recipeParts(id, 'movie'), id).toBeUndefined();
+    // Counted, one still asks for what atlas can read of it.
+    expect(facetParts('recipe-nordic-noir', 'movie')).toEqual([['genre', '80']]);
+  });
+});
+
+describe('filterItems', () => {
+  it('is the whole selection as one filter where every pick has a form there', () => {
+    expect(
+      filterItems(['country-SE', 'recipe-heist', 'person-Q25191', 'rating-7'], 'movie'),
+    ).toEqual([
+      { kind: 'country', id: 'SE' },
+      { kind: 'subgenre', id: 'Heist' },
+      { kind: 'person', id: 'Q25191' },
+      { kind: 'rating', id: '7' },
+    ]);
+  });
+
+  it('is nothing where one pick has no form there', () => {
+    expect(filterItems(['genre-80', 'recipe-nordic-noir'], 'movie')).toBeUndefined();
+    expect(filterItems(['like-tv-1396'], 'movie')).toBeUndefined();
   });
 });
 
@@ -78,53 +98,19 @@ describe('countedEmpty', () => {
     expect(countedEmpty('recipe-heist', 'movie', counts)).toBe(false);
   });
 
-  it('hides a recipe when one of its parts has none', () => {
-    // Romantic Comedy needs Comedy, which has none here.
-    expect(countedEmpty('recipe-romantic-comedy', 'movie', counts)).toBe(true);
+  it('hides a recipe when its subgenre has none', () => {
+    expect(countedEmpty('recipe-heist', 'movie', { subgenre: { Zombie: 2 } })).toBe(true);
   });
 
-  it('reads the per-kind shape, hiding only in a kind listed completely', () => {
+  it('reads atlas’s per-kind shape, hiding only in a kind listed completely', () => {
     const shaped = {
-      total: 40,
-      genre: { mode: 'multi', complete: true, values: { '28': 12 } },
-      language: { mode: 'single', complete: false, values: { sv: 4 } },
-    } as unknown as FacetCounts;
+      genre: { mode: 'and', complete: true, values: { '28': 12 } },
+      person: { mode: 'and', complete: false, values: { Q1: 4 } },
+    } as FacetCounts;
     expect(countedEmpty('genre-35', 'movie', shaped)).toBe(true);
     expect(countedEmpty('genre-28', 'movie', shaped)).toBe(false);
-    // An incomplete kind's missing value may simply not be listed.
-    expect(countedEmpty('lang-en', 'movie', shaped)).toBe(false);
-  });
-
-  it('asks for a plot row by atlas’s own axes, never the old `structure` it redirects from', () => {
-    expect(facetParts('plot-nonlinear', 'movie')).toEqual([['chronology', 'nonlinear']]);
-    expect(facetParts('plot-single-day', 'movie')).toEqual([['timespan', 'single-day']]);
-  });
-});
-
-describe('fetchFacetCounts', () => {
-  const answering = (status: number, body: unknown, asked: string[] = []) =>
-    (async (url: string) => {
-      asked.push(url);
-      return new Response(JSON.stringify(body), { status });
-    }) as unknown as typeof fetch;
-
-  it('reads the counts at the canonical address', async () => {
-    const asked: string[] = [];
-    const counts = await fetchFacetCounts('/atlas', 'movie', ['genre-28', 'country-SE'], {
-      fetchImpl: answering(200, { genre: { '28': 1 } }, asked),
-    });
-    expect(counts).toEqual({ genre: { '28': 1 } });
-    expect(asked).toEqual(['/atlas/index/facets/movie.json?sel=country:SE,genre:28']);
-  });
-
-  it('has none to give where atlas has no such route, or fails', async () => {
-    expect(
-      await fetchFacetCounts('/atlas', 'movie', [], { fetchImpl: answering(404, {}) }),
-    ).toBeNull();
-    const failing = (async () => {
-      throw new Error('offline');
-    }) as unknown as typeof fetch;
-    expect(await fetchFacetCounts('/atlas', 'movie', [], { fetchImpl: failing })).toBeNull();
+    // An incomplete kind's missing value may simply not be in its top.
+    expect(countedEmpty('person-Q2', 'movie', shaped)).toBe(false);
   });
 });
 
@@ -144,9 +130,23 @@ describe('emptyOptions with counts', () => {
     expect(emptyOptions(['country-SE'], [], false, chips).size).toBe(0);
   });
 
-  it('never hides what would take over a pick’s slot', () => {
-    const counts = { language: { sv: 9 } };
-    const empty = emptyOptions(['lang-sv'], [], false, chips, { counts, type: 'movie' });
-    expect(empty.has('lang-en')).toBe(false);
+  it('never judges a one-value kind against its own pick', () => {
+    const counts = {
+      language: { mode: 'and', complete: true, values: { sv: 9 } },
+      decade: { mode: 'single', complete: true, values: { '1990': 3 } },
+    } as FacetCounts;
+    const empty = emptyOptions(['decade-1990'], [], false, chips, { counts, type: 'movie' });
+    expect(empty.has('decade-1980')).toBe(false);
+    expect(empty.has('lang-en')).toBe(true);
+  });
+
+  it('lets the counts decide alone where they answered, even over what has loaded', () => {
+    const counts = { genre: { mode: 'and', complete: true, values: { '28': 5 } } } as FacetCounts;
+    const loaded = [{ type: 'movie' as const, id: 1, title: 'A', genreIds: [18] }];
+    const empty = emptyOptions(['mood-cozy'], loaded, true, chips, { counts, type: 'movie' });
+    // Nothing loaded is action, but atlas counts five.
+    expect(empty.has('genre-28')).toBe(false);
+    // atlas's cards carry no rating: the counts don't list one, so none is judged.
+    expect(empty.has('rating-7')).toBe(false);
   });
 });

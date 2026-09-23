@@ -8,16 +8,19 @@ import {
   exploreFeed,
   editDistance,
   facetQuery,
+  filterChips,
   fold,
   FOR_YOU,
   KIND,
   matchChips,
   offered,
+  pendingChip,
   remapChip,
   remapSet,
   browseChips,
   namesExactly,
 } from './explore';
+import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
 
 const film = (id: number, type: MediaType = 'movie'): Title => ({ type, id, title: `T${id}` });
@@ -428,6 +431,65 @@ describe('emptyOptions', () => {
   });
 });
 
+describe('the kinds only atlas’s filter knows', () => {
+  const counts: FilterCounts = {
+    total: 9,
+    ignored: [],
+    kindsUnavailable: ['warning'],
+    kinds: {
+      person: {
+        mode: 'and',
+        complete: false,
+        values: { Q1: 2, Q2: 7 },
+        labels: { Q1: 'Ann', Q2: 'Bob' },
+      },
+      technique: { mode: 'and', complete: true, values: { live_action: 9, 'hand drawn': 1 } },
+      runtime: { mode: 'single', complete: true, values: { 'under-90': 3 } },
+      cast: {
+        mode: 'and',
+        complete: false,
+        values: { Q3: 1 },
+        labels: { Q3: 'Cy' },
+        selected: ['Q3'],
+      },
+    },
+  };
+
+  it('lists each kind’s values from the counts, most titles first, named by atlas where it names them', () => {
+    const chips = filterChips(counts);
+    expect(chips.filter((c) => c.group === 'people').map((c) => [c.id, c.label])).toEqual([
+      ['person-Q2', 'Bob'],
+      ['person-Q1', 'Ann'],
+      // A cast member is listed only because it is picked: its pill's name.
+      ['cast-Q3', 'Cy'],
+    ]);
+    expect(chips.find((c) => c.id === 'technique-live_action')?.label).toBe('Live action');
+    // An id the address can't carry isn't offered.
+    expect(chips.some((c) => c.id.includes('hand'))).toBe(false);
+    expect(chips.find((c) => c.id === 'runtime-under-90')?.label).toBe('Under 90 min');
+  });
+
+  it('names a pick before the counts do', () => {
+    expect(pendingChip('person-Q9')?.label).toBe('Person…');
+    expect(pendingChip('runtime-over-150')?.label).toBe('Over 150 min');
+    expect(pendingChip('genre-28')).toBeUndefined();
+  });
+
+  it('stacks people, holds one runtime, and lets atlas’s filter mix what it knows', () => {
+    expect(applyPick(['person-Q1'], 'person-Q2', 'movie').set).toEqual(['person-Q1', 'person-Q2']);
+    expect(applyPick(['runtime-under-90'], 'runtime-over-150', 'movie').removed).toEqual([
+      'runtime-under-90',
+    ]);
+    // Without the filter a mood takes no country; with it, they stand together.
+    expect(applyPick(['mood-cozy'], 'country-SE', 'movie').removed).toEqual(['mood-cozy']);
+    expect(applyPick(['mood-cozy'], 'country-SE', 'movie', true).removed).toEqual([]);
+    // A recipe atlas has no form of still can't stand beside a kind only atlas knows.
+    expect(applyPick(['person-Q1'], 'recipe-nordic-noir', 'movie', true).removed).toEqual([
+      'person-Q1',
+    ]);
+  });
+});
+
 describe('Explore feeds', () => {
   const calls: { path: string; params: Record<string, string>; page: number }[] = [];
   const pages: Pages = async (path, type, params, page) => {
@@ -502,16 +564,60 @@ describe('Explore feeds', () => {
     expect(exploreFeed(['mood-cozy'], 'movie', sources()).id).toBe(`${FOR_YOU}-movie`);
   });
 
-  it('narrows a mood by the genre, language and decade beside it, on what its titles carry', () => {
+  it('asks atlas’s filter for the whole selection, and narrows nothing more itself', async () => {
+    const asked: string[] = [];
+    const row = exploreFeed(['mood-cozy', 'genre-35', 'country-SE', 'rating-7'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response(
+          JSON.stringify(
+            String(input).includes('/metadata')
+              ? { titles: [] }
+              : {
+                  titles: [{ type: 'movie', id: 5, title: 'Five', posterPath: '/5.jpg' }],
+                  order: 'o',
+                },
+          ),
+        );
+      }) as typeof fetch,
+    });
+    expect((await row.load(1)).map((t) => t.id)).toEqual([5]);
+    expect(asked[0]).toBe(
+      '/atlas/index/filter/movie/titles.json?sel=country:SE,genre:35,mood:Cozy,rating:7',
+    );
+    expect(row.filter?.({ ...film(9), genreIds: [18] })).toBe(true);
+  });
+
+  it('narrows a mood by the genre, language and decade beside it, where atlas has no filter', async () => {
     const row = exploreFeed(['mood-cozy', 'genre-35', 'lang-sv', 'decade-1990'], 'movie', {
       ...sources(),
       atlas: '/atlas',
+      fetchImpl: (async () => new Response('', { status: 404 })) as unknown as typeof fetch,
     });
+    // The filter's 404 hands over to atlas's row (unreachable here too).
+    await row.load(1).catch(() => {});
     const title = { ...film(1), genreIds: [35, 18], originalLanguage: 'sv', year: 1994 };
     expect(row.filter?.(title)).toBe(true);
     expect(row.filter?.({ ...title, genreIds: [18] })).toBe(false);
     expect(row.filter?.({ ...title, originalLanguage: 'en' })).toBe(false);
     expect(row.filter?.({ ...title, year: 2001 })).toBe(false);
+  });
+
+  it('keeps a recipe atlas has no form of on TMDB, asking atlas nothing', async () => {
+    calls.length = 0;
+    const asked: string[] = [];
+    await exploreFeed(['recipe-nordic-noir'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response('', { status: 404 });
+      }) as typeof fetch,
+    }).load(1);
+    expect(asked).toEqual([]);
+    expect(calls[0]?.path).toBe('/discover/movie');
   });
 
   it('names a mood’s posterless titles from TMDB, so the hide rules don’t empty it', async () => {
@@ -561,7 +667,9 @@ describe('Explore feeds', () => {
       });
       expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
       await row.load(1);
-      expect(asked[0]).toBe('/atlas/index/similar/movie/949.json?limit=200');
+      // atlas's filter first; with no such route, the title page's own "More like this".
+      expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:80,like:949,rating:7');
+      expect(asked[1]).toBe('/atlas/index/similar/movie/949.json?limit=200');
       // atlas has nothing for it: TMDB's recommendations, from their first page.
       expect(asked.some((url) => url.includes('/movie/949/recommendations'))).toBe(true);
       const title = { ...film(1), genreIds: [80, 18], rating: 7.6, votes: 4000 };
