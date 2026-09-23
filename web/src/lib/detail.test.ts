@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { fetchCollection, fetchDetail, parseDetail, parsePerson, parseSeason } from './detail';
+import { fetchDetails } from './tmdb';
 
 const movie = {
   title: 'Arrival',
@@ -117,6 +119,39 @@ describe('title pages', () => {
     ]);
     const down = (async () => new Response('{}', { status: 401 })) as typeof fetch;
     expect(await fetchDetail({ type: 'movie', id: 1 }, 'k', down)).toBeNull();
+  });
+
+  /**
+   * den-edge answers every detail question for a title from one whole-detail fetch (`src/tmdb.rs`,
+   * `MOVIE_APPENDS`/`TV_APPENDS`), but only for sub-requests on its list: one this app adds and that list
+   * lacks is asked of TMDB on its own again, a miss per title per question.
+   */
+  it("asks only for what den-edge's whole detail carries", async () => {
+    const source = readFileSync(new URL('../../../src/tmdb.rs', import.meta.url), 'utf8');
+    const carried = (name: string) =>
+      new Set(
+        [
+          ...(
+            new RegExp(`const ${name}: \\[&str; \\d+\\] =\\s*\\[([^\\]]*)\\]`).exec(source)?.[1] ??
+            ''
+          ).matchAll(/"([^"]+)"/g),
+        ].map((m) => m[1]),
+      );
+    const asked: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      asked.push(url);
+      return new Response(JSON.stringify(series), { status: 200 });
+    }) as typeof fetch;
+    for (const type of ['movie', 'tv'] as const) {
+      asked.length = 0;
+      await fetchDetail({ type, id: 1 }, 'k', fetchImpl);
+      await fetchDetails({ type, id: 1 }, 'k', fetchImpl);
+      const whole = carried(type === 'movie' ? 'MOVIE_APPENDS' : 'TV_APPENDS');
+      expect(whole.size, type).toBeGreaterThan(0);
+      for (const url of asked)
+        for (const append of new URL(url).searchParams.get('append_to_response')!.split(','))
+          expect(whole.has(append), `${type}: ${append}`).toBe(true);
+    }
   });
 });
 

@@ -24,6 +24,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -262,6 +263,275 @@ fn cache_path(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{}.json", crate::hex(&Sha256::digest(key.as_bytes()))))
 }
 
+/// What a title's details are asked of TMDB with, whoever asks: every sub-request any client appends to a film's or
+/// a series' record — the web app's detail page and library naming (`web/src/lib/detail.ts`, `tmdb.ts`), the TV's
+/// detail and title-screen requests (DenKit `TMDBClient`) and the link preview (`meta.rs`, which appends none). A
+/// detail question the cache cannot answer is asked as all of them, once, and kept under that one key; every later
+/// detail question for the title, from any client, is then answered from it (`Detail`). A client appending
+/// something not listed here is asked for exactly as before. `web/src/lib/detail.test.ts` holds the web app's
+/// requests to these lists.
+const MOVIE_APPENDS: [&str; 6] =
+    ["credits", "external_ids", "recommendations", "release_dates", "videos", "watch/providers"];
+const TV_APPENDS: [&str; 7] = [
+    "aggregate_credits",
+    "content_ratings",
+    "credits",
+    "external_ids",
+    "recommendations",
+    "videos",
+    "watch/providers",
+];
+
+/// The `append_to_response` values clients sent before every detail question was asked as the whole set, spelled
+/// exactly as they send them: a key keeps the value in its own order, so this is the only way to find what they
+/// left in the cache. An answer kept under one of these still answers any question it holds all of, so a title
+/// already kept is not asked for again. `""` is the bare record, the link preview's.
+const KEPT_MOVIE_APPENDS: [&str; 5] = [
+    "credits,recommendations,videos,external_ids,release_dates,watch/providers", // web detail page
+    "release_dates,watch/providers,credits,recommendations,videos",              // TV title screen
+    "release_dates,watch/providers",                                             // TV detail
+    "credits",                                                                   // web library naming
+    "",
+];
+const KEPT_TV_APPENDS: [&str; 5] = [
+    "aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers", // web detail page
+    "content_ratings,watch/providers,external_ids,credits,recommendations,videos", // TV title screen
+    "content_ratings,watch/providers,external_ids",                                // TV detail
+    "credits,external_ids",                                                        // web library naming
+    "",
+];
+
+/// A question for a film's or a series' own record (`/3/movie/550?append_to_response=credits`) whose sub-requests
+/// are all among the ones the whole detail carries.
+struct Detail {
+    path: String,
+    /// Every sub-request the whole detail carries for this kind of title, and what was kept before it existed.
+    all: &'static [&'static str],
+    kept: &'static [&'static str],
+    asked: BTreeSet<String>,
+    /// The question's other parameters (`language`, …): part of the key as they always were.
+    rest: Vec<(String, String)>,
+    /// The question exactly as asked, which is what an answer kept before the whole set existed is under.
+    exact: Option<String>,
+    dir: PathBuf,
+}
+
+/// What the cache holds for a detail question.
+enum Kept {
+    /// Fresh, with how long it is fresh for, its age and when it was kept.
+    Hit(Bytes, Duration, Duration, SystemTime),
+    /// A remembered 404, still believed.
+    Absent,
+    /// Past its freshness but inside the six months, with when it was kept and how long it was fresh for.
+    Stale(Bytes, SystemTime, Duration),
+    Nothing,
+}
+
+impl Detail {
+    fn of(path: &str, query: Option<&str>, dir: Option<&Path>) -> Option<Detail> {
+        let dir = dir?;
+        let mut parts = path.split('/').skip(1);
+        let (Some("3"), Some(kind), Some(id), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (all, kept): (&'static [&'static str], &'static [&'static str]) = match kind {
+            "movie" => (&MOVIE_APPENDS, &KEPT_MOVIE_APPENDS),
+            "tv" => (&TV_APPENDS, &KEPT_TV_APPENDS),
+            _ => return None,
+        };
+        let (mut asked, mut rest) = (BTreeSet::new(), Vec::new());
+        for (name, value) in url::form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
+            match name.as_ref() {
+                "api_key" | "session_id" => {}
+                "append_to_response" => {
+                    asked.extend(value.split(',').map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned))
+                }
+                _ => rest.push((name.into_owned(), value.into_owned())),
+            }
+        }
+        asked.iter().all(|a| all.contains(&a.as_str())).then(|| Detail {
+            path: path.to_owned(),
+            all,
+            kept,
+            asked,
+            rest,
+            exact: query.map(str::to_owned),
+            dir: dir.to_owned(),
+        })
+    }
+
+    /// This question's other parameters with `appends` as its sub-requests.
+    fn query(&self, appends: &str) -> Option<String> {
+        let mut out = url::form_urlencoded::Serializer::new(String::new());
+        out.extend_pairs(&self.rest);
+        if !appends.is_empty() {
+            out.append_pair("append_to_response", appends);
+        }
+        Some(out.finish()).filter(|q| !q.is_empty())
+    }
+
+    /// The whole detail: the question TMDB is asked, and the key its answer is kept under.
+    fn whole(&self) -> (Option<String>, PathBuf) {
+        let query = self.query(&self.all.join(","));
+        let file = cache_path(&self.dir, &cache_key(&self.path, query.as_deref()));
+        (query, file)
+    }
+
+    /// Where a kept answer to this question may be, and whether it is the question exactly: the question as asked,
+    /// then the whole detail, then what clients kept before it existed that holds everything asked.
+    fn candidates(&self) -> Vec<(PathBuf, bool)> {
+        let exact = cache_path(&self.dir, &cache_key(&self.path, self.exact.as_deref()));
+        let mut files = vec![(exact, true), (self.whole().1, false)];
+        for appends in self.kept {
+            let holds: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
+            if self.asked.iter().all(|a| holds.contains(a.as_str())) {
+                files.push((
+                    cache_path(&self.dir, &cache_key(&self.path, self.query(appends).as_deref())),
+                    false,
+                ));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        files.retain(|(file, _)| seen.insert(file.clone()));
+        files
+    }
+
+    /// An answer holding more than was asked, cut to what was: a record for a library's poster should not carry a
+    /// series' every guest actor. What it keeps is TMDB's own, so the narrower question gets the answer it would have.
+    fn narrowed(&self, body: Bytes) -> Bytes {
+        let Ok(serde_json::Value::Object(mut record)) = serde_json::from_slice(&body) else { return body };
+        for append in self.all {
+            if !self.asked.contains(*append) {
+                record.remove(*append);
+            }
+        }
+        serde_json::to_vec(&record).map_or(body, Bytes::from)
+    }
+
+    /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
+    /// freshness. Each is judged by its own age and what it says — an airing series stays fresh for hours.
+    async fn kept(&self) -> Kept {
+        let mut stale = Kept::Nothing;
+        for (file, exact) in self.candidates() {
+            let Some((body, age, modified)) = read(&file).await else { continue };
+            if body == ABSENT {
+                if age < ABSENT_TTL {
+                    return Kept::Absent;
+                }
+                continue;
+            }
+            let fresh = fresh_for_answer(&self.path, &body);
+            let body = if exact { body } else { self.narrowed(body) };
+            if age < fresh {
+                return Kept::Hit(body, fresh, age, modified);
+            }
+            if matches!(stale, Kept::Nothing) && age < RETENTION {
+                stale = Kept::Stale(body, modified, fresh);
+            }
+        }
+        stale
+    }
+
+    /// The question exactly as asked, and where its answer is kept: what a title too large to fetch whole is asked
+    /// as instead.
+    fn exact(&self) -> (Option<String>, PathBuf) {
+        let file = cache_path(&self.dir, &cache_key(&self.path, self.exact.as_deref()));
+        (self.exact.clone(), file)
+    }
+
+    /// Marks a title whose whole detail did not fit `MAX_ANSWER_BYTES` — a long series with every season's credits
+    /// can run past it — so its questions are asked one by one for a while rather than the whole again each time.
+    fn oversize_mark(&self) -> PathBuf {
+        self.whole().1.with_extension("oversize")
+    }
+
+    async fn oversize(&self) -> bool {
+        read(&self.oversize_mark()).await.is_some_and(|(_, age, _)| age < OVERSIZE_TTL)
+    }
+
+    /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — keep it, and answer this question
+    /// from it: the body, whether it was a `miss` or `revalidated`, and how long it is fresh for.
+    ///
+    /// When the whole cannot be had for any reason but "no such title" or a spent day, the question is asked exactly
+    /// as it was, as it was before the whole existed: one title's failure must not fail every question about it.
+    async fn ask(
+        &self,
+        state: &AppState,
+        key: &str,
+        rid: &str,
+    ) -> Result<(Bytes, &'static str, Duration), Box<Response>> {
+        if self.oversize().await {
+            let (query, file) = self.exact();
+            let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
+            return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
+        }
+        let (query, file) = self.whole();
+        let (body, how) = match ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await {
+            Ok(answer) => answer,
+            Err(response) => {
+                let code = response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
+                if response.status() == StatusCode::NOT_FOUND || code.as_deref() == Some("tmdb_budget_spent")
+                {
+                    return Err(response);
+                }
+                if code.as_deref() == Some("tmdb_answer_unreadable") {
+                    write(&self.oversize_mark(), &Bytes::new()).await;
+                }
+                let (query, file) = self.exact();
+                let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
+                return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
+            }
+        };
+        let fresh = fresh_for_answer(&self.path, &body);
+        Ok((self.narrowed(body), how, fresh))
+    }
+}
+
+/// How long a title whose whole detail was too large is asked one question at a time before the whole is tried
+/// again.
+const OVERSIZE_TTL: Duration = Duration::from_secs(7 * 86_400);
+
+/// Ask TMDB `query` — again, naming its ETag, when an answer is kept at `file` — and keep what it says there: the
+/// body, and whether it was a `miss` or `revalidated`. A 404 is kept as one.
+async fn ask_kept(
+    state: &AppState,
+    path: &str,
+    query: Option<&str>,
+    key: &str,
+    rid: &str,
+    file: &Path,
+) -> Result<(Bytes, &'static str), Box<Response>> {
+    let fetched = if tokio::fs::try_exists(file).await.unwrap_or(false) {
+        revalidate(state, path, query, key, rid, file).await
+    } else {
+        fetch(state, path, query, key, rid).await.map(|(body, etag)| Fetched::Answer(body, etag))
+    };
+    match fetched {
+        Ok(Fetched::Answer(body, etag)) => {
+            keep(file, &body, etag.as_deref()).await;
+            Ok((body, "miss"))
+        }
+        Ok(Fetched::Unchanged) => {
+            renew(file).await;
+            let Some((body, _, _)) = read(file).await else {
+                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+            };
+            Ok((body, "revalidated"))
+        }
+        Err(response) => {
+            if response.status() == StatusCode::NOT_FOUND {
+                keep(file, &Bytes::from_static(ABSENT), None).await;
+            }
+            Err(response)
+        }
+    }
+}
+
 /// The upstream question, with our key substituted for whatever the caller sent.
 fn upstream(path: &str, query: Option<&str>, key: &str) -> String {
     let mut params: Vec<(String, String)> = query
@@ -290,6 +560,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     }
     let asked = req.headers();
     let query = req.uri().query().map(str::to_owned);
+    if let Some(detail) = Detail::of(&path, query.as_deref(), state.tmdb_cache_dir.as_deref()) {
+        let ip = crate::handler::client_ip(state, &req);
+        return detail_answer(state, &ip, asked, &detail, key, rid).await;
+    }
     let cached = cache_key(&path, query.as_deref());
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cached));
 
@@ -347,17 +621,8 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
     }
     let ip = crate::handler::client_ip(state, &req);
-    if let Some(visitor_wait) = crate::link::throttled_at(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW) {
-        // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
-        // header therefore buys nothing, while a paired household can finish naming a large library.
-        let member = req.headers().get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
-        if !crate::library::is_member(state, member).await {
-            return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait);
-        }
-        if let Some(wait) = crate::link::throttled_at(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)
-        {
-            return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
-        }
+    if let Some(refusal) = over_allowance(state, &ip, asked).await {
+        return refusal;
     }
     match fetch(state, &path, query.as_deref(), key, rid).await {
         Ok((body, etag)) => {
@@ -378,6 +643,59 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     }
 }
 
+/// The refusal for a question that has to go to TMDB once this address's allowance is spent; `None` to ask.
+async fn over_allowance(state: &AppState, ip: &str, asked: &HeaderMap) -> Option<Response> {
+    let visitor_wait = crate::link::throttled_at(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW)?;
+    // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
+    // header therefore buys nothing, while a paired household can finish naming a large library.
+    let member = asked.get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
+    if !crate::library::is_member(state, member).await {
+        return Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait));
+    }
+    let wait = crate::link::throttled_at(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)?;
+    Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+}
+
+/// A detail question (`Detail`), answered from whatever kept answer holds it, else by asking TMDB for the whole
+/// detail once. Freshness is the served answer's own: a kept film is good for its six months from when it was
+/// fetched, an airing series for hours, and a stale series is shown at once while the whole detail is asked again
+/// behind it, as a stale list is.
+async fn detail_answer(
+    state: &Arc<AppState>,
+    ip: &str,
+    asked: &HeaderMap,
+    detail: &Detail,
+    key: &str,
+    rid: &str,
+) -> Response {
+    match detail.kept().await {
+        Kept::Hit(body, fresh, age, modified) => {
+            return answer(body, &fresh_policy(fresh, fresh.saturating_sub(age)), "hit", modified, asked)
+        }
+        Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+        Kept::Stale(body, modified, fresh) if fresh != DETAILS_TTL => {
+            let (query, file) = if detail.oversize().await { detail.exact() } else { detail.whole() };
+            let cached = cache_key(&detail.path, query.as_deref());
+            refresh_behind(
+                state,
+                Refresh { cached, path: detail.path.clone(), query, key: key.to_owned(), file },
+            );
+            return answer(body, "public, max-age=60", "stale", modified, asked);
+        }
+        // A settled record past its six months is asked again now, as it always was, without the allowance.
+        Kept::Stale(..) => {}
+        Kept::Nothing => {
+            if let Some(refusal) = over_allowance(state, ip, asked).await {
+                return refusal;
+            }
+        }
+    }
+    match detail.ask(state, key, rid).await {
+        Ok((body, how, fresh)) => answer(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked),
+        Err(response) => *response,
+    }
+}
+
 /// A TMDB answer as JSON, for den-edge asking on its own behalf rather than relaying somebody's request
 /// (`meta.rs`). The same allow-list, the same daily ceiling and the same cache: a question already asked by a
 /// device costs a local file read here too, and one asked here warms it for them.
@@ -385,6 +703,16 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     let key = state.tmdb_key.as_deref()?;
     if !allowed(path) {
         return None;
+    }
+    // A title's record is the same question the app asks next (`Detail`): answered from what the app keeps, and a
+    // cold one fetched whole, so the page this preview was built for opens on a hit.
+    if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
+        let body = match detail.kept().await {
+            Kept::Hit(body, ..) => body,
+            Kept::Absent => return None,
+            Kept::Stale(..) | Kept::Nothing => detail.ask(state, key, "meta").await.ok()?.0,
+        };
+        return serde_json::from_slice(&body).ok();
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
     let mut stale = None;
@@ -493,6 +821,10 @@ async fn send(
             3_600_000,
         )));
     }
+    #[cfg(test)]
+    if let Some(tmdb) = tests::stand_in(key) {
+        return tmdb(&upstream(path, query, key));
+    }
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "tmdb_proxy_off"));
     };
@@ -587,15 +919,20 @@ pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
 
 /// Written beside and renamed over, so a reader never sees half an answer. Ordinary caches may ignore a
 /// failure; endpoints that promise persistence can surface it.
+///
+/// The temporary file is this write's own. With one shared name, two writes of the same key at once — two cold
+/// questions for one title, now that a title's questions share one key — wrote into the same file, and the rename
+/// could put a mix of both in place, to be served as a hit for months.
 pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
     let Some(dir) = file.parent() else { return false };
     if tokio::fs::create_dir_all(dir).await.is_err() {
         return false;
     }
-    let temp = file.with_extension("tmp");
-    if tokio::fs::write(&temp, body).await.is_ok() {
-        return tokio::fs::rename(&temp, file).await.is_ok();
+    let temp = file.with_extension(format!("{}.tmp", crate::hex(&crate::random_bytes::<8>())));
+    if tokio::fs::write(&temp, body).await.is_ok() && tokio::fs::rename(&temp, file).await.is_ok() {
+        return true;
     }
+    let _ = tokio::fs::remove_file(&temp).await;
     false
 }
 
@@ -675,6 +1012,13 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
             Ok(Fetched::Answer(body, etag)) => keep(&asking.file, &body, etag.as_deref()).await,
             Ok(Fetched::Unchanged) => renew(&asking.file).await,
+            // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
+            Err(response)
+                if response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.as_str())
+                    == Some("tmdb_answer_unreadable") =>
+            {
+                write(&asking.file.with_extension("oversize"), &Bytes::new()).await;
+            }
             Err(_) => {}
         }
         crate::lock(&state.tmdb_refreshing).remove(&asking.cached);
@@ -1000,6 +1344,242 @@ mod tests {
         let unlimited = Harness::in_dir_with(temp_dir(), |_| {});
         refund(&unlimited.state);
         assert_eq!(crate::lock(&unlimited.state.tmdb_spent).1, 0, "nothing to give back without a ceiling");
+    }
+
+    type Upstream = Arc<dyn Fn(&str) -> Result<Fetched, Box<Response>> + Send + Sync>;
+    /// A stand-in TMDB per lent key, so tests running at once each get their own.
+    static UPSTREAMS: std::sync::Mutex<Vec<(String, Upstream)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn stand_in(key: &str) -> Option<Upstream> {
+        crate::lock(&UPSTREAMS).iter().find(|(k, _)| k == key).map(|(_, tmdb)| Arc::clone(tmdb))
+    }
+
+    /// A TMDB for the test lending `key`: a title's record, with each sub-request asked for as a field of its own,
+    /// and `status` for a series. It records every question it is asked, without the key.
+    fn tmdb_answering(key: &str, status: &'static str) -> Arc<std::sync::Mutex<Vec<String>>> {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let tmdb: Upstream = Arc::new(move |url: &str| {
+            let url = url::Url::parse(url).unwrap();
+            let id: u64 = url.path().rsplit('/').next().unwrap().parse().unwrap();
+            let mut body =
+                serde_json::json!({ "id": id, "title": "T", "status": status, "vote_average": 7.5 });
+            let mut appends = String::new();
+            for (name, value) in url.query_pairs().filter(|(name, _)| name != "api_key") {
+                if name == "append_to_response" {
+                    for append in value.split(',') {
+                        body[append] = serde_json::json!({ "from": append });
+                    }
+                }
+                appends.push_str(&format!("{name}={value}&"));
+            }
+            crate::lock(&seen).push(format!("{}?{appends}", url.path()));
+            Ok(Fetched::Answer(Bytes::from(body.to_string()), None))
+        });
+        crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+        asked
+    }
+
+    /// A TMDB whose whole series detail is too large to take (`MAX_ANSWER_BYTES`), as a long series' every-season
+    /// credits can be, answering every other question as `tmdb_answering` does.
+    fn tmdb_too_large_whole(key: &str) -> Arc<std::sync::Mutex<Vec<String>>> {
+        tmdb_answering(&format!("{key}-inner"), "Ended");
+        let inner = stand_in(&format!("{key}-inner")).unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let tmdb: Upstream = Arc::new(move |url: &str| {
+            let whole = url.contains("aggregate_credits");
+            crate::lock(&seen).push(if whole {
+                "whole".to_owned()
+            } else {
+                url.split("api_key").next().unwrap().to_owned()
+            });
+            if whole {
+                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+            }
+            inner(url)
+        });
+        crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+        asked
+    }
+
+    /// A series whose whole detail is too large used to 502 every question about it, spending the day's budget each
+    /// time. The question is asked as it was instead, and the whole is not tried again for a while.
+    #[tokio::test]
+    async fn a_title_too_large_to_fetch_whole_is_asked_one_question_at_a_time() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "too-large");
+        let asked = tmdb_too_large_whole("too-large");
+
+        let (how, named) = detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await;
+        assert_eq!(how, "miss");
+        assert!(named.get("credits").is_some(), "{named}");
+        assert_eq!(crate::lock(&asked).len(), 2, "the whole, refused, then the question itself");
+        assert_eq!(crate::lock(&asked)[0], "whole");
+
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399").await.0, "miss");
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "hit");
+        let asked = crate::lock(&asked).clone();
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert_ne!(asked[2], "whole", "the whole is not tried again");
+    }
+
+    /// Two writes of one key at once each write their own temporary file, so what ends up in place is one of them
+    /// whole, never a mix.
+    #[tokio::test]
+    async fn writes_of_one_key_at_once_leave_one_of_them_whole() {
+        let file = cache_path(&temp_dir(), "/3/tv/1399?");
+        let bodies: Vec<Bytes> = (0..16u8).map(|n| Bytes::from(vec![b'a' + n; 256 * 1024])).collect();
+        let writes: Vec<_> = bodies
+            .iter()
+            .cloned()
+            .map(|body| {
+                let file = file.clone();
+                tokio::spawn(async move { write(&file, &body).await })
+            })
+            .collect();
+        for w in writes {
+            assert!(w.await.unwrap(), "every write is kept whole or not at all");
+        }
+        let kept = read(&file).await.unwrap().0;
+        assert!(bodies.contains(&kept), "what is in place is one write, whole");
+        let strays = std::fs::read_dir(file.parent().unwrap()).unwrap().count();
+        assert_eq!(strays, 1, "no temporary file is left behind");
+    }
+
+    fn lending_as(cache: &Path, key: &str) -> Harness {
+        let (cache, key) = (cache.to_path_buf(), key.to_owned());
+        Harness::in_dir_with(temp_dir(), |state| {
+            state.tmdb_key = Some(key);
+            state.tmdb_cache_dir = Some(cache);
+        })
+    }
+
+    async fn detail(h: &Harness, url: &str) -> (String, serde_json::Value) {
+        let resp = h.send("GET", url, None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{url}");
+        let how = resp.headers()["x-den-tmdb"].to_str().unwrap().to_owned();
+        (how, serde_json::from_str(&body_text(resp).await).unwrap())
+    }
+
+    const WEB_MOVIE: &str = "credits,recommendations,videos,external_ids,release_dates,watch/providers";
+
+    /// A title used to be asked for once per client and question — the preview, the library's naming, the detail
+    /// page, the TV — each its own miss. Now the first question fetches the whole detail and the rest are hits.
+    #[tokio::test]
+    async fn every_detail_question_for_a_title_is_one_upstream_fetch() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "one-fetch");
+        let asked = tmdb_answering("one-fetch", "Ended");
+
+        let (how, bare) = detail(&h, "/tmdb/3/movie/550").await;
+        assert_eq!(how, "miss");
+        assert!(bare.get("credits").is_none(), "a bare question gets the bare record: {bare}");
+        let (how, named) = detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await;
+        assert_eq!(how, "hit");
+        assert!(named.get("credits").is_some() && named.get("videos").is_none(), "{named}");
+        let web = format!("/tmdb/3/movie/550?append_to_response={}", WEB_MOVIE.replace('/', "%2F"));
+        let (how, page) = detail(&h, &web).await;
+        assert_eq!(how, "hit");
+        for append in MOVIE_APPENDS {
+            assert!(page.get(append).is_some(), "{append} in {page}");
+        }
+        let tv_screen = "/tmdb/3/movie/550?append_to_response=release_dates,watch/providers,credits,recommendations,videos";
+        assert_eq!(detail(&h, tv_screen).await.0, "hit");
+        assert_eq!(ask(&h.state, "/3/movie/550", None).await.unwrap()["id"], 550, "the link preview");
+        assert_eq!(
+            *crate::lock(&asked),
+            [format!("/3/movie/550?append_to_response={}&", MOVIE_APPENDS.join(","))],
+            "one question, for the whole detail"
+        );
+
+        // The other parameters are still the question's own.
+        assert_eq!(detail(&h, "/tmdb/3/movie/550?language=fi").await.0, "miss");
+        assert_eq!(crate::lock(&asked).len(), 2);
+
+        // A series likewise, from the library's naming to the detail page.
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits,external_ids").await.0, "miss");
+        let tv_page = "/tmdb/3/tv/1399?append_to_response=aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers";
+        assert_eq!(detail(&h, tv_page).await.0, "hit");
+        assert_eq!(crate::lock(&asked).len(), 3);
+    }
+
+    /// The cache on the box is not started over: an answer kept under the question a client asked before the whole
+    /// detail existed answers that question, and any narrower one, with no call to TMDB — and keeps the age it was
+    /// kept with.
+    #[tokio::test]
+    async fn a_title_kept_before_the_upgrade_is_a_hit_without_asking() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "kept-before");
+        let asked = tmdb_answering("kept-before", "Ended");
+        let kept =
+            cache_path(&cache, &cache_key("/3/movie/550", Some(&format!("append_to_response={WEB_MOVIE}"))));
+        let body = serde_json::json!({ "id": 550, "title": "Fight Club", "credits": {}, "videos": {} });
+        write(&kept, &Bytes::from(body.to_string())).await;
+        aged(&kept, Duration::from_secs(30 * 86_400));
+
+        let web = format!("/tmdb/3/movie/550?append_to_response={}", WEB_MOVIE.replace(',', "%2C"));
+        let resp = h.send("GET", &web, None, &[]).await;
+        assert_eq!(resp.headers()["x-den-tmdb"], "hit");
+        let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
+        let left = (DETAILS_TTL - Duration::from_secs(30 * 86_400)).as_secs();
+        let max_age: u64 = policy.trim_start_matches("public, max-age=").parse().unwrap();
+        assert!(max_age <= left && max_age + 5 > left, "what is left of its own six months: {policy}");
+        let (how, bare) = detail(&h, "/tmdb/3/movie/550").await;
+        assert_eq!(how, "hit");
+        assert_eq!(bare, serde_json::json!({ "id": 550, "title": "Fight Club" }));
+        assert!(ask(&h.state, "/3/movie/550", None).await.is_some());
+        assert!(crate::lock(&asked).is_empty(), "nothing was asked of TMDB");
+    }
+
+    /// A kept answer holding less than was asked is no answer to it: the whole detail is fetched. And a sub-request
+    /// the whole detail does not carry is asked for as it always was.
+    #[tokio::test]
+    async fn a_question_for_more_than_a_kept_answer_holds_is_not_served_from_it() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "narrower");
+        let asked = tmdb_answering("narrower", "Ended");
+        let kept = cache_path(&cache, &cache_key("/3/movie/603", Some("append_to_response=credits")));
+        write(&kept, &Bytes::from_static(br#"{"id":603,"title":"The Matrix","credits":{}}"#)).await;
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/603?append_to_response=credits").await.0, "hit");
+        assert_eq!(detail(&h, "/tmdb/3/movie/603").await.0, "hit");
+        assert!(crate::lock(&asked).is_empty());
+        let (how, more) = detail(&h, "/tmdb/3/movie/603?append_to_response=credits,videos").await;
+        assert_eq!(how, "miss");
+        assert!(more.get("videos").is_some() && more.get("recommendations").is_none(), "{more}");
+        assert_eq!(crate::lock(&asked).len(), 1);
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/603?append_to_response=keywords").await.0, "miss");
+        assert_eq!(crate::lock(&asked)[1], "/3/movie/603?append_to_response=keywords&");
+    }
+
+    /// A series that is not over keeps its hours, whichever client's question finds it: shown at once, and the
+    /// whole detail asked again behind it. A finished one keeps its months.
+    #[tokio::test]
+    async fn an_airing_series_is_asked_again_on_its_shorter_rule() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "airing");
+        let asked = tmdb_answering("airing", "Returning Series");
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399").await.0, "miss");
+        let whole = Detail::of("/3/tv/1399", None, Some(&cache)).unwrap().whole().1;
+        aged(&whole, LIST_TTL + Duration::from_secs(60));
+
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "stale");
+        for _ in 0..200 {
+            if crate::lock(&h.state.tmdb_refreshing).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(crate::lock(&asked).len(), 2, "asked again behind the stale answer");
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "hit");
+
+        let ended = cache_path(&cache, &cache_key("/3/tv/1396", None));
+        write(&ended, &Bytes::from_static(br#"{"id":1396,"name":"Breaking Bad","status":"Ended"}"#)).await;
+        aged(&ended, LIST_TTL + Duration::from_secs(60));
+        assert_eq!(detail(&h, "/tmdb/3/tv/1396").await.0, "hit");
+        assert_eq!(crate::lock(&asked).len(), 2);
     }
 
     #[tokio::test]
