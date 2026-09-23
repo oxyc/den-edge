@@ -487,13 +487,12 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET_POST: &[Method] = &[Method::GET, Method::POST];
     const PUT_DELETE: &[Method] = &[Method::PUT, Method::DELETE];
     match route {
-        "/lib/:id/grants" => Some(GET_POST),
+        // A drain is one queue by its header (GET) or several by their keys in the body (POST).
+        "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
         "/grant/redeem" => Some(POST),
         "/grant/addons" => Some(GET),
-        "/health" | "/version" | "/config" | "/metrics" | "/inbox/drain" | "/lib/:id/changes" | "/tmdb" => {
-            Some(GET)
-        }
+        "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" => Some(GET_PUT),
         "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
         "/metadata/title/query" => Some(POST),

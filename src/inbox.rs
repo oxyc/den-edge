@@ -25,6 +25,8 @@ const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The newest fifty are kept; older ones fall off the front.
 const MAX_MESSAGES: usize = 50;
 const MAX_SEALED_CHARS: usize = 4096;
+/// Queues one `POST /inbox/drain` may take: a TV drains one per linked device, and a household links a handful.
+const MAX_DRAIN_KEYS: usize = 16;
 
 /// Cleanup is independent of requests to an abandoned link. Run once before serving, then hourly.
 pub async fn sweep(state: &AppState) {
@@ -45,9 +47,60 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
+        "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
         "/inbox/drain" => drain(state, link_key(&req)).await,
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
+}
+
+/// Several queues in one request: `{"keys": [...]}` in, `{"queues": [[...], ...]}` out, in the order asked. A TV
+/// with a handful of linked devices polls every few seconds while in front, and asked once per device.
+///
+/// Each key is still its own credential, exactly as for a single drain: a queue is emptied only for the key that
+/// names it, and one malformed key refuses the request rather than being skipped, so a client never mistakes a
+/// refused key for an empty queue. The keys travel in the body, which is never logged, like the header does for
+/// one.
+async fn drain_many(state: &AppState, req: Request) -> Response {
+    let body = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let Some(keys) = body.get("keys").and_then(Value::as_array) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    };
+    if keys.is_empty() || keys.len() > MAX_DRAIN_KEYS {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    }
+    let Some(keys) =
+        keys.iter().map(|k| k.as_str().filter(|k| valid_inbox_key(k))).collect::<Option<Vec<_>>>()
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
+    };
+    if keys.iter().collect::<std::collections::HashSet<_>>().len() != keys.len() {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    }
+    let _write = state.write_lock.lock().await;
+    let now = state.now();
+    // Every queue is read before any is emptied, so a failed read loses none of them.
+    let mut queues = Vec::with_capacity(keys.len());
+    for key in &keys {
+        match load(state, key, now).await {
+            Ok(queue) => queues.push(queue),
+            Err(e) => return internal("inbox read", e),
+        }
+    }
+    for (key, queue) in keys.iter().zip(&queues) {
+        // One that cannot be emptied is still handed over, and handed over again on the next drain, where a
+        // paired TV drops what it already applied (den-spec inbox-v1 §3). Refusing the lot would lose the queues
+        // already emptied before it.
+        if queue.is_some() {
+            if let Err(e) = state.store.delete(NS, key).await {
+                eprintln!("inbox delete: {e}");
+            }
+        }
+    }
+    let queues: Vec<Vec<Value>> = queues.into_iter().map(Option::unwrap_or_default).collect();
+    json_reply(StatusCode::OK, &json!({ "queues": queues }))
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
@@ -156,6 +209,53 @@ mod tests {
         assert_eq!(append(&h, "BAUG").await, StatusCode::OK);
         assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" }), json!({ "sealed": "BAUG" })]);
         assert!(drain(&h).await.is_empty(), "a drain empties the queue");
+    }
+
+    /// A TV with several linked devices drains all of their queues in one request, in the order it named them,
+    /// and each queue is emptied only for its own key.
+    #[tokio::test]
+    async fn several_queues_drain_in_one_request_in_the_order_asked() {
+        let h = Harness::new();
+        let other = "0123456789abcdef0123";
+        let idle = "fedcba9876543210fedc";
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let body = json!({ "inboxKey": other, "sealed": "BBBB" });
+        assert_eq!(h.call("POST", "/inbox/append", Some(body)).await.0, StatusCode::OK);
+
+        let (status, answer) =
+            h.call("POST", "/inbox/drain", Some(json!({ "keys": [other, idle, KEY] }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer, json!({ "queues": [[{ "sealed": "BBBB" }], [], [{ "sealed": "AAEC" }]] }));
+        let (_, again) = h.call("POST", "/inbox/drain", Some(json!({ "keys": [KEY, other] }))).await;
+        assert_eq!(again, json!({ "queues": [[], []] }), "each queue was emptied");
+        assert!(drain(&h).await.is_empty());
+    }
+
+    /// Each key is its own credential, so one that is not a key refuses the request instead of reading as an
+    /// empty queue — and refuses it before any queue is emptied.
+    #[tokio::test]
+    async fn a_multi_drain_is_bounded_and_refuses_a_bad_key_whole() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let too_many: Vec<String> = (0..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        for body in [
+            json!({}),
+            json!({ "keys": [] }),
+            json!({ "keys": KEY }),
+            json!({ "keys": too_many }),
+            json!({ "keys": [KEY, KEY] }),
+            json!({ "keys": [KEY, "short"] }),
+            json!({ "keys": [KEY, 7] }),
+        ] {
+            assert_eq!(
+                h.call("POST", "/inbox/drain", Some(body.clone())).await.0,
+                StatusCode::BAD_REQUEST,
+                "{body}"
+            );
+        }
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "nothing was emptied");
+        let at_most: Vec<String> = (1..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        assert_eq!(h.call("POST", "/inbox/drain", Some(json!({ "keys": at_most }))).await.0, StatusCode::OK);
     }
 
     #[tokio::test]
