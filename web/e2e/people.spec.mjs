@@ -25,6 +25,7 @@ async function serveAtlas(page) {
     const url = new URL(r.request().url());
     asked.push(url.pathname.replace(/^.*\/atlas/, '') + url.search);
     const role = /role:([a-z]+)/.exec(url.searchParams.get('traits') ?? '')?.[1];
+    const born = /born:([0-9-]+)/.exec(url.searchParams.get('traits') ?? '')?.[1];
     const people = PEOPLE.filter((p) => !role || p.roles.includes(role));
     if (url.pathname.endsWith('/people/counts.json'))
       return r.fulfill({
@@ -42,6 +43,13 @@ async function serveAtlas(page) {
               complete: true,
               values: { Q6581072: 1 },
               labels: { Q6581072: 'female' },
+            },
+            // Counted by decade; a range picked is named as atlas spells it.
+            born: {
+              mode: 'single',
+              complete: true,
+              values: { 1970: 2, 1980: 1 },
+              ...(born ? { selected: [born] } : {}),
             },
           },
           traitCoverage: {},
@@ -130,6 +138,79 @@ test('People lists who atlas credits, a role narrows it in the address, and Back
     await expect(page).toHaveURL(/\/people$/);
     await expect(card('Ann Actor')).toBeVisible();
     await expect(selected).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('A birth-year range takes a decade’s place, stays in the address, and an open end is asked open', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await guardNetwork(page);
+    const asked = await serveAtlas(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/people')}`);
+
+    const view = active(page);
+    const from = view.getByRole('textbox', { name: 'Born from (year)' });
+    const to = view.getByRole('textbox', { name: 'Born to (year)' });
+    const selected = view.getByRole('group', { name: 'Selected' });
+    const rail = view.getByRole('navigation', { name: 'Browse by category' });
+    const decade = rail.getByRole('group', { name: 'Born' }).getByRole('button', {
+      name: 'Born 1970s',
+      exact: true,
+    });
+
+    // A decade first, then a range: the range takes its place, and says so.
+    await decade.click();
+    await expect(page).toHaveURL(/\/people\?t=born-1970$/);
+    await from.fill('1976');
+    await to.fill('1996');
+    await to.press('Enter');
+    await expect(page).toHaveURL(/\/people\?t=born-1976-1996$/);
+    await expect(selected.getByRole('button', { name: 'Remove Born 1976–1996' })).toBeVisible();
+    await expect(selected.getByRole('button', { name: 'Remove Born 1970s' })).toHaveCount(0);
+    const status = view.locator('p.status');
+    await expect(status).toHaveText('Born 1976–1996 replaced Born 1970s.');
+    await expect.poll(() => asked).toContain('/index/filter/all/people.json?traits=born:1976-1996');
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/all/people/counts.json?traits=born:1976-1996');
+    // Moving from one field to the other was no pick of its own.
+    expect(asked).not.toContain('/index/filter/all/people.json?traits=born:1976-');
+    // One born pick at a time: no decade is offered beside the range.
+    await expect(decade).toHaveCount(0);
+
+    // An emptied end is an open one.
+    await to.fill('');
+    await to.press('Enter');
+    await expect(page).toHaveURL(/\/people\?t=born-from-1976$/);
+    await expect.poll(() => asked).toContain('/index/filter/all/people.json?traits=born:1976-');
+    await expect(selected.getByRole('button', { name: 'Remove Born 1976 or later' })).toBeVisible();
+
+    // A year atlas can't take is said, and not asked.
+    await to.fill('1700');
+    await to.press('Enter');
+    await expect(status).toContainText('Born: a year from 1800');
+    await expect(page).toHaveURL(/\/people\?t=born-from-1976$/);
+
+    // Back restores the closed range, fields and all; removing the pill empties them.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/people\?t=born-1976-1996$/);
+    await expect(from).toHaveValue('1976');
+    await expect(to).toHaveValue('1996');
+    await selected.getByRole('button', { name: 'Remove Born 1976–1996' }).click();
+    await expect(page).toHaveURL(/\/people$/);
+    await expect(from).toHaveValue('');
+    await expect(to).toHaveValue('');
     expect(errors).toEqual([]);
   } finally {
     await browser.close();

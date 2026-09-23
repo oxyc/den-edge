@@ -1,7 +1,8 @@
 // People: the people credited on the titles a selection matches, narrowed by what Wikidata says about them — the
-// credit (actor, director, writer, creator), gender, birth decade, nationality and occupation — from den-atlas's
-// people routes (`filterRoutes.ts`). The title facets are Explore's own chips; the person traits are picked as
-// `<trait>-<value>` ids (`role-director`, `gender-Q6581072`, `born-1970`), the address's `t=`.
+// credit (actor, director, writer, creator), gender, birth decade or years, nationality and occupation — from
+// den-atlas's people routes (`filterRoutes.ts`). The title facets are Explore's own chips; the person traits are
+// picked as `<trait>-<value>` ids (`role-director`, `gender-Q6581072`, `born-1970`, `born-1976-1996`), the
+// address's `t=`.
 
 import { filterItems } from './facetCounts';
 import { exploreChips, type Chip, type ChipGroup } from './explore';
@@ -20,11 +21,38 @@ const ROLES: Record<string, string> = {
   creator: 'Creators',
 };
 
+/**
+ * A birth-year range in an address, where an id may not end on a dash: `born-1976-1996`, and an open end as
+ * `born-from-1976` or `born-to-1996`. atlas writes them `1976-1996`, `1976-`, `-1996`.
+ */
+const bornValue = (value: string) =>
+  value.replace(/^from-(\d+)$/, '$1-').replace(/^to-(\d+)$/, '-$1');
+const bornPart = (value: string) =>
+  value.replace(/^(\d+)-$/, 'from-$1').replace(/^-(\d+)$/, 'to-$1');
+
 /** A trait pick as atlas's item: `role-director` is `role:director`; undefined for anything else. */
 export function traitItem(id: string): FilterItem | undefined {
   const at = id.indexOf('-');
-  const [kind, value] = [id.slice(0, at), id.slice(at + 1)];
+  const [kind, raw] = [id.slice(0, at), id.slice(at + 1)];
+  const value = kind === 'born' ? bornValue(raw) : raw;
   return at > 0 && value && TRAIT_KINDS[kind] ? { kind, id: value } : undefined;
+}
+
+/** A birth-year range's pick, either end left out (undefined), or undefined for no range at all. */
+export const bornRangeId = (from?: number, to?: number): string | undefined =>
+  from === undefined && to === undefined
+    ? undefined
+    : `born-${bornPart(`${from ?? ''}-${to ?? ''}`)}`;
+
+/** The birth-year range among the trait picks, its ends as years; undefined for none (a decade is no range). */
+export function bornRangeOf(traits: readonly string[]): { from?: number; to?: number } | undefined {
+  for (const id of traits) {
+    const item = traitItem(id);
+    if (item?.kind !== 'born' || !item.id.includes('-')) continue;
+    const [from, to] = item.id.split('-').map((year) => (year ? Number(year) : undefined));
+    return { from, to };
+  }
+  return undefined;
 }
 
 /** The trait picks as atlas's `traits`. */
@@ -39,7 +67,7 @@ const sameKind = (a: string, b: string) => traitItem(a)?.kind === traitItem(b)?.
 
 /**
  * The trait picks once `id` is picked: one already in comes out; any other goes in last, taking the place of another
- * value of a one-value trait (a person has one gender and one birth decade). Roles, nationalities and occupations
+ * value of a one-value trait (a person has one gender; a birth decade or a range of birth years is one pick). Roles, nationalities and occupations
  * stack: two roles are the people who hold both.
  */
 export function pickTrait(traits: readonly string[], id: string): string[] {
@@ -62,10 +90,19 @@ export function traitEmpty(id: string, counts: PeopleCounts): boolean {
   return !!item && !!answer?.complete && !(answer.values?.[item.id] ?? 0);
 }
 
-/** A trait value's words: a role's plural, a decade's "1970s", a Wikidata item by atlas's label. */
+/** A birth-year range's words: "Born 1976–1996", "Born 1976 or later", "Born 1996 or earlier". */
+function bornLabel(range: string): string {
+  const [from, to] = range.split('-');
+  if (from && to) return `Born ${from}–${to}`;
+  return from ? `Born ${from} or later` : `Born ${to} or earlier`;
+}
+
+/**
+ * A trait value's words: a role's plural, a decade's "1970s", a birth-year range, a Wikidata item by atlas's label.
+ */
 function traitLabel(kind: string, value: string, labels?: Record<string, string>): string {
   if (kind === 'role') return ROLES[value] ?? value;
-  if (kind === 'born') return `Born ${value}s`;
+  if (kind === 'born') return value.includes('-') ? bornLabel(value) : `Born ${value}s`;
   const label = labels?.[value];
   return label ? label.charAt(0).toUpperCase() + label.slice(1) : value;
 }
@@ -78,7 +115,10 @@ export function traitChips(counts: PeopleCounts): Chip[] {
   return TRAITS.flatMap((kind) => {
     const answer = counts.traits[kind];
     if (!answer) return [];
-    const values = Object.entries(answer.values ?? {});
+    // A born value is a decade; one before the common era (`-480`) has no address, and would read as a range.
+    const values = Object.entries(answer.values ?? {}).filter(
+      ([value]) => kind !== 'born' || /^\d+$/.test(value),
+    );
     if (kind === 'role') values.sort(([a], [b]) => roleRank(a) - roleRank(b));
     else if (kind === 'born') values.sort(([a], [b]) => Number(b) - Number(a));
     else values.sort(([, a], [, b]) => b - a);
@@ -93,7 +133,7 @@ export function traitChip(
   value: string,
   labels?: Record<string, string>,
 ): Chip | undefined {
-  const id = `${kind}-${value}`;
+  const id = `${kind}-${kind === 'born' ? bornPart(value) : value}`;
   return FACET.test(id)
     ? { id, label: traitLabel(kind, value, labels), group: kind as ChipGroup }
     : undefined;

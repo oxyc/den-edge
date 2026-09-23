@@ -227,6 +227,12 @@ describe('People’s address', () => {
     );
     expect(parseRoute(href)).toEqual({ page: 'people', ...view });
     expect(routePath({ page: 'people', ...view })).toBe(href);
+    // A birth-year range, closed or open at either end, is a trait like any other.
+    for (const born of ['born-1976-1996', 'born-from-1976', 'born-to-1996'])
+      expect(parseRoute(peopleHref({ traits: [born] }))).toEqual({
+        page: 'people',
+        traits: [born],
+      });
   });
 
   it('is a bare /people for its defaults, and drops what it cannot read', () => {

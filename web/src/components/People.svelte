@@ -1,7 +1,7 @@
 <!-- People: the people credited on the titles a selection matches, most prominent first, as Explore browses titles —
-     the same rail, pills and endless grid. Its person traits (role, gender, birth decade, nationality, occupation)
-     lead the rail, then Explore's title facets, which scope which credits count ("directors of Korean horror"). Its
-     state is its address (`/people?type=…&c=…&t=…&order=…`), so a view can be linked and Back takes back a pick. -->
+     the same rail, pills and endless grid. Its person traits (role, gender, birth decade or years, nationality,
+     occupation) lead the rail, then Explore's title facets, which scope which credits count ("directors of Korean
+     horror"). Its state is its address (`/people?type=…&c=…&t=…&order=…`), so a view can be linked and Back takes back a pick. -->
 <script lang="ts">
   import { untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
@@ -25,6 +25,7 @@
     fetchFilterCounts,
     fetchPeopleCounts,
     filterPeople,
+    FIRST_BIRTH_YEAR,
     searchTraitValues,
     type FilterCounts,
     type FilterPerson,
@@ -35,6 +36,8 @@
   import {
     ORDERS,
     SECTIONS,
+    bornRangeId,
+    bornRangeOf,
     pendingTraitChip,
     pickTrait,
     titleChips,
@@ -258,6 +261,44 @@
     go({ chips: set });
   }
 
+  /**
+   * The birth-year range's fields, as typed; set again from the address whenever it changes. A range is one `born`
+   * pick, so it takes the place of a birth decade, as another decade would.
+   */
+  let bornFrom = $state('');
+  let bornTo = $state('');
+  $effect(() => {
+    const range = bornRangeOf(traits);
+    bornFrom = range?.from?.toString() ?? '';
+    bornTo = range?.to?.toString() ?? '';
+  });
+  function chooseYears() {
+    const latest = new Date().getFullYear() + 1;
+    const year = (text: string) => (text.trim() ? Number(text.trim()) : undefined);
+    const [from, to] = [year(bornFrom), year(bornTo)];
+    if (
+      [from, to].some(
+        (y) => y !== undefined && !(Number.isInteger(y) && y >= FIRST_BIRTH_YEAR && y <= latest),
+      )
+    ) {
+      status = `Born: a year from ${FIRST_BIRTH_YEAR} to ${latest}.`;
+      return;
+    }
+    if (from !== undefined && to !== undefined && from > to) {
+      status = `Born: ${from} is after ${to}.`;
+      return;
+    }
+    const id = bornRangeId(from, to);
+    const born = traits.filter((x) => traitItem(x)?.kind === 'born');
+    // Emptied fields take out a range, and leave a decade be.
+    if (!id && !bornRangeOf(traits)) return;
+    const next = [...traits.filter((x) => !born.includes(x)), ...(id ? [id] : [])];
+    if (next.join(',') === traits.join(',')) return;
+    const removed = id ? born.filter((x) => x !== id) : [];
+    status = removed.length ? `${pendingTraitChip(id!)?.label} replaced ${names(removed)}.` : '';
+    go({ traits: next });
+  }
+
   function chooseType(to: MediaType | null) {
     const next: ExploreType = to ?? 'all';
     const { set, dropped } = remapSet(chips, type, next, titleChips(next));
@@ -344,6 +385,39 @@
             {/each}
           </div>
         {/if}
+        <!-- Taken on Enter, or once focus leaves both fields: moving from one to the other is not a pick. -->
+        <div
+          class="years"
+          role="group"
+          aria-label="Born between"
+          onfocusout={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) chooseYears();
+          }}
+        >
+          <input
+            class="find"
+            type="text"
+            inputmode="numeric"
+            maxlength="4"
+            autocomplete="off"
+            placeholder="Born from"
+            aria-label="Born from (year)"
+            bind:value={bornFrom}
+            onkeydown={(event) => event.key === 'Enter' && chooseYears()}
+          />
+          <span aria-hidden="true">–</span>
+          <input
+            class="find"
+            type="text"
+            inputmode="numeric"
+            maxlength="4"
+            autocomplete="off"
+            placeholder="to"
+            aria-label="Born to (year)"
+            bind:value={bornTo}
+            onkeydown={(event) => event.key === 'Enter' && chooseYears()}
+          />
+        </div>
         <ExploreChips
           chips={listed}
           selected={[...traits, ...chips]}
@@ -440,6 +514,20 @@
   .find:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
+  }
+
+  /* The birth-year range: two find fields side by side. */
+  .years {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    align-self: stretch;
+    color: var(--muted);
+  }
+
+  .years .find {
+    flex: 1;
+    min-width: 0;
   }
 
   /* What the find field found: the dashed pills Search's Browse row offers. */

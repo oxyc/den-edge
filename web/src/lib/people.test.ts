@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bornRangeId,
+  bornRangeOf,
   pendingTraitChip,
   pickTrait,
   titleChips,
@@ -76,6 +78,40 @@ describe('People’s person traits', () => {
       ['citizenship-Q189', 'Q189'],
     ]);
     expect(chips.find((c) => c.id === 'role-cast')?.group).toBe('role');
+  });
+
+  it('keeps a birth-year range in the address as one born pick, an open end spelled out', () => {
+    expect(bornRangeId(1976, 1996)).toBe('born-1976-1996');
+    expect(bornRangeId(1976)).toBe('born-from-1976');
+    expect(bornRangeId(undefined, 1996)).toBe('born-to-1996');
+    expect(bornRangeId()).toBeUndefined();
+    expect(traitItems(['born-1976-1996', 'born-from-1976', 'born-to-1996'])).toEqual([
+      { kind: 'born', id: '1976-1996' },
+      { kind: 'born', id: '1976-' },
+      { kind: 'born', id: '-1996' },
+    ]);
+    expect(bornRangeOf(['role-cast', 'born-from-1976'])).toEqual({ from: 1976, to: undefined });
+    expect(bornRangeOf(['born-1970'])).toBeUndefined();
+    // A range and a decade are one pick: either takes the other's place.
+    expect(pickTrait(['born-1970', 'role-cast'], 'born-1976-1996')).toEqual([
+      'role-cast',
+      'born-1976-1996',
+    ]);
+    expect(pickTrait(['born-to-1996'], 'born-1980')).toEqual(['born-1980']);
+    expect(pendingTraitChip('born-1976-1996')?.label).toBe('Born 1976–1996');
+    expect(pendingTraitChip('born-from-1976')?.label).toBe('Born 1976 or later');
+    expect(pendingTraitChip('born-to-1996')?.label).toBe('Born 1996 or earlier');
+    // atlas names the range it applied as `selected`, in its own spelling.
+    const picked = traitChips({
+      total: 1,
+      traits: {
+        born: { mode: 'single', complete: true, values: { '1980': 1 }, selected: ['1976-'] },
+      },
+    });
+    expect(picked.map((c) => [c.id, c.label])).toEqual([
+      ['born-1980', 'Born 1980s'],
+      ['born-from-1976', 'Born 1976 or later'],
+    ]);
   });
 
   it('hides a value only where atlas lists its trait whole', () => {
