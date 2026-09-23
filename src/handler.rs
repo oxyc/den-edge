@@ -28,6 +28,10 @@ fn config(state: &AppState) -> String {
     if let Some(id) = &state.simkl_client_id {
         config["simklClientId"] = Value::String(id.clone());
     }
+    // The address an assistant is connected with (Settings › Connections › Assistants); absent while it is off.
+    if let Some(oauth) = &state.oauth {
+        config["mcpUrl"] = Value::String(oauth.resource.clone());
+    }
     config.to_string()
 }
 
@@ -153,6 +157,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     };
     if path.starts_with("/grant/") || crate::grants::is_host_path(&path) {
         return crate::grants::handle(state, req).await;
+    }
+    // The MCP connector's authorization server and den-mcp behind it, before the addon relay: `/mcp` is streamed
+    // and gated on the token's session, which the addon relay does neither of.
+    if crate::oauth::is_path(&path) {
+        return crate::oauth::handle(state, req, rid).await;
     }
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
         return crate::relay::relay(state, req, target, rid, face).await;
@@ -322,7 +331,10 @@ impl Face {
             || path.starts_with("/warnings/")
             || path.starts_with("/ratings/")
             || path.starts_with("/metadata/")
-            || path.starts_with("/skipdb/");
+            || path.starts_with("/skipdb/")
+            // An assistant's server asks for tokens and calls `/mcp` on whichever public name it was given, and its
+            // person approves in the web app: the connector answers on every name, its own gate being the token.
+            || crate::oauth::is_path(path);
         match (self, path) {
             (Face::Invalid, _) => false,
             (_, "/health" | "/version" | "/routes" | "/config") | (Face::Both, _) => true,
@@ -408,6 +420,15 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/atlas/") => "/atlas",
         p if p.starts_with("/subtitles/") => "/subtitles",
         p if p.starts_with("/remux/") => "/remux",
+        "/mcp" => "/mcp",
+        "/oauth/authorize" => "/oauth/authorize",
+        "/oauth/register" => "/oauth/register",
+        "/oauth/token" => "/oauth/token",
+        "/oauth/revoke" => "/oauth/revoke",
+        "/oauth/connections" => "/oauth/connections",
+        p if p.starts_with("/oauth/connections/") => "/oauth/connections/:sid",
+        p if p.starts_with("/oauth/request/") => "/oauth/request",
+        p if p.starts_with("/.well-known/oauth-") => "/.well-known/oauth",
         _ => "other",
     }
 }

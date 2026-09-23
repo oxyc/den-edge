@@ -627,9 +627,29 @@ pub enum Denied {
 pub struct Live {
     pub gid: String,
     pub name: String,
+    /// The library that shares it.
+    pub host: String,
     pub addons: Vec<String>,
     pub installs: BTreeMap<String, String>,
     pub expires_at: Option<u64>,
+}
+
+/// Whether a grant is live now, without its secret: for what a grant's holder was given in its name (an assistant's
+/// connection, `oauth.rs`), which must stop the moment the grant is revoked, expires or is shortened. The end of
+/// access, if it has one, when it is.
+pub async fn standing(state: &AppState, gid: &str) -> Option<Option<u64>> {
+    if !valid_gid(gid) {
+        return None;
+    }
+    let record = match load(state, gid).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(e) => {
+            eprintln!("grant read: {e}");
+            return None;
+        }
+    };
+    (record.redeemed_at.is_some() && is_live(&record, state.now())).then(|| end(&record))
 }
 
 /// `<gid>:<secret>`.
@@ -678,6 +698,7 @@ pub async fn authenticate(
         expires_at: end(&record),
         gid: record.gid,
         name: record.name,
+        host: record.host,
         addons: record.addons,
         installs: record.installs,
     })
@@ -928,9 +949,11 @@ pub fn strip_manifest(value: &mut Value) {
 // ---- ending a grant's sessions
 
 /// Everything a grant that stopped being live must lose: the source addresses it opened the media listener for,
-/// and its sessions at den-remux. Returns whether remux was told (or had nothing to be told).
+/// the assistants connected in its name, and its sessions at den-remux. Returns whether remux was told (or had
+/// nothing to be told).
 pub async fn end_sessions(state: &AppState, gid: &str) -> bool {
     state.grants.forget(gid);
+    crate::oauth::end_grant(state, gid).await;
     let done = kill_remux(state, gid).await;
     if done {
         crate::lock(&state.grants.killed).insert(gid.to_owned());

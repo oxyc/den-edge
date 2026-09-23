@@ -491,6 +491,22 @@ pub async fn is_member(state: &AppState, member: Option<&str>) -> bool {
     })
 }
 
+/// Whether library `id` still takes the member token whose SHA-256 is `hash`: what an assistant connected by a member
+/// holds in its stead (`oauth.rs`), so a library key reset — a new member token — also ends those connections.
+pub async fn holds_member_hash(state: &AppState, id: &str, hash: &[u8; 32]) -> bool {
+    if !valid_hex_id(id) {
+        return false;
+    }
+    let mut libs = state.libraries.lock().await;
+    if load(state, &mut libs, id).await.is_err() {
+        return false;
+    }
+    libs.get(id).is_some_and(|lib| {
+        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
+        constant_time_eq(expected, hash)
+    })
+}
+
 async fn holds_another(
     state: &AppState,
     libs: &mut HashMap<String, Library>,

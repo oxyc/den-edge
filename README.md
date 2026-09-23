@@ -29,6 +29,14 @@ the rest is small JSON it validates and bounds.
 | `POST`/`GET /lib/{id}/grants`, `PUT`/`DELETE /lib/{id}/grants/{gid}` | a library owner's guest grants (oxyc/den#100): invite a named guest (`{name, addons, installs, codeExpiresAt?, accessDays? or accessUntil?, devices?}` → `{gid, code, grant}`, the code shown once), list, edit or extend, revoke. Authenticated by `x-den-library-member: <id>:<proof>` for the library in the path; at most 10 live grants per library (`409 too_many_grants`). `installs` is one bare base64url config segment per addon, never a URL |
 | `POST /grant/redeem` `{code, secretHash}` | a guest redeems an invite: `{gid, name, addons, expiresAt}`. One `404 invalid_code` for every failure; idempotent for the same `secretHash`; the access clock starts at the first redeem; throttled per address |
 | `GET /grant/addons`, `DELETE /grant/{gid}` | with `x-den-grant: <gid>:<secret>`: the guest's virtual installs (`/<addon>/~<gid>`; `410 grant_expired` once access ended), and leaving |
+| `GET /.well-known/oauth-authorization-server` | the MCP connector's authorization server (oxyc/den#25, `src/oauth.rs`): RFC 8414 metadata — code flow, PKCE S256 only, public clients, `den:search` |
+| `POST /oauth/register` | RFC 7591 dynamic registration: `{client_name?, redirect_uris}` (https, or http to loopback) → `{client_id, …}`, `token_endpoint_auth_method: none`. Ten a minute per address; a registration never consented to is reaped after a day |
+| `GET /oauth/authorize` | `response_type=code`, `client_id`, `redirect_uri`, `code_challenge` + `S256`, `state`, `resource?` → `302` to the web app's consent page, `/connect?request=<id>`. An unknown client or redirect is answered here, never redirected |
+| `GET /oauth/request/{id}`, `POST /oauth/request/{id}/approve\|deny` | the consent page: `{client, redirectHost}`, then the answer → `{redirect}`, back to the client with a code or `access_denied`. Approving takes `x-den-library-member` (a member) or `x-den-grant` (a guest with a live grant); anyone else is `403` |
+| `POST /oauth/token` | `authorization_code` (with the PKCE verifier) or `refresh_token` → `{access_token, refresh_token, expires_in}`. The access token is an EdDSA JWS (`at+jwt`) for `<resource>/mcp`, 15 minutes, never past a guest's end of access; the refresh token rotates, and a replaced one presented again ends the session |
+| `POST /oauth/revoke` | RFC 7009 |
+| `GET /oauth/connections`, `DELETE /oauth/connections/{sid}` | Settings › Connections › Assistants: a member sees its library's connections, its guests' included; a guest its own |
+| `* /mcp`, `GET /.well-known/oauth-protected-resource[/mcp]` | relayed to den-mcp (the `/mcp` entry of `ADDON_RELAY`), streamed. `/mcp` only for a token whose session still exists and whose member or grant still stands, checked on every call — so a revocation, a revoked or expired grant, or a library key reset stops the next call |
 
 `POST /pair/open` allows 20 tries a minute from one address (`429` past that).
 
@@ -58,6 +66,11 @@ a path allowlist, manifests stripped of `denInstallId` and debrid names, never f
 `/remux/health|releases|session` through with `x-den-edge-secret` and `x-den-owner: grant:<gid>`. Access is
 checked from the clock on every call. A background sweep asks den-remux to end the sessions of a grant that
 was revoked or expired, and reaps its record 30 days later.
+
+The MCP connector's state lives under `oauth/` (mode 0700): each registered client, each connection (session) with
+the SHA-256 of its current and previous refresh secret and whom it speaks for (a library and the hash of its member
+token, or a grant), and an index. Codes and consent requests live in memory for a minute and ten. Ending a grant
+ends its connections; an hourly sweep ends idle ones (30 days) and those whose member or grant no longer stands.
 
 `DATA_DIR/generation` is a random id minted the first time the store opens. Every `/lib` answer carries it.
 Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
@@ -100,6 +113,10 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 | `REMUX_EDGE_SECRET` | unset | shared with den-remux (its `EDGE_SECRET`). Set, a grant guest may use the `/remux` control routes and den-edge can end a grant's sessions (`POST /remux/admin/kill`); unset, guests are offered no remux, because remux would count their sessions as the host's |
 | `TRUSTED_PROXIES` | unset | proxies whose report of the visitor's address counts (comma-separated IPs) — the host running `tailscale serve`, `cloudflared`. Behind one, the per-address pairing limit reads `CF-Connecting-IP`, else the last `X-Forwarded-For` entry; from anyone else those headers are ignored. Unset, every visitor through a proxy shares its limit |
 | `LOG_REQUESTS` | off | one line per request: `<METHOD> <route> <status> <ms>ms` — a fixed route label, never a key |
+| `OAUTH_ISSUER` | unset | the MCP connector's authorization server: the public https origin assistants reach `/oauth/…` on. With `OAUTH_SIGNING_KEY` it turns `/oauth/…` and `/mcp` on; the startup line prints the public key den-mcp's `TOKEN_PUBLIC_KEYS` must hold |
+| `OAUTH_SIGNING_KEY` | unset | the Ed25519 private key that signs access tokens: 32 bytes, unpadded base64url. A secret |
+| `OAUTH_RESOURCE` | `OAUTH_ISSUER` | the origin assistants reach `/mcp` on, when it is not the issuer's; tokens are issued for `<it>/mcp` |
+| `OAUTH_CONSENT_ORIGIN` | `OAUTH_ISSUER` | where the web app's consent page is, when the issuer is a name that does not serve the web app (the device API's) |
 
 ## The Den web app
 

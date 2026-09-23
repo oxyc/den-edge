@@ -24,6 +24,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Gzip for the library's sync pages (`library.rs`): mostly base64 ciphertext, which it still cuts by a quarter.
 flate2 = "1"
+# Signs the MCP connector's access tokens (`oauth.rs`), which den-mcp checks with the public key alone. Pure Rust.
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
 
 # Small static binary, like every den addon.
 [profile.release]

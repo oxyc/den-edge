@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ConnectDialog from './components/ConnectDialog.svelte';
   import InviteDialog from './components/InviteDialog.svelte';
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
@@ -120,6 +121,7 @@
 
 <NavigationBar {route} {query} />
 <InviteDialog />
+<ConnectDialog />
 
 <main>
   {#if tmdbLimited}
