@@ -51,7 +51,8 @@
     const self = detail.title;
     const defined = [
       ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
-      moreLikeThisRow(detail, atlas, options),
+      // Films and series together: a series' closest titles include the films that share its world, and back.
+      moreLikeThisRow(detail, atlas, { ...options, mixed: true }),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
     ];
     let live = true;
