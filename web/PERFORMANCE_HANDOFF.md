@@ -55,12 +55,12 @@ ssh root@pve incus exec den -- curl -fsS http://127.0.0.1:8094/version
 ssh root@pve incus exec den -- curl -fsS http://127.0.0.1:8094/health
 ```
 
-The release already exists; do not repeat publication or move the v0.50.1 tag. Its release ID is `387680340`. Production HTTPS origin: `https://pve.tailce93d3.ts.net:8443/`. Do not read or print runtime environment secrets. For conditional-request checks compare the same negotiated encoding; this proxy can request gzip upstream for GET even when curl omitted Accept-Encoding.
+The release already exists; do not repeat publication or move the v0.50.1 tag. Its release ID is `387680340`. Production HTTPS origin: the box's tailnet name on `:8443`. Do not read or print runtime environment secrets. For conditional-request checks compare the same negotiated encoding; this proxy can request gzip upstream for GET even when curl omitted Accept-Encoding.
 
 ## Browser context — preserve pairing
 
 - Chrome DevTools MCP tools are dynamically available as `mcp__chrome_devtools__*`. The `web-perf` skill was applied: `/Users/cindy/.codex/skills/web-perf/SKILL.md`.
-- Page **4** remains paired to the user's library as “Den performance audit”, in the default browser context, at the original `https://oskars-macbook-pro.tailce93d3.ts.net:8443/#library`.
+- Page **4** remains paired to the user's library as “Den performance audit”, in the default browser context, at the original laptop tailnet address (`https://<laptop>.<tailnet>.ts.net:8443/#library`).
 - Viewport is still mobile 393×852×3, but **CPU/network throttling was disabled after the audit**. No trace is running. Reapply 4×/Slow 4G explicitly for comparable measurements.
 - Normal preview is Vite + HMR on port 5173 behind Tailscale 8443. Do not replace this server globally.
 - `npm run build`, then `/__build/#library` on that same secure origin, serves production bundles using existing API proxies and pairing. `/` remains development/HMR. This measures built frontend assets, not Rust's HTTP policy; inspect production headers separately.

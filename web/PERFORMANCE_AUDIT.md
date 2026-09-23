@@ -6,7 +6,7 @@ The audit found real layout instability during initial library naming and excess
 
 ## Measurements
 
-The authenticated tests used [the requested Tailscale preview](https://oskars-macbook-pro.tailce93d3.ts.net:8443/#library), a 393 × 852 viewport at 3× device scale, Chrome's **4× CPU slowdown and Slow 4G** network preset. Browser pairing and TMDB's IndexedDB cache were preserved. Reload measurements below use warm HTTP/image caches unless stated otherwise; they still fetch the encrypted library from the server.
+The authenticated tests used the requested Tailscale preview (`https://<laptop>.<tailnet>.ts.net:8443/#library`), a 393 × 852 viewport at 3× device scale, Chrome's **4× CPU slowdown and Slow 4G** network preset. Browser pairing and TMDB's IndexedDB cache were preserved. Reload measurements below use warm HTTP/image caches unless stated otherwise; they still fetch the encrypted library from the server.
 
 | Scenario                                      |     FCP |      LCP |   CLS |
 | --------------------------------------------- | ------: | -------: | ----: |
