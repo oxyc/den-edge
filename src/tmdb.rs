@@ -437,43 +437,98 @@ impl Detail {
         stale
     }
 
+    /// The question exactly as asked, and where its answer is kept: what a title too large to fetch whole is asked
+    /// as instead.
+    fn exact(&self) -> (Option<String>, PathBuf) {
+        let file = cache_path(&self.dir, &cache_key(&self.path, self.exact.as_deref()));
+        (self.exact.clone(), file)
+    }
+
+    /// Marks a title whose whole detail did not fit `MAX_ANSWER_BYTES` — a long series with every season's credits
+    /// can run past it — so its questions are asked one by one for a while rather than the whole again each time.
+    fn oversize_mark(&self) -> PathBuf {
+        self.whole().1.with_extension("oversize")
+    }
+
+    async fn oversize(&self) -> bool {
+        read(&self.oversize_mark()).await.is_some_and(|(_, age, _)| age < OVERSIZE_TTL)
+    }
+
     /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — keep it, and answer this question
     /// from it: the body, whether it was a `miss` or `revalidated`, and how long it is fresh for.
+    ///
+    /// When the whole cannot be had for any reason but "no such title" or a spent day, the question is asked exactly
+    /// as it was, as it was before the whole existed: one title's failure must not fail every question about it.
     async fn ask(
         &self,
         state: &AppState,
         key: &str,
         rid: &str,
     ) -> Result<(Bytes, &'static str, Duration), Box<Response>> {
+        if self.oversize().await {
+            let (query, file) = self.exact();
+            let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
+            return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
+        }
         let (query, file) = self.whole();
-        let fetched = if tokio::fs::try_exists(&file).await.unwrap_or(false) {
-            revalidate(state, &self.path, query.as_deref(), key, rid, &file).await
-        } else {
-            fetch(state, &self.path, query.as_deref(), key, rid)
-                .await
-                .map(|(body, etag)| Fetched::Answer(body, etag))
-        };
-        let (body, how) = match fetched {
-            Ok(Fetched::Answer(body, etag)) => {
-                keep(&file, &body, etag.as_deref()).await;
-                (body, "miss")
-            }
-            Ok(Fetched::Unchanged) => {
-                renew(&file).await;
-                let Some((body, _, _)) = read(&file).await else {
-                    return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
-                };
-                (body, "revalidated")
-            }
+        let (body, how) = match ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await {
+            Ok(answer) => answer,
             Err(response) => {
-                if response.status() == StatusCode::NOT_FOUND {
-                    keep(&file, &Bytes::from_static(ABSENT), None).await;
+                let code = response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
+                if response.status() == StatusCode::NOT_FOUND || code.as_deref() == Some("tmdb_budget_spent")
+                {
+                    return Err(response);
                 }
-                return Err(response);
+                if code.as_deref() == Some("tmdb_answer_unreadable") {
+                    write(&self.oversize_mark(), &Bytes::new()).await;
+                }
+                let (query, file) = self.exact();
+                let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
+                return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
             }
         };
         let fresh = fresh_for_answer(&self.path, &body);
         Ok((self.narrowed(body), how, fresh))
+    }
+}
+
+/// How long a title whose whole detail was too large is asked one question at a time before the whole is tried
+/// again.
+const OVERSIZE_TTL: Duration = Duration::from_secs(7 * 86_400);
+
+/// Ask TMDB `query` — again, naming its ETag, when an answer is kept at `file` — and keep what it says there: the
+/// body, and whether it was a `miss` or `revalidated`. A 404 is kept as one.
+async fn ask_kept(
+    state: &AppState,
+    path: &str,
+    query: Option<&str>,
+    key: &str,
+    rid: &str,
+    file: &Path,
+) -> Result<(Bytes, &'static str), Box<Response>> {
+    let fetched = if tokio::fs::try_exists(file).await.unwrap_or(false) {
+        revalidate(state, path, query, key, rid, file).await
+    } else {
+        fetch(state, path, query, key, rid).await.map(|(body, etag)| Fetched::Answer(body, etag))
+    };
+    match fetched {
+        Ok(Fetched::Answer(body, etag)) => {
+            keep(file, &body, etag.as_deref()).await;
+            Ok((body, "miss"))
+        }
+        Ok(Fetched::Unchanged) => {
+            renew(file).await;
+            let Some((body, _, _)) = read(file).await else {
+                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+            };
+            Ok((body, "revalidated"))
+        }
+        Err(response) => {
+            if response.status() == StatusCode::NOT_FOUND {
+                keep(file, &Bytes::from_static(ABSENT), None).await;
+            }
+            Err(response)
+        }
     }
 }
 
@@ -619,7 +674,7 @@ async fn detail_answer(
         }
         Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
         Kept::Stale(body, modified, fresh) if fresh != DETAILS_TTL => {
-            let (query, file) = detail.whole();
+            let (query, file) = if detail.oversize().await { detail.exact() } else { detail.whole() };
             let cached = cache_key(&detail.path, query.as_deref());
             refresh_behind(
                 state,
@@ -864,15 +919,20 @@ pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
 
 /// Written beside and renamed over, so a reader never sees half an answer. Ordinary caches may ignore a
 /// failure; endpoints that promise persistence can surface it.
+///
+/// The temporary file is this write's own. With one shared name, two writes of the same key at once — two cold
+/// questions for one title, now that a title's questions share one key — wrote into the same file, and the rename
+/// could put a mix of both in place, to be served as a hit for months.
 pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
     let Some(dir) = file.parent() else { return false };
     if tokio::fs::create_dir_all(dir).await.is_err() {
         return false;
     }
-    let temp = file.with_extension("tmp");
-    if tokio::fs::write(&temp, body).await.is_ok() {
-        return tokio::fs::rename(&temp, file).await.is_ok();
+    let temp = file.with_extension(format!("{}.tmp", crate::hex(&crate::random_bytes::<8>())));
+    if tokio::fs::write(&temp, body).await.is_ok() && tokio::fs::rename(&temp, file).await.is_ok() {
+        return true;
     }
+    let _ = tokio::fs::remove_file(&temp).await;
     false
 }
 
@@ -952,6 +1012,13 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
             Ok(Fetched::Answer(body, etag)) => keep(&asking.file, &body, etag.as_deref()).await,
             Ok(Fetched::Unchanged) => renew(&asking.file).await,
+            // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
+            Err(response)
+                if response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.as_str())
+                    == Some("tmdb_answer_unreadable") =>
+            {
+                write(&asking.file.with_extension("oversize"), &Bytes::new()).await;
+            }
             Err(_) => {}
         }
         crate::lock(&state.tmdb_refreshing).remove(&asking.cached);
@@ -1311,6 +1378,73 @@ mod tests {
         });
         crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
         asked
+    }
+
+    /// A TMDB whose whole series detail is too large to take (`MAX_ANSWER_BYTES`), as a long series' every-season
+    /// credits can be, answering every other question as `tmdb_answering` does.
+    fn tmdb_too_large_whole(key: &str) -> Arc<std::sync::Mutex<Vec<String>>> {
+        tmdb_answering(&format!("{key}-inner"), "Ended");
+        let inner = stand_in(&format!("{key}-inner")).unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let tmdb: Upstream = Arc::new(move |url: &str| {
+            let whole = url.contains("aggregate_credits");
+            crate::lock(&seen).push(if whole {
+                "whole".to_owned()
+            } else {
+                url.split("api_key").next().unwrap().to_owned()
+            });
+            if whole {
+                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+            }
+            inner(url)
+        });
+        crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+        asked
+    }
+
+    /// A series whose whole detail is too large used to 502 every question about it, spending the day's budget each
+    /// time. The question is asked as it was instead, and the whole is not tried again for a while.
+    #[tokio::test]
+    async fn a_title_too_large_to_fetch_whole_is_asked_one_question_at_a_time() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "too-large");
+        let asked = tmdb_too_large_whole("too-large");
+
+        let (how, named) = detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await;
+        assert_eq!(how, "miss");
+        assert!(named.get("credits").is_some(), "{named}");
+        assert_eq!(crate::lock(&asked).len(), 2, "the whole, refused, then the question itself");
+        assert_eq!(crate::lock(&asked)[0], "whole");
+
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399").await.0, "miss");
+        assert_eq!(detail(&h, "/tmdb/3/tv/1399?append_to_response=credits").await.0, "hit");
+        let asked = crate::lock(&asked).clone();
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert_ne!(asked[2], "whole", "the whole is not tried again");
+    }
+
+    /// Two writes of one key at once each write their own temporary file, so what ends up in place is one of them
+    /// whole, never a mix.
+    #[tokio::test]
+    async fn writes_of_one_key_at_once_leave_one_of_them_whole() {
+        let file = cache_path(&temp_dir(), "/3/tv/1399?");
+        let bodies: Vec<Bytes> = (0..16u8).map(|n| Bytes::from(vec![b'a' + n; 256 * 1024])).collect();
+        let writes: Vec<_> = bodies
+            .iter()
+            .cloned()
+            .map(|body| {
+                let file = file.clone();
+                tokio::spawn(async move { write(&file, &body).await })
+            })
+            .collect();
+        for w in writes {
+            assert!(w.await.unwrap(), "every write is kept whole or not at all");
+        }
+        let kept = read(&file).await.unwrap().0;
+        assert!(bodies.contains(&kept), "what is in place is one write, whole");
+        let strays = std::fs::read_dir(file.parent().unwrap()).unwrap().count();
+        assert_eq!(strays, 1, "no temporary file is left behind");
     }
 
     fn lending_as(cache: &Path, key: &str) -> Harness {
