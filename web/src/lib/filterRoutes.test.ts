@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 494c74b): both ends hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
@@ -35,6 +35,34 @@ describe('canonical filter addresses', () => {
 
 const answer = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+describe('saying why nothing came back', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('logs a failure, a bad body or an unexpected status, with the address; a 404 or a cancel stays quiet', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const status = (code: number) => (async () => answer({}, code)) as unknown as typeof fetch;
+    await fetchFilterCounts('/atlas', 'movie', [], { fetchImpl: status(404) });
+    await fetchFilterCounts('/atlas', 'movie', [], {
+      fetchImpl: (async () => {
+        throw new DOMException('replaced', 'AbortError');
+      }) as unknown as typeof fetch,
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    await fetchFilterCounts('/atlas', 'movie', [], { fetchImpl: status(500) });
+    expect(warn).toHaveBeenLastCalledWith(
+      'atlas filter:',
+      'answered 500',
+      '/atlas/index/filter/movie/counts.json',
+    );
+    await searchFilterValues('/atlas', 'movie', 'person', 'nolan', [], {
+      fetchImpl: (async () => new Response('not json')) as unknown as typeof fetch,
+    });
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[1]?.[2]).toBe('/atlas/index/filter/movie/values/person.json?q=nolan');
+  });
+});
 
 describe('fetching', () => {
   it('reads the counts, and has none where atlas has no such route', async () => {

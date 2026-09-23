@@ -785,7 +785,10 @@ function drawn(row: RowDef, title: FeedSources['title']): RowDef {
                     ? { ...full, primaryGenreName: t.primaryGenreName ?? full.primaryGenreName }
                     : t,
                 )
-                .catch(() => t),
+                .catch((error: unknown) => {
+                  console.warn('explore: no poster for', `${t.type}:${t.id}`, error);
+                  return t;
+                }),
         ),
       ),
   };
@@ -808,7 +811,14 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
         .slice(0, SEEDS)
         .map((seed) =>
           pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, 1).catch(
-            (): Title[] => [],
+            (error: unknown): Title[] => {
+              console.warn(
+                'explore: For You has no recommendations for',
+                `${seed.type}:${seed.id}`,
+                error,
+              );
+              return [];
+            },
           ),
         ),
     ).then((lists) =>
@@ -868,6 +878,7 @@ export function exploreFeed(set: readonly string[], type: MediaType, sources: Fe
           return await titles.load(page);
         } catch (error) {
           if (!(error instanceof FilterUnavailable)) throw error;
+          if (error.deployed) console.warn('explore: atlas filter gave way:', error.message, id);
           from = page - 1;
         }
       }

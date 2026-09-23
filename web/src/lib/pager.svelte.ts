@@ -37,7 +37,9 @@ export class Pager {
         this.page++;
         this.titles = appendUniqueTitles(this.titles, next);
         if (next.length === 0) this.done = this.exhausted = true;
-      } catch {
+      } catch (error) {
+        // The row ends where its source failed; what failed is said, not swallowed.
+        console.warn('pager: page', this.page + 1, 'failed, ending the row', error);
         this.done = true;
       }
       if (this.titles.filter(this.#admitted).length >= FILL * this.page) break;

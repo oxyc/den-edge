@@ -286,6 +286,16 @@ export interface FilterCounts {
 const strings = (value: unknown) =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 
+/**
+ * Says why atlas's filter gave nothing, where that is news: a failed request, a body that isn't what atlas sends, a
+ * status other than 404. A 404 is the routes not deployed, and a cancelled request is one the next question replaced:
+ * both expected, and quiet.
+ */
+function unanswered(url: string, why: unknown) {
+  if (why instanceof Response ? why.status === 404 : (why as Error)?.name === 'AbortError') return;
+  console.warn('atlas filter:', why instanceof Response ? `answered ${why.status}` : why, url);
+}
+
 /** atlas's counts beside a selection; null where the route isn't there, fails, or the question is refused. */
 export async function fetchFilterCounts(
   base: string,
@@ -297,23 +307,41 @@ export async function fetchFilterCounts(
   if (!url) return null;
   try {
     const res = await fetchImpl(url, { signal });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      unanswered(url, res);
+      return null;
+    }
     const body = (await res.json()) as Record<string, unknown> | null;
     const kinds = body?.kinds;
-    if (!body || !kinds || typeof kinds !== 'object') return null;
+    if (!body || !kinds || typeof kinds !== 'object') {
+      unanswered(url, new Error('counts without kinds'));
+      return null;
+    }
     return {
       total: typeof body.total === 'number' ? body.total : 0,
       kinds: kinds as Record<string, FilterKindCounts>,
       ignored: strings(body.ignored),
       kindsUnavailable: strings(body.kindsUnavailable),
     };
-  } catch {
+  } catch (error) {
+    unanswered(url, error);
     return null;
   }
 }
 
-/** Thrown by a titles page atlas can't give: the caller goes back to what it did without atlas's filter. */
-export class FilterUnavailable extends Error {}
+/**
+ * Thrown by a titles page atlas can't give: the caller goes back to what it did without atlas's filter. `deployed`
+ * is false for a 404 — the routes not there, expected and quiet — and true where atlas answered but couldn't apply
+ * the selection, which is worth saying.
+ */
+export class FilterUnavailable extends Error {
+  constructor(
+    message: string,
+    readonly deployed = true,
+  ) {
+    super(message);
+  }
+}
 
 /**
  * The titles carrying a selection, a page at a time, as a row's `load`. atlas pages by `skip`, so a page is a page
@@ -335,7 +363,7 @@ export function filterTitles(
     const url = filterUrl(base, type, 'titles', { items, skip });
     if (!url) throw new FilterUnavailable('atlas refuses this selection');
     const res = await fetchImpl(url);
-    if (res.status === 404) throw new FilterUnavailable('atlas has no filter routes');
+    if (res.status === 404) throw new FilterUnavailable('atlas has no filter routes', false);
     if (!res.ok) throw new Error(`atlas answered ${res.status}`);
     const body = (await res.json()) as Record<string, unknown>;
     const missing = [...strings(body.ignored), ...strings(body.kindsUnavailable)].filter((kind) =>
@@ -385,15 +413,22 @@ export async function searchFilterValues(
   if (!url) return [];
   try {
     const res = await fetchImpl(url, { signal });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      unanswered(url, res);
+      return [];
+    }
     const values = ((await res.json()) as { values?: unknown }).values;
-    if (!Array.isArray(values)) return [];
+    if (!Array.isArray(values)) {
+      unanswered(url, new Error('values without a list'));
+      return [];
+    }
     return (values as Record<string, unknown>[]).flatMap((v): FilterValue[] =>
       typeof v.id === 'string' && typeof v.name === 'string'
         ? [{ id: v.id, name: v.name, count: typeof v.count === 'number' ? v.count : 0 }]
         : [],
     );
-  } catch {
+  } catch (error) {
+    unanswered(url, error);
     return [];
   }
 }
