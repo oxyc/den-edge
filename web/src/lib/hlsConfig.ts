@@ -11,11 +11,20 @@ import type { HlsConfig } from 'hls.js';
  * far longer to answer than a copied one. hls.js gives up on a segment about ten seconds late and by default doesn't
  * retry a timeout at all, which turns a slow conversion into a dead session. Wait through it instead, and retry twice
  * before calling it broken.
+ *
+ * The buffer is deep enough to ride out a connection that drops for half a minute: two minutes ahead, where hls.js
+ * holds thirty by default. Its size cap is Chromium's own for one video SourceBuffer, 150 MB — asking for more only
+ * ends in a `bufferFullError` — which is two minutes of a 10 Mbit/s film. A minute behind the play head is kept for a
+ * seek back and then let go. Only desktop and Android browsers take this path: Apple's play HLS natively
+ * (`nativeHls`), so no phone short of memory is asked to hold it.
  */
 export function hlsConfig(startPosition?: number): Partial<HlsConfig> {
   return {
     enableWorker: false,
     startPosition: startPosition ?? -1,
+    maxBufferLength: 120,
+    maxBufferSize: 150 * 1000 * 1000,
+    backBufferLength: 60,
     fragLoadPolicy: {
       default: {
         maxTimeToFirstByteMs: 30_000,

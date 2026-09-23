@@ -14,6 +14,15 @@ describe('hlsConfig', () => {
     expect(policy?.errorRetry?.maxNumRetry).toBe(2);
   });
 
+  it('buffers two minutes ahead, within a browser’s SourceBuffer quota, and a minute behind', () => {
+    const config = hlsConfig();
+    expect(config.maxBufferLength).toBe(120);
+    // Half a minute of lost connection at 5 Mbit/s is what this has to ride out.
+    expect(config.maxBufferLength! - 30).toBeGreaterThanOrEqual(60);
+    expect(config.maxBufferSize).toBeLessThanOrEqual(150 * 1000 * 1000);
+    expect(config.backBufferLength).toBe(60);
+  });
+
   it('keeps hls.js off a worker, which the player and the cast page both rely on', () => {
     expect(hlsConfig().enableWorker).toBe(false);
   });
