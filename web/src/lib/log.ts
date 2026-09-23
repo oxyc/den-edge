@@ -240,9 +240,6 @@ export class LibraryLog {
       }
       await policy;
       if (res.status === 404) {
-        // No log here, so no membership to prove: `library::is_member` refuses the proof, and every relayed
-        // write carrying it (`/metadata/title`) would be a 401.
-        forgetLibraryCredential();
         if (!(await log.stageRecovery())) return null;
         log.memberRegistered = false;
         log.head = 0;
@@ -254,7 +251,6 @@ export class LibraryLog {
         return log;
       }
       if (!res.ok) return null;
-      useLibraryCredential(keys);
       const page = (await res.json()) as Page;
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (!(await log.stageRecovery())) return null;
@@ -307,7 +303,6 @@ export class LibraryLog {
           );
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
-            forgetLibraryCredential(); // as in `open`: no log, no membership to prove
             if (!(await this.stageRecovery())) return false;
             this.memberRegistered = false;
             this.head = 0;
@@ -317,9 +312,11 @@ export class LibraryLog {
             return true; // A first offline action must be able to create the log on reconnect.
           }
           if (!res.ok) return false;
-          // The log is here again (or always was): a refused start is over, and the membership stands.
-          this.refused = false;
-          useLibraryCredential(this.keys);
+          // The log is here again (or always was): a refused start is over, and the membership stands again.
+          if (this.refused) {
+            this.refused = false;
+            useLibraryCredential(this.keys);
+          }
           const page = (await res.json()) as Page;
           if (
             (this.generation && page.generation && this.generation !== page.generation) ||
@@ -485,8 +482,7 @@ export class LibraryLog {
           body: JSON.stringify({ writes: [{ k, base, v }] }),
         });
         if (res.status === 410) this.moved = true;
-        if (res.status === 403 && (await errorCode(res)) === 'new_libraries_closed')
-          this.refused = true;
+        if (res.status === 403) await this.refusedIf(res);
         if (!res.ok) return null;
         batch = (await res.json()) as Batch;
       } catch {
@@ -509,6 +505,17 @@ export class LibraryLog {
       target = merge(theirs, target);
     }
     return null;
+  }
+
+  /**
+   * A refused write that says den-edge will not start this library: `refused`, and this browser stops claiming a
+   * membership of it. With no log there, `library::is_member` refuses the proof, so every relayed write carrying it
+   * (`/metadata/title`) was a 401.
+   */
+  private async refusedIf(res: Response): Promise<void> {
+    if ((await errorCode(res)) !== 'new_libraries_closed') return;
+    this.refused = true;
+    forgetLibraryCredential();
   }
 
   private headers(): Record<string, string> {
@@ -602,8 +609,7 @@ export class LibraryLog {
             body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
           });
           if (res.status === 410) this.moved = true;
-          if (res.status === 403 && (await errorCode(res)) === 'new_libraries_closed')
-            this.refused = true;
+          if (res.status === 403) await this.refusedIf(res);
           if (!res.ok) return false;
           const result = (await res.json()) as Batch;
           for (const entry of chunk) {
