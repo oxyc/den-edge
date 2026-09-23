@@ -43,6 +43,10 @@ use std::path::{Component, Path, PathBuf};
 /// can, because a native request is not CORS-checked. So `/warnings/` proxies them here (`warnings.rs`) and
 /// the page asks this origin, which `'self'` already covers.
 ///
+/// `1.1.1.1` and `api.ipify.org` answer a page with its own IPv4 address (`web/src/lib/ipv4.ts`), which a page
+/// seen over IPv6 reports when it starts a public remux session, so the media listener can open for that one
+/// address rather than wide. Both are reachable over IPv4 only, and both send `Access-Control-Allow-Origin: *`.
+///
 /// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
 /// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
 /// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
@@ -55,7 +59,8 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
          https://live.metahub.space; \
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
-         connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443{media}; \
+         connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 https://1.1.1.1 \
+         https://api.ipify.org{media}; \
          frame-src https://www.youtube-nocookie.com{cast}; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -341,6 +346,17 @@ mod tests {
         assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
         // Bounded: https, and the one port `tailscale serve` publishes.
         assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
+    }
+
+    /// The page asks these for its own IPv4 address; it only ever reads from them, never loads media.
+    #[test]
+    fn policy_lets_the_page_ask_its_ipv4_address() {
+        let policy = super::csp(&[], None);
+        let directive = |name: &str| policy.split(name).nth(1).unwrap().split(';').next().unwrap().to_owned();
+        for origin in ["https://1.1.1.1", "https://api.ipify.org"] {
+            assert!(directive("connect-src").contains(origin), "{policy}");
+            assert!(!directive("media-src").contains(origin), "{policy}");
+        }
     }
 
     #[test]

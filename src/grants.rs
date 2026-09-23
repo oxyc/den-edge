@@ -96,23 +96,34 @@ impl Grants {
     /// grant holds fewer than `MAX_SOURCES`.
     pub fn allow_source(&self, gid: &str, addr: IpAddr, now: u64) -> bool {
         let mut sources = crate::lock(&self.sources);
-        let list = sources.entry(gid.to_owned()).or_default();
-        list.retain(|(_, at)| now.saturating_sub(*at) < SOURCE_TTL_MS);
-        if let Some(known) = list.iter_mut().find(|(a, _)| *a == addr) {
-            known.1 = now;
-            return true;
-        }
-        if list.len() >= MAX_SOURCES {
-            return false;
-        }
-        list.push((addr, now));
-        true
+        remember_source(sources.entry(gid.to_owned()).or_default(), addr, now, MAX_SOURCES, SOURCE_TTL_MS)
     }
 
     fn forget(&self, gid: &str) {
         crate::lock(&self.sources).remove(gid);
         crate::lock(&self.last_used).remove(gid);
     }
+}
+
+/// Add `addr` to `list`, the addresses seen within `ttl_ms`: a known one always, a new one only while fewer than
+/// `max` are held. What `allow_source` counts per grant, and the relay counts per member for hinted addresses.
+pub fn remember_source(
+    list: &mut Vec<(IpAddr, u64)>,
+    addr: IpAddr,
+    now: u64,
+    max: usize,
+    ttl_ms: u64,
+) -> bool {
+    list.retain(|(_, at)| now.saturating_sub(*at) < ttl_ms);
+    if let Some(known) = list.iter_mut().find(|(a, _)| *a == addr) {
+        known.1 = now;
+        return true;
+    }
+    if list.len() >= max {
+        return false;
+    }
+    list.push((addr, now));
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2282,6 +2293,131 @@ mod tests {
             r#"den_edge_guest_play_refused_total{code="too_many_sources"} 1"#,
             r#"den_edge_guest_play_refused_total{code="public_media_unavailable"} 0"#,
             r#"den_edge_public_media_wide_total{reason="cast",who="guest"} 0"#,
+            r#"den_edge_public_media_wide_total{reason="ipv6",who="guest"} 0"#,
+        ] {
+            assert!(metrics.contains(counted), "{counted} in {metrics}");
+        }
+    }
+
+    /// A guest seen over IPv6 plays from the IPv4 address its page reports, opened for that one address; without a
+    /// usable report it is refused as before. The report never reaches remux, and counts against the grant's sources.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_over_ipv6_plays_from_the_ipv4_address_its_page_reports() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        fn session(_: &str) -> (StatusCode, &'static str, String) {
+            (
+                StatusCode::CREATED,
+                "application/json",
+                json!({ "playlist": "/remux/s/id/sig/master.m3u8" }).to_string(),
+            )
+        }
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut opened) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let _ = sent.send(line);
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
+        });
+        let (base, seen) = addon(session).await;
+        let h = Harness::in_dir_with(temp_dir(), move |s| {
+            s.relays = crate::parse_relays(&format!("/remux={base}, /scout={base}"));
+            s.remux_edge_secret = Some("s".into());
+            s.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+            s.trusted_proxies = vec![IpAddr::from([192, 168, 1, 9])];
+            s.public_media_base = Some("https://203.0.113.4".into());
+            s.public_media_socket = Some(socket);
+        });
+        let h = members_only(h).await;
+        let (gid, header) =
+            redeemed(&h, json!({ "addons": ["scout"], "installs": { "scout": SCOUT } })).await;
+        let body = |extra: Value| {
+            let mut body = json!({ "scout": format!("https://d.oxy.fi/scout/~{gid}") });
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            body
+        };
+        let start = |source: &'static str, body: Value| {
+            let (h, header) = (&h, header.clone());
+            async move {
+                h.send(
+                    "POST",
+                    "/remux/session",
+                    Some(body.to_string()),
+                    &[
+                        (HEADER, &header),
+                        ("host", "d.oxy.fi"),
+                        ("content-type", "application/json"),
+                        ("x-forwarded-for", source),
+                    ],
+                )
+                .await
+            }
+        };
+        let error = |resp: Response| async move { (resp.status(), body_json(resp).await["error"].clone()) };
+        let ipv6_refused = (StatusCode::SERVICE_UNAVAILABLE, json!("public_media_ipv6"));
+
+        // Seen over IPv6 with a global IPv4 hint: opened for that address alone, logged as `hint`.
+        let resp = start("2001:db8::7", body(json!({ "ipv4Hint": "8.8.8.8" }))).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.extensions().get::<crate::handler::ListenerScope>().map(|s| s.0), Some("hint"));
+        let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
+        assert_eq!(asked, json!({ "open": true, "source": "8.8.8.8", "scope": "browser" }));
+        let relayed: Value = serde_json::from_str(&seen.lock().unwrap().last().unwrap().2).unwrap();
+        assert!(relayed.get("ipv4Hint").is_none() && relayed.get("noHint").is_none(), "{relayed}");
+
+        // The page's retry after a hinted session failed to play: today's refusal, and nothing reaches remux.
+        let before = seen.lock().unwrap().len();
+        let retry = body(json!({ "ipv4Hint": "8.8.8.8", "noHint": true }));
+        assert_eq!(error(start("2001:db8::7", retry).await).await, ipv6_refused);
+        // A hint that is not one global IPv4 address is not used, and the guest is refused as before.
+        for hint in [
+            json!("10.0.0.1"),
+            json!("100.64.0.1"),
+            json!("192.0.2.1"),
+            json!("8.8.8.8/32"),
+            json!("8.8.8.8:443"),
+            json!(134744072),
+        ] {
+            let resp = start("2001:db8::7", body(json!({ "ipv4Hint": hint }))).await;
+            assert_eq!(error(resp).await, ipv6_refused, "{hint}");
+        }
+        assert_eq!(seen.lock().unwrap().len(), before);
+
+        // Seen over IPv4, the observed address wins whatever the page says.
+        let resp = start("203.0.113.1", body(json!({ "ipv4Hint": "9.9.9.9" }))).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.extensions().get::<crate::handler::ListenerScope>().map(|s| s.0), Some("browser"));
+        let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
+        assert_eq!(asked["source"], "203.0.113.1");
+
+        // Hinted addresses count against the grant's sources with observed ones, under their own code.
+        for hint in ["9.9.9.9", "1.1.1.1"] {
+            let resp = start("2001:db8::7", body(json!({ "ipv4Hint": hint }))).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "{hint}");
+        }
+        let resp = start("2001:db8::7", body(json!({ "ipv4Hint": "1.0.0.1" }))).await;
+        assert_eq!(error(resp).await, (StatusCode::TOO_MANY_REQUESTS, json!("hint_limit")));
+        let known = start("2001:db8::8", body(json!({ "ipv4Hint": "8.8.8.8" }))).await;
+        assert_eq!(known.status(), StatusCode::CREATED, "a known address still plays");
+
+        let metrics = h.state.metrics.render();
+        for counted in [
+            r#"den_edge_public_media_hinted_total{who="guest"} 4"#,
+            r#"den_edge_public_media_hinted_total{who="member"} 0"#,
+            r#"den_edge_public_media_hint_rejected_total{reason="malformed"} 3"#,
+            r#"den_edge_public_media_hint_rejected_total{reason="not_global"} 3"#,
+            r#"den_edge_public_media_hint_rejected_total{reason="limit"} 1"#,
+            r#"den_edge_guest_play_refused_total{code="hint_limit"} 1"#,
+            r#"den_edge_guest_play_refused_total{code="public_media_ipv6"} 7"#,
             r#"den_edge_public_media_wide_total{reason="ipv6",who="guest"} 0"#,
         ] {
             assert!(metrics.contains(counted), "{counted} in {metrics}");
