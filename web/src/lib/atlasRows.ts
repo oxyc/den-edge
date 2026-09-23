@@ -28,7 +28,8 @@ const subgenre = (label: string): Where => ({ subgenre: label });
  */
 const FILM_ROWS: AtlasRow[] = [
   { id: 'mood-mind-bending', title: 'Mind-Bending', where: mood('Mind-bending') },
-  { id: 'plot-bittersweet', title: 'Bittersweet Endings', where: { ending: 'bittersweet' } },
+  // atlas's `unhappy` is tragic and bittersweet together.
+  { id: 'plot-unhappy', title: 'Not a Happy Ending', where: { ending: 'unhappy' } },
   { id: 'mood-feel-good', title: 'Feel-Good Movies', where: mood('Feel-good') },
   {
     id: 'plot-slow-bleak',
@@ -64,7 +65,6 @@ const FILM_ROWS: AtlasRow[] = [
   { id: 'plot-single-day', title: 'Over a Single Day', where: { timespan: 'single-day' } },
   { id: 'mood-thought-provoking', title: 'Thought-Provoking', where: mood('Thought-provoking') },
   { id: 'plot-person-vs-nature', title: 'Against Nature', where: { conflict: 'person-vs-nature' } },
-  { id: 'plot-tragic', title: 'Tragic Endings', where: { ending: 'tragic' } },
   { id: 'subgenre-neo-noir', title: 'Neo-Noir', where: subgenre('Neo-Noir') },
   { id: 'plot-19th-century', title: 'Set in the 19th Century', where: { era: '19th-century' } },
   { id: 'subgenre-cult', title: 'Cult Classics', where: subgenre('Cult') },
@@ -84,7 +84,10 @@ const FILM_ROWS: AtlasRow[] = [
   { id: 'mood-cozy', title: 'Cozy', where: mood('Cozy') },
 ];
 
-/** The series rows: the labels alone, since the plot facets describe too few series yet to fill a row. */
+/**
+ * The series rows: the labels, and of the plot facets only the combined unhappy ending — the single-value facets
+ * still describe too few series to fill a row.
+ */
 const SERIES_ROWS: AtlasRow[] = [
   { id: 'mood-bingeable', title: 'Bingeable', where: mood('Bingeable') },
   { id: 'mood-dark-gritty', title: 'Dark and Gritty Series', where: mood('Dark & Gritty') },
@@ -119,6 +122,7 @@ const SERIES_ROWS: AtlasRow[] = [
   { id: 'subgenre-coming-of-age', title: 'Coming-of-Age', where: subgenre('Coming-of-Age') },
   { id: 'subgenre-time-travel', title: 'Time Travel', where: subgenre('Time Travel') },
   { id: 'mood-tearjerker', title: 'Tearjerkers', where: mood('Tearjerker') },
+  { id: 'plot-unhappy', title: 'Not a Happy Ending', where: { ending: 'unhappy' } },
   { id: 'subgenre-serial-killer', title: 'Serial Killers', where: subgenre('Serial Killer') },
   { id: 'subgenre-political', title: 'Political Series', where: subgenre('Political') },
   { id: 'subgenre-legal', title: 'Legal Dramas', where: subgenre('Legal/Courtroom Drama') },
