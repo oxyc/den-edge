@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { recipeParts } from './catalog';
 import { exploreChips, emptyOptions } from './explore';
-import {
-  countedEmpty,
-  countItems,
-  facetParts,
-  filterItems,
-  recipeParts,
-  type FacetCounts,
-} from './facetCounts';
+import { countedEmpty, countItems, facetParts, filterItems, type FacetCounts } from './facetCounts';
 import { filterUrl } from './filterRoutes';
 
 describe('facetParts', () => {

@@ -732,6 +732,42 @@ test('where atlas’s filter has no titles route, the grid is TMDB discover as b
   }
 });
 
+for (const titles of [true, false])
+  test(`the Movies tab’s genre rows are ${titles ? 'atlas’s filter' : 'TMDB discover where atlas’s filter is missing'}`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({
+        viewport: { width: 1280, height: 900 },
+        reducedMotion: 'reduce',
+      });
+      await setup(page, { atlasGate: Promise.resolve() });
+      const asked = await serveFilter(page, { titles });
+      const discovered = [];
+      page.on('request', (r) => {
+        const url = new URL(r.url());
+        if (url.pathname.includes('/discover/'))
+          discovered.push(url.pathname + '?' + (url.searchParams.get('with_genres') ?? ''));
+      });
+      await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movies')}`);
+      // Drama: the fixture's TMDB films are all dramas, so TMDB's shelf has them too.
+      const drama = active(page).getByRole('region', { name: 'Drama', exact: true });
+      await drama.scrollIntoViewIfNeeded();
+      const primary = '/index/filter/movie/titles.json?sel=primary:Drama';
+      await expect.poll(() => asked).toContain(primary);
+      // The row may have drawn TMDB's page before atlas was found; once it is, the row is atlas's alone.
+      const [atlasCard, tmdbCard] = ['Atlas 500 2020', 'Film 100 2026'].map((name) =>
+        drama.getByRole('link', { name }),
+      );
+      await expect(atlasCard).toHaveCount(titles ? 1 : 0);
+      await expect(tmdbCard).toHaveCount(titles ? 0 : 1);
+      if (!titles) expect(discovered).toContain('/tmdb/3/discover/movie?18');
+    } finally {
+      await browser.close();
+    }
+  });
+
 test('"More like this" on a poster adds a "Like" pill without opening the title, and feeds atlas’s similar', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

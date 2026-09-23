@@ -347,8 +347,9 @@ export class FilterUnavailable extends Error {
 /**
  * The titles carrying a selection, a page at a time, as a row's `load`. atlas pages by `skip`, so a page is a page
  * boundary; if its `order` changes between pages (a new ratings join), paging starts again from the top, and titles
- * already given aren't given twice. Throws `FilterUnavailable` for a 404, and for an answer that ignored a picked kind
- * — its titles would not be the selection's.
+ * already given aren't given twice. A page asked out of turn — a row rebuilt under a list that had already loaded
+ * some — starts at that page's `skip` instead of at the top. Throws `FilterUnavailable` for a 404, and for an answer
+ * that ignored a picked kind or named one of its values unknown — its titles would not be the selection's.
  */
 export function filterTitles(
   base: string,
@@ -358,6 +359,7 @@ export function filterTitles(
 ): (page: number) => Promise<Title[]> {
   let order: string | undefined;
   let offset = 0;
+  let last = 0;
   const given = new Set<string>();
   const picked = new Set(items.map((item) => item.kind.toLowerCase()));
   async function read(skip: number) {
@@ -371,10 +373,14 @@ export function filterTitles(
       picked.has(kind),
     );
     if (missing.length) throw new FilterUnavailable(`atlas can't apply ${missing.join(', ')}`);
+    const unknown = strings(body.unknownValues);
+    if (unknown.length) throw new FilterUnavailable(`atlas has no ${unknown.join(', ')}`);
     return { titles: titlesOf(body), order: typeof body.order === 'string' ? body.order : '' };
   }
   // An empty page ends a row, so a page of titles already given (after a restart) reads on instead.
-  return async () => {
+  return async (page) => {
+    if (page !== last + 1) offset = (page - 1) * TITLES_PAGE;
+    last = page;
     for (;;) {
       let answer = await read(offset);
       if (order !== undefined && answer.order !== order) {

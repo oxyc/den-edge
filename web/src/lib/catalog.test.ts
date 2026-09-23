@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   appendUniqueTitles,
   browseRows,
@@ -249,6 +249,192 @@ describe('the screens', () => {
     expect([url.pathname, url.searchParams.get('page')]).toEqual(['/3/trending/movie/week', '2']);
     expect(await trending!.load(501)).toEqual([]);
     expect(asked).toHaveLength(1);
+  });
+});
+
+describe('rows atlas’s filter answers', () => {
+  const itemsOf = (type: 'movie' | 'tv') =>
+    Object.fromEntries(categories(type, 2026).map((c) => [c.id, c.atlas]));
+
+  it('says a genre by its primary label, a recipe by its subgenre or parts, a decade and a country as themselves', () => {
+    const movie = itemsOf('movie');
+    expect(movie['genre-28-movie']).toEqual([{ kind: 'primary', id: 'Action' }]);
+    expect(movie['recipe-romantic-comedy-movie']).toEqual([
+      { kind: 'subgenre', id: 'Romantic Comedy' },
+    ]);
+    expect(movie['recipe-french-cinema-movie']).toEqual([
+      { kind: 'language', id: 'fr' },
+      { kind: 'country', id: 'FR' },
+    ]);
+    expect(movie['decade-1990-movie']).toEqual([{ kind: 'decade', id: '1990' }]);
+    expect(movie['country-KR-movie']).toEqual([{ kind: 'country', id: 'KR' }]);
+    const tv = itemsOf('tv');
+    expect(tv['recipe-k-drama-tv']).toEqual([
+      { kind: 'genre', id: '18' },
+      { kind: 'language', id: 'ko' },
+      { kind: 'country', id: 'KR' },
+    ]);
+    expect(tv['recipe-turkish-drama-tv']).toEqual([
+      { kind: 'genre', id: '18' },
+      { kind: 'country', id: 'TR' },
+    ]);
+  });
+
+  it('leaves TMDB the rows atlas can’t say: keywords, several languages, genres left out, a rating order', () => {
+    const movie = itemsOf('movie');
+    for (const id of [
+      'recipe-nordic-noir-movie',
+      'recipe-korean-thriller-movie',
+      'recipe-latin-american-movie',
+      'recipe-pure-drama-movie',
+      'acclaimed-movie',
+    ])
+      expect(movie[id], id).toBeUndefined();
+  });
+
+  /** atlas's filter and den-edge's shared metadata, as a fake: `titles` answers each titles.json by its `skip`. */
+  function atlasFake(titles: (skip: number, sel: string) => Response) {
+    const asked: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/metadata/title/query'))
+        return new Response(JSON.stringify({ entries: [] }));
+      asked.push(url);
+      const params = new URL(url, 'https://x').searchParams;
+      return titles(Number(params.get('skip') ?? 0), params.get('sel') ?? '');
+    }) as typeof fetch;
+    return { asked, fetchImpl };
+  }
+  const card = (id: number, extra: Record<string, unknown> = {}) => ({
+    type: 'movie',
+    id,
+    title: `Atlas ${id}`,
+    posterPath: '/a.jpg',
+    ...extra,
+  });
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  /** TMDB's pages, recording each path and page asked. */
+  function tmdbFake() {
+    const asked: string[] = [];
+    const pages: Pages = async (path, type, params, page) => {
+      asked.push(`${path}?${params.with_genres ?? params.with_origin_country ?? ''}#${page}`);
+      return [{ type, id: 9000 + page, title: `TMDB ${page}`, posterPath: '/t.jpg' }];
+    };
+    return { asked, pages };
+  }
+
+  it('loads the Movies tab’s genre rows from atlas, and TMDB is not asked', async () => {
+    const atlas = atlasFake((skip) =>
+      json({ titles: [card(skip + 1, { primaryGenre: 'Action' })], order: 'o', ignored: [] }),
+    );
+    const tmdb = tmdbFake();
+    const rows = browseRows('movie', tmdb.pages, {
+      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+    });
+    // A row of its own to the screen, so one loaded from TMDB before atlas was found starts over.
+    expect(rows.map((r) => r.id)).not.toContain('genre-28');
+    const action = rows.find((r) => r.id === 'genre-28-atlas')!;
+    expect((await action.load(1)).map((t) => t.id)).toEqual([1]);
+    expect((await action.load(2)).map((t) => t.id)).toEqual([25]);
+    expect(atlas.asked).toEqual([
+      '/atlas/index/filter/movie/titles.json?sel=primary:Action',
+      '/atlas/index/filter/movie/titles.json?sel=primary:Action&skip=24',
+    ]);
+    expect(tmdb.asked).toEqual([]);
+    // atlas's answer is the shelf: TMDB's rarity guess (Animation, here) doesn't take a card out of it.
+    expect(action.filter?.({ type: 'movie', id: 5, title: 'Moana', genreIds: [28, 16] })).toBe(
+      true,
+    );
+    // Popular is TMDB's own chart either way.
+    await rows.find((r) => r.id === 'popular')!.load(1);
+    expect(tmdb.asked).toEqual(['/movie/popular?#1']);
+  });
+
+  it('is TMDB discover page for page where atlas has no filter routes', async () => {
+    const atlas = atlasFake(() => json({}, 404));
+    const tmdb = tmdbFake();
+    const [row] = browseRows('movie', tmdb.pages, {
+      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+    }).filter((r) => r.id === 'genre-28-atlas');
+    expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
+    expect((await row!.load(2)).map((t) => t.id)).toEqual([9002]);
+    // Asked once; TMDB's from then on, with its shelf filter back.
+    expect(atlas.asked).toHaveLength(1);
+    expect(tmdb.asked).toEqual(['/discover/movie?28#1', '/discover/movie?28#2']);
+    expect(row!.filter?.({ type: 'movie', id: 5, title: 'Moana', genreIds: [28, 16] })).toBe(false);
+  });
+
+  it('is TMDB’s where atlas has no such value, as for a genre it has no primary label for', async () => {
+    const atlas = atlasFake(() =>
+      json({ titles: [], ignored: [], unknownValues: ['primary:Animation'], order: 'o' }),
+    );
+    const tmdb = tmdbFake();
+    const animation = categories('movie', 2026).find((c) => c.id === 'genre-16-movie')!;
+    const [row] = homeRows(tmdb.pages, {
+      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+    }).filter((r) => r.id === `${animation.id}-atlas`);
+    expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
+    expect(atlas.asked).toEqual(['/atlas/index/filter/movie/titles.json?sel=primary:Animation']);
+  });
+
+  it('goes on with TMDB once atlas’s titles run out, so the row stays endless', async () => {
+    const atlas = atlasFake((skip) =>
+      json({ titles: skip ? [] : [card(1)], order: 'o', ignored: [] }),
+    );
+    const tmdb = tmdbFake();
+    const [row] = homeRows(tmdb.pages, {
+      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+    }).filter((r) => r.id === 'country-KR-movie-atlas');
+    expect((await row!.load(1)).map((t) => t.id)).toEqual([1]);
+    expect((await row!.load(2)).map((t) => t.id)).toEqual([9001]);
+    expect((await row!.load(3)).map((t) => t.id)).toEqual([9002]);
+    expect(atlas.asked).toEqual([
+      '/atlas/index/filter/movie/titles.json?sel=country:KR',
+      '/atlas/index/filter/movie/titles.json?sel=country:KR&skip=24',
+    ]);
+    expect(tmdb.asked).toEqual(['/discover/movie?KR#1', '/discover/movie?KR#2']);
+  });
+
+  it('is TMDB’s when atlas fails, and says so', async () => {
+    const atlas = atlasFake(() => json({}, 500));
+    const tmdb = tmdbFake();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const [row] = homeRows(tmdb.pages, {
+      atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl },
+    }).filter((r) => r.id === 'decade-2020-movie-atlas');
+    expect((await row!.load(1)).map((t) => t.id)).toEqual([9001]);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('draws a card atlas has no poster for from TMDB', async () => {
+    const atlas = atlasFake(() =>
+      json({ titles: [card(7, { posterPath: null })], order: 'o', ignored: [] }),
+    );
+    const [row] = homeRows(tmdbFake().pages, {
+      atlas: {
+        base: '/atlas',
+        fetchImpl: atlas.fetchImpl,
+        title: async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/drawn.jpg' }),
+      },
+    }).filter((r) => r.id === 'recipe-romantic-comedy-atlas');
+    expect(await row!.load(1)).toMatchObject([{ id: 7, posterPath: '/drawn.jpg' }]);
+    expect(atlas.asked).toEqual([
+      '/atlas/index/filter/movie/titles.json?sel=subgenre:Romantic%20Comedy',
+    ]);
+  });
+
+  it('keeps TMDB for the spine, Nordic Noir and Critically Acclaimed, and asks atlas nothing without it', async () => {
+    const atlas = atlasFake(() => json({ titles: [card(1)], order: 'o', ignored: [] }));
+    const tmdb = tmdbFake();
+    const rows = homeRows(tmdb.pages, { atlas: { base: '/atlas', fetchImpl: atlas.fetchImpl } });
+    for (const id of ['new-releases', 'recipe-nordic-noir', 'acclaimed-movie'])
+      await rows.find((r) => r.id === id)!.load(1);
+    expect(atlas.asked).toEqual([]);
+    expect(tmdb.asked).toHaveLength(3);
+    const plain = homeRows(tmdb.pages).find((r) => r.id === 'country-KR-movie')!;
+    await plain.load(1);
+    expect(atlas.asked).toEqual([]);
   });
 });
 

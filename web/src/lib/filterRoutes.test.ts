@@ -132,6 +132,39 @@ describe('fetching', () => {
         answer({ titles: [], ignored: ['rating'], kindsUnavailable: ['rating'] }),
     });
     await expect(ignored(1)).rejects.toBeInstanceOf(FilterUnavailable);
+    // atlas reads the kind but has no such value: an empty answer that says nothing about the selection.
+    const unknown = filterTitles('/atlas', 'tv', [{ kind: 'primary', id: 'Action & Adventure' }], {
+      fetchImpl: async () =>
+        answer({
+          titles: [],
+          ignored: [],
+          unknownValues: ['primary:Action%20%26%20Adventure'],
+        }),
+    });
+    await expect(unknown(1)).rejects.toBeInstanceOf(FilterUnavailable);
+  });
+
+  it('starts a page asked out of turn at its own skip, as a rebuilt row asks it', async () => {
+    const asked: string[] = [];
+    const load = filterTitles('/atlas', 'movie', [{ kind: 'decade', id: '1990' }], {
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/metadata')) return answer({ titles: [] });
+        asked.push(url);
+        const skip = Number(new URL(url, 'https://x').searchParams.get('skip') ?? 0);
+        return answer({
+          titles: [{ type: 'movie', id: skip + 1, title: 'A', posterPath: '/a.jpg' }],
+          order: 'a',
+          ignored: [],
+        });
+      }) as typeof fetch,
+    });
+    expect((await load(3)).map((t) => t.id)).toEqual([49]);
+    expect((await load(4)).map((t) => t.id)).toEqual([73]);
+    expect(asked).toEqual([
+      '/atlas/index/filter/movie/titles.json?sel=decade:1990&skip=48',
+      '/atlas/index/filter/movie/titles.json?sel=decade:1990&skip=72',
+    ]);
   });
 
   it('finds people by a typed prefix, and asks nothing for too short a one', async () => {

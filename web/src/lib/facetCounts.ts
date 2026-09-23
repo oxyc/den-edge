@@ -8,7 +8,7 @@
 // from the feed alone.
 
 import { atlasWhere } from './atlasRows';
-import { RECIPES, retargeted } from './catalog';
+import { RECIPES, recipeParts, retargeted } from './catalog';
 import type { FilterItem } from './filterRoutes';
 import type { MediaType } from './library';
 import { likeOf } from './route';
@@ -64,67 +64,6 @@ export type FilterOnlyKind = (typeof FILTER_ONLY)[number];
 export function filterOnlyKind(id: string): FilterOnlyKind | undefined {
   const kind = id.slice(0, id.indexOf('-'));
   return (FILTER_ONLY as readonly string[]).includes(kind) ? (kind as FilterOnlyKind) : undefined;
-}
-
-/**
- * The recipes that are one of atlas's subgenres. A subgenre is atlas's own judgement of what a title is, where the
- * recipe's TMDB form is a keyword or a pair of genres standing in for it.
- */
-const RECIPE_SUBGENRES: Record<string, string> = {
-  'romantic-comedy': 'Romantic Comedy',
-  'action-comedy': 'Action Comedy',
-  'horror-comedy': 'Horror Comedy',
-  'sci-fi-horror': 'Sci-Fi Horror',
-  'sci-fi-action': 'Sci-Fi Action',
-  'crime-thriller': 'Crime Thriller',
-  'action-thriller': 'Action Thriller',
-  'romantic-drama': 'Romantic Drama',
-  'war-drama': 'War Drama',
-  'historical-drama': 'Historical/Period Drama',
-  'fantasy-adventure': 'Fantasy Adventure',
-  'crime-comedy': 'Crime Comedy',
-  'police-procedural': 'Police Procedural',
-  heist: 'Heist',
-  'serial-killer': 'Serial Killer',
-  'spy-espionage': 'Spy/Espionage',
-  'assassin-hitman': 'Assassin/Hitman',
-  'time-travel': 'Time Travel',
-  cyberpunk: 'Cyberpunk',
-  zombie: 'Zombie',
-  slasher: 'Slasher',
-  superhero: 'Superhero',
-  'post-apocalyptic': 'Dystopian/Post-Apocalyptic',
-  'coming-of-age': 'Coming-of-Age',
-  'courtroom-legal': 'Legal/Courtroom Drama',
-  'martial-arts': 'Martial Arts',
-  biopic: 'Biopic',
-  mockumentary: 'Mockumentary',
-};
-
-/**
- * A recipe as atlas's filter, or undefined where atlas has no form of it. One of atlas's subgenres where there is one;
- * otherwise its TMDB query, where that is all AND-ed genres, one language and one country (K-Drama is
- * `country:KR,genre:18,language:ko`). Keywords, OR-ed genres, several languages or countries, or genres left out have
- * no form there: Nordic Noir, Korean Thriller, Latin American and Pure Drama stay TMDB's.
- */
-export function recipeParts(recipeId: string, type: MediaType): [string, string][] | undefined {
-  const label = RECIPE_SUBGENRES[recipeId];
-  if (label) return [['subgenre', label]];
-  const recipe = RECIPES.find((r) => r.id === recipeId);
-  const query = recipe && retargeted(recipe.query, type);
-  if (!query) return undefined;
-  if (
-    query.keywords?.length ||
-    query.withoutGenres?.length ||
-    (query.genreJoin === 'or' && (query.genres?.length ?? 0) > 1) ||
-    query.originalLanguage?.includes('|') ||
-    (query.originCountry?.length ?? 0) > 1
-  )
-    return undefined;
-  const parts: [string, string][] = (query.genres ?? []).map((g) => ['genre', String(g)]);
-  if (query.originalLanguage) parts.push(['language', query.originalLanguage]);
-  if (query.originCountry?.[0]) parts.push(['country', query.originCountry[0]]);
-  return parts;
 }
 
 /**
