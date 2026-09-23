@@ -7,11 +7,13 @@ import {
   categories,
   COUNTRIES,
   discoverRow,
+  drawn,
   equivalentGenre,
   EXPLORE,
   GENRES,
   interleave,
   RECIPES,
+  recipeParts,
   retargeted,
   type DiscoverQuery,
   type Pages,
@@ -22,7 +24,6 @@ import {
   countedEmpty,
   filterItems,
   filterOnlyKind,
-  recipeParts,
   type FacetCounts,
   type FilterOnlyKind,
 } from './facetCounts';
@@ -956,35 +957,6 @@ export interface FeedSources {
 
 /** How many of atlas's closest titles a "Like" asks for: all it keeps for one title. */
 const LIKE_DEPTH = 200;
-
-/**
- * atlas lists a title by id and name, and its poster only where some browser has already told den-edge
- * (`withSharedTitleMetadata`). A card with no poster is hidden, so without this a mood is mostly empty. The ones
- * still missing are looked up, as search's `drawable` does; one TMDB can't name stays as it was.
- */
-function drawn(row: RowDef, title: FeedSources['title']): RowDef {
-  if (!title) return row;
-  return {
-    ...row,
-    load: async (page) =>
-      Promise.all(
-        (await row.load(page)).map((t) =>
-          t.posterPath
-            ? t
-            : title(t)
-                .then((full) =>
-                  full
-                    ? { ...full, primaryGenreName: t.primaryGenreName ?? full.primaryGenreName }
-                    : t,
-                )
-                .catch((error: unknown) => {
-                  console.warn('explore: no poster for', `${t.type}:${t.id}`, error);
-                  return t;
-                }),
-        ),
-      ),
-  };
-}
 
 /** How many of the library's titles For You asks TMDB about, as the TV does (`maxSeeds: 3`). */
 const SEEDS = 3;

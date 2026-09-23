@@ -2,6 +2,7 @@
 // Movies and Series tabs (BrowseModel), and the endless tail under both (DiscoveryCatalog.categories, RecipeCatalog,
 // GenreCatalog). Pure definitions: each row fetches its own pages, once it scrolls into view.
 
+import { filterTitles, FilterUnavailable, type FilterItem } from './filterRoutes';
 import type { MediaType, Title } from './library';
 import { titleHref } from './route';
 import { toTitle } from './tmdb';
@@ -585,11 +586,88 @@ export const RECIPES: Recipe[] = [
   },
 ];
 
+/**
+ * The recipes that are one of atlas's subgenres. A subgenre is atlas's own judgement of what a title is, where the
+ * recipe's TMDB form is a keyword or a pair of genres standing in for it.
+ */
+const RECIPE_SUBGENRES: Record<string, string> = {
+  'romantic-comedy': 'Romantic Comedy',
+  'action-comedy': 'Action Comedy',
+  'horror-comedy': 'Horror Comedy',
+  'sci-fi-horror': 'Sci-Fi Horror',
+  'sci-fi-action': 'Sci-Fi Action',
+  'crime-thriller': 'Crime Thriller',
+  'action-thriller': 'Action Thriller',
+  'romantic-drama': 'Romantic Drama',
+  'war-drama': 'War Drama',
+  'historical-drama': 'Historical/Period Drama',
+  'fantasy-adventure': 'Fantasy Adventure',
+  'crime-comedy': 'Crime Comedy',
+  'police-procedural': 'Police Procedural',
+  heist: 'Heist',
+  'serial-killer': 'Serial Killer',
+  'spy-espionage': 'Spy/Espionage',
+  'assassin-hitman': 'Assassin/Hitman',
+  'time-travel': 'Time Travel',
+  cyberpunk: 'Cyberpunk',
+  zombie: 'Zombie',
+  slasher: 'Slasher',
+  superhero: 'Superhero',
+  'post-apocalyptic': 'Dystopian/Post-Apocalyptic',
+  'coming-of-age': 'Coming-of-Age',
+  'courtroom-legal': 'Legal/Courtroom Drama',
+  'martial-arts': 'Martial Arts',
+  biopic: 'Biopic',
+  mockumentary: 'Mockumentary',
+};
+
+/**
+ * A recipe as atlas's filter, or undefined where atlas has no form of it. One of atlas's subgenres where there is one;
+ * otherwise its TMDB query, where that is all AND-ed genres, one language and one country (K-Drama is
+ * `country:KR,genre:18,language:ko`). Keywords, OR-ed genres, several languages or countries, or genres left out have
+ * no form there: Nordic Noir, Korean Thriller, Latin American and Pure Drama stay TMDB's.
+ */
+export function recipeParts(recipeId: string, type: MediaType): [string, string][] | undefined {
+  const label = RECIPE_SUBGENRES[recipeId];
+  if (label) return [['subgenre', label]];
+  const recipe = RECIPES.find((r) => r.id === recipeId);
+  const query = recipe && retargeted(recipe.query, type);
+  if (!query) return undefined;
+  if (
+    query.keywords?.length ||
+    query.withoutGenres?.length ||
+    (query.genreJoin === 'or' && (query.genres?.length ?? 0) > 1) ||
+    query.originalLanguage?.includes('|') ||
+    (query.originCountry?.length ?? 0) > 1
+  )
+    return undefined;
+  const parts: [string, string][] = (query.genres ?? []).map((g) => ['genre', String(g)]);
+  if (query.originalLanguage) parts.push(['language', query.originalLanguage]);
+  if (query.originCountry?.[0]) parts.push(['country', query.originCountry[0]]);
+  return parts;
+}
+
+/** A recipe's row as atlas's filter items (`recipeParts`), or undefined where it stays TMDB's. */
+const recipeItems = (recipeId: string, type: MediaType): FilterItem[] | undefined =>
+  recipeParts(recipeId, type)?.map(([kind, id]) => ({ kind, id }));
+
+/**
+ * A genre's row as atlas's filter: the titles whose primary genre it is, by name, which is the shelf membership
+ * `primaryGenre` asks of TMDB's titles. A genre atlas has no such label for (Animation, TV's composites such as
+ * "Action & Adventure") comes back as an unknown value, and its row is TMDB's (`atlasFirst`).
+ */
+const genreItems = (type: MediaType, id: number): FilterItem[] | undefined => {
+  const name = GENRES[type][id];
+  return name ? [{ kind: 'primary', id: name }] : undefined;
+};
+
 /** One row of the endless tail. */
 export interface Category {
   id: string;
   title: string;
   query: DiscoverQuery;
+  /** The same row as atlas's filter (`filterRoutes.ts`), where atlas can say it; `query` is its fallback. */
+  atlas?: FilterItem[];
 }
 
 /** One from each list in turn, until all drain — genre, recipe, decade, country, genre… */
@@ -663,6 +741,7 @@ export function categories(
               voteCountGte: 50,
               releaseDateGte: dateGte,
             },
+            atlas: genreItems(type, id),
           },
         ]
       : [];
@@ -671,6 +750,7 @@ export function categories(
     id: `recipe-${r.id}-${type}`,
     title: r.title,
     query: r.query,
+    atlas: recipeItems(r.id, type),
   }));
   const decades: Category[] = [];
   for (let decade = Math.floor(currentYear / 10) * 10; decade >= 1950; decade -= 10) {
@@ -684,13 +764,16 @@ export function categories(
         releaseDateGte: `${Math.max(decade, minYear ?? decade)}-01-01`,
         releaseDateLte: `${decade + 9}-12-31`,
       },
+      atlas: [{ kind: 'decade', id: String(decade) }],
     });
   }
   const countries = COUNTRIES.map(([code, demonym]) => ({
     id: `country-${code}-${type}`,
     title: `${demonym} ${noun}`,
     query: { mediaType: type, originCountry: [code], voteCountGte: 30, releaseDateGte: dateGte },
+    atlas: [{ kind: 'country', id: code }],
   }));
+  // Stays TMDB's: it is ordered by the rating itself, and atlas's filter answers most-voted first.
   const acclaimed = {
     id: `acclaimed-${type}`,
     title: 'Critically Acclaimed',
@@ -766,6 +849,101 @@ export const discoverRow = (
     pages(`/discover/${query.mediaType}`, query.mediaType, discoverParams(query), page),
 });
 
+/** Where a browse row asks atlas's filter first: its address, and how a card with no poster is drawn. */
+export interface AtlasFilterSource {
+  base: string;
+  /** A title as TMDB draws it, for an atlas card no browser has told den-edge a poster for yet. */
+  title?: (ref: { type: MediaType; id: number }) => Promise<Title | null>;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * atlas lists a title by id and name, and its poster only where some browser has already told den-edge
+ * (`withSharedTitleMetadata`). A card with no poster is hidden, so without this an atlas row is mostly empty. The
+ * ones still missing are looked up, as search's `drawable` does; one TMDB can't name stays as it was.
+ */
+export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
+  if (!title) return row;
+  return {
+    ...row,
+    load: async (page) =>
+      Promise.all(
+        (await row.load(page)).map((t) =>
+          t.posterPath
+            ? t
+            : title(t)
+                .then((full) =>
+                  full
+                    ? { ...full, primaryGenreName: t.primaryGenreName ?? full.primaryGenreName }
+                    : t,
+                )
+                .catch((error: unknown) => {
+                  console.warn('atlas row: no poster for', `${t.type}:${t.id}`, error);
+                  return t;
+                }),
+        ),
+      ),
+  };
+}
+
+/**
+ * `atlas`'s titles, then `tmdb`'s. TMDB's row takes over where atlas can't give this one — no filter routes (a 404),
+ * a kind or value it doesn't know, a failed request — and once atlas's titles run out, so the row stays endless past
+ * atlas's corpus; the pager drops a title TMDB gives again. TMDB's shelf filter applies only to what TMDB gave:
+ * atlas's answer is the row's membership already.
+ *
+ * Nothing is kept but the page TMDB took over after, and a rebuilt row (the screen's rows are re-derived as the
+ * library and settings change) asks atlas for the page it is on (`filterTitles`), so it goes on where it was.
+ */
+export function atlasFirst(atlas: RowDef, tmdb: RowDef): RowDef {
+  /** The page TMDB's row took over after; undefined while atlas answers. */
+  let from: number | undefined;
+  let served = false;
+  return {
+    ...tmdb,
+    filter: (title) => from === undefined || (tmdb.filter?.(title) ?? true),
+    load: async (page) => {
+      if (from === undefined) {
+        try {
+          const titles = await atlas.load(page);
+          if (titles.length) {
+            served = true;
+            return titles;
+          }
+          // atlas has no more: TMDB's row goes on from its own first page.
+          from = page - 1;
+        } catch (error) {
+          // A kind or value atlas doesn't hold is expected for some rows (a genre with no primary label there);
+          // anything else that isn't the routes being absent is a failure worth a warning.
+          if (!(error instanceof FilterUnavailable))
+            console.warn('browse: atlas failed, TMDB takes the row:', tmdb.id, error);
+          else if (error.deployed) console.info('browse:', tmdb.id, 'is TMDB’s:', error.message);
+          // Where atlas gave nothing, TMDB's row is the row, page for page.
+          from = served ? page - 1 : 0;
+        }
+      }
+      return tmdb.load(page - from);
+    },
+  };
+}
+
+/**
+ * A category's row: atlas's filter first where it can say the category and atlas is there, TMDB's otherwise.
+ *
+ * The two are different rows to the screen (`-atlas` on the id), so a row that loaded from TMDB before atlas was
+ * found starts again from atlas's first page instead of going on from TMDB's page 1 at atlas's page 2.
+ */
+export function categoryRow(
+  pages: Pages,
+  { id, title, query, atlas: items }: Category,
+  atlas?: AtlasFilterSource,
+): RowDef {
+  const tmdb = discoverRow(pages, id, title, query);
+  if (!atlas || !items) return tmdb;
+  const load = filterTitles(atlas.base, query.mediaType, items, { fetchImpl: atlas.fetchImpl });
+  return { ...atlasFirst(drawn({ id, title, load }, atlas.title), tmdb), id: `${id}-atlas` };
+}
+
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
 /** Home's curated recipe rows, below the spine (TMDBDiscovery.homeRecipeRows). */
@@ -774,6 +952,10 @@ const HOME_RECIPES = ['romantic-comedy', 'nordic-noir', 'police-procedural'];
 /**
  * Home: the spine — trending, what became watchable lately, top series, upcoming — then its recipe rows, then movie
  * and series categories alternating. The tail leaves out what the head already shows.
+ *
+ * With `atlas`, every recipe and category atlas's filter can say is its answer first (`categoryRow`). The spine stays
+ * TMDB's: trending, top-rated and upcoming are TMDB's own charts, and New Releases is a release-date window, which
+ * atlas's filter has no kind for.
  */
 export function homeRows(
   pages: Pages,
@@ -781,6 +963,7 @@ export function homeRows(
     now = new Date(),
     minYear = undefined as number | undefined,
     excludedLanguages = new Set<string>(),
+    atlas = undefined as AtlasFilterSource | undefined,
   } = {},
 ): RowDef[] {
   const since = new Date(now.getTime() - 120 * 86_400_000);
@@ -810,7 +993,18 @@ export function homeRows(
   ];
   const recipes = HOME_RECIPES.flatMap((slug) => RECIPES.find((r) => r.id === slug) ?? [])
     .filter((r) => !onlyExcluded(r.query, excludedLanguages))
-    .map((r) => discoverRow(pages, `recipe-${r.id}`, r.title, r.query));
+    .map((r) =>
+      categoryRow(
+        pages,
+        {
+          id: `recipe-${r.id}`,
+          title: r.title,
+          query: r.query,
+          atlas: recipeItems(r.id, r.query.mediaType),
+        },
+        atlas,
+      ),
+    );
   const year = now.getFullYear();
   const tail = interleave([
     categories('movie', year, { minYear, excludedLanguages }),
@@ -820,7 +1014,7 @@ export function homeRows(
       c.id !== 'acclaimed-tv' &&
       !HOME_RECIPES.some((slug) => c.id === `recipe-${slug}-movie` || c.id === `recipe-${slug}-tv`),
   );
-  return [...spine, ...recipes, ...tail.map((c) => discoverRow(pages, c.id, c.title, c.query))];
+  return [...spine, ...recipes, ...tail.map((c) => categoryRow(pages, c, atlas))];
 }
 
 /**
@@ -848,7 +1042,8 @@ export function personalRows(
 
 /**
  * The Movies or Series tab (BrowseModel): Popular, three genre rows from the TV's Explore order, then that type's
- * categories — none of them a genre already shown, or one the TV hides.
+ * categories — none of them a genre already shown, or one the TV hides. With `atlas`, the genre rows and categories
+ * are atlas's filter first (`categoryRow`); Popular is TMDB's own chart and stays so.
  */
 export function browseRows(
   type: MediaType,
@@ -858,6 +1053,7 @@ export function browseRows(
     minYear = undefined as number | undefined,
     hiddenGenres = new Set<number>(),
     excludedLanguages = new Set<string>(),
+    atlas = undefined as AtlasFilterSource | undefined,
   } = {},
 ): RowDef[] {
   const curated = EXPLORE[type].filter((id) => !hiddenGenres.has(id)).slice(0, 3);
@@ -867,15 +1063,20 @@ export function browseRows(
     load: (page) => pages(`/${type}/popular`, type, {}, page),
   };
   const genreRows = curated.map((id) =>
-    discoverRow(pages, `genre-${id}`, GENRES[type][id] ?? '', {
-      mediaType: type,
-      genres: [id],
-      primaryGenre: id,
-    }),
+    categoryRow(
+      pages,
+      {
+        id: `genre-${id}`,
+        title: GENRES[type][id] ?? '',
+        query: { mediaType: type, genres: [id], primaryGenre: id },
+        atlas: genreItems(type, id),
+      },
+      atlas,
+    ),
   );
   const tail = categories(type, now.getFullYear(), { minYear, excludedLanguages }).filter((c) => {
     const only = c.id.startsWith('genre-') ? c.query.genres?.[0] : undefined;
     return only === undefined || (!curated.includes(only) && !hiddenGenres.has(only));
   });
-  return [popular, ...genreRows, ...tail.map((c) => discoverRow(pages, c.id, c.title, c.query))];
+  return [popular, ...genreRows, ...tail.map((c) => categoryRow(pages, c, atlas))];
 }
