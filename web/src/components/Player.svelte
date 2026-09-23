@@ -32,7 +32,7 @@
     type Want,
     videoCodecsOf,
   } from '../lib/remux';
-  import { optionLabel, swapNotice } from '../lib/releaseVerdicts';
+  import { optionLabel, releaseAfterMeasure, swapNotice } from '../lib/releaseVerdicts';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -152,6 +152,8 @@
    */
   let castOffer = $state<'idle' | 'waiting' | 'none'>('idle');
   let publicMaxBitrate: number | undefined;
+  /** The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick. */
+  let chosenRelease: string | undefined = untrack(() => filename);
   let session = $state<Session | null>(null);
   let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
   let key = $state('');
@@ -425,7 +427,7 @@
         measured <= 1_000_000_000
       ) {
         publicMaxBitrate = Math.round(measured);
-        restart({ filename: current.release.filename });
+        restart(releaseAfterMeasure(chosenRelease));
       }
     } else if (message.type === 'den-cast-availability') {
       // Whether a Chromecast is on the network. A receiver appearing late clears the notice; "none" only matters
@@ -766,10 +768,12 @@
     // Another file gets this browser's full claims: what one release couldn't decode says nothing about
     // whether the next needs converting.
     degraded = false;
+    chosenRelease = filename;
     restart({ filename });
   }
 
-  function restart(pick: { audioTrack?: number; filename: string }) {
+  /** `pick` undefined starts as the player first did: the release it was opened with, else den-remux's choice. */
+  function restart(pick: { audioTrack?: number; filename: string } | undefined) {
     if (!session) return;
     report();
     const total = length();
