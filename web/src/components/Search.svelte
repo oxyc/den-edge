@@ -742,10 +742,10 @@
     border-color: var(--muted);
   }
 
-  /* The query is this one's whole name: the likeliest meaning, drawn a little firmer. */
+  /* The query is this one's whole name: the likeliest meaning, first in the row and its name a little heavier. Its
+     border and colours stay its siblings': a solid outline or a fill is what a picked chip wears (the pills over the
+     grid, For You in the rail), and this one isn't picked until it is pressed. */
   .facet.exact {
-    border-style: solid;
-    border-color: var(--muted);
     font-weight: 600;
   }
 

@@ -1004,7 +1004,7 @@ test('the Browse row: the whole query first, fewer for long queries, a pick repl
     const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
     const heading = (name) => active(page).getByRole('heading', { name, exact: true });
 
-    // A short form counts in full: "uk" is the United Kingdom, first and drawn firmer.
+    // A short form counts in full: "uk" is the United Kingdom, first, its name a little heavier.
     await input(page).fill('uk');
     const first = browse.getByRole('button').first();
     await expect(first).toHaveText('United Kingdom · country');
@@ -1030,6 +1030,56 @@ test('the Browse row: the whole query first, fewer for long queries, a pick repl
     await page.goBack();
     await expect(page).toHaveURL(/\/search\?q=sweden$/);
     await expect(input(page)).toHaveValue('sweden');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the whole-query match is not drawn as picked: it looks like its siblings until pressed', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 1280);
+    await input(page).fill('swedish');
+    const browse = active(page).getByRole('group', { name: 'Browse', exact: true });
+    const sweden = browse.getByRole('button', { name: 'Sweden · country', exact: true });
+    await expect(sweden).toBeVisible();
+    // The first chip is the one drawn as the query's whole name.
+    const first = browse.getByRole('button').first();
+    await expect(first).toHaveClass(/exact/);
+
+    // No picked semantics, and nothing a pick wears: the same border, fill and colour as the chips beside it.
+    const look = (chip) =>
+      chip.evaluate((el) => {
+        const s = getComputedStyle(el);
+        return [s.borderTopStyle, s.borderTopColor, s.backgroundColor, s.color];
+      });
+    for (const chip of [first, sweden]) {
+      await expect(chip).not.toHaveAttribute('aria-pressed', /.*/);
+      await expect(chip).not.toHaveAttribute('aria-selected', /.*/);
+    }
+    expect(await look(first)).toEqual(await look(browse.getByRole('button').nth(1)));
+    expect(await look(sweden)).toEqual(await look(browse.getByRole('button').last()));
+    const picks = active(page).getByRole('group', { name: 'Selected' });
+    await expect(picks).toHaveCount(0);
+
+    // Pressed, it is picked: a pill over the grid, and out of the rail's Countries.
+    await sweden.click();
+    await expect(page).toHaveURL(/\/search\?c=country-SE$/);
+    await expect(picks.getByRole('button', { name: 'Remove Sweden' })).toBeVisible();
+    await expect(
+      active(page)
+        .getByRole('navigation', { name: 'Browse by category' })
+        .getByRole('group', { name: 'Countries' })
+        .getByRole('button', { name: 'Sweden', exact: true }),
+    ).toHaveCount(0);
   } finally {
     await browser.close();
   }
