@@ -614,9 +614,7 @@ test('a region is picked from the rail’s Regions, one at a time, and asks atla
         name: 'Remove Nordic',
       }),
     ).toBeVisible();
-    await expect
-      .poll(() => asked)
-      .toContain('/index/filter/movie/titles.json?sel=region:nordic');
+    await expect.poll(() => asked).toContain('/index/filter/movie/titles.json?sel=region:nordic');
     // One region at a time: the others leave the rail until it is taken out.
     await expect(rail.getByRole('group', { name: 'Regions' })).toHaveCount(0);
   } finally {
