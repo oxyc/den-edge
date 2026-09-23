@@ -12,14 +12,14 @@ import { legacyPath } from './lib/route';
 const legacy = legacyPath(location.hash);
 if (legacy) history.replaceState(history.state, '', legacy + location.search);
 
-// An invite link (`#invite=<code>`) opens Settings › Sharing with the code filled in, for the viewer to redeem. The code
-// leaves the address at once, so it isn't kept in history or shared onward by copying the URL.
+// An invite link (`#invite=<code>`) asks, on the page it opens, whether to accept (`InviteDialog`). The code leaves the
+// address at once, so it isn't kept in history or shared onward by copying the URL.
 const invited = parseInvite(location.hash);
 if (invited) {
   guestGrants.invite = invited;
   // A first-time guest has no library to open, and without browsing the app shows only the pairing screen.
-  links.browse();
-  history.replaceState(history.state, '', '/settings#sharing');
+  if (!links.current) links.browse();
+  history.replaceState(history.state, '', location.pathname + location.search);
 }
 
 const target = document.getElementById('app');

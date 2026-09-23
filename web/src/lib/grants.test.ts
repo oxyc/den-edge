@@ -6,6 +6,8 @@ import {
   grantAddons,
   hashInstalls,
   inviteLink,
+  keepCode,
+  keptCodes,
   leaveGrant,
   listGrants,
   newSecret,
@@ -97,6 +99,23 @@ test('an invite is read from a code or from the link that carries it, and from n
     '#invite=x',
   ])
     expect(parseInvite(bad), bad).toBeNull();
+});
+
+test('an invite’s code is kept to copy again until it is used, and then forgotten', () => {
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+  } as Storage;
+  keepCode('aaaa0001', 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA', storage);
+  keepCode('bbbb0002', 'b1b2c3d4.BBBBBBBBBBBBBBBBBBBBBB', storage);
+  expect(keptCodes(['aaaa0001', 'bbbb0002'], storage)).toEqual({
+    aaaa0001: 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA',
+    bbbb0002: 'b1b2c3d4.BBBBBBBBBBBBBBBBBBBBBB',
+  });
+  // bbbb0002 was redeemed or revoked: no longer unused.
+  expect(keptCodes(['aaaa0001'], storage)).toEqual({ aaaa0001: 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA' });
+  expect(keptCodes(undefined, storage)).toEqual({ aaaa0001: 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA' });
 });
 
 test('a shared install is one of this origin’s own ~gid bases, and nothing else', () => {

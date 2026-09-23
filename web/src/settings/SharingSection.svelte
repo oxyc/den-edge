@@ -9,7 +9,6 @@
   import Select from './Select.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
-  import { rows } from './rows.svelte';
   import {
     cappedCodeExpiry,
     createGrant,
@@ -17,7 +16,9 @@
     DEFAULT_REDEEM_DAYS,
     GRANT_ADDONS,
     inviteLink,
+    keepCode,
     keepUploaded,
+    keptCodes,
     listGrants,
     reuploadInstalls,
     revokeGrant,
@@ -32,7 +33,7 @@
   import type { Link } from '../lib/links.svelte';
   import { libraryCredentialId } from '../lib/relayFetch';
   import type { Routes } from '../lib/routes';
-  import { hostedInstalls } from '../lib/scout';
+  import { hostedInstalls, installsOf } from '../lib/scout';
 
   let {
     link,
@@ -72,8 +73,13 @@
   let created = $state<{ name: string; code: string } | null>(null);
   let copied = $state<string | null>(null);
   let renaming = $state<{ gid: string; name: string } | null>(null);
+  /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
+  let codes = $state<Record<string, string>>({});
 
   const offered = $derived(GRANT_ADDONS.filter((addon) => installs[addon]));
+  // Installed but not lendable: an install with no settings of its own (a bare Den Atlas) gives a guest nothing to hold.
+  const installed = (addon: GrantAddon) =>
+    installsOf(plugins, routes, addon === 'subtitles' ? 'subs' : addon).length > 0;
   const chosen = $derived(offered.filter((addon) => picked.has(addon)));
   const clamp = (n: number, low: number, high: number) =>
     Math.min(high, Math.max(low, Math.round(Number.isFinite(n) ? n : low)));
@@ -96,6 +102,7 @@
     }
     problem = null;
     grants = listed.value;
+    codes = keptCodes(listed.value.filter((g) => g.status === 'invited').map((g) => g.gid));
     // The plugin list may have changed since the escrow was made: what den-edge holds follows it.
     await reuploadInstalls(id, listed.value, installs);
   }
@@ -132,6 +139,8 @@
       return;
     }
     await keepUploaded(reply.value.grant.gid, installs, chosen);
+    keepCode(reply.value.grant.gid, reply.value.code);
+    codes = { ...codes, [reply.value.grant.gid]: reply.value.code };
     created = { name: reply.value.grant.name, code: reply.value.code };
     name = '';
     grants = [...(grants ?? []), reply.value.grant];
@@ -210,14 +219,6 @@
     throttled: 'Too many tries. Wait a minute and try again.',
     unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
   };
-
-  // An invite that arrived as a link is filled in, and its row opened; redeeming it is still the viewer's to do.
-  $effect(() => {
-    const code = guestGrants.invite;
-    if (!code) return;
-    pasted = code;
-    rows.open.add('shared-with-you');
-  });
 
   async function accept() {
     redeeming = true;
@@ -300,7 +301,9 @@
             options={GRANT_ADDONS.map((addon) => ({
               value: addon,
               label: NAMES[addon].label,
-              note: installs[addon] ? NAMES[addon].role : `${NAMES[addon].role} · not installed`,
+              note: installs[addon]
+                ? NAMES[addon].role
+                : `${NAMES[addon].role} · ${installed(addon) ? 'no settings to lend' : 'not installed'}`,
               disabled: !installs[addon],
             }))}
             checked={(addon) => picked.has(addon) && !!installs[addon]}
@@ -373,22 +376,35 @@
                 ></span
               >
               {#if grant.status !== 'revoked'}
-                <span class="actions">
+                {@const code = grant.status === 'invited' ? codes[grant.gid] : undefined}
+                <span class="actions guest">
+                  {#if code}
+                    {@const address = inviteLink(location.origin, code)}
+                    <button
+                      type="button"
+                      class="quiet"
+                      aria-label="Copy {grant.name}’s invite link"
+                      onclick={() => void copy(address)}
+                      >{copied === address ? 'Copied' : 'Copy link'}</button
+                    >
+                  {/if}
                   {#if !(grant.status === 'active' && grant.expiresAt === null)}
-                    <button
-                      type="button"
-                      class="quiet"
-                      disabled={working}
-                      aria-label="Extend {grant.name} by 7 days"
-                      onclick={() => extend(grant, 7)}>+7 days</button
-                    >
-                    <button
-                      type="button"
-                      class="quiet"
-                      disabled={working}
-                      aria-label="Extend {grant.name} by 30 days"
-                      onclick={() => extend(grant, 30)}>+30 days</button
-                    >
+                    <!-- Re-keyed on every change, so the picker returns to its prompt once the extension lands. -->
+                    {#key `${grant.codeExpiresAt}:${grant.expiresAt}`}
+                      <Select
+                        label="Extend {grant.name}"
+                        value=""
+                        disabled={working}
+                        options={[
+                          { value: '', label: 'Extend…' },
+                          { value: '7', label: '+7 days' },
+                          { value: '30', label: '+30 days' },
+                        ]}
+                        onchange={(days) => {
+                          if (days) extend(grant, Number(days));
+                        }}
+                      />
+                    {/key}
                   {/if}
                   <button
                     type="button"
@@ -536,5 +552,28 @@
     gap: 4px;
     color: var(--muted);
     font-size: 13px;
+  }
+
+  /* A guest's controls as one compact group: extending is one picker rather than a button per length, and every
+     control shares the smaller height, so a row reads as the guest first and its controls second. */
+  .guest {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .guest > button,
+  .guest :global(select),
+  .guest :global(button) {
+    min-height: 34px;
+    padding-inline: 12px;
+    font-size: 14px;
+  }
+
+  .guest :global(select) {
+    max-width: none;
+    padding-right: 28px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--fg);
   }
 </style>
