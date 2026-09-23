@@ -4,8 +4,8 @@
 //! pairs now.
 
 use crate::handler::{
-    error, header_key, internal, json_reply, link_key, method_not_allowed, read_json, valid_inbox_key,
-    MAX_BODY_BYTES,
+    error, header_key, internal, json_reply, link_key, method_not_allowed, read_json, retry_after,
+    valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::AppState;
 use axum::extract::Request;
@@ -48,7 +48,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
         "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
-        "/inbox/drain" => drain(state, link_key(&req)).await,
+        "/inbox/drain" => {
+            if let Some(wait) = drain_budget(state, &crate::handler::client_ip(state, &req), 1) {
+                return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+            }
+            drain(state, link_key(&req)).await
+        }
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
 }
@@ -61,6 +66,7 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 /// refused key for an empty queue. The keys travel in the body, which is never logged, like the header does for
 /// one.
 async fn drain_many(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
@@ -79,28 +85,42 @@ async fn drain_many(state: &AppState, req: Request) -> Response {
     if keys.iter().collect::<std::collections::HashSet<_>>().len() != keys.len() {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
     }
-    let _write = state.write_lock.lock().await;
+    if let Some(wait) = drain_budget(state, &ip, keys.len()) {
+        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
     let now = state.now();
-    // Every queue is read before any is emptied, so a failed read loses none of them.
     let mut queues = Vec::with_capacity(keys.len());
-    for key in &keys {
-        match load(state, key, now).await {
-            Ok(queue) => queues.push(queue),
-            Err(e) => return internal("inbox read", e),
-        }
-    }
-    for (key, queue) in keys.iter().zip(&queues) {
-        // One that cannot be emptied is still handed over, and handed over again on the next drain, where a
-        // paired TV drops what it already applied (den-spec inbox-v1 §3). Refusing the lot would lose the queues
-        // already emptied before it.
-        if queue.is_some() {
-            if let Err(e) = state.store.delete(NS, key).await {
-                eprintln!("inbox delete: {e}");
+    for key in keys {
+        // One queue at a time under the store's write lock, so a drain of many never holds every other writer
+        // for all of them. Nothing is lost by it: a queue that cannot be read is left where it is, answered as
+        // empty and delivered by the next drain; one that cannot be deleted is still handed over, and again next
+        // time, where a paired TV drops what it already applied (den-spec inbox-v1 §3).
+        let _write = state.write_lock.lock().await;
+        queues.push(match load(state, key, now).await {
+            Ok(Some(queue)) => {
+                if let Err(e) = state.store.delete(NS, key).await {
+                    eprintln!("inbox delete: {e}");
+                }
+                queue
             }
-        }
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                eprintln!("inbox read: {e}");
+                Vec::new()
+            }
+        });
     }
-    let queues: Vec<Vec<Value>> = queues.into_iter().map(Option::unwrap_or_default).collect();
     json_reply(StatusCode::OK, &json!({ "queues": queues }))
+}
+
+/// Queues drained per address per minute, a queue each whether asked one at a time or together. A drain is a read
+/// and a delete under the store's write lock, and the route answers on the public names: without a budget one
+/// address could keep every other writer waiting. A TV polling seven linked devices every ten seconds spends 42.
+const DRAINS_PER_WINDOW: u32 = 240;
+
+fn drain_budget(state: &AppState, ip: &str, queues: usize) -> Option<u64> {
+    let cost = u32::try_from(queues).unwrap_or(u32::MAX);
+    crate::link::throttled_by(state, &format!("inbox-drain:{ip}"), DRAINS_PER_WINDOW, cost)
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
@@ -256,6 +276,27 @@ mod tests {
         assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "nothing was emptied");
         let at_most: Vec<String> = (1..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
         assert_eq!(h.call("POST", "/inbox/drain", Some(json!({ "keys": at_most }))).await.0, StatusCode::OK);
+    }
+
+    /// Draining is priced per queue, however they are asked for: a 16-key drain spends 16 of an address's minute,
+    /// and a single drain shares the same budget. Refused whole, with the wait to come back after.
+    #[tokio::test]
+    async fn drains_are_limited_per_address_by_the_queues_they_take() {
+        let h = Harness::new();
+        let keys: Vec<String> = (1..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        let rounds = super::DRAINS_PER_WINDOW as usize / super::MAX_DRAIN_KEYS;
+        for round in 0..rounds {
+            let status = h.call("POST", "/inbox/drain", Some(json!({ "keys": keys }))).await.0;
+            assert_eq!(status, StatusCode::OK, "{round}");
+        }
+        let over = h.send("POST", "/inbox/drain", Some(json!({ "keys": keys }).to_string()), &[]).await;
+        assert_eq!(over.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(over.headers().contains_key("retry-after"));
+        let one = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
+        assert_eq!(one.status(), StatusCode::TOO_MANY_REQUESTS, "a single drain spends the same budget");
+
+        h.advance(60_000);
+        assert_eq!(drain(&h).await, Vec::<Value>::new(), "the window clears");
     }
 
     #[tokio::test]
