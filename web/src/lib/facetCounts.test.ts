@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { recipeParts } from './catalog';
 import { exploreChips, emptyOptions } from './explore';
-import { countedEmpty, countItems, facetParts, filterItems, type FacetCounts } from './facetCounts';
+import {
+  countedEmpty,
+  countItems,
+  facetParts,
+  filterItems,
+  groupKind,
+  type FacetCounts,
+} from './facetCounts';
 import { filterUrl } from './filterRoutes';
 
 describe('facetParts', () => {
@@ -86,6 +93,37 @@ describe('filterItems', () => {
   it('is nothing where one pick has no form there', () => {
     expect(filterItems(['genre-80', 'recipe-nordic-noir'], 'movie')).toBeUndefined();
     expect(filterItems(['like-tv-1396'], 'movie')).toBeUndefined();
+  });
+
+  it('asks a kind’s picks as one either-or group, in its first pick’s place', () => {
+    const set = ['country-FR', 'genre-18', 'country-IT', 'genre-28', 'decade-1980', 'decade-1990'];
+    expect(filterItems(set, 'movie')).toEqual([
+      { kind: 'country', id: 'FR|IT' },
+      { kind: 'genre', id: '18|28' },
+      { kind: 'decade', id: '1980|1990' },
+    ]);
+    expect(countItems(set, 'movie')).toEqual(filterItems(set, 'movie'));
+    expect(filterUrl('/atlas', 'movie', 'titles', { items: filterItems(set, 'movie') })).toBe(
+      '/atlas/index/filter/movie/titles.json?sel=country:FR|IT,decade:1980|1990,genre:18|28',
+    );
+  });
+
+  it('keeps a recipe’s parts and a plot pair’s axes apart from a group, and never groups a rating', () => {
+    // K-drama's drama AND Korean, beside Action: never "drama or action".
+    expect(filterItems(['genre-28', 'recipe-k-drama'], 'tv')).toEqual([
+      { kind: 'genre', id: '28' },
+      { kind: 'genre', id: '18' },
+      { kind: 'language', id: 'ko' },
+      { kind: 'country', id: 'KR' },
+    ]);
+    expect(groupKind('recipe-heist', 'movie')).toBeUndefined();
+    expect(groupKind('plot-slow-bleak', 'movie')).toBeUndefined();
+    expect(groupKind('rating-7', 'movie')).toBeUndefined();
+    expect(groupKind('mood-feel-good', 'movie')).toBe('mood');
+    expect(filterItems(['rating-6', 'rating-7'], 'movie')).toEqual([
+      { kind: 'rating', id: '6' },
+      { kind: 'rating', id: '7' },
+    ]);
   });
 });
 

@@ -650,7 +650,7 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
   }
 });
 
-test('a region is picked from the rail’s Regions, one at a time, and asks atlas for region:<slug>', async () => {
+test('a region is picked from the rail’s Regions, asks atlas for region:<slug>, and a second is either-or', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -679,8 +679,12 @@ test('a region is picked from the rail’s Regions, one at a time, and asks atla
       }),
     ).toBeVisible();
     await expect.poll(() => asked).toContain('/index/filter/all/titles.json?sel=region:nordic');
-    // One region at a time: the others leave the rail until it is taken out.
-    await expect(rail.getByRole('group', { name: 'Regions' })).toHaveCount(0);
+    // Another region stays offered, and joins the first as either-or: one item, atlas's values sorted.
+    await regions.getByRole('button', { name: 'East Asian', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=region-nordic,region-east-asian$/);
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/all/titles.json?sel=region:east-asian|nordic');
   } finally {
     await browser.close();
   }

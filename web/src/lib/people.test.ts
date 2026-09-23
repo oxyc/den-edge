@@ -48,21 +48,39 @@ describe('People’s person traits', () => {
     ]);
   });
 
-  it('stacks roles and nationalities, and lets a new gender or decade take the old one’s place', () => {
+  it('adds a second value of any trait beside the first, and takes a picked one out', () => {
     expect(pickTrait(['role-director'], 'role-writer')).toEqual(['role-director', 'role-writer']);
     expect(pickTrait(['gender-Q6581097', 'role-cast'], 'gender-Q6581072')).toEqual([
+      'gender-Q6581097',
       'role-cast',
       'gender-Q6581072',
+    ]);
+    expect(pickTrait(['born-1970', 'role-cast'], 'born-1980')).toEqual([
+      'born-1970',
+      'role-cast',
+      'born-1980',
     ]);
     expect(pickTrait(['born-1970', 'role-cast'], 'born-1970')).toEqual(['role-cast']);
     expect(pickTrait(['role-cast'], 'genre-27')).toEqual(['role-cast']);
   });
 
-  it('offers no second value of a one-value trait, and any number of a stacking one', () => {
-    expect(traitOffered(['gender-Q6581097'], 'gender-Q6581072')).toBe(false);
+  it('asks a trait’s values as one either-or group, a range of birth years alone', () => {
+    expect(
+      traitItems(['citizenship-Q30', 'role-cast', 'citizenship-Q145', 'born-1970', 'born-1980']),
+    ).toEqual([
+      { kind: 'citizenship', id: 'Q30|Q145' },
+      { kind: 'role', id: 'cast' },
+      { kind: 'born', id: '1970|1980' },
+    ]);
+  });
+
+  it('offers every value not picked, but no birth decade beside a range of birth years', () => {
+    expect(traitOffered(['gender-Q6581097'], 'gender-Q6581072')).toBe(true);
     expect(traitOffered(['gender-Q6581097'], 'born-1970')).toBe(true);
     expect(traitOffered(['citizenship-Q30'], 'citizenship-Q34')).toBe(true);
     expect(traitOffered(['citizenship-Q30'], 'citizenship-Q30')).toBe(false);
+    expect(traitOffered(['born-1970'], 'born-1980')).toBe(true);
+    expect(traitOffered(['born-1976-1996'], 'born-1980')).toBe(false);
   });
 
   it('lists the counted values as chips: roles in atlas’s order, decades latest first, the rest by people', () => {
@@ -122,6 +140,9 @@ describe('People’s person traits', () => {
     expect(traitEmpty('role-cast', counts)).toBe(false);
     expect(traitEmpty('citizenship-Q99', counts)).toBe(false);
     expect(traitEmpty('occupation-Q33999', counts)).toBe(false);
+    // Another value of a trait picked joins it as either-or: it can only add people, so it is never judged.
+    expect(traitEmpty('role-creator', counts, ['role-cast'])).toBe(false);
+    expect(traitEmpty('role-creator', counts, ['gender-Q6581072'])).toBe(true);
   });
 
   it('names a pick before atlas has counted it', () => {
@@ -144,6 +165,10 @@ describe('People’s title facets', () => {
     expect(titleItems(['genre-27', 'for-you', 'decade-1995'], 'movie')).toEqual([
       { kind: 'genre', id: '27' },
       { kind: 'decade', id: '1990' },
+    ]);
+    expect(titleItems(['country-FR', 'genre-27', 'country-IT', 'for-you'], 'movie')).toEqual([
+      { kind: 'country', id: 'FR|IT' },
+      { kind: 'genre', id: '27' },
     ]);
   });
 });

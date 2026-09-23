@@ -4,7 +4,7 @@
 // picked as `<trait>-<value>` ids (`role-director`, `gender-Q6581072`, `born-1970`, `born-1976-1996`), the
 // address's `t=`.
 
-import { filterItems } from './facetCounts';
+import { filterItems, groupItems } from './facetCounts';
 import { browseChips, exploreChips, FOR_YOU, type Chip, type ChipGroup } from './explore';
 import { TRAIT_KINDS, type FilterItem, type PeopleCounts } from './filterRoutes';
 import type { ExploreType } from './library';
@@ -55,39 +55,56 @@ export function bornRangeOf(traits: readonly string[]): { from?: number; to?: nu
   return undefined;
 }
 
-/** The trait picks as atlas's `traits`. */
-export const traitItems = (ids: readonly string[]): FilterItem[] =>
-  ids.flatMap((id) => traitItem(id) ?? []);
-
-const single = (id: string) => {
-  const kind = traitItem(id)?.kind;
-  return kind !== undefined && TRAIT_KINDS[kind]!.mode === 'single';
+/** A range of birth years: it stands alone, never in an OR group nor beside another birth pick. */
+const bornRange = (id: string) => {
+  const item = traitItem(id);
+  return item?.kind === 'born' && item.id.includes('-');
 };
+
+/**
+ * The trait picks as atlas's `traits`: a trait's values one OR group (American or British; a director or a writer),
+ * but a range of birth years, which stands alone.
+ */
+export const traitItems = (ids: readonly string[]): FilterItem[] =>
+  groupItems(
+    ids.flatMap((id) => {
+      const item = traitItem(id);
+      return item ? [{ items: [item], kind: bornRange(id) ? undefined : item.kind }] : [];
+    }),
+  );
+
 const sameKind = (a: string, b: string) => traitItem(a)?.kind === traitItem(b)?.kind;
 
 /**
- * The trait picks once `id` is picked: one already in comes out; any other goes in last, taking the place of another
- * value of a one-value trait (a person has one gender; a birth decade or a range of birth years is one pick). Roles, nationalities and occupations
- * stack: two roles are the people who hold both.
+ * The trait picks once `id` is picked: one already in comes out; any other goes in last, joining its trait's other
+ * values as either-or. A range of birth years stands alone: it takes the place of any other birth pick, and one takes
+ * its place.
  */
 export function pickTrait(traits: readonly string[], id: string): string[] {
   if (traits.includes(id)) return traits.filter((x) => x !== id);
   if (!traitItem(id)) return [...traits];
-  return [...traits.filter((x) => !(single(id) && sameKind(x, id))), id];
+  const gives = (x: string) => sameKind(x, id) && (bornRange(id) || bornRange(x));
+  return [...traits.filter((x) => !gives(x)), id];
 }
 
-/** Whether a trait option is worth offering: not picked, and not another value of a one-value trait already picked. */
+/** Whether a trait option is worth offering: not picked, and no birth decade beside a range of birth years. */
 export const traitOffered = (traits: readonly string[], id: string): boolean =>
-  !traits.includes(id) && !(single(id) && traits.some((x) => sameKind(x, id)));
+  !traits.includes(id) && !traits.some((x) => sameKind(x, id) && bornRange(x));
 
 /**
  * Whether a trait option leaves no one beside the selection, by atlas's counts: none in a trait they list completely.
- * A trait listed only in part (its top values) judges nothing.
+ * A trait listed only in part (its top values) judges nothing, and nor does a trait already picked: another of its
+ * values joins the pick as either-or, which can only add people.
  */
-export function traitEmpty(id: string, counts: PeopleCounts): boolean {
+export function traitEmpty(
+  id: string,
+  counts: PeopleCounts,
+  traits: readonly string[] = [],
+): boolean {
   const item = traitItem(id);
   const answer = item ? counts.traits[item.kind] : undefined;
-  return !!item && !!answer?.complete && !(answer.values?.[item.id] ?? 0);
+  if (!item || traits.some((x) => sameKind(x, id))) return false;
+  return !!answer?.complete && !(answer.values?.[item.id] ?? 0);
 }
 
 /** A birth-year range's words: "Born 1976–1996", "Born 1976 or later", "Born 1996 or earlier". */
@@ -212,9 +229,12 @@ export function peopleSuggestions(
   );
 }
 
-/** The title facets as atlas's `sel`, leaving out any it can't read. */
+/** The title facets as atlas's `sel`, leaving out any it can't read; a kind's values one OR group, as on Explore. */
 export const titleItems = (chips: readonly string[], type: ExploreType): FilterItem[] =>
-  chips.flatMap((id) => filterItems([id], type) ?? []);
+  filterItems(
+    chips.filter((id) => filterItems([id], type) !== undefined),
+    type,
+  ) ?? [];
 
 /** People's orders, as the sort names them. */
 export const ORDERS: { value: string; label: string }[] = [

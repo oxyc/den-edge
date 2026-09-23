@@ -263,6 +263,57 @@ test('On People the bar’s field offers people facets and people by name, and a
   }
 });
 
+test('A second value of one kind is either-or, on People and on Explore', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await guardNetwork(page);
+    const asked = await serveAtlas(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/people')}`);
+
+    // People: Actors, then Directors — still offered, though atlas counts no actor who directs.
+    const roles = () =>
+      active(page)
+        .getByRole('navigation', { name: 'Browse by category' })
+        .getByRole('group', { name: 'Role' });
+    await roles().getByRole('button', { name: 'Actors', exact: true }).click();
+    await expect(page).toHaveURL(/\/people\?t=role-cast$/);
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/all/people/counts.json?traits=role:cast');
+    await roles().getByRole('button', { name: 'Directors', exact: true }).click();
+    await expect(page).toHaveURL(/\/people\?t=role-cast,role-director$/);
+    await expect
+      .poll(() => asked)
+      .toContain('/index/filter/all/people.json?traits=role:cast|director');
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected).toContainText('Actors✕or Directors✕');
+
+    // Explore: Drama, then Comedy, asked as one group once atlas's filter has answered.
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?type=tv&c=genre-18')}`);
+    await expect.poll(() => asked).toContain('/index/filter/series/counts.json?sel=genre:18');
+    const genres = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Genres' });
+    await genres.getByRole('button', { name: 'Comedy', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-18,genre-35$/);
+    await expect.poll(() => asked).toContain('/index/filter/series/titles.json?sel=genre:18|35');
+    await expect(active(page).getByRole('group', { name: 'Selected' })).toContainText(
+      'Drama✕or Comedy✕',
+    );
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('A birth-year range takes a decade’s place, stays in the address, and an open end is asked open', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

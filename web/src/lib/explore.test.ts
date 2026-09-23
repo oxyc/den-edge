@@ -19,6 +19,7 @@ import {
   matchChips,
   offered,
   pendingChip,
+  pillOrder,
   remapChip,
   remapSet,
   browseChips,
@@ -316,6 +317,47 @@ describe('facets', () => {
     expect(offered(['like-movie-949'], 'like-movie-680', 'movie')).toBe(false);
     // Taken out, the kind is open again.
     expect(offered(['genre-35'], 'lang-en', 'movie')).toBe(true);
+  });
+
+  it('where atlas’s filter answers, take a second value of a kind beside the first, as either-or', () => {
+    const set = ['lang-sv', 'country-SE', 'decade-1990', 'mood-cozy', 'genre-35', 'rating-7'];
+    for (const other of ['lang-da', 'country-DK', 'decade-2000', 'mood-dark', 'genre-18']) {
+      expect(offered(set, other, 'movie', true), other).toBe(true);
+      expect(applyPick(set, other, 'movie', true)).toEqual({ set: [...set, other], removed: [] });
+    }
+    // One rating floor, one "Like", one recipe.
+    expect(offered(set, 'rating-8', 'movie', true)).toBe(false);
+    expect(offered(['like-movie-949'], 'like-movie-680', 'movie', true)).toBe(false);
+    expect(applyPick(['recipe-heist'], 'recipe-k-drama', 'tv', true).removed).toEqual([
+      'recipe-heist',
+    ]);
+    // Never judged empty beside its kind's pick: it can only widen the grid.
+    const counts: FacetCounts = {
+      country: { complete: true, values: { SE: 4 } },
+      language: { complete: true, values: { sv: 4 } },
+    };
+    const chips = exploreChips('movie', { atlas: true });
+    const empty = emptyOptions(['country-SE'], [], false, chips, {
+      counts,
+      type: 'movie',
+      filtered: true,
+    });
+    expect(empty.has('country-DK')).toBe(false);
+    expect(empty.has('lang-da')).toBe(true);
+  });
+
+  it('show a kind’s values side by side, each after the first as "or"', () => {
+    const kind = (id: string) => id.slice(0, id.indexOf('-'));
+    expect(
+      pillOrder(['country-SE', 'genre-35', 'country-DK', 'like-movie-1'], (id) =>
+        id.startsWith('like-') ? undefined : kind(id),
+      ),
+    ).toEqual([
+      { id: 'country-SE', or: false },
+      { id: 'country-DK', or: true },
+      { id: 'genre-35', or: false },
+      { id: 'like-movie-1', or: false },
+    ]);
   });
 
   it('take a "Like" as one feed: it replaces a mood or another "Like", and takes no country or recipe', () => {

@@ -1,5 +1,6 @@
 <!-- The picks over a browsed grid — Explore's and People's: each a quiet pill that takes it out, then "Clear all". A
-     paused pick (Explore's, while a query is typed) is drawn dashed and said so. -->
+     paused pick (Explore's, while a query is typed) is drawn dashed and said so. A pick that joins the one before it
+     as either-or (`or`, one kind's values: "Swedish or Danish") has an "or" between them. -->
 <script lang="ts">
   import type { Chip } from '../lib/explore';
 
@@ -8,7 +9,7 @@
     onremove,
     onclear,
   }: {
-    picks: { chip: Chip; paused?: boolean }[];
+    picks: { chip: Chip; paused?: boolean; or?: boolean }[];
     onremove: (id: string) => void;
     onclear: () => void;
   } = $props();
@@ -16,7 +17,8 @@
 
 {#if picks.length}
   <div class="picks" role="group" aria-label="Selected">
-    {#each picks as { chip, paused } (chip.id)}
+    {#each picks as { chip, paused, or } (chip.id)}
+      {#if or}<span class="or">or</span>{/if}
       <button
         type="button"
         class="pick"
@@ -70,6 +72,11 @@
 
   .x {
     font-size: 10px;
+  }
+
+  .or {
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .clear {

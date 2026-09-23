@@ -20,10 +20,11 @@
     filterChips,
     offered,
     pendingChip,
+    pillOrder,
     remapSet,
     type Chip,
   } from '../lib/explore';
-  import { countedEmpty } from '../lib/facetCounts';
+  import { countedEmpty, groupKind } from '../lib/facetCounts';
   import {
     fetchFilterCounts,
     fetchPeopleCounts,
@@ -245,16 +246,30 @@
     chipsOf(ids, known)
       .map((c) => c.label)
       .join(', ');
-  const picked = $derived(chipsOf([...traits, ...chips], known).map((chip) => ({ chip })));
+  /** The kind of OR group a pick joins, a trait's apart from a title facet's; none for a range of birth years. */
+  const orKind = (id: string) => {
+    const item = traitItem(id);
+    if (item) return item.kind === 'born' && item.id.includes('-') ? undefined : `t:${item.kind}`;
+    const kind = groupKind(id, type);
+    return kind && `c:${kind}`;
+  };
+  const picked = $derived(
+    pillOrder([...traits, ...chips], orKind).flatMap(({ id, or }) =>
+      chipsOf([id], known).map((chip) => ({ chip, or })),
+    ),
+  );
 
   /**
-   * Hidden: a trait value of a one-value trait already picked, a title facet that can't stand beside the picks, and
-   * whatever atlas's counts say would leave nothing (only where they list a kind completely).
+   * Hidden: a birth decade beside a range of birth years, a title facet that can't stand beside the picks, and
+   * whatever atlas's counts say would leave nothing (only where they list a kind completely, and never another value
+   * of a kind picked, which joins it as either-or).
    */
   const hidden = (id: string) => {
     if (traitItem(id))
-      return !traitOffered(traits, id) || (!!fresh?.people && traitEmpty(id, fresh.people));
+      return !traitOffered(traits, id) || (!!fresh?.people && traitEmpty(id, fresh.people, traits));
     if (!offered(chips, id, type, true)) return true;
+    const kind = groupKind(id, type);
+    if (kind && chips.some((x) => groupKind(x, type) === kind)) return false;
     return !!fresh?.titles && countedEmpty(id, type, fresh.titles.kinds);
   };
 

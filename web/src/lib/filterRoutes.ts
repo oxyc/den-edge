@@ -204,34 +204,51 @@ const byString = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Items in atlas's spelling — each normalised by `kinds`, sorted by kind, then positive before excluded, then id,
- * once each — or undefined where one can't be read, there are too many, or a `born` range stands beside another
- * positive `born` pick.
+ * once each — or undefined where one can't be read, there are too many values, or a `born` range stands beside
+ * another positive `born` pick.
+ *
+ * An item's id may be an OR group of its kind's values (`country:FR|IT`, any of them): each value normalised alone,
+ * the group sorted as strings and each value kept once, joined with a literal `|` (a one-value group has none) and
+ * sorted among the items by that joined id. Every value must read as the same kind (the old `structure` spreads over
+ * two), a "Like" never groups, and each value counts toward the cap.
  */
 function spelled(
   items: FilterItem[],
   kinds = FILTER_KINDS,
   type?: ExploreType,
 ): string[] | undefined {
-  const normal: Required<FilterItem>[] = [];
+  const normal: { kind: string; ids: string[]; exclude: boolean }[] = [];
   for (const item of items) {
-    const pair = normalise(item.kind, item.id, kinds, type);
-    if (!pair) return undefined;
-    normal.push({ kind: pair[0], id: pair[1], exclude: !!item.exclude });
+    let kind: string | undefined;
+    const ids: string[] = [];
+    for (const raw of item.id.split('|')) {
+      const pair = normalise(item.kind, raw, kinds, type);
+      if (!pair || (kind !== undefined && pair[0] !== kind)) return undefined;
+      kind = pair[0];
+      ids.push(pair[1]);
+    }
+    const group = [...new Set(ids)].sort(byString);
+    if (!kind || (group.length > 1 && kinds[kind]?.id === 'like')) return undefined;
+    normal.push({ kind, ids: group, exclude: !!item.exclude });
   }
   const born = new Set(
     normal
       .filter((item) => kinds === TRAIT_KINDS && item.kind === 'born' && !item.exclude)
-      .map((item) => item.id),
+      .flatMap((item) => item.ids),
   );
   if (born.size > 1 && [...born].some((id) => id.includes('-'))) return undefined;
+  const id = (item: (typeof normal)[number]) => item.ids.join('|');
   normal.sort(
     (a, b) =>
-      byString(a.kind, b.kind) || Number(a.exclude) - Number(b.exclude) || byString(a.id, b.id),
+      byString(a.kind, b.kind) || Number(a.exclude) - Number(b.exclude) || byString(id(a), id(b)),
   );
-  const list = normal
-    .map((item) => `${item.exclude ? '-' : ''}${item.kind}:${encodeURIComponent(item.id)}`)
-    .filter((item, at, all) => all.indexOf(item) === at);
-  return list.length > MAX_SELECTION ? undefined : list;
+  const spelt = normal.map((item) => ({
+    text: `${item.exclude ? '-' : ''}${item.kind}:${item.ids.map(encodeURIComponent).join('|')}`,
+    values: item.ids.length,
+  }));
+  const once = spelt.filter((item, at, all) => all.findIndex((x) => x.text === item.text) === at);
+  const values = once.reduce((sum, item) => sum + item.values, 0);
+  return values > MAX_SELECTION ? undefined : once.map((item) => item.text);
 }
 
 /**

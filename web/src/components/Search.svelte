@@ -28,9 +28,10 @@
     slotOf,
     browseChips,
     countedEmptyAcross,
+    pillOrder,
     type Chip,
   } from '../lib/explore';
-  import { countItems, filterItems } from '../lib/facetCounts';
+  import { countItems, filterItems, groupKind } from '../lib/facetCounts';
   import {
     fetchFilterCounts,
     mergeFilterValues,
@@ -325,12 +326,19 @@
   const shownSelection = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
   );
-  /** Every pick, over the grid. While a query is typed, all but the genres wait: shown, but paused. */
+  /**
+   * Every pick, over the grid, a kind's values side by side where atlas's filter takes them as either-or. While a
+   * query is typed, all but the genres wait: shown, but paused.
+   */
   const picked = $derived(
-    chipsOf(selection, known).map((chip) => ({
-      chip,
-      paused: typing && slotOf(chip.id) !== 'genre',
-    })),
+    pillOrder(selection, (id) => (filtered ? groupKind(id, exploreType) : undefined)).flatMap(
+      ({ id, or }) =>
+        chipsOf([id], known).map((chip) => ({
+          chip,
+          or,
+          paused: typing && slotOf(chip.id) !== 'genre',
+        })),
+    ),
   );
 
   /** Every pick taken out at once, the query left as it is. */
@@ -481,7 +489,7 @@
       feedHits.map((hit) => (hit.kind === 'title' ? hit.title : null)).filter((t) => t !== null),
       feed.pager.exhausted,
       listed,
-      { counts, counted, type: exploreType },
+      { counts, counted, type: exploreType, filtered },
     ),
   );
   /**
@@ -489,7 +497,9 @@
    * so a paused language still keeps the Browse row from offering a second — and what would show nothing.
    */
   const hidden = (id: string) =>
-    !offered(shownSelection, id, exploreType, filtered) || taken(selection, id) || empty.has(id);
+    !offered(shownSelection, id, exploreType, filtered) ||
+    taken(selection, id, filtered) ||
+    empty.has(id);
   /**
    * The pick to take out when the selection shows nothing: the latest, since it is what emptied a feed that had
    * titles before it. (atlas's counts say what adding an option leaves, not what removing a pick would bring back,

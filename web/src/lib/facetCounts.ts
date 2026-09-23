@@ -113,27 +113,69 @@ export function facetParts(id: string, type: ExploreType): [kind: string, value:
   );
 }
 
+/** The kinds whose picks never OR together: a "Like" is one title's neighbours, and a rating is a floor. */
+const UNGROUPED = new Set(['like', 'rating']);
+
+/**
+ * The one atlas kind a pick is a value of, where it is one — undefined for a recipe, a pick of several parts (a plot
+ * pair) or of a kind that never groups. Picks sharing a kind are one OR group (`groupItems`).
+ */
+export function groupKind(id: string, type: ExploreType): string | undefined {
+  if (id.startsWith('recipe-')) return undefined;
+  const parts = facetParts(id, type);
+  const kind = parts.length === 1 ? parts[0]![0] : undefined;
+  return kind && !UNGROUPED.has(kind) ? kind : undefined;
+}
+
+/**
+ * The picks' items as atlas's filter takes them: the picks that are each one value of a kind (`kind`) make that
+ * kind's one OR group (`country:FR|IT`, either), in the first one's place; any other pick keeps its own items, which
+ * AND with the rest.
+ */
+export function groupItems(picks: readonly { items: FilterItem[]; kind?: string }[]): FilterItem[] {
+  const items: FilterItem[] = [];
+  const at = new Map<string, number>();
+  for (const { items: parts, kind } of picks) {
+    const known = kind === undefined ? undefined : at.get(kind);
+    if (kind !== undefined && known !== undefined && parts.length === 1)
+      items[known] = { ...items[known]!, id: `${items[known]!.id}|${parts[0]!.id}` };
+    else {
+      if (kind !== undefined && parts.length === 1) at.set(kind, items.length);
+      items.push(...parts);
+    }
+  }
+  return items;
+}
+
 /** A selection's parts as atlas's filter items: what its counts are asked beside (`facetParts`). */
 export const countItems = (selection: readonly string[], type: ExploreType): FilterItem[] =>
-  selection.flatMap((id) => facetParts(id, type).map(([kind, id]) => ({ kind, id })));
+  groupItems(
+    selection.map((id) => ({
+      items: facetParts(id, type).map(([kind, value]) => ({ kind, id: value })),
+      kind: groupKind(id, type),
+    })),
+  );
 
 /**
  * The selection as one atlas filter, or undefined where a pick has no form there: a recipe atlas doesn't know, a
- * "Like" for the other type, an id nothing reads.
+ * "Like" for the other type, an id nothing reads. Picks of one kind are one OR group (`groupItems`).
  */
 export function filterItems(
   selection: readonly string[],
   type: ExploreType,
 ): FilterItem[] | undefined {
-  const items: FilterItem[] = [];
+  const picks: { items: FilterItem[]; kind?: string }[] = [];
   for (const id of selection) {
     const parts = id.startsWith('recipe-')
       ? recipeParts(id.slice('recipe-'.length), type === 'tv' ? 'tv' : 'movie')
       : facetParts(id, type);
     if (!parts?.length) return undefined;
-    items.push(...parts.map(([kind, value]) => ({ kind, id: value })));
+    picks.push({
+      items: parts.map(([kind, value]) => ({ kind, id: value })),
+      kind: groupKind(id, type),
+    });
   }
-  return items;
+  return groupItems(picks);
 }
 
 /**
