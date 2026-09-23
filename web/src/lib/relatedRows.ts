@@ -27,8 +27,8 @@ export interface RelatedOptions {
    */
   similarLimit?: number;
   /**
-   * Films and series together: atlas's closest titles as its `mixed` list, of either type, where it has one. Search's
-   * "Like" under All.
+   * Films and series together: atlas's closest titles as its `mixed` list, of either type, where it has one. A title
+   * page's row, and Search's "Like" under All.
    */
   mixed?: boolean;
 }
