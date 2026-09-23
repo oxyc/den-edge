@@ -159,6 +159,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "getrandom 0.4.3",
+ "http-body",
  "http-body-util",
  "hyper-rustls",
  "hyper-util",

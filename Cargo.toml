@@ -17,6 +17,8 @@ url = "2"
 # The addon relay's client (`relay.rs`); both already come with axum.
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+# The web app's files are streamed from disk (`web.rs`); axum already depends on it.
+http-body = "1"
 # TMDB through this origin (`tmdb.rs`) is the only thing den-edge fetches from outside the LAN, so it is the
 # only thing needing TLS. `ring` rather than aws-lc-rs (no C toolchain), and the roots compiled in rather than
 # read from the OS, which a `scratch` image has none of.
