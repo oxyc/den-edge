@@ -1208,7 +1208,7 @@ async fn relay_mcp(state: &AppState, req: Request, rid: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handler::tests::{body_json, temp_dir, Harness};
+    use crate::handler::tests::{body_json, body_text, temp_dir, Harness};
     use std::sync::Arc;
 
     const ISSUER: &str = "https://den.example";
@@ -1413,20 +1413,66 @@ mod tests {
         assert_eq!(off.call("POST", "/mcp", None).await.0, StatusCode::NOT_FOUND);
     }
 
-    /// An assistant's server reaches the connector on whichever public name it was given — the device API's, which
-    /// bypasses Access, or the web app's — and its person approves in the web app.
+    /// The connector lives on the web app's own name: the assistant's server registers, trades codes and calls `/mcp`
+    /// there, and its person approves on the same origin's `/connect`. The web-app name's split (`handler::Face`) must
+    /// not hide any of it, and the hardening every answer gets must leave each one usable to a client that is not a
+    /// browser page: JSON stays JSON, the redirect keeps its `Location`, a 401 keeps its challenge.
     #[tokio::test]
-    async fn the_connector_answers_on_every_public_name() {
+    async fn the_connector_answers_on_the_web_apps_name() {
+        let web = temp_dir();
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html><title>Den</title>").unwrap();
+        let origin = "https://web.example";
         let h = Harness::in_dir_with(temp_dir(), |s| {
-            s.oauth = Some(OAuth::new(ISSUER.into(), format!("{ISSUER}/mcp"), ISSUER.into(), [9u8; 32]));
+            s.oauth = Some(OAuth::new(origin.into(), format!("{origin}/mcp"), origin.into(), [9u8; 32]));
+            s.web_dir = Some(web);
             s.web_hosts = vec!["web.example".into()];
             s.api_hosts = vec!["api.example".into()];
         });
-        for host in ["web.example", "api.example", "192.168.1.2:8094"] {
-            for path in ["/.well-known/oauth-authorization-server", "/mcp"] {
-                let status = h.send("GET", path, None, &[("host", host)]).await.status();
-                assert_ne!(status, StatusCode::NOT_FOUND, "{host}{path}");
-            }
+        let host = [("host", "web.example")];
+        let meta = h.send("GET", "/.well-known/oauth-authorization-server", None, &host).await;
+        assert_eq!(meta.status(), StatusCode::OK);
+        assert_eq!(meta.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(body_json(meta).await["authorization_endpoint"], format!("{origin}/oauth/authorize"));
+
+        let body = json!({ "client_name": "Claude", "redirect_uris": [REDIRECT] }).to_string();
+        let registered = h
+            .send(
+                "POST",
+                "/oauth/register",
+                Some(body),
+                &[("host", "web.example"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(registered.status(), StatusCode::CREATED);
+        let client = body_json(registered).await["client_id"].as_str().unwrap().to_owned();
+
+        // The resource is this origin's /mcp, URL-encoded in the query.
+        let url = authorize_url(&client, "").replace("den.example", "web.example");
+        let authorize = h.send("GET", &url, None, &host).await;
+        assert_eq!(authorize.status(), StatusCode::FOUND);
+        assert!(
+            location(&authorize).starts_with(&format!("{origin}/connect?request=")),
+            "{}",
+            location(&authorize)
+        );
+        // The consent page is the web app's own shell on the same name.
+        let page = h.send("GET", "/connect?request=x", None, &host).await;
+        assert!(body_text(page).await.contains("<title>Den</title>"));
+
+        let mcp = h.send("POST", "/mcp", Some("{}".into()), &host).await;
+        assert_eq!(mcp.status(), StatusCode::UNAUTHORIZED);
+        assert!(mcp.headers()[header::WWW_AUTHENTICATE]
+            .to_str()
+            .unwrap()
+            .contains(&format!("{origin}/.well-known")));
+        // The device API's name and the LAN answer as well; nothing about the connector depends on the name.
+        for other in ["api.example", "192.168.1.2:8094"] {
+            let status = h
+                .send("GET", "/.well-known/oauth-authorization-server", None, &[("host", other)])
+                .await
+                .status();
+            assert_eq!(status, StatusCode::OK, "{other}");
         }
     }
 
