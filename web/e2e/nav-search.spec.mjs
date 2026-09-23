@@ -800,7 +800,9 @@ for (const titles of [true, false])
       await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movies')}`);
       // Drama: the fixture's TMDB films are all dramas, so TMDB's shelf has them too.
       const drama = active(page).getByRole('region', { name: 'Drama', exact: true });
-      await drama.scrollIntoViewIfNeeded();
+      // Once atlas is found the row is rebuilt under its own id, so the region drawn first can leave the page
+      // mid-scroll; the locator finds the new one on the next try.
+      await expect(() => drama.scrollIntoViewIfNeeded({ timeout: 1000 })).toPass();
       const primary = '/index/filter/movie/titles.json?sel=primary:Drama';
       await expect.poll(() => asked).toContain(primary);
       // The row may have drawn TMDB's page before atlas was found; once it is, the row is atlas's alone.
