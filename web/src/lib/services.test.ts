@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   compactServiceName,
   atlasCatalogs,
@@ -9,14 +9,20 @@ import {
   settleServiceRows,
   radarRows,
   resolvePicks,
+  serviceHero,
   serviceRows,
+  withBackdrops,
   type AtlasCatalog,
+  type AtlasServiceRow,
 } from './services';
 import type { Service } from '../settings/services';
 import type { Pages, RowDef } from './catalog';
 import type { Title } from './library';
 import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
+import { forgetReused } from './reuse';
 
+// The same questions are asked of a different fake in each test; nothing may be answered from the last one.
+beforeEach(forgetReused);
 afterEach(() => forgetLibraryCredential());
 
 /** The nth of a list, or a failure that says what was missing rather than a TypeError further down. */
@@ -412,6 +418,169 @@ describe('atlas rows', () => {
       tmdb.slice(0, 6).map((row) => row.title),
     );
     expect(at(rows, 6).title).toBe('Leaving Netflix');
+  });
+});
+
+describe('a service page asked twice', () => {
+  const counting = (body: unknown) => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (url) => {
+      asked.push(String(url));
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    return { asked, fetchImpl };
+  };
+
+  it('reads atlas’s manifest once for every caller', async () => {
+    const net = counting({ catalogs: [] });
+    await Promise.all([
+      atlasCatalogs('/atlas', net.fetchImpl),
+      atlasCatalogs('/atlas', net.fetchImpl),
+    ]);
+    await atlasCatalogs('/atlas', net.fetchImpl);
+    expect(net.asked).toEqual(['/atlas/manifest.json']);
+  });
+
+  // The tile's hover builds the page's rows, and the page builds them again when it mounts: the second set must
+  // join the first set's requests, or priming would only double what the page asks.
+  it('asks each chart once, however many times its rows are built', async () => {
+    const net = counting({
+      metas: [{ moviedb_id: 1, name: 'One', type: 'movie', posterPath: '/p' }],
+    });
+    const catalogs: AtlasCatalog[] = [
+      { id: 'jw-nfx-new', name: 'New on Netflix', type: 'movie', providerIds: [8] },
+    ];
+    const netflix = service({ id: 8, name: 'Netflix' });
+    const build = () =>
+      atlasServiceRows('/atlas', catalogs, netflix, 'US', { fetchImpl: net.fetchImpl });
+    const [hover, mounted] = [at(build(), 0), at(build(), 0)];
+    const [listed, loaded] = await Promise.all([hover.listed!(), mounted.load(1)]);
+    expect(listed.map((t) => t.id)).toEqual([1]);
+    expect(loaded.map((t) => t.id)).toEqual([1]);
+    expect(net.asked.filter((url) => url.includes('/catalog/'))).toEqual([
+      '/atlas/catalog/movie/jw-nfx-new/country=US.json',
+    ]);
+  });
+
+  it('publishes the rows once the charts list their titles, without waiting on their art', async () => {
+    let paint!: (titles: Title[]) => void;
+    const art = new Promise<Title[]>((resolve) => (paint = resolve));
+    const listed = [title(1, { type: 'movie' }), title(1, { type: 'movie' })];
+    const tmdb: RowDef[] = [
+      {
+        id: 'service-tmdb-8-US-new-movie',
+        title: 'Recently released Movies',
+        load: async () => [],
+      },
+      { id: 'service-feed-8-US-action-movie', title: 'Action Movies', load: async () => [] },
+    ];
+    const rows = await settleServiceRows(
+      [
+        {
+          id: 'service-atlas-8-US-jw-nfx-new-movie',
+          title: 'New on Netflix',
+          type: 'movie',
+          replaces: 'new',
+          listed: async () => listed,
+          load: () => art,
+        },
+        {
+          id: 'service-atlas-8-US-jw-nfx-leaving-movie',
+          title: 'Leaving Netflix',
+          type: 'movie',
+          listed: async () => [title(2, { type: 'movie' })],
+          load: () => art,
+        },
+      ],
+      tmdb,
+    );
+    expect(
+      rows.map((row) => row.id),
+      'settled while every chart’s art is still on its way',
+    ).toEqual([
+      'service-tmdb-8-US-new-movie',
+      'service-atlas-8-US-jw-nfx-leaving-movie',
+      'service-feed-8-US-action-movie',
+    ]);
+    const first = at(rows, 0).load(1);
+    paint([title(1, { type: 'movie', posterPath: '/art.jpg' }), title(1, { type: 'movie' })]);
+    expect(await first, 'the row’s first page is the chart with its art, once each').toEqual([
+      title(1, { type: 'movie', posterPath: '/art.jpg' }),
+    ]);
+  });
+});
+
+describe('serviceHero', () => {
+  const lead: RowDef = {
+    id: 'service-tmdb-8-US-new-movie',
+    title: 'Recently released Movies',
+    load: async () => [title(90, { type: 'movie' })],
+  };
+  const chart = (
+    over: Partial<AtlasServiceRow> & Pick<AtlasServiceRow, 'type'>,
+  ): AtlasServiceRow => ({
+    id: `atlas-${over.type}-${over.replaces ?? 'extra'}`,
+    title: 'A chart',
+    load: async () => {
+      throw new Error('the hero reads the chart’s titles, not its art');
+    },
+    ...over,
+  });
+
+  it('leads with the chart that takes the leading row’s place, asked directly', async () => {
+    const hero = await serviceHero(
+      [
+        chart({ type: 'movie', replaces: 'popular', listed: async () => [title(1)] }),
+        chart({ type: 'tv', replaces: 'new', listed: async () => [title(2)] }),
+        chart({
+          type: 'movie',
+          replaces: 'new',
+          listed: async () => [title(3, { type: 'movie' }), title(3, { type: 'movie' })],
+        }),
+      ],
+      [lead],
+    );
+    expect(hero.map((t) => t.id)).toEqual([3]);
+  });
+
+  it.each([
+    ['empty', async () => []],
+    [
+      'failing',
+      async () => {
+        throw new Error('atlas down');
+      },
+    ],
+  ])('falls back to the leading TMDB row when the chart is %s', async (_, listed) => {
+    const hero = await serviceHero([chart({ type: 'movie', replaces: 'new', listed })], [lead]);
+    expect(hero.map((t) => t.id)).toEqual([90]);
+  });
+});
+
+describe('withBackdrops', () => {
+  it('names the hero’s pictures up front, and leaves out what TMDB says has none', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (url) => {
+      const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
+      asked.push(`${id}`);
+      if (id === 4) return new Response('{}', { status: 500 });
+      return new Response(JSON.stringify({ backdrop_path: id === 2 ? '/two.jpg' : null }));
+    };
+    const titles = [title(1, { backdropPath: '/one.jpg' }), title(2), title(3), title(4), title(5)];
+    const hero = await withBackdrops(titles, 'k', { head: 4, fetchImpl });
+    expect(asked, 'a title that already has one is not asked about').toEqual(['2', '3', '4']);
+    expect(hero.map((t) => [t.id, t.backdropPath])).toEqual([
+      [1, '/one.jpg'],
+      [2, '/two.jpg'],
+      // TMDB could not be asked: kept, and the billboard looks it up again itself.
+      [4, undefined],
+    ]);
+  });
+
+  it('keeps the words when nothing has a picture at all', async () => {
+    const fetchImpl: typeof fetch = async () => new Response('{"backdrop_path":null}');
+    const titles = [title(1), title(2)];
+    expect(await withBackdrops(titles, 'k', { fetchImpl })).toEqual(titles);
   });
 });
 

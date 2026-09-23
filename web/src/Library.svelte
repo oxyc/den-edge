@@ -64,6 +64,7 @@
     atlasCatalogs,
     GUEST_PICKS,
     mergeNewRow,
+    primeServicePage,
     radarRows,
     resolvePicks,
     type AtlasCatalog,
@@ -737,6 +738,20 @@
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
+   * A service tile is about to be opened: fetch its screen's code and start the page's own requests, which the page
+   * joins when it mounts. Only once atlas discovery has answered, since the page asks nothing before that either and
+   * a guess made without it would be a different page.
+   */
+  function primeService(service: Service, country: string) {
+    void ServiceScreen.load();
+    if (!tmdbKey || !atlasReady) return;
+    primeServicePage(service, country, tmdbKey, atlas, {
+      minYear: prefs.minReleaseYear,
+      excludedLanguages: prefs.excludedLanguages,
+      shown: browseShown,
+    });
+  }
+  /**
    * What a title's OWN rows hide — "More like this", its collection, its cast's other work.
    *
    * The discovery rules do not apply here. A year floor and Hide Watched shape what to show you NEXT; on a
@@ -1293,7 +1308,7 @@
       </PosterRow>
     {/if}
     {#if !facet}
-      <ServicesRow {services} />
+      <ServicesRow {services} onintent={primeService} />
     {/if}
     <Browse {rows} shown={browseShown} />
   {/if}

@@ -4,10 +4,9 @@
      Nothing is capped. Each row pages on as it is scrolled, and a row that comes back empty hides itself, so the page
      ends up exactly as deep as the service is rather than promising a catalogue it doesn't have. -->
 <script lang="ts">
-  import { tmdbPages } from '../lib/catalog';
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
-  import { atlasCatalogs, atlasServiceRows, settleServiceRows, serviceRows } from '../lib/services';
+  import { servicePage } from '../lib/services';
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
   import { fetchServices, matches, type Service } from '../settings/services';
@@ -77,6 +76,14 @@
   const both = $derived(!!service?.movies && !!service.series);
   const only = $derived(tab ?? undefined);
   let rows = $state<RowDef[]>([]);
+  /**
+   * The page's own hero, as the TV's channel page opens with one rather than with a list (`ServiceChannelView`):
+   * the head of this page's leading row (`serviceHero`). It is asked for beside the rows, not after them, so it
+   * paints as soon as its own chart answers.
+   */
+  let featured = $state<Title[]>([]);
+  /** Until the hero has answered, its place shows that something is coming rather than a dark, empty frame. */
+  let heroLoading = $state(true);
   $effect(() => {
     const selected = service;
     const here = atlas;
@@ -87,71 +94,34 @@
     let current = true;
     rows = [];
     featured = [];
-    heroFrom = '';
+    heroLoading = true;
     if (!selected || !addonsSettled) return;
-    const tmdb = serviceRows(selected, country, tmdbPages(tmdbKey), {
+    // A tile's hover may already have asked all of this (`primeServicePage`); asking again joins it.
+    const page = servicePage(selected, country, tmdbKey, here, {
       minYear: year,
       only: mediaType,
       excludedLanguages: languages,
+      // Read when the hero answers, not here: a new `shown` must not rebuild the whole page.
+      shown: (title) => shown(title),
     });
-    if (!here) {
-      rows = tmdb;
-      return;
-    }
-    void atlasCatalogs(here)
-      .then((catalogs) =>
-        settleServiceRows(
-          atlasServiceRows(here, catalogs, selected, country, {
-            only: mediaType,
-            tmdbKey,
-          }),
-          tmdb,
-        ),
-      )
+    void page.rows.then((settled) => {
+      if (current) rows = settled;
+    });
+    void page.hero
       .then(
-        (settled) => {
-          if (current) rows = settled;
+        (titles) => {
+          if (current) featured = titles;
         },
         () => {
-          // Manifest failure is a settled answer too: publish the complete TMDB page once, with stable row keys.
-          if (current) rows = tmdb;
+          // No hero, then — the page is its rows, which is what it was before it had one.
         },
-      );
+      )
+      .finally(() => {
+        if (current) heroLoading = false;
+      });
     return () => {
       current = false;
     };
-  });
-
-  /**
-   * The page's own hero, as the TV's channel page opens with one rather than with a list (`ServiceChannelView`):
-   * the head of this page's leading row — what has just arrived on the service where atlas says so, and its most
-   * popular titles where it doesn't.
-   *
-   * It asks for that row itself instead of waiting to share it. The question is identical, so the row below is
-   * answered from this browser's own TMDB cache rather than from the network, and neither waits on the other.
-   */
-  let featured = $state<Title[]>([]);
-  /** As many as are worth cycling; the TV's hero carries forty, and a service's lead row is shorter than that. */
-  const SLIDES = 12;
-  /** Which row the hero was built from, so a re-derived `rows` doesn't fetch it again. */
-  let heroFrom = '';
-  $effect(() => {
-    const lead = rows[0];
-    if (!lead || lead.id === heroFrom) return;
-    heroFrom = lead.id;
-    const forRow = lead.id;
-    void lead.load(1).then(
-      (titles) => {
-        // Stale only if a DIFFERENT row has since taken the lead. This must not be a cleanup that cancels on
-        // re-run: `rows` re-derives the moment atlas's catalogs answer, and the cancel threw away the load in
-        // flight while the re-run saw the same row and returned early — so the hero appeared only when a warm
-        // cache let the load finish first, which is why a refresh showed it and a fresh visit did not.
-        if (forRow === heroFrom) featured = titles.filter(shown).slice(0, SLIDES);
-      },
-      () => {
-        // No hero, then — the page is its rows, which is what it was before it had one.
-      },
-    );
   });
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
@@ -171,6 +141,9 @@
     <!-- Billboard reserves its final responsive height even with no titles. Keeping it mounted makes directory,
          atlas, poster and trailer latency unable to move the service rows below it. -->
     <Billboard titles={featured} {tmdbKey} {reel} {routes} />
+    {#if heroLoading}
+      <div class="hero-loading"><Loading label="Loading featured titles" /></div>
+    {/if}
     <header class="brand">
       {#if service.logoPath}
         <img
@@ -202,6 +175,16 @@
 <style>
   .hero {
     position: relative;
+  }
+
+  /* Over the billboard's reserved frame, which keeps its height either way, so nothing moves when it goes. */
+  .hero-loading {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
   }
 
   .brand {
