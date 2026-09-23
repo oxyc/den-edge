@@ -280,10 +280,56 @@ function indexedStore(): Store | null {
   };
 }
 
+/** The caller's own wait, ended by the caller's own signal; the shared request behind it carries on. */
+function awaitedBy<T>(shared: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return shared;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+    shared.then(
+      (value) => {
+        signal.removeEventListener('abort', stop);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', stop);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * `fetch`, where a TMDB question already on its way is joined rather than asked again.
+ *
+ * A service page asks the same title's details from several places at once — a chart's missing poster, the hero's
+ * backdrop, the same title on two charts — and before this each one went to the network while the store was still
+ * empty. The shared request carries no caller's signal, so one caller giving up does not fail the others; each
+ * caller still stops waiting when its own signal says so.
+ */
+export function sharingFlights(inner: typeof fetch): typeof fetch {
+  const flying = new Map<string, Promise<Response>>();
+  return (input, init) => {
+    const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (!href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET') return inner(input, init);
+    const key = keyOf(new URL(href));
+    let flight = flying.get(key);
+    if (!flight) {
+      flight = inner(href, { ...init, signal: undefined });
+      flying.set(key, flight);
+      const done = () => flying.delete(key);
+      flight.then(done, done);
+    }
+    // Every caller reads its own copy of the body; the original is never read, so each clone can be.
+    return awaitedBy(flight, init?.signal).then((res) => res.clone());
+  };
+}
+
 const store = indexedStore();
 
 /** `fetch`, with TMDB's answers kept in this browser. */
-export const tmdbFetch = cachingFetch(store);
+export const tmdbFetch = sharingFlights(cachingFetch(store));
 
 /** Forget every kept answer: the TMDB key was removed. */
 export async function clearTmdbCache(): Promise<void> {

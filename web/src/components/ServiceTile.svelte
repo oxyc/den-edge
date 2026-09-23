@@ -12,12 +12,15 @@
     service,
     country,
     showCountry = false,
+    onintent,
   }: {
     service: Service;
     /** The country this tile's catalogue is for; part of its address, not a preference read later. */
     country: string;
     /** Said only when the same service is shown for more than one country, where the name alone is ambiguous. */
     showCountry?: boolean;
+    /** A pointer resting on it, a focus, a touch: the page it leads to can start loading before the press lands. */
+    onintent?: () => void;
   } = $props();
 
   const initials = $derived(
@@ -32,6 +35,9 @@
   class="tile"
   href={serviceHref(service.id, country, service.name)}
   aria-label={showCountry ? `${service.name}, ${country}` : service.name}
+  onpointerenter={onintent}
+  onfocus={onintent}
+  ontouchstart={onintent}
 >
   <span class="art">
     {#if service.logoPath}

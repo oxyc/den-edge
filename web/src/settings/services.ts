@@ -2,6 +2,7 @@
 // `ServiceCatalog.merging`): TMDB's `/watch/providers/{movie,tv}` for one country, tier and channel variants folded
 // onto the service people recognise, ordered by that country's own prominence, movies and series merged.
 
+import { reuse } from '../lib/reuse';
 import { tmdbFetch } from '../lib/tmdbCache';
 
 export interface Country {
@@ -226,11 +227,19 @@ export async function fetchServicesResult(
   return { services: mergeServices(...fulfilled), complete: fulfilled.length === settled.length };
 }
 
-/** One country's services for callers that do not render a partial/retry state. */
-export async function fetchServices(
+/**
+ * One country's services for callers that do not render a partial/retry state.
+ *
+ * Shared (`reuse`): Home's service row, a tile's hover and the service page all ask for the same directory, and
+ * each used to ask the network for it separately.
+ */
+export function fetchServices(
   country: string,
   key: string,
   fetchImpl = tmdbFetch,
 ): Promise<Service[]> {
-  return (await fetchServicesResult(country, key, fetchImpl)).services;
+  return reuse(
+    `services:${country}`,
+    async () => (await fetchServicesResult(country, key, fetchImpl)).services,
+  );
 }

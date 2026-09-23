@@ -3,11 +3,20 @@
      is availability data. An empty list draws nothing rather than an empty rail. -->
 <script lang="ts">
   import type { ResolvedService } from '../lib/services';
+  import type { Service } from '../settings/services';
   import JustWatchCredit from './JustWatchCredit.svelte';
   import ServiceTile from './ServiceTile.svelte';
 
-  let { services, heading = 'Services' }: { services: ResolvedService[]; heading?: string } =
-    $props();
+  let {
+    services,
+    heading = 'Services',
+    onintent,
+  }: {
+    services: ResolvedService[];
+    heading?: string;
+    /** A tile is about to be opened (`ServiceTile`): the page behind it can start loading. */
+    onintent?: (service: Service, country: string) => void;
+  } = $props();
 
   /** The same service picked in two countries: only then does a tile need to say which one it is. */
   const countries = $derived.by(() => {
@@ -26,6 +35,7 @@
           {service}
           country={pick.country}
           showCountry={(countries[service.id] ?? 0) > 1}
+          onintent={onintent && (() => onintent(service, pick.country))}
         />
       {/each}
     </div>

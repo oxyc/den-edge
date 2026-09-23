@@ -4,6 +4,7 @@ import {
   freshFor,
   onTmdbThrottle,
   RETENTION,
+  sharingFlights,
   TMDB_PROXY_KEY,
   type Entry,
   type Store,
@@ -308,5 +309,58 @@ describe('cachingFetch', () => {
     const quiet = network();
     await cachingFetch(settled.store, quiet.fetchImpl, () => 7 * HOUR)(series);
     expect(quiet.asked, 'a finished series is what it was six hours ago').toHaveLength(0);
+  });
+});
+
+describe('sharingFlights', () => {
+  /** A network whose answers wait until released, counting what it was asked and with which signal. */
+  function held() {
+    const asked: { url: string; signal: AbortSignal | null | undefined }[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl: typeof fetch = async (input, init) => {
+      asked.push({ url: String(input), signal: init?.signal });
+      await gate;
+      return new Response(JSON.stringify({ n: asked.length }), { status: 200 });
+    };
+    return { asked, fetchImpl, release };
+  }
+
+  it('joins a question already on its way, whatever key or parameter order asked it', async () => {
+    const net = held();
+    const shared = sharingFlights(net.fetchImpl);
+    const first = shared('https://api.themoviedb.org/3/movie/7?api_key=a&language=en');
+    const second = shared('https://api.themoviedb.org/3/movie/7?language=en&api_key=b');
+    net.release();
+    const bodies = await Promise.all([first, second].map(async (res) => (await res).json()));
+    expect(net.asked).toHaveLength(1);
+    expect(bodies, 'each caller reads its own copy of the one answer').toEqual([
+      { n: 1 },
+      { n: 1 },
+    ]);
+    await shared('https://api.themoviedb.org/3/movie/7?api_key=a&language=en');
+    expect(net.asked, 'once answered it is no longer in flight').toHaveLength(2);
+  });
+
+  it('lets one caller give up without failing the others', async () => {
+    const net = held();
+    const shared = sharingFlights(net.fetchImpl);
+    const leaving = new AbortController();
+    const gaveUp = shared(detail, { signal: leaving.signal });
+    const stayed = shared(detail);
+    expect(net.asked[0]?.signal, 'the shared request carries no caller’s signal').toBeUndefined();
+    leaving.abort(new Error('left the page'));
+    await expect(gaveUp).rejects.toThrow('left the page');
+    net.release();
+    expect(await (await stayed).json()).toEqual({ n: 1 });
+  });
+
+  it('leaves everything but a TMDB GET alone', async () => {
+    const net = held();
+    net.release();
+    const shared = sharingFlights(net.fetchImpl);
+    await Promise.all([shared('/atlas/manifest.json'), shared('/atlas/manifest.json')]);
+    await Promise.all([shared(detail, { method: 'POST' }), shared(detail, { method: 'POST' })]);
+    expect(net.asked).toHaveLength(4);
   });
 });
