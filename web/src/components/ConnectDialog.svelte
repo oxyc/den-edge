@@ -1,18 +1,25 @@
 <!-- An assistant asking to connect to Den (`/connect?request=…`, where den-edge's `/oauth/authorize` sends its person):
      who is asking, what it can do, and Allow or Deny. Only a browser that holds a library here, or a live invite to
-     one, can allow it; den-edge checks that again, since this page is only where the question is asked. -->
+     one, can allow it; den-edge checks that again, since this page is only where the question is asked. A browser
+     that holds neither can link to a library right here, with the web app's own link screen, and then answer the
+     same request: web storage is per address, so a library linked at another address of Den is not linked here. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { guestGrants } from '../lib/grants.svelte';
   import { links } from '../lib/links.svelte';
   import { answer, consentRequest, consentRequestId, type ConsentRequest } from '../lib/oauth';
   import { canProve } from '../lib/relayFetch';
+  import { LinkScreen } from '../lib/screens.svelte';
 
   let dialog = $state<HTMLDialogElement>();
   let id = $state<string | null>(null);
   let request = $state<ConsentRequest | null>(null);
   let working = $state(false);
   let problem = $state<string | null>(null);
+  /** Whether the link screen is open in the dialog. */
+  let linking = $state(false);
+  /** den-edge has forgotten the request: nothing here can answer it any more. */
+  let expired = $state(false);
 
   /** A browser that could say yes: linked to a library, or holding a live invite. */
   const eligible = $derived(!!links.current || guestGrants.list.some((grant) => !grant.ended));
@@ -25,15 +32,35 @@
     unreachable: 'Couldn’t reach Den. Try again in a moment.',
   };
 
+  function load(from: string) {
+    void consentRequest(from).then((reply) => {
+      if (reply.ok) request = reply.value;
+      else {
+        expired = reply.error === 'request_expired';
+        problem = failures[reply.error] ?? failures.unreachable!;
+      }
+    });
+  }
+
   onMount(() => {
     id = consentRequestId(location.href);
     if (!id) return;
     dialog?.showModal();
-    void consentRequest(id).then((reply) => {
-      if (reply.ok) request = reply.value;
-      else problem = failures[reply.error] ?? failures.unreachable!;
-    });
+    load(id);
   });
+
+  // Linked: back to the same request, asked again, since linking can outlast its ten minutes.
+  $effect(() => {
+    if (!linking || !eligible || !id) return;
+    linking = false;
+    problem = null;
+    load(id);
+  });
+
+  function startLinking() {
+    linking = true;
+    void LinkScreen.load();
+  }
 
   /** The library's proof arrives once it has opened, which may be a moment after this page did. */
   async function proofReady(): Promise<boolean> {
@@ -99,27 +126,50 @@
   {/if}
   {#if problem}<p role="alert" class="bad">{problem}</p>{/if}
   {#if !eligible}
-    <p>
-      Only someone with a Den library, or an invite to one, can connect an assistant. Open this link
-      in a browser linked to your Den.
+    <p class="why">
+      This browser isn’t linked to a Den library on this address. Link it to allow the connection.
     </p>
-    <div class="actions">
-      <button type="button" class="quiet" onclick={close}>Close</button>
-    </div>
+    {#if linking}
+      <p>
+        Get a code on your Apple TV under <b>Settings › Linked devices</b>, or in Den wherever your
+        library is already open, under <b>Settings › Linked devices › Get a code</b>. Then type it
+        here.
+      </p>
+      {#if LinkScreen.current}
+        <LinkScreen.current embedded />
+      {:else}
+        <p role="status">Loading…</p>
+      {/if}
+      <div class="actions">
+        <button type="button" class="quiet" onclick={() => (linking = false)}>Back</button>
+      </div>
+    {:else}
+      <p>If someone invited you to their Den, open their invite in this browser instead.</p>
+      <div class="actions">
+        <button type="button" class="primary" disabled={!request || expired} onclick={startLinking}
+          >Link this browser</button
+        >
+        <button type="button" class="quiet" onclick={close}>Close</button>
+      </div>
+    {/if}
   {:else}
     <div class="actions">
       <button
         type="button"
         class="primary"
-        disabled={working || !request}
+        disabled={working || !request || expired}
         onclick={() => void reply(true)}>{working ? 'Connecting…' : 'Allow'}</button
       >
-      <button
-        type="button"
-        class="quiet"
-        disabled={working || !request}
-        onclick={() => void reply(false)}>Deny</button
-      >
+      {#if expired}
+        <button type="button" class="quiet" onclick={close}>Close</button>
+      {:else}
+        <button
+          type="button"
+          class="quiet"
+          disabled={working || !request}
+          onclick={() => void reply(false)}>Deny</button
+        >
+      {/if}
     </div>
   {/if}
 </dialog>
@@ -157,6 +207,7 @@
     color: var(--danger);
   }
 
+  .why,
   .known {
     color: var(--fg);
     font-weight: 600;

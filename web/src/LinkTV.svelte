@@ -4,6 +4,9 @@
   import { links } from './lib/links.svelte';
   import { formatCode, join, parseCode, type JoinError } from './lib/pair';
 
+  /** Inside another screen's dialog (the assistant consent page), which says where the code comes from itself. */
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   // The TV's QR carries its code in the URL fragment, which never reaches a server; it is read once and dropped
   // from the address bar, so it isn't left in history.
   const scanned = new URLSearchParams(location.hash.slice(1)).get('pair');
@@ -74,16 +77,18 @@
   if (scanned && parseCode(scanned)) void link();
 </script>
 
-<section>
-  <h1>Link your Apple TV</h1>
+<section class:embedded>
+  {#if !embedded}<h1>Link your Apple TV</h1>{/if}
   {#if links.moved}
     <p class="sub" role="status">
       {links.moved} reset its library key, so this device needs to link again.
     </p>
   {/if}
-  <p class="sub">
-    On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
-  </p>
+  {#if !embedded}
+    <p class="sub">
+      On the TV, open <b>Settings › Linked devices</b> and scan its code, or type it here.
+    </p>
+  {/if}
   <form
     onsubmit={(event) => {
       event.preventDefault();
@@ -125,7 +130,9 @@
   {/if}
   <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
        remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
-  <button type="button" class="quiet" onclick={() => links.browse()}>Look around instead</button>
+  {#if !embedded}
+    <button type="button" class="quiet" onclick={() => links.browse()}>Look around instead</button>
+  {/if}
 </section>
 
 <style>
@@ -133,6 +140,10 @@
     max-width: 420px;
     margin: 8vh auto 0;
     text-align: center;
+  }
+
+  section.embedded {
+    margin: 0;
   }
 
   h1 {
