@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 494c74b): both ends hold to the same pairs.
+// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 38e3fd3): both ends hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
   canonicalFilterPath,
@@ -30,6 +30,14 @@ describe('canonical filter addresses', () => {
         skip: 48,
       }),
     ).toBe('/atlas/index/filter/series/titles.json?sel=country:KR,genre:18,language:ko&skip=48');
+    expect(
+      filterUrl('/atlas', 'movie', 'titles', {
+        items: [
+          { kind: 'region', id: 'Nordic' },
+          { kind: 'genre', id: '28' },
+        ],
+      }),
+    ).toBe('/atlas/index/filter/movie/titles.json?sel=genre:28,region:nordic');
   });
 });
 

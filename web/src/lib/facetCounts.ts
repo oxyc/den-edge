@@ -139,6 +139,8 @@ export function facetParts(id: string, type: MediaType): [kind: string, value: s
   if (language) return [['language', language]];
   const country = /^country-([A-Z]{2})$/.exec(id)?.[1];
   if (country) return [['country', country]];
+  const region = /^region-([a-z]+(?:-[a-z]+)*)$/.exec(id)?.[1];
+  if (region) return [['region', region]];
   const decade = /^decade-(\d{4})$/.exec(id)?.[1];
   if (decade) return [['decade', String(Math.floor(Number(decade) / 10) * 10)]];
   const rating = /^rating-(\d+)$/.exec(id)?.[1];

@@ -529,6 +529,13 @@ async function serveFilter(page, { titles = true, countsGate } = {}) {
               ...(person ? { selected: [person] } : {}),
             },
             runtime: { mode: 'single', complete: true, values: { 'under-90': 4 } },
+            region: {
+              mode: 'single',
+              complete: true,
+              values: { nordic: 6, 'east-asian': 2 },
+              labels: { nordic: 'Nordic', 'east-asian': 'East Asian' },
+              ...(/region:nordic/.test(sel) ? { selected: ['nordic'] } : {}),
+            },
           },
           ignored: [],
         },
@@ -603,6 +610,42 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
       .toContain('/index/filter/movie/titles.json?sel=country:SE,person:Q2');
     // Nothing of this went to TMDB discover.
     expect(discovered).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a region is picked from the rail’s Regions, one at a time, and asks atlas for region:<slug>', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    const asked = await serveFilter(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search')}`);
+    const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
+    const regions = rail.getByRole('group', { name: 'Regions' });
+    await expect(regions).toBeVisible();
+    // Directly under Countries, and without the regions atlas counts no titles for.
+    const headings = await rail.getByRole('heading').allTextContents();
+    expect(headings.indexOf('Regions')).toBe(headings.indexOf('Countries') + 1);
+    await expect(regions.getByRole('button', { name: 'Slavic', exact: true })).toHaveCount(0);
+    await expect(regions.getByRole('button', { name: 'East Asian', exact: true })).toBeVisible();
+
+    await regions.getByRole('button', { name: 'Nordic', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?c=region-nordic$/);
+    await expect(
+      active(page).getByRole('group', { name: 'Selected' }).getByRole('button', {
+        name: 'Remove Nordic',
+      }),
+    ).toBeVisible();
+    await expect.poll(() => asked).toContain('/index/filter/movie/titles.json?sel=region:nordic');
+    // One region at a time: the others leave the rail until it is taken out.
+    await expect(rail.getByRole('group', { name: 'Regions' })).toHaveCount(0);
   } finally {
     await browser.close();
   }
