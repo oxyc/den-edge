@@ -2265,9 +2265,15 @@ mod tests {
             let logged = resp.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
             (status, body_json(resp).await["error"].clone(), logged)
         };
+        // Seen over IPv6, its page is first asked for its IPv4 address; one that has none to give is refused.
+        let wanted =
+            (StatusCode::PRECONDITION_REQUIRED, json!("ipv4_hint_wanted"), Some("ipv4_hint_wanted".into()));
+        assert_eq!(refused(start("2001:db8::7", body.clone()).await).await, wanted);
         let ipv6 =
             (StatusCode::SERVICE_UNAVAILABLE, json!("public_media_ipv6"), Some("public_media_ipv6".into()));
-        assert_eq!(refused(start("2001:db8::7", body.clone()).await).await, ipv6);
+        let mut no_hint = body.clone();
+        no_hint["noHint"] = json!(true);
+        assert_eq!(refused(start("2001:db8::7", no_hint).await).await, ipv6);
         let mut cast = body.clone();
         cast["player"] = json!("cast");
         let cast_refused =
@@ -2292,6 +2298,7 @@ mod tests {
             r#"den_edge_guest_play_refused_total{code="public_media_cast"} 2"#,
             r#"den_edge_guest_play_refused_total{code="too_many_sources"} 1"#,
             r#"den_edge_guest_play_refused_total{code="public_media_unavailable"} 0"#,
+            r#"den_edge_public_media_hint_wanted_total{who="guest"} 1"#,
             r#"den_edge_public_media_wide_total{reason="cast",who="guest"} 0"#,
             r#"den_edge_public_media_wide_total{reason="ipv6",who="guest"} 0"#,
         ] {

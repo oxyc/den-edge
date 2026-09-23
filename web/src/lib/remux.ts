@@ -4,6 +4,7 @@
 // (tailscale serve), and a cookie from a one-time browser key lets this browser start sessions.
 
 import { sharedInstallOf } from './grants';
+import { ipv4Hint } from './ipv4';
 import type { Playable } from './playable';
 import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
@@ -88,9 +89,12 @@ export interface Want {
   maxBitrate?: number;
   /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
   player?: 'native' | 'hls.js' | 'cast';
-  /** This browser's IPv4 address (`ipv4.ts`), for den-edge alone: used only when it sees the page over IPv6. */
+  /**
+   * This browser's IPv4 address (`ipv4.ts`), for den-edge alone: added by `startSession` only when den-edge sees the
+   * page over IPv6 and asks for it (`ipv4_hint_wanted`).
+   */
   ipv4Hint?: string;
-  /** Asked again after a hinted session never played: den-edge uses no hint for it. */
+  /** Asked again after a hinted session never played, or when no address was found: den-edge uses no hint for it. */
   noHint?: boolean;
 }
 
@@ -542,11 +546,15 @@ export function wantedLanguages(
   };
 }
 
-/** A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. */
+/**
+ * A session at den-remux on `base` (`findRemux`); its playlist comes back as a URL this page can play. `lookup` finds
+ * this browser's IPv4 address when den-edge asks for it.
+ */
 export async function startSession(
   want: Want,
   fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
+  lookup: () => Promise<string | undefined> = () => ipv4Hint(),
 ): Promise<Session | Refused> {
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
@@ -591,9 +599,16 @@ export async function startSession(
       subtitleVerdicts.set(candidate, false); // not den-subtitles: the next, or none
       continue;
     }
+    // den-edge sees this page over IPv6 and asks for its IPv4 address. Looked up only now, so a page it sees over
+    // IPv4 never makes that third-party request; asked again once, as a page with no address when none was found.
+    if (error === 'ipv4_hint_wanted' && !want.ipv4Hint && !want.noHint) {
+      const address = await lookup();
+      const again: Want = address ? { ...want, ipv4Hint: address } : { ...want, noHint: true };
+      return startSession(again, fetchImpl, base, lookup);
+    }
     // Past den-edge's cap on distinct reported addresses: asked once more as a page that reported none.
     if (error === 'hint_limit' && want.ipv4Hint) {
-      return startSession({ ...want, ipv4Hint: undefined, noHint: true }, fetchImpl, base);
+      return startSession({ ...want, ipv4Hint: undefined, noHint: true }, fetchImpl, base, lookup);
     }
     // A zero fallback here means "it named nothing", which is the caller's own interval rather than
     // a wait of no time at all.

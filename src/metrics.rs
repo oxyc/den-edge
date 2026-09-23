@@ -22,6 +22,8 @@ pub struct Metrics {
     public_media_hinted: Mutex<BTreeMap<&'static str, u64>>,
     /// `ipv4Hint`s not used, by reason (one of `HINT_REJECTIONS`).
     public_media_hint_rejected: Mutex<BTreeMap<&'static str, u64>>,
+    /// Session starts from an IPv6 visitor sent back for an `ipv4Hint` (`ipv4_hint_wanted`), by who asked.
+    public_media_hint_wanted: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 /// The codes a guest's session start can be refused with, each always rendered, so a limit never met reads 0.
@@ -66,6 +68,10 @@ impl Metrics {
     pub fn record_public_media_hint_rejected(&self, reason: &'static str) {
         debug_assert!(HINT_REJECTIONS.contains(&reason), "{reason} is not a rendered label");
         *lock(&self.public_media_hint_rejected).entry(reason).or_default() += 1;
+    }
+
+    pub fn record_public_media_hint_wanted(&self, who: &'static str) {
+        *lock(&self.public_media_hint_wanted).entry(who).or_default() += 1;
     }
 
     pub fn render(&self) -> String {
@@ -126,6 +132,16 @@ impl Metrics {
         for reason in HINT_REJECTIONS {
             let n = rejected.get(reason).copied().unwrap_or(0);
             out.push_str(&format!("den_edge_public_media_hint_rejected_total{{reason=\"{reason}\"}} {n}\n"));
+        }
+        out.push_str(
+            "# HELP den_edge_public_media_hint_wanted_total IPv6 visitors' session starts sent back for an IPv4 \
+             hint, by who asked.\n\
+             # TYPE den_edge_public_media_hint_wanted_total counter\n",
+        );
+        let wanted = lock(&self.public_media_hint_wanted);
+        for who in ["member", "guest"] {
+            let n = wanted.get(who).copied().unwrap_or(0);
+            out.push_str(&format!("den_edge_public_media_hint_wanted_total{{who=\"{who}\"}} {n}\n"));
         }
         out
     }
