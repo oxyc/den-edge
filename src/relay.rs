@@ -643,13 +643,13 @@ async fn relay_with(
         _ => body,
     };
     // The page's report of its own IPv4 address is for this server alone: remux never sees it.
-    let (body, hint) = if control == "/remux/session" && method == Method::POST {
+    let (body, hint, no_hint) = if control == "/remux/session" && method == Method::POST {
         match take_hint(body) {
             Some(taken) => taken,
             None => return json(StatusCode::BAD_REQUEST, "bad_request"),
         }
     } else {
-        (body, None)
+        (body, None, false)
     };
     let cast = public_session
         && serde_json::from_slice::<serde_json::Value>(&body)
@@ -660,6 +660,14 @@ async fn relay_with(
     // Its page may say which (`ipv4Hint`), and then the listener opens for that one address rather than wide. The
     // observed address always wins: a visitor seen over IPv4 is opened for that, whatever its page says. A Cast
     // receiver fetches from its own address, which the page cannot know.
+    //
+    // The page looks its address up only when asked to, so a visitor seen over IPv4 — most of them — never makes
+    // that third-party request: an IPv6 visitor that said neither `ipv4Hint` nor `noHint` is sent back for one
+    // before anything reaches remux or the listener.
+    if public_session && !cast && hint.is_none() && !no_hint && address.is_some_and(|a| a.is_ipv6()) {
+        state.metrics.record_public_media_hint_wanted(if guest_remux { "guest" } else { "member" });
+        return json(StatusCode::PRECONDITION_REQUIRED, "ipv4_hint_wanted");
+    }
     let hinted = match (public_session && !cast, address, hint) {
         (true, Some(source), Some(hint)) if source.is_ipv6() => match hint_address(&hint) {
             Ok(v4) => Some(std::net::IpAddr::V4(v4)),
@@ -862,20 +870,22 @@ fn listener_scope(cast: bool, source: std::net::IpAddr) -> &'static str {
     }
 }
 
-/// A session start's body without its `ipv4Hint` and `noHint`, and the hint unless the page said `noHint` — which
-/// it does when a hinted session already failed to play. A body that is not a JSON object is left as it is, for
-/// remux to refuse. `None` only if the body cannot be written back.
-fn take_hint(body: Bytes) -> Option<(Bytes, Option<serde_json::Value>)> {
+/// A session start's body without its `ipv4Hint` and `noHint`, the hint unless the page said `noHint`, and whether
+/// it said `noHint` — which it does when a hinted session already failed to play, or its own lookup found nothing.
+/// A body that is not a JSON object is left as it is, for remux to refuse. `None` only if the body cannot be
+/// written back.
+fn take_hint(body: Bytes) -> Option<(Bytes, Option<serde_json::Value>, bool)> {
     let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_slice(&body) else {
-        return Some((body, None));
+        return Some((body, None, false));
     };
     let hint = fields.remove("ipv4Hint");
     let no_hint = fields.remove("noHint");
     if hint.is_none() && no_hint.is_none() {
-        return Some((body, None));
+        return Some((body, None, false));
     }
-    let hint = hint.filter(|_| no_hint.as_ref().and_then(serde_json::Value::as_bool) != Some(true));
-    serde_json::to_vec(&fields).ok().map(|body| (Bytes::from(body), hint))
+    let no_hint = no_hint.as_ref().and_then(serde_json::Value::as_bool) == Some(true);
+    let hint = hint.filter(|_| !no_hint);
+    serde_json::to_vec(&fields).ok().map(|body| (Bytes::from(body), hint, no_hint))
 }
 
 /// The address an `ipv4Hint` names: one bare IPv4 address (no prefix, no port) that someone on the internet could
@@ -1379,8 +1389,25 @@ mod tests {
         );
         assert_eq!(relayed.lock().unwrap().last().unwrap(), &json!({}), "remux never sees the hint");
 
+        // Seen over IPv6 and saying nothing either way: sent back for a hint, with nothing relayed or opened.
+        let before = relayed.lock().unwrap().len();
+        for body in [json!({}), json!({ "noHint": false })] {
+            let resp = start("2001:db8::7", body.clone()).await;
+            assert_eq!(resp.status(), StatusCode::PRECONDITION_REQUIRED, "{body}");
+            let logged = resp.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
+            assert_eq!(logged.as_deref(), Some("ipv4_hint_wanted"), "{body}");
+            assert_eq!(scope(&resp), None, "{body}");
+            assert_eq!(crate::handler::tests::body_json(resp).await["error"], "ipv4_hint_wanted", "{body}");
+        }
+        assert_eq!(relayed.lock().unwrap().len(), before, "nothing reaches remux");
+        assert!(opened.try_recv().is_err(), "no listener is opened");
+        // Seen over IPv4 it is never asked for one.
+        let resp = start("203.0.113.8", json!({})).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("browser")));
+        assert_eq!(opened.recv().await.unwrap()["source"], "203.0.113.8");
+
         for body in [
-            json!({}),
+            json!({ "noHint": true }),
             json!({ "ipv4Hint": "100.64.1.1" }),
             json!({ "ipv4Hint": "127.0.0.1" }),
             json!({ "ipv4Hint": "8.8.8.8", "noHint": true }),
@@ -1422,6 +1449,8 @@ mod tests {
             r#"den_edge_public_media_wide_total{reason="ipv6",who="member"} 4"#,
             r#"den_edge_public_media_hint_rejected_total{reason="not_global"} 2"#,
             r#"den_edge_public_media_hint_rejected_total{reason="limit"} 1"#,
+            r#"den_edge_public_media_hint_wanted_total{who="member"} 2"#,
+            r#"den_edge_public_media_hint_wanted_total{who="guest"} 0"#,
         ] {
             assert!(metrics.contains(counted), "{counted} in {metrics}");
         }
@@ -1473,15 +1502,19 @@ mod tests {
     #[test]
     fn a_hint_is_taken_out_of_the_session_body() {
         let take = |body: &str| {
-            let (body, hint) = super::take_hint(axum::body::Bytes::from(body.to_owned())).unwrap();
-            (String::from_utf8(body.to_vec()).unwrap(), hint)
+            let (body, hint, no_hint) = super::take_hint(axum::body::Bytes::from(body.to_owned())).unwrap();
+            (String::from_utf8(body.to_vec()).unwrap(), hint, no_hint)
         };
-        assert_eq!(take(r#"{"a":1,"ipv4Hint":"8.8.8.8"}"#), (r#"{"a":1}"#.into(), Some(json!("8.8.8.8"))));
-        assert_eq!(take(r#"{"a":1,"ipv4Hint":"8.8.8.8","noHint":true}"#), (r#"{"a":1}"#.into(), None));
-        assert_eq!(take(r#"{"a":1,"noHint":false}"#), (r#"{"a":1}"#.into(), None));
+        assert_eq!(
+            take(r#"{"a":1,"ipv4Hint":"8.8.8.8"}"#),
+            (r#"{"a":1}"#.into(), Some(json!("8.8.8.8")), false)
+        );
+        assert_eq!(take(r#"{"a":1,"ipv4Hint":"8.8.8.8","noHint":true}"#), (r#"{"a":1}"#.into(), None, true));
+        assert_eq!(take(r#"{"a":1,"noHint":true}"#), (r#"{"a":1}"#.into(), None, true));
+        assert_eq!(take(r#"{"a":1,"noHint":false}"#), (r#"{"a":1}"#.into(), None, false));
         // Untouched when there is nothing to take, byte for byte, and when it is not an object.
-        assert_eq!(take(r#"{ "a": 1 }"#), (r#"{ "a": 1 }"#.into(), None));
-        assert_eq!(take("not json"), ("not json".into(), None));
+        assert_eq!(take(r#"{ "a": 1 }"#), (r#"{ "a": 1 }"#.into(), None, false));
+        assert_eq!(take("not json"), ("not json".into(), None, false));
     }
 
     #[test]

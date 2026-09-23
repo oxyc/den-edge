@@ -245,6 +245,88 @@ describe('startSession', () => {
     ]);
     expect(result).toMatchObject({ playlist: session.playlist });
   });
+
+  /** Most visitors reach den-edge over IPv4, where the hint is never used: they make no third-party request. */
+  it('looks up no address when the first answer is a session', async () => {
+    const lookup = vi.fn(async () => '198.51.100.7');
+    const sent: Record<string, unknown>[] = [];
+    const result = await startSession(
+      { ...want, subtitleLanguages: [] },
+      async (_input, init) => {
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return answer(201, session);
+      },
+      '/remux',
+      lookup,
+    );
+    expect(result).toMatchObject({ playlist: session.playlist });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty('ipv4Hint');
+    expect(sent[0]).not.toHaveProperty('noHint');
+  });
+
+  it('looks up the address when den-edge asks for it, and asks once more with it', async () => {
+    const lookup = vi.fn(async () => '198.51.100.7');
+    const sent: Record<string, unknown>[] = [];
+    const result = await startSession(
+      { ...want, subtitleLanguages: [] },
+      async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        sent.push(body);
+        return body.ipv4Hint
+          ? answer(201, { ...session, hinted: true })
+          : answer(428, { error: 'ipv4_hint_wanted' });
+      },
+      '/remux',
+      lookup,
+    );
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(sent.map(({ ipv4Hint, noHint }) => ({ ipv4Hint, noHint }))).toEqual([
+      { ipv4Hint: undefined, noHint: undefined },
+      { ipv4Hint: '198.51.100.7', noHint: undefined },
+    ]);
+    expect(result).toMatchObject({ playlist: session.playlist, hinted: true });
+  });
+
+  it('asks once more as a page with no address when the lookup finds none', async () => {
+    const sent: Record<string, unknown>[] = [];
+    const result = await startSession(
+      { ...want, subtitleLanguages: [] },
+      async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        sent.push(body);
+        // A guest over IPv6 with no address to give: refused as such, and not asked for one again.
+        return body.noHint
+          ? answer(503, { error: 'public_media_ipv6' })
+          : answer(428, { error: 'ipv4_hint_wanted' });
+      },
+      '/remux',
+      async () => undefined,
+    );
+    expect(sent.map(({ ipv4Hint, noHint }) => ({ ipv4Hint, noHint }))).toEqual([
+      { ipv4Hint: undefined, noHint: undefined },
+      { ipv4Hint: undefined, noHint: true },
+    ]);
+    expect(result).toEqual({ failure: 'ipv6' });
+  });
+
+  it('asks for the address at most once per start', async () => {
+    const lookup = vi.fn(async () => '198.51.100.7');
+    let asked = 0;
+    const result = await startSession(
+      { ...want, subtitleLanguages: [] },
+      async () => {
+        asked += 1;
+        return answer(428, { error: 'ipv4_hint_wanted' });
+      },
+      '/remux',
+      lookup,
+    );
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(asked).toBe(2);
+    expect(result).toEqual({ failure: 'unreachable' });
+  });
 });
 
 describe('localNetworkRefused', () => {

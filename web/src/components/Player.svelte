@@ -10,7 +10,7 @@
   import { canOfferCast, CAST_DISCOVERY_MS } from '../lib/castOffer';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
-  import { ipv4Hint, retryWithoutHint } from '../lib/ipv4';
+  import { retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -242,9 +242,6 @@
     clearTimeout(retry);
     failure = null;
     swapped = null;
-    // Only the relay's sessions are public, and a Cast receiver fetches from its own address, not this browser's.
-    // Started now so it runs beside the lookups below rather than after them.
-    const hint = noHint || castMode || /^https?:/.test(route) ? undefined : ipv4Hint();
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
       if (!found) {
@@ -295,7 +292,8 @@
       maxBitrate,
       // For den-remux's log only, so a session can be told apart by the player that played it.
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
-      ...(noHint ? { noHint } : { ipv4Hint: await hint }),
+      // No address is looked up here: `startSession` does that only when den-edge asks for it.
+      ...(noHint ? { noHint } : {}),
       ...pick,
     };
     const result = await startSession(request, undefined, route);

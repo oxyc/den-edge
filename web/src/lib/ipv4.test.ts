@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   forgetIpv4Hint,
+  HINT_TTL_MS,
   ipifyAddress,
   ipv4Hint,
   lookupIpv4,
@@ -91,10 +92,21 @@ describe('lookupIpv4', () => {
 });
 
 describe('ipv4Hint', () => {
-  it('looks the address up once per page load', async () => {
+  it('reuses a looked-up address for two minutes, then looks it up again', async () => {
     const fetchImpl = vi.fn(async () => new Response(TRACE));
-    expect(await ipv4Hint(fetchImpl)).toBe('198.51.100.7');
-    expect(await ipv4Hint(fetchImpl)).toBe('198.51.100.7');
+    expect(await ipv4Hint(fetchImpl, 0)).toBe('198.51.100.7');
+    expect(await ipv4Hint(fetchImpl, HINT_TTL_MS - 1)).toBe('198.51.100.7');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(HINT_TTL_MS).toBe(2 * 60_000);
+    expect(await ipv4Hint(fetchImpl, HINT_TTL_MS)).toBe('198.51.100.7');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps no failed lookup, so the next play asks again', async () => {
+    const offline = vi.fn(() => Promise.reject(new TypeError('offline')));
+    expect(await ipv4Hint(offline, 0)).toBeUndefined();
+    const fetchImpl = vi.fn(async () => new Response(TRACE));
+    expect(await ipv4Hint(fetchImpl, 1)).toBe('198.51.100.7');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

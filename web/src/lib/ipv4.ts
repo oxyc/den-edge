@@ -64,11 +64,26 @@ export function lookupIpv4(
   return Promise.race([lookup, deadline]).finally(() => clearTimeout(timer));
 }
 
-let asked: Promise<string | undefined> | undefined;
+/**
+ * How long a looked-up address is reused: several plays in one visit ask once, and a network change (Wi-Fi to
+ * cellular) is looked up again soon after. Kept in this page's memory only, never in storage.
+ */
+export const HINT_TTL_MS = 2 * 60_000;
 
-/** `lookupIpv4`, asked once per page load. */
-export function ipv4Hint(fetchImpl?: typeof fetch): Promise<string | undefined> {
-  return (asked ??= lookupIpv4(fetchImpl));
+let asked: { at: number; address: Promise<string | undefined> } | undefined;
+
+/**
+ * `lookupIpv4`, reused for HINT_TTL_MS. Called only when den-edge asks for the address (`ipv4_hint_wanted`), which
+ * it does only of a page it sees over IPv6. A lookup that found nothing is not kept, so the next play asks again.
+ */
+export function ipv4Hint(fetchImpl?: typeof fetch, now = Date.now()): Promise<string | undefined> {
+  if (asked && now - asked.at < HINT_TTL_MS) return asked.address;
+  const entry = { at: now, address: lookupIpv4(fetchImpl) };
+  asked = entry;
+  void entry.address.then((address) => {
+    if (address === undefined && asked === entry) asked = undefined;
+  });
+  return entry.address;
 }
 
 /** Forget the looked-up address (tests). */
