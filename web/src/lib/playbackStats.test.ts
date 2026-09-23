@@ -14,6 +14,7 @@ import {
 } from './playbackStats';
 
 const noLive = { bandwidthEstimateKbps: null, droppedFrames: null, totalFrames: null };
+const noRequests = { loading: null, idleMs: null };
 const ranges = (...spans: [number, number][]) =>
   ({
     length: spans.length,
@@ -56,24 +57,58 @@ describe('PlaybackRecorder', () => {
       slowestMs: 2_500,
       kbpsP10: 4_000,
       kbpsMedian: 4_000,
+      idleLowMs: 0,
     });
+  });
+
+  it('sums the playing time spent idling on a low buffer', () => {
+    const recorder = new PlaybackRecorder('hls.js', 'x');
+    recorder.idleLow(250.4);
+    recorder.idleLow(-5);
+    recorder.idleLow(1_000);
+    expect(recorder.snapshot('end', 0, noLive).fragments.idleLowMs).toBe(1_250);
   });
 
   it('keeps the first stalls and counts the rest, one per stall however many signals say so', () => {
     const recorder = new PlaybackRecorder('hls.js', 'x');
     for (let i = 0; i < MAX_STALLS + 5; i++) {
       expect(
-        recorder.stalled(i * 1_000, { at: i, kind: 'wait', videoAhead: 0, audioAhead: 9 }),
+        recorder.stalled(i * 1_000, {
+          at: i,
+          kind: 'wait',
+          videoAhead: 0,
+          audioAhead: 9,
+          ...noRequests,
+        }),
       ).toBe(true);
       expect(
-        recorder.stalled(i * 1_000 + 1, { at: i, kind: 'wait', videoAhead: 0, audioAhead: 9 }),
+        recorder.stalled(i * 1_000 + 1, {
+          at: i,
+          kind: 'wait',
+          videoAhead: 0,
+          audioAhead: 9,
+          ...noRequests,
+        }),
       ).toBe(false);
       recorder.resumed(i * 1_000 + 400);
     }
-    recorder.stalled(99_000, { at: 99, kind: 'frozen', videoAhead: 0, audioAhead: 4 });
+    recorder.stalled(99_000, {
+      at: 99,
+      kind: 'frozen',
+      videoAhead: 0,
+      audioAhead: 4,
+      ...noRequests,
+    });
     const stats = recorder.snapshot('stall', 99_250, noLive);
     expect(stats.stalls).toHaveLength(MAX_STALLS);
-    expect(stats.stalls[0]).toEqual({ at: 0, ms: 400, kind: 'wait', videoAhead: 0, audioAhead: 9 });
+    expect(stats.stalls[0]).toEqual({
+      at: 0,
+      ms: 400,
+      kind: 'wait',
+      videoAhead: 0,
+      audioAhead: 9,
+      ...noRequests,
+    });
     expect(stats.stallCount).toBe(MAX_STALLS + 6);
     expect(stats.stalledMs, 'the open stall so far included').toBe((MAX_STALLS + 5) * 400 + 250);
   });
@@ -95,7 +130,7 @@ describe('reportBody', () => {
   const full = () => {
     const recorder = new PlaybackRecorder('hls.js', 'Chrome 141 / Windows');
     for (let i = 0; i < MAX_STALLS; i++) {
-      recorder.stalled(i, { at: i, kind: 'wait', videoAhead: 0, audioAhead: 1 });
+      recorder.stalled(i, { at: i, kind: 'wait', videoAhead: 0, audioAhead: 1, ...noRequests });
       recorder.resumed(i + 1);
     }
     for (let i = 0; i < MAX_ERRORS; i++) recorder.error(`error ${'x'.repeat(60)} ${i}`, false);

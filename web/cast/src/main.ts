@@ -1,6 +1,12 @@
 import Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
-import { reportUrlOf, watchPlayback, type Watcher } from '../../src/lib/playbackStats';
+import {
+  reportBody,
+  reportUrlOf,
+  sendReport,
+  watchPlayback,
+  type Watcher,
+} from '../../src/lib/playbackStats';
 import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
@@ -141,6 +147,11 @@ let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
 /** What this page's video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
 let watcher: Watcher | undefined;
+/**
+ * The playlist of the session this page plays, or hands to a receiver: where its failures are reported and its end is
+ * sent. The player outside can't do either for a session on the public address — its page may not connect there.
+ */
+let playing: string | undefined;
 /** How long a measured load waits for the player to say play on, before it plays on regardless. */
 const CONTINUE_WAIT_MS = 5_000;
 /** The measured load waiting for the player's `den-continue`. */
@@ -180,6 +191,26 @@ function tell(type: string, fields: Record<string, unknown> = {}): void {
   window.parent.postMessage({ type, id: current.id, ...fields }, parentOrigin);
 }
 
+/** Tell den-remux why the session couldn't play — its log sees nothing of it otherwise — and then the player. */
+function fail(message: string, code = 0): void {
+  if (playing) {
+    watcher?.spent();
+    sendReport(reportUrlOf(playing), reportBody(code, message));
+  }
+  tell('den-error', { message });
+}
+
+/** End the session this page played, so it stops holding den-remux and the media listener open. */
+function endPlaying(): void {
+  if (!playing) return;
+  const url = playing.replace(/\/master\.m3u8$/, '');
+  playing = undefined;
+  void fetch(url, { method: 'DELETE', keepalive: true }).catch((error: unknown) =>
+    // It ends on its own once idle; this only says why it lingered.
+    console.warn('ending the session failed:', error),
+  );
+}
+
 /**
  * Tell the player whether a Chromecast is discoverable. Also before anything is loaded here: the player asks
  * (`den-discover`) while its own video plays on, and moves playback here only once one is.
@@ -198,6 +229,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   hls?.destroy();
   hls = undefined;
   video.removeAttribute('src');
+  playing = url;
   const start = Math.max(0, media.currentTime ?? 0);
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url;
@@ -224,7 +256,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
         hls?.recoverMediaError();
         return;
       }
-      tell('den-error', { message: `hls.js ${data.type} ${data.details}` });
+      fail(`hls.js ${data.type} ${data.details}`);
     });
     hls.on(Hls.Events.MANIFEST_PARSED, () => applySubtitle(media.subtitleLanguage));
     hls.loadSource(url);
@@ -232,7 +264,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   } else {
     const message = 'This browser cannot play HLS';
     setStatus(message);
-    tell('den-error', { message });
+    fail(message);
     return;
   }
   describeToSystem(media);
@@ -319,7 +351,8 @@ async function loadCast(): Promise<void> {
     tell('den-cast-request', { profile: profile.value });
     return;
   }
-  const info = new chrome.media.MediaInfo(playUrl(id, media), 'application/x-mpegURL');
+  playing = playUrl(id, media);
+  const info = new chrome.media.MediaInfo(playing, 'application/x-mpegURL');
   info.streamType = chrome.media.StreamType.BUFFERED;
   info.hlsSegmentFormat = chrome.media.HlsSegmentFormat.FMP4;
   info.hlsVideoSegmentFormat = chrome.media.HlsVideoSegmentFormat.FMP4;
@@ -355,7 +388,7 @@ async function loadCast(): Promise<void> {
       castContext?.endCurrentSession(true);
     const message = 'Chromecast could not load this release';
     setStatus(message);
-    tell('den-error', { message });
+    fail(message);
   }
 }
 
@@ -434,7 +467,7 @@ function initializeCast(): boolean {
     else if (action === 'error') {
       if (castErrorAction(current?.media.terminal === true) === 'stop-receiver')
         castContext?.endCurrentSession(true);
-      tell('den-error', { message: 'Chromecast could not continue playback' });
+      fail('Chromecast could not continue playback');
     } else {
       // CANCELLED means the media was stopped; an unrelated sender's LOAD is merely disconnected from.
       castContext?.endCurrentSession(reason !== 'INTERRUPTED');
@@ -545,9 +578,12 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   held.resolve();
 });
 
+// The player outside removes this frame when its session ends — closed, restarted, or replaced — and that is this
+// page's hide. The last report goes first, then the end; a receiver still fetches on its own, so its session is left.
 window.addEventListener('pagehide', () => {
   watcher?.stop();
   watcher = undefined;
+  if (!castStarted) endPlaying();
 });
 
 /** The outside player's Skip button: move this page's video, or the receiver it is casting to, to `time`. */
@@ -574,7 +610,7 @@ video.addEventListener('timeupdate', () =>
 );
 video.addEventListener('ended', () => tell('den-ended'));
 video.addEventListener('error', () =>
-  tell('den-error', { message: video.error?.message ?? 'Playback failed' }),
+  fail(video.error?.message || 'Playback failed', video.error?.code ?? 0),
 );
 
 window.parent.postMessage({ type: 'den-ready' }, '*');

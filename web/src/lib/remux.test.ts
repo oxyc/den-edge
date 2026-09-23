@@ -834,6 +834,26 @@ describe('endSession', () => {
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
   });
+
+  it('leaves a session the cast page plays to that page, which alone may connect to its address', () => {
+    const calls: string[] = [];
+    const framed = {
+      ...session,
+      publicBase: 'https://media.test',
+      castOrigin: 'https://cast.test',
+    };
+    endSession(framed, async (input) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    });
+    expect(calls).toEqual([]);
+    // A relay session with no cast page is still this page's to end.
+    endSession({ ...session, publicBase: 'https://media.test' }, async (input) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    });
+    expect(calls).toEqual(['/remux/s/sid/sig']);
+  });
 });
 
 describe('describeRelease', () => {
@@ -1018,5 +1038,19 @@ describe('reportFailure', () => {
       200,
       true,
     ]);
+  });
+
+  it('sends nothing for a session the cast page plays: that page reports its own failures', () => {
+    const calls: string[] = [];
+    const framed = {
+      ...session,
+      publicBase: 'https://media.test',
+      castOrigin: 'https://cast.test',
+    };
+    reportFailure(framed, 3, 'DECODE', async (input) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    });
+    expect(calls).toEqual([]);
   });
 });
