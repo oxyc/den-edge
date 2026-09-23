@@ -4,7 +4,7 @@
 
 import { hkdf } from './crypto';
 import { libraryVault, type Vault } from './localVault';
-import { useLibraryCredential } from './relayFetch';
+import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
 import {
   believe,
   compareStamps,
@@ -75,6 +75,13 @@ export class LibraryLog {
   private memberRegistered = false;
   /** The TV reset the library key: this log is deleted, its id retired, and this browser's key reaches nothing. */
   moved = false;
+  /**
+   * den-edge has no log for this library and will not let this browser start one (`403 new_libraries_closed`, with
+   * `NEW_LIBRARIES=members`: only a device holding another library there may). Recovery is not sent again until a
+   * read finds the log — the TV writing it back — instead of on every refresh: one browser in this state sent 101
+   * refused batches over nearly six hours, one on each 30-second refresh while its tab was visible.
+   */
+  refused = false;
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
 
@@ -233,6 +240,9 @@ export class LibraryLog {
       }
       await policy;
       if (res.status === 404) {
+        // No log here, so no membership to prove: `library::is_member` refuses the proof, and every relayed
+        // write carrying it (`/metadata/title`) would be a 401.
+        forgetLibraryCredential();
         if (!(await log.stageRecovery())) return null;
         log.memberRegistered = false;
         log.head = 0;
@@ -244,6 +254,7 @@ export class LibraryLog {
         return log;
       }
       if (!res.ok) return null;
+      useLibraryCredential(keys);
       const page = (await res.json()) as Page;
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (!(await log.stageRecovery())) return null;
@@ -296,6 +307,7 @@ export class LibraryLog {
           );
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
+            forgetLibraryCredential(); // as in `open`: no log, no membership to prove
             if (!(await this.stageRecovery())) return false;
             this.memberRegistered = false;
             this.head = 0;
@@ -305,6 +317,9 @@ export class LibraryLog {
             return true; // A first offline action must be able to create the log on reconnect.
           }
           if (!res.ok) return false;
+          // The log is here again (or always was): a refused start is over, and the membership stands.
+          this.refused = false;
+          useLibraryCredential(this.keys);
           const page = (await res.json()) as Page;
           if (
             (this.generation && page.generation && this.generation !== page.generation) ||
@@ -470,6 +485,8 @@ export class LibraryLog {
           body: JSON.stringify({ writes: [{ k, base, v }] }),
         });
         if (res.status === 410) this.moved = true;
+        if (res.status === 403 && (await errorCode(res)) === 'new_libraries_closed')
+          this.refused = true;
         if (!res.ok) return null;
         batch = (await res.json()) as Batch;
       } catch {
@@ -585,6 +602,8 @@ export class LibraryLog {
             body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
           });
           if (res.status === 410) this.moved = true;
+          if (res.status === 403 && (await errorCode(res)) === 'new_libraries_closed')
+            this.refused = true;
           if (!res.ok) return false;
           const result = (await res.json()) as Batch;
           for (const entry of chunk) {
@@ -662,6 +681,8 @@ export class LibraryLog {
       const event = trackerEvent(row);
       if (event) this.project(event.after);
     }
+    // Kept, and sent once a read finds the log again (`refresh`).
+    if (this.refused) return this;
     if (this.storage) {
       const keys: string[] = [];
       for (let i = 0; i < this.storage.length; i++) {
@@ -726,6 +747,16 @@ export class LibraryLog {
         this.recoveryRows = undefined;
     }
     return this;
+  }
+}
+
+/** den-edge's `error` code for a refused request, or undefined when the body is not one. */
+async function errorCode(res: Response): Promise<string | undefined> {
+  try {
+    const body = (await res.clone().json()) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : undefined;
+  } catch {
+    return undefined;
   }
 }
 

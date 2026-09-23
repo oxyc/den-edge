@@ -10,6 +10,7 @@ import {
   type Library,
 } from './library';
 import { LibraryLog } from './log';
+import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent } from './trackerEvents';
 import { fetchDetails } from './tmdb';
 import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
@@ -350,6 +351,59 @@ describe('LibraryLog', () => {
     expect((await LibraryLog.open(LIBRARY_KEY, connection))!.title(blank.title)?.status.value).toBe(
       'watchlist',
     );
+  });
+
+  /**
+   * A browser holding the key of a library den-edge has no log for, where den-edge starts no library for it
+   * (`NEW_LIBRARIES=members`). It used to send its recovery on every 30-second refresh, each refused, and to go
+   * on claiming a membership `library::is_member` refuses — so every shared-metadata write was a 401 too.
+   */
+  it('stops resending to a relay that will not start the library, and claims no membership there', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null,
+      setItem: (k, v) => {
+        data.set(k, v);
+      },
+      removeItem: (k) => {
+        data.delete(k);
+      },
+      clear: () => data.clear(),
+    };
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!;
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    data.set(`den.pendingTracker.${keys.id}.first`, JSON.stringify(await seal(keys, journal)));
+    let server: Awaited<ReturnType<typeof edge>> | null = null;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') batches++;
+      if (server) return server.fetchImpl(url, init);
+      if (init?.method === 'POST')
+        return new Response('{"error":"new_libraries_closed"}', { status: 403 });
+      return new Response('{"error":"not_found"}', { status: 404 });
+    };
+    useLibraryCredential(keys);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(log.refused).toBe(true);
+    expect(hasLibraryCredential(), 'no log, so no membership to claim').toBe(false);
+    const tried = batches;
+    for (let i = 0; i < 3; i++) expect(await log.refresh()).toBe(true);
+    expect(batches, 'refreshes read, and send nothing again').toBe(tried);
+    expect(log.pendingActions).toBe(1);
+
+    // The TV writes the library back: the next read finds it, and the kept action goes out.
+    server = await edge([row(1)]);
+    expect(await log.refresh()).toBe(true);
+    expect(log.refused).toBe(false);
+    expect(hasLibraryCredential()).toBe(true);
+    expect(log.pendingActions).toBe(0);
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
+    forgetLibraryCredential();
   });
 
   it('skips an unreadable incremental row and still reaches later changes', async () => {
