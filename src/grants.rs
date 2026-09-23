@@ -2214,6 +2214,8 @@ mod tests {
 
         let resp = start("203.0.113.1", body.clone()).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
+        let scope = resp.extensions().get::<crate::handler::ListenerScope>().map(|s| s.0);
+        assert_eq!(scope, Some("browser"), "logged as the guest's own address");
         let answer = body_json(resp).await;
         assert_eq!(answer["publicBase"], "https://203.0.113.4");
         assert!(
@@ -2223,11 +2225,21 @@ mod tests {
         let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
         assert_eq!(asked, json!({ "open": true, "source": "203.0.113.1", "scope": "browser" }));
 
-        // IPv6 and Cast would need the wide scope, which a guest never gets.
-        assert_eq!(start("2001:db8::7", body.clone()).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // IPv6 and Cast would need the wide scope, which a guest never gets. Each is refused under its own code.
+        let refused = |resp: Response| async move {
+            let status = resp.status();
+            let logged = resp.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
+            (status, body_json(resp).await["error"].clone(), logged)
+        };
+        let ipv6 =
+            (StatusCode::SERVICE_UNAVAILABLE, json!("public_media_ipv6"), Some("public_media_ipv6".into()));
+        assert_eq!(refused(start("2001:db8::7", body.clone()).await).await, ipv6);
         let mut cast = body.clone();
         cast["player"] = json!("cast");
-        assert_eq!(start("203.0.113.1", cast).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let cast_refused =
+            (StatusCode::SERVICE_UNAVAILABLE, json!("public_media_cast"), Some("public_media_cast".into()));
+        assert_eq!(refused(start("203.0.113.1", cast.clone()).await).await, cast_refused);
+        assert_eq!(refused(start("2001:db8::7", cast).await).await, cast_refused, "casting is the reason");
 
         for source in ["203.0.113.2", "203.0.113.3", "203.0.113.4"] {
             let resp = start(source, body.clone()).await;
@@ -2239,6 +2251,45 @@ mod tests {
         let refused = start("203.0.113.5", body.clone()).await;
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS, "a fifth source address");
         assert_eq!(start("203.0.113.1", body).await.status(), StatusCode::CREATED, "a known one still plays");
+
+        let metrics = h.state.metrics.render();
+        for counted in [
+            r#"den_edge_guest_play_refused_total{code="public_media_ipv6"} 1"#,
+            r#"den_edge_guest_play_refused_total{code="public_media_cast"} 2"#,
+            r#"den_edge_guest_play_refused_total{code="too_many_sources"} 1"#,
+            r#"den_edge_guest_play_refused_total{code="public_media_unavailable"} 0"#,
+            r#"den_edge_public_media_wide_total{reason="cast",who="guest"} 0"#,
+            r#"den_edge_public_media_wide_total{reason="ipv6",who="guest"} 0"#,
+        ] {
+            assert!(metrics.contains(counted), "{counted} in {metrics}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guests_session_without_a_public_media_listener_is_refused_as_unavailable() {
+        let (base, _) = addon(|_| (StatusCode::CREATED, "application/json", "{}".into())).await;
+        let h = Harness::in_dir_with(temp_dir(), move |s| {
+            s.relays = crate::parse_relays(&format!("/remux={base}, /scout={base}"));
+            s.remux_edge_secret = Some("s".into());
+            s.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        });
+        let h = members_only(h).await;
+        let (gid, header) =
+            redeemed(&h, json!({ "addons": ["scout"], "installs": { "scout": SCOUT } })).await;
+        let body = json!({ "scout": format!("https://d.oxy.fi/scout/~{gid}") });
+        let resp = h
+            .send(
+                "POST",
+                "/remux/session",
+                Some(body.to_string()),
+                &[(HEADER, &header), ("host", "d.oxy.fi"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_json(resp).await["error"], "public_media_unavailable");
+        let metrics = h.state.metrics.render();
+        let counted = r#"den_edge_guest_play_refused_total{code="public_media_unavailable"} 1"#;
+        assert!(metrics.contains(counted), "{metrics}");
     }
 
     #[tokio::test]

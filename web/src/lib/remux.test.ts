@@ -7,6 +7,7 @@ import {
   forgetBrowserTokens,
   forgetLinks,
   forgetSubtitles,
+  guestLimits,
   linkLimit,
   LINK_MEMORY_MS,
   LINK_TTL_MS,
@@ -196,6 +197,15 @@ describe('startSession', () => {
       expect(await failing(guest, 404, 'not_found')).toEqual({ failure: 'ended' });
       expect(await failing(guest, 404, 'no_playable_release')).toEqual({ failure: 'none' });
       expect(await failing(guest, 503, 'public_media_unavailable')).toEqual({ failure: 'public' });
+      // The guest limits are known ones, and each says what to do instead.
+      expect(await failing(guest, 503, 'public_media_ipv6')).toEqual({ failure: 'ipv6' });
+      expect(await failing(guest, 503, 'public_media_cast')).toEqual({ failure: 'cast' });
+      expect(guestLimits.ipv6).toBe(
+        'Playing away from home needs an IPv4 connection for now. Try another network (a phone hotspot often works).',
+      );
+      expect(guestLimits.cast).toBe(
+        'Casting isn’t available for invited guests yet — play it in this browser instead.',
+      );
       // A library's own 404 is still a title with no release.
       expect(await failing({ ...want, subtitleLanguages: [] }, 404, 'not_found')).toEqual({
         failure: 'none',

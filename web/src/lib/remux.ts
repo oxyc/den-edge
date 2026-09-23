@@ -88,7 +88,17 @@ export interface Want {
   player?: 'native' | 'hls.js' | 'cast';
 }
 
-export type Failure = 'login' | 'none' | 'busy' | 'transcode' | 'unreachable' | 'ended' | 'public';
+export type Failure =
+  'login' | 'none' | 'busy' | 'transcode' | 'unreachable' | 'ended' | 'public' | 'ipv6' | 'cast';
+
+/**
+ * An invited guest's play away from home meets two known limits, not faults: the media address is IPv4-only, and a
+ * Cast receiver would need the listener opened wider than a guest is ever given.
+ */
+export const guestLimits: Record<'ipv6' | 'cast', string> = {
+  ipv6: 'Playing away from home needs an IPv4 connection for now. Try another network (a phone hotspot often works).',
+  cast: 'Casting isn’t available for invited guests yet — play it in this browser instead.',
+};
 
 /** A refusal, and — when den-remux said so — how long it asked to be left alone for. */
 export interface Refused {
@@ -792,7 +802,9 @@ function failureOf(status: number, error: string | undefined, shared: boolean): 
   if (status === 404) return shared && error !== 'no_playable_release' ? 'ended' : 'none';
   if (status === 429) return 'busy';
   if (error === 'transcode_unavailable') return 'transcode';
-  // The session has no public address to hand this network (a guest on IPv6, or Cast).
+  // The session has no public address to hand this network.
   if (status === 503 && error === 'public_media_unavailable') return 'public';
+  if (status === 503 && error === 'public_media_ipv6') return 'ipv6';
+  if (status === 503 && error === 'public_media_cast') return 'cast';
   return 'unreachable';
 }

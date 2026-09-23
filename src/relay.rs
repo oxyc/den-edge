@@ -6,7 +6,7 @@
 //! public name there is no address a browser can fetch it from directly. den-remux's control JSON may take this
 //! path for a member; its video never does — the player is given a signed URL on the public IP-literal origin.
 
-use crate::handler::{error, raw_json, MAX_BODY_BYTES};
+use crate::handler::{error, json_reply, ListenerScope, MAX_BODY_BYTES};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -585,28 +585,36 @@ async fn relay_with(
     } else {
         None
     };
+    // A guest's session gets the public listener as a member's does, but only on the public name, where a member's
+    // does too.
+    let guest_remux = face == crate::handler::Face::Web && grant.as_ref().is_some_and(Guest::remux);
+    let public_session =
+        (member_only || guest_remux) && req.uri().path() == "/remux/session" && method == Method::POST;
+    // A guest's play refused at its start, counted by code on `/metrics`.
+    let guest_refused = |code: &'static str| {
+        if guest_remux && public_session {
+            state.metrics.record_guest_play_refused(code);
+        }
+    };
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let _slot = match slot {
         Ok(Ok(permit)) => permit,
         // Every slot is taken: the wait it just spent is also how long the next caller should give it.
         _ => {
+            guest_refused("relay_busy");
             return crate::handler::retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &error("relay_busy"),
                 SLOT_WAIT.as_millis() as u64,
-            )
+            );
         }
     };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
-    // A guest's session gets the public listener as a member's does, but only on the public name, where a member's
-    // does too.
-    let guest_remux = face == crate::handler::Face::Web && grant.as_ref().is_some_and(Guest::remux);
-    let public_session =
-        (member_only || guest_remux) && req.uri().path() == "/remux/session" && method == Method::POST;
     if public_session
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
     {
+        guest_refused("public_media_unavailable");
         return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
     }
     // An answer that has to be rewritten cannot be read compressed, so a guest's is asked for as it is.
@@ -637,11 +645,19 @@ async fn relay_with(
     if let (true, Some(g), Some(source)) = (public_session, &grant, address) {
         // The wide scope opens the listener to more than the guest's own address, and a guest is never given it:
         // an IPv6 or Cast guest is turned away rather than let in to everyone. Nor may one grant open sources
-        // without end by changing address.
-        if cast || source.is_ipv6() {
-            return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_unavailable");
+        // without end by changing address. The media base is an IPv4 literal, so the exact-address grant can only
+        // name an IPv4 visitor; a Cast receiver fetches from its own address, which only the wide scope admits.
+        // Each gets its own code, so the page can say which limit it met and the log line shows it.
+        if cast {
+            guest_refused("public_media_cast");
+            return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_cast");
+        }
+        if source.is_ipv6() {
+            guest_refused("public_media_ipv6");
+            return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_ipv6");
         }
         if !state.grants.allow_source(&g.gid, source, state.now()) {
+            guest_refused("too_many_sources");
             return json(StatusCode::TOO_MANY_REQUESTS, "too_many_sources");
         }
     }
@@ -703,11 +719,19 @@ async fn relay_with(
             None => return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable"),
         }
     }
+    let mut scope = None;
     if public_session && parts.status == StatusCode::CREATED {
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
         {
+            let asked = listener_scope(cast, address);
+            scope = Some(ListenerScope(asked));
             if open_public_listener(socket, address, cast).await {
+                if let Some(reason) = asked.strip_prefix("wide:") {
+                    state
+                        .metrics
+                        .record_public_media_wide(reason, if guest_remux { "guest" } else { "member" });
+                }
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
                     // Only to a client behind the home's own router. Anyone else — a remote member, an invited
@@ -726,11 +750,14 @@ async fn relay_with(
                 }
             } else {
                 discard_failed_public_session(state, &target, &bytes, rid).await;
-                return crate::handler::retry_after(
+                guest_refused("public_listener_unavailable");
+                let mut refused = crate::handler::retry_after(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &error("public_listener_unavailable"),
                     1_000,
                 );
+                refused.extensions_mut().insert(ListenerScope(asked));
+                return refused;
             }
         }
     }
@@ -768,15 +795,30 @@ async fn relay_with(
             resp.headers_mut().insert(header::CACHE_CONTROL, policy);
         }
     }
+    if let Some(scope) = scope {
+        resp.extensions_mut().insert(scope);
+    }
     resp
+}
+
+/// Which listener grant a public session needs, as the request log names it: `browser` for the visitor's own
+/// address, else the wide scope and why. The media base is an IPv4 literal. A visitor Cloudflare saw over IPv6
+/// fetches it from an address this process never sees (dual-stack, NAT64, carrier NAT), so an exact-address grant
+/// would drop its own session; a Cast receiver fetches from its own address.
+fn listener_scope(cast: bool, source: std::net::IpAddr) -> &'static str {
+    if cast {
+        "wide:cast"
+    } else if source.is_ipv6() {
+        "wide:ipv6"
+    } else {
+        "browser"
+    }
 }
 
 /// Ask the root-owned helper for its one operation. It validates the address again and owns every nftables
 /// argument; this process never runs a privileged command or supplies a table, chain, port, or timeout.
 async fn open_public_listener(socket: &std::path::Path, source: std::net::IpAddr, cast: bool) -> bool {
-    // The media base is an IPv4 literal. A visitor Cloudflare saw over IPv6 fetches it from an address this
-    // process never sees (dual-stack, NAT64, carrier NAT), so an exact-address grant would drop its own session.
-    let wide = cast || source.is_ipv6();
+    let wide = listener_scope(cast, source) != "browser";
     let operation = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
         let request = serde_json::json!({
@@ -955,7 +997,7 @@ async fn stream(state: &AppState, req: Request, target: String, rid: &str, guest
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
-    raw_json(status, Body::from(error(code).to_string()), true)
+    json_reply(status, &error(code))
 }
 
 /// A refusal that says when the window clears, rather than leaving the caller to guess and come straight back.
@@ -966,6 +1008,7 @@ fn limited(after_ms: u64) -> Response {
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::Harness;
+    use crate::handler::ListenerScope;
     use axum::http::StatusCode;
     use serde_json::json;
     use std::sync::Arc;
@@ -1147,9 +1190,30 @@ mod tests {
             )
             .await;
         assert_eq!(answer.status(), StatusCode::CREATED);
+        // A member's Cast session is the wide scope: named on its log line, and counted once it is open.
+        assert_eq!(answer.extensions().get::<ListenerScope>().map(|s| s.0), Some("wide:cast"));
+        let metrics = h.state.metrics.render();
+        assert!(
+            metrics.contains(r#"den_edge_public_media_wide_total{reason="cast",who="member"} 1"#),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains(r#"den_edge_public_media_wide_total{reason="cast",who="guest"} 0"#),
+            "{metrics}"
+        );
         let body = crate::handler::tests::body_json(answer).await;
         let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
         (body, ask)
+    }
+
+    #[test]
+    fn a_public_session_names_the_listener_scope_it_needs() {
+        let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let v6: std::net::IpAddr = "2001:db8::7".parse().unwrap();
+        assert_eq!(super::listener_scope(false, v4), "browser");
+        assert_eq!(super::listener_scope(false, v6), "wide:ipv6");
+        assert_eq!(super::listener_scope(true, v4), "wide:cast");
+        assert_eq!(super::listener_scope(true, v6), "wide:cast");
     }
 
     #[cfg(unix)]
@@ -1257,6 +1321,15 @@ mod tests {
             .await;
         assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(answer.headers().contains_key("retry-after"));
+        // The log line says which scope was refused, and nothing opened is counted.
+        assert_eq!(answer.extensions().get::<ListenerScope>().map(|s| s.0), Some("wide:cast"));
+        let code = answer.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
+        assert_eq!(code.as_deref(), Some("public_listener_unavailable"));
+        let metrics = h.state.metrics.render();
+        assert!(
+            metrics.contains(r#"den_edge_public_media_wide_total{reason="cast",who="member"} 0"#),
+            "{metrics}"
+        );
         deleted_rx.await.unwrap();
     }
 

@@ -126,6 +126,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
 pub(crate) fn absent() -> Response {
     let mut resp = raw_json(StatusCode::NOT_FOUND, Body::from(error("not_found").to_string()), false);
     resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
+    resp.extensions_mut().insert(crate::handler::ErrorCode("not_found".to_owned()));
     resp
 }
 
@@ -408,7 +409,7 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
-    raw_json(status, Body::from(error(code).to_string()), true)
+    crate::handler::json_reply(status, &error(code))
 }
 
 fn refused(status: StatusCode, code: &str) -> Box<Response> {
