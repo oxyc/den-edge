@@ -3,9 +3,15 @@
 //! Provenance stays explicit: direct TMDB responses and Atlas's JustWatch-sourced IMDb score are stored as
 //! separate observations. Each allowlisted field carries its own server timestamp so partial observations
 //! merge and expire independently.
+//!
+//! Most of it is recorded here, not sent: every TMDB answer the proxy fetches (`observe_tmdb`, from `tmdb.rs`) and
+//! every atlas chart the relay passes on (`observe_atlas`, from `relay.rs`) is read for its titles behind the answer.
+//! `PUT /metadata/title` remains for what never passes through here — a client asking TMDB with its own key, or an
+//! atlas it reaches directly — and `POST /metadata/title/query` is how every client reads it back.
 
 use crate::handler::{client_ip, error, json_reply, read_json, retry_after};
 use crate::AppState;
+use axum::body::Bytes;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
@@ -214,11 +220,35 @@ async fn publish(state: &AppState, req: Request) -> Response {
     {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_metadata"));
     }
+    match merge(state, body.entries).await {
+        Ok(()) => json_reply(StatusCode::NO_CONTENT, &Value::Null),
+        Err(Unstored::Unavailable) => {
+            json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("metadata_store_unavailable"))
+        }
+        Err(Unstored::Failed) => {
+            json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"))
+        }
+    }
+}
+
+/// Why observations were not kept.
+#[derive(Debug)]
+enum Unstored {
+    /// No store configured.
+    Unavailable,
+    /// A record could not be written.
+    Failed,
+}
+
+/// Each observation merged into what is kept for its title and source, field by field, every field stamped now.
+/// Under the write lock, which the sweep also takes, so an expired record is never removed after a fresh one
+/// replaced it.
+async fn merge(state: &AppState, entries: Vec<Observation>) -> Result<(), Unstored> {
     let _write = state.title_metadata_writes.lock().await;
     let now = state.now();
-    for o in body.entries {
+    for o in entries {
         let Some(path) = file(state, &o.kind, o.id, &o.source) else {
-            return json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("metadata_store_unavailable"));
+            return Err(Unstored::Unavailable);
         };
         let mut fields = if let Some((bytes, _, _)) = crate::tmdb::read(&path).await {
             serde_json::from_slice::<Entry>(&bytes)
@@ -241,13 +271,138 @@ async fn publish(state: &AppState, req: Request) -> Response {
         }
         let entry = Entry { kind: o.kind, id: o.id, source: o.source, fields };
         let Ok(bytes) = serde_json::to_vec(&entry) else {
-            return json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"));
+            return Err(Unstored::Failed);
         };
         if !crate::tmdb::write(&path, &bytes.into()).await {
-            return json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"));
+            return Err(Unstored::Failed);
         }
     }
-    json_reply(StatusCode::NO_CONTENT, &Value::Null)
+    Ok(())
+}
+
+/// Observations being worked out and written at once, past which a new answer's are not recorded. A page asks for
+/// a row of titles at once, so a burst of misses is dozens; this bounds the work behind it, never the answers.
+pub const OBSERVING: usize = 64;
+
+/// What a TMDB answer den-edge just fetched says about its titles (`tmdb.rs`), kept as source `tmdb` — what a
+/// browser used to send back with `PUT` after receiving it through this proxy. Worked out and written behind the
+/// answer: spawned, bounded by `OBSERVING`, and unable to slow or fail it. An answer served from the cache is
+/// not observed again; it was when it was fetched.
+pub fn observe_tmdb(state: &Arc<AppState>, path: &str, body: &Bytes) {
+    let path = path.to_owned();
+    record(state, body, move |body| tmdb_observations(&path, body));
+}
+
+/// The same for an atlas catalog answer relayed here (`relay.rs`): each title's JustWatch IMDb score, as source
+/// `justwatch-imdb`, only where it is a valid rating. `gzipped` when atlas sent it so.
+pub fn observe_atlas(state: &Arc<AppState>, body: &Bytes, gzipped: bool) {
+    record(state, body, move |body| {
+        if !gzipped {
+            return atlas_observations(body);
+        }
+        use std::io::Read as _;
+        let mut plain = Vec::new();
+        let limit = 8 * 1024 * 1024;
+        match flate2::read::GzDecoder::new(body).take(limit).read_to_end(&mut plain) {
+            Ok(_) => atlas_observations(&plain),
+            Err(_) => Vec::new(),
+        }
+    });
+}
+
+fn record(
+    state: &Arc<AppState>,
+    body: &Bytes,
+    read: impl FnOnce(&[u8]) -> Vec<Observation> + Send + 'static,
+) {
+    if state.title_metadata_cache_dir.is_none() {
+        return;
+    }
+    let Ok(permit) = Arc::clone(&state.title_metadata_observing).try_acquire_owned() else { return };
+    let (state, body) = (Arc::clone(state), body.clone());
+    tokio::spawn(async move {
+        let _permit = permit;
+        let entries = read(&body);
+        if entries.is_empty() {
+            return;
+        }
+        if let Err(e) = merge(&state, entries).await {
+            eprintln!("title metadata: an observation was not kept ({e:?})");
+        }
+    });
+}
+
+/// The allowlisted fields a TMDB answer carries for its titles: a title's own record (`/3/movie/550`), and every
+/// title in a `results` list, typed by the path (`/3/discover/movie`) or by each item's `media_type`
+/// (`/3/trending/all/week`). The web app's `metadataIn` did this before; unlike it, the top-level record counts
+/// only on a title's own path and for its own id, because a season (`/3/tv/1399/season/1`) carries an id and a
+/// rating of its own that are not the series'.
+fn tmdb_observations(path: &str, body: &[u8]) -> Vec<Observation> {
+    let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(body) else { return Vec::new() };
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    let fixed = segments.iter().copied().find(|s| matches!(*s, "movie" | "tv"));
+    let mut found: Vec<Observation> = Vec::new();
+    let mut add = |kind: &str, item: &serde_json::Map<String, Value>| {
+        let Some(id) = item.get("id").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) else {
+            return;
+        };
+        let fields = InputFields {
+            rating: item.get("vote_average").and_then(Value::as_f64).filter(|r| valid_rating(*r)),
+            vote_count: item.get("vote_count").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
+            poster_path: item
+                .get("poster_path")
+                .and_then(Value::as_str)
+                .filter(|p| valid_poster(p))
+                .map(str::to_owned),
+        };
+        let o = Observation { kind: kind.to_owned(), id, source: "tmdb".to_owned(), fields };
+        if valid_observation(&o) && !found.iter().any(|f| f.kind == o.kind && f.id == o.id) {
+            found.push(o);
+        }
+    };
+    if let ["3", kind @ ("movie" | "tv"), id] = segments.as_slice() {
+        if parsed.get("id").and_then(Value::as_u64).is_some_and(|own| id.parse() == Ok(own)) {
+            add(kind, &parsed);
+        }
+    }
+    if let Some(Value::Array(results)) = parsed.get("results") {
+        for item in results.iter().filter_map(Value::as_object) {
+            let kind = fixed.or_else(|| item.get("media_type").and_then(Value::as_str));
+            if let Some(kind @ ("movie" | "tv")) = kind {
+                add(kind, item);
+            }
+        }
+    }
+    found.truncate(MAX_ENTRIES);
+    found
+}
+
+/// Each title in an atlas catalog answer (`{metas: [{type, moviedb_id, name, imdbRating}]}`) with a valid IMDb
+/// score, as `services.ts` read them for the web app's `rememberAtlasMetadata`.
+fn atlas_observations(body: &[u8]) -> Vec<Observation> {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else { return Vec::new() };
+    let Some(metas) = value.get("metas").and_then(Value::as_array) else { return Vec::new() };
+    let mut found: Vec<Observation> = metas
+        .iter()
+        .filter_map(|meta| {
+            let kind = match meta.get("type").and_then(Value::as_str)? {
+                "movie" => "movie",
+                "series" => "tv",
+                _ => return None,
+            };
+            let id = u32::try_from(meta.get("moviedb_id")?.as_u64()?).ok()?;
+            meta.get("name")?.as_str()?;
+            let rating = match meta.get("imdbRating")? {
+                Value::String(text) => text.trim().parse().ok()?,
+                other => other.as_f64()?,
+            };
+            let fields = InputFields { rating: Some(rating), ..InputFields::default() };
+            let o = Observation { kind: kind.to_owned(), id, source: "justwatch-imdb".to_owned(), fields };
+            valid_observation(&o).then_some(o)
+        })
+        .collect();
+    found.truncate(MAX_ENTRIES);
+    found
 }
 
 pub async fn sweep_forever(state: Arc<AppState>) {
@@ -424,6 +579,117 @@ mod tests {
             .unwrap();
         let answer = get(&h).await;
         assert!(answer["entries"][0]["fields"].get("posterPath").is_none());
+    }
+
+    /// An observation as kind, id, source, rating, votes and poster.
+    type Seen<'a> = (String, u32, &'a str, Option<f64>, Option<u32>, Option<&'a str>);
+
+    fn observed(o: &[Observation]) -> Vec<Seen<'_>> {
+        o.iter()
+            .map(|o| {
+                let f = &o.fields;
+                (o.kind.clone(), o.id, o.source.as_str(), f.rating, f.vote_count, f.poster_path.as_deref())
+            })
+            .collect()
+    }
+
+    /// What the web app's `metadataIn` read from a TMDB answer, now read here: a title's own record, and each
+    /// title in a `results` list, typed by the path or by its `media_type`.
+    #[test]
+    fn a_tmdb_answer_is_read_for_its_titles_and_nothing_else() {
+        let detail = br#"{"id":550,"title":"Fight Club","vote_average":8.4,"vote_count":31000,"poster_path":"/p.jpg"}"#;
+        assert_eq!(
+            observed(&tmdb_observations("/3/movie/550", detail)),
+            [("movie".into(), 550, "tmdb", Some(8.4), Some(31000), Some("/p.jpg"))]
+        );
+        let listed = br#"{"page":1,"results":[{"id":1,"vote_average":7.0},{"id":"x"},{"id":2,"poster_path":"https://x"}]}"#;
+        assert_eq!(
+            observed(&tmdb_observations("/3/discover/tv", listed)),
+            [("tv".into(), 1, "tmdb", Some(7.0), None, None)]
+        );
+        let trending = br#"{"results":[{"id":3,"media_type":"movie","vote_count":5},{"id":4,"media_type":"person","vote_average":6.0}]}"#;
+        assert_eq!(
+            observed(&tmdb_observations("/3/trending/all/week", trending)),
+            [("movie".into(), 3, "tmdb", None, Some(5), None)]
+        );
+        // A season carries an id and a rating of its own, which are not the series'; nor is another title's id.
+        let season = br#"{"id":3624,"vote_average":8.1,"poster_path":"/s.jpg","episodes":[]}"#;
+        assert!(tmdb_observations("/3/tv/1399/season/1", season).is_empty());
+        assert!(tmdb_observations("/3/movie/551", detail).is_empty());
+        for junk in [&b"not json"[..], b"[1,2]", br#"{"id":550}"#, br#"{"id":550,"vote_average":11}"#] {
+            assert!(tmdb_observations("/3/movie/550", junk).is_empty(), "{}", String::from_utf8_lossy(junk));
+        }
+    }
+
+    /// What `services.ts` read from an atlas chart for `rememberAtlasMetadata`: a valid IMDb score, per title.
+    #[test]
+    fn an_atlas_chart_is_read_for_valid_imdb_scores_only() {
+        let chart = br#"{"metas":[
+            {"type":"movie","moviedb_id":550,"name":"Fight Club","imdbRating":"8.8"},
+            {"type":"series","moviedb_id":1399,"name":"GoT","imdbRating":9.2},
+            {"type":"movie","moviedb_id":1,"name":"Unrated","imdbRating":"N/A"},
+            {"type":"movie","moviedb_id":2,"name":"Zero","imdbRating":"0"},
+            {"type":"movie","moviedb_id":3,"imdbRating":"7"},
+            {"type":"channel","moviedb_id":4,"name":"x","imdbRating":"7"}
+        ]}"#;
+        assert_eq!(
+            observed(&atlas_observations(chart)),
+            [
+                ("movie".into(), 550, "justwatch-imdb", Some(8.8), None, None),
+                ("tv".into(), 1399, "justwatch-imdb", Some(9.2), None, None)
+            ]
+        );
+        assert!(atlas_observations(b"{}").is_empty());
+    }
+
+    async fn kept(h: &Harness, kind: &str, id: u32) -> Value {
+        for _ in 0..200 {
+            let found = body_json(
+                h.send(
+                    "POST",
+                    "/metadata/title/query",
+                    Some(json!({"titles":[{"type":kind,"id":id}]}).to_string()),
+                    &[],
+                )
+                .await,
+            )
+            .await;
+            if found["entries"].as_array().is_some_and(|e| !e.is_empty()) {
+                return found["entries"][0].clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Value::Null
+    }
+
+    /// An atlas chart relayed here is kept with no browser sending it back, and says so. What atlas answers directly
+    /// (the tailnet's `/atlas`) never passes here, and carries no such word.
+    #[tokio::test]
+    async fn a_relayed_atlas_chart_is_kept_and_says_so() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            let chart =
+                json!({"metas":[{"type":"movie","moviedb_id":550,"name":"Fight Club","imdbRating":"8.8"}]});
+            let mut resp = Response::new(axum::body::Body::from(chart.to_string()));
+            resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            resp
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.title_metadata_cache_dir = Some(h.dir.join("title-metadata"));
+        state.relays = crate::parse_relays(&format!("/atlas=http://{addr}"));
+
+        let chart = h.send("GET", "/atlas/catalog/movie/jw-nfx/country=US.json", None, &[]).await;
+        assert_eq!(chart.headers()["x-den-title-metadata"], "kept");
+        let entry = kept(&h, "movie", 550).await;
+        assert_eq!(
+            (entry["source"].clone(), entry["fields"]["rating"]["value"].clone()),
+            (json!("justwatch-imdb"), json!(8.8))
+        );
+        let other = h.send("GET", "/atlas/recommend", None, &[]).await;
+        assert!(!other.headers().contains_key("x-den-title-metadata"));
     }
 
     #[tokio::test]

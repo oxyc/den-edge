@@ -6,7 +6,6 @@
 
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
-import { rememberTmdbMetadata } from './titleMetadata';
 
 const TMDB = 'https://api.themoviedb.org/3/';
 
@@ -203,10 +202,7 @@ export function cachingFetch(
           .then(async (res) => {
             if (!res.ok) return;
             const refreshed = entry(res, await res.text());
-            if (refreshed) {
-              rememberTmdbMetadata(url.pathname, refreshed.body, network);
-              await store.put(key, refreshed);
-            }
+            if (refreshed) await store.put(key, refreshed);
           })
           .catch(() => undefined)
           .finally(() => refreshing.delete(key));
@@ -221,10 +217,8 @@ export function cachingFetch(
       }
       const body = await res.text();
       const fetched = entry(res, body);
-      if (fetched) {
-        rememberTmdbMetadata(url.pathname, fetched.body, network);
-        void store.put(key, fetched).catch(() => undefined);
-      }
+      // What it says about its titles den-edge kept as it fetched it (`src/title_metadata.rs`).
+      if (fetched) void store.put(key, fetched).catch(() => undefined);
       return answer(body);
     } catch (error) {
       if (kept) return answer(kept.body);

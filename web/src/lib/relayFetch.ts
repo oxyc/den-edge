@@ -39,6 +39,8 @@ const OAUTH = /^\/oauth\/(?:request\/[0-9a-f]{32}\/approve|connections(?:\/[0-9a
 
 let credential: string | null = null;
 let libraryId: string | null = null;
+/** Counts every change of the credential, so a refusal of one can be told from the next (`credentialVersion`). */
+let version = 0;
 /** The secrets of the grants this browser holds, by grant id. Never leaves this module except in the header. */
 const grantSecrets = new Map<string, string>();
 let grantEnded: ((gid: string) => void) | null = null;
@@ -68,16 +70,23 @@ export function hasLibraryCredential(): boolean {
   return credential !== null;
 }
 
+/** Which credential this browser holds, as a number that changes whenever it is set or forgotten. */
+export function credentialVersion(): number {
+  return version;
+}
+
 /** Remember the open library's credential, so relayed calls can prove membership. */
 export function useLibraryCredential(keys: Pick<LibraryKeys, 'id' | 'member'>): void {
   credential = `${keys.id}:${keys.member}`;
   libraryId = keys.id;
+  version++;
 }
 
 /** Forget it — an unlinked browser is a visitor again, and must stop claiming otherwise. */
 export function forgetLibraryCredential(): void {
   credential = null;
   libraryId = null;
+  version++;
 }
 
 /**

@@ -138,6 +138,8 @@ pub struct AppState {
     pub title_metadata_cache_dir: Option<std::path::PathBuf>,
     /// Serializes the small read/merge/write records so simultaneous partial observations cannot erase fields.
     pub title_metadata_writes: tokio::sync::Mutex<()>,
+    /// Observations of proxied and relayed answers being recorded behind them (`title_metadata::OBSERVING`).
+    pub title_metadata_observing: Arc<tokio::sync::Semaphore>,
     /// Questions the household key may ask OMDb in a UTC day (env `OMDB_DAILY_MAX`); `None` is no ceiling of ours.
     pub ratings_daily_max: Option<u32>,
     /// Today (as a day number) and what the household key has spent of it.
@@ -232,6 +234,7 @@ impl AppState {
             ratings_cache_dir: None,
             title_metadata_cache_dir: None,
             title_metadata_writes: tokio::sync::Mutex::new(()),
+            title_metadata_observing: Arc::new(tokio::sync::Semaphore::new(title_metadata::OBSERVING)),
             skipdb_cache_dir: None,
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),

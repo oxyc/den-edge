@@ -18,7 +18,7 @@ import type { MediaType, Title } from './library';
 import type { ServicePick } from './prefs';
 import { relayFetch } from './relayFetch';
 import { tmdbFetch } from './tmdbCache';
-import { rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
+import { keptByEdge, rememberAtlasMetadata, withSharedTitleMetadata } from './titleMetadata';
 import { matches, type Service } from '../settings/services';
 
 /**
@@ -245,7 +245,7 @@ export function atlasServiceRows(
         );
         if (!res.ok) throw new Error(`atlas answered ${res.status}`);
         const received = titlesOfMetas(await res.json());
-        rememberAtlasMetadata(received, fetchImpl);
+        if (!keptByEdge(res)) rememberAtlasMetadata(received, fetchImpl);
         const titles = await withSharedTitleMetadata(received, fetchImpl);
         return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
       },
@@ -309,6 +309,7 @@ export function radarRows(
         caption: (title: Title) => captionOf(title, pool.soonest),
         load: async (page: number) => {
           if (page > 1) return [];
+          const unkept: Title[] = [];
           const charts = await inBatches(wanted, POOL_AT_ONCE, async ({ catalog, country }) => {
             const path = catalog.type === 'tv' ? 'series' : 'movie';
             const res = await fetchImpl(
@@ -316,10 +317,12 @@ export function radarRows(
             );
             if (!res.ok) return [];
             const named = catalog.providerIds.flatMap((id) => names[id] ?? []).slice(0, 1);
-            return titlesOfMetas(await res.json()).map((title) => ({ ...title, services: named }));
+            const titles = titlesOfMetas(await res.json());
+            if (!keptByEdge(res)) unkept.push(...titles);
+            return titles.map((title) => ({ ...title, services: named }));
           });
           const merged = mergePool(charts, pool.soonest);
-          rememberAtlasMetadata(merged, fetchImpl);
+          rememberAtlasMetadata(unkept, fetchImpl);
           const titles = await withSharedTitleMetadata(merged, fetchImpl);
           return tmdbKey ? fillPosters(titles, tmdbKey) : titles;
         },

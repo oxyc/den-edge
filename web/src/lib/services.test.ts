@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   compactServiceName,
   atlasCatalogs,
@@ -227,11 +227,41 @@ describe('atlas rows', () => {
     expect(await at(rows, 0).load(1)).toMatchObject([
       { id: 550, rating: 7.4, ratingSource: 'justwatch-imdb' },
     ]);
-    expect(writes.map((body) => JSON.parse(body))).toEqual([
-      {
-        entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
-      },
-    ]);
+    await vi.waitFor(() =>
+      expect(writes.map((body) => JSON.parse(body))).toEqual([
+        {
+          entries: [{ type: 'movie', id: 550, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+        },
+      ]),
+    );
+  });
+
+  // den-edge keeps what a chart it relays says (`x-den-title-metadata: kept`); sending it back would be the same
+  // write twice. Only a chart atlas answered directly — the tailnet's `/atlas` — is sent from here.
+  it('sends nothing back for a chart den-edge kept itself', async () => {
+    useLibraryCredential({ id: 'a', member: 'b' });
+    const writes: string[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      if (url === '/metadata/title') {
+        writes.push(String(init?.body));
+        return new Response(null, { status: 204 });
+      }
+      if (url === '/metadata/title/query') return new Response('{"entries":[]}');
+      const metas = [{ moviedb_id: 550, name: 'Fight Club', type: 'movie', imdbRating: '7.4' }];
+      return new Response(JSON.stringify({ metas }), {
+        headers: { 'x-den-title-metadata': 'kept' },
+      });
+    }) as unknown as typeof fetch;
+    const rows = atlasServiceRows(
+      '/atlas',
+      [{ id: 'jw-nfx', name: 'Popular', type: 'movie', providerIds: [8] }],
+      service({ id: 8, name: 'Netflix' }),
+      'US',
+      { fetchImpl },
+    );
+    expect(await at(rows, 0).load(1)).toMatchObject([{ id: 550, rating: 7.4 }]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(writes).toEqual([]);
   });
 
   // A chart's art is keyed by IMDb id. TMDB splits an anthology into one show per story where IMDb keeps one, so the
@@ -597,11 +627,13 @@ describe('radarRows', () => {
       0,
     ).load(1);
     expect(titles).toMatchObject([{ id: 7, rating: 7.4, ratingSource: 'justwatch-imdb' }]);
-    expect(writes).toEqual([
-      {
-        entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
-      },
-    ]);
+    await vi.waitFor(() =>
+      expect(writes).toEqual([
+        {
+          entries: [{ type: 'movie', id: 7, source: 'justwatch-imdb', fields: { rating: 7.4 } }],
+        },
+      ]),
+    );
   });
 
   it('names a title both services carry once, and says both', async () => {
