@@ -17,17 +17,27 @@ pub struct Metrics {
     /// Media listeners opened wide (to more than the visitor's own address), by reason (`cast`, `ipv6`) and by
     /// who asked (`member`, `guest`). A guest is never given the wide scope, so its rows stay 0.
     public_media_wide: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
+    /// Media listeners opened for the IPv4 address an IPv6 visitor's page reported (`ipv4Hint`) rather than
+    /// opened wide, by who asked. Each one is a `wide:ipv6` grant that did not happen.
+    public_media_hinted: Mutex<BTreeMap<&'static str, u64>>,
+    /// `ipv4Hint`s not used, by reason (one of `HINT_REJECTIONS`).
+    public_media_hint_rejected: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 /// The codes a guest's session start can be refused with, each always rendered, so a limit never met reads 0.
-pub const GUEST_PLAY_REFUSALS: [&str; 6] = [
+pub const GUEST_PLAY_REFUSALS: [&str; 7] = [
     "public_media_cast",
     "public_media_ipv6",
     "public_media_unavailable",
     "public_listener_unavailable",
     "relay_busy",
     "too_many_sources",
+    "hint_limit",
 ];
+
+/// Why an `ipv4Hint` was not used: not one bare IPv4 address, an address no one on the internet has, or one
+/// past the cap on distinct hinted addresses.
+pub const HINT_REJECTIONS: [&str; 3] = ["malformed", "not_global", "limit"];
 
 impl Metrics {
     pub fn record(&self, route: &'static str, status: u16) {
@@ -47,6 +57,15 @@ impl Metrics {
 
     pub fn record_public_media_wide(&self, reason: &'static str, who: &'static str) {
         *lock(&self.public_media_wide).entry((reason, who)).or_default() += 1;
+    }
+
+    pub fn record_public_media_hinted(&self, who: &'static str) {
+        *lock(&self.public_media_hinted).entry(who).or_default() += 1;
+    }
+
+    pub fn record_public_media_hint_rejected(&self, reason: &'static str) {
+        debug_assert!(HINT_REJECTIONS.contains(&reason), "{reason} is not a rendered label");
+        *lock(&self.public_media_hint_rejected).entry(reason).or_default() += 1;
     }
 
     pub fn render(&self) -> String {
@@ -88,6 +107,25 @@ impl Metrics {
                     "den_edge_public_media_wide_total{{reason=\"{reason}\",who=\"{who}\"}} {n}\n"
                 ));
             }
+        }
+        out.push_str(
+            "# HELP den_edge_public_media_hinted_total Media listeners opened for an IPv6 visitor's reported IPv4 \
+             address instead of wide, by who asked.\n\
+             # TYPE den_edge_public_media_hinted_total counter\n",
+        );
+        let hinted = lock(&self.public_media_hinted);
+        for who in ["member", "guest"] {
+            let n = hinted.get(who).copied().unwrap_or(0);
+            out.push_str(&format!("den_edge_public_media_hinted_total{{who=\"{who}\"}} {n}\n"));
+        }
+        out.push_str(
+            "# HELP den_edge_public_media_hint_rejected_total IPv4 hints not used, by reason.\n\
+             # TYPE den_edge_public_media_hint_rejected_total counter\n",
+        );
+        let rejected = lock(&self.public_media_hint_rejected);
+        for reason in HINT_REJECTIONS {
+            let n = rejected.get(reason).copied().unwrap_or(0);
+            out.push_str(&format!("den_edge_public_media_hint_rejected_total{{reason=\"{reason}\"}} {n}\n"));
         }
         out
     }

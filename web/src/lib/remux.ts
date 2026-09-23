@@ -23,6 +23,8 @@ export interface Session {
   lanPlaylist?: string;
   /** Static keyless iframe origin that owns browser-away and Cast media requests. */
   castOrigin?: string;
+  /** Set when den-edge opened the media listener for the `ipv4Hint` this page sent rather than the address it saw. */
+  hinted?: boolean;
   /** Seconds. */
   duration: number;
   release: {
@@ -86,6 +88,10 @@ export interface Want {
   maxBitrate?: number;
   /** The HLS player this page chose (`nativeHls`), for den-remux's session log. */
   player?: 'native' | 'hls.js' | 'cast';
+  /** This browser's IPv4 address (`ipv4.ts`), for den-edge alone: used only when it sees the page over IPv6. */
+  ipv4Hint?: string;
+  /** Asked again after a hinted session never played: den-edge uses no hint for it. */
+  noHint?: boolean;
 }
 
 export type Failure =
@@ -584,6 +590,10 @@ export async function startSession(
     if (error === 'bad_subtitles' && candidate) {
       subtitleVerdicts.set(candidate, false); // not den-subtitles: the next, or none
       continue;
+    }
+    // Past den-edge's cap on distinct reported addresses: asked once more as a page that reported none.
+    if (error === 'hint_limit' && want.ipv4Hint) {
+      return startSession({ ...want, ipv4Hint: undefined, noHint: true }, fetchImpl, base);
     }
     // A zero fallback here means "it named nothing", which is the caller's own interval rather than
     // a wait of no time at all.

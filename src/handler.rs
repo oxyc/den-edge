@@ -80,7 +80,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
 #[derive(Clone)]
 pub struct ErrorCode(pub String);
 
-/// The media listener grant a public remux session asked for (`browser`, `wide:cast`, `wide:ipv6`), carried on
+/// The media listener grant a public remux session asked for (`browser`, `hint`, `wide:cast`, `wide:ipv6`), carried on
 /// the response for the request log like `ErrorCode`.
 #[derive(Clone, Copy)]
 pub struct ListenerScope(pub &'static str);
@@ -933,7 +933,7 @@ pub mod tests {
         assert!(
             csp.contains(
                 "connect-src 'self' https://api.themoviedb.org \
-                 https://*.ts.net:8443 https://pve.example:8443;"
+                 https://*.ts.net:8443 https://1.1.1.1 https://api.ipify.org https://pve.example:8443;"
             ),
             "{csp}"
         );

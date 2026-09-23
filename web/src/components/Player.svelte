@@ -10,6 +10,7 @@
   import { canOfferCast, CAST_DISCOVERY_MS } from '../lib/castOffer';
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
+  import { ipv4Hint, retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
@@ -213,6 +214,13 @@
    * makes that smaller.
    */
   let degraded = false;
+  /**
+   * Set once a session den-edge opened for this browser's reported IPv4 address (`ipv4Hint`) failed before anything
+   * of it arrived: that address was not the one the media is fetched from, so no later session reports it either.
+   */
+  let noHint = false;
+  /** Whether anything of the playing session has arrived: its first frame here, or the cast page's metadata. */
+  let played = false;
 
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
@@ -234,6 +242,9 @@
     clearTimeout(retry);
     failure = null;
     swapped = null;
+    // Only the relay's sessions are public, and a Cast receiver fetches from its own address, not this browser's.
+    // Started now so it runs beside the lookups below rather than after them.
+    const hint = noHint || castMode || /^https?:/.test(route) ? undefined : ipv4Hint();
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
       if (!found) {
@@ -284,6 +295,7 @@
       maxBitrate,
       // For den-remux's log only, so a session can be told apart by the player that played it.
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
+      ...(noHint ? { noHint } : { ipv4Hint: await hint }),
       ...pick,
     };
     const result = await startSession(request, undefined, route);
@@ -301,6 +313,7 @@
     }
     started = at;
     askedMaxBitrate = maxBitrate;
+    played = false;
     session = result;
     // Asked to cast, but the relay's session has no public address or cast page: nothing can be cast from here.
     if (castOffer === 'waiting' && !(result.castOrigin && result.publicBase)) castOffer = 'none';
@@ -348,6 +361,13 @@
     }, STUCK_MS);
     const cleanup = () => clearTimeout(stuck);
     element.addEventListener('loadeddata', cleanup, { once: true });
+    element.addEventListener(
+      'loadeddata',
+      () => {
+        if (session === current) played = true;
+      },
+      { once: true },
+    );
     const reportUrl = reportUrlOf(current.playlist);
     const stopWatching = () => {
       cleanup();
@@ -442,6 +462,8 @@
     if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
+      // A length is known only once the playlist came through the media listener.
+      if (remoteDuration > 0) played = true;
       // The iframe has no `video` here to fire loadedmetadata and timeupdate, so its progress is what starts the
       // skip segments and drives the skip button, auto-skip and the next-episode warm-up.
       if (remoteDuration > 0) void loadSegments();
@@ -581,6 +603,13 @@
     const current = session;
     watcher?.spent();
     reportFailure(current, code, message);
+    // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
+    // carrier NAT with an address per destination, or a middlebox answering the lookup). Asked again once without it.
+    if (retryWithoutHint(current, played, noHint)) {
+      noHint = true;
+      restart({ filename: current.release.filename });
+      return;
+    }
     // A dead release looks exactly like this too — `MediaError 3`, and on the native path this page never
     // sees the segment responses that would say otherwise. Ask den-remux for the segment playback stalled
     // on before blaming the picture: converting a release whose bytes have stopped arriving cannot help,

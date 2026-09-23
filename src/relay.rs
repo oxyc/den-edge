@@ -73,6 +73,11 @@ const PLAYGROUND_BUSY_RETRY_MS: u64 = 1_000;
 /// How long a request waits for one of those slots before giving up, so a queue can't grow without bound.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 const FAILED_SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
+/// Distinct `ipv4Hint` addresses one member's rate-limit bucket (an IPv6 /64) may have the media listener opened
+/// for within `MEMBER_HINT_TTL_MS`. A household's few devices, and a carrier that moves them now and then, fit well
+/// inside it; a page cycling through made-up addresses does not.
+pub(crate) const MEMBER_HINTS: usize = 4;
+const MEMBER_HINT_TTL_MS: u64 = 60 * 60 * 1000;
 
 /// Where `path_and_query` goes when it is under one of `relays`: that addon's LAN origin with the rest of it.
 pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<String> {
@@ -637,28 +642,65 @@ async fn relay_with(
         }
         _ => body,
     };
+    // The page's report of its own IPv4 address is for this server alone: remux never sees it.
+    let (body, hint) = if control == "/remux/session" && method == Method::POST {
+        match take_hint(body) {
+            Some(taken) => taken,
+            None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+        }
+    } else {
+        (body, None)
+    };
     let cast = public_session
         && serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("player").and_then(serde_json::Value::as_str).map(str::to_owned))
             .is_some_and(|player| player == "cast");
+    // The media base is IPv4 only, so a visitor seen over IPv6 plays from an IPv4 address this server never sees.
+    // Its page may say which (`ipv4Hint`), and then the listener opens for that one address rather than wide. The
+    // observed address always wins: a visitor seen over IPv4 is opened for that, whatever its page says. A Cast
+    // receiver fetches from its own address, which the page cannot know.
+    let hinted = match (public_session && !cast, address, hint) {
+        (true, Some(source), Some(hint)) if source.is_ipv6() => match hint_address(&hint) {
+            Ok(v4) => Some(std::net::IpAddr::V4(v4)),
+            Err(reason) => {
+                state.metrics.record_public_media_hint_rejected(reason);
+                None
+            }
+        },
+        _ => None,
+    };
     if let (true, Some(g), Some(source)) = (public_session, &grant, address) {
         // The wide scope opens the listener to more than the guest's own address, and a guest is never given it:
-        // an IPv6 or Cast guest is turned away rather than let in to everyone. Nor may one grant open sources
-        // without end by changing address. The media base is an IPv4 literal, so the exact-address grant can only
-        // name an IPv4 visitor; a Cast receiver fetches from its own address, which only the wide scope admits.
-        // Each gets its own code, so the page can say which limit it met and the log line shows it.
+        // an IPv6 guest without a usable hint, or a Cast guest, is turned away rather than let in to everyone. Nor
+        // may one grant open sources without end by changing address, observed or hinted. The media base is an IPv4
+        // literal, so the exact-address grant can only name an IPv4 address; a Cast receiver fetches from its own
+        // address, which only the wide scope admits. Each gets its own code, so the page can say which limit it
+        // met and the log line shows it.
         if cast {
             guest_refused("public_media_cast");
             return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_cast");
         }
-        if source.is_ipv6() {
+        if let Some(hinted) = hinted {
+            if !state.grants.allow_source(&g.gid, hinted, state.now()) {
+                state.metrics.record_public_media_hint_rejected("limit");
+                guest_refused("hint_limit");
+                return json(StatusCode::TOO_MANY_REQUESTS, "hint_limit");
+            }
+        } else if source.is_ipv6() {
             guest_refused("public_media_ipv6");
             return json(StatusCode::SERVICE_UNAVAILABLE, "public_media_ipv6");
-        }
-        if !state.grants.allow_source(&g.gid, source, state.now()) {
+        } else if !state.grants.allow_source(&g.gid, source, state.now()) {
             guest_refused("too_many_sources");
             return json(StatusCode::TOO_MANY_REQUESTS, "too_many_sources");
+        }
+    }
+    if let (true, None, Some(hinted)) = (public_session, &grant, hinted) {
+        // A member is never refused the wide scope, so a hint only narrows its grant; but a hint is whatever the page
+        // says, so one member's addresses are still counted, as a guest's are.
+        if !allow_member_hint(state, &ip, hinted) {
+            state.metrics.record_public_media_hint_rejected("limit");
+            return json(StatusCode::TOO_MANY_REQUESTS, "hint_limit");
         }
     }
     // Nothing of the browser's goes along but what the addon reads: not its cookies, which carry its Access
@@ -724,16 +766,21 @@ async fn relay_with(
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
         {
-            let asked = listener_scope(cast, address);
+            let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, address) };
             scope = Some(ListenerScope(asked));
-            if open_public_listener(socket, address, cast).await {
-                if let Some(reason) = asked.strip_prefix("wide:") {
-                    state
-                        .metrics
-                        .record_public_media_wide(reason, if guest_remux { "guest" } else { "member" });
+            if open_public_listener(socket, hinted.unwrap_or(address), cast).await {
+                let who = if guest_remux { "guest" } else { "member" };
+                if hinted.is_some() {
+                    state.metrics.record_public_media_hinted(who);
+                } else if let Some(reason) = asked.strip_prefix("wide:") {
+                    state.metrics.record_public_media_wide(reason, who);
                 }
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
+                    // Opened for the page's reported address: if it was wrong, the page asks again without it.
+                    if hinted.is_some() {
+                        value["hinted"] = serde_json::Value::Bool(true);
+                    }
                     // Only to a client behind the home's own router. Anyone else — a remote member, an invited
                     // guest — cannot reach a private address, and would try it first on every play regardless.
                     if let Some(lan) = &state.lan_media_base {
@@ -813,6 +860,55 @@ fn listener_scope(cast: bool, source: std::net::IpAddr) -> &'static str {
     } else {
         "browser"
     }
+}
+
+/// A session start's body without its `ipv4Hint` and `noHint`, and the hint unless the page said `noHint` — which
+/// it does when a hinted session already failed to play. A body that is not a JSON object is left as it is, for
+/// remux to refuse. `None` only if the body cannot be written back.
+fn take_hint(body: Bytes) -> Option<(Bytes, Option<serde_json::Value>)> {
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_slice(&body) else {
+        return Some((body, None));
+    };
+    let hint = fields.remove("ipv4Hint");
+    let no_hint = fields.remove("noHint");
+    if hint.is_none() && no_hint.is_none() {
+        return Some((body, None));
+    }
+    let hint = hint.filter(|_| no_hint.as_ref().and_then(serde_json::Value::as_bool) != Some(true));
+    serde_json::to_vec(&fields).ok().map(|body| (Bytes::from(body), hint))
+}
+
+/// The address an `ipv4Hint` names: one bare IPv4 address (no prefix, no port) that someone on the internet could
+/// hold. Anything else is refused by reason, as `den_edge_public_media_hint_rejected_total` counts it.
+fn hint_address(hint: &serde_json::Value) -> Result<std::net::Ipv4Addr, &'static str> {
+    let addr: std::net::Ipv4Addr = hint.as_str().and_then(|s| s.parse().ok()).ok_or("malformed")?;
+    let [a, b, c, _] = addr.octets();
+    let special = a == 0 // "this network", the unspecified address among it
+        || addr.is_private()
+        || addr.is_loopback()
+        || addr.is_link_local()
+        || addr.is_multicast()
+        || addr.is_broadcast()
+        || addr.is_documentation()
+        || (a == 100 && (64..128).contains(&b)) // shared address space: carrier-grade NAT
+        || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+        || (a == 198 && (b == 18 || b == 19)) // benchmarking
+        || a >= 240; // reserved
+    if special {
+        Err("not_global")
+    } else {
+        Ok(addr)
+    }
+}
+
+/// May the member bucket `bucket` have the listener opened for `addr`, a hinted address? A known one always may, a
+/// new one while the bucket holds fewer than `MEMBER_HINTS` in the last hour.
+fn allow_member_hint(state: &AppState, bucket: &str, addr: std::net::IpAddr) -> bool {
+    let now = state.now();
+    let mut hints = crate::lock(&state.member_hints);
+    hints.retain(|_, list| list.iter().any(|(_, at)| now.saturating_sub(*at) < MEMBER_HINT_TTL_MS));
+    let list = hints.entry(bucket.to_owned()).or_default();
+    crate::grants::remember_source(list, addr, now, MEMBER_HINTS, MEMBER_HINT_TTL_MS)
 }
 
 /// Ask the root-owned helper for its one operation. It validates the address again and owns every nftables
@@ -1204,6 +1300,188 @@ mod tests {
         let body = crate::handler::tests::body_json(answer).await;
         let ask: serde_json::Value = serde_json::from_str(received.await.unwrap().trim()).unwrap();
         (body, ask)
+    }
+
+    /// A member seen over IPv6 whose page reports a global IPv4 address gets the listener for that address, not the
+    /// wide scope; without a usable report it gets the wide scope as before. A member seen over IPv4 is opened for
+    /// its observed address whatever the page says, and remux never sees the report.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_members_ipv4_hint_narrows_its_ipv6_grant_to_one_address() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let relayed = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let relayed = Arc::clone(&relayed);
+            move |req: axum::extract::Request| {
+                let relayed = Arc::clone(&relayed);
+                async move {
+                    let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap();
+                    relayed.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
+                    (StatusCode::CREATED, json!({ "playlist": "/remux/s/id/sig/master.m3u8" }).to_string())
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut opened) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let _ = sent.send(serde_json::from_str::<serde_json::Value>(line.trim()).unwrap());
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
+        });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let start = |source: &'static str, body: serde_json::Value| {
+            let (h, claim) = (&h, claim.clone());
+            async move {
+                h.send(
+                    "POST",
+                    "/remux/session",
+                    Some(body.to_string()),
+                    &[
+                        ("host", "d.oxy.fi"),
+                        ("content-type", "application/json"),
+                        ("x-den-library-member", &claim),
+                        ("x-forwarded-for", source),
+                    ],
+                )
+                .await
+            }
+        };
+        let scope = |resp: &axum::response::Response| resp.extensions().get::<ListenerScope>().map(|s| s.0);
+
+        let resp = start("2001:db8::7", json!({ "ipv4Hint": "8.8.8.8" })).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("hint")));
+        assert_eq!(crate::handler::tests::body_json(resp).await["hinted"], true);
+        assert_eq!(
+            opened.recv().await.unwrap(),
+            json!({ "open": true, "source": "8.8.8.8", "scope": "browser" })
+        );
+        assert_eq!(relayed.lock().unwrap().last().unwrap(), &json!({}), "remux never sees the hint");
+
+        for body in [
+            json!({}),
+            json!({ "ipv4Hint": "100.64.1.1" }),
+            json!({ "ipv4Hint": "127.0.0.1" }),
+            json!({ "ipv4Hint": "8.8.8.8", "noHint": true }),
+        ] {
+            let resp = start("2001:db8::7", body.clone()).await;
+            assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("wide:ipv6")), "{body}");
+            assert!(crate::handler::tests::body_json(resp).await.get("hinted").is_none(), "{body}");
+            assert_eq!(opened.recv().await.unwrap()["scope"], "cast", "{body}");
+            assert_eq!(relayed.lock().unwrap().last().unwrap(), &json!({}), "{body}");
+        }
+
+        let resp = start("203.0.113.7", json!({ "ipv4Hint": "9.9.9.9" })).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("browser")));
+        assert_eq!(opened.recv().await.unwrap()["source"], "203.0.113.7", "the observed address wins");
+
+        // One /64 may name `MEMBER_HINTS` distinct addresses an hour; a known one, or another /64, still plays.
+        for hint in ["9.9.9.9", "1.1.1.1", "1.0.0.1"] {
+            let resp = start("2001:db8::8", json!({ "ipv4Hint": hint })).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "{hint}");
+        }
+        let refused = start("2001:db8::9", json!({ "ipv4Hint": "8.8.4.4" })).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(crate::handler::tests::body_json(refused).await["error"], "hint_limit");
+        assert_eq!(
+            start("2001:db8::9", json!({ "ipv4Hint": "8.8.8.8" })).await.status(),
+            StatusCode::CREATED
+        );
+        let other = start("2001:db8:1::9", json!({ "ipv4Hint": "8.8.4.4" })).await;
+        assert_eq!(other.status(), StatusCode::CREATED);
+        h.advance(super::MEMBER_HINT_TTL_MS);
+        assert_eq!(
+            start("2001:db8::9", json!({ "ipv4Hint": "8.8.4.4" })).await.status(),
+            StatusCode::CREATED
+        );
+
+        let metrics = h.state.metrics.render();
+        for counted in [
+            r#"den_edge_public_media_hinted_total{who="member"} 7"#,
+            r#"den_edge_public_media_wide_total{reason="ipv6",who="member"} 4"#,
+            r#"den_edge_public_media_hint_rejected_total{reason="not_global"} 2"#,
+            r#"den_edge_public_media_hint_rejected_total{reason="limit"} 1"#,
+        ] {
+            assert!(metrics.contains(counted), "{counted} in {metrics}");
+        }
+    }
+
+    #[test]
+    fn an_ipv4_hint_is_one_global_ipv4_address() {
+        let hint = |value: serde_json::Value| super::hint_address(&value).map(|a| a.to_string());
+        for global in ["8.8.8.8", "1.1.1.1", "100.63.255.255", "100.128.0.1", "172.32.0.1", "198.20.0.1"] {
+            assert_eq!(hint(json!(global)), Ok(global.to_owned()));
+        }
+        for special in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "240.0.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "192.0.0.8",
+            "198.18.0.1",
+            "198.19.255.255",
+        ] {
+            assert_eq!(hint(json!(special)), Err("not_global"), "{special}");
+        }
+        for malformed in [
+            json!("8.8.8.8/32"),
+            json!("8.8.8.8:443"),
+            json!(" 8.8.8.8"),
+            json!("08.8.8.8"),
+            json!("8.8.8"),
+            json!("::ffff:8.8.8.8"),
+            json!("2001:4860::8888"),
+            json!(["8.8.8.8"]),
+            json!(null),
+        ] {
+            assert_eq!(hint(malformed.clone()), Err("malformed"), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn a_hint_is_taken_out_of_the_session_body() {
+        let take = |body: &str| {
+            let (body, hint) = super::take_hint(axum::body::Bytes::from(body.to_owned())).unwrap();
+            (String::from_utf8(body.to_vec()).unwrap(), hint)
+        };
+        assert_eq!(take(r#"{"a":1,"ipv4Hint":"8.8.8.8"}"#), (r#"{"a":1}"#.into(), Some(json!("8.8.8.8"))));
+        assert_eq!(take(r#"{"a":1,"ipv4Hint":"8.8.8.8","noHint":true}"#), (r#"{"a":1}"#.into(), None));
+        assert_eq!(take(r#"{"a":1,"noHint":false}"#), (r#"{"a":1}"#.into(), None));
+        // Untouched when there is nothing to take, byte for byte, and when it is not an object.
+        assert_eq!(take(r#"{ "a": 1 }"#), (r#"{ "a": 1 }"#.into(), None));
+        assert_eq!(take("not json"), ("not json".into(), None));
     }
 
     #[test]

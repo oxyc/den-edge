@@ -227,6 +227,24 @@ describe('startSession', () => {
     expect(await busy({ 'retry-after': '90' })).toEqual({ failure: 'busy', retryMs: 90_000 });
     expect(await busy()).toEqual({ failure: 'busy' });
   });
+
+  /** Past den-edge's cap on reported addresses is not "busy": waiting would meet the same cap again. */
+  it('asks once more without the IPv4 hint when den-edge has seen too many', async () => {
+    const sent: Record<string, unknown>[] = [];
+    const result = await startSession(
+      { ...want, subtitleLanguages: [], ipv4Hint: '198.51.100.7' },
+      async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        sent.push(body);
+        return body.ipv4Hint ? answer(429, { error: 'hint_limit' }) : answer(201, session);
+      },
+    );
+    expect(sent.map(({ ipv4Hint, noHint }) => ({ ipv4Hint, noHint }))).toEqual([
+      { ipv4Hint: '198.51.100.7', noHint: undefined },
+      { ipv4Hint: undefined, noHint: true },
+    ]);
+    expect(result).toMatchObject({ playlist: session.playlist });
+  });
 });
 
 describe('localNetworkRefused', () => {
