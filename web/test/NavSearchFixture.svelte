@@ -3,7 +3,7 @@
   import Router from '../src/Router.svelte';
   import Library from '../src/Library.svelte';
   import NavigationBar from '../src/components/NavigationBar.svelte';
-  import { parseRoute, type Explore } from '../src/lib/route';
+  import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import '../src/app.css';
@@ -19,6 +19,12 @@
     if (route.page !== 'search') return;
     query = route.query;
     explore = { type: route.type, chips: route.chips };
+  });
+  const peopleOf = (r: typeof route): PeopleView =>
+    r.page === 'people' ? { type: r.type, chips: r.chips, traits: r.traits, order: r.order } : {};
+  let people = $state<PeopleView>(untrack(() => peopleOf(route)));
+  $effect(() => {
+    if (route.page === 'people') people = peopleOf(route);
   });
   const log = {
     settings: (group: string) =>
@@ -50,7 +56,7 @@
   <Router onchange={(next) => (route = next)}>
     {#snippet children(route, active)}
       {#if route.page === 'settings'}<h1>Settings</h1>
-      {:else}<Library {link} {session} {route} {active} {query} {explore} />{/if}
+      {:else}<Library {link} {session} {route} {active} {query} {explore} {people} />{/if}
     {/snippet}
   </Router>
 </main>

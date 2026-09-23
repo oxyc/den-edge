@@ -23,6 +23,8 @@ export function pageTitle(route: Route): string {
       return `Settings · ${SITE}`;
     case 'search':
       return route.query.trim() ? `${route.query.trim()} · Search · ${SITE}` : `Search · ${SITE}`;
+    case 'people':
+      return `People · ${SITE}`;
     // Until the directory names it: the page calls itself "Netflix · Den" through `named` once it knows.
     case 'service':
       return `Service · ${SITE}`;

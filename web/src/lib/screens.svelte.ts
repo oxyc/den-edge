@@ -30,6 +30,7 @@ function lazy<C extends Component<any, any, any>>(load: () => Promise<{ default:
 export const DetailScreen = lazy(() => import('../components/Detail.svelte'));
 export const PersonScreen = lazy(() => import('../components/Person.svelte'));
 export const SearchScreen = lazy(() => import('../components/Search.svelte'));
+export const PeopleScreen = lazy(() => import('../components/People.svelte'));
 export const PlayerScreen = lazy(() => import('../components/Player.svelte'));
 export const ServiceScreen = lazy(() => import('../components/ServicePage.svelte'));
 export const SettingsScreen = lazy(() => import('../Settings.svelte'));

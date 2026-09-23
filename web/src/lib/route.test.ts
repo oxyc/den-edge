@@ -4,6 +4,7 @@ import {
   likeId,
   likeOf,
   parseRoute,
+  peopleHref,
   personHref,
   routePath,
   searchHref,
@@ -209,6 +210,34 @@ describe('routes', () => {
     expect(routePath({ page: 'search', query: 'fight club' })).toBe('/search?q=fight%20club');
     expect(routePath({ page: 'title', type: 'tv', id: 1399 })).toBe('/tv/1399');
     expect(routePath({ page: 'person', id: 287 })).toBe('/person/287');
+  });
+});
+
+describe('People’s address', () => {
+  it('carries the type, the title facets, the traits and the order, and reads them back', () => {
+    const view = {
+      type: 'movie' as const,
+      chips: ['genre-27', 'country-KR'],
+      traits: ['role-director', 'gender-Q6581072'],
+      order: 'born_desc',
+    };
+    const href = peopleHref(view);
+    expect(href).toBe(
+      '/people?type=movie&c=genre-27,country-KR&t=role-director,gender-Q6581072&order=born_desc',
+    );
+    expect(parseRoute(href)).toEqual({ page: 'people', ...view });
+    expect(routePath({ page: 'people', ...view })).toBe(href);
+  });
+
+  it('is a bare /people for its defaults, and drops what it cannot read', () => {
+    expect(peopleHref()).toBe('/people');
+    expect(peopleHref({ order: 'prominence' })).toBe('/people');
+    expect(parseRoute('/people')).toEqual({ page: 'people' });
+    expect(parseRoute('/people?type=all&t=role-cast,role-cast,bad%20id&order=popularity')).toEqual({
+      page: 'people',
+      traits: ['role-cast'],
+    });
+    expect(parseRoute('/people/extra')).toEqual({ page: 'library' });
   });
 });
 

@@ -9,6 +9,7 @@
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
     DetailScreen,
+    PeopleScreen,
     PersonScreen,
     PlayerScreen,
     preloadScreens,
@@ -56,7 +57,7 @@
   import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
   import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
-  import { titleHref, type Explore, type Route } from './lib/route';
+  import { titleHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import { discoverServices } from './lib/discoverServices';
   import {
@@ -86,6 +87,7 @@
     session,
     query = '',
     explore = {},
+    people = {},
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -95,6 +97,8 @@
     query?: string;
     /** What Search's Explore state is browsing, from the address as `query` is. */
     explore?: Explore;
+    /** What People is browsing, from the address as `explore` is. */
+    people?: PeopleView;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -312,6 +316,7 @@
     if (page) void DetailScreen.load();
     else if (route.page === 'person') void PersonScreen.load();
     else if (route.page === 'search') void SearchScreen.load();
+    else if (route.page === 'people') void PeopleScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
   });
   $effect(() => {
@@ -978,6 +983,7 @@
       route.page === 'title' ||
       route.page === 'person' ||
       route.page === 'search' ||
+      route.page === 'people' ||
       route.page === 'watchlist' ||
       route.page === 'service'
     )
@@ -1218,6 +1224,10 @@
     seeds={[...seeds.watched, ...seeds.watchlisted]}
     owned={seeds.owned}
   />
+{:else if route.page === 'people' && !PeopleScreen.current}
+  <Loading label="Loading" page />
+{:else if route.page === 'people'}
+  <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
 {:else if route.page === 'watchlist'}
   {#if !library}
     <p class="note">

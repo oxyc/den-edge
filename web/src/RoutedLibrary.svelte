@@ -6,17 +6,19 @@
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
   import { localLibraryKey } from './lib/localLibrary';
-  import type { Explore, Route } from './lib/route';
+  import type { Explore, PeopleView, Route } from './lib/route';
   import { LinkScreen, SettingsScreen } from './lib/screens.svelte';
   let {
     link,
     query,
     explore,
+    people,
     onchange,
   }: {
     link: Link | null;
     query: string;
     explore: Explore;
+    people: PeopleView;
     onchange: (route: Route) => void;
   } = $props();
   // With no TV, the browser's own library: the whole app, kept here, until a TV is linked.
@@ -54,7 +56,7 @@
         <Loading label="Loading" page />
       {/if}
     {:else}
-      <Library {link} {session} {route} {active} {query} {explore} />
+      <Library {link} {session} {route} {active} {query} {explore} {people} />
     {/if}
   {/snippet}
 </Router>
