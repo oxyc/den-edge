@@ -204,6 +204,8 @@
   /** The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick. */
   let chosenRelease: string | undefined = untrack(() => filename);
   let session = $state<Session | null>(null);
+  /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
+  let sessionRoute: string | undefined;
   let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
   let key = $state('');
   let badKey = $state(false);
@@ -354,8 +356,13 @@
       ...(excluded.length ? { exclude: [...excluded] } : {}),
       ...extra,
       ...pick,
+      // den-remux keeps the session being replaced playing until this one serves media, rather than ending it as
+      // soon as this is asked for. Only a session of the same route: another route's (a move to cast) may belong to
+      // another owner there, and is not ended by this one anyway.
+      ...(replacing?.sid && sessionRoute === route ? { replaces: replacing.sid } : {}),
     };
-    const result = await startSession(request, undefined, route);
+    const on = route;
+    const result = await startSession(request, undefined, on);
     if (ended || (replacing && session !== replacing)) {
       if (!('failure' in result)) endSession(result);
       return false;
@@ -391,6 +398,7 @@
     hold = result.prebuffer ? new PrebufferHold(result.prebuffer, performance.now()) : null;
     startsIn = null;
     session = result;
+    sessionRoute = on;
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
     if (castOffered && !(result.castOrigin && result.publicBase)) {

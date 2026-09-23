@@ -34,6 +34,7 @@ const castPage = (mode) => `<!doctype html><script>
 </script>`;
 
 const session = (base, n) => ({
+  sid: n,
   playlist: `/${base}/s/${n}/sig/master.m3u8`,
   duration: 60,
   release: { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1 },
@@ -42,7 +43,7 @@ const session = (base, n) => ({
   audioTracks: [],
 });
 
-async function open(mode) {
+async function open(mode, { releases = [] } = {}) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
@@ -61,7 +62,7 @@ async function open(mode) {
     asked.direct.push(r.request().postDataJSON());
     return r.fulfill({ status: 201, json: session('direct', `d${asked.direct.length}`) });
   });
-  await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases: [] } }));
+  await page.route(`${ORIGIN}/direct/releases`, (r) => r.fulfill({ json: { releases } }));
   await page.route(`${ORIGIN}/direct/s/**`, async (r) => {
     const request = r.request();
     const path = new URL(request.url()).pathname;
@@ -131,6 +132,31 @@ test('Cast with no Chromecast on the network leaves the video playing', async ()
   }
 });
 
+// Another release picked mid-film is a new session. den-remux gives a browser one, and ended the playing one as soon
+// as the new one was asked for, unless the request names it as the one replaced.
+test('a release picked mid-film names the session it replaces, which the page ends once the new one is in', async () => {
+  const { browser, page, asked } = await open('none', {
+    releases: [
+      { label: 'Fixture 1080p', filename: 'fixture.mkv', size: 1, plays: 'yes' },
+      { label: 'Other 720p', filename: 'other.mkv', size: 1, plays: 'yes' },
+    ],
+  });
+  try {
+    await playingPast(page, 3);
+    expect(asked.direct[0]).not.toHaveProperty('replaces');
+    await page.getByRole('combobox', { name: 'Release' }).selectOption('other.mkv');
+    await expect.poll(() => asked.direct.length).toBe(2);
+    expect(asked.direct[1]).toMatchObject({
+      filename: 'other.mkv',
+      transcode: 'never',
+      replaces: 'd1',
+    });
+    await expect.poll(() => asked.ended).toEqual(['/direct/s/d1/sig']);
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const [mode, what] of [
   ['receiver', 'fails to play'],
   ['silent', 'never plays'],
@@ -144,6 +170,8 @@ for (const [mode, what] of [
       // A receiver was seen, so playback moved to the relay, starting where the video was.
       await expect.poll(() => asked.relay.length).toBe(1);
       expect(asked.relay[0].startAt).toBeGreaterThanOrEqual(Math.floor(before));
+      // Another route's session may be another owner's at den-remux: not named as replaced.
+      expect(asked.relay[0]).not.toHaveProperty('replaces');
       // Then back on the direct route, from that same second — not retried at the relay as a conversion.
       await expect.poll(() => asked.direct.length, { timeout: 60_000 }).toBe(2);
       const back = asked.direct[1];
@@ -152,6 +180,7 @@ for (const [mode, what] of [
       expect(back.playable, 'asked as the same browser, not as one that refused').toEqual(
         asked.direct[0].playable,
       );
+      expect(back).not.toHaveProperty('replaces');
       await expect(page.locator('.player iframe[title="Den Cast player"]')).toHaveCount(0);
       await expect
         .poll(() =>

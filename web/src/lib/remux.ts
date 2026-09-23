@@ -12,6 +12,8 @@ import type { Entry } from './routes';
 import { relayFetch } from './relayFetch';
 
 export interface Session {
+  /** den-remux's id for the session, which a replacement names (`Want.replaces`). */
+  sid?: string;
   /** `/remux/s/<sid>/<sig>/master.m3u8`: a signed URL, so AirPlay can play it too. */
   playlist: string;
   /** Session-bound bandwidth probe under the same signature as the playlist. */
@@ -112,6 +114,11 @@ export interface Want {
   transcode?: 'never';
   /** Only a copy that fits `maxBitrate`, or nothing (`noFit`): a switch away from a release the link can't carry. */
   fitsOnly?: boolean;
+  /**
+   * The session this one replaces mid-film: den-remux keeps it playing, one past this browser's share, until this one
+   * serves media, instead of ending it as soon as this is asked for.
+   */
+  replaces?: string;
 }
 
 export type Failure =
