@@ -504,8 +504,12 @@ test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action o
     await expect(selected.getByRole('button', { name: 'Remove Action' })).toBeVisible();
     await expect(card(200)).toBeVisible();
     await expect(card(205)).toHaveCount(0);
-    expect(asked.at(-2)).toContain('with_genres=28');
-    expect(asked.at(-2)).toContain('with_origin_country=SE');
+    // One query carries both picks. Where it lands among the page requests depends on how the feed pages, so
+    // look for it rather than at a fixed position.
+    expect(
+      asked.some((q) => q.includes('with_genres=28') && q.includes('with_origin_country=SE')),
+      asked.join('\n'),
+    ).toBe(true);
     // Action left its section. The feed is loaded whole, and nothing in it is a comedy: no Comedy on offer.
     const genres = rail.getByRole('group', { name: 'Genres' });
     await expect(genres.getByRole('button', { name: 'Action', exact: true })).toHaveCount(0);
