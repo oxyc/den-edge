@@ -38,8 +38,10 @@ export interface Explore {
  * What People is browsing: the type, the title facets that scope which credits count (Explore's ids, `c=`), the
  * person traits picked (`t=`: `role-director`, `gender-Q6581072`, `born-1970`, `born-1976-1996`, `born-from-1976`,
  * `citizenship-Q34`, `occupation-Q33999`) and the order. Each absent for its default: All, no facets, no traits, prominence.
+ * `query` is what is typed in the bar's search field there (`q=`), which offers facets and people by that name.
  */
 export interface PeopleView {
+  query?: string;
   type?: MediaType;
   chips?: string[];
   traits?: string[];
@@ -125,8 +127,10 @@ export function parseRoute(url: string): Route {
     ];
     const [chips, traits] = [list('c'), list('t')];
     const order = params.get('order') ?? '';
+    const query = params.get('q') ?? '';
     return {
       page: 'people',
+      ...(query ? { query } : {}),
       ...(type === 'movie' || type === 'tv' ? { type } : {}),
       ...(chips.length ? { chips } : {}),
       ...(traits.length ? { traits } : {}),
@@ -204,10 +208,17 @@ export function searchHref(query: string, { type, chips = [] }: Explore = {}): s
 }
 
 /** People's address: what it is browsing, so a view of it can be linked and Back takes back the last pick. */
-export function peopleHref({ type, chips = [], traits = [], order }: PeopleView = {}): string {
+export function peopleHref({
+  query = '',
+  type,
+  chips = [],
+  traits = [],
+  order,
+}: PeopleView = {}): string {
   const valid = (ids: string[]) => ids.filter((id) => FACET.test(id));
   const [facets, picked] = [valid(chips), valid(traits)];
   const params = [
+    query.trim() ? `q=${encodeURIComponent(query)}` : '',
     type ? `type=${type}` : '',
     facets.length ? `c=${facets.join(',')}` : '',
     picked.length ? `t=${picked.join(',')}` : '',

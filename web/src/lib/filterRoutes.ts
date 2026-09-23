@@ -554,6 +554,8 @@ export interface FilterValue {
   id: string;
   name: string;
   count: number;
+  /** A person's TMDB id, where Wikidata has it: what their page is addressed by. */
+  tmdbId?: number;
 }
 
 /**
@@ -604,7 +606,14 @@ async function readValues(
     }
     return (values as Record<string, unknown>[]).flatMap((v): FilterValue[] =>
       typeof v.id === 'string' && typeof v.name === 'string'
-        ? [{ id: v.id, name: v.name, count: typeof v.count === 'number' ? v.count : 0 }]
+        ? [
+            {
+              id: v.id,
+              name: v.name,
+              count: typeof v.count === 'number' ? v.count : 0,
+              ...(typeof v.tmdbId === 'number' ? { tmdbId: v.tmdbId } : {}),
+            },
+          ]
         : [],
     );
   } catch (error) {

@@ -77,6 +77,15 @@ async function serveAtlas(page) {
       return r.fulfill({
         json: { total: 3, kinds: { genre: { mode: 'and', complete: true, values: { 18: 3 } } } },
       });
+    // The typeaheads: people by name, and an occupation.
+    if (url.pathname.endsWith('/values/person.json'))
+      return r.fulfill({
+        json: { values: [{ id: 'Q1', name: 'Ann Actor', count: 2, tmdbId: 11 }], complete: true },
+      });
+    if (url.pathname.endsWith('/people/values/occupation.json'))
+      return r.fulfill({
+        json: { values: [{ id: 'Q33999', name: 'actor', count: 2 }], complete: true },
+      });
     return r.fulfill({ json: { values: [], complete: true } });
   });
   await page.route('https://image.tmdb.org/**', (r) =>
@@ -138,6 +147,116 @@ test('People lists who atlas credits, a role narrows it in the address, and Back
     await expect(page).toHaveURL(/\/people$/);
     await expect(card('Ann Actor')).toBeVisible();
     await expect(selected).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('The Explore and People headings link each other, carrying the type and the title facets', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await guardNetwork(page);
+    await serveAtlas(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?type=tv&c=genre-18,rating-7')}`);
+
+    const tabs = active(page).getByRole('navigation', { name: 'Explore or People' });
+    await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
+    await expect(tabs.getByRole('link', { name: 'Explore' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    // The rating floor is TMDB's, and scopes no credits: it stays on Explore.
+    const toPeople = tabs.getByRole('link', { name: 'People' });
+    await expect(toPeople).not.toHaveAttribute('aria-current');
+    await expect(toPeople).toHaveAttribute('href', '/people?type=tv&c=genre-18');
+    await toPeople.focus();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/people\?type=tv&c=genre-18$/);
+    await expect(active(page).getByRole('heading', { name: 'People', exact: true })).toBeVisible();
+    await expect(active(page).getByRole('link', { name: 'People' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+
+    // A person trait is People's alone: the way back takes the type and the genre, not the role.
+    await active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Role' })
+      .getByRole('button', { name: 'Directors', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/people\?type=tv&c=genre-18&t=role-director$/);
+    await active(page)
+      .getByRole('navigation', { name: 'Explore or People' })
+      .getByRole('link', { name: 'Explore' })
+      .click();
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-18$/);
+    await expect(active(page).getByRole('heading', { name: 'Explore', exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('On People the bar’s field offers people facets and people by name, and a pick takes the text’s place', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await guardNetwork(page);
+    const asked = await serveAtlas(page);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/people?type=movie')}`);
+    const view = active(page);
+    await expect(view.getByRole('heading', { name: 'People', exact: true })).toBeVisible();
+
+    const field = page.getByRole('searchbox', { name: 'Search people, nationalities, roles…' });
+    await expect(field).toHaveAttribute('placeholder', 'Search people, nationalities, roles…');
+    await field.fill('act');
+    // The text stays on People, in its address, instead of opening Search.
+    await expect(page).toHaveURL(/\/people\?q=act&type=movie$/);
+
+    const browse = view.getByRole('group', { name: 'Browse' });
+    const actors = browse.getByRole('button', { name: 'Actors · role' });
+    await expect(actors).toBeVisible();
+    await expect(browse.getByRole('button', { name: 'Actor · occupation' })).toBeVisible();
+    // Not a title facet atlas counts no titles for (Action, beside the mock's dramas only).
+    await expect(browse.getByRole('button', { name: /^Action · / })).toHaveCount(0);
+    // And the person the text names, opening their page.
+    const ann = view.getByRole('region', { name: 'People by that name' }).getByRole('link', {
+      name: /^Ann Actor/,
+    });
+    await expect(ann).toHaveAttribute('href', '/person/11');
+    expect(asked.some((path) => path.startsWith('/index/filter/movie/values/person.json?'))).toBe(
+      true,
+    );
+
+    // Picking a chip adds its pill and clears the text, as Explore's Browse row does.
+    await actors.click();
+    await expect(page).toHaveURL(/\/people\?type=movie&t=role-cast$/);
+    await expect(field).toHaveValue('');
+    await expect(
+      view.getByRole('group', { name: 'Selected' }).getByRole('button', { name: 'Remove Actors' }),
+    ).toBeVisible();
+    await expect(view.getByRole('group', { name: 'Browse' })).toHaveCount(0);
+
+    // Enter still searches titles, taking the type along.
+    await field.fill('heat');
+    await field.press('Enter');
+    await expect(page).toHaveURL(/\/search\?q=heat&type=movie$/);
     expect(errors).toEqual([]);
   } finally {
     await browser.close();

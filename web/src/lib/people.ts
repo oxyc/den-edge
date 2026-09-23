@@ -5,10 +5,10 @@
 // address's `t=`.
 
 import { filterItems } from './facetCounts';
-import { exploreChips, type Chip, type ChipGroup } from './explore';
+import { browseChips, exploreChips, FOR_YOU, type Chip, type ChipGroup } from './explore';
 import { TRAIT_KINDS, type FilterItem, type PeopleCounts } from './filterRoutes';
 import type { ExploreType } from './library';
-import { FACET } from './route';
+import { FACET, likeOf, type Explore, type PeopleView } from './route';
 
 /** The traits, in the order the rail lists them. */
 export const TRAITS = ['role', 'gender', 'born', 'citizenship', 'occupation'] as const;
@@ -166,6 +166,49 @@ export function titleChips(type: ExploreType): Chip[] {
       chip.group !== 'for-you' &&
       chip.group !== 'rating' &&
       filterItems([chip.id], type) !== undefined,
+  );
+}
+
+/**
+ * What Explore's tab link to People carries: the type, and the title facets atlas's people filter can read. For You
+ * (one's own taste), a rating floor (TMDB's) and a "Like" (one title's neighbours) scope no credits, so they stay
+ * behind, as does a typed query.
+ */
+export function peopleFromExplore({ type, chips = [] }: Explore): PeopleView {
+  const kept = chips.filter(
+    (id) =>
+      id !== FOR_YOU &&
+      !id.startsWith('rating-') &&
+      !likeOf(id) &&
+      filterItems([id], type ?? 'all') !== undefined,
+  );
+  return { ...(type ? { type } : {}), ...(kept.length ? { chips: kept } : {}) };
+}
+
+/**
+ * What People's tab link to Explore carries: the type and the title facets, which are Explore's own ids. The person
+ * traits, the order and the typed text are People's alone.
+ */
+export const exploreFromPeople = ({ type, chips = [] }: PeopleView): Explore => ({
+  ...(type ? { type } : {}),
+  ...(chips.length ? { chips: [...chips] } : {}),
+});
+
+/**
+ * What the bar's search field offers on People, as Explore's Browse row does: the person traits the text names (a
+ * role, a gender, a birth decade), then the nationalities and occupations atlas found by it (`found`), then the title
+ * facets it names. Each once, and only those `offered` (not picked, and able to stand beside the picks).
+ */
+export function peopleSuggestions(
+  query: string,
+  listed: Chip[],
+  found: Chip[],
+  offered: (id: string) => boolean,
+): Chip[] {
+  const matched = browseChips(query, listed);
+  const trait = (chip: Chip) => traitItem(chip.id) !== undefined;
+  return [...matched.filter(trait), ...found, ...matched.filter((chip) => !trait(chip))].filter(
+    (chip, at, all) => offered(chip.id) && all.findIndex((other) => other.id === chip.id) === at,
   );
 }
 

@@ -21,7 +21,9 @@
     explore = { type: route.type, chips: route.chips };
   });
   const peopleOf = (r: typeof route): PeopleView =>
-    r.page === 'people' ? { type: r.type, chips: r.chips, traits: r.traits, order: r.order } : {};
+    r.page === 'people'
+      ? { query: r.query, type: r.type, chips: r.chips, traits: r.traits, order: r.order }
+      : {};
   let people = $state<PeopleView>(untrack(() => peopleOf(route)));
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
@@ -51,7 +53,7 @@
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>
 
-<NavigationBar {route} {query} />
+<NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
 <main style="padding:var(--bar-space) var(--gutter);max-width:1400px;margin:0 auto;overflow-x:clip">
   <Router onchange={(next) => (route = next)}>
     {#snippet children(route, active)}

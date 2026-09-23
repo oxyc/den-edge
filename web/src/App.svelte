@@ -107,7 +107,9 @@
   });
   // And what People is browsing.
   const peopleOf = (r: typeof route): PeopleView =>
-    r.page === 'people' ? { type: r.type, chips: r.chips, traits: r.traits, order: r.order } : {};
+    r.page === 'people'
+      ? { query: r.query, type: r.type, chips: r.chips, traits: r.traits, order: r.order }
+      : {};
   let people = $state<PeopleView>(untrack(() => peopleOf(route)));
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
@@ -126,7 +128,8 @@
   {/if}
 </svelte:head>
 
-<NavigationBar {route} {query} />
+<!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
+<NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
 <InviteDialog />
 <ConnectDialog />
 

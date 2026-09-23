@@ -4,8 +4,14 @@
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
-  import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
+  import { exploreFromPeople } from '../lib/people';
+  import { parseRoute, peopleHref, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
+  /**
+   * On People the field finds people and facets there: what is typed stays in People's address (`q=`) instead of
+   * opening Search, and Enter still searches titles.
+   */
+  const onPeople = $derived(route.page === 'people');
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
   // else — Back, a shared link, leaving search — and leads it only while someone is typing.
   let text = $state(untrack(() => query));
@@ -31,16 +37,19 @@
   function commit(top = true) {
     clearTimeout(pending);
     pending = undefined;
-    if (route.page !== 'search') return;
-    navigate(searchHref(text, explore()), true);
+    if (route.page === 'search') navigate(searchHref(text, explore()), true);
+    else if (route.page === 'people') navigate(peopleHref({ ...route, query: text }), true);
+    else return;
     if (top) window.scrollTo({ top: 0, behavior: 'instant' });
   }
   // eslint-disable-next-line svelte/prefer-writable-derived -- Focus must expand synchronously within the iPhone tap; route changes reconcile it after navigation.
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
+  // By page, not by route: each letter typed on People is a new route there, and must not fold a phone's field away.
+  const page = $derived(route.page);
   $effect(() => {
-    expanded = route.page === 'search';
+    expanded = page === 'search';
   });
   /**
    * Search opened fresh — loaded, reloaded, or come back to from another tab — puts the cursor in the field, so it
@@ -77,6 +86,10 @@
     });
     input?.blur();
     toggle?.focus({ preventScroll: true });
+    if (onPeople && text) {
+      text = '';
+      commit(false);
+    }
     // The address, not just the prop: opening and cancelling within one tick — which a fast tap does, and a
     // test does reliably — leaves the route prop still showing the page search was opened from, and Cancel
     // would do nothing at all. Out of Search in one step, however many chips were picked in it.
@@ -90,7 +103,7 @@
   function searchChanged() {
     // Arriving at search is a navigation, and happens at once. Every letter after that rewrites the same entry,
     // or Back would walk the spelling of what was typed instead of returning to the page it started from.
-    if (route.page !== 'search') {
+    if (route.page !== 'search' && !onPeople) {
       navigate(searchHref(text));
       return;
     }
@@ -102,7 +115,12 @@
   function submitted(event: SubmitEvent) {
     event.preventDefault();
     if (route.page === 'search') commit();
-    else navigate(searchHref(text, explore()));
+    else if (route.page === 'people') {
+      // Enter searches titles, as it does everywhere else, taking the type and title facets along.
+      clearTimeout(pending);
+      pending = undefined;
+      navigate(searchHref(text, exploreFromPeople(route)));
+    } else navigate(searchHref(text, explore()));
     input?.blur();
   }
   /**
@@ -119,7 +137,7 @@
   }
   /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
   function escaped() {
-    if (!text.trim() || route.page !== 'search') {
+    if (!text.trim() || (route.page !== 'search' && !onPeople)) {
       closeSearch();
       return;
     }
@@ -151,7 +169,7 @@
 </script>
 
 <div class="bar-anchor">
-  <header class="bar glass" class:searching={expanded}>
+  <header class="bar glass" class:searching={expanded} class:people={onPeople}>
     <div class="leading">
       <a class="brand" href="/" aria-label="Den home"
         ><img src={icon} width="54" height="32" alt="" /></a
@@ -177,14 +195,20 @@
         bind:this={input}
         bind:value={text}
         type="search"
-        aria-label="Search titles, people, moods, languages…"
-        placeholder={narrow.current
-          ? 'Titles, people, moods…'
+        aria-label={onPeople
+          ? 'Search people, nationalities, roles…'
           : 'Search titles, people, moods, languages…'}
+        placeholder={onPeople
+          ? narrow.current
+            ? 'People, nationalities, roles…'
+            : 'Search people, nationalities, roles…'
+          : narrow.current
+            ? 'Titles, people, moods…'
+            : 'Search titles, people, moods, languages…'}
         autocomplete="off"
         enterkeyhint="search"
         onfocus={() => {
-          if (route.page !== 'search') navigate(searchHref(text));
+          if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
         }}
         oninput={searchChanged}
         onblur={() => {
@@ -194,7 +218,7 @@
           if (event.key === 'Escape') {
             event.preventDefault();
             escaped();
-          } else if (event.key === 'ArrowDown' && route.page === 'search') {
+          } else if (event.key === 'ArrowDown' && (route.page === 'search' || onPeople)) {
             event.preventDefault();
             void intoResults();
           }
@@ -318,9 +342,10 @@
     outline: 1px solid var(--muted);
   }
 
-  /* On search, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
+  /* On search and People, at a laptop's width and up, room for the whole placeholder: it says what can be searched. */
   @media (width >= 1100px) {
-    .searching .search {
+    .searching .search,
+    .people .search {
       flex: 0 1 400px;
       max-width: 420px;
     }

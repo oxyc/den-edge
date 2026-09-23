@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   bornRangeId,
   bornRangeOf,
+  exploreFromPeople,
+  peopleFromExplore,
+  peopleSuggestions,
   pendingTraitChip,
   pickTrait,
   titleChips,
@@ -142,5 +145,69 @@ describe('People’s title facets', () => {
       { kind: 'genre', id: '27' },
       { kind: 'decade', id: '1990' },
     ]);
+  });
+});
+
+describe('Carrying a view between Explore and People', () => {
+  it('takes Explore’s type and the title facets People reads, and leaves the rest', () => {
+    expect(
+      peopleFromExplore({
+        type: 'tv',
+        chips: ['genre-27', 'for-you', 'rating-7', 'like-tv-1396', 'country-KR', 'person-Q25191'],
+      }),
+    ).toEqual({ type: 'tv', chips: ['genre-27', 'country-KR', 'person-Q25191'] });
+    expect(peopleFromExplore({ chips: ['for-you', 'rating-8'] })).toEqual({});
+    expect(peopleFromExplore({})).toEqual({});
+  });
+
+  it('gives Explore People’s type and title facets, without traits, order or text', () => {
+    expect(
+      exploreFromPeople({
+        query: 'nolan',
+        type: 'movie',
+        chips: ['genre-27', 'decade-1990'],
+        traits: ['role-director'],
+        order: 'name',
+      }),
+    ).toEqual({ type: 'movie', chips: ['genre-27', 'decade-1990'] });
+    expect(exploreFromPeople({ traits: ['gender-Q6581072'] })).toEqual({});
+  });
+
+  it('comes back to the same title facets after a round trip', () => {
+    const explore = { type: 'movie' as const, chips: ['genre-27', 'country-KR'] };
+    expect(exploreFromPeople(peopleFromExplore(explore))).toEqual(explore);
+  });
+});
+
+describe('The search field’s suggestions on People', () => {
+  const listed = [...traitChips(counts), ...titleChips('all')];
+  const everything = () => true;
+
+  it('names a role by its word', () => {
+    expect(peopleSuggestions('director', listed, [], everything)[0]?.id).toBe('role-director');
+    expect(peopleSuggestions('fem', listed, [], everything)[0]?.id).toBe('gender-Q6581072');
+  });
+
+  it('puts the traits first, then what atlas found, then title facets, each once', () => {
+    const found = [
+      { id: 'citizenship-Q34', label: 'Sweden', group: 'citizenship' as const },
+      { id: 'occupation-Q1', label: 'Swedish chef', group: 'occupation' as const },
+    ];
+    const ids = peopleSuggestions('swed', listed, found, everything).map((c) => c.id);
+    expect(ids.slice(0, 2)).toEqual(['citizenship-Q34', 'occupation-Q1']);
+    expect(ids.filter((id) => id === 'citizenship-Q34')).toHaveLength(1);
+    expect(ids.slice(2).length).toBeGreaterThan(0);
+    expect(ids.slice(2).every((id) => !id.startsWith('citizenship-'))).toBe(true);
+  });
+
+  it('offers only what may be picked', () => {
+    const ids = peopleSuggestions('direct', listed, [], (id) => id !== 'role-director').map(
+      (c) => c.id,
+    );
+    expect(ids).not.toContain('role-director');
+  });
+
+  it('offers nothing for text that names nothing', () => {
+    expect(peopleSuggestions('zzqx', listed, [], everything)).toEqual([]);
   });
 });
