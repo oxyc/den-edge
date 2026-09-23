@@ -255,6 +255,35 @@ test('a late search cannot replace a newer query', async () => {
   }
 });
 
+// Each chip and Movies/Series switch is its own history entry, so a Cancel that stepped back once walked
+// through every pick, one tap each, before it ever left Search.
+test('Cancel leaves Search in one tap, however many picks were made in it', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 800 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(FIXTURE);
+    await openSearch(page, 390);
+    const chip = (name) => active(page).getByRole('button', { name, exact: true });
+    await chip('Action').click();
+    await expect(page).toHaveURL(/\/search\?c=genre-28$/);
+    await chip('Series').click();
+    await expect(page).toHaveURL(/\/search\?type=tv&c=genre-10759$/);
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page).toHaveURL(HOME);
+    // And Forward still leads back into Search, so nothing was thrown away.
+    await page.goForward();
+    await expect(page).toHaveURL(/\/search/);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Explore browses before typing, remaps across types, and comes back after a query', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

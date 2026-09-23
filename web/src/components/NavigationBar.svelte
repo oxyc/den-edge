@@ -3,7 +3,7 @@
   import DetailIcon from './DetailIcon.svelte';
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import { navigate, navigateBack } from '../lib/navigation';
+  import { navigate, navigateBack, navigateOut } from '../lib/navigation';
   import { parseRoute, searchHref, type Explore, type Route } from '../lib/route';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
@@ -79,8 +79,8 @@
     toggle?.focus({ preventScroll: true });
     // The address, not just the prop: opening and cancelling within one tick — which a fast tap does, and a
     // test does reliably — leaves the route prop still showing the page search was opened from, and Cancel
-    // would do nothing at all.
-    if (searching()) navigateBack();
+    // would do nothing at all. Out of Search in one step, however many chips were picked in it.
+    if (searching()) navigateOut();
   }
   const searching = () =>
     route.page === 'search' || parseRoute(location.pathname + location.search).page === 'search';
