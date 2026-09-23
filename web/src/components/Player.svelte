@@ -51,8 +51,17 @@
     restartAfterMeasure,
     swapNotice,
   } from '../lib/releaseVerdicts';
-  import { reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
+  import { aheadIn, reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
   import { stuckWatch } from '../lib/stuckWatch';
+  import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
+  import {
+    bytesBetween,
+    DeliveryMeter,
+    scaleDemand,
+    shouldSwitch,
+    switchAsk,
+    waitAt,
+  } from '../lib/switchPolicy';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -139,7 +148,9 @@
     | 'source'
     | 'public'
     | 'ipv6'
-    | 'cast',
+    | 'cast'
+    | 'noCopy'
+    | 'noFit',
     string
   > = {
     public: 'Playback isn’t available from this network yet.',
@@ -151,6 +162,9 @@
     playback: 'This browser couldn’t play this release. Try it on your TV.',
     // Deliberately not "couldn't play": the release stopped arriving, and playing it again usually works.
     source: 'This release stopped responding. Try it again, or pick another one.',
+    noCopy: 'This can’t be played on this device right now. Try it on your TV.',
+    noFit:
+      'No release of this fits this connection as it is. Try it again on a faster one, or on your TV.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
@@ -233,6 +247,29 @@
   let noHint = false;
   /** Whether anything of the playing session has arrived: its first frame here, or the cast page's metadata. */
   let played = false;
+  /** Releases of this title a switch moved away from (`switchAway`), not asked for again; the viewer's pick clears it. */
+  let excluded: string[] = [];
+  let switching = false;
+  /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was. */
+  let playedSecs = 0;
+  let lastPosition: number | undefined;
+  /** What the playing session's media is really arriving at. */
+  let meter = new DeliveryMeter();
+  /** Set once no other copy fitted the link: this one plays on, and delivery is not weighed again. */
+  let deliveryGaveUp = false;
+  /** Shown while the link is slower than the playing release needs, and nothing else fits it. */
+  let struggling = $state(false);
+  /**
+   * The bytes of the playing session's fragments against what den-remux said it sends for the same stretches
+   * (`segments`): the share of its demand that really comes, which `waitAt` is weighed with.
+   */
+  let delivered = { bytes: 0, demand: 0 };
+  /** The playing session's start, held until it can play through (`prebuffer`); null once it plays. */
+  let hold: PrebufferHold | null = null;
+  /** What the countdown over a held start says; null when there is none to show. */
+  let startsIn = $state<string | null>(null);
+  /** Said when a change asked for mid-film (another track, another release, casting) couldn't be made as a copy. */
+  let unchanged = $state<string | null>(null);
 
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
@@ -245,20 +282,27 @@
     }
   })();
 
-  /** Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. */
+  /**
+   * Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. `extra`
+   * is what a switch adds to the request. With `replacing`, the session playing now is kept until the new one has
+   * started, and kept for good when none does: true when one did.
+   */
   async function begin(
     pick: { audioTrack?: number; filename: string } | undefined = filename
       ? { filename }
       : undefined,
-  ) {
+    extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
+    replacing?: Session,
+  ): Promise<boolean> {
     clearTimeout(retry);
-    failure = null;
+    if (!replacing) failure = null;
     swapped = null;
+    unchanged = null;
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
       if (!found) {
         failure = found === null ? 'imdb' : 'unreachable';
-        return;
+        return false;
       }
       imdb = found;
     }
@@ -268,9 +312,8 @@
       navigator.languages,
     );
     const claimed = (decodes ??= await playable());
-    // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR
-    // and no E-AC-3, which is what makes den-remux convert the release — sound included — rather than copy
-    // any part of it again.
+    // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
+    // E-AC-3, so den-remux copies another release this browser does decode — never converting one mid-film.
     const can = castMode
       ? castCapabilities(degraded ? 'legacy' : castProfile)
       : degraded
@@ -280,9 +323,11 @@
     // A direct remote origin can be measured before creation. Through the public control relay the link is what this
     // browser remembers (timed on the title's page, or at an earlier play); with nothing remembered, the first session
     // is measured inside and replaced only when what it chose needs more than the link carries (`castMessage`).
-    const maxBitrate = /^https?:/.test(route)
-      ? await linkLimit(route)
-      : (publicMaxBitrate = relayLimit(route, publicMaxBitrate));
+    const maxBitrate =
+      extra.maxBitrate ??
+      (/^https?:/.test(route)
+        ? await linkLimit(route)
+        : (publicMaxBitrate = relayLimit(route, publicMaxBitrate)));
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
@@ -306,37 +351,60 @@
       player: castMode ? 'cast' : nativeHls(document.createElement('video')) ? 'native' : 'hls.js',
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
+      ...(excluded.length ? { exclude: [...excluded] } : {}),
+      ...extra,
       ...pick,
     };
     const result = await startSession(request, undefined, route);
-    if (ended) {
+    if (ended || (replacing && session !== replacing)) {
       if (!('failure' in result)) endSession(result);
-      return;
+      return false;
     }
     if ('failure' in result) {
+      if (replacing) return false;
       failure = result.failure;
       if (result.failure === 'busy' || result.failure === 'transcode')
         // What it asked for, where it said: a converting GPU can mean minutes, and knocking every
         // twenty seconds until then is work for a box that is already the reason we are waiting.
-        retry = setTimeout(() => void begin(pick), result.retryMs ?? RETRY_MS);
-      return;
+        retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
+      return false;
+    }
+    if (replacing) {
+      // The new session is in hand: only now is the one playing let go.
+      watcher?.stop();
+      watcher = undefined;
+      hls?.destroy();
+      hls = undefined;
+      endSession(replacing);
     }
     started = at;
     askedMaxBitrate = maxBitrate;
     played = false;
+    // A switch keeps the early window it was made in: the time already played counts, or every switch would open
+    // another thirty seconds for the next.
+    if (!replacing) playedSecs = 0;
+    lastPosition = undefined;
+    meter = new DeliveryMeter();
+    delivered = { bytes: 0, demand: 0 };
+    deliveryGaveUp = false;
+    struggling = false;
+    hold = result.prebuffer ? new PrebufferHold(result.prebuffer, performance.now()) : null;
+    startsIn = null;
     session = result;
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
     if (castOffered && !(result.castOrigin && result.publicBase)) {
       castOffer = 'none';
       leaveCast();
-      return;
+      return true;
     }
-    swapped = swapNotice(
-      pick?.filename,
-      result,
-      (name) => releases.find((r) => r.filename === name)?.label ?? name,
-    );
+    // A switch is silent: the viewer sees the picture pause, not a notice about which file plays now.
+    if (!replacing)
+      swapped = swapNotice(
+        pick?.filename,
+        result,
+        (name) => releases.find((r) => r.filename === name)?.label ?? name,
+      );
     if (!releases.length) {
       void listReleases({ imdb, season, episode, scout: scout.install }, undefined, route, {
         videoCodecs: request.videoCodecs,
@@ -345,6 +413,64 @@
         releases = list ?? [];
       });
     }
+    return true;
+  }
+
+  /**
+   * Move the playing session to another release that plays copied, from the second it is at (`switchPolicy`): for a
+   * decoder that can't go on, narrowing what this browser claims; for a link that can't carry this one, one that fits
+   * the rate it is really getting. Never a transcode, and the release playing now keeps playing until the other has
+   * started — or for good, where none will do. True when it moved.
+   */
+  async function switchAway(reason: 'decode' | 'delivery', rate?: number): Promise<boolean> {
+    const current = session;
+    if (!current || switching) return false;
+    switching = true;
+    try {
+      if (reason === 'decode') degraded = true;
+      const at = video?.currentTime ?? remoteTime;
+      const total = length();
+      if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
+      const moved = await begin(
+        undefined,
+        switchAsk(reason, current.release.filename, excluded, rate),
+        current,
+      );
+      if (moved) excluded = [...excluded, current.release.filename];
+      else startAt = null;
+      return moved;
+    } finally {
+      switching = false;
+    }
+  }
+
+  /**
+   * Weigh the link as it is delivering against what the playing copy asks of it (`shouldSwitch`), and move early to
+   * one it carries when even a viewer's wait wouldn't do. Past the early window, or with nothing that fits, it plays on.
+   */
+  function weighDelivery() {
+    const current = session;
+    const element = video;
+    if (!current?.segments || !element || switching || deliveryGaveUp || castMode) return;
+    const total = length();
+    const buffered = element.buffered;
+    const reach = buffered.length ? buffered.end(buffered.length - 1) : element.currentTime;
+    if (!hls)
+      meter.reached(performance.now(), bytesBetween(current.segments, total, started ?? 0, reach));
+    const live = meter.rate();
+    if (!live) return;
+    // What den-remux said it sends, scaled by the share of it that came for the fragments loaded so far.
+    const demand = scaleDemand(current.segments, delivered);
+    const wait = waitAt(demand, total, element.currentTime, reach, live.bitsPerSecond);
+    const signal = { kind: 'delivery' as const, wait, measuredMs: live.spanMs };
+    if (!shouldSwitch(signal, { playedSecs, shownFrame: played })) return;
+    void switchAway('delivery', live.bitsPerSecond).then((moved) => {
+      // Nothing fits the link as it is: this release plays on, and the viewer is told why it pauses.
+      if (!moved && session === current) {
+        deliveryGaveUp = true;
+        struggling = true;
+      }
+    });
   }
 
   async function letIn(event: SubmitEvent) {
@@ -378,13 +504,18 @@
           void broke(
             element.error?.code ?? 0,
             `no picture after ${STUCK_MS / 1000} s with nothing arriving (readyState ${element.readyState}, networkState ${element.networkState})`,
+            'other',
           );
         }
       },
       arrived,
     );
-    // Bytes arriving: the element's own fetches (a native player's `progress`), and hls.js's fragments (below).
-    const arriving = () => stuck.progress();
+    // Bytes arriving: the element's own fetches (a native player's `progress`), and hls.js's fragments (below). Each
+    // is also a moment to weigh the link as it is delivering against what this release asks of it.
+    const arriving = () => {
+      stuck.progress();
+      weighDelivery();
+    };
     element.addEventListener('progress', arriving);
     const cleanup = () => {
       stuck.stop();
@@ -422,14 +553,27 @@
       });
       hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
         if (data.frag.type === 'subtitle') return;
-        finished += (data.part ?? data.frag).stats.loaded;
+        const stats = (data.part ?? data.frag).stats;
+        const bytes = stats.loaded || stats.total;
+        finished += bytes;
         loading = undefined;
+        // The link's time is from the first byte to the last: before it, den-remux was making the segment.
+        meter.add(stats.loading.end, bytes, stats.loading.first);
+        // What came against what den-remux said it would send for the same stretch (`deliveredShare`).
+        delivered.bytes += bytes;
+        if (session?.segments)
+          delivered.demand += bytesBetween(
+            session.segments,
+            length(),
+            data.frag.start,
+            data.frag.start + data.frag.duration,
+          );
         arriving();
       });
       watcher = watchPlayback({ video: element, hls: { instance: hls, Hls }, reportUrl });
       // A fatal media error is sometimes just a decoder that lost its place, which hls.js can reset the buffer and
-      // carry on from. Try that once per session; a second one is a real refusal and goes to broke() as before, so
-      // the release is still asked for again as a player that takes none of what it just refused.
+      // carry on from. Try that once per session; a second one is a real refusal, and the session moves to a copy
+      // this browser does decode (`switchAway`).
       let recovered = false;
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) return;
@@ -438,7 +582,11 @@
           hls?.recoverMediaError();
           return;
         }
-        void broke(0, `hls.js ${data.type} ${data.details}`);
+        void broke(
+          0,
+          `hls.js ${data.type} ${data.details}`,
+          data.type === Hls.ErrorTypes.MEDIA_ERROR ? 'decode' : 'other',
+        );
       });
       // hls.js has its subtitle tracks once the master is parsed, and would otherwise show the DEFAULT one.
       hls.on(Hls.Events.MANIFEST_PARSED, applySubtitles);
@@ -446,6 +594,34 @@
       hls.attachMedia(element);
     });
     return stopWatching;
+  });
+
+  // A start that needs a head start (`prebuffer`) waits for it, paused, rather than starting and then stalling — with a
+  // countdown where that is more than a moment (`PrebufferHold`), gone the moment it plays.
+  $effect(() => {
+    const [current, element, held] = [session, video, hold];
+    if (!current || current.castOrigin || !element || !held) return;
+    const tick = setInterval(() => {
+      if (hold !== held) return clearInterval(tick);
+      const { ready, seconds } = held.update(
+        aheadIn(element.buffered, element.currentTime),
+        performance.now(),
+      );
+      if (ready) {
+        clearInterval(tick);
+        hold = null;
+        startsIn = null;
+        element
+          .play()
+          .catch((error: unknown) =>
+            console.warn('The held start could not play on its own; its controls can.', error),
+          );
+        return;
+      }
+      startsIn = seconds === null ? null : countdownLabel(seconds);
+      if (!element.paused) element.pause();
+    }, 250);
+    return () => clearInterval(tick);
   });
 
   function sendToCastFrame(): void {
@@ -547,9 +723,10 @@
     } else if (message.type === 'den-cast-request') {
       const profile = message.profile ?? 'legacy';
       if (!castMode || castProfile !== profile) {
+        const was = { castMode, castProfile };
         castProfile = profile;
         castMode = true;
-        restart({ filename: current.release.filename });
+        restart({ filename: current.release.filename }, () => ({ castMode, castProfile } = was));
       }
     } else if (message.type === 'den-cast' && message.state === 'playing') {
       casting = true;
@@ -573,7 +750,8 @@
         leaveCast();
         return;
       }
-      void broke(0, message.message ?? 'cast player failed');
+      // A receiver that can't play what it was sent: a copy its conservative profile takes, as a decoder's refusal.
+      void broke(0, message.message ?? 'cast player failed', 'decode');
     }
   }
 
@@ -605,7 +783,10 @@
     route = RELAY;
     // Whatever the cast page reports is about this session alone: an earlier cast's position must not stand in for it.
     remoteTime = 0;
-    restart({ filename: session.release.filename });
+    restart({ filename: session.release.filename }, () => {
+      castOffered = false;
+      route = routeBeforeCast;
+    });
   }
 
   /** Back to the route this page started on, at the second the cast page got to — or the one Cast was pressed at. */
@@ -678,8 +859,16 @@
     };
   }
 
-  /** The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. */
-  async function broke(code = video?.error?.code ?? 0, message = video?.error?.message ?? '') {
+  /**
+   * The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. `kind` is
+   * whether the decoder refused it (`MediaError` 3 or 4, a media error hls.js couldn't recover), which moves the
+   * session to another copy; anything else stops here.
+   */
+  async function broke(
+    code = video?.error?.code ?? 0,
+    message = video?.error?.message ?? '',
+    kind: 'decode' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
+  ) {
     if (!session || failure) return;
     const current = session;
     watcher?.spent();
@@ -703,16 +892,11 @@
     }
     // The session may have been replaced while that was asked.
     if (session !== current || failure) return;
-    // It was copied because this browser said it could take it, and it couldn't. Ask for the same release
-    // again as a player that takes none of what it just refused: den-remux had that file queued as the
-    // fallback it converts, so this is the ask it was waiting for. A conversion that won't decode is not
-    // helped by converting it again, so this happens once.
-    if (!degraded && !current.video?.transcoded) {
-      degraded = true;
-      restart({ filename: current.release.filename });
-      return;
-    }
-    failure = 'playback';
+    // It was copied because this browser said it could take it, and it couldn't: another release, copied, that it
+    // does take, from the same second (`switchPolicy`). Never this one converted — a transcode is chosen before
+    // playback or not at all — and with no such copy, playback stops here and says so.
+    if (kind === 'decode' && (await switchAway('decode'))) return;
+    if (session === current && !failure) failure = 'playback';
   }
 
   /** Where playback stopped: the end of what was buffered, else the play head. */
@@ -860,6 +1044,13 @@
    */
   function tick() {
     const at = video?.currentTime ?? remoteTime;
+    // Playing time, for the early window a switch is judged in: a playing player's forward steps, not its seeks.
+    if (video && !video.paused && !video.seeking && lastPosition !== undefined) {
+      const step = at - lastPosition;
+      if (step > 0 && step < 1) playedSecs += step;
+    }
+    lastPosition = at;
+    weighDelivery();
     warmNext(at);
     if (!segments.length) return;
     active = activeAt(segments, at);
@@ -922,26 +1113,45 @@
     const filename = (event.currentTarget as HTMLSelectElement).value;
     if (!session || filename === session.release.filename) return;
     // Another file gets this browser's full claims: what one release couldn't decode says nothing about
-    // whether the next needs converting.
+    // whether the next needs converting. The viewer's pick is theirs to make, switched-away-from or not.
     degraded = false;
+    excluded = [];
     chosenRelease = filename;
     restart({ filename });
   }
 
-  /** `pick` undefined starts as the player first did: the release it was opened with, else den-remux's choice. */
-  function restart(pick: { audioTrack?: number; filename: string } | undefined) {
-    if (!session) return;
+  /**
+   * Another session for a change asked for: another track, another release, casting. `pick` undefined starts as the
+   * player first did: the release it was opened with, else den-remux's choice.
+   *
+   * Before the first frame it is the start over, chosen as any start is. Once playing it is a replacement: the session
+   * playing now plays on until the new one has started, and a conversion is never what replaces it
+   * (`transcode: 'never'`) — where only one would do, the change isn't made, `undo` puts back what was set for it, and
+   * the viewer is told.
+   */
+  function restart(pick: { audioTrack?: number; filename: string } | undefined, undo?: () => void) {
+    const current = session;
+    if (!current) return;
     report();
     const total = length();
     // Only a position worth carrying. A release refused before it drew a frame sits at zero, and taking that
     // forward would throw away where the library says this was left.
     const at = video?.currentTime ?? remoteTime;
     if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
+    if (played) {
+      void begin(pick, { transcode: 'never' }, current).then((moved) => {
+        if (moved || session !== current) return;
+        startAt = null;
+        undo?.();
+        unchanged = 'That can’t be played here as it is, so this carries on as it was.';
+      });
+      return;
+    }
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
-    endSession(session);
+    endSession(current);
     session = null;
     void begin(pick);
   }
@@ -1130,6 +1340,9 @@
           onended={finished}
           onerror={() => broke()}
         ></video>
+        {#if startsIn}
+          <p class="countdown" role="status">{startsIn}</p>
+        {/if}
       {/if}
     {/if}
     {#if lookOrigin}
@@ -1164,6 +1377,21 @@
         <p class="swap" role="status">
           <span>{swapped}</span>
           <button onclick={() => (swapped = null)}>Dismiss</button>
+        </p>
+      {/if}
+      {#if struggling}
+        <p class="swap" role="status">
+          <span
+            >This connection is slower than this release needs, and no other fits it: it may pause
+            now and then to catch up.</span
+          >
+          <button onclick={() => (struggling = false)}>Dismiss</button>
+        </p>
+      {/if}
+      {#if unchanged}
+        <p class="swap" role="status">
+          <span>{unchanged}</span>
+          <button onclick={() => (unchanged = null)}>Dismiss</button>
         </p>
       {/if}
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
@@ -1447,6 +1675,16 @@
     max-width: 50ch;
     color: rgb(255 255 255 / 0.6);
     text-align: center;
+  }
+
+  /* Over the held picture, clear of the video's own controls along the bottom. */
+  .countdown {
+    position: relative;
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.6);
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
 
   /* The line takes a phone's width to itself and shares a laptop's with the pickers. Its two parts are flex items,

@@ -57,6 +57,12 @@ export interface Session {
    * why `maxSubtitlesPerLanguage` cannot be honoured here however it is set.
    */
   subtitles?: { language: string; name: string }[];
+  /** Bits a second a copy needs to start within 10 s and never run dry; null for a transcode or an unknown one. */
+  need?: number | null;
+  /** Seconds to buffer before playing, on the link this browser named, so it then plays through; null or absent: none. */
+  prebuffer?: number | null;
+  /** Each segment's `[start, bytes]` of a copy: the demand the player weighs its live rate against (`switchPolicy`). */
+  segments?: [number, number][] | null;
 }
 
 export interface AudioTrack {
@@ -97,10 +103,31 @@ export interface Want {
   ipv4Hint?: string;
   /** Asked again after a hinted session never played, or when no address was found: den-edge uses no hint for it. */
   noHint?: boolean;
+  /** Releases not to open: the ones this player switched away from. */
+  exclude?: string[];
+  /**
+   * `never`: no transcode for this request — every one made once playback has started, which a conversion never
+   * replaces. Absent, den-remux's selection decides, a transcode included, before the first frame.
+   */
+  transcode?: 'never';
+  /** Only a copy that fits `maxBitrate`, or nothing (`noFit`): a switch away from a release the link can't carry. */
+  fitsOnly?: boolean;
 }
 
 export type Failure =
-  'login' | 'none' | 'busy' | 'transcode' | 'unreachable' | 'ended' | 'public' | 'ipv6' | 'cast';
+  | 'login'
+  | 'none'
+  | 'busy'
+  | 'transcode'
+  | 'unreachable'
+  | 'ended'
+  | 'public'
+  | 'ipv6'
+  | 'cast'
+  /** Nothing plays here as it is, and no transcode can be had now (the GPU in use, or `transcode: 'never'`). */
+  | 'noCopy'
+  /** No other release fits the link as it is (`fitsOnly`). */
+  | 'noFit';
 
 /**
  * An invited guest's play away from home meets two known limits, not faults: the media address is IPv4-only, and a
@@ -824,6 +851,8 @@ function failureOf(status: number, error: string | undefined, shared: boolean): 
   if (status === 401) return 'login';
   // A shared library's access ran out (`grant_expired`): not a fault of the player.
   if (status === 410 && error === 'grant_expired') return 'ended';
+  if (status === 404 && error === 'no_copy') return 'noCopy';
+  if (status === 404 && error === 'no_fitting_copy') return 'noFit';
   // A revoked or unknown grant is a plain 404 from its `~<gid>` base, which reads like a title with no release —
   // den-remux's own answer for that names itself.
   if (status === 404) return shared && error !== 'no_playable_release' ? 'ended' : 'none';

@@ -245,7 +245,7 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     );
   } else if (Hls.isSupported()) {
     // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
-    hls = new Hls(hlsConfig(start > 0 ? start : undefined));
+    hls = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver'));
     watcher = watchPlayback({ video, hls: { instance: hls, Hls }, reportUrl: reportUrlOf(url) });
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {

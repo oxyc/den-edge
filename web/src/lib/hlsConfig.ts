@@ -16,15 +16,21 @@ import type { HlsConfig } from 'hls.js';
  * holds thirty by default. Its size cap is Chromium's own for one video SourceBuffer, 150 MB — asking for more only
  * ends in a `bufferFullError` — which is two minutes of a 10 Mbit/s film. A minute behind the play head is kept for a
  * seek back and then let go. Only desktop and Android browsers take this path: Apple's play HLS natively
- * (`nativeHls`), so no phone short of memory is asked to hold it.
+ * (`nativeHls`), so no phone short of memory is asked to hold it. A Cast receiver (`receiver`) is: a Chromecast has
+ * a few hundred MB for everything, so it holds a minute or 50 MB ahead and ten seconds behind. den-remux weighs a
+ * release against the same numbers for each (`buffer_of`), so change them together.
  */
-export function hlsConfig(startPosition?: number): Partial<HlsConfig> {
+export function hlsConfig(
+  startPosition?: number,
+  player: 'page' | 'receiver' = 'page',
+): Partial<HlsConfig> {
+  const receiver = player === 'receiver';
   return {
     enableWorker: false,
     startPosition: startPosition ?? -1,
-    maxBufferLength: 120,
-    maxBufferSize: 150 * 1000 * 1000,
-    backBufferLength: 60,
+    maxBufferLength: receiver ? 60 : 120,
+    maxBufferSize: (receiver ? 50 : 150) * 1000 * 1000,
+    backBufferLength: receiver ? 10 : 60,
     fragLoadPolicy: {
       default: {
         maxTimeToFirstByteMs: 30_000,
