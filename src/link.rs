@@ -61,6 +61,12 @@ pub(crate) fn throttled(state: &AppState, ip: &str) -> Option<u64> {
 /// every client here guessed the same way — a fixed few seconds, forever — which turns one refusal into a
 /// steady knock against a door that was going to open on its own.
 pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option<u64> {
+    throttled_by(state, bucket, limit, 1)
+}
+
+/// `throttled_at` for an act that costs `cost` of the budget at once — a drain of several queues costs one per
+/// queue. Refused whole when it does not fit, and then it spends nothing.
+pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
     if claims.len() > 1024 {
@@ -70,10 +76,10 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option
     if t.until <= now {
         t.count = 0;
     }
-    if t.count >= limit {
+    if t.count.saturating_add(cost) > limit {
         return Some(t.until.saturating_sub(now));
     }
-    t.count += 1;
+    t.count += cost;
     t.until = now + CLAIM_WINDOW_MS;
     None
 }

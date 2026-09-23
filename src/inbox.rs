@@ -4,8 +4,8 @@
 //! pairs now.
 
 use crate::handler::{
-    error, header_key, internal, json_reply, link_key, method_not_allowed, read_json, valid_inbox_key,
-    MAX_BODY_BYTES,
+    error, header_key, internal, json_reply, link_key, method_not_allowed, read_json, retry_after,
+    valid_inbox_key, MAX_BODY_BYTES,
 };
 use crate::AppState;
 use axum::extract::Request;
@@ -25,6 +25,8 @@ const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The newest fifty are kept; older ones fall off the front.
 const MAX_MESSAGES: usize = 50;
 const MAX_SEALED_CHARS: usize = 4096;
+/// Queues one `POST /inbox/drain` may take: a TV drains one per linked device, and a household links a handful.
+const MAX_DRAIN_KEYS: usize = 16;
 
 /// Cleanup is independent of requests to an abandoned link. Run once before serving, then hourly.
 pub async fn sweep(state: &AppState) {
@@ -45,9 +47,80 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
-        "/inbox/drain" => drain(state, link_key(&req)).await,
+        "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
+        "/inbox/drain" => {
+            if let Some(wait) = drain_budget(state, &crate::handler::client_ip(state, &req), 1) {
+                return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+            }
+            drain(state, link_key(&req)).await
+        }
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
+}
+
+/// Several queues in one request: `{"keys": [...]}` in, `{"queues": [[...], ...]}` out, in the order asked. A TV
+/// with a handful of linked devices polls every few seconds while in front, and asked once per device.
+///
+/// Each key is still its own credential, exactly as for a single drain: a queue is emptied only for the key that
+/// names it, and one malformed key refuses the request rather than being skipped, so a client never mistakes a
+/// refused key for an empty queue. The keys travel in the body, which is never logged, like the header does for
+/// one.
+async fn drain_many(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    let body = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let Some(keys) = body.get("keys").and_then(Value::as_array) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    };
+    if keys.is_empty() || keys.len() > MAX_DRAIN_KEYS {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    }
+    let Some(keys) =
+        keys.iter().map(|k| k.as_str().filter(|k| valid_inbox_key(k))).collect::<Option<Vec<_>>>()
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
+    };
+    if keys.iter().collect::<std::collections::HashSet<_>>().len() != keys.len() {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_keys"));
+    }
+    if let Some(wait) = drain_budget(state, &ip, keys.len()) {
+        return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
+    let now = state.now();
+    let mut queues = Vec::with_capacity(keys.len());
+    for key in keys {
+        // One queue at a time under the store's write lock, so a drain of many never holds every other writer
+        // for all of them. Nothing is lost by it: a queue that cannot be read is left where it is, answered as
+        // empty and delivered by the next drain; one that cannot be deleted is still handed over, and again next
+        // time, where a paired TV drops what it already applied (den-spec inbox-v1 §3).
+        let _write = state.write_lock.lock().await;
+        queues.push(match load(state, key, now).await {
+            Ok(Some(queue)) => {
+                if let Err(e) = state.store.delete(NS, key).await {
+                    eprintln!("inbox delete: {e}");
+                }
+                queue
+            }
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                eprintln!("inbox read: {e}");
+                Vec::new()
+            }
+        });
+    }
+    json_reply(StatusCode::OK, &json!({ "queues": queues }))
+}
+
+/// Queues drained per address per minute, a queue each whether asked one at a time or together. A drain is a read
+/// and a delete under the store's write lock, and the route answers on the public names: without a budget one
+/// address could keep every other writer waiting. A TV polling seven linked devices every ten seconds spends 42.
+const DRAINS_PER_WINDOW: u32 = 240;
+
+fn drain_budget(state: &AppState, ip: &str, queues: usize) -> Option<u64> {
+    let cost = u32::try_from(queues).unwrap_or(u32::MAX);
+    crate::link::throttled_by(state, &format!("inbox-drain:{ip}"), DRAINS_PER_WINDOW, cost)
 }
 
 async fn append(state: &AppState, req: Request) -> Response {
@@ -156,6 +229,74 @@ mod tests {
         assert_eq!(append(&h, "BAUG").await, StatusCode::OK);
         assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" }), json!({ "sealed": "BAUG" })]);
         assert!(drain(&h).await.is_empty(), "a drain empties the queue");
+    }
+
+    /// A TV with several linked devices drains all of their queues in one request, in the order it named them,
+    /// and each queue is emptied only for its own key.
+    #[tokio::test]
+    async fn several_queues_drain_in_one_request_in_the_order_asked() {
+        let h = Harness::new();
+        let other = "0123456789abcdef0123";
+        let idle = "fedcba9876543210fedc";
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let body = json!({ "inboxKey": other, "sealed": "BBBB" });
+        assert_eq!(h.call("POST", "/inbox/append", Some(body)).await.0, StatusCode::OK);
+
+        let (status, answer) =
+            h.call("POST", "/inbox/drain", Some(json!({ "keys": [other, idle, KEY] }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer, json!({ "queues": [[{ "sealed": "BBBB" }], [], [{ "sealed": "AAEC" }]] }));
+        let (_, again) = h.call("POST", "/inbox/drain", Some(json!({ "keys": [KEY, other] }))).await;
+        assert_eq!(again, json!({ "queues": [[], []] }), "each queue was emptied");
+        assert!(drain(&h).await.is_empty());
+    }
+
+    /// Each key is its own credential, so one that is not a key refuses the request instead of reading as an
+    /// empty queue — and refuses it before any queue is emptied.
+    #[tokio::test]
+    async fn a_multi_drain_is_bounded_and_refuses_a_bad_key_whole() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let too_many: Vec<String> = (0..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        for body in [
+            json!({}),
+            json!({ "keys": [] }),
+            json!({ "keys": KEY }),
+            json!({ "keys": too_many }),
+            json!({ "keys": [KEY, KEY] }),
+            json!({ "keys": [KEY, "short"] }),
+            json!({ "keys": [KEY, 7] }),
+        ] {
+            assert_eq!(
+                h.call("POST", "/inbox/drain", Some(body.clone())).await.0,
+                StatusCode::BAD_REQUEST,
+                "{body}"
+            );
+        }
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "nothing was emptied");
+        let at_most: Vec<String> = (1..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        assert_eq!(h.call("POST", "/inbox/drain", Some(json!({ "keys": at_most }))).await.0, StatusCode::OK);
+    }
+
+    /// Draining is priced per queue, however they are asked for: a 16-key drain spends 16 of an address's minute,
+    /// and a single drain shares the same budget. Refused whole, with the wait to come back after.
+    #[tokio::test]
+    async fn drains_are_limited_per_address_by_the_queues_they_take() {
+        let h = Harness::new();
+        let keys: Vec<String> = (1..=super::MAX_DRAIN_KEYS as u64).map(|n| format!("{n:016x}")).collect();
+        let rounds = super::DRAINS_PER_WINDOW as usize / super::MAX_DRAIN_KEYS;
+        for round in 0..rounds {
+            let status = h.call("POST", "/inbox/drain", Some(json!({ "keys": keys }))).await.0;
+            assert_eq!(status, StatusCode::OK, "{round}");
+        }
+        let over = h.send("POST", "/inbox/drain", Some(json!({ "keys": keys }).to_string()), &[]).await;
+        assert_eq!(over.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(over.headers().contains_key("retry-after"));
+        let one = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
+        assert_eq!(one.status(), StatusCode::TOO_MANY_REQUESTS, "a single drain spends the same budget");
+
+        h.advance(60_000);
+        assert_eq!(drain(&h).await, Vec::<Value>::new(), "the window clears");
     }
 
     #[tokio::test]
