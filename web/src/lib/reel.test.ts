@@ -68,7 +68,7 @@ describe('where a trailer’s bytes may be loaded from', () => {
       return answering(meta, 200, absolute)(input);
     };
     expect(
-      await ask({ reel: [{ url: 'https://pve.tailce93d3.ts.net:8443/reel' }] }, counting),
+      await ask({ reel: [{ url: 'https://box.tail0000.ts.net:8443/reel' }] }, counting),
     ).toEqual([]);
     expect(asked, 'and reel is never even asked, since there is nowhere to play from').toBe(0);
   });

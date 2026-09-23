@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ahead, healed, readPrivateAddresses, storable } from './privateAddresses';
 import type { SettingsRow, Stamp } from './wire';
 
-const TAILNET = 'https://pve.tailce93d3.ts.net:8443/remux';
+const TAILNET = 'https://box.tail0000.ts.net:8443/remux';
 const at: Stamp = [1, 1, 'd'];
 
 const row = (values: Record<string, string>): SettingsRow => ({
@@ -17,21 +17,21 @@ const row = (values: Record<string, string>): SettingsRow => ({
 describe('storable', () => {
   it('takes a tailnet https base and nothing else', () => {
     expect(storable(TAILNET)).toBe(true);
-    expect(storable('https://pve.tailce93d3.ts.net:8443')).toBe(true);
+    expect(storable('https://box.tail0000.ts.net:8443')).toBe(true);
   });
 
   it('refuses what a page cannot use, or should not keep', () => {
     // Mixed content on an https page: refused by the browser before it is ever reached.
-    expect(storable('http://pve.tailce93d3.ts.net:8443/remux')).toBe(false);
+    expect(storable('http://box.tail0000.ts.net:8443/remux')).toBe(false);
     // Not the tailnet. A LAN address means nothing to a browser that is not on that LAN, and a
     // public name is already the table's to give.
     expect(storable('https://192.168.86.193:8095/remux')).toBe(false);
     expect(storable('https://d-remux.oxy.fi/remux')).toBe(false);
     // A base to append paths to — not a URL carrying state of its own.
-    expect(storable('https://pve.tailce93d3.ts.net/remux?token=secret')).toBe(false);
-    expect(storable('https://pve.tailce93d3.ts.net/remux#x')).toBe(false);
+    expect(storable('https://box.tail0000.ts.net/remux?token=secret')).toBe(false);
+    expect(storable('https://box.tail0000.ts.net/remux#x')).toBe(false);
     // A credential in a URL is a credential written into the library and into every log it reaches.
-    expect(storable('https://user:pw@pve.tailce93d3.ts.net/remux')).toBe(false);
+    expect(storable('https://user:pw@box.tail0000.ts.net/remux')).toBe(false);
     // And a hostname that merely ends in the same letters is not the tailnet.
     expect(storable('https://evil.example.ts.net.attacker.example/remux')).toBe(false);
     expect(storable('not a url')).toBe(false);

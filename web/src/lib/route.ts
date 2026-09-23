@@ -5,7 +5,8 @@
 //
 // den-edge serves `index.html` for any path with no file behind it (`web.rs`), so these are the app's to read.
 // They must not collide with an API path — `/lib`, `/link`, `/pair`, `/inbox`, `/scout`, `/atlas`, `/reel`,
-// `/remux`, `/routes`, `/config`, `/health`, `/metrics`, `/p` — because the API answers first.
+// `/remux`, `/routes`, `/config`, `/health`, `/metrics`, `/p`, `/oauth`, `/mcp` — because the API answers first.
+// `/connect` is the assistant connector's consent page (`ConnectDialog`), shown over Home.
 
 import type { MediaType } from './library';
 

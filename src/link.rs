@@ -78,6 +78,27 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option
     None
 }
 
+/// `limit` a minute in fixed windows: a window opens at its first request and closes a minute later, whatever came
+/// in it. For a steady caller — an assistant's MCP calls — where `throttled_at`, whose window moves on with every
+/// request allowed, would never close and refuse it for good once it passed the limit.
+pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -> Option<u64> {
+    let now = state.now();
+    let mut claims = lock(&state.claims);
+    if claims.len() > 1024 {
+        claims.retain(|_, t| t.until > now);
+    }
+    let t = claims.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 });
+    if t.until <= now {
+        t.count = 0;
+        t.until = now + CLAIM_WINDOW_MS;
+    }
+    if t.count >= limit {
+        return Some(t.until.saturating_sub(now));
+    }
+    t.count += 1;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::handler::tests::Harness;

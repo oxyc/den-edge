@@ -30,7 +30,7 @@ use std::path::{Component, Path, PathBuf};
 /// built from the table has no entry for it. Video never crosses the Cloudflare tunnel, so that fallback is
 /// the only way playback works away from the LAN, and without this it failed as a blocked media load with
 /// nothing on the server to show why. A wildcard rather than one host because a tailnet's name belongs to
-/// its household, not to this box: `pve.tailce93d3.ts.net` is only ours. It is bounded by the scheme and by
+/// its household, not to this box: each household's is its own. It is bounded by the scheme and by
 /// `tailscale serve`'s port, and it grants nothing a tailnet peer could not already reach — reaching one at
 /// all requires being on it.
 ///
@@ -61,8 +61,8 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     )
 }
 
-/// Whether an origin names a tailnet host. The exact name is a household's own — `pve.tailce93d3.ts.net` is
-/// ours — and putting it in a policy served on a public name publishes it to anyone who loads the page.
+/// Whether an origin names a tailnet host. The exact name is a household's own, and putting it in a policy served
+/// on a public name publishes it to anyone who loads the page.
 fn tailnet(origin: &str) -> bool {
     let rest = origin.split("://").nth(1).unwrap_or(origin);
     let host = rest.split(['/', ':']).next().unwrap_or("");
@@ -306,13 +306,13 @@ mod tests {
     }
 
     /// The wildcard REPLACES the exact tailnet host on the browser's public name rather than joining it:
-    /// naming `pve.tailce93d3.ts.net` in a policy served to anyone who loads the page publishes whose
+    /// naming a household's tailnet host in a policy served to anyone who loads the page publishes whose
     /// household it is, and the wildcard already allows the address that page stored for itself. Every other
     /// name — the LAN, the tailnet itself, the device API — is told the whole list, as before.
     #[test]
     fn the_public_name_is_told_every_media_origin_but_the_tailnets() {
         let media = [
-            "https://pve.tailce93d3.ts.net:8443".to_owned(),
+            "https://box.tail0000.ts.net:8443".to_owned(),
             "http://192.168.86.193:8095/remux".to_owned(),
             "https://d-remux.oxy.fi".to_owned(),
         ];
@@ -320,8 +320,8 @@ mod tests {
             super::public_media(&media),
             ["http://192.168.86.193:8095/remux", "https://d-remux.oxy.fi"]
         );
-        assert!(super::tailnet("https://pve.tailce93d3.ts.net:8443"));
-        assert!(super::tailnet("https://pve.tailce93d3.ts.net:8443/remux"));
+        assert!(super::tailnet("https://box.tail0000.ts.net:8443"));
+        assert!(super::tailnet("https://box.tail0000.ts.net:8443/remux"));
         assert!(!super::tailnet("https://d-remux.oxy.fi"));
         // A suffix, not the host: the name has to END there.
         assert!(!super::tailnet("https://evil.ts.net.attacker.example"));

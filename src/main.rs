@@ -13,6 +13,7 @@ mod library;
 mod link;
 mod meta;
 mod metrics;
+mod oauth;
 mod pair;
 mod ratings;
 mod relay;
@@ -175,6 +176,9 @@ pub struct AppState {
     /// as a session's owner and end its sessions. Unset, a guest is offered no remux at all — without it remux
     /// would count the guest's sessions as the host's.
     pub remux_edge_secret: Option<String>,
+    /// The authorization server for Den's MCP connector (`oauth.rs`; env `OAUTH_ISSUER`, `OAUTH_SIGNING_KEY`).
+    /// `None` turns `/oauth/…` and `/mcp` off.
+    pub oauth: Option<oauth::OAuth>,
 }
 
 impl AppState {
@@ -233,6 +237,7 @@ impl AppState {
             media_leases: Mutex::new(HashMap::new()),
             grants: grants::Grants::default(),
             remux_edge_secret: None,
+            oauth: None,
         }
     }
 
@@ -335,6 +340,7 @@ async fn main() {
     state.title_metadata_cache_dir = Some(std::path::Path::new(&dir).join("title-metadata"));
     // No key to gate this one on: SkipDB's read API is open, so the only question is where to keep the answers.
     state.skipdb_cache_dir = Some(std::path::Path::new(&dir).join("skipdb"));
+    state.oauth = oauth_config();
     let state = Arc::new(state);
     inbox::sweep(&state).await;
     tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
@@ -344,6 +350,7 @@ async fn main() {
     tokio::spawn(title_metadata::sweep_forever(Arc::clone(&state)));
     tokio::spawn(skipdb::sweep_forever(Arc::clone(&state)));
     tokio::spawn(grants::sweep_forever(Arc::clone(&state)));
+    tokio::spawn(oauth::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
@@ -356,7 +363,8 @@ async fn main() {
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
         "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
-         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={}",
+         web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
+         oauth={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
@@ -383,6 +391,11 @@ async fn main() {
             (Some(_), Some(max)) => format!("household-key(max {max}/day)"),
         },
         on(state.remux_edge_secret.is_some()),
+        // The public key is what den-mcp's TOKEN_PUBLIC_KEYS must hold; it is not a secret.
+        state.oauth.as_ref().map_or_else(
+            || "off".to_owned(),
+            |o| format!("on(issuer {} key {})", o.issuer, oauth::b64url(o.verifying_key().as_bytes())),
+        ),
     );
     let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
     eprintln!("{}", outcome.describe());
@@ -460,6 +473,31 @@ fn origin(o: &str) -> Option<String> {
             && !host.contains(['/', '?', '#', '@', ' ', ';', ','])
     });
     ok.then_some(o)
+}
+
+/// The MCP connector's authorization server, when `OAUTH_ISSUER` (its public https origin) and `OAUTH_SIGNING_KEY` (an
+/// Ed25519 private key's 32 bytes, unpadded base64url) are both set. `OAUTH_RESOURCE` is the origin den-mcp is reached
+/// on when it is not the issuer's, and `OAUTH_CONSENT_ORIGIN` the web app's when the issuer is not its name.
+fn oauth_config() -> Option<oauth::OAuth> {
+    let (issuer, seed) = match (env_opt("OAUTH_ISSUER"), env_opt("OAUTH_SIGNING_KEY")) {
+        (None, None) => return None,
+        (Some(issuer), Some(seed)) => (issuer, seed),
+        _ => {
+            eprintln!("OAUTH_ISSUER and OAUTH_SIGNING_KEY go together — the MCP connector is off");
+            return None;
+        }
+    };
+    let Some(issuer) = origin(&issuer) else {
+        eprintln!("OAUTH_ISSUER must be a bare origin — the MCP connector is off");
+        return None;
+    };
+    let Some(seed) = oauth::b64url_decode(seed.trim()).and_then(|s| <[u8; 32]>::try_from(s).ok()) else {
+        eprintln!("OAUTH_SIGNING_KEY must be 32 bytes, unpadded base64url — the MCP connector is off");
+        return None;
+    };
+    let resource = env_opt("OAUTH_RESOURCE").and_then(|v| origin(&v)).unwrap_or_else(|| issuer.clone());
+    let consent = env_opt("OAUTH_CONSENT_ORIGIN").and_then(|v| origin(&v)).unwrap_or_else(|| issuer.clone());
+    Some(oauth::OAuth::new(issuer, format!("{resource}/mcp"), consent, seed))
 }
 
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.

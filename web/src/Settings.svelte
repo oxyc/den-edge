@@ -4,6 +4,7 @@
      can't read it. -->
 <script lang="ts">
   import AboutSection from './settings/AboutSection.svelte';
+  import AssistantsSection from './settings/AssistantsSection.svelte';
   import ExpandAll from './settings/ExpandAll.svelte';
   import AdvancedSection from './settings/AdvancedSection.svelte';
   import ConnectionsSection from './settings/ConnectionsSection.svelte';
@@ -200,6 +201,7 @@
       {write}
     />
     <SharingSection {link} {plugins} {routes} ready={!!log} />
+    <AssistantsSection />
     <PlaybackSection {prefs} {disabled} save={savePrefs} />
     <ContentSection
       {prefs}

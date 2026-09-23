@@ -74,7 +74,7 @@ describe('a table that names no address for the service', () => {
   const PUBLIC_ONLY: Routes = { edge: [{ url: 'https://d-api.oxy.fi' }] };
 
   it('reads the config segment off the install itself, whichever shape it is', async () => {
-    const TAILNET = 'https://pve.tailce93d3.ts.net:8443/scout/sealed-cfg/manifest.json';
+    const TAILNET = 'https://box.tail0000.ts.net:8443/scout/sealed-cfg/manifest.json';
     for (const install of [SCOUT_LAN, TAILNET]) {
       const { asked, fetchImpl } = addons({ '/scout/sealed-cfg/manifest.json': 'com.den.scout' });
       expect(await findAddon([install], PUBLIC_ONLY, SCOUT, fetchImpl)).toEqual({

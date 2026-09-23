@@ -31,6 +31,11 @@ const GRANT_BASE = /^\/(?:scout|atlas|reel|subtitles)\/~([0-9a-f]{8})(?:\/|$)/;
 const GRANT_INSTALL = /\/(?:scout|subtitles)\/~([0-9a-f]{8})\/?$/;
 /** The host's own grant routes, which prove membership of the library in the path. */
 const HOST_GRANTS = /^\/lib\/([0-9a-f]+)\/grants(?:\/|$)/;
+/**
+ * The assistant connector's routes that ask who this browser is (`oauth.rs`): approving a connection, and listing or
+ * ending them. A member proves membership; a guest, with no library of their own, proves their grant.
+ */
+const OAUTH = /^\/oauth\/(?:request\/[0-9a-f]{32}\/approve|connections(?:\/[0-9a-f]{32})?)$/;
 
 let credential: string | null = null;
 let libraryId: string | null = null;
@@ -107,6 +112,7 @@ function relayed(href: string): boolean {
     !!url &&
     (RELAYED.some((p) => url.pathname.startsWith(p)) ||
       REMUX_CONTROL.has(url.pathname) ||
+      OAUTH.test(url.pathname) ||
       (libraryId !== null && HOST_GRANTS.exec(url.pathname)?.[1] === libraryId))
   );
 }
@@ -119,6 +125,7 @@ function relayed(href: string): boolean {
 function grantOf(url: URL, init: RequestInit | undefined): string | null {
   const shared = GRANT_BASE.exec(url.pathname)?.[1];
   if (shared) return shared;
+  if (OAUTH.test(url.pathname)) return credential ? null : (heldGrant() ?? null);
   if (!REMUX_CONTROL.has(url.pathname)) return null;
   if (typeof init?.body === 'string') {
     try {
@@ -129,7 +136,17 @@ function grantOf(url: URL, init: RequestInit | undefined): string | null {
       // Not JSON: nothing names a grant.
     }
   }
-  return credential ? null : (grantSecrets.keys().next().value ?? null);
+  return credential ? null : (heldGrant() ?? null);
+}
+
+/** A grant this browser holds, for a call that needs some proof and has no member's to give. */
+function heldGrant(): string | undefined {
+  return grantSecrets.keys().next().value;
+}
+
+/** Whether this browser can prove anything: that it holds a library here, or a live grant. */
+export function canProve(): boolean {
+  return credential !== null || grantSecrets.size > 0;
 }
 
 /** A call carrying the grant's credential, and never the library's: a guest is not a member. */
