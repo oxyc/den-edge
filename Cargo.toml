@@ -15,14 +15,14 @@ sha2 = "0.11"
 getrandom = "0.4"
 url = "2"
 # The addon relay's client (`relay.rs`); both already come with axum.
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 # The web app's files are streamed from disk (`web.rs`); axum already depends on it.
 http-body = "1"
 # TMDB through this origin (`tmdb.rs`) is the only thing den-edge fetches from outside the LAN, so it is the
 # only thing needing TLS. `ring` rather than aws-lc-rs (no C toolchain), and the roots compiled in rather than
 # read from the OS, which a `scratch` image has none of.
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Gzip for the library's sync pages (`library.rs`): mostly base64 ciphertext, which it still cuts by a quarter.
 flate2 = "1"

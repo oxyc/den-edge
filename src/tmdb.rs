@@ -30,14 +30,26 @@ use std::time::{Duration, SystemTime};
 
 pub type TmdbClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
-/// https only, http1, and the roots compiled in — no OS trust store to depend on in a `scratch` image.
+/// https only, and the roots compiled in — no OS trust store to depend on in a `scratch` image.
+///
+/// HTTP/2 where the server offers it (ALPN), HTTP/1.1 where it does not. A page asks for a burst of titles at
+/// once, and over HTTP/1.1 each question the pool has no idle connection for opens one of its own — a TCP and
+/// TLS handshake apiece before TMDB is asked anything. Over HTTP/2 the burst shares one connection. The same
+/// client asks OMDb (`ratings.rs`), doesthedogdie (`warnings.rs`) and SkipDB (`skipdb.rs`); none of them sets
+/// a header HTTP/2 forbids, and a server that offers only HTTP/1.1 is still asked over it.
 pub fn client() -> TmdbClient {
     // rustls needs a crypto provider chosen before any config is built. `ring` is the light one, and the only
     // one compiled in; installing it twice is not an error worth stopping for.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let https =
-        hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_only().enable_http1().build();
-    Client::builder(TokioExecutor::new()).build(https)
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_only()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    // An idle connection is kept a while so the next page's questions skip the handshake; a server that closes
+    // it first says so (GOAWAY), and the next question opens another.
+    Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(90)).build(https)
 }
 
 const HOST: &str = "https://api.themoviedb.org";
