@@ -35,7 +35,8 @@ export const PLOT_AXES = [
   'tone',
 ] as const;
 
-type IdFormat = 'integer' | 'decade' | 'lower' | 'upper' | 'label' | 'qid' | 'character' | 'like';
+type IdFormat =
+  'integer' | 'decade' | 'born' | 'lower' | 'upper' | 'label' | 'qid' | 'character' | 'like';
 
 /** Every kind atlas's filter reads, with how it combines and how its ids are written (its `/index/schema.json`). */
 export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = {
@@ -71,7 +72,7 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
 /** Every person trait the people routes read in `traits` (atlas's `filter.traits` in `/index/schema.json`). */
 export const TRAIT_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = {
   gender: { mode: 'single', id: 'qid' },
-  born: { mode: 'single', id: 'decade' },
+  born: { mode: 'single', id: 'born' },
   citizenship: { mode: 'and', id: 'qid' },
   occupation: { mode: 'and', id: 'qid' },
   role: { mode: 'and', id: 'lower' },
@@ -92,6 +93,27 @@ const STRUCTURE_ALIAS: Record<string, string> = {
   'single-day': 'timespan',
   anthology: 'continuity',
 };
+
+/** The earliest birth year a `born` range may name; the latest is next year. */
+export const FIRST_BIRTH_YEAR = 1800;
+
+/**
+ * A `born` range of birth years as atlas spells it — `1976-1996`, `1976-`, `-1996`: both ends inclusive, either left
+ * out, each a year from `FIRST_BIRTH_YEAR` to next year — or undefined for one atlas refuses.
+ */
+export function bornRange(id: string): string | undefined {
+  const ends = id.split('-');
+  if (ends.length !== 2) return undefined;
+  const latest = new Date().getUTCFullYear() + 1;
+  const years = ends.map((end) => end.trim());
+  if (years.some((year) => year && !/^\d+$/.test(year))) return undefined;
+  const [from, to] = years.map((year) => (year ? Number(year) : undefined));
+  if (from === undefined && to === undefined) return undefined;
+  if ([from, to].some((year) => year !== undefined && (year < FIRST_BIRTH_YEAR || year > latest)))
+    return undefined;
+  if (from !== undefined && to !== undefined && from > to) return undefined;
+  return `${from ?? ''}-${to ?? ''}`;
+}
 
 const MAX_SELECTION = 16;
 const TITLES_PAGE = 24;
@@ -145,6 +167,14 @@ function normalise(
       return number === undefined ? undefined : [kind, String(number)];
     case 'decade':
       return number === undefined ? undefined : [kind, String(Math.floor(number / 10) * 10)];
+    // A birth decade, or a range of birth years.
+    case 'born': {
+      if (id.includes('-')) {
+        const range = bornRange(id);
+        return range === undefined ? undefined : [kind, range];
+      }
+      return number === undefined ? undefined : [kind, String(Math.floor(number / 10) * 10)];
+    }
     case 'lower':
       return [kind, id.toLowerCase()];
     case 'upper':
@@ -174,7 +204,8 @@ const byString = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Items in atlas's spelling — each normalised by `kinds`, sorted by kind, then positive before excluded, then id,
- * once each — or undefined where one can't be read or there are too many.
+ * once each — or undefined where one can't be read, there are too many, or a `born` range stands beside another
+ * positive `born` pick.
  */
 function spelled(
   items: FilterItem[],
@@ -187,6 +218,12 @@ function spelled(
     if (!pair) return undefined;
     normal.push({ kind: pair[0], id: pair[1], exclude: !!item.exclude });
   }
+  const born = new Set(
+    normal
+      .filter((item) => kinds === TRAIT_KINDS && item.kind === 'born' && !item.exclude)
+      .map((item) => item.id),
+  );
+  if (born.size > 1 && [...born].some((id) => id.includes('-'))) return undefined;
   normal.sort(
     (a, b) =>
       byString(a.kind, b.kind) || Number(a.exclude) - Number(b.exclude) || byString(a.id, b.id),

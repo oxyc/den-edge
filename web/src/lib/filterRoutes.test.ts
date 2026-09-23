@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 4cd3e09): both ends hold to the same pairs.
+// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 6b1a92c): both ends hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
   canonicalFilterPath,
@@ -106,6 +106,49 @@ describe('canonical filter addresses', () => {
     ).toBeUndefined();
     expect(filterUrl('/atlas', 'movie', 'people', { order: 'popularity' })).toBeUndefined();
     expect(canonicalFilterPath('/index/filter/movie/people/values/role.json')).toBeUndefined();
+  });
+
+  it('asks a birth-year range as one born trait, either end open, never beside another born pick', () => {
+    const people = (born: string, more: { kind: string; id: string }[] = []) =>
+      filterUrl('/atlas', 'movie', 'people', {
+        items: [{ kind: 'decade', id: '2020' }],
+        traits: [...more, { kind: 'born', id: born }],
+      });
+    expect(
+      people('1976-1996', [
+        { kind: 'role', id: 'cast' },
+        { kind: 'gender', id: 'Q6581097' },
+      ]),
+    ).toBe(
+      '/atlas/index/filter/movie/people.json?sel=decade:2020&traits=born:1976-1996,gender:Q6581097,role:cast',
+    );
+    expect(people('1976-')).toBe(
+      '/atlas/index/filter/movie/people.json?sel=decade:2020&traits=born:1976-',
+    );
+    expect(people(' -01996')).toBe(
+      '/atlas/index/filter/movie/people.json?sel=decade:2020&traits=born:-1996',
+    );
+    const nextYear = new Date().getUTCFullYear() + 1;
+    expect(people(`1990-${nextYear}`)).toContain(`born:1990-${nextYear}`);
+    for (const refused of [
+      '1996-1976',
+      '1799-',
+      `-${nextYear + 1}`,
+      '-',
+      '1976-1986-1996',
+      '19x6-',
+    ])
+      expect(people(refused), refused).toBeUndefined();
+    expect(people('1976-1996', [{ kind: 'born', id: '1970' }])).toBeUndefined();
+    // Leaving a range out is no pick beside it.
+    expect(
+      filterUrl('/atlas', 'movie', 'people', {
+        traits: [
+          { kind: 'born', id: '1980-1985', exclude: true },
+          { kind: 'born', id: '1976-1996' },
+        ],
+      }),
+    ).toBe('/atlas/index/filter/movie/people.json?traits=born:1976-1996,-born:1980-1985');
   });
 });
 
