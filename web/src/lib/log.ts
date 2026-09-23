@@ -4,7 +4,7 @@
 
 import { hkdf } from './crypto';
 import { libraryVault, type Vault } from './localVault';
-import { forgetLibraryCredential, useLibraryCredential } from './relayFetch';
+import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import {
   believe,
   compareStamps,
@@ -55,6 +55,9 @@ interface Snapshot {
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
 const SNAPSHOT = 'log.v1';
 
+/** How long a log den-edge refused to start waits before its kept work is sent again (`refused`). */
+const RECHECK_MS = 10 * 60_000;
+
 /** Conflict rounds per write: another device writing the same row every time is not a thing a person does. */
 const ROUNDS = 3;
 
@@ -78,10 +81,13 @@ export class LibraryLog {
   /**
    * den-edge has no log for this library and will not let this browser start one (`403 new_libraries_closed`, with
    * `NEW_LIBRARIES=members`: only a device holding another library there may). Recovery is not sent again until a
-   * read finds the log — the TV writing it back — instead of on every refresh: one browser in this state sent 101
-   * refused batches over nearly six hours, one on each 30-second refresh while its tab was visible.
+   * read finds the log — the TV writing it back — or `RECHECK_MS` has passed, instead of on every refresh: one
+   * browser in this state sent 101 refused batches over nearly six hours, one on each 30-second refresh while its
+   * tab was visible. The occasional re-check is what notices den-edge opened to new libraries again.
    */
   refused = false;
+  /** When den-edge last refused (`Date.now()`). */
+  private refusedAt = 0;
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
 
@@ -313,7 +319,7 @@ export class LibraryLog {
           }
           if (!res.ok) return false;
           // The log is here again (or always was): a refused start is over, and the membership stands again.
-          if (this.refused) {
+          if (this.refused || !hasLibraryCredential()) {
             this.refused = false;
             useLibraryCredential(this.keys);
           }
@@ -515,6 +521,7 @@ export class LibraryLog {
   private async refusedIf(res: Response): Promise<void> {
     if ((await errorCode(res)) !== 'new_libraries_closed') return;
     this.refused = true;
+    this.refusedAt = Date.now();
     forgetLibraryCredential();
   }
 
@@ -688,7 +695,9 @@ export class LibraryLog {
       if (event) this.project(event.after);
     }
     // Kept, and sent once a read finds the log again (`refresh`).
-    if (this.refused) return this;
+    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS) return this;
+    // Tried again: refused once more, it waits another `RECHECK_MS`.
+    this.refused = false;
     if (this.storage) {
       const keys: string[] = [];
       for (let i = 0; i < this.storage.length; i++) {

@@ -406,6 +406,61 @@ describe('LibraryLog', () => {
     forgetLibraryCredential();
   });
 
+  /** den-edge opened to new libraries again: a refused log tries once more after a while, not only on a reload. */
+  it('tries a refused library again after a while, and starts it once den-edge lets it', async () => {
+    const data = new Map<string, string>();
+    const storage: Storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i) => [...data.keys()][i] ?? null,
+      getItem: (k) => data.get(k) ?? null,
+      setItem: (k, v) => {
+        data.set(k, v);
+      },
+      removeItem: (k) => {
+        data.delete(k);
+      },
+      clear: () => data.clear(),
+    };
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'first')!;
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    data.set(`den.pendingTracker.${keys.id}.first`, JSON.stringify(await seal(keys, journal)));
+    const server = await edge();
+    let open = false;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') {
+        batches++;
+        if (!open) return new Response('{"error":"new_libraries_closed"}', { status: 403 });
+      } else if (init?.method !== 'PUT' && server.stored.size === 0) {
+        return new Response('{"error":"not_found"}', { status: 404 });
+      }
+      return server.fetchImpl(url, init);
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+      expect(log.refused).toBe(true);
+      const tried = batches;
+      open = true; // NEW_LIBRARIES=open
+      expect(await log.refresh()).toBe(true);
+      expect(batches, 'not straight away').toBe(tried);
+
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      expect(await log.refresh()).toBe(true);
+      expect(batches).toBeGreaterThan(tried);
+      expect(log.pendingActions).toBe(0);
+      expect(await log.refresh()).toBe(true);
+      expect(log.refused).toBe(false);
+      expect(hasLibraryCredential(), 'the log is there, and so is the membership').toBe(true);
+    } finally {
+      vi.useRealTimers();
+      forgetLibraryCredential();
+    }
+  });
+
   it('skips an unreadable incremental row and still reaches later changes', async () => {
     const server = await edge();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
