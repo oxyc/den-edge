@@ -4,6 +4,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
+  import ExploreTabs from './ExploreTabs.svelte';
+  import FacetSuggestions from './FacetSuggestions.svelte';
   import Loading from './Loading.svelte';
   import Picks from './Picks.svelte';
   import SearchResults from './SearchResults.svelte';
@@ -16,7 +18,6 @@
     exploreChips,
     exploreFeed,
     filterChips,
-    KIND,
     likeChip,
     offered,
     pendingChip,
@@ -27,10 +28,10 @@
     slotOf,
     browseChips,
     countedEmptyAcross,
-    namesExactly,
+    pillOrder,
     type Chip,
   } from '../lib/explore';
-  import { countItems, filterItems } from '../lib/facetCounts';
+  import { countItems, filterItems, groupKind } from '../lib/facetCounts';
   import {
     fetchFilterCounts,
     mergeFilterValues,
@@ -40,8 +41,9 @@
   import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
+  import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import { FACET, likeId, likeOf, searchHref, type Explore } from '../lib/route';
+  import { FACET, likeId, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
 
@@ -324,12 +326,19 @@
   const shownSelection = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
   );
-  /** Every pick, over the grid. While a query is typed, all but the genres wait: shown, but paused. */
+  /**
+   * Every pick, over the grid, a kind's values side by side where atlas's filter takes them as either-or. While a
+   * query is typed, all but the genres wait: shown, but paused.
+   */
   const picked = $derived(
-    chipsOf(selection, known).map((chip) => ({
-      chip,
-      paused: typing && slotOf(chip.id) !== 'genre',
-    })),
+    pillOrder(selection, (id) => (filtered ? groupKind(id, exploreType) : undefined)).flatMap(
+      ({ id, or }) =>
+        chipsOf([id], known).map((chip) => ({
+          chip,
+          or,
+          paused: typing && slotOf(chip.id) !== 'genre',
+        })),
+    ),
   );
 
   /** Every pick taken out at once, the query left as it is. */
@@ -480,7 +489,7 @@
       feedHits.map((hit) => (hit.kind === 'title' ? hit.title : null)).filter((t) => t !== null),
       feed.pager.exhausted,
       listed,
-      { counts, counted, type: exploreType },
+      { counts, counted, type: exploreType, filtered },
     ),
   );
   /**
@@ -488,7 +497,9 @@
    * so a paused language still keeps the Browse row from offering a second — and what would show nothing.
    */
   const hidden = (id: string) =>
-    !offered(shownSelection, id, exploreType, filtered) || taken(selection, id) || empty.has(id);
+    !offered(shownSelection, id, exploreType, filtered) ||
+    taken(selection, id, filtered) ||
+    empty.has(id);
   /**
    * The pick to take out when the selection shows nothing: the latest, since it is what emptied a feed that had
    * titles before it. (atlas's counts say what adding an option leaves, not what removing a pick would bring back,
@@ -540,7 +551,15 @@
   aria-label={typing ? 'Search results' : 'Explore'}
   aria-busy={typing ? pending : feed.pager.page === 0 && !feed.pager.done}
 >
-  <h1>{typing ? 'Search' : 'Explore'}</h1>
+  {#if typing}
+    <h1>Search</h1>
+  {:else}
+    <ExploreTabs
+      current="explore"
+      explore={searchHref('', explore)}
+      people={peopleHref(peopleFromExplore(explore))}
+    />
+  {/if}
   <div class="explore">
     {#if !typing}{@render rail()}{/if}
     <div class="feed">
@@ -557,22 +576,8 @@
       <Picks picks={picked} onremove={(id) => pick(id, typing)} onclear={clearAll} />
       <p class="status" role="status">{[status, scope].filter(Boolean).join(' ')}</p>
       {#if typing}
-        {#if browse.length}
-          <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->
-          <div class="browse" role="group" aria-label="Browse">
-            {#each browse as chip, at (chip.id)}
-              <button
-                type="button"
-                class="facet"
-                class:exact={at === 0 && namesExactly(query, chip)}
-                data-chip={chip.id}
-                onclick={() => pickFound(chip)}
-                >{chip.label}<span class="kind">{` · ${chip.kind ?? KIND[chip.group]}`}</span
-                ></button
-              >
-            {/each}
-          </div>
-        {/if}
+        <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->
+        <FacetSuggestions chips={browse} {query} onpick={pickFound} />
         {#if hits === null}
           <Loading label="Searching" />
         {:else if typedHits.length}
@@ -617,10 +622,6 @@
   h1 {
     font-size: 28px;
     margin: 8px 0 16px;
-  }
-
-  .kind {
-    color: var(--muted);
   }
 
   .note {
@@ -736,58 +737,6 @@
   .prompts button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
-  }
-
-  /* The ways to browse a query points at: wrapped on a wide screen, one sideways line on a phone. */
-  .browse {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 8px;
-    margin: 0 0 16px;
-  }
-
-  .facet {
-    flex-shrink: 0;
-    min-height: 30px;
-    padding: 0 10px;
-    border: 1px dashed var(--line);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--fg);
-    font: inherit;
-    font-size: 14px;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .facet:hover {
-    border-color: var(--muted);
-  }
-
-  /* The query is this one's whole name: the likeliest meaning, first in the row and its name a little heavier. Its
-     border and colours stay its siblings': a solid outline or a fill is what a picked chip wears (the pills over the
-     grid, For You in the rail), and this one isn't picked until it is pressed. */
-  .facet.exact {
-    font-weight: 600;
-  }
-
-  .facet:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
-  }
-
-  @media (width <= 759px) {
-    .browse {
-      flex-wrap: nowrap;
-      margin-inline: calc(-1 * var(--gutter));
-      padding-inline: var(--gutter);
-      overflow-x: auto;
-      scrollbar-width: none;
-    }
-
-    .browse::-webkit-scrollbar {
-      display: none;
-    }
   }
 
   /* A wide screen: a rail down the side, as the TV's is, with the grid beside it. */

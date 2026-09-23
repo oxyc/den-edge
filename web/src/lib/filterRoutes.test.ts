@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 6b1a92c): both ends hold to the same pairs.
+// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 1d8fcb4): both ends hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
   canonicalFilterPath,

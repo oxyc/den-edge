@@ -1,10 +1,14 @@
 <!-- People: the people credited on the titles a selection matches, most prominent first, as Explore browses titles —
      the same rail, pills and endless grid. Its person traits (role, gender, birth decade or years, nationality,
      occupation) lead the rail, then Explore's title facets, which scope which credits count ("directors of Korean
-     horror"). Its state is its address (`/people?type=…&c=…&t=…&order=…`), so a view can be linked and Back takes back a pick. -->
+     horror"). Its state is its address (`/people?type=…&c=…&t=…&order=…`), so a view can be linked and Back takes back a pick.
+     Text typed in the bar's search field here (`q=`) offers traits and facets by name, as Explore's Browse row does,
+     and the people it names. -->
 <script lang="ts">
   import { untrack } from 'svelte';
   import ExploreChips from './ExploreChips.svelte';
+  import ExploreTabs from './ExploreTabs.svelte';
+  import FacetSuggestions from './FacetSuggestions.svelte';
   import Loading from './Loading.svelte';
   import Picks from './Picks.svelte';
   import SearchResults from './SearchResults.svelte';
@@ -14,21 +18,24 @@
     applyPick,
     chipsOf,
     filterChips,
-    KIND,
     offered,
     pendingChip,
+    pillOrder,
     remapSet,
     type Chip,
   } from '../lib/explore';
-  import { countedEmpty } from '../lib/facetCounts';
+  import { countedEmpty, groupKind } from '../lib/facetCounts';
   import {
     fetchFilterCounts,
     fetchPeopleCounts,
     filterPeople,
     FIRST_BIRTH_YEAR,
+    mergeFilterValues,
+    searchFilterValues,
     searchTraitValues,
     type FilterCounts,
     type FilterPerson,
+    type FilterValue,
     type PeopleCounts,
   } from '../lib/filterRoutes';
   import type { ExploreType, MediaType } from '../lib/library';
@@ -38,6 +45,8 @@
     SECTIONS,
     bornRangeId,
     bornRangeOf,
+    exploreFromPeople,
+    peopleSuggestions,
     pendingTraitChip,
     pickTrait,
     titleChips,
@@ -49,7 +58,7 @@
     traitItems,
     traitOffered,
   } from '../lib/people';
-  import { peopleHref, type PeopleView } from '../lib/route';
+  import { peopleHref, searchHref, type PeopleView } from '../lib/route';
   import type { Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
 
@@ -74,10 +83,14 @@
   const chips = $derived(chipsKey ? chipsKey.split(',') : []);
   const traits = $derived(traitsKey ? traitsKey.split(',') : []);
   const order = $derived(view.order ?? 'prominence');
+  const query = $derived(view.query ?? '');
+  const typing = $derived(query.trim().length >= 2);
 
-  /** Each pick, type and order is somewhere a person went: its own history entry. */
+  /** Each pick, type and order is somewhere a person went: its own history entry. What is typed stays. */
   function go(next: PeopleView) {
-    navigate(peopleHref({ type: view.type, chips, traits, order: view.order, ...next }));
+    navigate(
+      peopleHref({ query: view.query, type: view.type, chips, traits, order: view.order, ...next }),
+    );
   }
 
   // The people, a page at a time. Only what reaches atlas starts the list again.
@@ -142,8 +155,7 @@
   let photos = $state<Record<number, string | null>>({});
   $effect(() => {
     const from = sources;
-    for (const person of people) {
-      const id = person.tmdbId;
+    for (const id of [...people, ...byName].map((p) => p.tmdbId)) {
       if (id === undefined || untrack(() => id in photos)) continue;
       photos[id] = null;
       from
@@ -154,10 +166,11 @@
         .catch((error: unknown) => console.warn('people: no photo for', id, error));
     }
   });
-  const hits = $derived.by(() => {
+  /** People as cards: each once, and only those with a TMDB id, their page's address. */
+  const cards = (list: { tmdbId?: number; name: string; knownFor?: { title: string }[] }[]) => {
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one derivation; nothing renders from it.
     const seen = new Set<number>();
-    return people.flatMap((p): Hit[] => {
+    return list.flatMap((p): Hit[] => {
       if (p.tmdbId === undefined || seen.has(p.tmdbId)) return [];
       seen.add(p.tmdbId);
       return [
@@ -167,12 +180,13 @@
             id: p.tmdbId,
             name: p.name,
             profilePath: photos[p.tmdbId] ?? undefined,
-            knownFor: p.knownFor.map((t) => t.title),
+            ...(p.knownFor ? { knownFor: p.knownFor.map((t) => t.title) } : {}),
           },
         },
       ];
     });
-  });
+  };
+  const hits = $derived(cards(people));
 
   /**
    * atlas's counts beside the selection, a moment after it settles: the traits' (who would be left) and the titles'
@@ -232,33 +246,48 @@
     chipsOf(ids, known)
       .map((c) => c.label)
       .join(', ');
-  const picked = $derived(chipsOf([...traits, ...chips], known).map((chip) => ({ chip })));
+  /** The kind of OR group a pick joins, a trait's apart from a title facet's; none for a range of birth years. */
+  const orKind = (id: string) => {
+    const item = traitItem(id);
+    if (item) return item.kind === 'born' && item.id.includes('-') ? undefined : `t:${item.kind}`;
+    const kind = groupKind(id, type);
+    return kind && `c:${kind}`;
+  };
+  const picked = $derived(
+    pillOrder([...traits, ...chips], orKind).flatMap(({ id, or }) =>
+      chipsOf([id], known).map((chip) => ({ chip, or })),
+    ),
+  );
 
   /**
-   * Hidden: a trait value of a one-value trait already picked, a title facet that can't stand beside the picks, and
-   * whatever atlas's counts say would leave nothing (only where they list a kind completely).
+   * Hidden: a birth decade beside a range of birth years, a title facet that can't stand beside the picks, and
+   * whatever atlas's counts say would leave nothing (only where they list a kind completely, and never another value
+   * of a kind picked, which joins it as either-or).
    */
   const hidden = (id: string) => {
     if (traitItem(id))
-      return !traitOffered(traits, id) || (!!fresh?.people && traitEmpty(id, fresh.people));
+      return !traitOffered(traits, id) || (!!fresh?.people && traitEmpty(id, fresh.people, traits));
     if (!offered(chips, id, type, true)) return true;
+    const kind = groupKind(id, type);
+    if (kind && chips.some((x) => groupKind(x, type) === kind)) return false;
     return !!fresh?.titles && countedEmpty(id, type, fresh.titles.kinds);
   };
 
   /** What gave way to the last pick, said once. */
   let status = $state('');
-  function pick(id: string) {
+  /** A pick from the rail, a pill or the Browse row; `text` is what the search field keeps. */
+  function pick(id: string, text = query) {
     const label = known.find((c) => c.id === id)?.label ?? '';
     if (traitItem(id)) {
       const next = pickTrait(traits, id);
       const removed = traits.filter((x) => x !== id && !next.includes(x));
       status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-      go({ traits: next });
+      go({ traits: next, query: text });
       return;
     }
     const { set, removed } = applyPick(chips, id, type, true);
     status = removed.length ? `${label} replaced ${names(removed)}.` : '';
-    go({ chips: set });
+    go({ chips: set, query: text });
   }
 
   /**
@@ -311,47 +340,82 @@
     go({ chips: [], traits: [] });
   }
 
-  /** Nationalities and occupations by name, past the rail's strongest few, beside the selection. */
-  let text = $state('');
+  /**
+   * What the typed text finds, beside the selection, a moment after typing settles: nationalities and occupations by
+   * name, past the rail's strongest few, and the people credited there by that name. Under All, where atlas may have
+   * no `all` route for names, each type's answers together.
+   */
   let found = $state<Chip[]>([]);
+  let byName = $state<FilterValue[]>([]);
+  let finding = $state(false);
   $effect(() => {
-    const q = text.trim();
+    const q = query.trim();
     const [here, t] = [atlas, type];
     const [items, picks] = [titleItems(chips, t), traitItems(traits)];
-    const already = traits;
     found = [];
+    byName = [];
+    finding = false;
     if (!here || q.length < 2) return;
+    finding = true;
     const ask = new AbortController();
+    const options = { signal: ask.signal };
     const timer = setTimeout(async () => {
       const kinds = ['citizenship', 'occupation'];
-      const answers = await Promise.all(
-        kinds.map((kind) =>
-          searchTraitValues(here, t, kind, q, items, picks, { signal: ask.signal }),
+      const names = async () => {
+        const answer = await searchFilterValues(here, t, 'person', q, items, options);
+        if (answer || t !== 'all') return answer ?? [];
+        const sides = await Promise.all(
+          (['movie', 'tv'] as const).map((side) =>
+            searchFilterValues(here, side, 'person', q, titleItems(chips, side), options),
+          ),
+        );
+        return mergeFilterValues(sides);
+      };
+      const [answers, people] = await Promise.all([
+        Promise.all(
+          kinds.map((kind) => searchTraitValues(here, t, kind, q, items, picks, options)),
+        ),
+        names(),
+      ]);
+      if (ask.signal.aborted) return;
+      found = kinds.flatMap((kind, at) =>
+        (answers[at] ?? []).flatMap(
+          (value) => traitChip(kind, value.id, { [value.id]: value.name }) ?? [],
         ),
       );
-      if (ask.signal.aborted) return;
-      found = kinds
-        .flatMap((kind, at) =>
-          (answers[at] ?? []).flatMap(
-            (value) => traitChip(kind, value.id, { [value.id]: value.name }) ?? [],
-          ),
-        )
-        .filter((chip) => traitOffered(already, chip.id));
+      byName = people;
+      finding = false;
     }, 250);
     return () => {
       clearTimeout(timer);
       ask.abort();
     };
   });
+  const matches = $derived(cards(byName));
+  /** The Browse row: what the text names, not yet picked and able to stand beside the picks. */
+  const suggested = $derived(
+    typing
+      ? peopleSuggestions(
+          query,
+          listed,
+          found,
+          (id) => ![...traits, ...chips].includes(id) && !hidden(id),
+        )
+      : [],
+  );
+  /** A suggestion picked: it joins the picks, and the text it was found by goes. */
   function pickFound(chip: Chip) {
     named[chip.id] = chip;
-    text = '';
-    pick(chip.id);
+    pick(chip.id, '');
   }
 </script>
 
 <section class="people" aria-label="People" aria-busy={total === null && !done}>
-  <h1>People</h1>
+  <ExploreTabs
+    current="people"
+    explore={searchHref('', exploreFromPeople(view))}
+    people={peopleHref({ type: view.type, chips, traits, order: view.order })}
+  />
   {#if !atlas && atlasReady}
     <p class="note">People comes from atlas, which this page can’t reach right now.</p>
   {:else if !atlas}
@@ -364,27 +428,6 @@
           onchange={chooseType}
           label="People in movies, series or both"
         />
-        <input
-          class="find"
-          type="search"
-          placeholder="Find a nationality or occupation"
-          aria-label="Find a nationality or occupation"
-          autocomplete="off"
-          bind:value={text}
-        />
-        {#if found.length}
-          <div class="found" role="group" aria-label="Found">
-            {#each found as chip (chip.id)}
-              <button
-                type="button"
-                class="facet"
-                data-chip={chip.id}
-                onclick={() => pickFound(chip)}
-                >{chip.label}<span class="kind">{` · ${KIND[chip.group]}`}</span></button
-              >
-            {/each}
-          </div>
-        {/if}
         <!-- Taken on Enter, or once focus leaves both fields: moving from one to the other is not a pick. -->
         <div
           class="years"
@@ -428,20 +471,36 @@
         />
       </div>
       <div class="feed">
-        <div class="bar">
-          <p class="total">
-            {total === null ? '' : `${total.toLocaleString()} ${total === 1 ? 'person' : 'people'}`}
-          </p>
-          <Select
-            label="Sort people"
-            value={order}
-            options={ORDERS}
-            onchange={(value) => go({ order: value === 'prominence' ? undefined : value })}
-          />
-        </div>
-        <Picks picks={picked} onremove={pick} onclear={clearAll} />
+        {#if !typing}
+          <div class="bar">
+            <p class="total">
+              {total === null
+                ? ''
+                : `${total.toLocaleString()} ${total === 1 ? 'person' : 'people'}`}
+            </p>
+            <Select
+              label="Sort people"
+              value={order}
+              options={ORDERS}
+              onchange={(value) => go({ order: value === 'prominence' ? undefined : value })}
+            />
+          </div>
+        {/if}
+        <Picks picks={picked} onremove={(id) => pick(id)} onclear={clearAll} />
         <p class="status" role="status">{status}</p>
-        {#if hits.length}
+        {#if typing}
+          <!-- Picking one turns the text into it, as on Explore: the text goes, the pick stays. -->
+          <FacetSuggestions chips={suggested} {query} onpick={pickFound} />
+          {#if matches.length}
+            <section aria-label="People by that name">
+              <SearchResults hits={matches} />
+            </section>
+          {:else if finding}
+            <Loading label="Searching" />
+          {:else}
+            <p class="note" role="status">No one by that name.</p>
+          {/if}
+        {:else if hits.length}
           <SearchResults {hits} onend={() => void more()} />
         {:else if failed}
           <p class="note" role="status">Couldn’t load people right now. Try again in a moment.</p>
@@ -456,13 +515,7 @@
 </section>
 
 <style>
-  h1 {
-    font-size: 28px;
-    margin: 8px 0 16px;
-  }
-
   .note,
-  .kind,
   .total {
     color: var(--muted);
   }
@@ -490,7 +543,7 @@
     font-size: 14px;
   }
 
-  /* A phone and a tablet: the type, the find field and one line of chips over the grid. */
+  /* A phone and a tablet: the type, the birth years and one line of chips over the grid. */
   .rail {
     display: flex;
     flex-direction: column;
@@ -528,35 +581,6 @@
   .years .find {
     flex: 1;
     min-width: 0;
-  }
-
-  /* What the find field found: the dashed pills Search's Browse row offers. */
-  .found {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 8px;
-  }
-
-  .facet {
-    min-height: 30px;
-    padding: 0 10px;
-    border: 1px dashed var(--line);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--fg);
-    font: inherit;
-    font-size: 14px;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .facet:hover {
-    border-color: var(--muted);
-  }
-
-  .facet:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
   }
 
   /* A wide screen: the rail down the side, as Explore's is, with the grid beside it. */

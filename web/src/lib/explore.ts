@@ -29,6 +29,7 @@ import {
   countedEmpty,
   filterItems,
   filterOnlyKind,
+  groupKind,
   type FacetCounts,
   type FilterOnlyKind,
 } from './facetCounts';
@@ -693,6 +694,16 @@ const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
 /** The slots whose values all apply together. */
 const stacks = (slot: Slot | undefined) => slot === 'genre' || slot === 'more';
 
+/**
+ * Where atlas's filter answers, a second value of a kind joins the first as an OR group (`groupItems`: Swedish or
+ * Danish), so every slot takes several values but these: one rating floor, one "Like", one recipe.
+ */
+const ONE_WHERE_FILTERED: ReadonlySet<Slot | undefined> = new Set<Slot>([
+  'rating',
+  'like',
+  'recipe',
+]);
+
 export function slotOf(id: string): Slot | undefined {
   if (id === FOR_YOU) return undefined;
   if (likeOf(id)) return 'like';
@@ -730,11 +741,12 @@ const recipeQuery = (id: string, type: ExploreType) => {
  * rules out.
  *
  * Where atlas's filter answers (`filtered`), it takes any mix of what it knows, so all that is lifted: what it can't
- * take is a recipe it has no form of (`recipeParts`) beside a kind only it knows.
+ * take is a recipe it has no form of (`recipeParts`) beside a kind only it knows. Two of one slot stand together
+ * there too, a kind's values as one OR group, but for the slots that hold one (`ONE_WHERE_FILTERED`).
  */
 function clash(a: string, b: string, type: ExploreType, filtered = false): boolean {
   const [sa, sb] = [slotOf(a), slotOf(b)];
-  if (sa === sb) return !stacks(sa);
+  if (sa === sb) return filtered ? ONE_WHERE_FILTERED.has(sa) : !stacks(sa);
   const fromAtlas = (slot: Slot | undefined) =>
     slot === 'atlas' ||
     slot === 'like' ||
@@ -792,10 +804,14 @@ export function applyPick(
   return { set: [...set.filter((x) => !removed.includes(x)), id], removed };
 }
 
-/** Whether `id`'s kind holds one value and the selection already has another: it can't be picked until that goes. */
-export function taken(set: readonly string[], id: string): boolean {
+/**
+ * Whether `id`'s kind holds one value and the selection already has another: it can't be picked until that goes.
+ * Where atlas's filter answers (`filtered`), only a rating and a "Like" hold one; a recipe takes over the one picked.
+ */
+export function taken(set: readonly string[], id: string, filtered = false): boolean {
   const slot = slotOf(id);
-  return SINGLE.has(slot) && set.some((x) => x !== id && slotOf(x) === slot);
+  const one = filtered ? ONE_WHERE_FILTERED.has(slot) && slot !== 'recipe' : SINGLE.has(slot);
+  return one && set.some((x) => x !== id && slotOf(x) === slot);
 }
 
 /**
@@ -810,7 +826,7 @@ export function offered(
   filtered = false,
 ): boolean {
   if (id === FOR_YOU) return true;
-  if (set.includes(id) || taken(set, id)) return false;
+  if (set.includes(id) || taken(set, id, filtered)) return false;
   return !set.some((x) => slotOf(x) !== slotOf(id) && clash(x, id, type, filtered));
 }
 
@@ -975,6 +991,9 @@ function atlasFilter(set: readonly string[], type: ExploreType): (title: Title) 
  *
  * `counted` stands in for `counts` where there is no one answer to read: All's two per-type answers
  * (`countedEmptyAcross`).
+ *
+ * Where atlas's filter answers (`filtered`), another value of a kind already picked joins it as an OR group, which
+ * can only widen what is shown: it is never judged.
  */
 export function emptyOptions(
   selection: readonly string[],
@@ -985,21 +1004,28 @@ export function emptyOptions(
     counts,
     counted,
     type = 'movie',
+    filtered = false,
   }: {
     counts?: FacetCounts | null;
     counted?: ((id: string) => boolean) | null;
     type?: ExploreType;
+    filtered?: boolean;
   } = {},
 ): Set<string> {
   const empty = new Set<string>();
   const picked = new Set(selection.map(slotOf));
+  const groups = new Set(filtered ? selection.map((id) => groupKind(id, type)) : []);
   const judged = complete || ((picked.has('atlas') || picked.has('like')) && loaded.length > 0);
   for (const chip of chips) {
     const slot = slotOf(chip.id);
     if (!slot || selection.includes(chip.id)) continue;
-    // A one-value kind's other values are the alternative pick, never judged beside the pick itself.
-    const replaces = !stacks(slot) && picked.has(slot);
-    if (replaces) continue;
+    // A one-value kind's other values are the alternative pick, never judged beside the pick itself; nor is a value
+    // that would join a pick's OR group.
+    const replaces = filtered
+      ? ONE_WHERE_FILTERED.has(slot) && picked.has(slot)
+      : !stacks(slot) && picked.has(slot);
+    const kind = groupKind(chip.id, type);
+    if (replaces || (kind !== undefined && groups.has(kind))) continue;
     // atlas's counts, where it answered, are the whole judgement: the feed's loaded titles are the fallback.
     const judge = counts ? (id: string) => countedEmpty(id, type, counts) : counted;
     if (judge) {
@@ -1030,6 +1056,24 @@ export function countedEmptyAcross(
     const form = forms.find((f) => f.type === type)?.set[0];
     return form === undefined || countedEmpty(form, type, counts);
   });
+}
+
+/**
+ * The picks in the order their pills show them: the values of one OR group (`kindOf`, undefined for a pick that joins
+ * none) side by side where the group's first was picked, each after the first marked `or` — "Swedish or Danish".
+ */
+export function pillOrder(
+  ids: readonly string[],
+  kindOf: (id: string) => string | undefined,
+): { id: string; or: boolean }[] {
+  const buckets: { kind?: string; ids: string[] }[] = [];
+  for (const id of ids) {
+    const kind = kindOf(id);
+    const bucket = kind === undefined ? undefined : buckets.find((b) => b.kind === kind);
+    if (bucket) bucket.ids.push(id);
+    else buckets.push({ kind, ids: [id] });
+  }
+  return buckets.flatMap((bucket) => bucket.ids.map((id, at) => ({ id, or: at > 0 })));
 }
 
 /** The chips of `ids`, in that order, less any this type doesn't have. */

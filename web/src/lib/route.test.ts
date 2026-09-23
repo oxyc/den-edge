@@ -235,6 +235,18 @@ describe('People’s address', () => {
       });
   });
 
+  it('carries what the search field has typed there', () => {
+    expect(peopleHref({ query: 'nolan', traits: ['role-director'] })).toBe(
+      '/people?q=nolan&t=role-director',
+    );
+    expect(parseRoute('/people?q=j%C3%B6rn&type=tv')).toEqual({
+      page: 'people',
+      query: 'jörn',
+      type: 'tv',
+    });
+    expect(peopleHref({ query: '  ' })).toBe('/people');
+  });
+
   it('is a bare /people for its defaults, and drops what it cannot read', () => {
     expect(peopleHref()).toBe('/people');
     expect(peopleHref({ order: 'prominence' })).toBe('/people');
