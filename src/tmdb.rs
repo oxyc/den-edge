@@ -611,6 +611,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                         }
                         Ok(Fetched::Unchanged) => {
                             renew(file).await;
+                            crate::title_metadata::observe_tmdb(state, &path, &body);
                             answer(body, &fresh_policy(fresh, fresh), "revalidated", SystemTime::now(), asked)
                         }
                         Err(response) => *response,
@@ -694,9 +695,8 @@ async fn detail_answer(
     }
     match detail.ask(state, key, rid).await {
         Ok((whole, how, fresh)) => {
-            if how == "miss" {
-                crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            }
+            // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
+            crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
             answer(detail.narrowed(whole), &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
         Err(response) => *response,
@@ -1021,7 +1021,12 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
                 keep(&asking.file, &body, etag.as_deref()).await;
                 crate::title_metadata::observe_tmdb(&state, path, &body);
             }
-            Ok(Fetched::Unchanged) => renew(&asking.file).await,
+            Ok(Fetched::Unchanged) => {
+                renew(&asking.file).await;
+                if let Some((body, _, _)) = read(&asking.file).await {
+                    crate::title_metadata::observe_tmdb(&state, path, &body);
+                }
+            }
             // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
             Err(response)
                 if response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.as_str())
@@ -1634,6 +1639,39 @@ mod tests {
             "nothing else was recorded"
         );
         assert_eq!(crate::lock(&asked).len(), 2);
+    }
+
+    /// A title seen only through a kept detail would otherwise age out of the shared metadata after its 180 days:
+    /// TMDB confirming the kept answer (a 304) records it again.
+    #[tokio::test]
+    async fn a_confirmed_answer_is_recorded_again() {
+        let (cache, metadata) = (temp_dir(), temp_dir());
+        let (kept_in, meta) = (cache.clone(), metadata.clone());
+        let h = Harness::in_dir_with(temp_dir(), move |state| {
+            state.tmdb_key = Some("confirmed".into());
+            state.tmdb_cache_dir = Some(kept_in);
+            state.title_metadata_cache_dir = Some(meta);
+        });
+        crate::lock(&UPSTREAMS)
+            .push(("confirmed".to_owned(), Arc::new(|_: &str| Ok(Fetched::Unchanged)) as Upstream));
+        let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
+        keep(
+            &whole,
+            &Bytes::from_static(br#"{"id":550,"title":"Fight Club","vote_average":8.4}"#),
+            Some("W/\"a\""),
+        )
+        .await;
+        aged(&whole, DETAILS_TTL + Duration::from_secs(60));
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "revalidated");
+        let record = metadata.join("movie-550-tmdb.json");
+        for _ in 0..200 {
+            if record.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(record.exists(), "the confirmed answer was recorded");
     }
 
     #[tokio::test]

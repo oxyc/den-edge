@@ -287,15 +287,17 @@ pub const OBSERVING: usize = 64;
 /// What a TMDB answer den-edge just fetched says about its titles (`tmdb.rs`), kept as source `tmdb` — what a
 /// browser used to send back with `PUT` after receiving it through this proxy. Worked out and written behind the
 /// answer: spawned, bounded by `OBSERVING`, and unable to slow or fail it. An answer served from the cache is
-/// not observed again; it was when it was fetched.
+/// not observed again; it was when it was fetched, and is again each time TMDB confirms it (a 304), so a title
+/// seen only through a cached detail does not expire here.
 pub fn observe_tmdb(state: &Arc<AppState>, path: &str, body: &Bytes) {
     let path = path.to_owned();
     record(state, body, move |body| tmdb_observations(&path, body));
 }
 
 /// The same for an atlas catalog answer relayed here (`relay.rs`): each title's JustWatch IMDb score, as source
-/// `justwatch-imdb`, only where it is a valid rating. `gzipped` when atlas sent it so.
-pub fn observe_atlas(state: &Arc<AppState>, body: &Bytes, gzipped: bool) {
+/// `justwatch-imdb`, only where it is a valid rating. `gzipped` when atlas sent it so. False when it was not taken
+/// — no store, or `OBSERVING` already at work — so the answer does not claim it was kept.
+pub fn observe_atlas(state: &Arc<AppState>, body: &Bytes, gzipped: bool) -> bool {
     record(state, body, move |body| {
         if !gzipped {
             return atlas_observations(body);
@@ -307,18 +309,19 @@ pub fn observe_atlas(state: &Arc<AppState>, body: &Bytes, gzipped: bool) {
             Ok(_) => atlas_observations(&plain),
             Err(_) => Vec::new(),
         }
-    });
+    })
 }
 
+/// Whether the observation was taken on: false with no store, or with `OBSERVING` already at work.
 fn record(
     state: &Arc<AppState>,
     body: &Bytes,
     read: impl FnOnce(&[u8]) -> Vec<Observation> + Send + 'static,
-) {
+) -> bool {
     if state.title_metadata_cache_dir.is_none() {
-        return;
+        return false;
     }
-    let Ok(permit) = Arc::clone(&state.title_metadata_observing).try_acquire_owned() else { return };
+    let Ok(permit) = Arc::clone(&state.title_metadata_observing).try_acquire_owned() else { return false };
     let (state, body) = (Arc::clone(state), body.clone());
     tokio::spawn(async move {
         let _permit = permit;
@@ -330,6 +333,7 @@ fn record(
             eprintln!("title metadata: an observation was not kept ({e:?})");
         }
     });
+    true
 }
 
 /// The allowlisted fields a TMDB answer carries for its titles: a title's own record (`/3/movie/550`), and every
@@ -690,6 +694,19 @@ mod tests {
         );
         let other = h.send("GET", "/atlas/recommend", None, &[]).await;
         assert!(!other.headers().contains_key("x-den-title-metadata"));
+
+        // Not taken on — every observer busy — is not claimed: the browser sends it instead.
+        let busy =
+            Arc::clone(&h.state.title_metadata_observing).try_acquire_many_owned(OBSERVING as u32).unwrap();
+        let chart = h.send("GET", "/atlas/catalog/movie/jw-nfx/country=US.json", None, &[]).await;
+        assert!(!chart.headers().contains_key("x-den-title-metadata"), "all {OBSERVING} busy");
+        drop(busy);
+        while Arc::strong_count(&h.state) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await; // the first observation finishing
+        }
+        Arc::get_mut(&mut h.state).unwrap().title_metadata_cache_dir = None;
+        let chart = h.send("GET", "/atlas/catalog/movie/jw-nfx/country=US.json", None, &[]).await;
+        assert!(!chart.headers().contains_key("x-den-title-metadata"), "no store");
     }
 
     #[tokio::test]

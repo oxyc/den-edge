@@ -770,14 +770,13 @@ async fn relay_with(
         }
     }
     // atlas's catalog charts carry each title's JustWatch IMDb score. It is kept here for every client, as the TMDB
-    // proxy keeps what it fetches (`title_metadata.rs`), and the answer says so, so a browser sends nothing back.
+    // proxy keeps what it fetches (`title_metadata.rs`), and the answer says so — only when it was taken on — so a
+    // browser sends nothing back.
     let encoding = parts.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes());
     let observed = parts.status == StatusCode::OK
         && atlas_catalog(&control)
-        && matches!(encoding, None | Some(b"identity" | b"gzip"));
-    if observed {
-        crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
-    }
+        && matches!(encoding, None | Some(b"identity" | b"gzip"))
+        && crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
     let mut scope = None;
     if public_session && parts.status == StatusCode::CREATED {
         if let (Some(base), Some(socket), Some(address)) =
