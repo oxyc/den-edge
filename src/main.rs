@@ -60,6 +60,8 @@ pub struct AppState {
     pub web_origins: Vec<String>,
     /// The Den web app's built files (env `WEB_DIR`), served at `/`. `None` serves no app.
     pub web_dir: Option<std::path::PathBuf>,
+    /// The web app's ETags and its shell, kept so a request neither hashes nor reads a whole file (`web.rs`).
+    pub web_files: web::Files,
     /// Proxies whose report of the visitor's address counts (env `TRUSTED_PROXIES`, comma-separated IPs):
     /// `cloudflared` and `tailscale serve` connect from their own address (`handler::client_ip`).
     pub trusted_proxies: Vec<std::net::IpAddr>,
@@ -200,6 +202,7 @@ impl AppState {
             log_requests,
             web_origins: Vec::new(),
             web_dir: None,
+            web_files: web::Files::default(),
             trusted_proxies: Vec::new(),
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),

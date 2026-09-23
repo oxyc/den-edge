@@ -6,11 +6,19 @@
 //!
 //! The app's routes must not reuse an API path (`/settings`, `/plugins`, `/link/…`): the API answers first.
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
+use http_body::{Frame, SizeHint};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::task::{ready, Context, Poll};
+use std::time::SystemTime;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
 /// `tailscale serve` on the tailnet) — TMDB's images and API, OMDb's ratings (both BYOK, straight from the
@@ -100,31 +108,194 @@ pub async fn serve(
     };
     let Some(relative) = relative(path) else { return not_found() };
     let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
-    let (bytes, file, immutable) = match tokio::fs::read(&asked).await {
-        Ok(bytes) => (bytes, asked, path.starts_with("/assets/")),
+    let (mut opened, file, immutable) = match open(&asked).await {
+        Some(opened) => (opened, asked, path.starts_with("/assets/")),
         // A route in the app, not a file: the app's shell renders it.
-        Err(_) if !path.rsplit('/').next().unwrap_or("").contains('.') => {
+        None if !path.rsplit('/').next().unwrap_or("").contains('.') => {
             let index = dir.join("index.html");
-            match tokio::fs::read(&index).await {
-                Ok(bytes) => (bytes, index, false),
-                Err(_) => return not_found(),
+            match open(&index).await {
+                Some(opened) => (opened, index, false),
+                None => return not_found(),
             }
         }
-        Err(_) => return not_found(),
+        None => return not_found(),
     };
-    // The shell says which page this is before any of it has run, for whatever is about to build a link
-    // preview from it (`meta.rs`). Injected bytes are served as they are: the gzip sidecar on disk is of the
-    // file, not of this answer, and serving it would hand out the generic block to everything that asks for
-    // gzip — which is everything.
-    if file.file_name().is_some_and(|name| name == "index.html") {
+    let cast_origin = state.cast_origin.as_deref();
+    let modified = opened.1.modified().ok();
+    let identity = if file.file_name().is_some_and(|name| name == "index.html") {
+        let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else { return not_found() };
+        // The shell says which page this is before any of it has run, for whatever is about to build a link
+        // preview from it (`meta.rs`). Injected bytes are served as they are: the gzip sidecar on disk is of
+        // the file, not of this answer, and serving it would hand out the generic block to everything that
+        // asks for gzip — which is everything.
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
+            let (etag, length) = (digest(html.as_bytes()), html.len() as u64);
             return crate::cache::revalidate(
-                respond(html.into_bytes(), &file, false, media, state.cast_origin.as_deref()),
+                respond(Body::from(html), length, etag, &file, false, media, cast_origin),
                 headers,
             );
         }
+        Identity::Shell(bytes, etag)
+    } else {
+        Identity::Disk(opened)
+    };
+    encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await
+}
+
+/// A regular file, opened, with what `fstat` says of it. The length and the time come from the handle that is
+/// then read, so an answer's `Content-Length`, `ETag` and bytes all describe the same file even if a new one
+/// is renamed into its place meanwhile.
+type Opened = (tokio::fs::File, std::fs::Metadata);
+
+async fn open(path: &Path) -> Option<Opened> {
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let meta = file.metadata().await.ok()?;
+    meta.is_file().then_some((file, meta))
+}
+
+/// The uncompressed representation: the shell from memory, anything else streamed from disk.
+enum Identity {
+    Shell(Bytes, HeaderValue),
+    Disk(Opened),
+}
+
+/// How many ETags are kept before the cache starts again. A build is a few hundred files, so this is reached
+/// only by a WEB_DIR that has been updated by hand many times over without a restart.
+const ETAGS_MAX: usize = 4096;
+/// Read and streamed in pieces of this size, so no request holds a whole file.
+const CHUNK: usize = 64 * 1024;
+
+/// A file's length and modification time: when both are unchanged, so is what was worked out from its bytes.
+type Stamp = (u64, SystemTime);
+
+fn stamp(meta: &std::fs::Metadata) -> Option<Stamp> {
+    meta.modified().ok().map(|modified| (meta.len(), modified))
+}
+
+/// What is kept of the web app between requests: each file's ETag, and the shell's bytes, which `meta.rs`
+/// rewrites per request and so has to hold. Both are keyed by the file's `Stamp`, so a WEB_DIR updated by hand
+/// is read again rather than served from here.
+#[derive(Default)]
+pub struct Files {
+    etags: Mutex<HashMap<PathBuf, (Stamp, HeaderValue)>>,
+    shell: Mutex<Option<(PathBuf, Stamp, Bytes, HeaderValue)>>,
+    /// Whole-file reads: a hash for an ETag, or the shell read into memory.
+    #[cfg(test)]
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl Files {
+    #[cfg(test)]
+    fn count_read(&self) {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    encoded(bytes, &file, immutable, media, state.cast_origin.as_deref(), headers).await
+
+    #[cfg(not(test))]
+    fn count_read(&self) {}
+
+    /// The file's strong ETag: from the cache while its `Stamp` holds, otherwise hashed from the open handle,
+    /// which is then rewound for the body.
+    async fn etag(&self, path: &Path, (file, meta): &mut Opened) -> io::Result<HeaderValue> {
+        let stamp = stamp(meta);
+        if let Some((kept, etag)) = crate::lock(&self.etags).get(path) {
+            if Some(*kept) == stamp {
+                return Ok(etag.clone());
+            }
+        }
+        self.count_read();
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0; CHUNK];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        file.rewind().await?;
+        let etag = quoted(&hasher.finalize());
+        if let Some(stamp) = stamp {
+            let mut etags = crate::lock(&self.etags);
+            if etags.len() >= ETAGS_MAX && !etags.contains_key(path) {
+                etags.clear();
+            }
+            etags.insert(path.to_owned(), (stamp, etag.clone()));
+        }
+        Ok(etag)
+    }
+
+    /// The shell's bytes and ETag: from memory while its `Stamp` holds, otherwise read from the open handle.
+    async fn shell(&self, path: &Path, (file, meta): &mut Opened) -> io::Result<(Bytes, HeaderValue)> {
+        let stamp = stamp(meta);
+        if let Some((kept_path, kept, bytes, etag)) = crate::lock(&self.shell).as_ref() {
+            if kept_path == path && Some(*kept) == stamp {
+                return Ok((bytes.clone(), etag.clone()));
+            }
+        }
+        self.count_read();
+        let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+        file.read_to_end(&mut bytes).await?;
+        let bytes = Bytes::from(bytes);
+        let etag = digest(&bytes);
+        if let Some(stamp) = stamp {
+            *crate::lock(&self.shell) = Some((path.to_owned(), stamp, bytes.clone(), etag.clone()));
+        }
+        Ok((bytes, etag))
+    }
+}
+
+/// An opened file as a response body, read a `CHUNK` at a time as the connection takes it. It ends after the
+/// length `fstat` gave, which is what `Content-Length` promised; a file cut short under it fails the body
+/// rather than sending fewer bytes than were announced.
+struct FileBody {
+    file: tokio::fs::File,
+    left: u64,
+    buf: Box<[u8]>,
+}
+
+impl FileBody {
+    fn new((file, meta): Opened) -> Self {
+        let left = meta.len();
+        let buf = vec![0; usize::try_from(left).unwrap_or(CHUNK).min(CHUNK)].into_boxed_slice();
+        FileBody { file, left, buf }
+    }
+}
+
+impl http_body::Body for FileBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        let this = &mut *self;
+        if this.left == 0 {
+            return Poll::Ready(None);
+        }
+        let want = this.buf.len().min(usize::try_from(this.left).unwrap_or(usize::MAX));
+        let mut read = ReadBuf::new(&mut this.buf[..want]);
+        ready!(Pin::new(&mut this.file).poll_read(cx, &mut read))?;
+        let filled = read.filled();
+        if filled.is_empty() {
+            return Poll::Ready(Some(Err(io::ErrorKind::UnexpectedEof.into())));
+        }
+        this.left -= filled.len() as u64;
+        Poll::Ready(Some(Ok(Frame::data(Bytes::copy_from_slice(filled)))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.left == 0
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.left)
+    }
+}
+
+fn quoted(digest: &[u8]) -> HeaderValue {
+    HeaderValue::from_str(&format!("\"{}\"", crate::hex(digest))).expect("a quoted SHA-256 digest")
+}
+
+fn digest(bytes: &[u8]) -> HeaderValue {
+    quoted(&Sha256::digest(bytes))
 }
 
 /// RFC 9110 §12.5.3: explicit refusals override wildcard acceptance, including across field lines.
@@ -169,8 +340,11 @@ pub(crate) fn encodings(headers: &HeaderMap) -> (u16, u16) {
     (gzip.or(wildcard).unwrap_or(0), identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn encoded(
-    bytes: Vec<u8>,
+    files: &Files,
+    plain: Identity,
+    modified: Option<SystemTime>,
     file: &Path,
     immutable: bool,
     media: &[String],
@@ -181,17 +355,17 @@ async fn encoded(
     if gzip > 0 && gzip >= identity {
         let mut sidecar = file.as_os_str().to_os_string();
         sidecar.push(".gz");
+        let sidecar = PathBuf::from(sidecar);
         // A hand-updated WEB_DIR must never serve a stale sidecar after its original changed.
-        let fresh = match (tokio::fs::metadata(file).await, tokio::fs::metadata(&sidecar).await) {
-            (Ok(original), Ok(compressed)) => match (original.modified(), compressed.modified()) {
-                (Ok(original), Ok(compressed)) => compressed >= original,
-                _ => false,
-            },
+        let fresh = |compressed: &Opened| match (modified, compressed.1.modified()) {
+            (Some(original), Ok(compressed)) => compressed >= original,
             _ => false,
         };
-        if fresh {
-            if let Ok(compressed) = tokio::fs::read(sidecar).await {
-                let mut response = respond(compressed, file, immutable, media, cast_origin);
+        if let Some(mut compressed) = open(&sidecar).await.filter(fresh) {
+            if let Ok(etag) = files.etag(&sidecar, &mut compressed).await {
+                let length = compressed.1.len();
+                let body = Body::new(FileBody::new(compressed));
+                let mut response = respond(body, length, etag, file, immutable, media, cast_origin);
                 response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                 return crate::cache::revalidate(response, headers);
             }
@@ -204,7 +378,14 @@ async fn encoded(
         response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
         return response;
     }
-    crate::cache::revalidate(respond(bytes, file, immutable, media, cast_origin), headers)
+    let (length, body, etag) = match plain {
+        Identity::Shell(bytes, etag) => (bytes.len() as u64, Body::from(bytes), etag),
+        Identity::Disk(mut opened) => match files.etag(file, &mut opened).await {
+            Ok(etag) => (opened.1.len(), Body::new(FileBody::new(opened)), etag),
+            Err(_) => return not_found(),
+        },
+    };
+    crate::cache::revalidate(respond(body, length, etag, file, immutable, media, cast_origin), headers)
 }
 
 /// The request path as a path under the web directory, or `None` if it would step outside it.
@@ -215,7 +396,9 @@ fn relative(path: &str) -> Option<PathBuf> {
 }
 
 fn respond(
-    bytes: Vec<u8>,
+    body: Body,
+    length: u64,
+    etag: HeaderValue,
     file: &Path,
     immutable: bool,
     media: &[String],
@@ -235,11 +418,9 @@ fn respond(
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
-    let etag = format!("\"{}\"", crate::hex(&Sha256::digest(&bytes)));
-    let length = bytes.len();
-    let mut resp = Response::new(Body::from(bytes));
+    let mut resp = Response::new(body);
     let headers = resp.headers_mut();
-    headers.insert(header::ETAG, HeaderValue::from_str(&etag).expect("a quoted SHA-256 digest"));
+    headers.insert(header::ETAG, etag);
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -520,5 +701,82 @@ mod tests {
     #[tokio::test]
     async fn without_a_web_dir_the_root_is_the_old_404() {
         assert_eq!(Harness::new().call("GET", "/", None).await.0, StatusCode::NOT_FOUND);
+    }
+
+    fn reads(h: &Harness) -> usize {
+        h.state.web_files.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An asset larger than one piece arrives as several frames, with the length and type it was announced with.
+    #[tokio::test]
+    async fn an_asset_is_streamed_in_pieces_with_its_length_and_type() {
+        use http_body_util::BodyExt;
+        let h = with_app();
+        let wasm: Vec<u8> = (0..super::CHUNK * 2 + 123).map(|i| (i % 251) as u8).collect();
+        std::fs::write(h.dir.join("web/assets/core-abc123.wasm"), &wasm).unwrap();
+        let response = h.send("GET", "/assets/core-abc123.wasm", None, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/wasm");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], wasm.len().to_string());
+        let mut body = response.into_body();
+        let (mut frames, mut got) = (0, Vec::new());
+        while let Some(frame) = body.frame().await {
+            got.extend_from_slice(frame.unwrap().data_ref().unwrap());
+            frames += 1;
+        }
+        assert_eq!(got, wasm);
+        assert_eq!(frames, 3, "read a piece at a time, not as one buffer");
+    }
+
+    /// A file is hashed once for its ETag; after that, requests for it read none of it until it changes. The
+    /// gzip sidecar is a file of its own, with its own tag, hashed once too.
+    #[tokio::test]
+    async fn an_etag_is_worked_out_once_and_again_only_when_the_file_changes() {
+        let h = with_app();
+        let asset = "/assets/index-abc123.js";
+        let first = h.send("GET", asset, None, &[]).await;
+        let etag = first.headers()[header::ETAG].clone();
+        assert_eq!(reads(&h), 1);
+        for _ in 0..3 {
+            let again = h.send("GET", asset, None, &[]).await;
+            assert_eq!(again.headers()[header::ETAG], etag);
+            assert_eq!(body_text(again).await, "console.log(1)");
+        }
+        assert_eq!(
+            h.send("GET", asset, None, &[("if-none-match", etag.to_str().unwrap())]).await.status(),
+            StatusCode::NOT_MODIFIED
+        );
+        assert_eq!(reads(&h), 1, "neither a repeat nor a revalidation hashes again");
+
+        std::fs::write(h.dir.join("web/assets/index-abc123.js.gz"), b"sidecar").unwrap();
+        let gzip = h.send("GET", asset, None, &[("accept-encoding", "gzip")]).await;
+        assert_ne!(gzip.headers()[header::ETAG], etag);
+        h.send("GET", asset, None, &[("accept-encoding", "gzip")]).await;
+        assert_eq!(reads(&h), 2);
+
+        // The same length, so only the time tells it apart.
+        let path = h.dir.join("web/assets/index-abc123.js");
+        std::fs::write(&path, "console.log(2)").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10)).unwrap();
+        let changed = h.send("GET", asset, None, &[("if-none-match", etag.to_str().unwrap())]).await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_ne!(changed.headers()[header::ETAG], etag);
+        assert_eq!(body_text(changed).await, "console.log(2)");
+    }
+
+    /// The shell is held in memory, read once, and read again when it changes on disk.
+    #[tokio::test]
+    async fn the_shell_is_read_once_and_again_after_it_changes() {
+        let h = with_app();
+        for path in ["/", "/movies/603", "/index.html"] {
+            assert!(body_text(h.send("GET", path, None, &[]).await).await.contains("<title>Den</title>"));
+        }
+        assert_eq!(reads(&h), 1);
+        std::fs::write(h.dir.join("web/index.html"), "<!doctype html><title>Den 2</title>").unwrap();
+        let root = h.send("GET", "/", None, &[]).await;
+        assert!(body_text(root).await.contains("<title>Den 2</title>"));
+        h.send("GET", "/", None, &[]).await;
+        assert_eq!(reads(&h), 2);
     }
 }
