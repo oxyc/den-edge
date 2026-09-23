@@ -373,6 +373,13 @@ fn gate(state: &AppState, bucket: String, limit: u32) -> Option<Response> {
         .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
+/// `limit` a minute to `/mcp`, in fixed windows: an assistant calls steadily, and a window that moved on with every
+/// call allowed (`gate`) would never close and refuse it for good once past the limit.
+fn gate_steady(state: &AppState, bucket: String, limit: u32) -> Option<Response> {
+    crate::link::throttled_per_minute(state, &bucket, limit)
+        .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+}
+
 // ---- storage
 
 async fn load<T: serde::de::DeserializeOwned>(state: &AppState, key: &str) -> io::Result<Option<T>> {
@@ -1322,7 +1329,7 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
         return relay_mcp(state, req, rid).await;
     }
     let ip = crate::handler::client_ip(state, &req);
-    if let Some(limited) = gate(state, format!("mcp-gate:{ip}"), MCP_GATE_PER_WINDOW) {
+    if let Some(limited) = gate_steady(state, format!("mcp-gate:{ip}"), MCP_GATE_PER_WINDOW) {
         return limited;
     }
     let authorization = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
@@ -1337,7 +1344,7 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
     if still_stands(state, &session.who).await.is_none() {
         return unauthorized(oauth, true);
     }
-    if let Some(limited) = gate(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
+    if let Some(limited) = gate_steady(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
         return limited;
     }
     // At most `MCP_IN_FLIGHT` calls at den-mcp at once from here, whoever makes them: past that, come back shortly.
@@ -2072,6 +2079,50 @@ mod tests {
         let index = load_index(&h.state).await.unwrap();
         assert!(!index.clients.iter().any(|c| c.id == gone_client), "no connection left: reaped");
         assert!(index.clients.iter().any(|c| c.id == kept_client), "still connected: kept");
+    }
+
+    /// Every /mcp call checks the member behind it; for a library not loaded, that is its log's header alone, not a
+    /// replay of the whole log into memory.
+    #[tokio::test]
+    async fn checking_a_member_does_not_load_their_library() {
+        let h = harness().await;
+        h.state.libraries.lock().await.clear();
+        let hash: [u8; 32] = Sha256::digest(TOKEN.as_bytes()).into();
+        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await);
+        assert!(!crate::library::holds_member_hash(&h.state, LIB, &[0u8; 32]).await);
+        assert!(!h.state.libraries.lock().await.contains_key(LIB), "the library was not loaded to answer");
+        // Loaded, it is answered from memory the same way.
+        let claim = member();
+        connect(&h, &[("x-den-library-member", &claim)]).await;
+        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await);
+    }
+
+    /// An assistant calls steadily: its /mcp allowance renews each minute, where a window moved on by every call
+    /// allowed would never close.
+    #[tokio::test]
+    async fn a_steady_caller_gets_a_new_window_each_minute() {
+        let h = harness().await;
+        let (steady, moving) = ("mcp:steady", "mcp:moving");
+        for bucket in [steady, moving] {
+            let limited = |b: &str| {
+                if b == steady {
+                    crate::link::throttled_per_minute(&h.state, b, 2).is_some()
+                } else {
+                    crate::link::throttled_at(&h.state, b, 2).is_some()
+                }
+            };
+            assert!(!limited(bucket));
+            h.advance(30_000);
+            assert!(!limited(bucket));
+            h.advance(10_000);
+            assert!(limited(bucket), "{bucket}: past the limit within the minute");
+            h.advance(21_000);
+            if bucket == steady {
+                assert!(!limited(bucket), "a minute after the first call, a new window");
+            } else {
+                assert!(limited(bucket), "the moving window is still open: what /mcp no longer uses");
+            }
+        }
     }
 
     /// `/mcp` calls at den-mcp at once are capped here too: past it a caller is told to come back.

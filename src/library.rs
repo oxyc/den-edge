@@ -497,14 +497,28 @@ pub async fn holds_member_hash(state: &AppState, id: &str, hash: &[u8; 32]) -> b
     if !valid_hex_id(id) {
         return false;
     }
-    let mut libs = state.libraries.lock().await;
-    if load(state, &mut libs, id).await.is_err() {
-        return false;
+    // Loaded: answered from memory.
+    {
+        let libs = state.libraries.lock().await;
+        if let Some(lib) = libs.get(id) {
+            return constant_time_eq(lib.member_hash.as_ref().unwrap_or(&lib.token_hash), hash);
+        }
     }
-    libs.get(id).is_some_and(|lib| {
-        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
-        constant_time_eq(expected, hash)
-    })
+    // Not loaded: its log's first line says whose it is, without replaying the log into memory (and holding every
+    // library's lock while it does) for a question the header alone answers. An MCP call asks this every time.
+    match header_of(state, id).await {
+        Ok(Some((token_hash, member_hash))) => {
+            constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), hash)
+        }
+        _ => false,
+    }
+}
+
+/// A library's token and member hashes, from its log's header alone; `None` for a library there is no log of.
+async fn header_of(state: &AppState, id: &str) -> io::Result<Option<([u8; 32], Option<[u8; 32]>)>> {
+    let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(None) };
+    let first = log_read(&mut BufReader::new(file)).await?;
+    log_header(&first).map(Some)
 }
 
 async fn holds_another(
