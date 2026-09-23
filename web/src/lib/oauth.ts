@@ -8,9 +8,12 @@ import { relayFetch } from './relayFetch';
 
 /** What the consent page shows about a request. */
 export interface ConsentRequest {
+  /** The name the client gave itself when it registered: anyone can register under any name. */
   client: string;
   /** The host the answer is sent back to, which is who is really asking. */
   redirectHost: string | null;
+  /** Whether den-edge knows that host as an assistant's own (claude.ai, chatgpt.com) or as this computer. */
+  verified: boolean;
 }
 
 /** A connected assistant, as Settings lists it. */
@@ -82,13 +85,18 @@ export async function consentRequest(
 ): Promise<Reply<ConsentRequest>> {
   const reply = await ask(fetchImpl, `/oauth/request/${id}`);
   if (!reply.ok) return reply;
-  const body = reply.value as { client?: unknown; redirectHost?: unknown } | null;
+  const body = reply.value as {
+    client?: unknown;
+    redirectHost?: unknown;
+    verified?: unknown;
+  } | null;
   if (typeof body?.client !== 'string') return { ok: false, status: 0, error: 'failed' };
   return {
     ok: true,
     value: {
       client: body.client,
       redirectHost: typeof body.redirectHost === 'string' ? body.redirectHost : null,
+      verified: body.verified === true,
     },
   };
 }

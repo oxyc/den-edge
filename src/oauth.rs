@@ -23,7 +23,14 @@
 //! An access token is a compact JWS signed with Ed25519 (`alg: EdDSA`, `typ: at+jwt`, RFC 9068's claims), so den-mcp
 //! checks it with the public key alone and never asks this server. It lasts `ACCESS_TTL_S`, and a guest's never
 //! outlasts the grant. The refresh token is `<sid>.<secret>`; only the secret's SHA-256 is kept, it is replaced on
-//! every use, and presenting a replaced one ends the session (refresh-token reuse detection, OAuth 2.1 §4.3.1).
+//! every use, and presenting a replaced one ends the session (refresh-token reuse detection, OAuth 2.1 §4.3.1) —
+//! except the one just replaced, once more within `REFRESH_GRACE_MS`, which is a client retrying a lost answer.
+//!
+//! # Before consent
+//!
+//! Registering and asking are open to anyone, so nothing before a person says yes sends a browser anywhere: every
+//! refusal is Den's own page (`error_page`), and the consent page leads with where the answer would go, marked known
+//! only for the assistants' own hosts. Full tables make room by dropping the oldest unused entry.
 //!
 //! # Cutting a connection off
 //!
@@ -63,9 +70,22 @@ const CODE_MS: u64 = 60_000;
 /// Registered clients kept, and how long one that was never used is kept.
 const MAX_CLIENTS: usize = 500;
 const UNUSED_CLIENT_MS: u64 = 86_400_000;
-/// Connections one library may have (its guests' included), and in all.
+/// How long a client that was consented to is kept once it has no connection left.
+const IDLE_CLIENT_MS: u64 = 30 * 86_400_000;
+/// Authorizations waiting for the consent page, in all and for one client.
+const MAX_PENDING: usize = 1000;
+const MAX_PENDING_PER_CLIENT: usize = 10;
+/// The most of `state` an authorization request may carry: it is sent back, and kept until then.
+const STATE_MAX: usize = 1024;
+/// Connections one library may have (its guests' included), one guest may make, and in all.
 const MAX_SESSIONS_PER_HOST: usize = 50;
+const MAX_SESSIONS_PER_GRANT: usize = 5;
 const MAX_SESSIONS: usize = 1000;
+/// How long after a refresh the refresh token it replaced is still taken, once: a client whose answer was lost
+/// retries with the old one, and that is a retry, not a theft.
+const REFRESH_GRACE_MS: u64 = 60_000;
+/// Replaced refresh secrets remembered per session, so any older one presented is known for reuse.
+const RETIRED_KEPT: usize = 8;
 /// Requests per address per minute to each public endpoint, and per session to `/mcp`.
 const REGISTER_PER_WINDOW: u32 = 10;
 const AUTHORIZE_PER_WINDOW: u32 = 60;
@@ -93,7 +113,13 @@ pub struct OAuth {
     codes: Mutex<HashMap<String, Code>>,
     /// Held across every read-modify-write of the index, a session's rotation included.
     lock: tokio::sync::Mutex<()>,
+    /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer is back.
+    mcp_slots: tokio::sync::Semaphore,
 }
+
+/// The most `/mcp` calls relayed to den-mcp at once. den-mcp answers a call in milliseconds and runs 32 at a time
+/// itself; this keeps a flood from reaching it and holding this server's connections open while it waits.
+const MCP_IN_FLIGHT: usize = 32;
 
 impl OAuth {
     /// `seed` is the Ed25519 private key's 32 bytes.
@@ -109,6 +135,7 @@ impl OAuth {
             pending: Mutex::default(),
             codes: Mutex::default(),
             lock: tokio::sync::Mutex::new(()),
+            mcp_slots: tokio::sync::Semaphore::new(MCP_IN_FLIGHT),
         }
     }
 
@@ -131,6 +158,8 @@ struct Pending {
     challenge: String,
     state: Option<String>,
     until: u64,
+    /// Arrival order, which decides the oldest when several arrived in the same millisecond.
+    seq: u64,
 }
 
 /// A code, waiting to be exchanged.
@@ -177,6 +206,9 @@ struct Client {
     created_at: u64,
     /// A consent was given to it at least once; an unused registration is reaped after a day.
     used: bool,
+    /// When a consent was last given to it; with no connection left, it is reaped `IDLE_CLIENT_MS` after.
+    #[serde(default)]
+    consented_at: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -189,9 +221,15 @@ struct Session {
     #[serde(default)]
     redirect_host: Option<String>,
     who: Who,
-    /// Hex SHA-256 of the refresh secret now valid, and of the one it replaced (reuse detection).
+    /// Hex SHA-256 of the refresh secret now valid, and of the one it replaced, which is taken again only within
+    /// `REFRESH_GRACE_MS` of `rotated_at`.
     refresh_hash: String,
     previous_hash: Option<String>,
+    #[serde(default)]
+    rotated_at: u64,
+    /// Older replaced secrets: one of them presented is a stolen token being used, and ends the session.
+    #[serde(default)]
+    retired: Vec<String>,
     created_at: u64,
     used_at: u64,
 }
@@ -439,15 +477,39 @@ async fn register(state: &AppState, oauth: &OAuth, req: Request) -> Response {
         url::Url::parse(&uris[0]).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
     });
     let now = state.now();
-    let client =
-        Client { v: VERSION, id: random_id(), name, redirect_uris: uris, created_at: now, used: false };
+    let client = Client {
+        v: VERSION,
+        id: random_id(),
+        name,
+        redirect_uris: uris,
+        created_at: now,
+        used: false,
+        consented_at: 0,
+    };
     let _lock = oauth.lock.lock().await;
     let mut index = match load_index(state).await {
         Ok(index) => index,
         Err(e) => return internal("oauth index", e),
     };
+    // Registering is open to anyone, so a full table makes room by dropping the oldest registration nobody ever
+    // consented to, rather than refusing everyone after it; only a table of clients people use is full.
     if index.clients.len() >= MAX_CLIENTS {
-        return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable", "too many clients");
+        match oldest_unused(state, &index).await {
+            Ok(Some(id)) => {
+                if let Err(e) = state.store.delete(NS, &client_key(&id)).await {
+                    return internal("oauth client delete", e);
+                }
+                index.clients.retain(|c| c.id != id);
+            }
+            Ok(None) => {
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "too many clients",
+                )
+            }
+            Err(e) => return internal("oauth client read", e),
+        }
     }
     if let Err(e) = save(state, &client_key(&client.id), &client).await {
         return internal("oauth client write", e);
@@ -471,7 +533,62 @@ async fn register(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     )
 }
 
+/// The oldest registration no consent was ever given to. Under `oauth.lock`.
+async fn oldest_unused(state: &AppState, index: &Index) -> io::Result<Option<String>> {
+    let mut by_age: Vec<&IndexClient> = index.clients.iter().collect();
+    by_age.sort_by_key(|c| c.created_at);
+    for entry in by_age {
+        match load::<Client>(state, &client_key(&entry.id)).await? {
+            Some(client) if client.used => {}
+            _ => return Ok(Some(entry.id.clone())),
+        }
+    }
+    Ok(None)
+}
+
 // ---- authorization
+
+/// The registered redirect `given` names: the same URI, or — for an app on this computer — the same loopback URI on
+/// any port, which RFC 8252 §7.3 has the server allow, since a desktop app takes whatever port is free at the time.
+fn registered_redirect(registered: &[String], given: &str) -> bool {
+    if registered.iter().any(|r| r == given) {
+        return true;
+    }
+    let Ok(given) = url::Url::parse(given) else { return false };
+    let loopback = |u: &url::Url| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))
+    };
+    loopback(&given)
+        && registered.iter().filter_map(|r| url::Url::parse(r).ok()).any(|r| {
+            loopback(&r)
+                && r.host_str() == given.host_str()
+                && r.path() == given.path()
+                && r.query() == given.query()
+                && r.fragment().is_none()
+                && given.fragment().is_none()
+        })
+}
+
+/// An authorization that cannot go ahead, said on Den's own page. Never a redirect: before a person has said yes,
+/// a registered redirect URI is only what some client chose, and sending the browser there on an error would make
+/// this server an open redirector for anyone who registers one.
+fn error_page(detail: &str) -> Response {
+    let escape =
+        |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" \
+         content=\"width=device-width,initial-scale=1\"><title>Den — can't connect</title>\
+         <body style=\"font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem\">\
+         <h1 style=\"font-size:1.3rem\">This connection can't go ahead</h1><p>{}</p>\
+         <p>Start connecting again from the assistant.</p></body></html>",
+        escape(detail)
+    );
+    let mut resp = Response::new(Body::from(html));
+    *resp.status_mut() = StatusCode::BAD_REQUEST;
+    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
 
 fn query_map(req: &Request) -> HashMap<String, String> {
     url::form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()).into_owned().collect()
@@ -511,53 +628,65 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     }
     let q = query_map(&req);
     let get = |k: &str| q.get(k).map(String::as_str);
-    // Until the client and its redirect URI are known good, an error is said here and never sent anywhere.
+    // Nothing is redirected before a person has said yes (`error_page`): every refusal here is said on Den's page.
     let Some(client_id) = get("client_id").filter(|id| valid_id(id)) else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown client_id");
+        return error_page("The assistant named no client Den knows.");
     };
     let client: Client = match load(state, &client_key(client_id)).await {
         Ok(Some(client)) => client,
-        Ok(None) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "unknown client_id"),
+        Ok(None) => return error_page("The assistant named no client Den knows."),
         Err(e) => return internal("oauth client read", e),
     };
     let redirect_uri = match get("redirect_uri") {
-        Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => uri.to_owned(),
+        Some(uri) if registered_redirect(&client.redirect_uris, uri) => uri.to_owned(),
         None if client.redirect_uris.len() == 1 => client.redirect_uris[0].clone(),
-        _ => {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "redirect_uri is not registered")
-        }
+        _ => return error_page("The assistant asked for its answer at an address it did not register."),
     };
     let state_param = get("state").map(str::to_owned);
-    let fail = |code: &str, description: &str| {
-        let mut params =
-            vec![("error", code), ("error_description", description), ("iss", oauth.issuer.as_str())];
-        if let Some(s) = &state_param {
-            params.push(("state", s));
-        }
-        redirect(&with_params(&redirect_uri, &params))
-    };
+    if state_param.as_ref().is_some_and(|s| s.len() > STATE_MAX) {
+        return error_page("The assistant's request is too long.");
+    }
     if get("response_type") != Some("code") {
-        return fail("unsupported_response_type", "code only");
+        return error_page(
+            "The assistant asked for a kind of answer Den does not give (response_type code only).",
+        );
     }
     let Some(challenge) = get("code_challenge").filter(|c| valid_challenge(c)) else {
-        return fail("invalid_request", "PKCE is required: code_challenge with code_challenge_method S256");
+        return error_page("The assistant did not use PKCE, which Den requires (code_challenge, S256).");
     };
     if get("code_challenge_method") != Some("S256") {
-        return fail("invalid_request", "code_challenge_method S256 only");
+        return error_page("The assistant used a PKCE method Den does not take (S256 only).");
     }
     if get("resource").is_some_and(|r| r.trim_end_matches('/') != oauth.resource) {
-        return fail("invalid_target", "the resource is this server's /mcp");
+        return error_page("The assistant asked to connect to something other than Den's search (/mcp).");
     }
     if get("scope").is_some_and(|s| s.split(' ').any(|s| !s.is_empty() && s != SCOPE)) {
-        return fail("invalid_scope", "den:search only");
+        return error_page("The assistant asked for more than Den gives: searching only (den:search).");
     }
     let now = state.now();
     let id = random_id();
     {
         let mut pending = crate::lock(&oauth.pending);
         pending.retain(|_, p| p.until > now);
-        if pending.len() >= 1000 {
-            return fail("temporarily_unavailable", "too many authorizations in progress");
+        // Full, in all or for this client: the oldest waiting request makes room, so a flood of unanswered requests
+        // cannot lock anyone else out; a person answers within minutes or not at all.
+        let oldest = |pending: &HashMap<String, Pending>, client: Option<&str>| {
+            pending
+                .iter()
+                .filter(|(_, p)| client.is_none_or(|c| p.client_id == c))
+                .min_by_key(|(_, p)| (p.until, p.seq))
+                .map(|(k, _)| k.clone())
+        };
+        let seq = pending.values().map(|p| p.seq + 1).max().unwrap_or(0);
+        if pending.values().filter(|p| p.client_id == client.id).count() >= MAX_PENDING_PER_CLIENT {
+            if let Some(key) = oldest(&pending, Some(&client.id)) {
+                pending.remove(&key);
+            }
+        }
+        if pending.len() >= MAX_PENDING {
+            if let Some(key) = oldest(&pending, None) {
+                pending.remove(&key);
+            }
         }
         pending.insert(
             id.clone(),
@@ -568,6 +697,7 @@ async fn authorize(state: &AppState, oauth: &OAuth, req: Request) -> Response {
                 challenge: challenge.to_owned(),
                 state: state_param,
                 until: now + PENDING_MS,
+                seq,
             },
         );
     }
@@ -578,6 +708,15 @@ fn redirect_host(uri: &str) -> Option<String> {
     url::Url::parse(uri).ok().and_then(|u| u.host_str().map(str::to_owned))
 }
 
+/// The hosts known to be the assistants' own, where a connection's answer goes back to. A client names itself
+/// whatever it likes at registration, so the consent page leads with where the answer goes, and marks it known only
+/// for these — and for an app on this very computer (loopback), which only its own person can be running.
+const KNOWN_ASSISTANT_HOSTS: &[&str] = &["claude.ai", "chatgpt.com"];
+
+fn known_host(host: &str) -> bool {
+    KNOWN_ASSISTANT_HOSTS.contains(&host) || matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
 fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, format!("oauth-consent:{ip}"), CONSENT_PER_WINDOW * 2) {
@@ -586,10 +725,14 @@ fn request_info(state: &AppState, oauth: &OAuth, req: Request, id: &str) -> Resp
     let now = state.now();
     let pending = crate::lock(&oauth.pending);
     match pending.get(id).filter(|p| p.until > now) {
-        Some(p) => json_reply(
-            StatusCode::OK,
-            &json!({ "client": p.client_name, "redirectHost": redirect_host(&p.redirect_uri), "scope": SCOPE }),
-        ),
+        Some(p) => {
+            let host = redirect_host(&p.redirect_uri);
+            let verified = host.as_deref().is_some_and(known_host);
+            json_reply(
+                StatusCode::OK,
+                &json!({ "client": p.client_name, "redirectHost": host, "verified": verified, "scope": SCOPE }),
+            )
+        }
         None => json_reply(StatusCode::NOT_FOUND, &error("request_expired")),
     }
 }
@@ -653,14 +796,14 @@ async fn consent(state: &AppState, oauth: &OAuth, req: Request, id: &str, approv
                 );
             }
             params.push(("code", code));
-            // A client that was consented to is kept past the day an unused registration is.
+            // A client that was consented to is kept past the day an unused registration is, and for
+            // `IDLE_CLIENT_MS` after the last consent once it has no connection left.
             let _lock = oauth.lock.lock().await;
             if let Ok(Some(mut client)) = load::<Client>(state, &client_key(&pending.client_id)).await {
-                if !client.used {
-                    client.used = true;
-                    if let Err(e) = save(state, &client_key(&client.id), &client).await {
-                        eprintln!("oauth client write: {e}");
-                    }
+                client.used = true;
+                client.consented_at = now;
+                if let Err(e) = save(state, &client_key(&client.id), &client).await {
+                    eprintln!("oauth client write: {e}");
                 }
             }
         }
@@ -820,6 +963,8 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
         who: code.who,
         refresh_hash: sha(secret.as_bytes()),
         previous_hash: None,
+        rotated_at: 0,
+        retired: Vec::new(),
         created_at: now,
         used_at: now,
     };
@@ -829,7 +974,16 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
         Err(e) => return internal("oauth index", e),
     };
     let host = session.who.host().to_owned();
-    if index.sessions.len() >= MAX_SESSIONS
+    // A guest's connections are capped on their own, so one invite cannot use up its host's.
+    let grant_full = match &session.who {
+        Who::Guest { gid, .. } => {
+            index.sessions.iter().filter(|s| s.gid.as_deref() == Some(gid.as_str())).count()
+                >= MAX_SESSIONS_PER_GRANT
+        }
+        Who::Member { .. } => false,
+    };
+    if grant_full
+        || index.sessions.len() >= MAX_SESSIONS
         || index.sessions.iter().filter(|s| s.host == host).count() >= MAX_SESSIONS_PER_HOST
     {
         return oauth_error(
@@ -865,23 +1019,29 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
         Ok(None) => return invalid("unknown refresh token"),
         Err(e) => return internal("oauth session read", e),
     };
+    // A public client names itself on every refresh (OAuth 2.1 §4.3.1), and only the client the session is for may.
+    if client_id != Some(session.client_id.as_str()) {
+        return invalid("client_id is required, and must be the client the token was issued to");
+    }
     let presented = sha(secret.as_bytes());
-    if !constant_time_eq(presented.as_bytes(), session.refresh_hash.as_bytes()) {
-        // A replaced token presented again means two holders of one session: end it for both.
-        if session
-            .previous_hash
-            .as_deref()
-            .is_some_and(|p| constant_time_eq(p.as_bytes(), presented.as_bytes()))
-        {
-            eprintln!("oauth: a replaced refresh token was used again — ending the session");
+    let is = |hash: &str| constant_time_eq(hash.as_bytes(), presented.as_bytes());
+    let current = is(&session.refresh_hash);
+    // The token the last refresh replaced, presented again within the grace: the client never got that answer and
+    // retried. It gets a fresh pair, and the one it never received is retired.
+    let retry = !current
+        && session.previous_hash.as_deref().is_some_and(is)
+        && now < session.rotated_at + REFRESH_GRACE_MS;
+    if !current && !retry {
+        // A replaced token presented after the grace, or any older one: two holders of one session. End it for both.
+        let reused =
+            session.previous_hash.as_deref().is_some_and(is) || session.retired.iter().any(|h| is(h));
+        if reused {
+            eprintln!("oauth: a replaced refresh token was used again ({sid}) — ending the session");
             if let Err(e) = end_session(state, sid).await {
                 return internal("oauth session delete", e);
             }
         }
         return invalid("unknown refresh token");
-    }
-    if client_id.is_some_and(|c| c != session.client_id) {
-        return invalid("the token was issued to another client");
     }
     let stands =
         if now >= session.used_at + IDLE_MS { None } else { still_stands(state, &session.who).await };
@@ -892,7 +1052,16 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
         return invalid("the connection has ended");
     };
     let secret = b64url(&crate::random_bytes::<32>());
-    session.previous_hash = Some(std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes())));
+    let replaced = std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes()));
+    if retry {
+        // The secret the lost answer carried is never valid; the one presented stays the grace's.
+        session.retired.push(replaced);
+    } else {
+        session.retired.extend(session.previous_hash.replace(replaced));
+        session.rotated_at = now;
+    }
+    let excess = session.retired.len().saturating_sub(RETIRED_KEPT);
+    session.retired.drain(..excess);
     session.used_at = now;
     if let Err(e) = save(state, &session_key(sid), &session).await {
         return internal("oauth session write", e);
@@ -1029,19 +1198,31 @@ pub async fn sweep(state: &AppState) {
         }
     };
     let mut ended = Vec::new();
+    // The clients a connection still stands for.
+    let mut connected: Vec<String> = Vec::new();
     for entry in &index.sessions {
         match load::<Session>(state, &session_key(&entry.sid)).await {
-            Ok(Some(s)) if now < s.used_at + IDLE_MS && still_stands(state, &s.who).await.is_some() => {}
+            Ok(Some(s)) if now < s.used_at + IDLE_MS && still_stands(state, &s.who).await.is_some() => {
+                connected.push(s.client_id);
+            }
             Ok(_) => ended.push(entry.sid.clone()),
             Err(e) => eprintln!("oauth sweep: {e}"),
         }
     }
-    // A registration nobody ever consented to, a day on, is reaped: registering is open to anyone.
+    // A registration nobody ever consented to, a day on, is reaped: registering is open to anyone. So is one that
+    // was consented to but has had no connection for `IDLE_CLIENT_MS` since: an assistant that comes back
+    // registers again.
     let mut unused = Vec::new();
     for entry in index.clients.iter().filter(|c| now >= c.created_at + UNUSED_CLIENT_MS) {
         match load::<Client>(state, &client_key(&entry.id)).await {
-            Ok(Some(client)) if client.used => {}
-            Ok(_) => unused.push(entry.id.clone()),
+            Ok(Some(client)) if !client.used => unused.push(entry.id.clone()),
+            Ok(Some(client)) => {
+                let last = client.consented_at.max(client.created_at);
+                if !connected.contains(&client.id) && now >= last + IDLE_CLIENT_MS {
+                    unused.push(entry.id.clone());
+                }
+            }
+            Ok(None) => unused.push(entry.id.clone()),
             Err(e) => eprintln!("oauth sweep: {e}"),
         }
     }
@@ -1051,10 +1232,19 @@ pub async fn sweep(state: &AppState) {
     let _lock = oauth.lock.lock().await;
     let result = async {
         let mut index = load_index(state).await?;
+        // Only those still unused: a consent given since they were read renews them.
+        let mut reaped = Vec::new();
         for id in &unused {
-            state.store.delete(NS, &client_key(id)).await?;
+            match load::<Client>(state, &client_key(id)).await? {
+                Some(c) if c.used && now < c.consented_at.max(c.created_at) + IDLE_CLIENT_MS => {}
+                Some(c) if c.used && connected.contains(&c.id) => {}
+                _ => {
+                    state.store.delete(NS, &client_key(id)).await?;
+                    reaped.push(id.clone());
+                }
+            }
         }
-        index.clients.retain(|c| !unused.contains(&c.id));
+        index.clients.retain(|c| !reaped.contains(&c.id));
         // Only those still ended: a session refreshed since it was read is no longer idle.
         let mut still = Vec::new();
         for sid in &ended {
@@ -1082,7 +1272,12 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
 /// The session an access token names, when its signature is this server's and it is for the MCP resource and in date.
 /// den-mcp checks it again; this is so the relay can look the session up before anything reaches den-mcp.
 fn session_of(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Option<String> {
-    let token = authorization?.strip_prefix("Bearer ")?.trim();
+    // The scheme is case-insensitive (RFC 9110 §11.1).
+    let (scheme, token) = authorization?.trim_start().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
     let mut parts = token.split('.');
     let (head, body, sig) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
@@ -1090,6 +1285,11 @@ fn session_of(oauth: &OAuth, authorization: Option<&str>, now_s: u64) -> Option<
     }
     let header: Value = serde_json::from_slice(&b64url_decode(head)?).ok()?;
     if header.get("alg").and_then(Value::as_str) != Some("EdDSA") {
+        return None;
+    }
+    // An access token (RFC 9068), not any other JWT this key might one day sign.
+    let typ = header.get("typ").and_then(Value::as_str).unwrap_or("");
+    if !typ.eq_ignore_ascii_case("at+jwt") && !typ.eq_ignore_ascii_case("application/at+jwt") {
         return None;
     }
     let sig: [u8; 64] = b64url_decode(sig)?.try_into().ok()?;
@@ -1140,6 +1340,10 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
     if let Some(limited) = gate(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
         return limited;
     }
+    // At most `MCP_IN_FLIGHT` calls at den-mcp at once from here, whoever makes them: past that, come back shortly.
+    let Ok(_slot) = oauth.mcp_slots.try_acquire() else {
+        return retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("busy"), 2_000);
+    };
     relay_mcp(state, req, rid).await
 }
 
@@ -1521,23 +1725,113 @@ mod tests {
         assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
         let elsewhere = authorize_url(&client, "").replace("assistant.example", "evil.example");
         assert_eq!(h.send("GET", &elsewhere, None, &[]).await.status(), StatusCode::BAD_REQUEST);
-        // PKCE is required, and S256 only.
-        for (from, to) in
-            [("code_challenge_method=S256", "code_challenge_method=plain"), ("code_challenge=", "x=")]
-        {
-            let resp = h.send("GET", &authorize_url(&client, "").replace(from, to), None, &[]).await;
-            assert_eq!(resp.status(), StatusCode::FOUND);
-            let back = query_of(&location(&resp));
-            assert_eq!((back["error"].as_str(), back["state"].as_str()), ("invalid_request", "xyz"));
+        // PKCE is required, and S256 only; the resource is /mcp and the state is short. Every refusal before a
+        // person said yes is said on Den's own page and sends the browser nowhere: a registered redirect is only what
+        // some client chose, and following it on an error would make this an open redirector.
+        let long_state = format!("&state={}", "s".repeat(STATE_MAX + 1));
+        for (url, says) in [
+            (
+                authorize_url(&client, "")
+                    .replace("code_challenge_method=S256", "code_challenge_method=plain"),
+                "S256",
+            ),
+            (authorize_url(&client, "").replace("code_challenge=", "x="), "PKCE"),
+            (authorize_url(&client, "").replace("%2Fmcp", "%2Fother"), "/mcp"),
+            (
+                authorize_url(&client, "").replace("response_type=code", "response_type=token"),
+                "response_type",
+            ),
+            (authorize_url(&client, "&scope=admin"), "den:search"),
+            (authorize_url(&client, &long_state).replace("&state=xyz", ""), "too long"),
+            (authorize_url(&"0".repeat(32), ""), "no client"),
+        ] {
+            let resp = h.send("GET", &url, None, &[]).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{url}");
+            assert!(!resp.headers().contains_key(header::LOCATION), "{url}: never redirected");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+            let page = body_text(resp).await;
+            assert!(page.contains(says), "{url}: {page}");
         }
-        let other = authorize_url(&client, "").replace("%2Fmcp", "%2Fother");
-        assert_eq!(query_of(&location(&h.send("GET", &other, None, &[]).await))["error"], "invalid_target");
         let id = request(&h, &client).await;
         let (status, info) = h.call("GET", &format!("/oauth/request/{id}"), None).await;
+        // The consent page is told where the answer goes, and that assistant.example is no assistant Den knows.
         assert_eq!(
-            (status, &info["client"], &info["redirectHost"]),
-            (StatusCode::OK, &json!("Claude"), &json!("assistant.example"))
+            (status, &info["client"], &info["redirectHost"], &info["verified"]),
+            (StatusCode::OK, &json!("Claude"), &json!("assistant.example"), &json!(false))
         );
+    }
+
+    /// A client names itself whatever it likes: the consent page leads with where the answer goes, and marks as known
+    /// only the assistants' own hosts and this computer.
+    #[test]
+    fn only_the_assistants_hosts_and_this_computer_are_known() {
+        for host in ["claude.ai", "chatgpt.com", "127.0.0.1", "localhost", "[::1]"] {
+            assert!(known_host(host), "{host}");
+        }
+        for host in ["evil.example", "claude.ai.evil.example", "evil-claude.ai", "chatgpt.com.example", ""] {
+            assert!(!known_host(host), "{host}");
+        }
+    }
+
+    /// RFC 8252 §7.3: a desktop app's loopback redirect is taken on whatever port it has free now.
+    #[test]
+    fn a_loopback_redirect_is_taken_on_any_port() {
+        let registered = vec!["http://127.0.0.1:33418/callback".to_owned(), REDIRECT.to_owned()];
+        assert!(registered_redirect(&registered, "http://127.0.0.1:50123/callback"));
+        assert!(registered_redirect(&registered, "http://127.0.0.1/callback"));
+        assert!(registered_redirect(&registered, REDIRECT));
+        assert!(!registered_redirect(&registered, "http://127.0.0.1:50123/other"), "the path must match");
+        assert!(!registered_redirect(&registered, "http://[::1]:50123/callback"), "the host must match");
+        assert!(
+            !registered_redirect(&registered, "https://assistant.example:8443/callback"),
+            "not for https"
+        );
+        assert!(!registered_redirect(&registered, "http://127.0.0.1:1/callback#x"));
+    }
+
+    /// Registering and asking are open to anyone, so a full table makes room rather than locking everyone out: the
+    /// oldest registration never consented to, and a client's own oldest waiting request.
+    #[tokio::test]
+    async fn a_full_table_makes_room_instead_of_refusing() {
+        let h = harness().await;
+        let client = register(&h).await;
+        let ids: Vec<String> = {
+            let mut ids = Vec::new();
+            for _ in 0..MAX_PENDING_PER_CLIENT + 2 {
+                ids.push(request(&h, &client).await);
+            }
+            ids
+        };
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let waiting = crate::lock(&oauth.pending).values().filter(|p| p.client_id == client).count();
+        assert_eq!(waiting, MAX_PENDING_PER_CLIENT, "one client's requests are capped");
+        let (latest, _) = h.call("GET", &format!("/oauth/request/{}", ids.last().unwrap()), None).await;
+        assert_eq!(latest, StatusCode::OK, "the newest request stands");
+        let (first, _) = h.call("GET", &format!("/oauth/request/{}", ids[0]), None).await;
+        assert_eq!(first, StatusCode::NOT_FOUND, "the oldest made room");
+
+        // Clients: fill the table, then one more registers in place of the oldest unused one.
+        let mut index = load_index(&h.state).await.unwrap();
+        for n in index.clients.len()..MAX_CLIENTS {
+            let id = format!("{n:032x}");
+            let c = Client {
+                v: VERSION,
+                id: id.clone(),
+                name: "x".into(),
+                redirect_uris: vec![REDIRECT.into()],
+                created_at: n as u64 + 1,
+                used: false,
+                consented_at: 0,
+            };
+            save(&h.state, &client_key(&id), &c).await.unwrap();
+            index.clients.push(IndexClient { id, created_at: n as u64 + 1 });
+        }
+        save(&h.state, INDEX, &index).await.unwrap();
+        let newest = register(&h).await;
+        let index = load_index(&h.state).await.unwrap();
+        assert_eq!(index.clients.len(), MAX_CLIENTS);
+        assert!(index.clients.iter().any(|c| c.id == newest));
+        assert!(index.clients.iter().any(|c| c.id == client), "the client in use was not the one dropped");
     }
 
     #[tokio::test]
@@ -1636,7 +1930,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{next}");
         let second = next["refresh_token"].as_str().unwrap().to_owned();
         assert_ne!(second, first);
-        // The replaced one again: two holders of one session. It ends for both.
+        // The replaced one again, past the grace a lost answer gets: two holders of one session. It ends for both.
+        h.advance(REFRESH_GRACE_MS + 1);
         assert_eq!(refresh(first.to_owned()).await.1["error"], "invalid_grant");
         assert_eq!(refresh(second).await.1["error"], "invalid_grant");
         let access = next["access_token"].as_str().unwrap();
@@ -1645,6 +1940,187 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "its access token is refused too"
         );
+    }
+
+    /// A client whose refresh answer was lost retries with the token it still holds: within the grace that is a
+    /// retry, answered with a fresh pair, and the pair it never received is retired. Any retired token presented later
+    /// ends the session.
+    #[tokio::test]
+    async fn a_lost_refresh_is_retried_and_a_retired_token_ends_the_session() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let client = tokens["client_id"].as_str().unwrap().to_owned();
+        let refresh = |token: String| {
+            let (h, client) = (&h, client.clone());
+            async move {
+                post_form(
+                    h,
+                    "/oauth/token",
+                    &[("grant_type", "refresh_token"), ("refresh_token", &token), ("client_id", &client)],
+                )
+                .await
+            }
+        };
+        let first = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let (_, lost) = refresh(first.clone()).await;
+        let lost = lost["refresh_token"].as_str().unwrap().to_owned();
+        // The answer never arrived: the same token again, a few seconds on.
+        h.advance(5_000);
+        let (status, again) = refresh(first.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        let kept = again["refresh_token"].as_str().unwrap().to_owned();
+        assert_eq!(call_mcp(&h, again["access_token"].as_str().unwrap()).await.status(), StatusCode::OK);
+        // Rotating on normally, later.
+        h.advance(REFRESH_GRACE_MS);
+        let (status, later) = refresh(kept).await;
+        assert_eq!(status, StatusCode::OK, "{later}");
+        // The token the lost answer carried turns up: someone else has it. The session ends.
+        assert_eq!(refresh(lost).await.1["error"], "invalid_grant");
+        let next = later["refresh_token"].as_str().unwrap().to_owned();
+        assert_eq!(refresh(next).await.1["error"], "invalid_grant", "ended for its holder too");
+    }
+
+    /// A public client names itself on every refresh, and only the client a session is for can refresh it.
+    #[tokio::test]
+    async fn a_refresh_names_its_client() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let token = tokens["refresh_token"].as_str().unwrap();
+        for form in [
+            vec![("grant_type", "refresh_token"), ("refresh_token", token)],
+            vec![("grant_type", "refresh_token"), ("refresh_token", token), ("client_id", LIB)],
+        ] {
+            let (status, answer) = post_form(&h, "/oauth/token", &form).await;
+            assert_eq!((status, &answer["error"]), (StatusCode::BAD_REQUEST, &json!("invalid_grant")));
+            assert!(answer["error_description"].as_str().unwrap().contains("client_id"), "{answer}");
+        }
+        let client = tokens["client_id"].as_str().unwrap();
+        let form = [("grant_type", "refresh_token"), ("refresh_token", token), ("client_id", client)];
+        assert_eq!(
+            post_form(&h, "/oauth/token", &form).await.0,
+            StatusCode::OK,
+            "and the token still stands"
+        );
+    }
+
+    /// One invite's guest may connect a few assistants, never its host's whole allowance.
+    #[tokio::test]
+    async fn a_guest_connects_a_few_assistants_at_most() {
+        let h = harness().await;
+        let (_, proof) = guest(&h, json!({})).await;
+        for _ in 0..MAX_SESSIONS_PER_GRANT {
+            connect(&h, &[("x-den-grant", &proof)]).await;
+        }
+        let client = register(&h).await;
+        let id = request(&h, &client).await;
+        let (_, approved) = approve(&h, &id, &[("x-den-grant", &proof)]).await;
+        let code = query_of(approved["redirect"].as_str().unwrap())["code"].clone();
+        let form = [
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client.as_str()),
+            ("redirect_uri", REDIRECT),
+            ("code_verifier", VERIFIER),
+        ];
+        let (status, answer) = post_form(&h, "/oauth/token", &form).await;
+        assert_eq!((status, &answer["error"]), (StatusCode::BAD_REQUEST, &json!("invalid_grant")));
+        // The host's own members are not held to it.
+        let claim = member();
+        connect(&h, &[("x-den-library-member", &claim)]).await;
+    }
+
+    /// A client consented to is kept while a connection stands for it, and reaped `IDLE_CLIENT_MS` after its last
+    /// consent once none does.
+    #[tokio::test]
+    async fn a_client_with_no_connection_left_is_reaped_in_time() {
+        let h = harness().await;
+        let claim = member();
+        let gone = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let kept = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let (_, listed) =
+            send_json(&h, "GET", "/oauth/connections", &[("x-den-library-member", &claim)]).await;
+        let first_sid = listed["connections"][0]["sid"].as_str().unwrap().to_owned();
+        let gone_session: Session = load(&h.state, &session_key(&first_sid)).await.unwrap().unwrap();
+        let (gone_client, kept_client) = if gone_session.client_id == gone["client_id"] {
+            (gone["client_id"].as_str().unwrap().to_owned(), kept["client_id"].as_str().unwrap().to_owned())
+        } else {
+            (kept["client_id"].as_str().unwrap().to_owned(), gone["client_id"].as_str().unwrap().to_owned())
+        };
+        let del = h
+            .send(
+                "DELETE",
+                &format!("/oauth/connections/{first_sid}"),
+                None,
+                &[("x-den-library-member", &claim)],
+            )
+            .await;
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        // Twenty days on the remaining connection is used; another fifteen and both clients are past the idle time
+        // since their consent, but only one still has a connection.
+        h.advance(20 * 86_400_000);
+        let kept_token = if kept_client == kept["client_id"] { &kept } else { &gone };
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", kept_token["refresh_token"].as_str().unwrap()),
+            ("client_id", kept_client.as_str()),
+        ];
+        assert_eq!(post_form(&h, "/oauth/token", &form).await.0, StatusCode::OK);
+        h.advance(15 * 86_400_000);
+        sweep(&h.state).await;
+        let index = load_index(&h.state).await.unwrap();
+        assert!(!index.clients.iter().any(|c| c.id == gone_client), "no connection left: reaped");
+        assert!(index.clients.iter().any(|c| c.id == kept_client), "still connected: kept");
+    }
+
+    /// `/mcp` calls at den-mcp at once are capped here too: past it a caller is told to come back.
+    #[tokio::test]
+    async fn mcp_calls_past_the_cap_are_told_to_come_back() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let access = tokens["access_token"].as_str().unwrap();
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let held = oauth.mcp_slots.try_acquire_many(MCP_IN_FLIGHT as u32).unwrap();
+        let busy = call_mcp(&h, access).await;
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(busy.headers().contains_key(header::RETRY_AFTER));
+        drop(held);
+        assert_eq!(call_mcp(&h, access).await.status(), StatusCode::OK);
+    }
+
+    /// The relay reads the bearer scheme in any case, and takes only an access token.
+    #[test]
+    fn the_relay_reads_any_bearer_and_only_an_access_token() {
+        let oauth = OAuth::new(ISSUER.into(), format!("{ISSUER}/mcp"), ISSUER.into(), [9u8; 32]);
+        let session = Session {
+            v: VERSION,
+            sid: "0123456789abcdef0123456789abcdef".into(),
+            client_id: "c".into(),
+            client_name: "c".into(),
+            redirect_host: None,
+            who: Who::Member { library: LIB.into(), member_hash: String::new() },
+            refresh_hash: String::new(),
+            previous_hash: None,
+            rotated_at: 0,
+            retired: Vec::new(),
+            created_at: 0,
+            used_at: 0,
+        };
+        let now = 1_800_000_000;
+        let (token, _) = access_token(&oauth, &session, now * 1000, None);
+        for scheme in ["Bearer", "bearer", "BEARER"] {
+            assert!(session_of(&oauth, Some(&format!("{scheme} {token}")), now).is_some(), "{scheme}");
+        }
+        assert!(session_of(&oauth, Some(&format!("Basic {token}")), now).is_none());
+        // The same key and claims under another type: not an access token.
+        let (_, rest) = token.split_once('.').unwrap();
+        let (body, _) = rest.split_once('.').unwrap();
+        let head = b64url(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let signed = format!("{head}.{body}");
+        let other = format!("{signed}.{}", b64url(&oauth.key.sign(signed.as_bytes()).to_bytes()));
+        assert!(session_of(&oauth, Some(&format!("Bearer {other}")), now).is_none());
     }
 
     #[tokio::test]
@@ -1669,10 +2145,14 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
         assert!(refused.headers()[header::WWW_AUTHENTICATE].to_str().unwrap().contains("invalid_token"));
         let refresh = tokens["refresh_token"].as_str().unwrap();
-        let (_, answer) =
-            post_form(&h, "/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh)])
-                .await;
+        let client = tokens["client_id"].as_str().unwrap();
+        let form = [("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client)];
+        let (_, answer) = post_form(&h, "/oauth/token", &form).await;
         assert_eq!(answer["error"], "invalid_grant");
+        assert!(
+            answer["error_description"].as_str().unwrap().contains("unknown"),
+            "the session is gone: {answer}"
+        );
     }
 
     #[tokio::test]
@@ -1687,10 +2167,11 @@ mod tests {
         h.advance(5 * 60_000);
         assert_eq!(call_mcp(&h, &access).await.status(), StatusCode::UNAUTHORIZED);
         let refresh = tokens["refresh_token"].as_str().unwrap();
-        let (_, answer) =
-            post_form(&h, "/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh)])
-                .await;
+        let client = tokens["client_id"].as_str().unwrap();
+        let form = [("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client)];
+        let (_, answer) = post_form(&h, "/oauth/token", &form).await;
         assert_eq!(answer["error"], "invalid_grant");
+        assert!(answer["error_description"].as_str().unwrap().contains("ended"), "{answer}");
     }
 
     #[tokio::test]
@@ -1734,6 +2215,8 @@ mod tests {
             who: Who::Member { library: LIB.into(), member_hash: sha(TOKEN.as_bytes()) },
             refresh_hash: String::new(),
             previous_hash: None,
+            rotated_at: 0,
+            retired: Vec::new(),
             created_at: 0,
             used_at: 0,
         };
@@ -1762,6 +2245,8 @@ mod tests {
             who: Who::Guest { gid: "0a1b2c3d".into(), host: LIB.into(), name: "Sam".into() },
             refresh_hash: String::new(),
             previous_hash: None,
+            rotated_at: 0,
+            retired: Vec::new(),
             created_at: 0,
             used_at: 0,
         };

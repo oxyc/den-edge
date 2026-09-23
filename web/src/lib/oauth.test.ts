@@ -51,11 +51,21 @@ test('a request is shown by the client and the host it answers to', async () => 
   const fetchImpl = reply(200, {
     client: 'Claude',
     redirectHost: 'claude.ai',
+    verified: true,
     scope: 'den:search',
   });
   expect(await consentRequest(ID, fetchImpl)).toEqual({
     ok: true,
-    value: { client: 'Claude', redirectHost: 'claude.ai' },
+    value: { client: 'Claude', redirectHost: 'claude.ai', verified: true },
+  });
+  // Only den-edge's own word marks a host known; anything else, or nothing, is not.
+  const unsure = await consentRequest(
+    ID,
+    reply(200, { client: 'Claude', redirectHost: 'evil.example', verified: 'yes' }),
+  );
+  expect(unsure).toEqual({
+    ok: true,
+    value: { client: 'Claude', redirectHost: 'evil.example', verified: false },
   });
   expect(fetchImpl.mock.calls[0]?.[0]).toBe(`/oauth/request/${ID}`);
   expect(await consentRequest(ID, reply(404, { error: 'request_expired' }))).toEqual({

@@ -5,7 +5,13 @@ const ORIGIN = 'http://127.0.0.1:5198';
 const CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 
 /** A context that answers den-edge's consent routes and records what the page sent them. */
-async function consentContext(browser, { grants = [] } = {}) {
+async function consentContext(
+  browser,
+  {
+    grants = [],
+    asking = { client: 'Claude', redirectHost: 'claude.ai', verified: true, scope: 'den:search' },
+  } = {},
+) {
   const sent = [];
   const context = await browser.newContext();
   if (grants.length)
@@ -24,8 +30,7 @@ async function consentContext(browser, { grants = [] } = {}) {
       });
     if (url.origin !== ORIGIN) return route.abort('blockedbyclient');
     const json = (status, body) => route.fulfill({ status, json: body });
-    if (url.pathname === `/oauth/request/${ID}`)
-      return json(200, { client: 'Claude', redirectHost: 'claude.ai', scope: 'den:search' });
+    if (url.pathname === `/oauth/request/${ID}`) return json(200, asking);
     if (url.pathname.startsWith(`/oauth/request/${ID}/`)) {
       const headers = await request.allHeaders();
       sent.push({ path: url.pathname, grant: headers['x-den-grant'] ?? null });
@@ -69,9 +74,11 @@ test('a guest allows an assistant and is sent back to it', async () => {
     const { context, sent } = await consentContext(browser, { grants: GUEST });
     const page = await context.newPage();
     await page.goto(`${ORIGIN}/connect?request=${ID}`);
-    const dialog = page.getByRole('dialog', { name: 'Connect Claude to Den?' });
+    // Where the answer goes leads, known as an assistant's; the name the client gave itself comes second.
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('claude.ai');
+    await expect(dialog).toContainText('A known assistant’s address');
+    await expect(dialog).toContainText('It calls itself “Claude”');
     await expect(dialog).toContainText('can’t see your library');
     await dialog.getByRole('button', { name: 'Allow' }).click();
     await page.waitForURL(`${CALLBACK}?code=abc&state=s`);
@@ -89,10 +96,41 @@ test('Deny sends the person back with a refusal', async () => {
     const { context, sent } = await consentContext(browser, { grants: GUEST });
     const page = await context.newPage();
     await page.goto(`${ORIGIN}/connect?request=${ID}`);
-    const dialog = page.getByRole('dialog', { name: 'Connect Claude to Den?' });
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
     await dialog.getByRole('button', { name: 'Deny' }).click();
     await page.waitForURL(`${CALLBACK}?error=access_denied&state=s`);
     expect(sent.map((s) => s.path)).toEqual([`/oauth/request/${ID}/deny`]);
+  } finally {
+    await browser.close();
+  }
+});
+
+// A client may call itself anything: one named "Claude" whose answer goes to evil.example is shown as evil.example,
+// with no known mark and a warning, whatever its name.
+test('a client named like a known assistant is shown by where its answer goes', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { context } = await consentContext(browser, {
+      grants: GUEST,
+      asking: {
+        client: 'Claude',
+        redirectHost: 'evil.example',
+        verified: false,
+        scope: 'den:search',
+      },
+    });
+    const page = await context.newPage();
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect evil.example to Den?' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading', { level: 2 })).toHaveText(
+      'Connect evil.example to Den?',
+    );
+    await expect(dialog).toContainText('Den doesn’t know this address');
+    await expect(dialog).not.toContainText('A known assistant’s address');
+    await expect(dialog).toContainText('It calls itself “Claude”');
   } finally {
     await browser.close();
   }
@@ -106,7 +144,7 @@ test('a browser with no library and no invite cannot allow one', async () => {
     const { context, sent } = await consentContext(browser);
     const page = await context.newPage();
     await page.goto(`${ORIGIN}/connect?request=${ID}`);
-    const dialog = page.getByRole('dialog', { name: 'Connect Claude to Den?' });
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
     await expect(dialog).toContainText('Only someone with a Den library, or an invite to one');
     await expect(dialog.getByRole('button', { name: 'Allow' })).toHaveCount(0);
     await dialog.getByRole('button', { name: 'Close' }).click();

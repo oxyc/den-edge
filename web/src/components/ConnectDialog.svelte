@@ -74,15 +74,25 @@
   }}
 >
   {#if request}
-    <h2 id="connect-title">Connect {request.client} to Den?</h2>
+    {@const host = request.redirectHost ?? 'an unknown address'}
+    <!-- Where the answer goes leads: a client names itself whatever it likes, so its name comes second and a
+         known mark only for the hosts den-edge knows. -->
+    <h2 id="connect-title">Connect {host} to Den?</h2>
+    {#if request.verified}
+      <p class="known">✓ A known assistant’s address</p>
+    {:else}
+      <p class="unknown" role="note">
+        Den doesn’t know this address. Allow it only if you started connecting from <b>{host}</b>
+        yourself, just now.
+      </p>
+    {/if}
     <p>
-      <b>{request.client}</b>{#if request.redirectHost}
-        ({request.redirectHost}){/if} wants to search Den for you: find films, series and people in Den’s
-      index, and link you to their pages here.
+      It calls itself <b>“{request.client}”</b> and wants to search Den for you: find films, series and
+      people in Den’s index, and link you to their pages here.
     </p>
     <p>
       It can’t see your library, watchlist or settings. You can disconnect it any time under
-      Settings › Connections.
+      Settings › Assistants.
     </p>
   {:else}
     <h2 id="connect-title">Connect an assistant to Den?</h2>
@@ -145,6 +155,18 @@
 
   .bad {
     color: var(--danger);
+  }
+
+  .known {
+    color: var(--fg);
+    font-weight: 600;
+  }
+
+  .unknown {
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--fg);
   }
 
   .actions {
