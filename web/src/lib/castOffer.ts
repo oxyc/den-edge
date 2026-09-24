@@ -14,9 +14,9 @@ export function canOfferCast(ua: string = globalThis.navigator?.userAgent ?? '')
 export const CAST_DISCOVERY_MS = 6_000;
 
 /**
- * How long a session moved to the cast page for casting may show nothing before the viewer is taken back to the
- * player they left. Room for what the cast page does before it plays: the home-network check, a link measure (two
- * tries of ten seconds) and the wait after it.
+ * How long a session in the cast page may show nothing before the viewer is taken back to the player they left — or,
+ * away from home where the cast page is the player, told it failed. Room for what the cast page does before it plays:
+ * the home-network check, a link measure (two tries of ten seconds) and the wait after it.
  */
 export const CAST_PLAY_MS = 45_000;
 

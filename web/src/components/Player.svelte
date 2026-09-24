@@ -975,15 +975,19 @@
   });
 
   // A session moved to the cast page that shows nothing — no error either, as when neither of its addresses answers
-  // and hls.js is still retrying — goes back to the player it left, rather than sitting at 00:00.
+  // and hls.js is still retrying — goes back to the player it left, rather than sitting at 00:00. One that plays in
+  // the cast page because this browser is away from home has no other player to go back to: it fails, and says so,
+  // rather than leaving the frame blank.
   $effect(() => {
     const current = session;
     if (!current?.castOrigin || casting) return;
     const wait = setTimeout(() => {
-      if (session !== current || played || casting || !returnsFromCast(castOffered, castMode))
-        return;
-      reportFailure(current, 0, `nothing played in the cast page after ${CAST_PLAY_MS / 1000} s`);
-      leaveCast();
+      if (session !== current || played || casting) return;
+      const why = `nothing played in the cast page after ${CAST_PLAY_MS / 1000} s`;
+      if (returnsFromCast(castOffered, castMode)) {
+        reportFailure(current, 0, why);
+        leaveCast();
+      } else if (!castOffered && !castMode) void broke(0, why, 'other');
     }, CAST_PLAY_MS);
     return () => clearTimeout(wait);
   });
