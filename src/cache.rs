@@ -93,7 +93,8 @@ fn parse_http_date(s: &str) -> Option<u64> {
     let [_, day, month, year, time, "GMT"] = parts.as_slice() else { return None };
     let day: u32 = day.parse().ok().filter(|d| (1..=31).contains(d))?;
     let month = MONTHS.iter().position(|m| m == month)? as u32 + 1;
-    let year: i64 = year.parse().ok().filter(|y| *y >= 1970)?;
+    // Four digits, as the form has them: a longer year overflows `days_from_civil`.
+    let year: i64 = year.parse().ok().filter(|y| (1970..=9999).contains(y))?;
     let mut hms = time.split(':').map(|n| n.parse::<u64>().ok());
     let (Some(Some(h)), Some(Some(m)), Some(Some(sec)), None) =
         (hms.next(), hms.next(), hms.next(), hms.next())
@@ -153,6 +154,10 @@ mod tests {
             "Sunday, 06-Nov-94 08:49:37 GMT",
             "Sun Nov  6 08:49:37 1994",
             "Sun, 06 Nov 1994 25:00:00 GMT",
+            // A year past the four digits the form allows overflowed the day count: a panic in a debug build, and
+            // in release a wrapped date that could answer 304.
+            "Sun, 06 Nov 9223372036854775807 00:00:00 GMT",
+            "Sun, 06 Nov 10000 00:00:00 GMT",
         ] {
             assert_eq!(parse_http_date(bad), None, "{bad}");
         }
