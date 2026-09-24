@@ -179,18 +179,25 @@ const MEDIA_BUSY_RETRY_MS: u64 = 30_000;
 /// One admitted trailer session.
 ///
 /// Admission is decided once — at the master playlist, or at a first `/play` for a video with nothing
-/// open — and everything that follows rides on it. A guest's lease owns one of `guest_media_slots`;
-/// dropping the lease is what returns it.
+/// open — and everything that follows rides on it. A guest's lease shares one of `guest_media_slots`
+/// with every body it is streaming; the slot comes back once the lease has idled out and the last of
+/// those bodies has ended. Held by the lease alone, a trailer streaming past the idle time outlived it.
 pub struct Lease {
-    member: bool,
     until: u64,
-    _slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl Lease {
+    /// Idle, and no body of this lease still streaming.
+    fn over(&self, now: u64) -> bool {
+        self.until <= now && self.slot.as_ref().is_none_or(|slot| Arc::strong_count(slot) == 1)
+    }
 }
 
 /// What admission decided.
 enum Admitted {
-    /// Play on. `guest` says whether these bytes count against the guest ceiling.
-    Yes { guest: bool },
+    /// Play on. A guest's bytes count against the guest ceiling, and its body holds `slot` while it streams.
+    Yes { slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>> },
     /// Every guest slot is taken.
     Busy,
     /// Today's guest allowance is gone.
@@ -239,10 +246,10 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
     let side = |member: bool| format!("{bucket}|{}", if member { "member" } else { "guest" });
     {
         let mut leases = crate::lock(&state.media_leases);
-        leases.retain(|_, lease| lease.until > now);
+        leases.retain(|_, lease| !lease.over(now));
         if let Some(lease) = leases.get_mut(&side(claim.is_some())) {
             lease.until = now + LEASE_IDLE_MS;
-            return Admitted::Yes { guest: !lease.member };
+            return Admitted::Yes { slot: lease.slot.clone() };
         }
     }
     // Nothing open for this address: this is a session starting, and the only place membership is
@@ -255,13 +262,13 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
             return Admitted::Spent;
         }
         match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
-            Ok(slot) => Some(slot),
+            Ok(slot) => Some(Arc::new(slot)),
             Err(_) => return Admitted::Busy,
         }
     };
     crate::lock(&state.media_leases)
-        .insert(side(member), Lease { member, until: now + LEASE_IDLE_MS, _slot: slot });
-    Admitted::Yes { guest: !member }
+        .insert(side(member), Lease { until: now + LEASE_IDLE_MS, slot: slot.clone() });
+    Admitted::Yes { slot }
 }
 
 /// Is there anything left of today's guest allowance (env `MEDIA_DAILY_MAX_BYTES`)?
@@ -548,7 +555,7 @@ async fn relay_with(
         // this one is awaited inside the handler.
         let claim = if grant.is_some() { None } else { member_claim(&req) };
         return match admit(state, claim.as_deref(), &ip).await {
-            Admitted::Yes { guest } => stream(state, req, target, rid, guest).await,
+            Admitted::Yes { slot } => stream(state, req, target, rid, slot).await,
             // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
             // part-way through one: that would be a stall, and a player would simply keep asking.
             Admitted::Busy => crate::handler::retry_after(
@@ -1094,7 +1101,13 @@ fn minted_native(path: &str) -> bool {
 ///
 /// It takes no in-flight slot. Those bound what is happening at once against a box of one addon, and a
 /// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
-async fn stream(state: &Arc<AppState>, req: Request, target: String, rid: &str, guest: bool) -> Response {
+async fn stream(
+    state: &Arc<AppState>,
+    req: Request,
+    target: String,
+    rid: &str,
+    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [
         header::RANGE,
@@ -1128,9 +1141,10 @@ async fn stream(state: &Arc<AppState>, req: Request, target: String, rid: &str, 
     // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
     // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling. Each is counted on the
     // day it leaves: a stream begun before UTC midnight that kept its first day reset the new day's count.
-    let body = if guest {
+    let body = if let Some(slot) = slot {
         let state = Arc::clone(state);
         Body::new(body.map_frame(move |frame| {
+            let _held = &slot;
             if let Some(data) = frame.data_ref() {
                 let day = (state.clock)() / 86_400_000;
                 let mut spent = crate::lock(&state.media_spent);
@@ -2155,6 +2169,28 @@ mod tests {
             got += body.frame().await.unwrap().unwrap().into_data().unwrap().len();
         }
         assert_eq!(*crate::lock(&h.state.media_spent), (1, 1500));
+    }
+
+    /// The guest cap bounds viewers at once, so a slot is held for as long as a guest's trailer is still streaming,
+    /// not only for the thirty seconds after its last request: a long stream used to outlive it and let another
+    /// guest in past the cap.
+    #[tokio::test]
+    async fn a_guest_slot_is_held_while_its_trailer_streams() {
+        let mut h = reel_mid_stream(10).await;
+        Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        h.advance(super::LEASE_IDLE_MS + 1);
+
+        let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        assert_eq!(other.status(), StatusCode::SERVICE_UNAVAILABLE, "the first guest is still watching");
+        let same = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(same.status(), StatusCode::OK, "and still holds its own slot");
+
+        drop((first, same));
+        h.advance(super::LEASE_IDLE_MS + 1);
+        let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        assert_eq!(other.status(), StatusCode::OK, "the slot came back once it stopped");
     }
 
     /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.
