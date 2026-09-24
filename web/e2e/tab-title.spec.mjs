@@ -1,4 +1,4 @@
-import { guardNetwork } from './network.mjs';
+import { guardNetwork, routeTmdb } from './network.mjs';
 import { test, chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
 
@@ -34,6 +34,25 @@ test('the tab names the page on screen, including a kept page returned to', asyn
     await titled('Title 1');
     await page.waitForTimeout(100);
     assert.equal(await page.title(), 'Title 1');
+  } finally {
+    await browser.close();
+  }
+});
+
+// Playing a film from its title page makes that page inactive, so it stops naming the tab: the player names it.
+test('the tab keeps the title while its player is open', async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage();
+    await guardNetwork(page);
+    await routeTmdb(page, (r) => r.fulfill({ status: 404, json: {} }));
+    await page.goto('http://127.0.0.1:5198/test/player.html');
+    await page.waitForFunction(() => document.title === 'The Movie (2001) · Den');
+    await page.getByRole('button', { name: 'Close' }).click();
+    await page.waitForFunction(() => document.title === 'Den');
   } finally {
     await browser.close();
   }

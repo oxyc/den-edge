@@ -77,6 +77,8 @@
     type SkipSegment,
   } from '../lib/skipdb';
   import { shouldWarmNext } from '../lib/binge';
+  import { named } from '../lib/pageTitle';
+  import { nameTab } from '../lib/tabName.svelte';
 
   let {
     title,
@@ -308,6 +310,9 @@
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
   );
+  // The page under the player is not on screen while it plays (its `active` is off), so it names the tab no more:
+  // the player does, as the title's page would.
+  nameTab(() => named(heading, season === undefined ? title.year : undefined));
   const names = (() => {
     try {
       return new Intl.DisplayNames([navigator.language], { type: 'language' });
