@@ -928,6 +928,61 @@ describe('All: films and series together', () => {
     }
   });
 
+  /**
+   * A side that failed was asked again at once, in the same request, and ended on a second failure a moment later;
+   * and once titles had been given, both sides failing ended the feed quietly, with no Try again.
+   */
+  it('asks a failed side again at the next request, and fails a request both sides failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const asked: number[] = [];
+      let down = false;
+      const flaky = {
+        id: 'f',
+        title: '',
+        load: async (p: number) => {
+          asked.push(p);
+          if (down) throw new Error('blip');
+          return p <= 3 ? [film(p)] : [];
+        },
+      };
+      const short = {
+        id: 's',
+        title: '',
+        load: async (p: number) => (p === 1 ? [film(1, 'tv')] : []),
+      };
+      const row = interleaveFeeds('mixed', [
+        { type: 'movie', row: flaky },
+        { type: 'tv', row: short },
+      ]);
+      const keys = (titles: Title[]) => titles.map((x) => `${x.type}:${x.id}`);
+      expect(keys(await row.load(1))).toEqual(['movie:1', 'tv:1']);
+      down = true;
+      await expect(row.load(2), 'nothing to give: Try again').rejects.toThrow('blip');
+      expect(asked, 'asked once, not again at once').toEqual([1, 2]);
+      await expect(row.load(2)).rejects.toThrow('blip');
+      down = false;
+      expect(keys(await row.load(2)), 'Try again asks once more').toEqual(['movie:2']);
+
+      const broken = (type: MediaType) => ({
+        id: type,
+        title: '',
+        load: async (p: number) => {
+          if (p > 1) throw new Error('down');
+          return [film(9, type)];
+        },
+      });
+      const both = interleaveFeeds('both', [
+        { type: 'movie', row: broken('movie') },
+        { type: 'tv', row: broken('tv') },
+      ]);
+      expect(await both.load(1)).toHaveLength(2);
+      await expect(both.load(2)).rejects.toThrow('down');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   const answering = (asked: string[], body: (url: string) => unknown) =>
     (async (input: RequestInfo | URL) => {
       const url = String(input);

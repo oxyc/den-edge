@@ -1226,9 +1226,11 @@ const SIDE_TRIES = 2;
 
 /**
  * Films and series as one feed: each type's own feed, a page of each in turn, interleaved title by title and each
- * title once. A side that runs out, or fails `SIDE_TRIES` times running, leaves the other to go on, and the feed ends
- * when both have; a page a side failed on is asked again, not skipped. Asked for its first page, the feed starts
- * over. Each card is narrowed by its own type's feed (`filter`): a series by the series feed's shelf, never the
+ * title once. A side that runs out, or fails `SIDE_TRIES` page requests running, leaves the other to go on, and the
+ * feed ends when both have run out. A side that fails is asked again at the next page request, for the page it failed
+ * on, not at once in the same one. A request that got nothing because a side failed fails too, so the grid offers a
+ * Try again rather than ending; a side given up on is asked once more by that. Asked for its first page, the feed
+ * starts over. Each card is narrowed by its own type's feed (`filter`): a series by the series feed's shelf, never the
  * films'.
  */
 export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDef }[]): RowDef {
@@ -1236,7 +1238,10 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
   /** The page each side is asked for next. */
   const next = sides.map(() => 1);
   const failures = sides.map(() => 0);
+  /** Each side's last failure. */
+  const errors: unknown[] = sides.map(() => undefined);
   const given = new Set<string>();
+  const live = (at: number) => !ended[at] && failures[at]! < SIDE_TRIES;
   return {
     id,
     title: '',
@@ -1246,14 +1251,17 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
       if (page === 1) {
         ended.fill(false);
         next.fill(1);
-        failures.fill(0);
         given.clear();
       }
-      let failure: unknown;
-      while (ended.includes(false)) {
+      // A new start, or a Try again after every side still running was given up on.
+      if (page === 1 || !sides.some((_, at) => live(at))) failures.fill(0);
+      const failed = new Set<number>();
+      for (;;) {
+        const asking = sides.map((_, at) => live(at) && !failed.has(at));
+        if (!asking.includes(true)) break;
         const pages = await Promise.all(
           sides.map(async ({ row }, at) => {
-            if (ended[at]) return [];
+            if (!asking[at]) return [];
             try {
               const titles = await row.load(next[at]!);
               next[at]!++;
@@ -1262,8 +1270,9 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
               return titles;
             } catch (error) {
               console.warn('explore: one side of All failed, the other goes on:', row.id, error);
-              if (++failures[at]! >= SIDE_TRIES) ended[at] = true;
-              failure = error;
+              failures[at]!++;
+              failed.add(at);
+              errors[at] = error;
               return [];
             }
           }),
@@ -1276,8 +1285,9 @@ export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDe
         });
         if (fresh.length) return fresh;
       }
-      // Both sides failed before giving anything: the feed failed, as one side alone would have.
-      if (failure !== undefined && !given.size) throw failure;
+      // Every side that has not run out failed, now or before: the feed is not over.
+      const unfinished = ended.indexOf(false);
+      if (unfinished >= 0) throw errors[unfinished];
       return [];
     },
   };
