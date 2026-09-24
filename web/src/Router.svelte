@@ -291,7 +291,17 @@
 
 {#each pages as page (page.key)}
   <RoutePage active={current.key === page.key}>
-    {@render children(page.route, current.key === page.key)}
+    <!-- One page's error stays that page's: without a boundary it reached the root and took every page down,
+         including one kept out of sight. -->
+    <svelte:boundary onerror={(error) => console.error('den: a page failed', error)}>
+      {@render children(page.route, current.key === page.key)}
+      {#snippet failed(_, reset)}
+        <div class="failed" role="alert">
+          <p>Something went wrong on this page.</p>
+          <button onclick={reset}>Try again</button>
+        </div>
+      {/snippet}
+    </svelte:boundary>
   </RoutePage>
 {/each}
 
@@ -300,6 +310,25 @@
 {/if}
 
 <style>
+  .failed {
+    padding-top: 24px;
+    color: var(--muted);
+  }
+
+  .failed button {
+    min-height: 44px;
+    padding: 8px 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .failed button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
   /* The outgoing snapshot stays opaque underneath the incoming page: no fade through the background. */
   :global(::view-transition-group(root)) {
     animation-duration: 180ms;

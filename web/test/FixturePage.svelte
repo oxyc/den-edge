@@ -3,6 +3,12 @@
   import { navigate } from '../src/lib/navigation';
   import { nameTab } from '../src/lib/tabName.svelte';
   let { route, active }: { route: Route; active: boolean } = $props();
+  // Title 13 fails to render the first time it is drawn, as a page with a bug would.
+  const failing = (window as unknown as { failedOnce?: boolean }).failedOnce !== true;
+  function fail(): string {
+    (window as unknown as { failedOnce?: boolean }).failedOnce = true;
+    throw new Error('title 13 failed');
+  }
   // A title names itself as Detail does, once it has "loaded".
   let loaded = $state(false);
   setTimeout(() => (loaded = true), 30);
@@ -16,7 +22,7 @@
   data-page={route.page}
   data-route-id={route.page === 'title' || route.page === 'person' ? route.id : undefined}
 >
-  <h1>{route.page}</h1>
+  <h1>{route.page === 'title' && route.id === 13 && failing ? fail() : route.page}</h1>
   <input aria-label="Search" bind:value={query} />
   <button onclick={() => (count += 6)}>Load more</button>
   <div class="rail" style="display:flex;width:100%;overflow-x:auto;height:120px;">
