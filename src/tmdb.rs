@@ -514,8 +514,9 @@ impl Detail {
     /// Ask TMDB for the whole detail — again, naming its ETag, when one is kept — and keep it: the whole body, which
     /// `narrowed` cuts to this question, whether it was a `miss` or `revalidated`, and how long it is fresh for.
     ///
-    /// When the whole cannot be had for any reason but "no such title" or a spent day, the question is asked exactly
-    /// as it was, as it was before the whole existed: one title's failure must not fail every question about it.
+    /// When the whole is too large to take, the question is asked exactly as it was, as it was before the whole
+    /// existed: one title's size must not fail every question about it. Any other failure — TMDB down, slow or
+    /// refusing, the day spent — is the answer: asking again for less would fail the same way and spend twice.
     async fn ask(
         &self,
         state: &AppState,
@@ -531,14 +532,10 @@ impl Detail {
         let (body, how) = match ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await {
             Ok(answer) => answer,
             Err(response) => {
-                let code = response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.clone());
-                if response.status() == StatusCode::NOT_FOUND || code.as_deref() == Some("tmdb_budget_spent")
-                {
+                if !too_large(&response) {
                     return Err(response);
                 }
-                if code.as_deref() == Some("tmdb_answer_unreadable") {
-                    write(&self.oversize_mark(), &Bytes::new()).await;
-                }
+                write(&self.oversize_mark(), &Bytes::new()).await;
                 let (query, file) = self.exact();
                 let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
                 return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
@@ -547,6 +544,15 @@ impl Detail {
         let fresh = fresh_for_answer(&self.path, &body);
         Ok((body, how, fresh))
     }
+}
+
+/// The refusal for an answer past `MAX_ANSWER_BYTES`, which alone marks a title's whole detail as too large to ask
+/// for. A body that broke off partway is `tmdb_answer_unreadable`: marked as too large, a network error kept a
+/// title's questions one by one for a week.
+const TOO_LARGE: &str = "tmdb_answer_too_large";
+
+fn too_large(response: &Response) -> bool {
+    response.extensions().get::<crate::handler::ErrorCode>().is_some_and(|c| c.0 == TOO_LARGE)
 }
 
 /// How long a title whose whole detail was too large is asked one question at a time before the whole is tried
@@ -908,9 +914,8 @@ async fn send(
         Ok(answer) => answer,
         Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable")),
         Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
-        Err(Failed::TooLarge | Failed::Unreadable) => {
-            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"))
-        }
+        Err(Failed::TooLarge) => return Err(refused(StatusCode::BAD_GATEWAY, TOO_LARGE)),
+        Err(Failed::Unreadable) => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable")),
     };
     if status == StatusCode::NOT_MODIFIED && etag.is_some() {
         refund(state);
@@ -1106,10 +1111,7 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
                 }
             }
             // A whole detail too large to take (`Detail::oversize_mark`): its questions are asked one by one next.
-            Err(response)
-                if response.extensions().get::<crate::handler::ErrorCode>().map(|c| c.0.as_str())
-                    == Some("tmdb_answer_unreadable") =>
-            {
+            Err(response) if too_large(&response) => {
                 write(&asking.file.with_extension("oversize"), &Bytes::new()).await;
             }
             Err(_) => {}
@@ -1606,7 +1608,7 @@ mod tests {
                 url.split("api_key").next().unwrap().to_owned()
             });
             if whole {
-                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+                return Err(refused(StatusCode::BAD_GATEWAY, TOO_LARGE));
             }
             inner(url)
         });
@@ -1633,6 +1635,30 @@ mod tests {
         let asked = crate::lock(&asked).clone();
         assert_eq!(asked.len(), 3, "{asked:?}");
         assert_ne!(asked[2], "whole", "the whole is not tried again");
+    }
+
+    /// Only an answer too large to take sends a title's questions one by one. TMDB down or refusing used to ask the
+    /// question a second time, exactly, which failed the same way and spent twice; and a body that broke off partway
+    /// was taken for a large one, and marked the title for a week.
+    #[tokio::test]
+    async fn a_whole_detail_that_fails_for_any_other_reason_is_asked_once() {
+        for (key, code) in [("broke-off", "tmdb_answer_unreadable"), ("refusing", "tmdb_refused")] {
+            let cache = temp_dir();
+            let h = lending_as(&cache, key);
+            let asked = Arc::new(std::sync::Mutex::new(0));
+            let seen = Arc::clone(&asked);
+            let tmdb: Upstream = Arc::new(move |_: &str| {
+                *crate::lock(&seen) += 1;
+                Err(refused(StatusCode::BAD_GATEWAY, code))
+            });
+            crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+
+            let resp = h.send("GET", "/tmdb/3/tv/1399?append_to_response=credits", None, &[]).await;
+            assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{code}");
+            assert_eq!(*crate::lock(&asked), 1, "{code}: asked once");
+            let detail = Detail::of("/3/tv/1399", None, Some(&cache)).unwrap();
+            assert!(!detail.oversize_mark().exists(), "{code}: not marked as too large");
+        }
     }
 
     /// Two writes of one key at once each write their own temporary file, so what ends up in place is one of them
