@@ -145,73 +145,122 @@ export interface DeviceIdentity {
 /**
  * Drain a hosted pairing's inbox for the joiner's authenticated stable identity. Browser hosts keep the link key
  * until this arrives; old joiners simply leave the record name-only for the conservative legacy fallback.
- * `'gone'` is a queue den-edge no longer has (404 or 410): asking again can't bring an identity.
  */
 export async function receiveDeviceIdentity(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   fetchImpl: typeof fetch = fetch,
   now = Date.now(),
   storage: Storage | undefined = globalThis.localStorage,
-): Promise<DeviceIdentity | 'gone' | null> {
+): Promise<DeviceIdentity | null> {
   try {
     const response = await fetchImpl('/inbox/drain', {
       headers: { 'x-den-link': link.inboxKey },
       cache: 'no-store',
     });
-    if (response.status === 404 || response.status === 410) return 'gone';
     if (!response.ok) return null;
-    const body = (await response.json()) as { messages?: { sealed?: unknown }[] };
-    if (!Array.isArray(body.messages)) return null;
-    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-    const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
-    let newest: (DeviceIdentity & { sentAt: number }) | null = null;
-    for (const entry of body.messages) {
-      if (typeof entry.sealed !== 'string') continue;
-      try {
-        const combined = fromBase64url(entry.sealed);
-        if (combined.length < 28) continue;
-        const plain = await crypto.subtle.decrypt(
-          { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
-          key,
-          combined.slice(12),
-        );
-        const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
-          id?: unknown;
-          sentAt?: unknown;
-          message?: { type?: unknown; name?: unknown; deviceId?: unknown };
-        };
-        const name =
-          typeof envelope.message?.name === 'string' ? cleanLabel(envelope.message.name) : '';
-        const id = envelope.message?.deviceId;
-        const hasId = Object.prototype.hasOwnProperty.call(envelope.message ?? {}, 'deviceId');
-        const sentAt = envelope.sentAt;
-        const age = typeof sentAt === 'number' ? now - sentAt : Number.POSITIVE_INFINITY;
-        if (
-          typeof envelope.id === 'string' &&
-          /^[0-9a-f]{32}$/.test(envelope.id) &&
-          envelope.message?.type === 'device' &&
-          name &&
-          (!hasId || (typeof id === 'string' && /^[0-9a-f]{16}$/.test(id))) &&
-          typeof sentAt === 'number' &&
-          Number.isFinite(sentAt) &&
-          age <= SEAL_WINDOW &&
-          age >= -SEAL_AHEAD &&
-          admit(envelope.id, now, storage) &&
-          (!newest || sentAt > newest.sentAt)
-        ) {
-          newest = { name, ...(hasId ? { deviceId: id as string } : {}), sentAt };
-        }
-      } catch {
-        // A malformed or differently keyed message does not identify this link.
-      }
-    }
-    if (newest)
-      return {
-        name: newest.name,
-        ...(newest.deviceId ? { deviceId: newest.deviceId } : {}),
-      };
+    const body = (await response.json()) as { messages?: unknown };
+    return await identityIn(body.messages, link, now, storage);
   } catch {
     // The record stays pending and can retry when Settings opens again.
+    return null;
   }
-  return null;
+}
+
+/** Queues one `POST /inbox/drain` may take (den-edge's `MAX_DRAIN_KEYS`). */
+const DRAIN_AT_ONCE = 16;
+
+/**
+ * `receiveDeviceIdentity` for several links, in one request per sixteen (`POST /inbox/drain`) rather than one each: the
+ * identity each link's queue held, by inbox key, or null when it held none. A link whose queue could not be drained
+ * is left out. A queue den-edge has dropped drains as empty, as does one with nothing new.
+ */
+export async function receiveDeviceIdentities(
+  links: Pick<Link, 'inboxKey' | 'linkKey'>[],
+  fetchImpl: typeof fetch = fetch,
+  now = Date.now(),
+  storage: Storage | undefined = globalThis.localStorage,
+): Promise<Map<string, DeviceIdentity | null>> {
+  const found = new Map<string, DeviceIdentity | null>();
+  // den-edge refuses a request naming a queue twice.
+  const unique = [...new Map(links.map((link) => [link.inboxKey, link])).values()];
+  for (let at = 0; at < unique.length; at += DRAIN_AT_ONCE) {
+    const batch = unique.slice(at, at + DRAIN_AT_ONCE);
+    try {
+      const response = await fetchImpl('/inbox/drain', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keys: batch.map((link) => link.inboxKey) }),
+        cache: 'no-store',
+      });
+      if (!response.ok) continue;
+      const { queues } = (await response.json()) as { queues?: unknown };
+      if (!Array.isArray(queues)) continue;
+      for (const [i, link] of batch.entries())
+        found.set(link.inboxKey, await identityIn(queues[i], link, now, storage));
+    } catch {
+      // These records stay pending, and are asked again at the next check.
+    }
+  }
+  return found;
+}
+
+/** The newest authentic device identity among a drained queue's `messages`, sealed under `link`'s key. */
+async function identityIn(
+  messages: unknown,
+  link: Pick<Link, 'linkKey'>,
+  now: number,
+  storage: Storage | undefined,
+): Promise<DeviceIdentity | null> {
+  if (!Array.isArray(messages)) return null;
+  let key: CryptoKey;
+  try {
+    const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
+    key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
+  } catch {
+    return null; // A link key that isn't one opens nothing, and must not cost the other links theirs.
+  }
+  let newest: (DeviceIdentity & { sentAt: number }) | null = null;
+  for (const entry of messages as { sealed?: unknown }[]) {
+    if (typeof entry?.sealed !== 'string') continue;
+    try {
+      const combined = fromBase64url(entry.sealed);
+      if (combined.length < 28) continue;
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: combined.slice(0, 12), additionalData: AAD },
+        key,
+        combined.slice(12),
+      );
+      const envelope = JSON.parse(new TextDecoder().decode(plain)) as {
+        id?: unknown;
+        sentAt?: unknown;
+        message?: { type?: unknown; name?: unknown; deviceId?: unknown };
+      };
+      const name =
+        typeof envelope.message?.name === 'string' ? cleanLabel(envelope.message.name) : '';
+      const id = envelope.message?.deviceId;
+      const hasId = Object.prototype.hasOwnProperty.call(envelope.message ?? {}, 'deviceId');
+      const sentAt = envelope.sentAt;
+      const age = typeof sentAt === 'number' ? now - sentAt : Number.POSITIVE_INFINITY;
+      if (
+        typeof envelope.id === 'string' &&
+        /^[0-9a-f]{32}$/.test(envelope.id) &&
+        envelope.message?.type === 'device' &&
+        name &&
+        (!hasId || (typeof id === 'string' && /^[0-9a-f]{16}$/.test(id))) &&
+        typeof sentAt === 'number' &&
+        Number.isFinite(sentAt) &&
+        age <= SEAL_WINDOW &&
+        age >= -SEAL_AHEAD &&
+        admit(envelope.id, now, storage) &&
+        (!newest || sentAt > newest.sentAt)
+      ) {
+        newest = { name, ...(hasId ? { deviceId: id as string } : {}), sentAt };
+      }
+    } catch {
+      // A malformed or differently keyed message does not identify this link.
+    }
+  }
+  return newest
+    ? { name: newest.name, ...(newest.deviceId ? { deviceId: newest.deviceId } : {}) }
+    : null;
 }

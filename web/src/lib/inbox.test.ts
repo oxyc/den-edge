@@ -140,11 +140,9 @@ describe('receiving a paired device identity', () => {
     expect(await receiveDeviceIdentity(link, fetchImpl, now)).toEqual({ name: 'Old browser' });
   });
 
-  it('tells a queue den-edge no longer has from one that is merely empty or failing', async () => {
+  it('finds nothing in a refused or failing drain', async () => {
     const status = (code: number) =>
       (async () => new Response('{}', { status: code })) as typeof fetch;
-    expect(await receiveDeviceIdentity(link, status(404))).toBe('gone');
-    expect(await receiveDeviceIdentity(link, status(410))).toBe('gone');
     expect(await receiveDeviceIdentity(link, status(429))).toBeNull();
     expect(await receiveDeviceIdentity(link, status(503))).toBeNull();
   });

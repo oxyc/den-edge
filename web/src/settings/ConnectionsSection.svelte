@@ -3,7 +3,7 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network, reset the library key — says where to do it. -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
@@ -15,7 +15,7 @@
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
-  import { receiveDeviceIdentity } from '../lib/inbox';
+  import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
@@ -408,62 +408,61 @@
    * Drain sealed pairing identities while Settings is open. A linked device can resend after an upgrade, rename, or
    * stamp-id change, so learning the first id must not stop later authenticated updates from being applied.
    *
-   * One drain per device per check. Only a device handed the library in the last few minutes gets quick retries,
-   * since its message may still be on the way; every other device has either sent it already or never will, so
-   * retrying them only multiplies the requests an open tab makes. A queue den-edge no longer has is not asked again
-   * this visit, and a hidden tab doesn't check at all.
+   * Every device's queue in one request per check (`receiveDeviceIdentities`), not one each. Only a device handed the
+   * library in the last few minutes, still without an id, gets quick retries, since its message may still be on the
+   * way. A check runs only while Settings is the page on screen in a visible tab: the page is kept, hidden, once
+   * another is opened (`RoutePage`), and went on draining every 30 seconds for the rest of the visit.
    */
   const FRESH_PAIRING_MS = 10 * 60_000;
-  // These are deliberately non-reactive: starting or finishing a request must not retrigger the effect below.
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity
-  const learningIdentities = new Set<string>();
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity
-  const goneQueues = new Set<string>();
-  const identityKey = (entry: Shared) => entry.inboxKey ?? `${entry.at}:${entry.name}`;
-  async function learnIdentity(entry: Shared) {
-    if (!entry.inboxKey || !entry.linkKey) return;
-    const key = identityKey(entry);
-    if (learningIdentities.has(key) || goneQueues.has(key)) return;
-    learningIdentities.add(key);
-    const credential = { inboxKey: entry.inboxKey, linkKey: entry.linkKey };
-    const attempts = !entry.deviceId && Date.now() - entry.at < FRESH_PAIRING_MS ? 8 : 1;
+  const QUICK_TRIES = 8;
+  // Deliberately non-reactive: starting or finishing a check must not retrigger the effect below.
+  let learning = false;
+  const onScreen = () =>
+    document.visibilityState === 'visible' &&
+    !document.getElementById('connections')?.closest('[hidden]');
+  const credentialOf = (entry: Shared) =>
+    entry.inboxKey && entry.linkKey ? { inboxKey: entry.inboxKey, linkKey: entry.linkKey } : null;
+  async function learnIdentities() {
+    if (learning || !onScreen()) return;
+    learning = true;
     try {
-      for (let attempt = 0; attempt < attempts; attempt++) {
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one check; nothing renders from it.
+      const answered = new Set<string>();
+      for (let attempt = 0; attempt < QUICK_TRIES; attempt++) {
         if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-        const identity = await receiveDeviceIdentity(credential);
-        if (identity === 'gone') {
-          goneQueues.add(key);
-          return;
-        }
-        if (identity) {
+        const now = Date.now();
+        const asked = links.shared.filter(
+          (entry) =>
+            credentialOf(entry) &&
+            !answered.has(entry.inboxKey!) &&
+            (attempt === 0 || (!entry.deviceId && now - entry.at < FRESH_PAIRING_MS)),
+        );
+        if (!asked.length) return;
+        const found = await receiveDeviceIdentities(asked.map((entry) => credentialOf(entry)!));
+        for (const entry of asked) {
+          const identity = found.get(entry.inboxKey!);
+          if (!identity) continue;
+          answered.add(entry.inboxKey!);
           links.identifyShared(entry, identity.name, identity.deviceId);
-          return;
         }
       }
     } finally {
-      learningIdentities.delete(key);
+      learning = false;
     }
   }
-  function learnIdentities(entries: Shared[]) {
-    for (const entry of entries) void learnIdentity(entry);
-  }
-  const checkIdentities = () => {
-    if (document.visibilityState === 'visible') learnIdentities(links.shared);
-  };
   $effect(() => {
-    learnIdentities(links.shared);
+    void links.shared;
+    untrack(() => void learnIdentities());
   });
   onMount(() => {
-    const interval = window.setInterval(checkIdentities, 30_000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') checkIdentities();
-    };
-    window.addEventListener('online', checkIdentities);
-    document.addEventListener('visibilitychange', onVisible);
+    const check = () => void learnIdentities();
+    const interval = window.setInterval(check, 30_000);
+    window.addEventListener('online', check);
+    document.addEventListener('visibilitychange', check);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener('online', checkIdentities);
-      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', check);
+      document.removeEventListener('visibilitychange', check);
     };
   });
 
