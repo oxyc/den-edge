@@ -57,6 +57,13 @@ interface Snapshot {
   memberRegistered?: boolean;
 }
 
+/** One piece of work kept in this browser (`pendingPrefix`), opened: a recovery, a bulk of actions, or one action. */
+interface KeptWork {
+  key: string;
+  rows: Row[];
+  kind: 'restore' | 'bulk' | 'one';
+}
+
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
 const SNAPSHOT = 'log.v1';
 
@@ -82,6 +89,8 @@ export class LibraryLog {
    * edits: what the next visit starts from.
    */
   private readonly acknowledged = new Map<string, Entry>();
+  /** How many times `project` changed a row: `replay` says it changed what this browser holds by it. */
+  private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
   private readonly flushing = new Set<string>();
   /** `acknowledged` changed since it was last kept. */
@@ -251,6 +260,8 @@ export class LibraryLog {
       if (log.memberRegistered) useLibraryCredential(keys);
       log.fromCache = true;
       log.projectJournal();
+      // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
+      await log.projectKept();
       return log;
     }
     // Register before exposing the proof to relayed requests.
@@ -787,8 +798,46 @@ export class LibraryLog {
     const name = rowName(after);
     const current = this.entries.get(name);
     const row = current ? merge(current.row, after) : after;
+    if (!current || canonical(current.row) !== canonical(row)) this.projected++;
     this.entries.set(name, { seq: current?.seq ?? 0, row });
     return row;
+  }
+
+  /** Each piece of work kept in this browser (`pendingPrefix`), opened; one that doesn't open is left out. */
+  private async keptWork(): Promise<KeptWork[]> {
+    if (!this.storage) return [];
+    const keys: string[] = [];
+    for (let i = 0; i < this.storage.length; i++) {
+      const key = this.storage.key(i);
+      if (key?.startsWith(this.pendingPrefix)) keys.push(key);
+    }
+    const kept: KeptWork[] = [];
+    for (const key of keys) {
+      try {
+        const pending = JSON.parse(this.storage.getItem(key)!) as {
+          k: string;
+          v: string;
+          bulk?: { k: string; v: string }[];
+          restore?: { k: string; v: string }[];
+        };
+        const sealed = pending.restore ?? pending.bulk ?? [pending];
+        const rows = await Promise.all(sealed.map(({ k, v }) => open(this.keys, k, v)));
+        kept.push({ key, rows, kind: pending.restore ? 'restore' : pending.bulk ? 'bulk' : 'one' });
+      } catch {
+        /* Unreadable: `replay` keeps it, and it has nothing to show. */
+      }
+    }
+    return kept;
+  }
+
+  /** What the work kept in this browser will do once sent, shown now: projected, and nothing sent. */
+  private async projectKept(): Promise<void> {
+    for (const { rows, kind } of await this.keptWork()) {
+      for (const row of rows) {
+        if (kind === 'restore') this.project(row);
+        else if (row.kind === 'set' && trackerEvent(row)) this.project(trackerEvent(row)!.after);
+      }
+    }
   }
 
   private get pendingPrefix(): string {
@@ -817,75 +866,55 @@ export class LibraryLog {
     }
   }
 
-  /** Send the work kept in this browser (`pendingPrefix`). True when some of it reached den-edge. */
+  /**
+   * Send the work kept in this browser (`pendingPrefix`). True when some of it reached den-edge, or when drawing it
+   * changed a row here even though it could not be sent (kept by another tab, or den-edge failed the batch).
+   */
   private async replay(): Promise<boolean> {
+    const projected = this.projected;
     // Kept, and sent once a read finds the log again (`refresh`).
-    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS) return false;
+    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS)
+      return this.projectKeptChanged(projected);
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
-    if (Date.now() - this.rejectedAt < RECHECK_MS) return false;
+    if (Date.now() - this.rejectedAt < RECHECK_MS) return this.projectKeptChanged(projected);
     const waiting = this.pendingActions;
     let delivered = false;
-    if (this.storage) {
-      const keys: string[] = [];
-      for (let i = 0; i < this.storage.length; i++) {
-        const key = this.storage.key(i);
-        if (key?.startsWith(this.pendingPrefix)) keys.push(key);
-      }
-      keys.sort(
-        (a, b) =>
-          Number(a.startsWith(this.pendingPrefix + 'recovery')) -
-          Number(b.startsWith(this.pendingPrefix + 'recovery')),
-      );
-      for (const key of keys) {
-        if (this.flushing.has(key)) continue;
-        this.flushing.add(key);
-        try {
-          const pending = JSON.parse(this.storage.getItem(key)!) as {
-            k: string;
-            v: string;
-            bulk?: { k: string; v: string }[];
-            restore?: { k: string; v: string }[];
-          };
-          if (pending.restore) {
-            const rows = await Promise.all(
-              pending.restore.map(({ k, v }) => open(this.keys, k, v)),
-            );
-            for (const row of rows) this.project(row);
-            if (
-              await this.flushRows(key, [
-                rows.filter(trackerEvent),
-                rows.filter((row) => !trackerEvent(row)),
-              ])
-            )
-              this.recoveryRows = undefined;
-            continue;
-          }
-          if (pending.bulk) {
-            const rows = await Promise.all(pending.bulk.map(({ k, v }) => open(this.keys, k, v)));
-            // Only `writeActions` keeps a bulk, of actions only: anything else can never be sent, and would be
-            // counted as waiting (`pendingActions`) for good.
-            if (
-              !rows.every(
-                (row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null,
-              )
-            ) {
-              this.discard(key);
-              continue;
-            }
-            for (const row of rows) this.project(trackerEvent(row)!.after);
-            await this.flushRows(key, [rows, rows.map((row) => trackerEvent(row)!.after)]);
-            continue;
-          }
-          const { k, v } = pending;
-          const row = await open(this.keys, k, v);
-          if (row.kind === 'set' && trackerEvent(row)) await this.act(row, false);
-          else this.discard(key); // Only `writeAction` keeps one, of an action: as for a bulk above.
-        } catch {
-          /* Keep unreadable pending data; never acknowledge or delete it. */
-        } finally {
-          this.flushing.delete(key);
+    const kept = (await this.keptWork()).sort(
+      (a, b) => Number(a.kind === 'restore') - Number(b.kind === 'restore'),
+    );
+    for (const { key, rows, kind } of kept) {
+      // Sent by a send that ended since it was read.
+      if (this.flushing.has(key) || this.storage?.getItem(key) == null) continue;
+      this.flushing.add(key);
+      try {
+        if (kind === 'restore') {
+          for (const row of rows) this.project(row);
+          if (
+            await this.flushRows(key, [
+              rows.filter(trackerEvent),
+              rows.filter((row) => !trackerEvent(row)),
+            ])
+          )
+            this.recoveryRows = undefined;
+          continue;
         }
+        // Only `writeAction` and `writeActions` keep work other than recovery, and only actions: anything else can
+        // never be sent, and would be counted as waiting (`pendingActions`) for good.
+        if (
+          !rows.every((row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null)
+        ) {
+          this.discard(key);
+          continue;
+        }
+        if (kind === 'bulk') {
+          for (const row of rows) this.project(trackerEvent(row)!.after);
+          await this.flushRows(key, [rows, rows.map((row) => trackerEvent(row)!.after)]);
+        } else await this.act(rows[0]!, false);
+      } catch {
+        /* Keep unsent work; never acknowledge or delete it. */
+      } finally {
+        this.flushing.delete(key);
       }
     }
     if (!this.storage && this.recoveryRows) {
@@ -900,7 +929,13 @@ export class LibraryLog {
         this.recoveryRows = undefined;
       }
     }
-    return delivered || this.pendingActions < waiting;
+    return delivered || this.pendingActions < waiting || this.projected !== projected;
+  }
+
+  /** Kept work not sent now is still drawn; true when that changed a row since `projected`. */
+  private async projectKeptChanged(projected: number): Promise<boolean> {
+    await this.projectKept();
+    return this.projected !== projected;
   }
 }
 

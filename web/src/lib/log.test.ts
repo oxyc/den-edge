@@ -89,6 +89,21 @@ function memoryVault() {
   return { data, vault };
 }
 
+function memoryStorage() {
+  const data = new Map<string, string>();
+  const storage = {
+    get length() {
+      return data.size;
+    },
+    key: (i: number) => [...data.keys()][i] ?? null,
+    getItem: (k: string) => data.get(k) ?? null,
+    setItem: (k: string, v: string) => void data.set(k, v),
+    removeItem: (k: string) => void data.delete(k),
+    clear: () => data.clear(),
+  } as Storage;
+  return { data, storage };
+}
+
 describe('LibraryLog', () => {
   /**
    * The default fetch is kept on the instance and later called as `this.fetchImpl(…)` — a METHOD call,
@@ -238,6 +253,54 @@ describe('LibraryLog', () => {
     expect(await log.refresh()).toBe(true);
     expect(log.pendingActions).toBe(0);
     expect(log.title(blank.title)?.status.value).toBe('watchlist');
+  });
+
+  /**
+   * A return visit opens from the kept copy without asking den-edge anything. The action this browser kept unsent
+   * was not drawn until a refresh reached den-edge: reloaded while it was out of reach, the mark was gone.
+   */
+  it('draws kept work on a return visit while den-edge is out of reach', async () => {
+    const { data: kept, vault } = memoryVault();
+    const { data, storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
+    await vi.waitFor(() => expect(kept.size).toBe(1));
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'kept')!;
+    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
+    const offline: typeof fetch = async () => {
+      throw new TypeError('offline');
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, offline, storage, vault))!;
+    expect(log.fromCache).toBe(true);
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
+    expect(await log.refresh()).toBe(false);
+    expect(log.pendingActions).toBe(1);
+  });
+
+  /** den-edge answers the read but fails the batch: what the kept work does is drawn, and the refresh says so. */
+  it('says a refresh changed something when it drew kept work it could not send', async () => {
+    const { data, storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    let failing = false;
+    const connection: typeof fetch = async (url, init) =>
+      failing && init?.method === 'POST'
+        ? new Response('{}', { status: 503 })
+        : server.fetchImpl(url, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    // Kept by another tab of this browser while den-edge was out of its reach.
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'kept')!;
+    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
+    failing = true;
+    expect(await log.refresh()).toBe(true);
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
+    expect(await log.refresh(), 'already drawn').toBe(false);
+    failing = false;
+    expect(await log.refresh()).toBe(true);
+    expect(log.pendingActions).toBe(0);
   });
 
   it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
