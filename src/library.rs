@@ -238,12 +238,9 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
             Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
             Err(e) => return read_error(e),
         };
-        let line = match log_read(&mut BufReader::new(file)).await {
-            Ok(line) => line,
-            Err(e) => return read_error(e),
-        };
-        match log_header(&line) {
-            Ok((hash, _)) => hash,
+        match read_header(&mut BufReader::new(file)).await {
+            Ok(Some((hash, _))) => hash,
+            Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
             Err(e) => return read_error(e),
         }
     };
@@ -517,8 +514,7 @@ pub async fn holds_member_hash(state: &AppState, id: &str, hash: &[u8; 32]) -> b
 /// A library's token and member hashes, from its log's header alone; `None` for a library there is no log of.
 async fn header_of(state: &AppState, id: &str) -> io::Result<Option<([u8; 32], Option<[u8; 32]>)>> {
     let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(None) };
-    let first = log_read(&mut BufReader::new(file)).await?;
-    log_header(&first).map(Some)
+    read_header(&mut BufReader::new(file)).await
 }
 
 async fn holds_another(
@@ -587,6 +583,18 @@ async fn log_read(reader: &mut BufReader<tokio::fs::File>) -> io::Result<Vec<u8>
     Ok(line)
 }
 
+/// A log's token and member hashes, from its first line. `None` when that line was never finished — an empty
+/// log, or a header without its newline: the first write failed or was cut short, and nobody was told it landed.
+async fn read_header(
+    reader: &mut BufReader<tokio::fs::File>,
+) -> io::Result<Option<([u8; 32], Option<[u8; 32]>)>> {
+    let first = log_read(reader).await?;
+    if !first.ends_with(b"\n") {
+        return Ok(None);
+    }
+    log_header(&first).map(Some)
+}
+
 fn log_header(line: &[u8]) -> io::Result<([u8; 32], Option<[u8; 32]>)> {
     let header: Value = serde_json::from_slice(line).map_err(io::Error::other)?;
     let token = header
@@ -616,8 +624,10 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
     let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(()) };
     reserve_cache(libs, id, state.library_limits.library_bytes, state.library_limits)?;
     let mut reader = BufReader::new(file);
-    let first = log_read(&mut reader).await?;
-    let (token_hash, member_hash) = log_header(&first)?;
+    let Some((token_hash, member_hash)) = read_header(&mut reader).await? else {
+        // Left by a first write that never finished; the library was never started.
+        return state.store.delete_file(NS, id, EXT).await;
+    };
     let mut lib = Library {
         token_hash,
         member_hash,
@@ -627,7 +637,7 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
         last_used: state.now(),
         bytes: LIBRARY_OVERHEAD,
     };
-    let mut repair = !first.ends_with(b"\n");
+    let mut repair = false;
     loop {
         let bytes = log_read(&mut reader).await?;
         if bytes.is_empty() {
@@ -639,7 +649,13 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
                 repair = true;
                 break;
             }
-            Err(e) => return Err(io::Error::other(e)),
+            Err(e) => match glued(&bytes) {
+                Some(line) => {
+                    repair = true;
+                    line
+                }
+                None => return Err(io::Error::other(e)),
+            },
         };
         if !valid_hex_id(&line.k) || line.v.len() > MAX_VALUE {
             return Err(full());
@@ -662,6 +678,14 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
     }
     libs.insert(id.to_owned(), lib);
     Ok(())
+}
+
+/// The write in a line that begins with the fragment of an append that failed part-way, before appends were cut
+/// back on failure: the whole line glued on after it. A line starts `{"s":`, which a value, escaped, cannot hold.
+fn glued(bytes: &[u8]) -> Option<Line> {
+    const START: &[u8] = br#"{"s":"#;
+    let at = bytes.windows(START.len()).rposition(|w| w == START).filter(|&at| at > 0)?;
+    serde_json::from_slice(&bytes[at..]).ok()
 }
 
 /// Rewrite the log as its header and the live rows, in sequence order.
@@ -1047,6 +1071,55 @@ mod tests {
             all["entries"],
             json!([{ "k": K1, "seq": 1, "v": "whole" }, { "k": K2, "seq": 2, "v": "after" }])
         );
+    }
+
+    fn log_path(h: &Harness) -> std::path::PathBuf {
+        use sha2::Digest;
+        h.dir.join("lib").join(format!("{}.log", crate::hex(&sha2::Sha256::digest(LIB.as_bytes()))))
+    }
+
+    /// An append that failed part-way left its first bytes behind, and the next write was glued onto them: a
+    /// line ending in a newline that is no JSON. The glued write is kept; the fragment, which nobody was told
+    /// landed, is not.
+    #[tokio::test]
+    async fn a_fragment_a_failed_append_left_mid_log_is_dropped_on_load() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "whole" }])).await;
+        let mut text = std::fs::read_to_string(log_path(&h)).unwrap();
+        text.push_str(r#"{"s":2,"k":"bbbbbbbbbbbbbbbb","v":"fail"#);
+        text.push_str(&super::log_line(2, K2, "glued"));
+        text.push_str(&super::log_line(3, K1, "after"));
+        std::fs::write(log_path(&h), text).unwrap();
+
+        let restarted = Harness::in_dir(h.dir.clone());
+        let (status, all) = changes(&restarted, TOKEN, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            all["entries"],
+            json!([{ "k": K2, "seq": 2, "v": "glued" }, { "k": K1, "seq": 3, "v": "after" }])
+        );
+        let again = Harness::in_dir(h.dir.clone());
+        assert_eq!(changes(&again, TOKEN, "").await.1["head"], 3, "the log was rewritten whole");
+    }
+
+    /// A first write that never finished leaves an empty log or a torn header. Nobody was told it landed, so the
+    /// library does not exist: it can be started again, and nothing answers 500.
+    #[tokio::test]
+    async fn an_empty_or_torn_header_is_a_library_that_was_never_started() {
+        for leftover in ["", r#"{"token":"01"#] {
+            let h = Harness::new();
+            std::fs::write(log_path(&h), leftover).unwrap();
+            assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::NOT_FOUND, "{leftover:?}");
+            assert_eq!(delete(&h, TOKEN).await, StatusCode::NOT_FOUND, "{leftover:?}");
+            let fresh = Harness::in_dir(h.dir.clone());
+            assert_eq!(delete(&fresh, TOKEN).await, StatusCode::NOT_FOUND, "{leftover:?}");
+            assert_eq!(
+                batch(&fresh, TOKEN, json!([{ "k": K1, "base": 0, "v": "v" }])).await.0,
+                StatusCode::OK
+            );
+            let restarted = Harness::in_dir(h.dir.clone());
+            assert_eq!(changes(&restarted, TOKEN, "").await.1["head"], 1, "{leftover:?}");
+        }
     }
 
     fn bounded(h: &Harness, library_bytes: usize, cache_bytes: usize) -> Harness {

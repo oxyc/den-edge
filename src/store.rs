@@ -117,14 +117,28 @@ impl Store {
         }
     }
 
-    /// Add to the end of a file, creating it, and sync before returning — an append-only log's write.
+    /// Add to the end of a file, creating it, and sync before returning — an append-only log's write. One that
+    /// fails is cut back to where it started, so what landed of it is not left for the next append to be glued
+    /// onto.
     pub async fn append_file(&self, ns: &str, key: &str, ext: &str, bytes: &[u8]) -> io::Result<()> {
-        self.check(0, bytes.len() as u64)?;
+        let len = bytes.len() as u64;
+        self.check(0, len)?;
         let mut file =
             tokio::fs::OpenOptions::new().create(true).append(true).open(self.path(ns, key, ext)).await?;
-        file.write_all(bytes).await?;
-        file.sync_data().await?;
-        self.account(0, bytes.len() as u64);
+        let before = file.metadata().await?.len();
+        let written = async {
+            file.write_all(bytes).await?;
+            file.sync_data().await
+        };
+        if let Err(e) = written.await {
+            let after = match file.set_len(before).await {
+                Ok(()) => before,
+                Err(_) => file.metadata().await.map_or(before + len, |m| m.len()),
+            };
+            self.account(before, after);
+            return Err(e);
+        }
+        self.account(0, len);
         Ok(())
     }
 
