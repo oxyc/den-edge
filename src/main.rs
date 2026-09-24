@@ -557,9 +557,17 @@ struct Limits {
 }
 
 /// Longest a connection may take to send a request head, idle keep-alive included: past it the connection is
-/// closed. hyper's own default, which only applies once the server has a timer — `axum::serve` gives it none, so a
-/// client could hold a socket half-way through a head for as long as it liked.
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// closed. It only applies once the server has a timer — `axum::serve` gives it none, so a client could hold a
+/// socket half-way through a head for as long as it liked.
+///
+/// hyper has no separate keep-alive idle bound, so this is also how long an idle connection is kept, and it is
+/// longer than the proxies in front keep theirs: a proxy that sends a request into a connection den-edge is closing
+/// at that moment gets no answer, and one it does not retry — Go's transport retries only idempotent requests, so a
+/// POST — would reach the visitor as a 502. That race is reasoned from the defaults, not seen. hyper's own default
+/// of 30 s was under the 90 s idle both `cloudflared` (`keepAliveTimeout`) and `tailscale serve` (Go's
+/// `http.DefaultTransport`) are assumed to keep: their documented defaults, not checked on the box.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const _: () = assert!(HEADER_READ_TIMEOUT.as_secs() > 90);
 
 /// Serve until `shutdown` resolves, then drain for at most `limits.grace` — den-atlas's bounded drain: hyper waits
 /// on a connection that is mid-request, so without the bound a client holding half a request head decides
