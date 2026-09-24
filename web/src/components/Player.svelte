@@ -319,8 +319,10 @@
     if (!replacing) failure = null;
     swapped = null;
     unchanged = null;
+    // Each wait below may outlast the player: once it is closed, nothing more is asked for, and no session started.
     if (!imdb) {
       const found = await fetchImdbId({ type: title.type, id: title.id }, tmdbKey);
+      if (ended) return false;
       if (!found) {
         failure = found === null ? 'imdb' : 'unreachable';
         return false;
@@ -333,6 +335,7 @@
       navigator.languages,
     );
     const claimed = (decodes ??= await playable());
+    if (ended) return false;
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
     // E-AC-3, so den-remux copies another release this browser does decode — never converting one mid-film.
     const can = castMode
@@ -349,6 +352,7 @@
       (/^https?:/.test(route)
         ? await linkLimit(route)
         : (publicMaxBitrate = relayLimit(route, publicMaxBitrate)));
+    if (ended) return false;
     // Not the very start, nor the credits. A resume the library holds as a fraction alone can't be named before the
     // video's length is known: it is sought to once the video has loaded, as before.
     const from = startAt ?? resume;
