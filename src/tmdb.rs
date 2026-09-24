@@ -126,7 +126,6 @@ const MEMBER_PER_WINDOW: u32 = 600;
 /// `TMDB_DAILY_MAX` is set. A kept title costs nothing and is not counted; past this a preview is the generic one.
 const PREVIEWS_PER_MINUTE: u32 = 30;
 
-/// How long an answer to `path` stays fresh — the same split the app makes in `tmdbCache.ts`.
 /// A body this exact size and shape means "TMDB says there is no such thing". It is stored like any other
 /// answer so the existing read path finds it, and is distinguishable from a real answer because no TMDB
 /// response is this.
@@ -164,6 +163,11 @@ fn verdict(is_absent: bool, age: Duration, fresh: Duration) -> Cached {
     }
 }
 
+/// How long an answer to `path` stays fresh by its path alone: a search an hour; a title's or a person's own record,
+/// its credits, external ids and keywords, and a season's episodes, six months; anything else — lists, trending, and
+/// a title's videos, where it streams and what is recommended beside it, each asked on its own path — six hours.
+/// `fresh_for_answer` shortens a record by what it says and what was asked with it. The app keeps its own copy by
+/// its own rule (`tmdbCache.ts`); this does not follow it.
 fn fresh_for(path: &str) -> Duration {
     if path.starts_with("/3/search/") {
         return SEARCH_TTL;
