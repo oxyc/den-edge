@@ -21,11 +21,38 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let listener =
         tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await.expect("bind cast listener");
-    axum::serve(listener, app).await.expect("serve cast files");
+    // PID 1 in a `scratch` image gets no default action for SIGTERM, so without this every stop waited out the
+    // stop timeout and ended in SIGKILL. Requests in flight get a moment to finish, never longer.
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        stop_signal().await;
+        let _ = stopping.send(());
+    });
+    tokio::select! {
+        served = serve => served.expect("serve cast files"),
+        () = async {
+            let _ = stopped.await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        } => {}
+    }
+}
+
+/// SIGTERM or SIGINT; never, if neither could be registered.
+async fn stop_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+        (Ok(mut term), Ok(mut int)) => {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+        }
+        _ => std::future::pending().await,
+    }
 }
 
 async fn index(axum::extract::State(root): axum::extract::State<Arc<PathBuf>>) -> Response<Body> {
-    response(root.join("index.html"), false)
+    response(root.join("index.html"), false).await
 }
 
 async fn file(
@@ -36,18 +63,19 @@ async fn file(
         return empty(StatusCode::NOT_FOUND);
     }
     let asset = path.starts_with("assets/");
+    // Asynchronous file reads: this runs on a single-threaded runtime, where a blocking one stalls every request.
     let candidate = root.join(&path);
-    if candidate.is_file() {
-        response(candidate, asset)
+    if tokio::fs::metadata(&candidate).await.is_ok_and(|m| m.is_file()) {
+        response(candidate, asset).await
     } else if !asset {
-        response(root.join("index.html"), false)
+        response(root.join("index.html"), false).await
     } else {
         empty(StatusCode::NOT_FOUND)
     }
 }
 
-fn response(path: PathBuf, immutable: bool) -> Response<Body> {
-    let Ok(bytes) = std::fs::read(&path) else { return empty(StatusCode::NOT_FOUND) };
+async fn response(path: PathBuf, immutable: bool) -> Response<Body> {
+    let Ok(bytes) = tokio::fs::read(&path).await else { return empty(StatusCode::NOT_FOUND) };
     let mime = match path.extension().and_then(|x| x.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
@@ -77,4 +105,24 @@ fn response(path: PathBuf, immutable: bool) -> Response<Body> {
 
 fn empty(status: StatusCode) -> Response<Body> {
     Response::builder().status(status).body(Body::empty()).expect("empty response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_file_an_app_route_and_a_missing_asset() {
+        let root = std::env::temp_dir().join(format!("den-cast-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("index.html"), "<html>").unwrap();
+        std::fs::write(root.join("assets/app.js"), "x").unwrap();
+        let root = axum::extract::State(Arc::new(root));
+        let asset = file(root.clone(), Path("assets/app.js".into())).await;
+        assert_eq!(asset.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+        let route = file(root.clone(), Path("receiver".into())).await;
+        assert_eq!(route.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(file(root.clone(), Path("assets/gone.js".into())).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(file(root, Path("../etc/passwd".into())).await.status(), StatusCode::NOT_FOUND);
+    }
 }
