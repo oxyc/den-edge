@@ -4,7 +4,7 @@
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
-  import type { Title } from '../lib/library';
+  import { titleKey, type Title } from '../lib/library';
   import {
     collectionRow,
     firstScreen,
@@ -30,7 +30,11 @@
   } = $props();
 
   let reached = $state(false);
-  let rows = $state<RowDef[]>([]);
+  /** Each shown row with its build: a rebuilt row keeps its id, and must still start its own loader afresh. */
+  let rows = $state<{ build: number; row: RowDef }[]>([]);
+  /** The title `rows` were built for, and how many builds there have been. Not reactive: the effect only reads them. */
+  let rowsFor = '';
+  let builds = 0;
 
   function approach(node: HTMLElement) {
     const observer = new IntersectionObserver(
@@ -44,11 +48,19 @@
   }
 
   // Each row is read once the rows are near the screen, and shown if it has anything. A row remembers what it has
-  // loaded, so a new title, or an atlas that answers late, builds them afresh.
+  // loaded, so a new title, or an atlas that answers late, builds them afresh. The rows already shown stay until
+  // the rebuilt ones are ready: emptying them first would shorten the page under someone scrolled down it, and the
+  // browser would pull them up by the rows' height. A replaced row holds its height with `BrowseRow`'s card-sized
+  // placeholders until its first page shows. Only a different title clears them at once.
   $effect(() => {
     if (!reached) return;
     const options = { key: tmdbKey };
     const self = detail.title;
+    const key = titleKey(self);
+    if (key !== rowsFor) {
+      rows = [];
+      rowsFor = key;
+    }
     const defined = [
       ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
       // Films and series together: a series' closest titles include the films that share its world, and back.
@@ -57,17 +69,18 @@
     ];
     let live = true;
     void Promise.all(defined.map((row) => firstScreen(row, shown))).then((found) => {
-      if (live) rows = found.filter((row): row is RowDef => row !== null);
+      if (!live) return;
+      const build = ++builds;
+      rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
     });
     return () => {
       live = false;
-      rows = [];
     };
   });
 </script>
 
 <div use:approach aria-hidden={!active}>
-  {#each rows as row (row.id)}
+  {#each rows as { build, row } (`${build}:${row.id}`)}
     <BrowseRow {row} {shown} />
   {/each}
 </div>
