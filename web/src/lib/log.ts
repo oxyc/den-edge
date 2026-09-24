@@ -39,6 +39,11 @@ interface Page {
   more: boolean;
 }
 
+/** Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach. */
+interface Outcome {
+  refused: boolean;
+}
+
 interface Batch {
   applied: { k: string; seq: number }[];
   conflicts: { k: string; seq: number; v: string | null }[];
@@ -94,6 +99,12 @@ export class LibraryLog {
   refused = false;
   /** When den-edge last refused (`Date.now()`). */
   private refusedAt = 0;
+  /**
+   * When den-edge last refused a write for good (`failed`): a full library, a row it will not take. The work kept
+   * here is sent again after `RECHECK_MS`, not on every refresh, where it was refused every 30 seconds for as long as
+   * the tab stayed open.
+   */
+  private rejectedAt = 0;
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
 
@@ -485,13 +496,13 @@ export class LibraryLog {
    * ours is merged on top of it and written again. Resolves to the row as stored, or null when it couldn't be saved
    * — `moved` says when that is because the library moved to a new key.
    */
-  async write(local: Row): Promise<Row | null> {
-    const run = this.writes.then(() => this.writeSerial(local));
+  async write(local: Row, outcome?: Outcome): Promise<Row | null> {
+    const run = this.writes.then(() => this.writeSerial(local, outcome));
     this.writes = run.catch(() => null);
     return run;
   }
 
-  private async writeSerial(local: Row): Promise<Row | null> {
+  private async writeSerial(local: Row, outcome?: Outcome): Promise<Row | null> {
     if (this.offline) return this.keepLocally(local);
     const seen = this.entries.get(rowName(local))?.row;
     let target = seen ? merge(seen, local) : local;
@@ -506,9 +517,10 @@ export class LibraryLog {
           headers: { ...this.headers(), 'content-type': 'application/json' },
           body: JSON.stringify({ writes: [{ k, base, v }] }),
         });
-        if (res.status === 410) this.moved = true;
-        if (res.status === 403) await this.refusedIf(res);
-        if (!res.ok) return null;
+        if (!res.ok) {
+          await this.failed(res, outcome);
+          return null;
+        }
         batch = (await res.json()) as Batch;
       } catch {
         return null;
@@ -533,15 +545,28 @@ export class LibraryLog {
   }
 
   /**
-   * A refused write that says den-edge will not start this library: `refused`, and this browser stops claiming a
-   * membership of it. With no log there, `library::is_member` refuses the proof, so every relayed write carrying it
-   * (`/metadata/title`) was a 401.
+   * A write den-edge answered with an error. `410`: the library `moved`. `403 new_libraries_closed`: den-edge will
+   * not start this library — `refused`, and this browser stops claiming a membership of it. With no log there,
+   * `library::is_member` refuses the proof, so every relayed write carrying it (`/metadata/title`) was a 401. Any
+   * other 400, 403 or 413 (`library_full`) refuses the write itself, and sending it again gets the same answer:
+   * `outcome.refused`. Anything else may pass.
    */
-  private async refusedIf(res: Response): Promise<void> {
-    if ((await errorCode(res)) !== 'new_libraries_closed') return;
-    this.refused = true;
-    this.refusedAt = Date.now();
-    forgetLibraryCredential();
+  private async failed(res: Response, outcome?: Outcome): Promise<void> {
+    if (res.status === 410) {
+      this.moved = true;
+      return;
+    }
+    if (![400, 403, 413].includes(res.status)) return;
+    const code = await errorCode(res);
+    if (res.status === 403 && code === 'new_libraries_closed') {
+      this.refused = true;
+      this.refusedAt = Date.now();
+      forgetLibraryCredential();
+      return;
+    }
+    this.rejectedAt = Date.now();
+    if (outcome) outcome.refused = true;
+    console.warn(`den: den-edge refused a library write (${res.status} ${code ?? ''})`);
   }
 
   /** A request to den-edge that gives up after `REQUEST_MS`. */
@@ -592,8 +617,14 @@ export class LibraryLog {
     } catch {
       return false;
     }
+    const outcome = { refused: false };
+    await this.flushRows(key, [journals, journals.map((row) => trackerEvent(row)!.after)], outcome);
+    // Refused for good, it is not kept to be refused again: the viewer is told it wasn't saved.
+    if (outcome.refused) {
+      this.discard(key);
+      return false;
+    }
     for (const row of journals) this.project(trackerEvent(row)!.after);
-    await this.flushRows(key, [journals, journals.map((row) => trackerEvent(row)!.after)]);
     return true; // Either on the relay or the complete intent is still durable locally.
   }
 
@@ -622,7 +653,7 @@ export class LibraryLog {
     } // Do not discard the old cursors until recovery work is safely retained.
   }
 
-  private async flushRows(key: string, groups: Row[][]): Promise<boolean> {
+  private async flushRows(key: string, groups: Row[][], outcome?: Outcome): Promise<boolean> {
     const run = this.writes.then(async () => {
       for (const rows of groups) {
         for (let offset = 0; offset < rows.length; offset += 32) {
@@ -639,14 +670,16 @@ export class LibraryLog {
             headers: { ...this.headers(), 'content-type': 'application/json' },
             body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
           });
-          if (res.status === 410) this.moved = true;
-          if (res.status === 403) await this.refusedIf(res);
-          if (!res.ok) return false;
+          if (!res.ok) {
+            await this.failed(res, outcome);
+            return false;
+          }
           const result = (await res.json()) as Batch;
           for (const entry of chunk) {
             const applied = result.applied.find(({ k }) => k === entry.k);
             if (applied) this.entries.set(entry.name, { seq: applied.seq, row: entry.row });
-            else if (!(await this.writeSerial(entry.row))) return false; // CAS merge/retry without leaving the lock.
+            // CAS merge/retry without leaving the lock.
+            else if (!(await this.writeSerial(entry.row, outcome))) return false;
           }
         }
       }
@@ -662,7 +695,15 @@ export class LibraryLog {
   }
 
   /** The immutable journal is authoritative; its snapshot repairs an interrupted projection write. */
-  async writeAction(journal: SettingsRow): Promise<Row | null> {
+  writeAction(journal: SettingsRow): Promise<Row | null> {
+    return this.act(journal, true);
+  }
+
+  /**
+   * `writeAction`, and the replay of one kept from before (`fresh` false). A fresh action den-edge refuses for good is
+   * dropped and says it wasn't saved; a kept one stays kept, and is sent again after `RECHECK_MS`.
+   */
+  private async act(journal: SettingsRow, fresh: boolean): Promise<Row | null> {
     const event = trackerEvent(journal);
     if (!event) return null;
     if (this.offline) {
@@ -677,7 +718,12 @@ export class LibraryLog {
     } catch {
       return null;
     }
-    const accepted = await this.write(journal);
+    const outcome = { refused: false };
+    const accepted = await this.write(journal, outcome);
+    if (!accepted && outcome.refused && fresh) {
+      this.discard(storageKey);
+      return null;
+    }
     if (!accepted && !this.storage) return null;
     if (accepted) {
       try {
@@ -690,6 +736,15 @@ export class LibraryLog {
     const saved = await this.write(event.after);
     if (saved) return saved;
     return this.project(event.after);
+  }
+
+  /** Drop work kept in this browser (`pendingPrefix`). */
+  private discard(key: string): void {
+    try {
+      this.storage?.removeItem(key);
+    } catch {
+      /* Replaying it is refused again, and costs only the request. */
+    }
   }
 
   private project(after: Row): Row {
@@ -732,6 +787,7 @@ export class LibraryLog {
     if (this.refused && Date.now() - this.refusedAt < RECHECK_MS) return false;
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
+    if (Date.now() - this.rejectedAt < RECHECK_MS) return false;
     const waiting = this.pendingActions;
     let delivered = false;
     if (this.storage) {
@@ -769,19 +825,24 @@ export class LibraryLog {
           }
           if (pending.bulk) {
             const rows = await Promise.all(pending.bulk.map(({ k, v }) => open(this.keys, k, v)));
+            // Only `writeActions` keeps a bulk, of actions only: anything else can never be sent, and would be
+            // counted as waiting (`pendingActions`) for good.
             if (
               !rows.every(
                 (row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null,
               )
-            )
+            ) {
+              this.discard(key);
               continue;
+            }
             for (const row of rows) this.project(trackerEvent(row)!.after);
             await this.flushRows(key, [rows, rows.map((row) => trackerEvent(row)!.after)]);
             continue;
           }
           const { k, v } = pending;
           const row = await open(this.keys, k, v);
-          if (row.kind === 'set' && trackerEvent(row)) await this.writeAction(row);
+          if (row.kind === 'set' && trackerEvent(row)) await this.act(row, false);
+          else this.discard(key); // Only `writeAction` keeps one, of an action: as for a bulk above.
         } catch {
           /* Keep unreadable pending data; never acknowledge or delete it. */
         }

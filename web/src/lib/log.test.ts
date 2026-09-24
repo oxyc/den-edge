@@ -539,6 +539,93 @@ describe('LibraryLog', () => {
     }
   });
 
+  /**
+   * `413 library_full` (or any 400/403 but `new_libraries_closed`) is den-edge refusing the write itself. Kept work it
+   * refused was sent again on every 30-second refresh, forever, and a fresh action said it was saved.
+   */
+  it('tells a refused action apart from an unreachable den-edge, and does not resend it every refresh', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i: number) => [...data.keys()][i] ?? null,
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+      clear: () => data.clear(),
+    } as Storage;
+    const server = await edge([row(1)]);
+    let full = false;
+    let offline = false;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (offline) throw new TypeError('offline');
+      if (init?.method === 'POST') {
+        batches++;
+        if (full) return new Response('{"error":"library_full"}', { status: 413 });
+      }
+      return server.fetchImpl(url, init);
+    };
+    const action = (id: number, name: string) => {
+      const blank = blankTitle({ type: 'movie', id }, 0);
+      return recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), name)!;
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+      full = true;
+      expect(await log.writeAction(action(10, 'single')), 'refused, not saved').toBeNull();
+      expect(await log.writeActions([action(11, 'bulk')])).toBe(false);
+      expect(log.pendingActions, 'nothing kept to be refused again').toBe(0);
+      expect(log.title({ type: 'movie', id: 10 })).toBeUndefined();
+      expect(log.title({ type: 'movie', id: 11 })).toBeUndefined();
+
+      // Kept while out of reach, then refused once den-edge is back.
+      offline = true;
+      expect(await log.writeAction(action(12, 'kept'))).not.toBeNull();
+      offline = false;
+      expect(log.pendingActions).toBe(1);
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      await log.refresh();
+      expect(log.pendingActions, 'kept, as it was saved on this device').toBe(1);
+      const tried = batches;
+      for (let i = 0; i < 3; i++) await log.refresh();
+      expect(batches, 'not sent again on every refresh').toBe(tried);
+      full = false;
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      await log.refresh();
+      expect(log.pendingActions).toBe(0);
+      expect(log.title({ type: 'movie', id: 12 })?.status.value).toBe('watchlist');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops kept work that is not an action, which could never be sent', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i: number) => [...data.keys()][i] ?? null,
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+      clear: () => data.clear(),
+    } as Storage;
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    data.set(`den.pendingTracker.${keys.id}.odd`, JSON.stringify(await seal(keys, row(5))));
+    data.set(
+      `den.pendingTracker.${keys.id}.bulk:odd`,
+      JSON.stringify({ bulk: [await seal(keys, row(6))] }),
+    );
+    data.set(`den.pendingTracker.${keys.id}.unreadable`, JSON.stringify({ k: 'ab', v: 'AAAA' }));
+    const server = await edge([row(1)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage))!;
+    expect(log.pendingActions, 'only the one that does not open is kept').toBe(1);
+  });
+
   it('skips an unreadable incremental row and still reaches later changes', async () => {
     const server = await edge();
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
