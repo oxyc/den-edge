@@ -952,27 +952,41 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // A title's record is the same question the app asks next (`Detail`): answered from what the app keeps, and a
     // cold one fetched whole, so the page this preview was built for opens on a hit.
     if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
-        let body = match detail.kept().await {
-            Kept::Hit(body, ..) => body,
+        let stale = match detail.kept().await {
+            Kept::Hit(body, ..) => return serde_json::from_slice(&body).ok(),
             Kept::Absent => return None,
-            Kept::Stale(..) | Kept::Nothing => {
-                let mut asking = one_asking(&detail.whole().1, "tmdb").await.ok()?;
-                match detail.kept().await {
-                    Kept::Hit(body, ..) => body,
-                    Kept::Absent => return None,
-                    Kept::Stale(..) | Kept::Nothing => {
-                        preview_allowed(state)?;
-                        match detail.ask(state, key, "meta").await {
-                            Ok((whole, ..)) => detail.narrowed(whole).await,
-                            Err(refusal) => {
-                                asking.failed(refusal).await;
+            Kept::Stale(body, ..) => Some(body),
+            Kept::Nothing => None,
+        };
+        // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
+        let asked = 'asked: {
+            let mut asking = match one_asking(&detail.whole().1, "tmdb").await {
+                Ok(asking) => asking,
+                Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => return None,
+                Err(_) => break 'asked None,
+            };
+            match detail.kept().await {
+                Kept::Hit(body, ..) => Some(body),
+                Kept::Absent => return None,
+                Kept::Stale(..) | Kept::Nothing => {
+                    if preview_allowed(state).is_none() {
+                        break 'asked None;
+                    }
+                    match detail.ask(state, key, "meta").await {
+                        Ok((whole, ..)) => Some(detail.narrowed(whole).await),
+                        Err(refusal) => {
+                            let absent = refusal.status() == StatusCode::NOT_FOUND;
+                            asking.failed(refusal).await;
+                            if absent {
                                 return None;
                             }
+                            break 'asked None;
                         }
                     }
                 }
             }
         };
+        let body = asked.or(stale)?;
         return serde_json::from_slice(&body).ok();
     }
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
@@ -998,7 +1012,9 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // one URL, requested in a loop by anyone, drained TMDB_DAILY_MAX at one unit per request, unauthenticated
     // and unthrottled, and that budget is shared with the /tmdb proxy the app browses through. Draining it
     // took out browsing, not just link previews.
-    preview_allowed(state)?;
+    if preview_allowed(state).is_none() {
+        return stale.and_then(|body| serde_json::from_slice(&body).ok());
+    }
     let fetched = match (&file, &stale) {
         (Some(file), Some(_)) => revalidate(state, path, query, key, "meta", file).await,
         _ => fetch(state, path, query, key, "meta").await.map(|(body, etag)| Fetched::Answer(body, etag)),
@@ -1021,8 +1037,9 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 if let Some(file) = &file {
                     keep(file, &Bytes::from_static(ABSENT), None).await;
                 }
+                return None;
             }
-            None
+            stale.and_then(|body| serde_json::from_slice(&body).ok())
         }
     }
 }
@@ -2184,6 +2201,43 @@ mod tests {
         assert!(ask(&h.state, "/3/movie/1", None).await.is_some(), "a kept title is still described");
         h.advance(60_001);
         assert!(ask(&h.state, "/3/movie/9999", None).await.is_some(), "and the next minute asks again");
+    }
+
+    /// A title kept past its freshness was thrown away once the minute's preview questions were spent, or TMDB
+    /// failed, and the page went out with the generic block. What is kept is still the better preview.
+    #[tokio::test]
+    async fn a_preview_past_the_minutes_questions_or_a_failing_tmdb_is_what_is_kept() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "stale-preview");
+        let refusing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let asked = Arc::new(std::sync::Mutex::new(0));
+        let (seen, refuses) = (Arc::clone(&asked), Arc::clone(&refusing));
+        let tmdb: Upstream = Arc::new(move |_: &str| {
+            *crate::lock(&seen) += 1;
+            if refuses.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_refused"));
+            }
+            let body = serde_json::json!({ "id": 1399, "name": "New", "status": "Returning Series" });
+            Ok(Fetched::Answer(Bytes::from(body.to_string()), None))
+        });
+        crate::lock(&UPSTREAMS).push(("stale-preview".to_owned(), tmdb));
+        let whole = Detail::of("/3/tv/1399", None, Some(&cache)).unwrap().whole().1;
+        let kept = serde_json::json!({ "id": 1399, "name": "Kept", "status": "Returning Series" });
+        write(&whole, &Bytes::from(kept.to_string())).await;
+        aged(&whole, LIST_TTL + Duration::from_secs(60));
+
+        for _ in 0..PREVIEWS_PER_MINUTE {
+            assert!(preview_allowed(&h.state).is_some());
+        }
+        let preview = ask(&h.state, "/3/tv/1399", None).await;
+        assert_eq!(preview.expect("the kept one")["name"], "Kept", "past the minute's questions");
+        assert_eq!(*crate::lock(&asked), 0);
+
+        h.advance(60_001);
+        refusing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let preview = ask(&h.state, "/3/tv/1399", None).await;
+        assert_eq!(preview.expect("the kept one")["name"], "Kept", "TMDB refusing");
+        assert_eq!(*crate::lock(&asked), 1);
     }
 
     /// A write its caller stopped waiting for — a preview past its budget — left its temporary file behind.
