@@ -174,7 +174,7 @@
     noCopy: 'This can’t be played on this device right now. Try it on your TV.',
     noFit:
       'No release of this fits this connection as it is. Try it again on a faster one, or on your TV.',
-    engine: 'Couldn’t load the player. Check the connection, then try again.',
+    engine: 'Couldn’t load the player. Check the connection, then reload the page.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
@@ -754,6 +754,7 @@
       console.warn('hls.js could not be started.', error);
       if (gone || ended || session !== current) return;
       failure = 'engine';
+      letGo();
     });
     return () => {
       gone = true;
@@ -1529,6 +1530,11 @@
       </p>
     {:else if failure}
       <p class="error" role="alert">{messages[failure]}</p>
+      {#if failure === 'engine'}
+        <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
+             with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
+        <button class="primary" onclick={() => location.reload()}>Reload</button>
+      {/if}
     {:else if !session}
       <p class="note">Finding a release this browser can play…</p>
     {:else}
