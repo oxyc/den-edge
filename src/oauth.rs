@@ -1084,7 +1084,9 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
     token_reply(access, expires_in, format!("{sid}.{secret}"))
 }
 
-/// RFC 7009: the refresh token's session ends. An unknown token is answered the same, as the RFC asks.
+/// RFC 7009: the session a token was issued in ends — for its refresh token, one a refresh replaced (the client may
+/// not have had the answer), or an access token, which is only as good as its session. An unknown token is
+/// answered the same, as the RFC asks.
 async fn revoke(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate(state, format!("oauth-token:{ip}"), TOKEN_PER_WINDOW) {
@@ -1093,21 +1095,28 @@ async fn revoke(state: &AppState, oauth: &OAuth, req: Request) -> Response {
     let Some(p) = params_of(req).await else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "a form-encoded body");
     };
-    if let Some((sid, secret)) =
-        p.get("token").and_then(|t| t.split_once('.')).filter(|(sid, _)| valid_id(sid))
-    {
-        let _lock = oauth.lock.lock().await;
-        if let Ok(Some(session)) = load::<Session>(state, &session_key(sid)).await {
-            if constant_time_eq(sha(secret.as_bytes()).as_bytes(), session.refresh_hash.as_bytes()) {
-                match load_index(state).await {
-                    Ok(mut index) => {
-                        if let Err(e) = drop_sessions(state, &mut index, &[sid.to_owned()]).await {
-                            return internal("oauth session delete", e);
-                        }
-                    }
-                    Err(e) => return internal("oauth index", e),
-                }
-            }
+    let token = p.get("token").map_or("", String::as_str);
+    // An access token is a signed JWS naming its session; a refresh token is `<sid>.<secret>`.
+    let access = session_of(oauth, Some(&format!("Bearer {token}")), state.now() / 1000);
+    let refresh = token.split_once('.').filter(|(sid, _)| valid_id(sid));
+    let Some(sid) = access.as_deref().or(refresh.map(|(sid, _)| sid)) else {
+        return json_reply(StatusCode::OK, &json!({}));
+    };
+    let _lock = oauth.lock.lock().await;
+    let session = match load::<Session>(state, &session_key(sid)).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return json_reply(StatusCode::OK, &json!({})),
+        Err(e) => return internal("oauth session read", e),
+    };
+    let issued = access.is_some()
+        || refresh.is_some_and(|(_, secret)| {
+            let presented = sha(secret.as_bytes());
+            let is = |hash: &String| constant_time_eq(hash.as_bytes(), presented.as_bytes());
+            is(&session.refresh_hash) || session.previous_hash.iter().chain(&session.retired).any(is)
+        });
+    if issued {
+        if let Err(e) = end_session(state, sid).await {
+            return internal("oauth session delete", e);
         }
     }
     json_reply(StatusCode::OK, &json!({}))
@@ -2337,6 +2346,37 @@ mod tests {
             assert_eq!(claims[claim], value, "{claim}");
         }
         println!("{token}");
+    }
+
+    /// RFC 7009: any token the session was given ends it — its refresh token, the one a refresh just replaced, or
+    /// an access token (which is checked against the session, so ending the session is what revokes it). Anything
+    /// else is answered the same and ends nothing.
+    #[tokio::test]
+    async fn revoking_any_of_a_sessions_tokens_ends_it() {
+        let h = harness().await;
+        let claim = member();
+        let revoke = |token: String| {
+            let h = &h;
+            async move { post_form(h, "/oauth/revoke", &[("token", &token)]).await.0 }
+        };
+        for which in ["refresh", "previous", "access"] {
+            let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+            let client = tokens["client_id"].as_str().unwrap();
+            let first = tokens["refresh_token"].as_str().unwrap();
+            let form = [("grant_type", "refresh_token"), ("refresh_token", first), ("client_id", client)];
+            let (status, next) = post_form(&h, "/oauth/token", &form).await;
+            assert_eq!(status, StatusCode::OK);
+            let access = next["access_token"].as_str().unwrap();
+            assert_eq!(revoke("junk".into()).await, StatusCode::OK);
+            assert_eq!(call_mcp(&h, access).await.status(), StatusCode::OK, "{which}: junk ended nothing");
+            let token = match which {
+                "refresh" => next["refresh_token"].as_str().unwrap(),
+                "previous" => first,
+                _ => access,
+            };
+            assert_eq!(revoke(token.to_owned()).await, StatusCode::OK);
+            assert_eq!(call_mcp(&h, access).await.status(), StatusCode::UNAUTHORIZED, "{which}");
+        }
     }
 
     /// A member's library log or a guest's grant that cannot be read for a moment is not a revocation: the call is a
