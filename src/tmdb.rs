@@ -1447,9 +1447,8 @@ mod tests {
         let bodies: Vec<Bytes> = (0..16u8).map(|n| Bytes::from(vec![b'a' + n; 256 * 1024])).collect();
         let writes: Vec<_> = bodies
             .iter()
-            .cloned()
             .map(|body| {
-                let file = file.clone();
+                let (file, body) = (file.clone(), body.clone());
                 tokio::spawn(async move { write(&file, &body).await })
             })
             .collect();
