@@ -1,8 +1,9 @@
-// TMDB's answers kept in this browser (IndexedDB), as the TV keeps them on disk: a title's own details for 30 days,
-// lists and search for 6 hours — so a reload paints from here and asks TMDB only for what is missing or old. The API
-// key is never part of what is kept. An answer up to a week past that is served at once and refreshed behind it, so
-// a return visit never waits on TMDB for what it showed last time; an older one TMDB can't refresh is served stale
-// rather than not at all, and nothing is kept past TMDB's six-month limit on cached content.
+// TMDB's answers kept in this browser (IndexedDB), as the TV keeps them on disk: a title's own settled details for
+// six months, and an airing series, anything that moves with a title, lists and search for 6 hours (`freshFor`) — so
+// a reload paints from here and asks TMDB only for what is missing or old. The API key is never part of what is
+// kept. An answer up to a week past that is served at once and refreshed behind it, so a return visit never waits on
+// TMDB for what it showed last time; an older one TMDB can't refresh is served stale rather than not at all, and
+// nothing is kept past TMDB's six-month limit on cached content.
 
 import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
