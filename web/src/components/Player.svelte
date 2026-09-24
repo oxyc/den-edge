@@ -1068,7 +1068,10 @@
   /** The end: count down to the next episode, when there is one. */
   function finished() {
     progress.complete(video?.currentTime ?? remoteTime);
-    if (!onnext) return;
+    if (!onnext || ended) return;
+    // A second end (the last seconds replayed, or the cast page's `den-ended` again) starts the count over; left
+    // running, the first would advance again every second after it.
+    clearInterval(countdown);
     upNext = UP_NEXT_SECS;
     countdown = setInterval(() => {
       upNext = (upNext ?? 1) - 1;
