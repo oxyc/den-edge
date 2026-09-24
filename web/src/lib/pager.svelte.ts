@@ -18,6 +18,8 @@ export class Pager {
   exhausted = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
+  /** The last page asked for failed: the list says so and offers `retry`, rather than simply ending. */
+  failed = $state(false);
   #loading = false;
   readonly #load: (page: number) => Promise<Title[]>;
   readonly #admitted: (title: Title) => boolean;
@@ -38,9 +40,10 @@ export class Pager {
         this.titles = appendUniqueTitles(this.titles, next);
         if (next.length === 0) this.done = this.exhausted = true;
       } catch (error) {
-        // The row ends where its source failed; what failed is said, not swallowed.
-        console.warn('pager: page', this.page + 1, 'failed, ending the row', error);
-        this.done = true;
+        // The row stops where its source failed, until `retry`; what failed is said, not swallowed.
+        console.warn('pager: page', this.page + 1, 'failed', error);
+        this.failed = this.done = true;
+        break;
       }
       if (this.titles.filter(this.#admitted).length >= FILL * this.page) break;
     }
@@ -49,5 +52,12 @@ export class Pager {
     // on screen forever.
     if (!this.titles.some(this.#admitted)) this.done = true;
     this.#loading = false;
+  }
+
+  /** Ask again for the page that failed, and carry on from there. */
+  retry(): Promise<void> {
+    if (!this.failed || this.#loading) return Promise.resolve();
+    this.failed = this.done = false;
+    return this.more();
   }
 }

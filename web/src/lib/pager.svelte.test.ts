@@ -68,6 +68,31 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
+    expect(pager.failed).toBe(true);
+  });
+
+  it('says a page failed, and carries on from it when asked to try again', async () => {
+    const asked: number[] = [];
+    let down = true;
+    const pager = new Pager(
+      async (page) => {
+        asked.push(page);
+        if (page === 2 && down) throw new Error('TMDB answered 500');
+        return pageOf(page * 100);
+      },
+      () => true,
+    );
+    await pager.more();
+    await pager.more();
+    expect(pager.failed).toBe(true);
+    expect(pager.done).toBe(true);
+    expect(pager.titles).toHaveLength(20);
+    down = false;
+    await pager.retry();
+    expect(asked).toEqual([1, 2, 2]);
+    expect(pager.failed).toBe(false);
+    expect(pager.done).toBe(false);
+    expect(pager.titles).toHaveLength(40);
   });
 
   it('never loads the same title twice across pages', async () => {

@@ -41,7 +41,7 @@
   });
 </script>
 
-<div bind:this={wrapper} class:gone={done && visible.length === 0}>
+<div bind:this={wrapper} class:gone={done && !pager.failed && visible.length === 0}>
   <PosterRow heading={row.title} headingLink={row.headingLink} aside={row.aside}>
     {#each visible as title (key(title))}
       <PosterCard
@@ -54,6 +54,12 @@
         {#each { length: 6 } as _, i (i)}<span class="skeleton" aria-hidden="true"></span>{/each}
       {/if}
     {/each}
+    {#if pager.failed}
+      <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
+      <button class="retry" onclick={() => void pager.retry()}
+        >Couldn’t load these. Try again</button
+      >
+    {/if}
     <span bind:this={end} class="end" aria-hidden="true"></span>
   </PosterRow>
 </div>
@@ -74,5 +80,23 @@
 
   .end {
     width: 1px;
+  }
+
+  .retry {
+    flex: 0 0 var(--card-w);
+    width: var(--card-w);
+    height: calc(var(--card-w) * 1.5);
+    padding: 12px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--card);
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .retry:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
   }
 </style>
