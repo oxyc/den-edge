@@ -409,18 +409,19 @@
 
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
   // `src`, and is torn down with the source it was given — switching candidates must never leave two
-  // engines feeding one element. A master that will not play falls back to reel's own file, which is
-  // what `upgraded = null` selects.
+  // engines feeding one element. A master that will not play steps on exactly as the element's own
+  // `error` does (`nextTrailer`): reel's next offer, the next candidate, then reel's own file. Clearing
+  // `upgraded` alone did nothing once reel had named the sources, because `managed` follows the rung.
   $effect(() => {
     const player = video;
     const master = managed;
     if (!player || !master) return;
     let live = true;
     let engine: Hls | undefined;
-    void import('hls.js').then(({ default: Hls }) => {
+    const starting = import('hls.js').then(({ default: Hls }) => {
       if (!live) return;
       if (!Hls.isSupported()) {
-        upgraded = null;
+        nextTrailer();
         return;
       }
       // The membership claim travels on hls.js's own requests too, or a paired household counts as a
@@ -437,7 +438,10 @@
         testBandwidth: false,
       });
       engine.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) upgraded = null;
+        // Once per engine: a fatal error can be followed by another, and each would step again.
+        if (!data.fatal || !live) return;
+        live = false;
+        nextTrailer();
       });
       // Open on the rung carrying the most bits, found by MEASURE rather than by position: an index is not
       // a ranking, because hls.js orders `levels` for itself whatever order the master lists them in.
@@ -459,6 +463,11 @@
       });
       engine.loadSource(master);
       engine.attachMedia(player);
+    });
+    // hls.js is its own chunk, fetched only now; one that never comes is a master that will not play.
+    void starting.catch((error: unknown) => {
+      console.warn('hls.js could not be started for the trailer.', error);
+      if (live) nextTrailer();
     });
     return () => {
       live = false;
