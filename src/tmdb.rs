@@ -113,6 +113,7 @@ const LIST_TTL: Duration = Duration::from_secs(6 * 3600);
 /// A search is asked once per keystroke by a person who is still typing.
 const SEARCH_TTL: Duration = Duration::from_secs(3600);
 const TIMEOUT: Duration = Duration::from_secs(15);
+const DAY_MS: u64 = 86_400_000;
 /// TMDB's largest answers here — a series with every season's credits — are well under this.
 const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// Proxied questions per address per minute. A detail page asks a handful; a crawl asks thousands.
@@ -881,7 +882,8 @@ async fn send(
         return Err(Box::new(retry_after(
             StatusCode::SERVICE_UNAVAILABLE,
             &error("tmdb_budget_spent"),
-            3_600_000,
+            // The day starts over at UTC midnight (`spend`), not an hour from now.
+            DAY_MS - state.now() % DAY_MS,
         )));
     }
     #[cfg(test)]
@@ -916,13 +918,37 @@ async fn send(
     }
     let tag = headers.get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
     if !status.is_success() {
-        // TMDB's own refusal, passed on as ours without its body: it may name the key.
-        return Err(refused(
-            if status == StatusCode::NOT_FOUND { StatusCode::NOT_FOUND } else { StatusCode::BAD_GATEWAY },
-            if status == StatusCode::NOT_FOUND { "not_found" } else { "tmdb_refused" },
-        ));
+        return Err(refusal(state, status, &headers));
     }
     Ok(Fetched::Answer(bytes, tag))
+}
+
+/// TMDB's own refusal, passed on as ours without its body: it may name the key.
+///
+/// Anything but a 404 is said in the log, once a minute per status: a revoked `TMDB_KEY` (401), TMDB rate-limiting
+/// the household (429) or TMDB down (5xx) otherwise showed only as a 502 to whoever asked next. A 429 is passed on
+/// as a wait, with TMDB's own `Retry-After`, rather than as a failure.
+fn refusal(state: &AppState, status: StatusCode, headers: &HeaderMap) -> Box<Response> {
+    if status == StatusCode::NOT_FOUND {
+        return refused(StatusCode::NOT_FOUND, "not_found");
+    }
+    if crate::link::throttled_per_minute(state, &format!("tmdb-refused:{}", status.as_u16()), 1).is_none() {
+        let check = if status == StatusCode::UNAUTHORIZED { " - check TMDB_KEY" } else { "" };
+        eprintln!("tmdb: TMDB answered {status}{check}");
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let secs = headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10);
+        return Box::new(retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &error("tmdb_rate_limited"),
+            secs.saturating_mul(1000),
+        ));
+    }
+    refused(StatusCode::BAD_GATEWAY, "tmdb_refused")
 }
 
 /// Take one from today's allowance (env `TMDB_DAILY_MAX`), or refuse. Only questions that actually leave the
@@ -932,7 +958,7 @@ async fn send(
 /// the household's quota and it is the household TMDB rate-limits afterwards, on every device it owns.
 fn spend(state: &AppState) -> bool {
     let Some(max) = state.tmdb_daily_max else { return true };
-    let day = state.now() / 86_400_000;
+    let day = state.now() / DAY_MS;
     let mut spent = crate::lock(&state.tmdb_spent);
     if spent.0 != day {
         *spent = (day, 0);
@@ -1186,6 +1212,37 @@ mod tests {
         // A new UTC day starts the budget over.
         harness.advance(86_400_000);
         assert!(spend(state), "tomorrow asks again");
+    }
+
+    /// A refused key, a rate limit and an outage were each a bare 502 with nothing in the log; a 429's own wait was
+    /// dropped, and a spent day said to come back in an hour whatever the time until UTC midnight.
+    #[tokio::test]
+    async fn tmdbs_refusals_say_what_they_are_and_how_long_to_wait() {
+        let h = Harness::in_dir_with(temp_dir(), |state| state.tmdb_daily_max = Some(0));
+        let mut waits = HeaderMap::new();
+        waits.insert(header::RETRY_AFTER, HeaderValue::from_static("7"));
+        let limited = refusal(&h.state, StatusCode::TOO_MANY_REQUESTS, &waits);
+        assert_eq!(limited.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(limited.headers()[header::RETRY_AFTER], "7");
+        let limited = refusal(&h.state, StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new());
+        assert_eq!(limited.headers()[header::RETRY_AFTER], "10", "a 429 without a wait still names one");
+        assert_eq!(
+            refusal(&h.state, StatusCode::UNAUTHORIZED, &HeaderMap::new()).status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            refusal(&h.state, StatusCode::NOT_FOUND, &HeaderMap::new()).status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // The harness's clock starts at a known time of day; a spent day waits until the next UTC midnight.
+        let spent = send(&h.state, "/3/movie/550", None, "k", "t", None).await.err().unwrap();
+        assert_eq!(spent.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let wait: u64 = spent.headers()[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+        assert_eq!(wait, (DAY_MS - h.state.now() % DAY_MS).div_ceil(1000));
+        h.advance(DAY_MS - h.state.now() % DAY_MS - 5_000);
+        let spent = send(&h.state, "/3/movie/550", None, "k", "t", None).await.err().unwrap();
+        assert_eq!(spent.headers()[header::RETRY_AFTER], "5", "five seconds before midnight");
     }
 
     /// What a cached body is worth, decided without a clock or a filesystem.
