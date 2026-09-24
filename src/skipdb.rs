@@ -51,6 +51,17 @@ const ABSENT_TTL: Duration = Duration::from_secs(DAY);
 const ABSENT: &[u8] = b"{\"den_absent\":true}";
 /// The longest runtime worth asking about, in seconds — past this the caller is naming something absurd.
 const MAX_DURATION: u64 = 24 * 3600;
+/// Questions that may leave for SkipDB in a minute, from every caller together: half what one address may ask here.
+/// A play asks one, and every runtime, season and episode is a question of its own, so the per-address limit alone
+/// let a few addresses make this box ask SkipDB as fast as they liked.
+const UPSTREAM_PER_MINUTE: u32 = 30;
+/// Answers kept a day under a name not kept before. Each runtime, season and episode is a name, and each is kept
+/// for `RETENTION`; without a ceiling, asking for made-up ones filled the disk with files for three months. Past it
+/// an answer is still given, and is not kept.
+const NEW_PER_DAY: u32 = 1000;
+/// Today (UTC day number) and how many new names have been kept in it. For the whole process, as the cache
+/// directory is.
+static KEPT_NEW: std::sync::Mutex<(u64, u32)> = std::sync::Mutex::new((0, 0));
 
 pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
@@ -68,10 +79,13 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     let file = state.skipdb_cache_dir.as_ref().map(|dir| dir.join(asked_for.file_name()));
     // Segments past their freshness but inside `RETENTION`: asked for again, and served when SkipDB cannot say.
     let mut stale = None;
-    if let Some((body, age, modified)) = match &file {
+    let kept = match &file {
         Some(file) => crate::tmdb::read(file).await,
         None => None,
-    } {
+    };
+    // Where an answer to this may be written: over what is kept, or under a new name while today allows one.
+    let keep = file.filter(|_| kept.is_some() || new_name(state));
+    if let Some((body, age, modified)) = kept {
         let absent = body.as_ref() == ABSENT;
         if absent && age < ABSENT_TTL {
             return crate::warnings::absent();
@@ -85,19 +99,19 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     }
     match lookup(state, &asked_for, rid).await {
         Ok(Some(body)) => {
-            if let Some(file) = &file {
+            if let Some(file) = &keep {
                 crate::tmdb::write(file, &body).await;
                 let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
-            if let (Some(file), Some((body, modified))) = (&file, stale) {
+            if let (Some(file), Some((body, modified))) = (&keep, stale) {
                 if !gone(file).await {
                     return answer(body, STALE_MAX_AGE, "stale", modified, asked);
                 }
             }
-            if let Some(file) = &file {
+            if let Some(file) = &keep {
                 crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
             }
             crate::warnings::absent()
@@ -108,6 +122,20 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             None => *refused,
         },
     }
+}
+
+/// Whether today allows one more answer kept under a new name (`NEW_PER_DAY`), counting it if so.
+fn new_name(state: &AppState) -> bool {
+    let day = state.now() / (DAY * 1000);
+    let mut kept = crate::lock(&KEPT_NEW);
+    if kept.0 != day {
+        *kept = (day, 0);
+    }
+    if kept.1 >= NEW_PER_DAY {
+        return false;
+    }
+    kept.1 += 1;
+    true
 }
 
 /// SkipDB answering "nothing" for segments it named before. It answers every title it has never heard of the same
@@ -197,10 +225,13 @@ impl Ask {
 /// SkipDB's answer as it is kept: `Some` body, or `None` where it names no segment at all. Every other refusal
 /// is already the response to give.
 async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>, Box<Response>> {
+    if let Some(wait) = crate::link::throttled_per_minute(state, "skipdb:upstream", UPSTREAM_PER_MINUTE) {
+        return Err(Box::new(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("skipdb_busy"), wait)));
+    }
     #[cfg(test)]
     if let Some(skipdb) = tests::stand_in(&ask.imdb) {
         let (status, bytes) = skipdb();
-        return said(status, &bytes);
+        return said(status, &HeaderMap::new(), &bytes);
     }
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "skipdb_off"));
@@ -212,7 +243,7 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
-    let (status, _, bytes) =
+    let (status, headers, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "skipdb").await {
             Ok(answer) => answer,
             Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable")),
@@ -221,16 +252,30 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
                 return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
             }
         };
-    said(status, &bytes)
+    said(status, &headers, &bytes)
 }
 
 /// What SkipDB's answer says: `Some` body to keep, `None` where it names no segment at all, or the refusal to give.
-fn said(status: StatusCode, bytes: &Bytes) -> Result<Option<Bytes>, Box<Response>> {
+fn said(status: StatusCode, headers: &HeaderMap, bytes: &Bytes) -> Result<Option<Bytes>, Box<Response>> {
     if !status.is_success() {
         // A 404 means SkipDB has nothing for this title, which is an answer worth keeping rather than an error
         // to repeat on every play.
         if status == StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+        // SkipDB asking this box to wait is passed on as a wait, with its own `Retry-After` (a minute when it names
+        // none), not as a failure.
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let secs = headers
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(60);
+            return Err(Box::new(retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("skipdb_rate_limited"),
+                secs.saturating_mul(1000),
+            )));
         }
         return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_refused"));
     }
@@ -393,5 +438,54 @@ mod tests {
         assert_eq!(get().await.status(), StatusCode::NOT_FOUND);
         assert_eq!(std::fs::read(&file).unwrap(), ABSENT);
         assert_eq!(*crate::lock(&asked), 4);
+    }
+
+    /// Every runtime, season and episode is a question of its own and a file kept for 90 days, so made-up ones
+    /// made this box ask SkipDB, and fill its disk, as fast as the per-address limit let a caller ask. And SkipDB
+    /// asking to wait was a 502 without saying how long.
+    #[tokio::test]
+    async fn made_up_questions_are_bounded_and_a_429_says_how_long() {
+        let cache = crate::handler::tests::temp_dir();
+        let dir = cache.clone();
+        let h =
+            crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), move |state| {
+                state.skipdb_cache_dir = Some(dir);
+            });
+        let (answers, asked) = skipdb("tt0000202");
+        for n in 1..=UPSTREAM_PER_MINUTE {
+            let resp = h.send("GET", &format!("/skipdb/tt0000202/1/{n}"), None, &[]).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{n}");
+        }
+        let resp = h.send("GET", "/skipdb/tt0000202/1/999", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(
+            *crate::lock(&asked),
+            UPSTREAM_PER_MINUTE,
+            "SkipDB was not asked past the minute's allowance"
+        );
+
+        h.advance(61_000);
+        *crate::lock(&answers) = (StatusCode::TOO_MANY_REQUESTS, "");
+        let resp = h.send("GET", "/skipdb/tt0000202/2/1", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "60");
+
+        // A day's new names run out; what is already kept is still written over.
+        h.advance(DAY * 1000);
+        let today = h.state.now() / (DAY * 1000);
+        *crate::lock(&KEPT_NEW) = (today, NEW_PER_DAY - 1);
+        assert!(new_name(&h.state), "the last one today");
+        assert!(!new_name(&h.state), "and no more");
+        *crate::lock(&answers) = (StatusCode::OK, NAMED);
+        let resp = h.send("GET", "/skipdb/tt0000202/3/1", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK, "still answered");
+        assert!(!cache.join("tt0000202-s3e1.json").exists(), "but not kept");
+        let kept = cache.join("tt0000202-s1e1.json");
+        aged(&kept, FRESH + Duration::from_secs(DAY));
+        assert_eq!(h.send("GET", "/skipdb/tt0000202/1/1", None, &[]).await.headers()["x-den-skipdb"], "miss");
+        assert!(crate::tmdb::read(&kept).await.unwrap().1 < Duration::from_secs(60), "written over");
+        h.advance(DAY * 1000);
+        assert!(new_name(&h.state), "tomorrow starts over");
     }
 }
