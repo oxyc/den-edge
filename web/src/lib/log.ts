@@ -205,6 +205,8 @@ export class LibraryLog {
   async writeRows(rows: Row[]): Promise<boolean> {
     if (this.offline) {
       for (const row of rows) this.keepLocally(row);
+      // Kept once it is in this browser's store, which the next `openLocal` reads.
+      await this.saving;
       return true;
     }
     return this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [
