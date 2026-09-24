@@ -106,6 +106,7 @@ export class LibraryLog {
   private generation?: string;
   private recoveryRows?: Row[];
   private memberRegistered = false;
+  private registering?: Promise<void>;
   /** The TV reset the library key: this log is deleted, its id retired, and this browser's key reaches nothing. */
   moved = false;
   /**
@@ -260,9 +261,14 @@ export class LibraryLog {
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }
-      // Shown before den-edge is asked anything: `refresh`, which follows at once, registers a membership not yet
-      // registered and sends the work kept here. An unanswered request kept the kept library off the screen.
+      // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
+      // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
+      // follows at once, sends the work kept here.
       if (log.memberRegistered) useLibraryCredential(keys);
+      else
+        void log.registerMember().then(() => {
+          if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
+        });
       log.fromCache = true;
       log.projectJournal();
       // Unsent work is drawn too, without sending it: a reload while den-edge is out of reach showed none of it.
@@ -602,8 +608,13 @@ export class LibraryLog {
     return { 'x-den-library-token': this.keys.token };
   }
 
-  private async registerMember(): Promise<void> {
-    if (this.memberRegistered || this.offline) return;
+  /** Register this browser's membership, once at a time: a cached open starts it while `refresh` may ask too. */
+  private registerMember(): Promise<void> {
+    if (this.memberRegistered || this.offline) return Promise.resolve();
+    return (this.registering ??= this.putMember().finally(() => (this.registering = undefined)));
+  }
+
+  private async putMember(): Promise<void> {
     try {
       const res = await this.send(`/lib/${this.keys.id}/member`, {
         method: 'PUT',

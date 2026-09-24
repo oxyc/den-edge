@@ -327,6 +327,35 @@ describe('LibraryLog', () => {
     expect(log.pendingActions).toBe(0);
   });
 
+  /** A return visit whose membership den-edge never took claimed none until the first refresh read /changes. */
+  it('registers a membership not yet registered as soon as a return visit opens', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1)]);
+    let members = 0;
+    let refuseMember = true;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'PUT') {
+        members++;
+        if (refuseMember) return new Response('{}', { status: 503 });
+        return new Response('{}');
+      }
+      return server.fetchImpl(url, init);
+    };
+    forgetLibraryCredential();
+    await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault);
+    await vi.waitFor(() => expect(data.size).toBe(1));
+    forgetLibraryCredential();
+    refuseMember = false;
+    members = 0;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    expect(log.fromCache).toBe(true);
+    await vi.waitFor(() => expect(hasLibraryCredential()).toBe(true));
+    expect(members).toBe(1);
+    await log.refresh();
+    expect(members, 'not asked again').toBe(1);
+    forgetLibraryCredential();
+  });
+
   it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(1)]);
