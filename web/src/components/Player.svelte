@@ -327,7 +327,12 @@
     replacing?: Session,
   ): Promise<boolean | Failure> {
     clearTimeout(retry);
-    if (!replacing) failure = null;
+    if (!replacing) {
+      // A session a failure left standing (a browser key asked for mid-film, say) goes first: kept, its video would
+      // come back and load it again, and den-remux would hold its slot until the player closed.
+      letGo();
+      failure = null;
+    }
     swapped = null;
     unchanged = null;
     // Each wait below may outlast the player: once it is closed, nothing more is asked for, and no session started.
@@ -397,7 +402,8 @@
     };
     const on = route;
     const result = await startSession(request, undefined, on);
-    if (ended || (replacing && session !== replacing)) {
+    // Another start (a retry and the key form, say) may have got there first.
+    if (ended || session !== (replacing ?? null)) {
       if (!('failure' in result)) endSession(result);
       return false;
     }
@@ -1337,13 +1343,19 @@
       });
       return;
     }
+    void begin(pick);
+  }
+
+  /** End the session held now, with nothing left playing it. */
+  function letGo() {
+    const current = session;
+    if (!current) return;
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
     hls = undefined;
     endSession(current);
     session = null;
-    void begin(pick);
   }
 
   function trackLabel(track: AudioTrack, n: number): string {
