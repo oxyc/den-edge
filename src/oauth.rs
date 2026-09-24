@@ -94,6 +94,8 @@ const CONSENT_PER_WINDOW: u32 = 30;
 const MCP_GATE_PER_WINDOW: u32 = 600;
 const MCP_PER_SESSION: u32 = 600;
 const MCP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a call's body may take to arrive: it is at most 256 KiB, read before the call takes a slot.
+const MCP_BODY_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 10_000 });
 const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 const NAME_MAX: usize = 80;
 const URI_MAX: usize = 512;
@@ -113,8 +115,8 @@ pub struct OAuth {
     codes: Mutex<HashMap<String, Code>>,
     /// Held across every read-modify-write of the index, a session's rotation included.
     lock: tokio::sync::Mutex<()>,
-    /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer is back.
-    mcp_slots: tokio::sync::Semaphore,
+    /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer has been passed on.
+    mcp_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 /// The most `/mcp` calls relayed to den-mcp at once. den-mcp answers a call in milliseconds and runs 32 at a time
@@ -135,7 +137,7 @@ impl OAuth {
             pending: Mutex::default(),
             codes: Mutex::default(),
             lock: tokio::sync::Mutex::new(()),
-            mcp_slots: tokio::sync::Semaphore::new(MCP_IN_FLIGHT),
+            mcp_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MCP_IN_FLIGHT)),
         }
     }
 
@@ -1350,35 +1352,85 @@ fn unauthorized(oauth: &OAuth, invalid: bool) -> Response {
 /// `/mcp`: the token's session must still exist, and the member or grant behind it still stand, on every call — that
 /// is what makes a revocation immediate — then the call goes to den-mcp.
 async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> Response {
-    if req.method() == Method::OPTIONS {
-        return relay_mcp(state, req, rid).await;
-    }
     let ip = crate::handler::client_ip(state, &req);
     if let Some(limited) = gate_steady(state, format!("mcp-gate:{ip}"), MCP_GATE_PER_WINDOW) {
         return limited;
     }
-    let authorization = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    let Some(sid) = session_of(oauth, authorization, state.now() / 1000) else {
-        return unauthorized(oauth, authorization.is_some());
-    };
-    let session: Session = match load(state, &session_key(&sid)).await {
-        Ok(Some(session)) => session,
-        Ok(None) => return unauthorized(oauth, true),
-        Err(e) => return internal("oauth session read", e),
-    };
-    match still_stands(state, &session.who).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return unauthorized(oauth, true),
-        Err(e) => return internal("oauth standing", e),
+    // A CORS preflight carries no token, by design; it is still relayed, so it is counted and takes a slot.
+    if req.method() != Method::OPTIONS {
+        let authorization = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let Some(sid) = session_of(oauth, authorization, state.now() / 1000) else {
+            return unauthorized(oauth, authorization.is_some());
+        };
+        let session: Session = match load(state, &session_key(&sid)).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return unauthorized(oauth, true),
+            Err(e) => return internal("oauth session read", e),
+        };
+        match still_stands(state, &session.who).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return unauthorized(oauth, true),
+            Err(e) => return internal("oauth standing", e),
+        }
+        if let Some(limited) = gate_steady(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
+            return limited;
+        }
     }
-    if let Some(limited) = gate_steady(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
-        return limited;
-    }
+    // The body is read before a slot is taken, and in bounded time: one sent slowly must not hold a slot.
+    let (parts, body) = req.into_parts();
+    let body = match tokio::time::timeout(
+        MCP_BODY_TIMEOUT,
+        axum::body::to_bytes(body, crate::handler::MAX_BODY_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large")),
+        Err(_) => return json_reply(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")),
+    };
+    let req = Request::from_parts(parts, Body::from(body));
     // At most `MCP_IN_FLIGHT` calls at den-mcp at once from here, whoever makes them: past that, come back shortly.
-    let Ok(_slot) = oauth.mcp_slots.try_acquire() else {
+    let Ok(slot) = std::sync::Arc::clone(&oauth.mcp_slots).try_acquire_owned() else {
         return retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("busy"), 2_000);
     };
-    relay_mcp(state, req, rid).await
+    let call = req.method() == Method::POST;
+    let resp = relay_mcp(state, req, rid).await;
+    if !call {
+        return resp;
+    }
+    // A call's answer may be an event stream (Streamable HTTP), and the call is at den-mcp until it ends, so the slot
+    // goes with the answer. A GET is not held: it opens the stream den-mcp may speak first on, which stays open.
+    resp.map(|body| Body::new(Held { body, slot: Some(slot) }))
+}
+
+/// An answer that holds its `/mcp` slot until its last frame, or until it is dropped unfinished.
+struct Held {
+    body: Body,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl http_body::Body for Held {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(frame, std::task::Poll::Ready(None | Some(Err(_)))) {
+            self.slot = None;
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 /// den-mcp's LAN origin: the `/mcp` entry of `ADDON_RELAY`.
@@ -2166,6 +2218,80 @@ mod tests {
         assert!(busy.headers().contains_key(header::RETRY_AFTER));
         drop(held);
         assert_eq!(call_mcp(&h, access).await.status(), StatusCode::OK);
+    }
+
+    /// A call holds its slot until den-mcp's answer has been passed on whole, not only its head: an answer may be a
+    /// stream, and it is at den-mcp until it ends.
+    #[tokio::test]
+    async fn a_call_holds_its_slot_until_its_answer_ends() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let answer = call_mcp(&h, tokens["access_token"].as_str().unwrap()).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT - 1, "the answer is still coming");
+        body_text(answer).await;
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT);
+    }
+
+    /// A body that never finishes arriving: what a caller sending slowly looks like from here.
+    struct Stalled;
+
+    impl http_body::Body for Stalled {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// A call's body is read before it takes a slot, and in bounded time, so one sent slowly holds nothing.
+    #[tokio::test]
+    async fn a_slow_body_holds_no_slot() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let bearer = format!("Bearer {}", tokens["access_token"].as_str().unwrap());
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("authorization", &bearer)
+            .body(Body::new(Stalled))
+            .unwrap();
+        let state = Arc::clone(&h.state);
+        let call =
+            tokio::spawn(async move { gate_mcp(&state, state.oauth.as_ref().unwrap(), req, "rid").await });
+        tokio::time::sleep(MCP_BODY_TIMEOUT / 2).await;
+        let oauth = h.state.oauth.as_ref().unwrap();
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT, "no slot while the body arrives");
+        assert_eq!(call.await.unwrap().status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT);
+    }
+
+    async fn preflight(h: &Harness) -> Response {
+        let headers = [("origin", "https://claude.ai"), ("access-control-request-method", "POST")];
+        h.send("OPTIONS", "/mcp", None, &headers).await
+    }
+
+    /// A preflight carries no token, by design, but it still reaches den-mcp: it takes a slot, and counts against
+    /// its address's budget.
+    #[tokio::test]
+    async fn a_preflight_is_counted_like_a_call() {
+        let h = harness().await;
+        let oauth = h.state.oauth.as_ref().unwrap();
+
+        assert_eq!(preflight(&h).await.status(), StatusCode::OK);
+        let held = oauth.mcp_slots.try_acquire_many(MCP_IN_FLIGHT as u32).unwrap();
+        assert_eq!(preflight(&h).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(held);
+        for _ in 1..MCP_GATE_PER_WINDOW {
+            preflight(&h).await;
+        }
+        assert_eq!(preflight(&h).await.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     /// The relay reads the bearer scheme in any case, and takes only an access token.
