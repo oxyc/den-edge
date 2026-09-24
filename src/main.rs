@@ -284,7 +284,7 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tokio::main]
 async fn main() {
     let dir = env_opt("DATA_DIR").unwrap_or_else(|| "data".to_owned());
-    let cap = env_opt("STORE_CAP_BYTES").and_then(|v| v.parse().ok()).unwrap_or(store::DEFAULT_CAP);
+    let cap = env_number("STORE_CAP_BYTES").unwrap_or(store::DEFAULT_CAP);
     let store = store::Store::open(std::path::Path::new(&dir), cap).unwrap_or_else(|e| {
         eprintln!("data dir {dir} is unusable: {e}");
         std::process::exit(1);
@@ -335,8 +335,8 @@ async fn main() {
     // a deployment without one carries no directory it will never write to.
     state.simkl_client_id = env_opt("SIMKL_CLIENT_ID");
     state.tmdb_key = env_opt("TMDB_KEY");
-    state.tmdb_daily_max = env_opt("TMDB_DAILY_MAX").and_then(|v| v.parse().ok());
-    state.media_daily_max = env_opt("MEDIA_DAILY_MAX_BYTES").and_then(|v| v.parse().ok());
+    state.tmdb_daily_max = env_number("TMDB_DAILY_MAX");
+    state.media_daily_max = env_number("MEDIA_DAILY_MAX_BYTES");
     state.remux_edge_secret = env_opt("REMUX_EDGE_SECRET");
     // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
     // a browser that cannot ask doesthedogdie itself. Built whether or not a key is lent — gated on the TMDB
@@ -350,7 +350,7 @@ async fn main() {
     state.warnings_key = env_opt("DOESTHEDOGDIE_KEY");
     state.warnings_cache_dir = Some(std::path::Path::new(&dir).join("warnings"));
     state.ratings_key = env_opt("OMDB_KEY");
-    state.ratings_daily_max = env_opt("OMDB_DAILY_MAX").and_then(|v| v.parse().ok());
+    state.ratings_daily_max = env_number("OMDB_DAILY_MAX");
     state.ratings_cache_dir = Some(std::path::Path::new(&dir).join("ratings"));
     state.title_metadata_cache_dir = Some(std::path::Path::new(&dir).join("title-metadata"));
     // No key to gate this one on: SkipDB's read API is open, so the only question is where to keep the answers.
@@ -368,7 +368,7 @@ async fn main() {
     tokio::spawn(oauth::sweep_forever(Arc::clone(&state)));
     let app = axum::Router::new().fallback(handler::handle).with_state(Arc::clone(&state));
 
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let port: u16 = env_number("PORT").unwrap_or(8080);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
         eprintln!("bind :{port} failed: {e}");
         std::process::exit(1);
@@ -517,6 +517,21 @@ fn oauth_config() -> Option<oauth::OAuth> {
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// A whole number from the environment, unset and empty both meaning "not configured". One that is set and does
+/// not parse stops the start, as a mistyped `NEW_LIBRARIES` does: dropped, a mistyped daily ceiling was silently
+/// no ceiling at all, and a mistyped port or store cap silently the default.
+fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
+    let value = env_opt(name)?;
+    Some(parse_number(name, &value).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }))
+}
+
+fn parse_number<T: std::str::FromStr>(name: &str, value: &str) -> Result<T, String> {
+    value.trim().parse().map_err(|_| format!("{name} is {value:?}: expected a whole number"))
 }
 
 /// How serving ended. A drain that ran out of time is designed and exits 0, like a clean one.
@@ -758,6 +773,16 @@ mod tests {
         let answer =
             tokio::time::timeout(Duration::from_secs(3), exchange(addr, idle)).await.expect("still open");
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+
+    #[test]
+    fn a_number_that_does_not_parse_is_said_not_dropped() {
+        assert_eq!(parse_number::<u64>("TMDB_DAILY_MAX", " 500 "), Ok(500));
+        assert_eq!(
+            parse_number::<u64>("TMDB_DAILY_MAX", "5k"),
+            Err(r#"TMDB_DAILY_MAX is "5k": expected a whole number"#.to_owned())
+        );
+        assert!(parse_number::<u16>("PORT", "80800").is_err(), "out of range");
     }
 
     #[tokio::test]
