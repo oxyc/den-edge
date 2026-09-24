@@ -11,7 +11,7 @@ import {
 } from './library';
 import { LibraryLog } from './log';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
-import { recordTrackerEvent } from './trackerEvents';
+import { recordTrackerEvent, trackerEvent } from './trackerEvents';
 import { fetchDetails } from './tmdb';
 import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
 
@@ -796,6 +796,85 @@ describe('LibraryLog', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  /** A 400 or 403 den-edge's `/lib` never sends (a proxy's page) is not a refusal: the action stays kept. */
+  it('keeps an action refused with an answer den-edge does not give, and sends it on the next refresh', async () => {
+    const { storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    let proxy = false;
+    const connection: typeof fetch = async (url, init) =>
+      proxy && init?.method === 'POST'
+        ? new Response('<html>Bad Request</html>', { status: 400 })
+        : server.fetchImpl(url, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    proxy = true;
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'proxy')!;
+    expect(await log.writeAction(journal), 'kept on this device').not.toBeNull();
+    expect(log.pendingActions).toBe(1);
+    proxy = false;
+    await log.refresh();
+    expect(log.pendingActions).toBe(0);
+  });
+
+  /** One kept action den-edge refused held every other one kept later back for ten minutes. */
+  it('holds back only the kept work den-edge refused', async () => {
+    const { data, storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const action = (id: number, name: string) => {
+      const blank = blankTitle({ type: 'movie', id }, 0);
+      return recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), name)!;
+    };
+    const refusedK = (await seal(keys, action(10, 'bad'))).k;
+    let batches = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') {
+        batches++;
+        if (String(init.body).includes(refusedK))
+          return new Response('{"error":"invalid_batch"}', { status: 400 });
+      }
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const keep = async (name: string, id: number) =>
+      data.set(
+        `den.pendingTracker.${keys.id}.${name}`,
+        JSON.stringify(await seal(keys, action(id, name))),
+      );
+    await keep('bad', 10);
+    await log.refresh();
+    expect(log.pendingActions).toBe(1);
+    const tried = batches;
+    await log.refresh();
+    expect(batches, 'the refused one is not sent again at once').toBe(tried);
+    // Kept later, by another tab.
+    await keep('good', 11);
+    await log.refresh();
+    expect(log.pendingActions, 'sent, though another was refused').toBe(1);
+    expect(log.title({ type: 'movie', id: 11 })?.status.value).toBe('watchlist');
+  });
+
+  /**
+   * A bulk's first chunks landed and a later one was refused: it said none of it was saved and dropped it, while
+   * den-edge held part of it.
+   */
+  it('keeps a bulk den-edge refused part of, once some of it landed', async () => {
+    const { storage } = memoryStorage();
+    const server = await edge([row(1)]);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(2000)), at(2000), 'bulk')!;
+    const afterK = (await seal(keys, trackerEvent(journal)!.after)).k;
+    const connection: typeof fetch = async (url, init) =>
+      init?.method === 'POST' && String(init.body).includes(afterK)
+        ? new Response('{"error":"library_full"}', { status: 413 })
+        : server.fetchImpl(url, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    expect(await log.writeActions([journal]), 'the journal landed').toBe(true);
+    expect(log.pendingActions, 'the rest is kept').toBe(1);
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
   });
 
   it('drops kept work that is not an action, which could never be sent', async () => {
