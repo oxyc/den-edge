@@ -93,6 +93,11 @@ export class LibraryLog {
   private projected = 0;
   /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
   private readonly flushing = new Set<string>();
+  /**
+   * A refresh changed what this browser holds and has not said so yet: one that read page N and failed on N+1 keeps
+   * the rows of N, and the next refresh to finish reports them, where it may find nothing new of its own.
+   */
+  private unreported = false;
   /** `acknowledged` changed since it was last kept. */
   private dirty = false;
   private saving: Promise<void> = Promise.resolve();
@@ -337,9 +342,8 @@ export class LibraryLog {
   async refresh(): Promise<boolean> {
     // Nothing else writes a library kept only here.
     if (this.offline) return false;
-    // Null when den-edge couldn't be read; otherwise whether a row arrived or the log was reset.
-    const run = this.writes.then(async (): Promise<boolean | null> => {
-      let changed = false;
+    // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
+    const run = this.writes.then(async (): Promise<true | null> => {
       try {
         for (;;) {
           const res = await this.send(
@@ -356,7 +360,8 @@ export class LibraryLog {
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
             this.dirty = true;
-            return staged; // A first offline action must be able to create the log on reconnect: `replay` sends it.
+            if (staged) this.unreported = true;
+            return true; // A first offline action must be able to create the log on reconnect: `replay` sends it.
           }
           if (!res.ok) return null;
           // The log is here again (or always was): a refused start is over, and the membership stands again.
@@ -379,7 +384,7 @@ export class LibraryLog {
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
             this.dirty = true;
-            changed = true;
+            this.unreported = true;
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
@@ -392,7 +397,7 @@ export class LibraryLog {
                   seq: entry.seq,
                   row: previous ? merge(previous.row, row) : row,
                 });
-                changed = true;
+                this.unreported = true;
               }
               // Compared with den-edge's own copy, not `entries`: this browser's write already carries its seq there.
               if (entry.seq > (this.acknowledged.get(rowName(row))?.seq ?? 0)) {
@@ -404,15 +409,16 @@ export class LibraryLog {
             }
           }
           this.head = page.entries.at(-1)?.seq ?? page.head;
-          if (!page.more || page.entries.length === 0) return changed;
+          if (!page.more || page.entries.length === 0) return true;
         }
       } catch {
         return null;
       }
     });
     this.writes = run.catch(() => null);
-    const changed = await run;
-    if (changed === null) return false;
+    if ((await run) === null) return false;
+    const changed = this.unreported;
+    this.unreported = false;
     this.persist();
     // Rows that arrived may carry actions to project; with none, the projections already stand.
     if (changed) this.projectJournal();

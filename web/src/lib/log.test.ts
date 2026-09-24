@@ -194,6 +194,30 @@ describe('LibraryLog', () => {
     expect(await log.refresh()).toBe(false);
   });
 
+  /**
+   * A refresh that read one page and failed on the next keeps the rows of the first, and said nothing: the next one,
+   * finding only this browser's own write, said nothing either, and the TV's rows were never drawn.
+   */
+  it('says a change a failed refresh read, on the next refresh that finishes', async () => {
+    const server = await edge([row(1)]);
+    let reads = 0;
+    let failSecondRead = false;
+    const connection: typeof fetch = async (url, init) => {
+      if (!init?.method && failSecondRead && ++reads === 2) throw new TypeError('offline');
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    await tv.write(row(2));
+    await tv.write(row(3));
+    await log.write(row(4));
+    failSecondRead = true;
+    expect(await log.refresh(), 'failed on its second page').toBe(false);
+    expect(await log.refresh(), "the TV's rows it read before").toBe(true);
+    expect(log.title({ type: 'movie', id: 2 })).toBeDefined();
+    expect(await log.refresh()).toBe(false);
+  });
+
   /** Refresh and writes share one queue: a read den-edge never answered held every later save behind it. */
   it('gives up on a request den-edge never answers, and saves after it', async () => {
     const server = await edge([row(1)]);
