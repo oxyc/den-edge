@@ -118,6 +118,21 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     let Some(key) = spendable(state, member.as_deref(), own, state.warnings_key.as_ref()).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
+    let _asking = match &file {
+        Some(file) => {
+            let asking = crate::tmdb::one_asking(file).await;
+            // A question for this title that got here first has kept its answer by now.
+            if let Some((body, age, modified)) = crate::tmdb::read(file).await {
+                match verdict(body.as_ref() == ABSENT, age) {
+                    Kept::Absent => return absent(),
+                    Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit", modified, asked),
+                    Kept::Cold => {}
+                }
+            }
+            Some(asking)
+        }
+        None => None,
+    };
     match lookup(state, &imdb, &key, rid).await {
         Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss", asked).await,
         Ok(None) => forget(file.as_deref()).await,
@@ -212,6 +227,21 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
             }
         }
     }
+    let _asking = match &file {
+        Some(file) => {
+            let asking = crate::tmdb::one_asking(file).await;
+            // Every cold title needs the table, so a burst of them asked for it at once, two questions apiece.
+            if let Some((body, age, _)) = crate::tmdb::read(file).await {
+                if age < FRESH {
+                    if let Ok(table) = serde_json::from_slice(&body) {
+                        return Ok(table);
+                    }
+                }
+            }
+            Some(asking)
+        }
+        None => None,
+    };
     let topics = ask(state, "/topics", key, rid).await?;
     let categories = ask(state, "/topiccategories", key, rid).await?;
     let table = topic_table(&topics, &categories);
@@ -633,5 +663,46 @@ mod tests {
         *crate::lock(&good) = true;
         assert_eq!(topics(&h.state, &key, "t").await.unwrap()["153"]["name"], "a dog dies");
         assert!(cache.join(TOPICS_FILE).exists());
+    }
+
+    /// Every cold title needs the topic table, and a burst of them each asked doesthedogdie for it, twice over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_cold_titles_asks_for_the_topic_table_once() {
+        let cache = temp_dir();
+        let h = std::sync::Arc::new(Harness::in_dir_with(temp_dir(), |state| {
+            state.warnings_cache_dir = Some(cache.clone())
+        }));
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&asked);
+        let dtdd: Dtdd = std::sync::Arc::new(move |path: &str| {
+            crate::lock(&seen).push(path.to_owned());
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(match path {
+                "/topics" => json!([{ "id": 153, "name": "a dog dies", "topicCategoryId": 56 }]),
+                "/topiccategories" => json!([{ "id": 56, "name": "Animal Injury or Death" }]),
+                p if p.starts_with("/items?imdb=") => {
+                    json!([{ "id": 7, "imdbId": p.trim_start_matches("/items?imdb=") }])
+                }
+                _ => json!({ "topicItemStats": [{ "topicId": 153, "yesSum": 1, "noSum": 0 }] }),
+            })
+        });
+        crate::lock(&DTDDS).push(("burst-key".to_owned(), dtdd));
+        let callers: Vec<_> = ["tt0000501", "tt0000502", "tt0000503", "tt0000501"]
+            .into_iter()
+            .map(|imdb| {
+                let h = std::sync::Arc::clone(&h);
+                tokio::spawn(async move {
+                    h.send("GET", &format!("/warnings/imdb/{imdb}"), None, &[("x-api-key", "burst-key")])
+                        .await
+                        .status()
+                })
+            })
+            .collect();
+        for caller in callers {
+            assert_eq!(caller.await.unwrap(), StatusCode::OK);
+        }
+        let asked = crate::lock(&asked).clone();
+        assert_eq!(asked.iter().filter(|p| *p == "/topics").count(), 1, "{asked:?}");
+        assert_eq!(asked.iter().filter(|p| p.starts_with("/items?imdb=tt0000501")).count(), 1, "{asked:?}");
     }
 }

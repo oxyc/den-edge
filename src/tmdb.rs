@@ -734,7 +734,7 @@ async fn detail_answer(
     key: &str,
     rid: &str,
 ) -> Response {
-    match detail.kept().await {
+    let _asking = match detail.kept().await {
         Kept::Hit(body, fresh, age, modified) => {
             return answer(body, &fresh_policy(fresh, fresh.saturating_sub(age)), "hit", modified, asked)
         }
@@ -749,13 +749,28 @@ async fn detail_answer(
             return answer(body, "public, max-age=60", "stale", modified, asked);
         }
         // A settled record past its six months is asked again now, as it always was, without the allowance.
-        Kept::Stale(..) => {}
+        Kept::Stale(..) => None,
         Kept::Nothing => {
             if let Some(refusal) = over_allowance(state, ip, asked).await {
                 return refusal;
             }
+            let asking = one_asking(&detail.whole().1).await;
+            // A question about this title that got here first has kept its answer by now.
+            match detail.kept().await {
+                Kept::Hit(body, fresh, age, modified) => {
+                    return answer(
+                        body,
+                        &fresh_policy(fresh, fresh.saturating_sub(age)),
+                        "hit",
+                        modified,
+                        asked,
+                    )
+                }
+                Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+                Kept::Stale(..) | Kept::Nothing => Some(asking),
+            }
         }
-    }
+    };
     match detail.ask(state, key, rid).await {
         Ok((whole, how, fresh)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
@@ -763,6 +778,35 @@ async fn detail_answer(
             answer(detail.narrowed(whole), &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
         Err(response) => *response,
+    }
+}
+
+/// Questions being asked of an upstream right now, by the file their answer will be kept at.
+static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The one question for `file` in flight, held until it is dropped. A cold question used to be asked once per
+/// caller: a page opening a title in several tabs, or a burst of devices naming the same library, asked TMDB (or
+/// OMDb, or doesthedogdie) that many times and spent that many units of the day's budget. Whoever holds this asks;
+/// whoever waits for it looks at what was kept first. Shared by `ratings.rs` and `warnings.rs`, whose answers are
+/// kept in files too.
+pub(crate) async fn one_asking(file: &Path) -> Asking {
+    let turn = Arc::clone(crate::lock(&ASKING).entry(file.to_owned()).or_default());
+    Asking { file: file.to_owned(), _held: turn.lock_owned().await }
+}
+
+pub(crate) struct Asking {
+    file: PathBuf,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        // The last one out takes the entry with it: two references are the map's and this guard's own.
+        let mut asking = crate::lock(&ASKING);
+        if asking.get(&self.file).is_some_and(|turn| Arc::strong_count(turn) == 2) {
+            asking.remove(&self.file);
+        }
     }
 }
 
@@ -780,7 +824,16 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
         let body = match detail.kept().await {
             Kept::Hit(body, ..) => body,
             Kept::Absent => return None,
-            Kept::Stale(..) | Kept::Nothing => detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0),
+            Kept::Stale(..) | Kept::Nothing => {
+                let _asking = one_asking(&detail.whole().1).await;
+                match detail.kept().await {
+                    Kept::Hit(body, ..) => body,
+                    Kept::Absent => return None,
+                    Kept::Stale(..) | Kept::Nothing => {
+                        detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0)
+                    }
+                }
+            }
         };
         return serde_json::from_slice(&body).ok();
     }
@@ -1766,6 +1819,40 @@ mod tests {
         assert_eq!(bare, serde_json::json!({ "id": 550, "title": "Fight Club" }));
         assert!(ask(&h.state, "/3/movie/550", None).await.is_some());
         assert!(crate::lock(&asked).is_empty(), "nothing was asked of TMDB");
+    }
+
+    /// A cold title asked for by several callers at once was asked of TMDB once per caller.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn callers_asking_for_one_cold_title_at_once_ask_tmdb_once() {
+        let cache = temp_dir();
+        let h = Arc::new(lending_as(&cache, "at-once"));
+        let asked = tmdb_answering("at-once-inner", "Ended");
+        let inner = stand_in("at-once-inner").unwrap();
+        // TMDB taking a moment, as it does, so every caller finds the cache cold.
+        let slow: Upstream = Arc::new(move |url: &str| {
+            std::thread::sleep(Duration::from_millis(100));
+            inner(url)
+        });
+        crate::lock(&UPSTREAMS).push(("at-once".to_owned(), slow));
+        let callers: Vec<_> = ["", "?append_to_response=credits", "?append_to_response=videos", ""]
+            .into_iter()
+            .map(|q| {
+                let h = Arc::clone(&h);
+                tokio::spawn(async move {
+                    h.send("GET", &format!("/tmdb/3/movie/550{q}"), None, &[]).await.status()
+                })
+            })
+            .collect();
+        for caller in callers {
+            assert_eq!(caller.await.unwrap(), StatusCode::OK);
+        }
+        let _ = ask(&h.state, "/3/movie/550", None).await.unwrap();
+        let asked = crate::lock(&asked).clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
+            "nothing is left in flight"
+        );
     }
 
     /// A kept answer holding less than was asked is no answer to it: the whole detail is fetched. And a sub-request

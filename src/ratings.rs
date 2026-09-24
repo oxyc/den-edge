@@ -107,6 +107,22 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     let Some(key) = spendable(state, member.as_deref(), own, state.ratings_key.as_ref()).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
+    let _asking = match &file {
+        Some(file) => {
+            let asking = crate::tmdb::one_asking(file).await;
+            // A question for this title that got here first has kept its answer by now.
+            if let Some((body, age, modified)) = crate::tmdb::read(file).await {
+                if body.as_ref() == ABSENT && age < ABSENT_TTL {
+                    return crate::warnings::absent();
+                }
+                if body.as_ref() != ABSENT && age < FRESH {
+                    return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
+                }
+            }
+            Some(asking)
+        }
+        None => None,
+    };
     match lookup(state, &imdb, &key, rid).await {
         Ok(Some(body)) => {
             if let Some(file) = &file {
@@ -411,5 +427,34 @@ mod tests {
         }
         assert!(crate::lock(&h.state.ratings_refreshing).is_empty(), "the refresh finished");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), kept, "and what was kept stays");
+    }
+
+    /// A cold title opened by several callers at once was asked of OMDb once per caller, each spending a question.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn callers_asking_for_one_cold_title_at_once_ask_omdb_once() {
+        let cache = temp_dir();
+        let h =
+            Arc::new(Harness::in_dir_with(temp_dir(), |state| state.ratings_cache_dir = Some(cache.clone())));
+        let asked = Arc::new(std::sync::Mutex::new(0));
+        let counted = Arc::clone(&asked);
+        let omdb: Omdb = Arc::new(move || {
+            *crate::lock(&counted) += 1;
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(Some(Bytes::from(json!({ "Response": "True", "imdbRating": "8.8" }).to_string())))
+        });
+        crate::lock(&OMDBS).push(("tt0000404".to_owned(), omdb));
+        let callers: Vec<_> = (0..4)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                tokio::spawn(async move {
+                    h.send("GET", "/ratings/imdb/tt0000404", None, &[("x-api-key", "caller")]).await.status()
+                })
+            })
+            .collect();
+        for caller in callers {
+            assert_eq!(caller.await.unwrap(), StatusCode::OK);
+        }
+        let asked = *crate::lock(&asked);
+        assert_eq!(asked, 1);
     }
 }
