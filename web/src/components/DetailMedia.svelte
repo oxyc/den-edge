@@ -192,8 +192,7 @@
    *
    * What this does NOT do is stop a trailer Safari has already started playing for itself. Once
    * AVFoundation owns an item, its audio runs to the end of the clip past `muted`, `volume`, the audio
-   * rendition, `pause()`, and destroying the element outright — all measured. That is why the billboard
-   * asks for the managed stream instead of the native one; see the note beside its `playsHls`.
+   * rendition, `pause()`, and destroying the element outright — all measured.
    */
   function quieten(player: HTMLMediaElement) {
     player.muted = !sound;

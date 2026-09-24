@@ -531,13 +531,17 @@
    * viewer has returned to is the thing they would then have to hunt down and silence.
    */
   /**
-   * Quiet, and quiet is all this needs now.
+   * Quiet, and `muted` is all this sets.
    *
-   * Switching the master's separate audio rendition off used to live here, for a native player that went
-   * on playing it past `muted`. This slide no longer has one: hls.js feeds it, and disabling a rendition
-   * on a MediaSource element instead makes the media clock wait on audio that will never be rendered —
-   * measured as a beat of playback, a second of nothing, and round again, with twenty seconds buffered
-   * and `readyState` at 4 throughout.
+   * Switching the master's separate audio rendition off used to live here too, for a native player that
+   * went on playing it past `muted`. It went while hls.js fed this slide, where disabling a rendition on
+   * the MediaSource element made the media clock wait on audio that would never be rendered — measured as
+   * a beat of playback, a second of nothing, and round again, with twenty seconds buffered and
+   * `readyState` at 4 throughout.
+   *
+   * hls.js no longer feeds it. The slide is a bare `<video>` with a `src` (see where its source is chosen):
+   * reel's ordered MP4, or a playlist only where the element plays HLS itself. Whether a native master's
+   * audio rendition plays past `muted` on this silent surface has not been measured since.
    */
   function hush(player: HTMLMediaElement, loud = false) {
     player.muted = !loud;
