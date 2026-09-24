@@ -26,6 +26,18 @@ const KEY = 'den.grants';
  * the way, followed by a reload, made a new secret that den-edge refused, and the guest was locked out.
  */
 const PENDING_KEY = 'den.grants.pending';
+/**
+ * How long a secret waiting for den-edge's answer is kept: the longest an invite can be redeemed for (grants.rs
+ * `CODE_MAX_MS`). Kept for good, one was left for every code ever tried while den-edge was out of reach; kept for
+ * less, a retry within the code's window would make a new secret and be refused.
+ */
+const PENDING_MS = 90 * 24 * 60 * 60 * 1000;
+
+interface PendingSecret {
+  secret: string;
+  /** When it was first kept (`Date.now()`). */
+  at: number;
+}
 
 function storage(): Storage | undefined {
   try {
@@ -49,32 +61,58 @@ function isGuestGrant(value: unknown): value is GuestGrant {
   );
 }
 
-/** The secrets kept under `PENDING_KEY`, by code. */
-function keptSecrets(): Record<string, string> {
+/**
+ * The secrets kept under `PENDING_KEY`, by code, less those older than `PENDING_MS`. One kept bare, before they
+ * carried a time, counts from now.
+ */
+function keptSecrets(now: number): Record<string, PendingSecret> {
   try {
     const kept = JSON.parse(storage()?.getItem(PENDING_KEY) ?? '{}') as unknown;
-    return kept && typeof kept === 'object' && !Array.isArray(kept)
-      ? Object.fromEntries(
-          Object.entries(kept).filter(
-            (entry): entry is [string, string] => typeof entry[1] === 'string',
-          ),
-        )
-      : {};
+    if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return {};
+    return Object.fromEntries(
+      Object.entries(kept).flatMap(([code, value]: [string, unknown]) => {
+        const entry =
+          typeof value === 'string'
+            ? { secret: value, at: now }
+            : (value as Partial<PendingSecret>);
+        return typeof entry?.secret === 'string' &&
+          typeof entry.at === 'number' &&
+          now - entry.at < PENDING_MS
+          ? [[code, { secret: entry.secret, at: entry.at }]]
+          : [];
+      }),
+    );
   } catch {
     return {};
   }
 }
 
 /** Keep `secret` as the one `code` is redeemed with, or with null forget it: den-edge answered for good. */
-function keepSecret(code: string, secret: string | null): void {
+function keepSecret(code: string, secret: string | null, now = Date.now()): void {
   try {
-    const { [code]: _, ...rest } = keptSecrets();
-    const next = secret === null ? rest : { ...rest, [code]: secret };
-    if (Object.keys(next).length) storage()?.setItem(PENDING_KEY, JSON.stringify(next));
-    else storage()?.removeItem(PENDING_KEY);
+    const { [code]: previous, ...rest } = keptSecrets(now);
+    writeSecrets(
+      secret === null
+        ? rest
+        : { ...rest, [code]: { secret, at: previous?.secret === secret ? previous.at : now } },
+    );
   } catch {
     // Held for this visit only (`pending`).
   }
+}
+
+/** Drop the kept secrets `PENDING_MS` has passed for. */
+function pruneSecrets(now = Date.now()): void {
+  try {
+    if (storage()?.getItem(PENDING_KEY)) writeSecrets(keptSecrets(now));
+  } catch {
+    // Nothing kept can be read, or changed.
+  }
+}
+
+function writeSecrets(secrets: Record<string, PendingSecret>): void {
+  if (Object.keys(secrets).length) storage()?.setItem(PENDING_KEY, JSON.stringify(secrets));
+  else storage()?.removeItem(PENDING_KEY);
 }
 
 export class GuestGrants {
@@ -123,7 +161,7 @@ export class GuestGrants {
   ): Promise<GuestGrant | RedeemFailure> {
     const code = parseInvite(input);
     if (!code) return 'malformed';
-    const secret = this.pending.get(code) ?? keptSecrets()[code] ?? newSecret();
+    const secret = this.pending.get(code) ?? keptSecrets(Date.now())[code]?.secret ?? newSecret();
     this.pending.set(code, secret);
     // Kept before it is sent: the answer can be lost, and the page reloaded, after den-edge has taken it.
     keepSecret(code, secret);
@@ -154,6 +192,7 @@ export class GuestGrants {
 
   /** Ask den-edge what each held grant gives now: a renamed host, a moved end date, or the access ended. */
   async refresh(fetchImpl: typeof fetch = fetch): Promise<void> {
+    pruneSecrets();
     const before = JSON.stringify(this.list);
     const next = await Promise.all(
       this.list

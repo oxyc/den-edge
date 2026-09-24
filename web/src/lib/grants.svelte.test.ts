@@ -106,6 +106,28 @@ test('a retry after a lost answer and a reload redeems with the same secret', as
   expect(reloaded.list[0]?.secret).toBeTruthy();
 });
 
+/** A secret was kept for every code tried while den-edge was out of reach, and never dropped. */
+test('drops a waiting secret once no invite could still be redeemed with it', async () => {
+  const day = 24 * 60 * 60 * 1000;
+  const offline = vi.fn(async () => {
+    throw new TypeError('offline');
+  });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    expect(await new GuestGrants().redeem(CODE, offline)).toBe('unreachable');
+    const secret = JSON.parse(kept.get('den.grants.pending')!)[CODE].secret as string;
+    vi.setSystemTime(Date.now() + 30 * day);
+    // Tried again within the invite's window: the same secret, still counted from the first try.
+    expect(await new GuestGrants().redeem(CODE, offline)).toBe('unreachable');
+    expect(JSON.parse(kept.get('den.grants.pending')!)[CODE].secret).toBe(secret);
+    vi.setSystemTime(Date.now() + 61 * day);
+    await new GuestGrants().refresh(offline);
+    expect(kept.has('den.grants.pending')).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('gives up on a redeem den-edge never answers', async () => {
   const hung = vi.fn(
     (_input: RequestInfo | URL, init?: RequestInit) =>
