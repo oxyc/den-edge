@@ -622,8 +622,10 @@ pub fn link_key(req: &Request) -> String {
 /// `tailscale serve` and `cloudflared`, which connect from their own address — so behind a proxy listed in
 /// `TRUSTED_PROXIES` the address is the one that proxy reports: `CF-Connecting-IP` from one listed as `cf:`
 /// (Cloudflare sets it), else the last `X-Forwarded-For` entry, the one the proxy added. From anyone else those
-/// headers are ignored: they could say anything. `tailscale serve` is one of those for `CF-Connecting-IP`: it
-/// passes on whatever a tailnet peer wrote there.
+/// headers are ignored: they could say anything. `tailscale serve` is one of those for `CF-Connecting-IP`: it is
+/// assumed to pass on whatever a tailnet peer wrote there (inferred, not measured). Proxies are told apart only by
+/// the address they connect from, so this holds only while `cloudflared` and `tailscale serve` reach den-edge from
+/// different addresses.
 pub fn client_ip(state: &AppState, req: &Request) -> String {
     client_addr(state, req).map_or_else(|| "unknown".to_owned(), rate_limit_key)
 }
