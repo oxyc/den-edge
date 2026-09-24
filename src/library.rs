@@ -259,6 +259,10 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
         return internal("library delete", e);
     }
     libs.remove(id);
+    // So the retirement cannot be undone by a power loss. Both are done; a failure is reported, not answered.
+    if let Err(e) = state.store.sync_dir(NS).await {
+        eprintln!("library retire: {e}");
+    }
     drop(libs);
     for gid in revoked {
         crate::grants::end_sessions(state, &gid).await;
@@ -317,6 +321,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    let creating = existing.is_none();
     let lib = existing.unwrap_or(&fresh);
     let new_rows = writes.iter().filter(|w| !lib.rows.contains_key(&w.k)).count();
     if lib.rows.len() + new_rows > MAX_ROWS {
@@ -351,6 +356,13 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     if !out.is_empty() {
         if let Err(e) = state.store.append_file(NS, id, EXT, out.as_bytes()).await {
             return internal("library write", e);
+        }
+        // A new log's name is on disk only once the directory is synced. The writes are in the log already, so a
+        // failure here is reported and the batch still answered: memory must match the log.
+        if creating {
+            if let Err(e) = state.store.sync_dir(NS).await {
+                eprintln!("library create: {e}");
+            }
         }
     }
     let lib = libs.entry(id.to_owned()).or_insert(fresh);
@@ -696,7 +708,9 @@ async fn compact(state: &AppState, id: &str, lib: &mut Library) -> io::Result<()
     }
     state.store.replace_file(NS, id, EXT, out.as_bytes()).await?;
     lib.lines = lib.rows.len();
-    Ok(())
+    // The rename is on disk only once the directory is synced: until then a power loss could bring back the log
+    // this one replaced.
+    state.store.sync_dir(NS).await
 }
 
 fn header_line(token_hash: &[u8; 32], member_hash: Option<&[u8; 32]>) -> String {
