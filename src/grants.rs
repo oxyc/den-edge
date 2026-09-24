@@ -647,20 +647,13 @@ pub struct Live {
 
 /// Whether a grant is live now, without its secret: for what a grant's holder was given in its name (an assistant's
 /// connection, `oauth.rs`), which must stop the moment the grant is revoked, expires or is shortened. The end of
-/// access, if it has one, when it is.
-pub async fn standing(state: &AppState, gid: &str) -> Option<Option<u64>> {
+/// access, if it has one, when it is. A record that cannot be read is an error, not a revocation.
+pub async fn standing(state: &AppState, gid: &str) -> io::Result<Option<Option<u64>>> {
     if !valid_gid(gid) {
-        return None;
+        return Ok(None);
     }
-    let record = match load(state, gid).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return None,
-        Err(e) => {
-            eprintln!("grant read: {e}");
-            return None;
-        }
-    };
-    (record.redeemed_at.is_some() && is_live(&record, state.now())).then(|| end(&record))
+    let Some(record) = load(state, gid).await? else { return Ok(None) };
+    Ok((record.redeemed_at.is_some() && is_live(&record, state.now())).then(|| end(&record)))
 }
 
 /// `<gid>:<secret>`.

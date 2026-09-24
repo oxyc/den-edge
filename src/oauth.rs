@@ -883,12 +883,13 @@ fn token_reply(access: String, expires_in: u64, refresh: String) -> Response {
 }
 
 /// Whether the one a session speaks for still stands, and until when a guest's access lasts. `None` when it does
-/// not: a revoked, expired or shortened grant, or a library whose member token changed.
-async fn still_stands(state: &AppState, who: &Who) -> Option<Option<u64>> {
+/// not: a revoked, expired or shortened grant, or a library whose member token changed. An error when that could not
+/// be read, which ends nothing.
+async fn still_stands(state: &AppState, who: &Who) -> io::Result<Option<Option<u64>>> {
     match who {
         Who::Member { library, member_hash } => {
-            let hash: [u8; 32] = hex_bytes(member_hash)?;
-            crate::library::holds_member_hash(state, library, &hash).await.then_some(None)
+            let Some(hash) = hex_bytes::<32>(member_hash) else { return Ok(None) };
+            Ok(crate::library::holds_member_hash(state, library, &hash).await?.then_some(None))
         }
         Who::Guest { gid, .. } => crate::grants::standing(state, gid).await,
     }
@@ -952,8 +953,10 @@ async fn exchange(state: &AppState, oauth: &OAuth, p: &HashMap<String, String>) 
     if !verified {
         return invalid("code_verifier does not match the code_challenge");
     }
-    let Some(grant_end) = still_stands(state, &code.who).await else {
-        return invalid("the membership or invite behind this approval has ended");
+    let grant_end = match still_stands(state, &code.who).await {
+        Ok(Some(end)) => end,
+        Ok(None) => return invalid("the membership or invite behind this approval has ended"),
+        Err(e) => return internal("oauth standing", e),
     };
     let client_name = match load::<Client>(state, &client_key(&code.client_id)).await {
         Ok(Some(client)) => client.name,
@@ -1051,12 +1054,16 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
         return invalid("unknown refresh token");
     }
     let stands =
-        if now >= session.used_at + IDLE_MS { None } else { still_stands(state, &session.who).await };
-    let Some(grant_end) = stands else {
-        if let Err(e) = end_session(state, sid).await {
-            return internal("oauth session delete", e);
+        if now >= session.used_at + IDLE_MS { Ok(None) } else { still_stands(state, &session.who).await };
+    let grant_end = match stands {
+        Ok(Some(end)) => end,
+        Ok(None) => {
+            if let Err(e) = end_session(state, sid).await {
+                return internal("oauth session delete", e);
+            }
+            return invalid("the connection has ended");
         }
-        return invalid("the connection has ended");
+        Err(e) => return internal("oauth standing", e),
     };
     let secret = b64url(&crate::random_bytes::<32>());
     let replaced = std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes()));
@@ -1209,9 +1216,15 @@ pub async fn sweep(state: &AppState) {
     let mut connected: Vec<String> = Vec::new();
     for entry in &index.sessions {
         match load::<Session>(state, &session_key(&entry.sid)).await {
-            Ok(Some(s)) if now < s.used_at + IDLE_MS && still_stands(state, &s.who).await.is_some() => {
-                connected.push(s.client_id);
-            }
+            Ok(Some(s)) if now < s.used_at + IDLE_MS => match still_stands(state, &s.who).await {
+                Ok(Some(_)) => connected.push(s.client_id),
+                Ok(None) => ended.push(entry.sid.clone()),
+                // Not known to have ended, so it is kept, and its client with it.
+                Err(e) => {
+                    eprintln!("oauth sweep: {e}");
+                    connected.push(s.client_id);
+                }
+            },
             Ok(_) => ended.push(entry.sid.clone()),
             Err(e) => eprintln!("oauth sweep: {e}"),
         }
@@ -1256,7 +1269,10 @@ pub async fn sweep(state: &AppState) {
         let mut still = Vec::new();
         for sid in &ended {
             match load::<Session>(state, &session_key(sid)).await? {
-                Some(s) if now < s.used_at + IDLE_MS && still_stands(state, &s.who).await.is_some() => {}
+                // Kept unless it is known to have ended: a failed read is not a revocation.
+                Some(s)
+                    if now < s.used_at + IDLE_MS
+                        && !matches!(still_stands(state, &s.who).await, Ok(None)) => {}
                 _ => still.push(sid.clone()),
             }
         }
@@ -1341,8 +1357,10 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
         Ok(None) => return unauthorized(oauth, true),
         Err(e) => return internal("oauth session read", e),
     };
-    if still_stands(state, &session.who).await.is_none() {
-        return unauthorized(oauth, true);
+    match still_stands(state, &session.who).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return unauthorized(oauth, true),
+        Err(e) => return internal("oauth standing", e),
     }
     if let Some(limited) = gate_steady(state, format!("mcp:{sid}"), MCP_PER_SESSION) {
         return limited;
@@ -2088,13 +2106,13 @@ mod tests {
         let h = harness().await;
         h.state.libraries.lock().await.clear();
         let hash: [u8; 32] = Sha256::digest(TOKEN.as_bytes()).into();
-        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await);
-        assert!(!crate::library::holds_member_hash(&h.state, LIB, &[0u8; 32]).await);
+        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await.unwrap());
+        assert!(!crate::library::holds_member_hash(&h.state, LIB, &[0u8; 32]).await.unwrap());
         assert!(!h.state.libraries.lock().await.contains_key(LIB), "the library was not loaded to answer");
         // Loaded, it is answered from memory the same way.
         let claim = member();
         connect(&h, &[("x-den-library-member", &claim)]).await;
-        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await);
+        assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await.unwrap());
     }
 
     /// An assistant calls steadily: its /mcp allowance renews each minute, where a window moved on by every call
@@ -2319,6 +2337,44 @@ mod tests {
             assert_eq!(claims[claim], value, "{claim}");
         }
         println!("{token}");
+    }
+
+    /// A member's library log or a guest's grant that cannot be read for a moment is not a revocation: the call is a
+    /// 500, and neither a refresh nor the sweep ends the connection over it.
+    #[tokio::test]
+    async fn a_failed_read_behind_a_connection_ends_nothing() {
+        let h = harness().await;
+        let claim = member();
+        let (gid, proof) = guest(&h, json!({})).await;
+        let hashed = |ns: &str, key: &str, ext: &str| {
+            h.dir.join(ns).join(format!("{}.{ext}", crate::hex(&Sha256::digest(key.as_bytes()))))
+        };
+        for (proof, record) in [
+            (("x-den-library-member", claim.as_str()), hashed("lib", LIB, "log")),
+            (("x-den-grant", proof.as_str()), hashed("grants", &format!("g:{gid}"), "json")),
+        ] {
+            let tokens = connect(&h, &[proof]).await;
+            let access = tokens["access_token"].as_str().unwrap();
+            let form = [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", tokens["refresh_token"].as_str().unwrap()),
+                ("client_id", tokens["client_id"].as_str().unwrap()),
+            ];
+            // The record is there but reading it fails: a directory stands in its place.
+            h.state.libraries.lock().await.clear();
+            let aside = record.with_extension("aside");
+            std::fs::rename(&record, &aside).unwrap();
+            std::fs::create_dir(&record).unwrap();
+            assert_eq!(call_mcp(&h, access).await.status(), StatusCode::INTERNAL_SERVER_ERROR, "{record:?}");
+            assert_eq!(post_form(&h, "/oauth/token", &form).await.0, StatusCode::INTERNAL_SERVER_ERROR);
+            sweep(&h.state).await;
+
+            std::fs::remove_dir(&record).unwrap();
+            std::fs::rename(&aside, &record).unwrap();
+            assert_eq!(call_mcp(&h, access).await.status(), StatusCode::OK, "{record:?}");
+            let (status, refreshed) = post_form(&h, "/oauth/token", &form).await;
+            assert_eq!(status, StatusCode::OK, "the connection outlived the failure: {refreshed}");
+        }
     }
 
     #[tokio::test]
