@@ -31,6 +31,7 @@
     linkLimit,
     listReleases,
     login,
+    reassertGrant,
     relayLimit,
     releaseParts,
     rememberLink,
@@ -52,6 +53,7 @@
     swapNotice,
   } from '../lib/releaseVerdicts';
   import { aheadIn, reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
+  import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
   import {
@@ -130,6 +132,10 @@
   const START_SLACK_SECS = 10;
   /** How long before asking again while every slot, or the GPU, is taken — unless den-remux names its own. */
   const RETRY_MS = 20_000;
+  /** How often, at most, den-edge is asked to let this browser's address back in while segments aren't arriving. */
+  const REGRANT_MS = 15_000;
+  /** Seconds of picture left ahead below which a connection that is down shows as "Reconnecting…". */
+  const RECONNECT_AHEAD_SECS = 0.5;
   /** Seconds the next episode waits once this one has ended. */
   const UP_NEXT_SECS = 10;
   /**
@@ -206,7 +212,20 @@
   let session = $state<Session | null>(null);
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
-  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | null>(null);
+  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | null>(
+    null,
+  );
+  /**
+   * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
+   * which is waited out rather than acted on. One per hls.js instance.
+   */
+  let link: Link | undefined;
+  /** Shown over the held picture while the connection is down and the buffer has run out. */
+  let reconnecting = $state(false);
+  /** Where playback was when its session was lost (`lose`): where the viewer's Resume picks up. */
+  let lostAt = $state(0);
+  /** When den-edge was last asked to let this browser's address in again (`regrant`). */
+  let regrantedAt = -Infinity;
   let key = $state('');
   let badKey = $state(false);
   /** Seconds until the next episode starts, once this one has ended. */
@@ -460,6 +479,8 @@
     const current = session;
     const element = video;
     if (!current?.segments || !element || switching || deliveryGaveUp || castMode) return;
+    // A connection that is down delivers nothing, and that is no verdict on what this release asks of it.
+    if (link?.down) return;
     const total = length();
     const buffered = element.buffered;
     const reach = buffered.length ? buffered.end(buffered.length - 1) : element.currentTime;
@@ -479,6 +500,53 @@
         struggling = true;
       }
     });
+  }
+
+  /**
+   * Let this browser's address in to the public media listener again, for the session it plays (`reassertGrant`): its
+   * address may have changed while the connection was down. Asked at most every REGRANT_MS, however many segments are
+   * waiting on it.
+   */
+  function regrant(current: Session): Promise<void> {
+    const now = performance.now();
+    if (!current.publicBase || session !== current || now - regrantedAt < REGRANT_MS)
+      return Promise.resolve();
+    regrantedAt = now;
+    return reassertGrant(current, scout.install, undefined, sessionRoute ?? route).then(
+      () => undefined,
+    );
+  }
+
+  /** The session is gone — ended by den-remux, or out of reach for too long: say so, and offer to pick up at `at`. */
+  function lose(at: number) {
+    if (!session || failure) return;
+    lostAt = at;
+    reconnecting = false;
+    report();
+    failure = 'lost';
+  }
+
+  /** `1:02:03`, or `2:03` under an hour. */
+  function clockTime(seconds: number): string {
+    const whole = Math.max(0, Math.floor(seconds));
+    const [h, m, sec] = [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60];
+    const two = (n: number) => String(n).padStart(2, '0');
+    return h ? `${h}:${two(m)}:${two(sec)}` : `${m}:${two(sec)}`;
+  }
+
+  /** The viewer's Resume after `lose`: a new session of the same release, from the second it had got to. */
+  function resumeLost() {
+    const current = session;
+    if (!current) return;
+    const total = length() || current.duration;
+    startAt = total && lostAt >= 1 ? { seconds: lostAt, fraction: lostAt / total } : null;
+    watcher?.stop();
+    watcher = undefined;
+    hls?.destroy();
+    hls = undefined;
+    endSession(current);
+    session = null;
+    void begin({ filename: current.release.filename });
   }
 
   async function letIn(event: SubmitEvent) {
@@ -501,9 +569,30 @@
     let finished = 0;
     let loading: { loaded: number } | undefined;
     const arrived = () => finished + (loading?.loaded ?? 0);
+    // A connection that went away is waited out, not taken for a browser that can't play: the watchdog, the
+    // switching policy and hls.js's fatal path all leave it alone, and the viewer sees "Reconnecting…" over the held
+    // frame once the buffer runs out. Playback carries on from the same second, on the same session, when it is back.
+    const connection = (link = new Link());
+    if (current.publicBase) connection.beforeRetry = () => regrant(current);
+    let watching: ReturnType<typeof setInterval> | undefined;
+    const showReconnecting = () => {
+      reconnecting =
+        connection.down && aheadIn(element.buffered, element.currentTime) < RECONNECT_AHEAD_SECS;
+    };
+    const unsubscribe = connection.subscribe((down) => {
+      clearInterval(watching);
+      showReconnecting();
+      if (down) watching = setInterval(showReconnecting, 250);
+      // What arrived before the connection went is no measure of the link it came back on.
+      else meter = new DeliveryMeter();
+    });
     const stuck = stuckWatch(
       STUCK_MS,
       () => {
+        if (connection.down) {
+          stuck.progress();
+          return;
+        }
         const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
         if (
           noSource ||
@@ -542,6 +631,11 @@
       cleanup();
       watcher?.stop();
       watcher = undefined;
+      unsubscribe();
+      clearInterval(watching);
+      connection.dispose();
+      if (link === connection) link = undefined;
+      reconnecting = false;
     };
     if (nativeHls(element)) {
       element.src = current.playlist;
@@ -554,7 +648,7 @@
         failure = 'unsupported';
         return;
       }
-      hls = new Hls(hlsConfig(started));
+      hls = new Hls(hlsConfig(started, 'page', connection));
       // A request starting is no progress; its bytes, counted as they come in (`arrived`), are.
       hls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
         if (data.frag.type !== 'subtitle') loading = data.frag.stats;
@@ -565,8 +659,9 @@
         const bytes = stats.loaded || stats.total;
         finished += bytes;
         loading = undefined;
-        // The link's time is from the first byte to the last: before it, den-remux was making the segment.
-        meter.add(stats.loading.end, bytes, stats.loading.first);
+        // The link's time is from the first byte to the last: before it, den-remux was making the segment. A transfer
+        // that broke and was resumed spans the outage too, which says nothing about the link's rate.
+        if (!wasInterrupted(stats)) meter.add(stats.loading.end, bytes, stats.loading.first);
         // What came against what den-remux said it would send for the same stretch (`deliveredShare`).
         delivered.bytes += bytes;
         if (session?.segments)
@@ -588,6 +683,16 @@
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
           recovered = true;
           hls?.recoverMediaError();
+          return;
+        }
+        // The session den-remux ended (410) — idle past its limit — or a connection that stayed away until the
+        // loader stopped asking: not a verdict on the release, and never a restart from zero.
+        const code = data.response?.code;
+        if (
+          data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
+          (code === 410 || (code === 0 && connection.down))
+        ) {
+          lose(element.currentTime);
           return;
         }
         void broke(
@@ -722,6 +827,11 @@
           restart(releaseAfterMeasure(chosenRelease));
         else frame?.postMessage({ type: 'den-continue', id: current.playlist }, current.castOrigin);
       }
+    } else if (message.type === 'den-reconnect') {
+      // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
+      void regrant(current);
+    } else if (message.type === 'den-lost') {
+      lose(Number.isFinite(message.currentTime) ? (message.currentTime ?? 0) : remoteTime);
     } else if (message.type === 'den-lan') {
       // den-remux answered on the home network, where there is no upload link to fit: a limit remembered from away
       // does not apply here, and a session asked under one is asked again without it.
@@ -1309,6 +1419,11 @@
       </form>
     {:else if failure === 'busy' || failure === 'transcode'}
       <p class="note" role="status">{waits[failure]}</p>
+    {:else if failure === 'lost'}
+      <div class="lost" role="alert">
+        <p>The connection was gone too long for this to carry on.</p>
+        <button class="primary" onclick={resumeLost}>Resume from {clockTime(lostAt)}</button>
+      </div>
     {:else if failure === 'ended'}
       <p class="error" role="alert">
         {guestGrants.endedText() ?? 'Your access ended'}. Ask whoever shared their library with you.
@@ -1348,7 +1463,9 @@
           onended={finished}
           onerror={() => broke()}
         ></video>
-        {#if startsIn}
+        {#if reconnecting}
+          <p class="countdown" role="status">Reconnecting…</p>
+        {:else if startsIn}
           <p class="countdown" role="status">{startsIn}</p>
         {/if}
       {/if}
@@ -1820,6 +1937,14 @@
   .error {
     max-width: 50ch;
     color: var(--danger);
+    text-align: center;
+  }
+
+  .lost {
+    display: grid;
+    gap: 12px;
+    justify-items: center;
+    max-width: 50ch;
     text-align: center;
   }
 </style>

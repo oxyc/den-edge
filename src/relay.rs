@@ -100,9 +100,22 @@ pub fn target(relays: &[(String, String)], path_and_query: &str) -> Option<Strin
 
 /// The den-remux routes this relay passes: its control JSON, and `/speed` — random bytes a player away from home times
 /// its link by before it starts a session, so the first session it asks for already fits. Never its video.
+///
+/// `/remux/grant` is this server's own: a player whose session is already open asks for the media listener to be
+/// opened again for the address it now comes from (`relay_with`).
 fn remux_control(path: &str) -> bool {
-    matches!(path, "/remux/health" | "/remux/session" | "/remux/releases" | "/remux/speed")
+    matches!(path, "/remux/health" | "/remux/session" | "/remux/releases" | "/remux/speed" | GRANT)
 }
+
+/// Where a player re-asserts the public media grant for a session it already has, from whatever address it has now:
+/// `{"playlist": "/remux/s/<sid>/<sig>/master.m3u8"}`, plus `ipv4Hint`/`noHint` as a session start takes them.
+///
+/// The grant is made for the address a session started from, and kept by the listener while that session is live.
+/// A viewer whose address changes mid-film (Wi-Fi to mobile, or a carrier that moves it) arrives from one the listener
+/// does not know, and its next segment is dropped as a stranger's. The session's signed playlist is what proves the
+/// caller holds it: den-remux is asked for it (`HEAD`) and only a live session's answer (200) opens the listener. The
+/// caller passes the same membership or guest gate as a session start, and a guest's addresses are counted the same.
+const GRANT: &str = "/remux/grant";
 
 /// Most bytes a relayed `/remux/speed` asks den-remux for: what the web app times a link over. Every byte leaves over
 /// the home upload, so nobody gets more through here.
@@ -593,8 +606,14 @@ async fn relay_with(
     // A guest's session gets the public listener as a member's does, but only on the public name, where a member's
     // does too.
     let guest_remux = face == crate::handler::Face::Web && grant.as_ref().is_some_and(Guest::remux);
-    let public_session =
-        (member_only || guest_remux) && req.uri().path() == "/remux/session" && method == Method::POST;
+    // A grant asked again for an open session opens the listener as a start does, and goes through the same checks.
+    let regrant = req.uri().path() == GRANT;
+    let public_session = (member_only || guest_remux)
+        && (req.uri().path() == "/remux/session" || regrant)
+        && method == Method::POST;
+    if regrant && !public_session {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
     // A guest's play refused at its start, counted by code on `/metrics`.
     let guest_refused = |code: &'static str| {
         if guest_remux && public_session {
@@ -643,7 +662,7 @@ async fn relay_with(
         _ => body,
     };
     // The page's report of its own IPv4 address is for this server alone: remux never sees it.
-    let (body, hint, no_hint) = if control == "/remux/session" && method == Method::POST {
+    let (body, hint, no_hint) = if public_session {
         match take_hint(body) {
             Some(taken) => taken,
             None => return json(StatusCode::BAD_REQUEST, "bad_request"),
@@ -717,6 +736,16 @@ async fn relay_with(
     // and within `MAX_ANSWER_BYTES`.
     // This request's id goes with it. The addon logs one line per request and so does this server; without a
     // shared id the two are impossible to put side by side afterwards, which is exactly when you want to.
+    // What den-remux is asked: for a grant, whether the named session is live — its signed playlist, which only the
+    // session's holder can name, and which counts as the session being used.
+    let (method, target, body) = if regrant {
+        match session_end_url(&target, &body) {
+            Some(root) => (Method::HEAD, format!("{root}/master.m3u8"), Bytes::new()),
+            None => return json(StatusCode::BAD_REQUEST, "bad_request"),
+        }
+    } else {
+        (method, target, body)
+    };
     let mut out = axum::http::Request::builder()
         .method(method)
         .uri(&target)
@@ -778,7 +807,8 @@ async fn relay_with(
         && matches!(encoding, None | Some(b"identity" | b"gzip"))
         && crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
     let mut scope = None;
-    if public_session && parts.status == StatusCode::CREATED {
+    let opened = if regrant { StatusCode::OK } else { StatusCode::CREATED };
+    if public_session && parts.status == opened {
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
         {
@@ -790,6 +820,14 @@ async fn relay_with(
                     state.metrics.record_public_media_hinted(who);
                 } else if let Some(reason) = asked.strip_prefix("wide:") {
                     state.metrics.record_public_media_wide(reason, who);
+                }
+                if regrant {
+                    let mut resp = Response::new(Body::empty());
+                    *resp.status_mut() = StatusCode::NO_CONTENT;
+                    resp.headers_mut()
+                        .insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                    resp.extensions_mut().insert(ListenerScope(asked));
+                    return resp;
                 }
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
@@ -812,7 +850,10 @@ async fn relay_with(
                     }
                 }
             } else {
-                discard_failed_public_session(state, &target, &bytes, rid).await;
+                // A session that plays on is never ended for this: only one this call just made.
+                if !regrant {
+                    discard_failed_public_session(state, &target, &bytes, rid).await;
+                }
                 guest_refused("public_listener_unavailable");
                 let mut refused = crate::handler::retry_after(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1664,6 +1705,109 @@ mod tests {
             "{metrics}"
         );
         deleted_rx.await.unwrap();
+    }
+
+    /// A member whose address changed mid-film asks for the listener again for the session it holds: den-remux is asked
+    /// only whether that signed session is live (`HEAD` of its playlist), and only a live one opens the listener, for
+    /// the address the call comes from. A dead one is answered as den-remux answered it, and a refused listener never
+    /// ends the session that plays on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_grant_is_asked_again_for_a_live_session_from_the_address_it_comes_from() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let sid = "A".repeat(22);
+        let sig = "b".repeat(22);
+        let playlist = format!("/remux/s/{sid}/{sig}/master.m3u8");
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let asked = Arc::clone(&asked);
+            let live = playlist.clone();
+            move |req: axum::extract::Request| {
+                let asked = Arc::clone(&asked);
+                let live = live.clone();
+                async move {
+                    asked.lock().unwrap().push(format!("{} {}", req.method(), req.uri().path()));
+                    if req.uri().path() == live {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::GONE
+                    }
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Acknowledged once, then refused.
+            for answer in [&b"ok\n"[..], &b"no\n"[..]] {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let _ = sent.send(line);
+                stream.into_inner().write_all(answer).await.unwrap();
+            }
+        });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let grant = |body: serde_json::Value, member: bool| {
+            let h = &h;
+            let claim = claim.clone();
+            async move {
+                let headers: Vec<(&str, &str)> = [("host", "d.oxy.fi"), ("content-type", "application/json")]
+                    .into_iter()
+                    .chain(member.then_some(("x-den-library-member", claim.as_str())))
+                    .collect();
+                h.send("POST", "/remux/grant", Some(body.to_string()), &headers).await
+            }
+        };
+
+        assert_eq!(
+            grant(json!({ "playlist": playlist }), false).await.status(),
+            StatusCode::NOT_FOUND,
+            "only a member (or a guest's grant) may ask"
+        );
+        assert!(asked.lock().unwrap().is_empty());
+
+        let answer = grant(json!({ "playlist": playlist }), true).await;
+        assert_eq!(answer.status(), StatusCode::NO_CONTENT);
+        assert_eq!(answer.headers()["cache-control"], "no-store");
+        assert_eq!(answer.extensions().get::<ListenerScope>().map(|s| s.0), Some("browser"));
+        let ask: serde_json::Value = serde_json::from_str(received.recv().await.unwrap().trim()).unwrap();
+        assert_eq!(ask, json!({ "open": true, "source": "192.168.1.9", "scope": "browser" }));
+        assert_eq!(asked.lock().unwrap().as_slice(), [format!("HEAD {playlist}")]);
+
+        let other = format!("/remux/s/{}/{sig}/master.m3u8", "C".repeat(22));
+        let gone = grant(json!({ "playlist": other }), true).await;
+        assert_eq!(gone.status(), StatusCode::GONE, "a session den-remux no longer has opens nothing");
+        for not_a_session in [json!({ "playlist": "/remux/session" }), json!({}), json!({ "playlist": 1 })] {
+            assert_eq!(grant(not_a_session, true).await.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let refused = grant(json!({ "playlist": playlist }), true).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(refused.headers().contains_key("retry-after"));
+        received.recv().await.unwrap();
+        assert!(
+            asked.lock().unwrap().iter().all(|a| a.starts_with("HEAD ")),
+            "the playing session is never ended: {:?}",
+            asked.lock().unwrap()
+        );
     }
 
     /// A public name is an unmetered proxy to the addons without this — including atlas's half-megabyte labels.

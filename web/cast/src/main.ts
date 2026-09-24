@@ -1,5 +1,6 @@
 import Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
+import { Link } from '../../src/lib/resumingLoader';
 import {
   reportBody,
   reportUrlOf,
@@ -147,6 +148,11 @@ let castSubtitleAppliedId: string | undefined;
 let measuredId: string | undefined;
 /** What this page's video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
 let watcher: Watcher | undefined;
+/** The connection as this page's segments see it (`resumingLoader`); one per hls.js instance. */
+let link: Link | undefined;
+let linkWatch: ReturnType<typeof setInterval> | undefined;
+/** Said over the held picture while the connection is down and the buffer has run out. */
+const RECONNECTING = 'Reconnecting…';
 /**
  * The playlist of the session this page plays, or hands to a receiver: where its failures are reported and its end is
  * sent. The player outside can't do either for a session on the public address — its page may not connect there.
@@ -223,11 +229,44 @@ function announceDevices(): void {
   );
 }
 
-async function loadLocal(media: Media, url: string): Promise<void> {
+/** Stop this page's hls.js and the connection it was watching. */
+function stopLocal(): void {
   watcher?.stop();
   watcher = undefined;
   hls?.destroy();
   hls = undefined;
+  clearInterval(linkWatch);
+  link?.dispose();
+  link = undefined;
+  if (statusPill.textContent === RECONNECTING) setStatus('');
+}
+
+/**
+ * A connection that went away is waited out (`resumingLoader`): "Reconnecting…" once the buffer runs out, the
+ * player outside asked to let this browser's address back in (it may have changed, and only that page can say so),
+ * and playback carried on from the same second when the segments come back.
+ */
+function watchLink(connection: Link): void {
+  const show = () => {
+    const buffered = video.buffered;
+    const ahead = buffered.length ? buffered.end(buffered.length - 1) - video.currentTime : 0;
+    const shown = statusPill.textContent === RECONNECTING;
+    if (connection.down && ahead < 0.5 && !shown) setStatus(RECONNECTING);
+    else if ((!connection.down || ahead >= 0.5) && shown) setStatus('');
+  };
+  connection.beforeRetry = () => {
+    tell('den-reconnect');
+    return Promise.resolve();
+  };
+  connection.subscribe((down) => {
+    clearInterval(linkWatch);
+    show();
+    if (down) linkWatch = setInterval(show, 250);
+  });
+}
+
+async function loadLocal(media: Media, url: string): Promise<void> {
+  stopLocal();
   video.removeAttribute('src');
   playing = url;
   const start = Math.max(0, media.currentTime ?? 0);
@@ -245,7 +284,9 @@ async function loadLocal(media: Media, url: string): Promise<void> {
     );
   } else if (Hls.isSupported()) {
     // The same tolerance as the player outside: a release den-remux converts answers its first segment late.
-    hls = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver'));
+    const connection = (link = new Link());
+    watchLink(connection);
+    hls = new Hls(hlsConfig(start > 0 ? start : undefined, 'receiver', connection));
     watcher = watchPlayback({ video, hls: { instance: hls, Hls }, reportUrl: reportUrlOf(url) });
     let recovered = false;
     hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -254,6 +295,18 @@ async function loadLocal(media: Media, url: string): Promise<void> {
         // A decoder that lost its place: reset the buffer and carry on, once.
         recovered = true;
         hls?.recoverMediaError();
+        return;
+      }
+      // The session ended at den-remux (410), or the connection stayed away until the loader stopped asking: the
+      // player outside offers to pick up where this was, rather than taking it for a release that won't play.
+      const code = data.response?.code;
+      if (
+        data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR &&
+        (code === 410 || (code === 0 && connection.down))
+      ) {
+        clearInterval(linkWatch);
+        setStatus('');
+        tell('den-lost', { currentTime: video.currentTime });
         return;
       }
       fail(`hls.js ${data.type} ${data.details}`);
@@ -583,6 +636,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 window.addEventListener('pagehide', () => {
   watcher?.stop();
   watcher = undefined;
+  link?.dispose();
   if (!castStarted) endPlaying();
 });
 

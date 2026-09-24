@@ -773,6 +773,46 @@ export function endSession(session: Session, fetchImpl: typeof fetch = fetch): v
 }
 
 /**
+ * Ask den-edge to open the public media listener again for a session this browser already plays, from whatever
+ * address it has now: a viewer who moved from Wi-Fi to mobile mid-film arrives from one the listener never let in,
+ * and its segments are dropped until it is. The session's signed playlist is what proves it is this browser's, and
+ * `scout` names the install it was started with, so a guest's call carries that grant. Asked again with this
+ * browser's IPv4 address when den-edge sees it over IPv6 and wants one, as a session start is. Whether it opened;
+ * nothing to ask for a session with no public address.
+ */
+export async function reassertGrant(
+  session: Session,
+  scout?: string,
+  fetchImpl: typeof fetch = relayFetch,
+  base = '/remux',
+  lookup: () => Promise<string | undefined> = () => ipv4Hint(),
+): Promise<boolean> {
+  if (!session.publicBase) return true;
+  let playlist: string;
+  try {
+    playlist = new URL(session.playlist).pathname;
+  } catch {
+    return false;
+  }
+  const ask = (extra: Record<string, unknown> = {}) =>
+    fetchImpl(`${base}/grant`, {
+      method: 'POST',
+      headers: browserHeaders(base),
+      body: JSON.stringify({ playlist, ...(scout ? { scout } : {}), ...extra }),
+    });
+  try {
+    let res = await ask();
+    if (res.status === 428 && (await errorCode(res)) === 'ipv4_hint_wanted') {
+      const address = await lookup();
+      res = await ask(address ? { ipv4Hint: address } : { noHint: true });
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Tell den-remux this browser couldn't play the session — its MediaError code (0 for hls.js) and message — for its
  * log: the browser's verdict is otherwise seen by nobody. A beacon, so it goes even as the page closes. Not for a
  * session the cast page plays, which reports its own failures and its stats.

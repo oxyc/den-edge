@@ -21,6 +21,7 @@ const REMUX_CONTROL = new Set([
   '/remux/session',
   '/remux/releases',
   '/remux/speed',
+  '/remux/grant',
 ]);
 const MEMBER_HEADER = 'x-den-library-member';
 /** A shared library's own credential (`x-den-grant: <gid>:<secret>`): a guest is never a member. */
