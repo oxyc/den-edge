@@ -25,6 +25,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::Full;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -36,7 +37,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
 /// Questions per address per minute, kept or not. A detail page asks one.
 const PER_WINDOW: u32 = 60;
-/// Questions that may leave the box in a minute, whoever's key they carry: under the free tier's 30.
+/// Questions that may leave the box in a minute on one key: under the free tier's 30, which is the key's own. Counted
+/// per key, because a caller's key is whatever it sends: counted together, any string in `x-api-key` spent the
+/// minute's allowance and a household member's question was refused behind it.
 const UPSTREAM_PER_MINUTE: u32 = 25;
 const DAY: Duration = Duration::from_secs(86_400);
 /// How long anything kept is served: the 30 days their terms allow before cached data must be refreshed.
@@ -286,7 +289,13 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
             rest_until - now,
         )));
     }
-    if let Some(wait) = crate::link::throttled_at(state, "warnings:upstream", UPSTREAM_PER_MINUTE) {
+    let bucket = if key.household {
+        "warnings:upstream".to_owned()
+    } else {
+        // Named by a digest, so the map of allowances holds no caller's key.
+        format!("warnings:upstream:{}", crate::hex(&Sha256::digest(key.value.as_bytes())[..8]))
+    };
+    if let Some(wait) = crate::link::throttled_at(state, &bucket, UPSTREAM_PER_MINUTE) {
         return Err(Box::new(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("warnings_busy"), wait)));
     }
     let Some(client) = state.tmdb_client.as_ref() else {
@@ -544,6 +553,32 @@ mod tests {
         let resp =
             h.send("GET", "/warnings/imdb/tt0050798", None, &[("x-den-library-member", "0123:forged")]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a claim to membership is checked, not believed");
+    }
+
+    /// Anyone could send any string as a key, and every question on one spent the same minute's allowance the
+    /// household key asks from, so a household member was refused (`warnings_busy`) behind made-up keys.
+    #[tokio::test]
+    async fn made_up_keys_spend_only_their_own_allowance() {
+        let h = Harness::new();
+        for n in 0..UPSTREAM_PER_MINUTE {
+            let bogus = Key { value: format!("bogus-{}", n % 2), household: false };
+            // No client here, so a question that got past the allowance ends at `warnings_off`.
+            let refused = ask(&h.state, "/items?imdb=tt1", &bogus, "t").await.err().unwrap();
+            assert_eq!(refused.status(), StatusCode::NOT_FOUND, "{n}");
+        }
+        let household = Key { value: "household".into(), household: true };
+        let asked = ask(&h.state, "/items?imdb=tt1", &household, "t").await.err().unwrap();
+        assert_eq!(asked.status(), StatusCode::NOT_FOUND, "the household's question went ahead");
+        let mut spent = 0;
+        for _ in 0..UPSTREAM_PER_MINUTE {
+            let one = Key { value: "bogus-0".into(), household: false };
+            if ask(&h.state, "/items?imdb=tt1", &one, "t").await.err().unwrap().status()
+                == StatusCode::SERVICE_UNAVAILABLE
+            {
+                spent += 1;
+            }
+        }
+        assert!(spent > 0, "one key is still held to its own allowance");
     }
 
     #[tokio::test]
