@@ -30,8 +30,7 @@ const MAX_DRAIN_KEYS: usize = 16;
 
 /// Cleanup is independent of requests to an abandoned link. Run once before serving, then hourly.
 pub async fn sweep(state: &AppState) {
-    let _write = state.write_lock.lock().await;
-    if let Err(e) = state.store.sweep_inboxes(state.now()).await {
+    if let Err(e) = state.store.sweep_inboxes(state.now(), &state.write_lock).await {
         eprintln!("inbox expiry sweep: {e}");
     }
 }
@@ -411,6 +410,23 @@ mod tests {
             assert_eq!(a.await.unwrap(), StatusCode::OK);
         }
         assert_eq!(drain(&h).await.len(), 20);
+    }
+
+    /// One file the sweep cannot read is reported and passed over; it does not stop the sweep reclaiming the rest.
+    #[tokio::test]
+    async fn a_file_the_sweep_cannot_read_does_not_stop_it() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        // Directories named like queues: opened, but never read.
+        for n in 0..10 {
+            std::fs::create_dir(h.dir.join("inbox").join(format!("{n}.json"))).unwrap();
+        }
+        h.advance(super::TTL_MS);
+        super::sweep(&h.state).await;
+        assert!(
+            h.state.store.get(super::NS, KEY).await.unwrap().is_none(),
+            "the expired queue was reclaimed"
+        );
     }
 
     #[tokio::test]

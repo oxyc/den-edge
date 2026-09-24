@@ -226,9 +226,11 @@ impl Store {
         }
     }
 
-    /// Reclaim expired inbox files even when their original link never returns. Called under the
-    /// inbox write lock, so a refreshed queue cannot be removed using its previous expiry.
-    pub async fn sweep_inboxes(&self, now: u64) -> io::Result<usize> {
+    /// Reclaim expired inbox files even when their original link never returns. Each file is looked at under the
+    /// inbox's write lock on its own — so a refreshed queue cannot be removed using its previous expiry, and a
+    /// sweep does not hold every append and drain for the whole directory — and one that cannot be read is
+    /// reported and passed over, not the end of the sweep.
+    pub async fn sweep_inboxes(&self, now: u64, write_lock: &tokio::sync::Mutex<()>) -> io::Result<usize> {
         let mut entries = tokio::fs::read_dir(self.dir.join("inbox")).await?;
         let mut removed = 0;
         while let Some(entry) = entries.next_entry().await? {
@@ -236,22 +238,37 @@ impl Store {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let file = tokio::fs::File::open(&path).await?;
-            let size = file.metadata().await?.len();
-            // Fifty 4 KiB messages plus the envelope; avoid reading corrupt oversized files wholesale.
-            let mut bytes = Vec::new();
-            file.take(256 * 1024 + 1).read_to_end(&mut bytes).await?;
-            let expired = serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .and_then(|v| v.get("expiresAt").and_then(serde_json::Value::as_u64))
-                .is_none_or(|expiry| expiry <= now);
-            if expired {
-                tokio::fs::remove_file(&path).await?;
-                self.release("inbox", size);
-                removed += 1;
+            let _write = write_lock.lock().await;
+            match self.sweep_inbox(&path, now).await {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => eprintln!("inbox expiry sweep: {}: {e}", path.display()),
             }
         }
         Ok(removed)
+    }
+
+    /// Remove one inbox file if it has expired; whether it did. One drained since it was listed is not there.
+    async fn sweep_inbox(&self, path: &Path, now: u64) -> io::Result<bool> {
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let size = file.metadata().await?.len();
+        // Fifty 4 KiB messages plus the envelope; avoid reading corrupt oversized files wholesale.
+        let mut bytes = Vec::new();
+        file.take(256 * 1024 + 1).read_to_end(&mut bytes).await?;
+        let expired = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("expiresAt").and_then(serde_json::Value::as_u64))
+            .is_none_or(|expiry| expiry <= now);
+        if !expired {
+            return Ok(false);
+        }
+        tokio::fs::remove_file(path).await?;
+        self.release("inbox", size);
+        Ok(true)
     }
 }
 
