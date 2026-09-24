@@ -415,13 +415,33 @@ pub async fn sweep_forever(state: Arc<AppState>) {
         return;
     };
     loop {
-        // A sweep decides from the file's old mtime and then removes it. Serialize that decision with
-        // publication, otherwise a writer can atomically replace an expired file between those two steps and
-        // the sweep will delete the fresh observation.
-        let _write = state.title_metadata_writes.lock().await;
-        crate::tmdb::sweep_older_than(&dir, RETENTION).await;
-        drop(_write);
+        sweep(&state, &dir).await;
         tokio::time::sleep(Duration::from_secs(86_400)).await;
+    }
+}
+
+/// Remove what is past `RETENTION`. The directory is scanned without the write lock — held across the whole scan,
+/// it stopped every observation and `PUT` for as long as the scan took — and each expired file is judged again under
+/// the lock before it goes: a writer may have replaced it with a fresh observation since the scan saw it.
+async fn sweep(state: &AppState, dir: &std::path::Path) {
+    let expired = |modified: std::io::Result<std::time::SystemTime>| {
+        modified
+            .ok()
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age > RETENTION)
+    };
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
+    let mut old = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.metadata().await.is_ok_and(|m| expired(m.modified())) {
+            old.push(entry.path());
+        }
+    }
+    for path in old {
+        let _write = state.title_metadata_writes.lock().await;
+        if tokio::fs::metadata(&path).await.is_ok_and(|m| expired(m.modified())) {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
     }
 }
 
@@ -740,5 +760,49 @@ mod tests {
         );
         Arc::get_mut(&mut unavailable.state).unwrap().title_metadata_cache_dir = None;
         assert_eq!(put(&unavailable, json!({"rating":8.0})).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The sweep held the write lock across its whole directory scan, so every observation and `PUT` waited for it.
+    /// It scans unlocked now, and judges an expired file again under the lock, so one renewed meanwhile stays.
+    #[tokio::test]
+    async fn the_sweep_scans_without_the_write_lock_and_spares_a_renewed_file() {
+        let h = harness().await;
+        let dir = h.dir.join("sweep-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (fresh, old) = (dir.join("fresh.json"), dir.join("old.json"));
+        std::fs::write(&fresh, b"{}").unwrap();
+        std::fs::write(&old, b"{}").unwrap();
+        let aged = std::time::SystemTime::now() - RETENTION - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(aged).unwrap();
+
+        // With a writer holding the lock, a scan that finds nothing to remove finishes without it.
+        std::fs::remove_file(&old).unwrap();
+        let write = h.state.title_metadata_writes.lock().await;
+        let scanned = tokio::time::timeout(Duration::from_secs(2), sweep(&h.state, &dir)).await;
+        assert!(scanned.is_ok(), "the scan waited on the write lock");
+
+        // One the scan found expired, renewed before the sweep got the lock, stays.
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(aged).unwrap();
+        let state = Arc::clone(&h.state);
+        let swept = {
+            let dir = dir.clone();
+            tokio::spawn(async move { sweep(&state, &dir).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+        drop(write);
+        swept.await.unwrap();
+        assert!(old.exists() && fresh.exists());
+
+        // And an expired one goes.
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(aged).unwrap();
+        sweep(&h.state, &dir).await;
+        assert!(!old.exists() && fresh.exists());
     }
 }
