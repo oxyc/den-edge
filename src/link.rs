@@ -20,6 +20,25 @@ pub struct Throttle {
     until: u64,
 }
 
+/// Every budget's count, one map for all of them.
+#[derive(Default)]
+pub struct Throttles {
+    map: std::collections::HashMap<String, Throttle>,
+    /// The size past which the next count sweeps out the expired entries: twice what the last sweep left. Swept at
+    /// every count once past a fixed 1024, a map holding that many live budgets was scanned whole on every request.
+    sweep_above: usize,
+}
+
+impl Throttles {
+    fn entry(&mut self, bucket: &str, now: u64) -> &mut Throttle {
+        if self.map.len() > self.sweep_above.max(1024) {
+            self.map.retain(|_, t| t.until > now);
+            self.sweep_above = self.map.len() * 2;
+        }
+        self.map.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 })
+    }
+}
+
 pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/link" if req.method() == Method::DELETE => forget(state, link_key(&req)).await,
@@ -74,10 +93,7 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option
 pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
-    if claims.len() > 1024 {
-        claims.retain(|_, t| t.until > now);
-    }
-    let t = claims.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 });
+    let t = claims.entry(bucket, now);
     if t.until <= now {
         t.count = 0;
     }
@@ -102,10 +118,7 @@ pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -
 pub(crate) fn throttled_per_minute_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
-    if claims.len() > 1024 {
-        claims.retain(|_, t| t.until > now);
-    }
-    let t = claims.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 });
+    let t = claims.entry(bucket, now);
     if t.until <= now {
         t.count = 0;
         t.until = now + CLAIM_WINDOW_MS;
@@ -141,6 +154,25 @@ mod tests {
         assert_eq!(drained["messages"], json!([]));
         assert_eq!(h.send("DELETE", "/link", None, &link).await.status(), StatusCode::OK, "again is fine");
         assert_eq!(h.send("DELETE", "/link", None, &[]).await.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The expired budgets are swept once the map has doubled since the last sweep, not on every count once past
+    /// 1024: a sweep that finds everything still live would otherwise run again at the very next request.
+    #[tokio::test]
+    async fn the_budget_map_is_swept_only_once_it_has_doubled() {
+        let h = Harness::new();
+        for i in 0..1500 {
+            assert!(super::throttled_at(&h.state, &format!("b:{i}"), 1).is_none());
+        }
+        let sweep_above = crate::lock(&h.state.claims).sweep_above;
+        assert_eq!(sweep_above, 2050, "one sweep at 1025, which found all of them live");
+        h.advance(super::CLAIM_WINDOW_MS);
+        for i in 1500..2051 {
+            super::throttled_at(&h.state, &format!("b:{i}"), 1);
+        }
+        assert_eq!(crate::lock(&h.state.claims).map.len(), 2051, "not swept yet");
+        super::throttled_at(&h.state, "b:last", 1);
+        assert_eq!(crate::lock(&h.state.claims).map.len(), 552, "the 1500 expired ones gone at the next");
     }
 
     #[tokio::test]

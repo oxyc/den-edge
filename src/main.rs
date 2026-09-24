@@ -41,8 +41,9 @@ pub struct AppState {
     pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
     /// Memory budgets include keys and conservative allocation overhead, not only ciphertext.
     pub library_limits: library::Limits,
-    /// Guesses per client address, to keep a pairing's nameplate from being guessed online.
-    pub claims: Mutex<HashMap<String, link::Throttle>>,
+    /// Every per-address budget's count (`link::throttled_at`, `link::throttled_per_minute`): a pairing's guesses,
+    /// the relay's and the proxies' questions.
+    pub claims: Mutex<link::Throttles>,
     /// Pairing sessions by `sid`. Ten minutes long at most, so memory is enough: a restart costs a pairing in
     /// progress, which the TV simply starts again.
     pub pairs: Mutex<HashMap<String, pair::Session>>,
@@ -197,7 +198,7 @@ impl AppState {
             write_lock: tokio::sync::Mutex::new(()),
             libraries: tokio::sync::Mutex::new(HashMap::new()),
             library_limits: library::Limits::default(),
-            claims: Mutex::new(HashMap::new()),
+            claims: Mutex::new(link::Throttles::default()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_nameplate: Box::new(pair::gen_nameplate),
