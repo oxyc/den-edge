@@ -58,7 +58,7 @@ export class Navigation {
     return (this.current = page);
   }
   /**
-   * Keep tabs as reusable browsing surfaces, and of the detail pages only the `KEPT_DETAILS` nearest in history
+   * Keep tabs other than Settings as reusable browsing surfaces, and of the detail pages only the `KEPT_DETAILS` nearest in history
    * (`nearest`): one on a discarded branch can't be reached again, and one further back is opened afresh if Back
    * ever reaches it.
    */
@@ -70,7 +70,10 @@ export class Navigation {
       if (page && page !== this.current && isDetail(page.route)) kept.add(key);
     }
     for (const [key, page] of this.pages) {
-      if (page !== this.current && isDetail(page.route) && !kept.has(key)) this.pages.delete(key);
+      if (page === this.current) continue;
+      // Settings is left behind whole: kept, its checks of every linked device went on polling out of sight.
+      if ((isDetail(page.route) && !kept.has(key)) || page.route.page === 'settings')
+        this.pages.delete(key);
     }
   }
   save(x: number, y: number) {
