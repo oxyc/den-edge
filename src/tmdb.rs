@@ -1195,7 +1195,7 @@ fn spend(state: &AppState) -> bool {
         if spent.1 == max {
             spent.1 = max + 1;
             eprintln!(
-                "tmdb: daily budget of {max} spent — guest browsing and link previews answer 503 until UTC                  midnight. A cached answer still serves; only new questions stop."
+                "tmdb: daily budget of {max} spent — guest browsing and link previews answer 503 until UTC midnight. A cached answer still serves; only new questions stop."
             );
         }
         return false;
