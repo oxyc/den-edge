@@ -273,6 +273,11 @@
   /** Releases of this title a switch moved away from (`switchAway`), not asked for again; the viewer's pick clears it. */
   let excluded: string[] = [];
   let switching = false;
+  /**
+   * The session `broke` is already judging. A video's `error` and a fatal hls.js error, or the cast page's `den-error`
+   * twice, can arrive for one failure; the second would find the first's switch under way and call it unplayable.
+   */
+  let breaking: Session | null = null;
   /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was. */
   let playedSecs = 0;
   let lastPosition: number | undefined;
@@ -1004,8 +1009,9 @@
     message = video?.error?.message ?? '',
     kind: 'decode' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
   ) {
-    if (!session || failure) return;
+    if (!session || failure || breaking === session) return;
     const current = session;
+    breaking = current;
     watcher?.spent();
     reportFailure(current, code, message);
     // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
