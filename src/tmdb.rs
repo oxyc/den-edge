@@ -817,8 +817,14 @@ async fn detail_answer(
 }
 
 /// Questions being asked of an upstream right now, by the file their answer will be kept at.
-static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> =
+static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<Turn>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One file's question: whose turn it is to ask.
+#[derive(Default)]
+struct Turn {
+    ask: Arc<tokio::sync::Mutex<()>>,
+}
 
 /// The one question for `file` in flight, held until it is dropped. A cold question used to be asked once per
 /// caller: a page opening a title in several tabs, or a burst of devices naming the same library, asked TMDB (or
@@ -826,20 +832,41 @@ static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<tokio::s
 /// whoever waits for it looks at what was kept first. Shared by `ratings.rs` and `warnings.rs`, whose answers are
 /// kept in files too.
 pub(crate) async fn one_asking(file: &Path) -> Asking {
-    let turn = Arc::clone(crate::lock(&ASKING).entry(file.to_owned()).or_default());
-    Asking { file: file.to_owned(), _held: turn.lock_owned().await }
+    let place = {
+        let mut asking = crate::lock(&ASKING);
+        Place { file: file.to_owned(), turn: Some(Arc::clone(asking.entry(file.to_owned()).or_default())) }
+    };
+    let ask = Arc::clone(&place.turn().ask);
+    Asking { _held: ask.lock_owned().await, _place: place }
 }
 
 pub(crate) struct Asking {
-    file: PathBuf,
+    // Let go of first, so the turn passes on before the place is given up.
     _held: tokio::sync::OwnedMutexGuard<()>,
+    _place: Place,
 }
 
-impl Drop for Asking {
+/// A caller's place in a file's turn, from joining it to leaving it however it leaves: with its answer, or
+/// dropped while it still waited.
+struct Place {
+    file: PathBuf,
+    turn: Option<Arc<Turn>>,
+}
+
+impl Place {
+    fn turn(&self) -> &Turn {
+        self.turn.as_deref().expect("a place holds its turn until it is dropped")
+    }
+}
+
+impl Drop for Place {
     fn drop(&mut self) {
-        // The last one out takes the entry with it: two references are the map's and this guard's own.
+        // The last one out takes the entry with it. Every reference is taken and let go under the map's lock, so the
+        // count is exact: one left is the map's own. Counted from the guard alone, a waiter dropped before its first
+        // look held a reference nobody counted down, and the entry stayed for good.
         let mut asking = crate::lock(&ASKING);
-        if asking.get(&self.file).is_some_and(|turn| Arc::strong_count(turn) == 2) {
+        drop(self.turn.take());
+        if asking.get(&self.file).is_some_and(|turn| Arc::strong_count(turn) == 1) {
             asking.remove(&self.file);
         }
     }
@@ -1963,6 +1990,25 @@ mod tests {
             crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
             "nothing is left in flight"
         );
+    }
+
+    /// A waiter dropped between the holder letting go and its own first look — a preview past its budget, a page
+    /// closed — held the entry's last reference but no turn, so the holder saw one reference too many and the file
+    /// stayed in `ASKING` for good.
+    #[tokio::test]
+    async fn a_waiter_that_stops_waiting_leaves_nothing_in_flight() {
+        let file = cache_path(&temp_dir(), "/3/movie/550?");
+        let holder = one_asking(&file).await;
+        let waiter = {
+            let file = file.clone();
+            tokio::spawn(async move { drop(one_asking(&file).await) })
+        };
+        tokio::task::yield_now().await;
+        // The turn passes to the waiter, which is stopped before it is run again.
+        drop(holder);
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(!crate::lock(&ASKING).contains_key(&file), "nothing is left in flight");
     }
 
     /// A link preview gives up on TMDB after its budget, and the question used to be dropped with it after it was
