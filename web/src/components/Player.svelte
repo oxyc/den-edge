@@ -1328,11 +1328,7 @@
     const current = session;
     if (!current) return;
     report();
-    const total = length();
-    // Only a position worth carrying. A release refused before it drew a frame sits at zero, and taking that
-    // forward would throw away where the library says this was left.
-    const at = video?.currentTime ?? remoteTime;
-    if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
+    carryPosition();
     if (played) {
       void begin(pick, { transcode: 'never' }, current).then((moved) => {
         // False is a player closed, or a session replaced, meanwhile: nothing to say.
@@ -1346,10 +1342,22 @@
     void begin(pick);
   }
 
-  /** End the session held now, with nothing left playing it. */
+  /**
+   * Where the next session starts: where this one is, or — once a failure took its video away — where it last was
+   * (`lastPosition`), or was started at. Only a position worth carrying: a release refused before it drew a frame sits
+   * at zero, and taking that forward would throw away where the library says this was left.
+   */
+  function carryPosition() {
+    const total = length();
+    const at = video?.currentTime ?? lastPosition ?? started ?? remoteTime;
+    if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
+  }
+
+  /** End the session held now, carrying where it got to (`carryPosition`), with nothing left playing it. */
   function letGo() {
     const current = session;
     if (!current) return;
+    carryPosition();
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
