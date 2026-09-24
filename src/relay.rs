@@ -28,8 +28,12 @@ pub fn client() -> RelayClient {
 
 /// Past scout's scrape timeout on a slow indexer (8 s), with its answer still to come.
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// An addon's JSON answer — a catalog page, an index slice — is far under this.
+/// An addon's JSON answer — a catalog page, an index slice — is far under this. An answer passed on as it arrives
+/// (`Passed`) is cut off past it, and one collected to be rewritten is refused.
 const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
+/// How long an answer passed on as it arrives may wait on the addon for its next bytes. An addon sends its body in
+/// one go once it has built it (inferred from how they answer, not measured), so a wait this long is a stall.
+const ANSWER_IDLE: Duration = Duration::from_secs(10);
 /// Relayed fetches per address per minute.
 ///
 /// Both were first set as though a page were a handful of requests. It is not: one home render is four
@@ -349,16 +353,23 @@ impl Guest {
         self.segment.is_none()
     }
 
+    /// Whether `answer` rewrites an answer with these headers, which then has to be collected whole: JSON from an
+    /// addon whose answers name the install. Everything else a guest is answered goes through as it came.
+    fn rewrites(&self, headers: &axum::http::HeaderMap) -> bool {
+        self.segment.is_some()
+            && (self.scrub || self.manifest)
+            && headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.contains("json"))
+    }
+
     /// An answer as the guest may see it, or `None` when it cannot be made so (an encoding this cannot read).
     fn answer(&self, headers: &axum::http::HeaderMap, body: &Bytes) -> Option<Bytes> {
-        let Some(segment) = self.segment.as_ref().filter(|_| self.scrub || self.manifest) else {
+        let Some(segment) = self.segment.as_ref().filter(|_| self.rewrites(headers)) else {
             return Some(body.clone());
         };
-        let json = headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|t| t.contains("json"));
-        if !json || body.is_empty() {
+        if body.is_empty() {
             return Some(body.clone());
         }
         if headers.get(header::CONTENT_ENCODING).is_some_and(|e| e != "identity") {
@@ -695,7 +706,7 @@ async fn relay_with(
     drop(body_slot);
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
-    let _slot = match slot {
+    let slot = match slot {
         Ok(Ok(permit)) => permit,
         // Every slot is taken: the wait it just spent is also how long the next caller should give it.
         _ => {
@@ -846,6 +857,34 @@ async fn relay_with(
         Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
     };
     let (parts, body) = answer.into_parts();
+    // An answer that says it is too large is refused whole, before any of it is passed on.
+    if http_body::Body::size_hint(&body).lower() > MAX_ANSWER_BYTES as u64 {
+        return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
+    }
+    // atlas's catalog charts carry each title's JustWatch IMDb score. It is kept here for every client, as the TMDB
+    // proxy keeps what it fetches (`title_metadata.rs`), and the answer says so — only when it was taken on — so a
+    // browser sends nothing back.
+    let encoding = parts.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes());
+    let observe = parts.status == StatusCode::OK
+        && atlas_catalog(&control)
+        && matches!(encoding, None | Some(b"identity" | b"gzip"))
+        && state.title_metadata_cache_dir.is_some();
+    // Only an answer something here reads or rewrites is collected whole. Every other one — most of them — is passed
+    // on as it arrives: collected, sixteen slots' answers of up to eight megabytes each could be in memory at once.
+    let collect = observe
+        || (public_session && parts.status == StatusCode::CREATED)
+        || grant.as_ref().is_some_and(|g| g.rewrites(&parts.headers));
+    if !collect {
+        let passed = Passed::new(body, deadline, ANSWER_IDLE, slot);
+        return answer_response(
+            &parts,
+            Body::new(passed),
+            public_session || playground || speed,
+            member_only || grant.is_some(),
+            None,
+            false,
+        );
+    }
     let mut bytes = match collect_by(body, deadline).await {
         Ok(bytes) => bytes,
         Err((status, code)) => return json(status, code),
@@ -857,14 +896,7 @@ async fn relay_with(
             None => return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable"),
         }
     }
-    // atlas's catalog charts carry each title's JustWatch IMDb score. It is kept here for every client, as the TMDB
-    // proxy keeps what it fetches (`title_metadata.rs`), and the answer says so — only when it was taken on — so a
-    // browser sends nothing back.
-    let encoding = parts.headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes());
-    let observed = parts.status == StatusCode::OK
-        && atlas_catalog(&control)
-        && matches!(encoding, None | Some(b"identity" | b"gzip"))
-        && crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
+    let observed = observe && crate::title_metadata::observe_atlas(state, &bytes, encoding == Some(b"gzip"));
     let mut scope = None;
     let opened = if regrant { StatusCode::OK } else { StatusCode::CREATED };
     if public_session && parts.status == opened {
@@ -924,9 +956,29 @@ async fn relay_with(
             }
         }
     }
+    drop(slot);
+    answer_response(
+        &parts,
+        Body::from(bytes),
+        public_session || playground || speed,
+        member_only || grant.is_some(),
+        scope,
+        observed,
+    )
+}
+
+/// The browser's answer: `body` with the addon's status and only those of its headers that may cross.
+fn answer_response(
+    parts: &axum::http::response::Parts,
+    body: Body,
+    no_store: bool,
+    private_only: bool,
+    scope: Option<ListenerScope>,
+    observed: bool,
+) -> Response {
     // Only the answer's cache policy, its validators and diagnostic fields cross this boundary. In particular
     // an upstream cannot set a cookie, redirect the browser, or grant another origin access.
-    let mut resp = Response::new(Body::from(bytes));
+    let mut resp = Response::new(body);
     *resp.status_mut() = parts.status;
     for name in [
         header::CONTENT_TYPE,
@@ -947,13 +999,13 @@ async fn relay_with(
     }
     // A tuned row answers one caller's knobs; atlas says `no-store`, and this holds to it whatever atlas says, so
     // no cache in front of this origin keeps one.
-    if public_session || playground || speed {
+    if no_store {
         resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     }
     // Scout's answers are shared caching material on the LAN, where anyone may ask. On the web name only a member
     // is answered at all, so a shared cache in front of it — Cloudflare's — must not keep one to hand a stranger.
     // The browser keeps its own copy for as long as scout said.
-    if member_only || grant.is_some() {
+    if private_only {
         if let Some(policy) = resp.headers().get(header::CACHE_CONTROL).map(private) {
             resp.headers_mut().insert(header::CACHE_CONTROL, policy);
         }
@@ -977,6 +1029,104 @@ where
         Ok(Ok(collected)) => Ok(collected.to_bytes()),
         Ok(Err(_)) => Err((StatusCode::BAD_GATEWAY, "addon_answer_unreadable")),
         Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "addon_timeout")),
+    }
+}
+
+/// An addon's answer passed on to the browser as it arrives, never whole in memory.
+///
+/// Its relay slot is held until the answer ends, is dropped, or reaches the deadline the whole call was given —
+/// whichever is first, and on a timer of its own, so a browser that stops reading holds a slot no longer than a
+/// collected answer did. The body itself ends in an error, which the browser sees as a cut-off answer, once it passes
+/// `MAX_ANSWER_BYTES`, or once it has waited on the addon for `idle` or past the deadline; its status is already sent
+/// by then, so a clean 502 is no longer possible.
+struct Passed<B> {
+    body: B,
+    sent: usize,
+    idle_for: Duration,
+    idle: std::pin::Pin<Box<tokio::time::Sleep>>,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// Dropped when the answer ends, which gives the slot back.
+    held: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl<B> Passed<B> {
+    fn new(
+        body: B,
+        deadline: tokio::time::Instant,
+        idle_for: Duration,
+        slot: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        let (held, ended) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout_at(deadline, ended).await;
+            drop(slot);
+        });
+        Passed {
+            body,
+            sent: 0,
+            idle_for,
+            idle: Box::pin(tokio::time::sleep(idle_for)),
+            deadline: Box::pin(tokio::time::sleep_until(deadline)),
+            held: Some(held),
+        }
+    }
+
+    fn cut(
+        &mut self,
+        why: &'static str,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+        eprintln!("relay: answer cut off after {} bytes: {why}", self.sent);
+        self.held = None;
+        std::task::Poll::Ready(Some(Err(axum::Error::new(why))))
+    }
+}
+
+impl<B> http_body::Body for Passed<B>
+where
+    B: http_body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+        use std::future::Future;
+        use std::task::Poll;
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.body).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                this.sent = this.sent.saturating_add(frame.data_ref().map_or(0, Bytes::len));
+                if this.sent > MAX_ANSWER_BYTES {
+                    return this.cut("larger than MAX_ANSWER_BYTES");
+                }
+                let next = tokio::time::Instant::now() + this.idle_for;
+                this.idle.as_mut().reset(next);
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                this.held = None;
+                Poll::Ready(Some(Err(axum::Error::new(e))))
+            }
+            Poll::Ready(None) => {
+                this.held = None;
+                Poll::Ready(None)
+            }
+            // Timed only while waiting on the addon: a browser that reads slowly is not the addon stalling.
+            Poll::Pending if this.idle.as_mut().poll(cx).is_ready() => this.cut("the addon went silent"),
+            Poll::Pending if this.deadline.as_mut().poll(cx).is_ready() => this.cut("past the deadline"),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
     }
 }
 
@@ -2252,6 +2402,125 @@ mod tests {
         .await
         .expect("still waiting on the body");
         assert_eq!(given_up.unwrap_err().0, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    /// An addon that answers every connection with `head` and then `body` in 64 KiB chunked frames — or, with
+    /// `hold`, stops after the first frame and holds the connection open.
+    async fn chunked_addon(head: &'static str, body: Vec<u8>, hold: bool) -> Harness {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = Arc::new(body);
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                let body = Arc::clone(&body);
+                tokio::spawn(async move {
+                    let _ = conn.read(&mut [0; 4096]).await;
+                    conn.write_all(head.as_bytes()).await.unwrap();
+                    for chunk in body.chunks(64 * 1024) {
+                        let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
+                        if conn.write_all(&frame).await.is_err() {
+                            return;
+                        }
+                        if hold {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
+                    }
+                    let _ = conn.write_all(b"0\r\n\r\n").await;
+                });
+            }
+        });
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/scout=http://{addr}"));
+        h
+    }
+
+    /// The slots free once the task holding a finished answer's slot has run.
+    async fn slots_back(slots: &tokio::sync::Semaphore) -> usize {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        slots.available_permits()
+    }
+
+    const CHUNKED_JSON: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nset-cookie: a=b\r\n\
+                                etag: \"e\"\r\ntransfer-encoding: chunked\r\n\r\n";
+
+    /// An answer nothing here rewrites is passed on as it arrives — the whole of it, with only the allowed headers.
+    #[tokio::test]
+    async fn an_answer_passed_on_as_it_arrives_arrives_whole() {
+        let body: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let h = chunked_addon(CHUNKED_JSON, body.clone(), false).await;
+        let answer = h.send("GET", "/scout/catalog.json", None, &[]).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(answer.headers()["etag"], "\"e\"");
+        assert!(!answer.headers().contains_key("set-cookie"), "headers are allowlisted as before");
+        let got = axum::body::to_bytes(answer.into_body(), usize::MAX).await.unwrap();
+        assert!(got == body, "{} bytes of {}", got.len(), body.len());
+        assert_eq!(slots_back(&h.state.relay_slots).await, super::MAX_IN_FLIGHT, "its slot came back");
+    }
+
+    /// Past `MAX_ANSWER_BYTES`: an answer that says so is a 502 before anything is passed on, and one that does not
+    /// is cut off where it passes the cap.
+    #[tokio::test]
+    async fn an_answer_over_the_cap_is_refused_or_cut_off() {
+        let declared = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 8388609\r\n\r\n";
+        let h = chunked_addon(declared, Vec::new(), false).await;
+        let answer = h.send("GET", "/scout/catalog.json", None, &[]).await;
+        assert_eq!(answer.status(), StatusCode::BAD_GATEWAY);
+        // A HEAD's length is the resource's, not a body's: nothing is refused for it.
+        let head = h.send("HEAD", "/scout/catalog.json", None, &[]).await;
+        assert_eq!(head.status(), StatusCode::OK);
+
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; super::MAX_ANSWER_BYTES + 1], false).await;
+        let answer = h.send("GET", "/scout/catalog.json", None, &[]).await;
+        assert_eq!(answer.status(), StatusCode::OK, "said before the size was known");
+        let cut = axum::body::to_bytes(answer.into_body(), usize::MAX).await;
+        assert!(cut.is_err(), "the body ends in an error rather than whole");
+        assert_eq!(slots_back(&h.state.relay_slots).await, super::MAX_IN_FLIGHT);
+    }
+
+    /// An answer passed on that goes silent part-way is ended at the idle deadline, and gives its slot back.
+    #[tokio::test]
+    async fn a_passed_answer_that_stalls_mid_body_is_ended() {
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; 1024 * 1024], true).await;
+        let target = &h.state.relays[0].1;
+        let ask = axum::http::Request::get(format!("{target}/x"))
+            .body(http_body_util::Full::new(axum::body::Bytes::new()))
+            .unwrap();
+        let answer = super::client().request(ask).await.unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let far = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let idle = std::time::Duration::from_millis(200);
+        let passed = super::Passed::new(answer.into_body(), far, idle, slot);
+        let ended = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            axum::body::to_bytes(axum::body::Body::new(passed), usize::MAX),
+        )
+        .await
+        .expect("still waiting on the body");
+        assert!(ended.is_err());
+        assert_eq!(slots_back(&slots).await, 1, "the slot came back");
+    }
+
+    /// A browser that stops reading holds the slot no longer than the call's deadline, as a collected answer did.
+    #[tokio::test]
+    async fn an_unread_passed_answer_gives_its_slot_back_at_the_deadline() {
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; 1024 * 1024], true).await;
+        let target = &h.state.relays[0].1;
+        let ask = axum::http::Request::get(format!("{target}/x"))
+            .body(http_body_util::Full::new(axum::body::Bytes::new()))
+            .unwrap();
+        let answer = super::client().request(ask).await.unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        let unread =
+            super::Passed::new(answer.into_body(), deadline, std::time::Duration::from_secs(60), slot);
+        assert_eq!(slots.available_permits(), 0);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(slots.available_permits(), 1, "given back without a read");
+        drop(unread);
     }
 
     /// A player keeps asking for segments for as long as it plays, and the budget is per minute. Counted in a window
