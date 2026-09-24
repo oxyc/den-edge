@@ -1,5 +1,6 @@
 import Hls from 'hls.js';
 import { hlsConfig } from '../../src/lib/hlsConfig';
+import { nativeHls } from '../../src/lib/nativeHls';
 import { Link } from '../../src/lib/resumingLoader';
 import {
   reportBody,
@@ -270,7 +271,9 @@ async function loadLocal(media: Media, url: string): Promise<void> {
   video.removeAttribute('src');
   playing = url;
   const start = Math.max(0, media.currentTime ?? 0);
-  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  // The player's own rule (`nativeHls`): Chrome claims HLS too, but hls.js plays there, and only hls.js rides out a
+  // dropped connection with `resumingLoader`.
+  if (nativeHls(video)) {
     video.src = url;
     watcher = watchPlayback({ video, reportUrl: reportUrlOf(url) });
     // A native player takes a start position once it knows the stream; set before that it is ignored.

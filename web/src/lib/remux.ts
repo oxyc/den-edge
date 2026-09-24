@@ -11,6 +11,8 @@ import { retryAfterMs } from './retryAfter';
 import type { Entry } from './routes';
 import { relayFetch } from './relayFetch';
 
+export { nativeHls } from './nativeHls';
+
 export interface Session {
   /** den-remux's id for the session, which a replacement names (`Want.replaces`). */
   sid?: string;
@@ -673,23 +675,6 @@ export function downmixLabel(session: Session): string | null {
   if (!track || session.audioChannels === undefined || session.audioChannels >= track.channels)
     return null;
   return session.audioChannels <= 2 ? 'Stereo' : '5.1';
-}
-
-/**
- * Whether to hand a playlist to the `<video>` element itself rather than to hls.js. Apple's WebKit — Safari, and every
- * browser on an iPhone — plays it natively, with AirPlay and picture-in-picture. Chrome answers `canPlayType` for HLS
- * too now (151 says "maybe"), but its own player fetched den-remux's master and media playlists and never asked for a
- * segment, so wherever Media Source Extensions exist outside WebKit, hls.js plays instead.
- */
-export function nativeHls(
-  element: Pick<HTMLMediaElement, 'canPlayType'>,
-  env: { vendor?: string; mse?: boolean } = {
-    vendor: globalThis.navigator?.vendor,
-    mse: 'MediaSource' in globalThis || 'ManagedMediaSource' in globalThis,
-  },
-): boolean {
-  if (!element.canPlayType('application/vnd.apple.mpegurl')) return false;
-  return (env.vendor ?? '').startsWith('Apple') || !env.mse;
 }
 
 /** Whether this browser plays a release: as it is, after a conversion, or not at all. */

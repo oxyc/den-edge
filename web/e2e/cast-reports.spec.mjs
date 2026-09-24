@@ -198,9 +198,9 @@ test('a session the cast page plays reports its stats and is ended when the play
     await expect.poll(() => heard.reports.length).toBe(1);
     const [report] = heard.reports;
     expect(report).toMatchObject({ code: 0, message: 'playback stats (end)' });
-    // hls.js, or the browser's own HLS where it has one (Chrome on macOS now does).
-    expect(report.stats).toMatchObject({ event: 'end' });
-    expect(['hls.js', 'native']).toContain(report.stats.engine);
+    // hls.js, as in the player (`nativeHls`), though Chrome claims HLS of its own: only hls.js rides out a dropped
+    // connection (`resumingLoader`).
+    expect(report.stats).toMatchObject({ event: 'end', engine: 'hls.js' });
     // Once, from the cast page: the player's page, which may not connect there, sends neither.
     await page.waitForTimeout(1_000);
     expect(heard.ended).toHaveLength(1);
