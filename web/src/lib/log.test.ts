@@ -179,6 +179,67 @@ describe('LibraryLog', () => {
     expect(await log.refresh()).toBe(false);
   });
 
+  /** Refresh and writes share one queue: a read den-edge never answered held every later save behind it. */
+  it('gives up on a request den-edge never answers, and saves after it', async () => {
+    const server = await edge([row(1)]);
+    const timeouts: AbortController[] = [];
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const controller = new AbortController();
+      timeouts.push(controller);
+      return controller.signal;
+    });
+    let stall = false;
+    const connection: typeof fetch = (url, init) =>
+      stall && init?.method !== 'POST'
+        ? new Promise((_, reject) =>
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
+          )
+        : server.fetchImpl(url, init);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+      stall = true;
+      const refreshed = log.refresh();
+      const saved = log.write(row(2));
+      await vi.waitFor(() => expect(timeouts.length).toBeGreaterThan(1));
+      timeouts.at(-1)!.abort(new DOMException('timed out', 'TimeoutError'));
+      expect(await refreshed).toBe(false);
+      expect(await saved).not.toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('shows the kept copy without waiting on den-edge, and sends kept work on the refresh after', async () => {
+    const { vault } = memoryVault();
+    const data = new Map<string, string>();
+    const storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i: number) => [...data.keys()][i] ?? null,
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+      clear: () => data.clear(),
+    } as Storage;
+    const server = await edge([row(1)]);
+    await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault);
+    const blank = blankTitle({ type: 'movie', id: 10 }, 0);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    const journal = recordTrackerEvent(blank, addToWatchlist(blank, at(1000)), at(1000), 'kept')!;
+    data.set(`den.pendingTracker.${keys.id}.kept`, JSON.stringify(await seal(keys, journal)));
+    await vi.waitFor(async () => {
+      const hung: typeof fetch = () => new Promise(() => undefined);
+      const log = (await LibraryLog.open(LIBRARY_KEY, hung, storage, vault))!;
+      expect(log.fromCache).toBe(true);
+    });
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
+    expect(log.pendingActions).toBe(1);
+    expect(await log.refresh()).toBe(true);
+    expect(log.pendingActions).toBe(0);
+    expect(log.title(blank.title)?.status.value).toBe('watchlist');
+  });
+
   it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(1)]);

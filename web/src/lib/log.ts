@@ -58,6 +58,12 @@ const SNAPSHOT = 'log.v1';
 /** How long a log den-edge refused to start waits before its kept work is sent again (`refused`). */
 const RECHECK_MS = 10 * 60_000;
 
+/**
+ * How long one request to den-edge may take, its body included. Refresh and writes share one queue (`writes`), so
+ * a request that never answers would otherwise hold every later save and every refresh behind it until a reload.
+ */
+const REQUEST_MS = 20_000;
+
 /** Conflict rounds per write: another device writing the same row every time is not a thing a person does. */
 const ROUNDS = 3;
 
@@ -164,7 +170,7 @@ export class LibraryLog {
       return true;
     }
     try {
-      const res = await this.fetchImpl(`/lib/${this.keys.id}`, {
+      const res = await this.send(`/lib/${this.keys.id}`, {
         method: 'DELETE',
         headers: this.headers(),
       });
@@ -224,12 +230,12 @@ export class LibraryLog {
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }
-      // The successful marker avoids even an idempotent request on every return visit. Old snapshots migrate
-      // once; a brand-new library has no server log yet and retries after its first successful write below.
-      await log.registerMember();
-      useLibraryCredential(keys);
+      // Shown before den-edge is asked anything: `refresh`, which follows at once, registers a membership not yet
+      // registered and sends the work kept here. An unanswered request kept the kept library off the screen.
+      if (log.memberRegistered) useLibraryCredential(keys);
       log.fromCache = true;
-      return log.restoreJournal();
+      log.projectJournal();
+      return log;
     }
     // Register before exposing the proof to relayed requests.
     await log.registerMember();
@@ -238,7 +244,7 @@ export class LibraryLog {
     for (;;) {
       let res: Response;
       try {
-        res = await fetchImpl(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, {
+        res = await log.send(`/lib/${log.keys.id}/changes?since=${since}&limit=1000`, {
           headers: log.headers(),
         });
       } catch {
@@ -309,7 +315,7 @@ export class LibraryLog {
       let changed = false;
       try {
         for (;;) {
-          const res = await this.fetchImpl(
+          const res = await this.send(
             `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
             { headers: this.headers() },
           );
@@ -329,6 +335,8 @@ export class LibraryLog {
           // The log is here again (or always was): a refused start is over, and the membership stands again.
           if (this.refused || !hasLibraryCredential()) {
             this.refused = false;
+            // Register before exposing the proof to relayed requests.
+            await this.registerMember();
             useLibraryCredential(this.keys);
           }
           const page = (await res.json()) as Page;
@@ -493,7 +501,7 @@ export class LibraryLog {
       const { k, v } = await seal(this.keys, target);
       let batch: Batch;
       try {
-        const res = await this.fetchImpl(`/lib/${this.keys.id}/batch`, {
+        const res = await this.send(`/lib/${this.keys.id}/batch`, {
           method: 'POST',
           headers: { ...this.headers(), 'content-type': 'application/json' },
           body: JSON.stringify({ writes: [{ k, base, v }] }),
@@ -536,6 +544,11 @@ export class LibraryLog {
     forgetLibraryCredential();
   }
 
+  /** A request to den-edge that gives up after `REQUEST_MS`. */
+  private send(path: string, init: RequestInit = {}): Promise<Response> {
+    return this.fetchImpl(path, { ...init, signal: AbortSignal.timeout(REQUEST_MS) });
+  }
+
   private headers(): Record<string, string> {
     return { 'x-den-library-token': this.keys.token };
   }
@@ -543,7 +556,7 @@ export class LibraryLog {
   private async registerMember(): Promise<void> {
     if (this.memberRegistered || this.offline) return;
     try {
-      const res = await this.fetchImpl(`/lib/${this.keys.id}/member`, {
+      const res = await this.send(`/lib/${this.keys.id}/member`, {
         method: 'PUT',
         headers: {
           ...this.headers(),
@@ -621,7 +634,7 @@ export class LibraryLog {
               return { row, name, base: previous?.seq ?? 0, ...(await seal(this.keys, row)) };
             }),
           );
-          const res = await this.fetchImpl(`/lib/${this.keys.id}/batch`, {
+          const res = await this.send(`/lib/${this.keys.id}/batch`, {
             method: 'POST',
             headers: { ...this.headers(), 'content-type': 'application/json' },
             body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
