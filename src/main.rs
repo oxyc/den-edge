@@ -151,6 +151,8 @@ pub struct AppState {
     /// Where each release's skip segments are kept (`<DATA_DIR>/skipdb`), for every browser that plays it
     /// (`skipdb.rs`). SkipDB's read API needs no key, so there is nothing to spend and no household key here.
     pub skipdb_cache_dir: Option<std::path::PathBuf>,
+    /// Today (a UTC day number) and how many SkipDB answers have been kept under a new name in it (`skipdb::new_name`).
+    pub skipdb_kept_new: Mutex<(u64, u32)>,
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
@@ -240,6 +242,7 @@ impl AppState {
             title_metadata_writes: tokio::sync::Mutex::new(()),
             title_metadata_observing: Arc::new(tokio::sync::Semaphore::new(title_metadata::OBSERVING)),
             skipdb_cache_dir: None,
+            skipdb_kept_new: Mutex::new((0, 0)),
             ratings_daily_max: None,
             ratings_spent: Mutex::new((0, 0)),
             ratings_refreshing: Mutex::new(std::collections::HashSet::new()),

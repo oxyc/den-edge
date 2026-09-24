@@ -59,9 +59,6 @@ const UPSTREAM_PER_MINUTE: u32 = 30;
 /// for `RETENTION`; without a ceiling, asking for made-up ones filled the disk with files for three months. Past it
 /// an answer is still given, and is not kept.
 const NEW_PER_DAY: u32 = 1000;
-/// Today (UTC day number) and how many new names have been kept in it. For the whole process, as the cache
-/// directory is.
-static KEPT_NEW: std::sync::Mutex<(u64, u32)> = std::sync::Mutex::new((0, 0));
 
 pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
@@ -127,7 +124,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
 /// Whether today allows one more answer kept under a new name (`NEW_PER_DAY`), counting it if so.
 fn new_name(state: &AppState) -> bool {
     let day = state.now() / (DAY * 1000);
-    let mut kept = crate::lock(&KEPT_NEW);
+    let mut kept = crate::lock(&state.skipdb_kept_new);
     if kept.0 != day {
         *kept = (day, 0);
     }
@@ -474,7 +471,7 @@ mod tests {
         // A day's new names run out; what is already kept is still written over.
         h.advance(DAY * 1000);
         let today = h.state.now() / (DAY * 1000);
-        *crate::lock(&KEPT_NEW) = (today, NEW_PER_DAY - 1);
+        *crate::lock(&h.state.skipdb_kept_new) = (today, NEW_PER_DAY - 1);
         assert!(new_name(&h.state), "the last one today");
         assert!(!new_name(&h.state), "and no more");
         *crate::lock(&answers) = (StatusCode::OK, NAMED);
