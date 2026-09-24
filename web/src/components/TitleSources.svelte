@@ -144,7 +144,7 @@
   <div id={panelId} bind:this={panel} class="source-panel">
     {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
     {#if !scout}<p class="note">
-        Add Den Scout in <a href="#settings">Settings</a> to browse sources.
+        Add Den Scout in <a href="/settings">Settings</a> to browse sources.
       </p>
     {:else if !imdb}<p class="note">
         TMDB has no IMDb record for this title, so sources can’t be matched yet.

@@ -1159,16 +1159,16 @@
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its
     library key, unlink in
-    <a href="#settings">Settings</a> and pair again.
+    <a href="/settings">Settings</a> and pair again.
   </p>
 {:else if route.page !== 'library' && !tmdbKey}
   <p class="note">
     {#if link}
-      This page needs your TMDB key: your TV shares it, or add it in <a href="#settings">Settings</a
+      This page needs your TMDB key: your TV shares it, or add it in <a href="/settings">Settings</a
       >.
     {:else}
       Title pages need a TMDB key, which arrives with a paired Apple TV.
-      <a href="#settings">Pair one</a> to see them.
+      <a href="/settings">Pair one</a> to see them.
     {/if}
   </p>
 {:else if page && !DetailScreen.current}
