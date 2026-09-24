@@ -154,7 +154,8 @@ fn file(state: &AppState, kind: &str, id: u32, source: &str) -> Option<std::path
 pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let ip = client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_at(state, &format!("title-metadata:{ip}"), PER_WINDOW) {
+    if let Some(wait) = crate::link::throttled_per_minute(state, &format!("title-metadata:{ip}"), PER_WINDOW)
+    {
         return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     match (req.method().clone(), path.as_str()) {

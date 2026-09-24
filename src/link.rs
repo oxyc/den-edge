@@ -51,6 +51,11 @@ pub(crate) fn throttled(state: &AppState, ip: &str) -> Option<u64> {
 /// Counts one act against `bucket`'s own budget; true once it is over `limit`. A blocked attempt doesn't extend
 /// the window, an allowed one does — so a steady stream stays blocked and the window clears once it stops.
 ///
+/// That makes it a guard against guessing and filling (pairing's nameplates, grant codes, new inbox queues), where
+/// nobody legitimate keeps asking. It is not "`limit` a minute": at two a minute a caller that never pauses for a
+/// whole minute is refused at its `limit`th. A budget meant as a rate — browsing, a player's segments — is
+/// `throttled_per_minute`.
+///
 /// `bucket` is the whole key, so a caller prefixes what it is limiting (`relay:<ip>`, `inbox:<ip>`) and each
 /// budget counts on its own: browsing the relay hard must not spend the pairing allowance, and the other way
 /// about. All of them share the one map, and so the one sweep that keeps it bounded.
@@ -85,8 +90,9 @@ pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32
 }
 
 /// `limit` a minute in fixed windows: a window opens at its first request and closes a minute later, whatever came
-/// in it. For a steady caller — an assistant's MCP calls — where `throttled_at`, whose window moves on with every
-/// request allowed, would never close and refuse it for good once it passed the limit.
+/// in it. For a steady caller — an assistant's MCP calls, a TV's drains, a browser's relayed and proxied questions, a
+/// player's segments — where `throttled_at`, whose window moves on with every request allowed, would never close
+/// and refuse it for good once it passed the limit.
 pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -> Option<u64> {
     throttled_per_minute_by(state, bucket, limit, 1)
 }

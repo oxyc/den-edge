@@ -62,7 +62,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let path = req.uri().path().trim_start_matches("/ratings").to_owned();
     let ip = client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_at(state, &format!("ratings:{ip}"), PER_WINDOW) {
+    if let Some(wait) = crate::link::throttled_per_minute(state, &format!("ratings:{ip}"), PER_WINDOW) {
         return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     // Settings' "Save & validate": the caller's key, asked for a title it would find if it worked.

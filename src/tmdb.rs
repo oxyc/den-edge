@@ -648,14 +648,14 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
 
 /// The refusal for a question that has to go to TMDB once this address's allowance is spent; `None` to ask.
 async fn over_allowance(state: &AppState, ip: &str, asked: &HeaderMap) -> Option<Response> {
-    let visitor_wait = crate::link::throttled_at(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW)?;
+    let visitor_wait = crate::link::throttled_per_minute(state, &format!("tmdb:{ip}"), GUEST_PER_WINDOW)?;
     // Verify the more expensive membership claim only after the visitor allowance is spent. A forged
     // header therefore buys nothing, while a paired household can finish naming a large library.
     let member = asked.get(crate::library::MEMBER_HEADER).and_then(|value| value.to_str().ok());
     if !crate::library::is_member(state, member).await {
         return Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), visitor_wait));
     }
-    let wait = crate::link::throttled_at(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)?;
+    let wait = crate::link::throttled_per_minute(state, &format!("tmdb-member:{ip}"), MEMBER_PER_WINDOW)?;
     Some(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
@@ -1690,7 +1690,8 @@ mod tests {
         assert_eq!(started.status(), StatusCode::OK);
 
         for _ in 0..GUEST_PER_WINDOW {
-            assert!(crate::link::throttled_at(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW).is_none());
+            assert!(crate::link::throttled_per_minute(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW)
+                .is_none());
         }
 
         let forged = format!("{LIB}:wrong");

@@ -372,7 +372,8 @@ pub async fn guest(
     }
     let not_found = || json(StatusCode::NOT_FOUND, "not_found");
     let ip = crate::handler::client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_at(state, &format!("relay-guest-gate:{ip}"), MEMBER_PER_WINDOW)
+    if let Some(wait) =
+        crate::link::throttled_per_minute(state, &format!("relay-guest-gate:{ip}"), MEMBER_PER_WINDOW)
     {
         return Ok(limited(wait));
     }
@@ -393,7 +394,7 @@ pub async fn guest(
         }
     };
     if let Some(wait) =
-        crate::link::throttled_at(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
+        crate::link::throttled_per_minute(state, &format!("relay-grant:{}", live.gid), GRANT_PER_WINDOW)
     {
         return Ok(limited(wait));
     }
@@ -526,7 +527,7 @@ async fn relay_with(
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
         if let Some(wait) =
-            crate::link::throttled_at(state, &format!("relay-member-gate:{ip}"), MEMBER_PER_WINDOW)
+            crate::link::throttled_per_minute(state, &format!("relay-member-gate:{ip}"), MEMBER_PER_WINDOW)
         {
             return limited(wait);
         }
@@ -548,7 +549,9 @@ async fn relay_with(
     // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
     // the video has to be served from this origin. Streamed rather than collected, and on its own budget.
     if media(req.uri().path()) && !native_master(req.uri().path(), req.uri().query()) {
-        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW) {
+        if let Some(wait) =
+            crate::link::throttled_per_minute(state, &format!("relay-media:{ip}"), MEDIA_PER_WINDOW)
+        {
             return limited(wait);
         }
         // Read here rather than inside `admit`: an async fn holding a `&Request` is not `Send`, and
@@ -577,20 +580,21 @@ async fn relay_with(
         None
     } else if playground {
         if let Some(wait) =
-            crate::link::throttled_at(state, &format!("relay-playground:{ip}"), PLAYGROUND_PER_WINDOW)
+            crate::link::throttled_per_minute(state, &format!("relay-playground:{ip}"), PLAYGROUND_PER_WINDOW)
         {
             return limited(wait);
         }
         None
     } else {
-        crate::link::throttled_at(state, &format!("relay:{ip}"), GUEST_PER_WINDOW)
+        crate::link::throttled_per_minute(state, &format!("relay:{ip}"), GUEST_PER_WINDOW)
     };
     if let Some(visitor_wait) = visitor_wait {
         let member = member_claim(&req);
         if !crate::library::is_member(state, member.as_deref()).await {
             return limited(visitor_wait);
         }
-        if let Some(wait) = crate::link::throttled_at(state, &format!("relay-member:{ip}"), MEMBER_PER_WINDOW)
+        if let Some(wait) =
+            crate::link::throttled_per_minute(state, &format!("relay-member:{ip}"), MEMBER_PER_WINDOW)
         {
             return limited(wait);
         }
@@ -2198,6 +2202,24 @@ mod tests {
         .await
         .expect("still waiting on the body");
         assert_eq!(given_up.unwrap_err().status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    /// A player keeps asking for segments for as long as it plays, and the budget is per minute. Counted in a window
+    /// that moved on with every request allowed, a steady viewer's window never closed: at one segment a second the
+    /// 601st, ten minutes in, was refused mid-trailer. Browsing the JSON relay met the same wall at its 121st call.
+    #[tokio::test]
+    async fn a_steady_viewer_or_browser_is_never_refused() {
+        let h = reel();
+        for i in 0..700 {
+            let status = h.send("GET", SEGMENT, None, &[]).await.status();
+            assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "segment {i}");
+            h.advance(1_000);
+        }
+        let h = harness();
+        for i in 0..150 {
+            assert_ne!(ask(&h, &[]).await, StatusCode::TOO_MANY_REQUESTS, "call {i}");
+            h.advance(10_000);
+        }
     }
 
     const SEGMENT: &str = "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx";

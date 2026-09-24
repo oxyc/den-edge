@@ -54,7 +54,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     let ip = client_ip(state, &req);
-    if let Some(wait) = crate::link::throttled_at(state, &format!("skipdb:{ip}"), PER_WINDOW) {
+    if let Some(wait) = crate::link::throttled_per_minute(state, &format!("skipdb:{ip}"), PER_WINDOW) {
         return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     let Some(asked_for) = Ask::parse(req.uri()) else {
