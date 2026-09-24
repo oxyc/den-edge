@@ -272,6 +272,33 @@ describe('cachingFetch', () => {
     expect(freshFor('/3/search/multi')).toBe(6 * HOUR);
   });
 
+  /** The detail page's "where to watch" came from an answer kept for six months. */
+  it('keeps a title asked with where it streams, or what is like it, for hours', () => {
+    expect(freshFor('/3/movie/603', undefined, 'credits')).toBe(RETENTION);
+    expect(freshFor('/3/tv/1399', undefined, 'credits,external_ids')).toBe(RETENTION);
+    expect(
+      freshFor(
+        '/3/movie/603',
+        undefined,
+        'credits,recommendations,videos,external_ids,release_dates,watch/providers',
+      ),
+    ).toBe(6 * HOUR);
+    expect(freshFor('/3/tv/1399', undefined, 'watch/providers')).toBe(6 * HOUR);
+  });
+
+  it('asks again the same day for a title asked with where it streams', async () => {
+    const withProviders =
+      'https://api.themoviedb.org/3/movie/603?api_key=secret&append_to_response=credits,watch/providers';
+    const { entries, store } = memory();
+    const net = network();
+    entries.set(
+      'https://api.themoviedb.org/3/movie/603?append_to_response=credits%2Cwatch%2Fproviders',
+      { body: '{"id":603}', fetchedAt: 0 },
+    );
+    await cachingFetch(store, net.fetchImpl, () => 7 * HOUR)(withProviders);
+    await vi.waitFor(() => expect(net.asked).toHaveLength(1));
+  });
+
   /**
    * Only TMDB knows whether a series has ended, so the answer decides this and not the path. Kept for six
    * months, a series still airing leaves the app believing the season ended months ago — and the next episode,

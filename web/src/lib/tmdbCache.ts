@@ -88,17 +88,37 @@ function announceThrottle(res: Response): void {
  *
  * A title's details are kept for as long as TMDB's terms allow, which is also how long den-edge keeps them
  * (`tmdb.rs`): what a film is called, when it came out and who was in it does not change, and asking again
- * every month bought nothing but a wait. Lists and search still move, and keep their hours.
+ * every month bought nothing but a wait. Lists and search still move, and keep their hours — and so does a title
+ * whose `appends` (`append_to_response`) carry one of them: where it streams (`watch/providers`) and what is like it
+ * (`recommendations`) move like any list. The detail page asks for both, and was kept for six months.
  */
-export function freshFor(path: string, body?: string): number {
+export function freshFor(path: string, body?: string, appends?: string | null): number {
   if (
     /\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) ||
     path.includes('/season/')
   )
     return RETENTION;
   if (/^\/3\/(movie|tv|person)\/\d+$/.test(path))
-    return unfinished(path, body) ? DAY / 4 : RETENTION;
+    return unfinished(path, body) || moving(appends) ? DAY / 4 : RETENTION;
   return DAY / 4;
+}
+
+/** What a title's record can carry along (`append_to_response`) that settles as the record itself does. */
+const SETTLED = new Set([
+  'credits',
+  'aggregate_credits',
+  'combined_credits',
+  'external_ids',
+  'keywords',
+  'videos',
+  'images',
+  'release_dates',
+  'content_ratings',
+]);
+
+/** Does `appends` ask for anything that moves, as a list does? */
+function moving(appends: string | null | undefined): boolean {
+  return (appends ?? '').split(',').some((append) => append.trim() && !SETTLED.has(append.trim()));
 }
 
 /** Only these are over. Returning, in production and planned are not, whatever is scheduled right now. */
@@ -191,7 +211,7 @@ export function cachingFetch(
     const kept =
       stored && keepable(stored.body) && now() - stored.fetchedAt < RETENTION ? stored : undefined;
     // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
-    const fresh = freshFor(url.pathname, kept?.body);
+    const fresh = freshFor(url.pathname, kept?.body, url.searchParams.get('append_to_response'));
     const age = kept ? now() - kept.fetchedAt : Infinity;
     if (kept && age < fresh) return answer(kept.body);
     if (kept && age < fresh + STALE_FOR) {
