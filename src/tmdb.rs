@@ -171,7 +171,6 @@ fn fresh_for(path: &str) -> Duration {
     let settled = path.ends_with("/credits")
         || path.ends_with("/external_ids")
         || path.ends_with("/keywords")
-        || path.ends_with("/videos")
         || path.ends_with("/combined_credits")
         || path.contains("/season/")
         || is_entity(path);
@@ -182,19 +181,32 @@ fn fresh_for(path: &str) -> Duration {
     }
 }
 
-/// How long an answer stays fresh once TMDB has said what it is.
+/// How long an answer to `path?query` stays fresh once TMDB has said what it is.
 ///
 /// One record here is not a settled fact: a series that is not over. Its next episode, its latest air date and
 /// its season list all still move, and the app reads a series' shape to decide which episode comes next — so
 /// kept for six months like a finished title's details, Den goes on believing the season ended months ago and
 /// withholds an episode that aired on Friday. An unfinished series is a list, not a record.
-fn fresh_for_answer(path: &str, body: &[u8]) -> Duration {
+///
+/// Nor is a record that carries what moves beside it (`MOVING`): kept for six months with the title, a detail page
+/// named services a film had long left and none it had joined.
+fn fresh_for_answer(path: &str, query: Option<&str>, body: &[u8]) -> Duration {
     let fresh = fresh_for(path);
-    if fresh == DETAILS_TTL && unfinished(path, body) {
+    if fresh == DETAILS_TTL && (unfinished(path, body) || carries_moving(query)) {
         LIST_TTL
     } else {
         fresh
     }
+}
+
+/// Sub-requests that change while the title stays what it is: where it can be watched, what TMDB recommends beside
+/// it, and its trailers. Each is a list of its own when asked for on its own path (`fresh_for`).
+const MOVING: [&str; 3] = ["watch/providers", "recommendations", "videos"];
+
+fn carries_moving(query: Option<&str>) -> bool {
+    url::form_urlencoded::parse(query.unwrap_or("").as_bytes()).any(|(name, value)| {
+        name == "append_to_response" && value.split(',').any(|append| MOVING.contains(&append.trim()))
+    })
 }
 
 /// Does this body describe a series that can still change?
@@ -487,7 +499,7 @@ impl Detail {
                 }
                 continue;
             }
-            let fresh = fresh_for_answer(&self.path, &body);
+            let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
             let body = if exact { body } else { self.narrowed(body) };
             if age < fresh {
                 return Kept::Hit(body, fresh, age, modified);
@@ -531,7 +543,7 @@ impl Detail {
         if self.oversize().await {
             let (query, file) = self.exact();
             let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
-            return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
+            return Ok((body.clone(), how, fresh_for_answer(&self.path, self.exact.as_deref(), &body)));
         }
         let (query, file) = self.whole();
         let (body, how) = match ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await {
@@ -543,10 +555,10 @@ impl Detail {
                 write(&self.oversize_mark(), &Bytes::new()).await;
                 let (query, file) = self.exact();
                 let (body, how) = ask_kept(state, &self.path, query.as_deref(), key, rid, &file).await?;
-                return Ok((body.clone(), how, fresh_for_answer(&self.path, &body)));
+                return Ok((body.clone(), how, fresh_for_answer(&self.path, self.exact.as_deref(), &body)));
             }
         };
-        let fresh = fresh_for_answer(&self.path, &body);
+        let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
         Ok((body, how, fresh))
     }
 }
@@ -640,7 +652,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     if let Some(file) = &file {
         if let Some((body, age, modified)) = read(file).await {
             // What TMDB said narrows what the path alone could say: an airing series is kept for hours, not months.
-            let fresh = fresh_for_answer(&path, &body);
+            let fresh = fresh_for_answer(&path, query.as_deref(), &body);
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
             //
@@ -674,7 +686,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                             keep(file, &new, etag.as_deref()).await;
                             crate::title_metadata::observe_tmdb(state, &path, &new);
                             // The series may have ended since it was last asked for, which gives it its months back.
-                            let fresh = fresh_for_answer(&path, &new);
+                            let fresh = fresh_for_answer(&path, query.as_deref(), &new);
                             answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
                         Ok(Fetched::Unchanged) => {
@@ -700,7 +712,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 keep(file, &body, etag.as_deref()).await;
             }
             crate::title_metadata::observe_tmdb(state, &path, &body);
-            let fresh = fresh_for_answer(&path, &body);
+            let fresh = fresh_for_answer(&path, query.as_deref(), &body);
             answer(body, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
         }
         Err(response) => {
@@ -852,7 +864,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 if age < ABSENT_TTL {
                     return None;
                 }
-            } else if age < fresh_for_answer(path, &body) {
+            } else if age < fresh_for_answer(path, query, &body) {
                 return serde_json::from_slice(&body).ok();
             } else {
                 stale = Some(body);
@@ -1397,14 +1409,14 @@ mod tests {
         let between: &[u8] = br#"{"id":1399,"status":"Returning Series","next_episode_to_air":null}"#;
         let ended: &[u8] = br#"{"id":1399,"status":"Ended","next_episode_to_air":null}"#;
         let cancelled: &[u8] = br#"{"id":1399,"status":"Canceled","next_episode_to_air":null}"#;
-        assert_eq!(fresh_for_answer("/3/tv/1399", airing), LIST_TTL);
-        assert_eq!(fresh_for_answer("/3/tv/1399", between), LIST_TTL);
-        assert_eq!(fresh_for_answer("/3/tv/1399", ended), DETAILS_TTL);
-        assert_eq!(fresh_for_answer("/3/tv/1399", cancelled), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", None, airing), LIST_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", None, between), LIST_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", None, ended), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399", None, cancelled), DETAILS_TTL);
         // A series' own record and nothing else: a season's episodes are settled once they have aired, and a
         // film has no status to read.
-        assert_eq!(fresh_for_answer("/3/tv/1399/season/2", airing), DETAILS_TTL);
-        assert_eq!(fresh_for_answer("/3/movie/550", airing), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/tv/1399/season/2", None, airing), DETAILS_TTL);
+        assert_eq!(fresh_for_answer("/3/movie/550", None, airing), DETAILS_TTL);
     }
 
     /// The same question from a TV and from a browser is one entry, whatever key either of them sent.
@@ -1828,8 +1840,9 @@ mod tests {
         write(&kept, &Bytes::from(body.to_string())).await;
         aged(&kept, Duration::from_secs(30 * 86_400));
 
-        let web = format!("/tmdb/3/movie/550?append_to_response={}", WEB_MOVIE.replace(',', "%2C"));
-        let resp = h.send("GET", &web, None, &[]).await;
+        // Asked for without what moves (`MOVING`), which keeps the months of the title itself.
+        let resp =
+            h.send("GET", "/tmdb/3/movie/550?append_to_response=credits%2Crelease_dates", None, &[]).await;
         assert_eq!(resp.headers()["x-den-tmdb"], "hit");
         let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
         let left = (DETAILS_TTL - Duration::from_secs(30 * 86_400)).as_secs();
@@ -1840,6 +1853,45 @@ mod tests {
         assert_eq!(bare, serde_json::json!({ "id": 550, "title": "Fight Club" }));
         assert!(ask(&h.state, "/3/movie/550", None).await.is_some());
         assert!(crate::lock(&asked).is_empty(), "nothing was asked of TMDB");
+    }
+
+    /// A detail answer carrying where a title streams was kept, and served, for the six months of the title itself:
+    /// the page named services a film had left months before. What moves makes the answer a list; the title's own
+    /// record, from the same kept detail, keeps its months.
+    #[tokio::test]
+    async fn where_to_watch_is_kept_for_hours_and_the_title_for_months() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "moving");
+        let asked = tmdb_answering("moving", "Ended");
+        assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "miss");
+        let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
+        aged(&whole, LIST_TTL + Duration::from_secs(60));
+
+        assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "hit");
+        let web = format!("/tmdb/3/movie/550?append_to_response={WEB_MOVIE}");
+        let resp = h.send("GET", &web, None, &[]).await;
+        assert_eq!(resp.headers()["x-den-tmdb"], "stale", "shown at once, and asked again behind it");
+        for _ in 0..200 {
+            if crate::lock(&h.state.tmdb_refreshing).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(crate::lock(&asked).len(), 2);
+        let resp = h.send("GET", &web, None, &[]).await;
+        assert_eq!(resp.headers()["x-den-tmdb"], "hit");
+        let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
+        assert!(policy.contains("stale-while-revalidate"), "a list's policy: {policy}");
+
+        for append in MOVING {
+            let query = format!("append_to_response=credits,{append}");
+            assert_eq!(
+                fresh_for_answer("/3/tv/1396", Some(&query), br#"{"status":"Ended"}"#),
+                LIST_TTL,
+                "{append}"
+            );
+        }
+        assert_eq!(fresh_for("/3/movie/550/videos"), LIST_TTL);
     }
 
     /// A cold title asked for by several callers at once was asked of TMDB once per caller.
