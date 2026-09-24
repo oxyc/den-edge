@@ -37,10 +37,19 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
 /// Questions per address per minute, kept or not. A detail page asks one.
 const PER_WINDOW: u32 = 60;
-/// Questions that may leave the box in a minute on one key: under the free tier's 30, which is the key's own. Counted
-/// per key, because a caller's key is whatever it sends: counted together, any string in `x-api-key` spent the
-/// minute's allowance and a household member's question was refused behind it.
-const UPSTREAM_PER_MINUTE: u32 = 25;
+/// Questions that may leave the box in a minute on one key. Counted per key, because a caller's key is whatever it
+/// sends: counted together, any string in `x-api-key` spent the minute's allowance and a household member's question
+/// was refused behind it.
+///
+/// Half the free tier's 30, in fixed minute windows (`throttled_per_minute`): the end of one window and the start of
+/// the next can together send twice this within 60 s, and that stays inside the 30. Counted as a sliding window
+/// (`throttled_at`) 25 never passed 30 either, but the count cleared only after a whole minute without a question, so
+/// a household asking steadily under the rate — a cold title every ten seconds — was refused within minutes.
+const UPSTREAM_PER_MINUTE: u32 = 15;
+/// Questions that may leave the box in a minute on callers' own keys, all of them together. A made-up key is a new
+/// allowance of `UPSTREAM_PER_MINUTE`, so without this what the box asked doesthedogdie had no ceiling. The
+/// household's key is not counted here, so no caller's key can spend it.
+const CALLERS_PER_MINUTE: u32 = 30;
 const DAY: Duration = Duration::from_secs(86_400);
 /// How long anything kept is served: the 30 days their terms allow before cached data must be refreshed.
 const FRESH: Duration = Duration::from_secs(30 * 86_400);
@@ -349,13 +358,13 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
             rest_until - now,
         )));
     }
-    let bucket = if key.household {
-        "warnings:upstream".to_owned()
-    } else {
-        // Named by a digest, so the map of allowances holds no caller's key.
-        format!("warnings:upstream:{}", crate::hex(&Sha256::digest(key.value.as_bytes())[..8]))
-    };
-    if let Some(wait) = crate::link::throttled_at(state, &bucket, UPSTREAM_PER_MINUTE) {
+    // Named by whose key it is, so the map of allowances holds no caller's key.
+    let own = format!("warnings:upstream:{}", key.whose());
+    let mut busy = crate::link::throttled_per_minute(state, &own, UPSTREAM_PER_MINUTE);
+    if busy.is_none() && !key.household {
+        busy = crate::link::throttled_per_minute(state, "warnings:upstream:callers", CALLERS_PER_MINUTE);
+    }
+    if let Some(wait) = busy {
         return Err(Box::new(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("warnings_busy"), wait)));
     }
     #[cfg(test)]
@@ -643,6 +652,30 @@ mod tests {
             }
         }
         assert!(spent > 0, "one key is still held to its own allowance");
+    }
+
+    /// Counted per key, made-up keys each had a minute of their own, so what this box asked doesthedogdie had no
+    /// ceiling at all. And the household's allowance cleared only after a whole minute without a question, so a
+    /// household asking steadily under the free tier's rate was refused.
+    #[tokio::test]
+    async fn every_key_together_is_bounded_and_the_household_asking_steadily_is_never_refused() {
+        let h = Harness::new();
+        let mut reached = 0;
+        for n in 0..200 {
+            let bogus = Key { value: format!("made-up-{n}"), household: false };
+            if ask(&h.state, "/items?imdb=tt1", &bogus, "t").await.err().unwrap().status()
+                == StatusCode::NOT_FOUND
+            {
+                reached += 1;
+            }
+        }
+        assert_eq!(reached, CALLERS_PER_MINUTE, "callers' keys together are held to their minute");
+        let household = Key { value: "household".into(), household: true };
+        for n in 0..10 * UPSTREAM_PER_MINUTE {
+            let asked = ask(&h.state, "/items?imdb=tt1", &household, "t").await.err().unwrap();
+            assert_eq!(asked.status(), StatusCode::NOT_FOUND, "question {n} went ahead");
+            h.advance(60_000 / u64::from(UPSTREAM_PER_MINUTE));
+        }
     }
 
     #[tokio::test]
