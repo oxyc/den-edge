@@ -77,8 +77,13 @@ const utf8 = new TextEncoder();
 export class LibraryLog {
   /** Each row as last read or written, by the name its key is the HMAC of. */
   private readonly entries = new Map<string, Entry>();
-  /** Each row exactly as den-edge last gave it, without this browser's unsent edits: what the next visit starts from. */
+  /**
+   * Each row exactly as den-edge last gave it or applied this browser's write of it, without this browser's unsent
+   * edits: what the next visit starts from.
+   */
   private readonly acknowledged = new Map<string, Entry>();
+  /** Kept work (`pendingPrefix`) being sent now, which `replay` leaves to that send. */
+  private readonly flushing = new Set<string>();
   /** `acknowledged` changed since it was last kept. */
   private dirty = false;
   private saving: Promise<void> = Promise.resolve();
@@ -527,14 +532,16 @@ export class LibraryLog {
       }
       const applied = batch.applied.find((a) => a.k === k);
       if (applied) {
-        this.entries.set(name, { seq: applied.seq, row: target });
+        this.acknowledge(name, applied.seq, target);
         await this.registerMember();
         return target;
       }
       const conflict = batch.conflicts.find((c) => c.k === k);
       if (!conflict) return null;
       if (conflict.v === null) {
-        this.entries.delete(name); // what this browser remembered belongs to a log that was reset
+        // What this browser remembered belongs to a log that was reset.
+        this.entries.delete(name);
+        this.acknowledged.delete(name);
         continue;
       }
       const theirs = believe(await open(this.keys, k, conflict.v));
@@ -653,17 +660,43 @@ export class LibraryLog {
     } // Do not discard the old cursors until recovery work is safely retained.
   }
 
+  /**
+   * den-edge already holds exactly `row` as the row `name`, as far as this browser knows: sending it would only write
+   * the same row again under a new sequence. A retried bulk resent the chunks already applied, and recovery after a
+   * restore resent every row, not only what the restored log lacks.
+   */
+  private holds(name: string, row: Row): boolean {
+    const known = this.acknowledged.get(name);
+    return (
+      !!known &&
+      known.seq > 0 &&
+      this.entries.get(name)?.seq === known.seq &&
+      canonical(known.row) === canonical(row)
+    );
+  }
+
+  /** den-edge applied this browser's write of `row`: it now holds exactly that, at `seq`. */
+  private acknowledge(name: string, seq: number, row: Row): void {
+    this.entries.set(name, { seq, row });
+    this.acknowledged.set(name, { seq, row });
+    this.dirty = true;
+  }
+
   private async flushRows(key: string, groups: Row[][], outcome?: Outcome): Promise<boolean> {
+    // Replayed by `replay` only once this send is over, rather than sent twice at once.
+    this.flushing.add(key);
     const run = this.writes.then(async () => {
       for (const rows of groups) {
         for (let offset = 0; offset < rows.length; offset += 32) {
+          const due = rows.slice(offset, offset + 32).flatMap((local) => {
+            const name = rowName(local),
+              previous = this.entries.get(name);
+            const row = previous ? merge(previous.row, local) : local;
+            return this.holds(name, row) ? [] : [{ row, name, base: previous?.seq ?? 0 }];
+          });
+          if (!due.length) continue;
           const chunk = await Promise.all(
-            rows.slice(offset, offset + 32).map(async (local) => {
-              const name = rowName(local),
-                previous = this.entries.get(name);
-              const row = previous ? merge(previous.row, local) : local;
-              return { row, name, base: previous?.seq ?? 0, ...(await seal(this.keys, row)) };
-            }),
+            due.map(async (entry) => ({ ...entry, ...(await seal(this.keys, entry.row)) })),
           );
           const res = await this.send(`/lib/${this.keys.id}/batch`, {
             method: 'POST',
@@ -677,7 +710,7 @@ export class LibraryLog {
           const result = (await res.json()) as Batch;
           for (const entry of chunk) {
             const applied = result.applied.find(({ k }) => k === entry.k);
-            if (applied) this.entries.set(entry.name, { seq: applied.seq, row: entry.row });
+            if (applied) this.acknowledge(entry.name, applied.seq, entry.row);
             // CAS merge/retry without leaving the lock.
             else if (!(await this.writeSerial(entry.row, outcome))) return false;
           }
@@ -691,7 +724,7 @@ export class LibraryLog {
       return true;
     });
     this.writes = run.catch(() => false);
-    return run.catch(() => false);
+    return run.catch(() => false).finally(() => this.flushing.delete(key));
   }
 
   /** The immutable journal is authoritative; its snapshot repairs an interrupted projection write. */
@@ -719,7 +752,10 @@ export class LibraryLog {
       return null;
     }
     const outcome = { refused: false };
-    const accepted = await this.write(journal, outcome);
+    this.flushing.add(storageKey);
+    const accepted = await this.write(journal, outcome).finally(() =>
+      this.flushing.delete(storageKey),
+    );
     if (!accepted && outcome.refused && fresh) {
       this.discard(storageKey);
       return null;
@@ -802,6 +838,8 @@ export class LibraryLog {
           Number(b.startsWith(this.pendingPrefix + 'recovery')),
       );
       for (const key of keys) {
+        if (this.flushing.has(key)) continue;
+        this.flushing.add(key);
         try {
           const pending = JSON.parse(this.storage.getItem(key)!) as {
             k: string;
@@ -845,6 +883,8 @@ export class LibraryLog {
           else this.discard(key); // Only `writeAction` keeps one, of an action: as for a bulk above.
         } catch {
           /* Keep unreadable pending data; never acknowledge or delete it. */
+        } finally {
+          this.flushing.delete(key);
         }
       }
     }
@@ -878,6 +918,15 @@ async function errorCode(res: Response): Promise<string | undefined> {
 async function localKey(libraryKey: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   const bytes = await hkdf(libraryKey, 'den/web/local/v1', 'enc', 32);
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+/** `value` as JSON with every object's keys in order, so two equal rows read the same whatever built them. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
 }
 
 function merge(theirs: Row, ours: Row): Row {

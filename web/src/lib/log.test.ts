@@ -353,6 +353,86 @@ describe('LibraryLog', () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
+  /** README: after a restore, a device "writes back what the snapshot lacks" — it rewrote every row it held. */
+  it('writes back only what a restored log lacks', async () => {
+    let server = await edge([row(1), row(2), row(3), row(4)]);
+    let generation = 'original';
+    const sent: number[] = [];
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST')
+        sent.push((JSON.parse(String(init.body)) as { writes: unknown[] }).writes.length);
+      const res = await server.fetchImpl(url, init);
+      return new Response(JSON.stringify({ ...(await res.json()), generation }), {
+        status: res.status,
+      });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    server = await edge([row(1), row(2), row(3)]);
+    generation = 'restored';
+    expect(await log.refresh()).toBe(true);
+    expect(
+      sent.reduce((a, b) => a + b, 0),
+      'only row 4',
+    ).toBe(1);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    expect(reopened.rows()).toHaveLength(4);
+  });
+
+  it('resends only the kept work den-edge has not applied, and never twice at once', async () => {
+    const data = new Map<string, string>();
+    const storage = {
+      get length() {
+        return data.size;
+      },
+      key: (i: number) => [...data.keys()][i] ?? null,
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+      clear: () => data.clear(),
+    } as Storage;
+    const server = await edge([row(1)]);
+    let allowed = Infinity;
+    let rows = 0;
+    const connection: typeof fetch = async (url, init) => {
+      if (init?.method === 'POST') {
+        if (allowed-- <= 0) return new Response('{}', { status: 503 });
+        rows += (JSON.parse(String(init.body)) as { writes: unknown[] }).writes.length;
+      }
+      return server.fetchImpl(url, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage))!;
+    const journals = Array.from({ length: 40 }, (_, i) => {
+      const before = blankTitle({ type: 'movie', id: i + 10 }, 0);
+      return recordTrackerEvent(before, addToWatchlist(before, at(1000)), at(1000), 'b' + i)!;
+    });
+    allowed = 1; // The first 32 journals, then den-edge fails.
+    await log.writeActions(journals);
+    expect(rows).toBe(32);
+    allowed = Infinity;
+    await log.refresh();
+    expect(log.pendingActions).toBe(0);
+    expect(rows, 'the 8 journals left, then the 40 titles').toBe(32 + 8 + 40);
+
+    // Two refreshes at once (the timer and a tab coming back) each replay what is kept.
+    let offline = false;
+    const flaky: typeof fetch = (url, init) =>
+      offline ? Promise.reject(new TypeError('offline')) : connection(url, init);
+    const again = (await LibraryLog.open(LIBRARY_KEY, flaky, storage))!;
+    offline = true;
+    for (const id of [90, 91, 92]) {
+      const before = blankTitle({ type: 'movie', id }, 0);
+      await again.writeAction(
+        recordTrackerEvent(before, addToWatchlist(before, at(2000)), at(2000), 'k' + id)!,
+      );
+    }
+    expect(again.pendingActions).toBe(3);
+    offline = false;
+    rows = 0;
+    await Promise.all([again.refresh(), again.refresh()]);
+    expect(again.pendingActions).toBe(0);
+    expect(rows, 'each journal and title once').toBe(6);
+  });
+
   it('persists a complete bulk action before delivery and retries it in bounded batches', async () => {
     const data = new Map<string, string>();
     const storage: Storage = {
