@@ -27,7 +27,6 @@ mod warnings;
 mod web;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -412,12 +411,9 @@ async fn main() {
             |o| format!("on(issuer {} key {})", o.issuer, oauth::b64url(o.verifying_key().as_bytes())),
         ),
     );
-    let outcome = serve_until(listener, app, shutdown, DRAIN_GRACE).await;
+    let limits = Limits { grace: DRAIN_GRACE, header_read: HEADER_READ_TIMEOUT };
+    let outcome = serve_until(listener, app, shutdown, limits).await;
     eprintln!("{}", outcome.describe());
-    let code = outcome.exit_code();
-    if code != 0 {
-        std::process::exit(code);
-    }
 }
 
 /// `TRUSTED_PROXIES`: comma-separated IP addresses, the trusted ones and, second, those written `cf:<ip>` — the
@@ -522,55 +518,89 @@ fn env_opt(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// How serving ended. A drain that ran out of time is designed and exits 0; only a serve error fails.
+/// How serving ended. A drain that ran out of time is designed and exits 0, like a clean one.
 #[derive(Debug)]
 enum Outcome {
     Drained,
     DeadlineHit(String),
-    Failed(String),
 }
 
 impl Outcome {
-    fn exit_code(&self) -> i32 {
-        match self {
-            Outcome::Drained | Outcome::DeadlineHit(_) => 0,
-            Outcome::Failed(_) => 1,
-        }
-    }
-
     fn describe(&self) -> String {
         match self {
             Outcome::Drained => "shut down cleanly".to_owned(),
-            Outcome::DeadlineHit(why) | Outcome::Failed(why) => why.clone(),
+            Outcome::DeadlineHit(why) => why.clone(),
         }
     }
 }
 
-/// Serve until `shutdown` resolves, then drain for at most `grace` — den-atlas's bounded drain: hyper waits
+/// How long a connection may take over its request head, and how long a stop waits for the requests in flight.
+struct Limits {
+    grace: Duration,
+    header_read: Duration,
+}
+
+/// Longest a connection may take to send a request head, idle keep-alive included: past it the connection is
+/// closed. hyper's own default, which only applies once the server has a timer — `axum::serve` gives it none, so a
+/// client could hold a socket half-way through a head for as long as it liked.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Serve until `shutdown` resolves, then drain for at most `limits.grace` — den-atlas's bounded drain: hyper waits
 /// on a connection that is mid-request, so without the bound a client holding half a request head decides
 /// how long a restart takes.
+///
+/// hyper's HTTP/1 server directly rather than `axum::serve`, which offers no way to give hyper a timer, and
+/// without one the header read timeout is never applied.
 async fn serve_until(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    grace: Duration,
+    limits: Limits,
 ) -> Outcome {
-    let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel::<()>();
-    let serve = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            let _ = signalled_tx.send(());
-        });
-    tokio::select! {
-        r = serve => match r {
-            Ok(()) => Outcome::Drained,
-            Err(e) => Outcome::Failed(format!("serve error: {e}")),
-        },
-        _ = async {
-            let _ = signalled_rx.await;
-            tokio::time::sleep(grace).await;
-        } => Outcome::DeadlineHit(format!("drain deadline ({grace:?}) reached with requests still in flight")),
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    // HTTP/1 only. Left to tell HTTP/2 prior knowledge from HTTP/1 itself, the builder waits for a connection's
+    // first bytes before hyper's timer starts, so one that sends nothing was held without limit
+    // (`a_request_head_that_never_ends_is_closed`). No client of den-edge is known to speak cleartext HTTP/2 to it:
+    // browsers never do, and `tailscale serve` and `cloudflared` default to HTTP/1.1 towards an http origin (their
+    // documented defaults, not checked on the box).
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http1_only();
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(limits.header_read);
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(accepted) => accepted,
+                // What `axum::serve` does: a connection reset before it was taken is that connection's
+                // business, and anything else (out of descriptors) is waited out rather than spun on.
+                Err(e) if is_connection_error(&e) => continue,
+                Err(e) => {
+                    eprintln!("accept error: {e}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            () = &mut shutdown => break,
+        };
+        let service = hyper_util::service::TowerToHyperService::new(
+            app.clone().layer(axum::Extension(axum::extract::ConnectInfo(peer))),
+        );
+        let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
+        tokio::spawn(conn);
     }
+    drop(listener);
+    tokio::select! {
+        () = graceful.shutdown() => Outcome::Drained,
+        () = tokio::time::sleep(limits.grace) => Outcome::DeadlineHit(format!(
+            "drain deadline ({:?}) reached with requests still in flight",
+            limits.grace
+        )),
+    }
+}
+
+fn is_connection_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
+    matches!(e.kind(), ConnectionRefused | ConnectionAborted | ConnectionReset)
 }
 
 /// Under podman's default 10s stop timeout, so the drain finishes before anything kills it.
@@ -635,8 +665,9 @@ mod tests {
         let app = axum::Router::new().fallback(handler::handle).with_state(state);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let grace = Duration::from_millis(300);
+        let limits = Limits { grace, header_read: HEADER_READ_TIMEOUT };
         let server =
-            tokio::spawn(async move { serve_until(l, app, async { rx.await.unwrap_or(()) }, grace).await });
+            tokio::spawn(async move { serve_until(l, app, async { rx.await.unwrap_or(()) }, limits).await });
 
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
         sock.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n").await.unwrap();
@@ -649,14 +680,83 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), server).await.expect("unbounded drain").unwrap();
         assert!(matches!(&outcome, Outcome::DeadlineHit(w) if w.contains("drain deadline")), "{outcome:?}");
         assert!(started.elapsed() < grace * 4);
-        assert_eq!(outcome.exit_code(), 0, "a routine drain timeout must not look like a crash");
         drop(sock);
     }
 
-    #[test]
-    fn only_a_serve_error_exits_non_zero() {
-        assert_eq!(Outcome::Drained.exit_code(), 0);
-        assert_eq!(Outcome::Failed("bind failed".into()).exit_code(), 1);
+    /// A server on a fresh port, relaying `/atlas` to an addon that answers `{}` at once; stopped by dropping the
+    /// sender.
+    async fn relaying_server(
+        header_read: Duration,
+    ) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addon = upstream.local_addr().unwrap();
+        let answer = axum::Router::new().fallback(|| async { "{}" });
+        tokio::spawn(async move { axum::serve(upstream, answer).await.unwrap() });
+        let mut state = AppState::new(
+            store::Store::open(&handler::tests::temp_dir(), store::DEFAULT_CAP).unwrap(),
+            None,
+            false,
+        );
+        state.relays = parse_relays(&format!("/atlas=http://{addon}"));
+        let app = axum::Router::new().fallback(handler::handle).with_state(Arc::new(state));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let limits = Limits { grace: Duration::from_millis(100), header_read };
+        tokio::spawn(async move { serve_until(l, app, async { rx.await.unwrap_or(()) }, limits).await });
+        (addr, tx)
+    }
+
+    /// What `raw` gets back, read until the server closes.
+    async fn exchange(addr: std::net::SocketAddr, raw: &str) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        sock.write_all(raw.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        sock.read_to_string(&mut answer).await.unwrap();
+        answer
+    }
+
+    /// Sixteen uploads that never finish their body used to take every relay slot for as long as their sockets
+    /// stayed open, and the household's next relayed request waited out the slot wait for a 503 `relay_busy`.
+    #[tokio::test]
+    async fn uploads_that_never_finish_do_not_take_the_relay() {
+        let (addr, _stop) = relaying_server(Duration::from_secs(30)).await;
+        let mut stalled = Vec::new();
+        for _ in 0..relay::MAX_IN_FLIGHT {
+            let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let head = "POST /atlas/recommend HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n";
+            sock.write_all(format!("{head}Content-Length: 100\r\n\r\n{{").as_bytes()).await.unwrap();
+            stalled.push(sock);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let answer = tokio::time::timeout(
+            Duration::from_secs(3),
+            exchange(addr, "GET /atlas/labels.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        )
+        .await
+        .expect("the relay was held");
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+
+    /// A connection that never finishes its request head is closed after the header read timeout; with no timer,
+    /// hyper never applied one and the socket was held for as long as the client liked.
+    #[tokio::test]
+    async fn a_request_head_that_never_ends_is_closed() {
+        let (addr, _stop) = relaying_server(Duration::from_millis(200)).await;
+        let closed = tokio::time::timeout(
+            Duration::from_secs(3),
+            exchange(addr, "GET /health HTTP/1.1\r\nHost: x\r\n"),
+        );
+        assert!(closed.await.is_ok(), "still open");
+        // So is one that never sends a byte.
+        let silent = tokio::time::timeout(Duration::from_secs(3), exchange(addr, ""));
+        assert!(silent.await.is_ok(), "a silent connection is still open");
+        // An idle keep-alive connection is the same wait for a head, and goes the same way.
+        let idle = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n";
+        let answer =
+            tokio::time::timeout(Duration::from_secs(3), exchange(addr, idle)).await.expect("still open");
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     }
 
     #[tokio::test]

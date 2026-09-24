@@ -14,8 +14,8 @@ serde_json = "1"
 sha2 = "0.11"
 getrandom = "0.4"
 url = "2"
-# The addon relay's client (`relay.rs`); both already come with axum.
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+# The addon relay's client (`relay.rs`), and the server with a timer (`main.rs`); both already come with axum.
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio", "server-auto", "server-graceful", "service"] }
 http-body-util = "0.1"
 # The web app's files are streamed from disk (`web.rs`); axum already depends on it.
 http-body = "1"

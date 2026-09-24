@@ -627,20 +627,6 @@ async fn relay_with(
             state.metrics.record_guest_play_refused(code);
         }
     };
-    // Held until this answer is done with, so the cap counts what is actually in flight upstream.
-    let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
-    let _slot = match slot {
-        Ok(Ok(permit)) => permit,
-        // Every slot is taken: the wait it just spent is also how long the next caller should give it.
-        _ => {
-            guest_refused("relay_busy");
-            return crate::handler::retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &error("relay_busy"),
-                SLOT_WAIT.as_millis() as u64,
-            );
-        }
-    };
     let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
     if public_session
         && (state.public_media_base.is_none() || state.public_media_socket.is_none() || address.is_none())
@@ -656,8 +642,27 @@ async fn relay_with(
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
     let control = req.uri().path().to_owned();
-    let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await else {
-        return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
+    // Read before a relay slot is taken, and within `TIMEOUT`: sixteen uploads that never finished their body held
+    // every slot for as long as their sockets stayed open, and the relay was busy for everyone.
+    let body =
+        match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES)).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            Err(_) => return json(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+        };
+    // Held until this answer is done with, so the cap counts what is actually in flight upstream.
+    let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
+    let _slot = match slot {
+        Ok(Ok(permit)) => permit,
+        // Every slot is taken: the wait it just spent is also how long the next caller should give it.
+        _ => {
+            guest_refused("relay_busy");
+            return crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("relay_busy"),
+                SLOT_WAIT.as_millis() as u64,
+            );
+        }
     };
     let body = match &grant {
         Some(g) if g.remux() && method == Method::POST && control != "/remux/health" => {
