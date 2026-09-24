@@ -437,6 +437,12 @@
     startsIn = null;
     session = result;
     sessionRoute = on;
+    // Another release is another encode, whose intro and credits sit at other times: its own are asked for.
+    if (result.release.filename !== segmentsOf) {
+      segments = [];
+      active = null;
+      askedFor = 0;
+    }
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
     if (castOffered && !(result.castOrigin && result.publicBase)) {
@@ -1167,6 +1173,8 @@
   const skipped: Partial<Record<SkipKind, true>> = {};
   /** The length SkipDB was last asked about; 0 before it was asked. */
   let askedFor = 0;
+  /** The release SkipDB was last asked about, by filename. */
+  let segmentsOf: string | undefined;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
@@ -1179,12 +1187,17 @@
     const asked = length();
     if (askedFor > 0 && Math.abs(asked - askedFor) < 2) return;
     askedFor = asked;
+    const release = session?.release.filename;
+    segmentsOf = release;
     const found = await fetchSkipSegments(imdb, {
       season,
       episode,
       durationSeconds: length(),
     });
-    if (!ended) segments = found;
+    if (ended) return;
+    if (session?.release.filename === release) segments = found;
+    // Another release started meanwhile: these are the old encode's times. Its own are asked for once it has a length.
+    else askedFor = 0;
   }
 
   /**
