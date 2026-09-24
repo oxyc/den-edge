@@ -43,6 +43,8 @@ const DAY: u64 = 86_400;
 const FRESH: Duration = Duration::from_secs(7 * DAY);
 /// How long a kept answer may still be served while nobody has refreshed it. The sweep deletes what is older.
 const RETENTION: Duration = Duration::from_secs(90 * DAY);
+/// How long a browser keeps segments served past their freshness: they are asked for again on the next play.
+const STALE_MAX_AGE: Duration = Duration::from_secs(60);
 /// How long "SkipDB has nothing for this" is believed. Short: a title gains segments when someone times it.
 const ABSENT_TTL: Duration = Duration::from_secs(DAY);
 /// A kept "nothing here". No answer of SkipDB's has this shape.
@@ -64,6 +66,8 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
 
     let asked = req.headers();
     let file = state.skipdb_cache_dir.as_ref().map(|dir| dir.join(asked_for.file_name()));
+    // Segments past their freshness but inside `RETENTION`: asked for again, and served when SkipDB cannot say.
+    let mut stale = None;
     if let Some((body, age, modified)) = match &file {
         Some(file) => crate::tmdb::read(file).await,
         None => None,
@@ -75,21 +79,54 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         if !absent && age < FRESH {
             return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
         }
+        if !absent && age < RETENTION {
+            stale = Some((body, modified));
+        }
     }
     match lookup(state, &asked_for, rid).await {
         Ok(Some(body)) => {
             if let Some(file) = &file {
                 crate::tmdb::write(file, &body).await;
+                let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
+            if let (Some(file), Some((body, modified))) = (&file, stale) {
+                if !gone(file).await {
+                    return answer(body, STALE_MAX_AGE, "stale", modified, asked);
+                }
+            }
             if let Some(file) = &file {
                 crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
             }
             crate::warnings::absent()
         }
-        Err(refused) => *refused,
+        // SkipDB down, slow or refusing: the segments kept are still the best answer there is.
+        Err(refused) => match stale {
+            Some((body, modified)) => answer(body, STALE_MAX_AGE, "stale", modified, asked),
+            None => *refused,
+        },
+    }
+}
+
+/// SkipDB answering "nothing" for segments it named before. It answers every title it has never heard of the same
+/// way (200, every segment `null`), so one such answer cannot say whether the segments were taken down or the answer
+/// is wrong, and a wrong one used to replace good segments for as long as "nothing" is believed. The first is noted
+/// beside the kept segments (`<name>.empty`) and they go on being served; only SkipDB still saying so `ABSENT_TTL`
+/// later lets it replace them.
+async fn gone(file: &std::path::Path) -> bool {
+    let mark = file.with_extension("empty");
+    match crate::tmdb::read(&mark).await {
+        Some((_, age, _)) if age >= ABSENT_TTL => {
+            let _ = tokio::fs::remove_file(&mark).await;
+            true
+        }
+        Some(_) => false,
+        None => {
+            crate::tmdb::write(&mark, &Bytes::new()).await;
+            false
+        }
     }
 }
 
@@ -160,6 +197,11 @@ impl Ask {
 /// SkipDB's answer as it is kept: `Some` body, or `None` where it names no segment at all. Every other refusal
 /// is already the response to give.
 async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>, Box<Response>> {
+    #[cfg(test)]
+    if let Some(skipdb) = tests::stand_in(&ask.imdb) {
+        let (status, bytes) = skipdb();
+        return said(status, &bytes);
+    }
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "skipdb_off"));
     };
@@ -179,6 +221,11 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
                 return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
             }
         };
+    said(status, &bytes)
+}
+
+/// What SkipDB's answer says: `Some` body to keep, `None` where it names no segment at all, or the refusal to give.
+fn said(status: StatusCode, bytes: &Bytes) -> Result<Option<Bytes>, Box<Response>> {
     if !status.is_success() {
         // A 404 means SkipDB has nothing for this title, which is an answer worth keeping rather than an error
         // to repeat on every play.
@@ -189,7 +236,7 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
     }
     // Kept verbatim, unlike the ratings: every field SkipDB names about a segment — the match, the offset, the
     // confidence — is something the client reads to decide whether it may act on the times unasked.
-    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+    let body: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(body) => body,
         Err(_) => return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable")),
     };
@@ -200,7 +247,7 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
     if !named_any {
         return Ok(None);
     }
-    Ok(Some(bytes))
+    Ok(Some(bytes.clone()))
 }
 
 /// `remaining` is what is left of the freshness window; a browser keeps it a day at most.
@@ -275,5 +322,76 @@ mod tests {
         // Absurd or empty runtimes are simply not sent.
         assert!(ask("/skipdb/tt0111161?duration=0").unwrap().duration.is_none());
         assert!(ask("/skipdb/tt0111161?duration=999999").unwrap().duration.is_none());
+    }
+
+    type SkipDb = std::sync::Arc<dyn Fn() -> (StatusCode, Bytes) + Send + Sync>;
+    /// A stand-in SkipDB per IMDb id, so tests running at once each get their own.
+    static SKIPDBS: std::sync::Mutex<Vec<(String, SkipDb)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn stand_in(imdb: &str) -> Option<SkipDb> {
+        crate::lock(&SKIPDBS)
+            .iter()
+            .find(|(id, _)| id == imdb)
+            .map(|(_, skipdb)| std::sync::Arc::clone(skipdb))
+    }
+
+    type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+    /// A SkipDB for `imdb` answering whatever `answers` holds at the time, counting its questions.
+    fn skipdb(imdb: &str) -> (Shared<(StatusCode, &'static str)>, Shared<u32>) {
+        let answers = std::sync::Arc::new(std::sync::Mutex::new((StatusCode::OK, NAMED)));
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let (a, n) = (std::sync::Arc::clone(&answers), std::sync::Arc::clone(&asked));
+        let tmdb: SkipDb = std::sync::Arc::new(move || {
+            *crate::lock(&n) += 1;
+            let (status, body) = *crate::lock(&a);
+            (status, Bytes::from_static(body.as_bytes()))
+        });
+        crate::lock(&SKIPDBS).push((imdb.to_owned(), tmdb));
+        (answers, asked)
+    }
+
+    const NAMED: &str =
+        r#"{"segments":{"intro":{"start_ms":229500,"end_ms":246500,"match":"agnostic"},"outro":null}}"#;
+    /// What SkipDB answers for a title it has nothing for, measured: a 200 with every segment null.
+    const NOTHING: &str = r#"{"segments":{"intro":null,"recap":null,"outro":null,"preview":null}}"#;
+
+    fn aged(file: &std::path::Path, age: Duration) {
+        let handle = std::fs::File::options().write(true).open(file).unwrap();
+        handle.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    /// Kept segments past their week were a 502 the moment SkipDB could not be reached, although the comment on
+    /// `RETENTION` said they would be served; and one "nothing" answer replaced them for a day at a time.
+    #[tokio::test]
+    async fn kept_segments_outlast_an_outage_and_a_single_empty_answer() {
+        let cache = crate::handler::tests::temp_dir();
+        let dir = cache.clone();
+        let h =
+            crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), move |state| {
+                state.skipdb_cache_dir = Some(dir);
+            });
+        let (answers, asked) = skipdb("tt0000101");
+        let get = || h.send("GET", "/skipdb/tt0000101", None, &[]);
+        let file = cache.join("tt0000101.json");
+
+        assert_eq!(get().await.headers()["x-den-skipdb"], "miss");
+        aged(&file, FRESH + Duration::from_secs(DAY));
+
+        *crate::lock(&answers) = (StatusCode::SERVICE_UNAVAILABLE, "");
+        let resp = get().await;
+        assert_eq!(resp.status(), StatusCode::OK, "served through the outage");
+        assert_eq!(resp.headers()["x-den-skipdb"], "stale");
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=60");
+
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = get().await;
+        assert_eq!(resp.headers()["x-den-skipdb"], "stale", "one empty answer does not replace them");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), NAMED);
+        // SkipDB still saying so a day later is believed.
+        aged(&file.with_extension("empty"), ABSENT_TTL + Duration::from_secs(60));
+        assert_eq!(get().await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(std::fs::read(&file).unwrap(), ABSENT);
+        assert_eq!(*crate::lock(&asked), 4);
     }
 }
