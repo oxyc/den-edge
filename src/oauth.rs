@@ -96,6 +96,9 @@ const MCP_PER_SESSION: u32 = 600;
 const MCP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a call's body may take to arrive: it is at most 256 KiB, read before the call takes a slot.
 const MCP_BODY_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 10_000 });
+/// How long a call's answer may go without a frame before its slot comes back: den-mcp answers in milliseconds, so
+/// this is an answer that stalled or a caller that stopped reading.
+const MCP_ANSWER_IDLE: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 30_000 });
 const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 const NAME_MAX: usize = 80;
 const URI_MAX: usize = 512;
@@ -115,7 +118,7 @@ pub struct OAuth {
     codes: Mutex<HashMap<String, Code>>,
     /// Held across every read-modify-write of the index, a session's rotation included.
     lock: tokio::sync::Mutex<()>,
-    /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer has been passed on.
+    /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer has been passed on or has idled out.
     mcp_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
@@ -1400,13 +1403,42 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
     }
     // A call's answer may be an event stream (Streamable HTTP), and the call is at den-mcp until it ends, so the slot
     // goes with the answer. A GET is not held: it opens the stream den-mcp may speak first on, which stays open.
-    resp.map(|body| Body::new(Held { body, slot: Some(slot) }))
+    let slot = std::sync::Arc::new(HeldSlot {
+        permit: Mutex::new(Some(slot)),
+        sent: Mutex::new(tokio::time::Instant::now()),
+    });
+    tokio::spawn(release_when_idle(std::sync::Arc::downgrade(&slot)));
+    resp.map(|body| Body::new(Held { body, slot }))
 }
 
-/// An answer that holds its `/mcp` slot until its last frame, or until it is dropped unfinished.
+/// An answer that holds its `/mcp` slot until its last frame, until it is dropped unfinished, or until it has gone
+/// `MCP_ANSWER_IDLE` without a frame. Unbounded, an answer that stalled mid-stream or a caller that never read it held
+/// a slot for as long as the connection stayed open, and 32 of them refused every call until a restart.
 struct Held {
     body: Body,
-    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    slot: std::sync::Arc<HeldSlot>,
+}
+
+struct HeldSlot {
+    permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    /// When the answer last passed on a frame (or began).
+    sent: Mutex<tokio::time::Instant>,
+}
+
+/// Gives a held slot back once its answer has gone `MCP_ANSWER_IDLE` without a frame. A task of its own, not the
+/// body's `poll_frame`: an answer nobody reads is not polled at all (as in `an_answer_that_goes_idle_gives_its_slot_back`),
+/// which is what a caller that stopped reading is expected to look like here. The answer itself runs on.
+async fn release_when_idle(slot: std::sync::Weak<HeldSlot>) {
+    loop {
+        let Some(held) = slot.upgrade() else { return };
+        let deadline = *crate::lock(&held.sent) + MCP_ANSWER_IDLE;
+        if deadline <= tokio::time::Instant::now() {
+            crate::lock(&held.permit).take();
+            return;
+        }
+        drop(held);
+        tokio::time::sleep_until(deadline).await;
+    }
 }
 
 impl http_body::Body for Held {
@@ -1418,8 +1450,12 @@ impl http_body::Body for Held {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
-        if matches!(frame, std::task::Poll::Ready(None | Some(Err(_)))) {
-            self.slot = None;
+        match frame {
+            std::task::Poll::Ready(Some(Ok(_))) => {
+                *crate::lock(&self.slot.sent) = tokio::time::Instant::now()
+            }
+            std::task::Poll::Ready(None | Some(Err(_))) => drop(crate::lock(&self.slot.permit).take()),
+            std::task::Poll::Pending => {}
         }
         frame
     }
@@ -2233,6 +2269,22 @@ mod tests {
         assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT - 1, "the answer is still coming");
         body_text(answer).await;
         assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT);
+    }
+
+    /// An answer nobody reads gives its slot back once it has gone the idle time without a frame: held until it ended,
+    /// 32 callers that never read — or 32 answers stalled mid-stream — refused every call until a restart.
+    #[tokio::test]
+    async fn an_answer_that_goes_idle_gives_its_slot_back() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let answer = call_mcp(&h, tokens["access_token"].as_str().unwrap()).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT - 1);
+        tokio::time::sleep(MCP_ANSWER_IDLE * 2).await;
+        assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT, "never read, and given back");
+        assert!(!body_text(answer).await.is_empty(), "the answer itself was not cut");
     }
 
     /// A body that never finishes arriving: what a caller sending slowly looks like from here.
