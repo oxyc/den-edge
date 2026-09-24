@@ -116,7 +116,7 @@ it('releases discarded detail branches while retaining reachable visits and tab 
 });
 
 describe('kept pages', () => {
-  it('keeps only the detail pages nearest in history, and the browsing tabs', () => {
+  it('keeps only the detail pages nearest in history, and every tab', () => {
     const nav = new Navigation('/');
     const entries = new Map<number, { pageKey: string }>([[0, { pageKey: 'library' }]]);
     // Home → title → Home → title …, as the router records it: each title visit its own page.
@@ -133,11 +133,11 @@ describe('kept pages', () => {
     expect([...nav.pages.keys()].sort()).toEqual(
       ['library', 'settings', 'visit-5', 'visit-6', 'visit-7', 'visit-8'].sort(),
     );
-    // Settings, left, is not kept: nothing of it runs out of sight.
+    // Settings, left, is kept too: a pairing it is hosting goes on while another page is open.
     nav.visit('/', 'library');
     entries.set(18, { pageKey: 'library' });
     nav.prune(nearest(entries, 18));
-    expect(nav.pages.has('settings')).toBe(false);
+    expect(nav.pages.has('settings')).toBe(true);
     expect(KEPT_DETAILS).toBe(4);
   });
 
