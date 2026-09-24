@@ -253,7 +253,8 @@ mod tests {
     #[tokio::test]
     async fn an_address_holds_only_a_few_live_sessions() {
         let mut h = Harness::new();
-        Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        (state.trusted_proxies, state.cloudflare_proxies) = crate::parse_proxies("cf:192.168.1.9");
         let new = |n: usize, visitor: &'static str| {
             let h = &h;
             async move {
