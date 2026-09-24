@@ -740,13 +740,12 @@ async fn redeem(state: &AppState, req: Request) -> Response {
     }
     let now = state.now();
     let _lock = state.grants.lock.lock().await;
+    // A store that fails is answered as one, like every other write: a guest told a good code is wrong gives up on
+    // it. It says nothing of the code — a read fails before the code is compared, a write only for a good one.
     let mut record = match load(state, gid).await {
         Ok(Some(r)) => r,
         Ok(None) => return invalid_code(),
-        Err(e) => {
-            eprintln!("grant read: {e}");
-            return invalid_code();
-        }
+        Err(e) => return internal("grant read", e),
     };
     if !constant_time_eq(record.code_hash.as_bytes(), sha(code.as_bytes()).as_bytes())
         || !is_live(&record, now)
@@ -768,8 +767,7 @@ async fn redeem(state: &AppState, req: Request) -> Response {
         record.redeemed_at.get_or_insert(now);
         // Marked before it is answered: a guest told "yes" holds a slot that is on disk.
         if let Err(e) = save(state, &record).await {
-            eprintln!("grant write: {e}");
-            return invalid_code();
+            return internal("grant write", e);
         }
     }
     json_reply(
@@ -1497,6 +1495,21 @@ mod tests {
 
         // One device by default: another secret is turned away, indistinguishably.
         assert_eq!(redeem_with(&h, &code, SECRET2).await, invalid);
+    }
+
+    /// A redeem that cannot be written is the store's failure, not the code's: it is answered as one (507 for a full
+    /// store), so the guest is not told a good code is wrong, and the code still works once the store does.
+    #[tokio::test]
+    async fn a_redeem_the_store_cannot_keep_is_not_an_invalid_code() {
+        let h = harness().await;
+        let (_, code) = invited(&h, json!({})).await;
+        let full = Harness::in_dir_with(h.dir.clone(), |s| {
+            s.store = crate::store::Store::open(&h.dir, 1).unwrap();
+            s.new_libraries = crate::library::NewLibraries::Members;
+        });
+        let (status, body) = redeem_with(&full, &code, SECRET).await;
+        assert_eq!((status, body), (StatusCode::INSUFFICIENT_STORAGE, json!({ "error": "storage_full" })));
+        assert_eq!(redeem_with(&h, &code, SECRET).await.0, StatusCode::OK);
     }
 
     #[tokio::test]
