@@ -37,6 +37,12 @@ function proxied(url: URL): string {
 const DAY = 86_400_000;
 /** TMDB's terms cap how long its content may be cached. */
 export const RETENTION = 180 * DAY;
+/**
+ * How long a request no single caller owns may take: one shared by several callers (`sharingFlights`), or a refresh
+ * behind a kept answer. Without it, one that never answered was joined by every later caller of the same question,
+ * which stayed unanswered — a title without its name or poster — until a reload.
+ */
+const SHARED_MS = 20_000;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
 export const STALE_FOR = 7 * DAY;
 
@@ -218,7 +224,7 @@ export function cachingFetch(
       if (!refreshing.has(key)) {
         refreshing.add(key);
         // Not the caller's signal: leaving the page that asked must not cancel what the next visit will read.
-        void network(asked, { ...init, signal: undefined })
+        void network(asked, { ...init, signal: AbortSignal.timeout(SHARED_MS) })
           .then(async (res) => {
             if (!res.ok) return;
             const refreshed = entry(res, await res.text());
@@ -328,7 +334,7 @@ function awaitedBy<T>(shared: Promise<T>, signal: AbortSignal | null | undefined
  * A service page asks the same title's details from several places at once — a chart's missing poster, the hero's
  * backdrop, the same title on two charts — and before this each one went to the network while the store was still
  * empty. The shared request carries no caller's signal, so one caller giving up does not fail the others; each
- * caller still stops waiting when its own signal says so.
+ * caller still stops waiting when its own signal says so. It carries its own limit (`SHARED_MS`) instead.
  */
 export function sharingFlights(inner: typeof fetch): typeof fetch {
   const flying = new Map<string, Promise<Response>>();
@@ -338,7 +344,7 @@ export function sharingFlights(inner: typeof fetch): typeof fetch {
     const key = keyOf(new URL(href));
     let flight = flying.get(key);
     if (!flight) {
-      flight = inner(href, { ...init, signal: undefined });
+      flight = inner(href, { ...init, signal: AbortSignal.timeout(SHARED_MS) });
       flying.set(key, flight);
       const done = () => flying.delete(key);
       flight.then(done, done);

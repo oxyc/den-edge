@@ -400,11 +400,39 @@ describe('sharingFlights', () => {
     const leaving = new AbortController();
     const gaveUp = shared(detail, { signal: leaving.signal });
     const stayed = shared(detail);
-    expect(net.asked[0]?.signal, 'the shared request carries no caller’s signal').toBeUndefined();
+    expect(net.asked[0]?.signal, 'the shared request carries no caller’s signal').not.toBe(
+      leaving.signal,
+    );
     leaving.abort(new Error('left the page'));
     await expect(gaveUp).rejects.toThrow('left the page');
     net.release();
     expect(await (await stayed).json()).toEqual({ n: 1 });
+  });
+
+  it('gives up on a shared question nobody answers, so the next caller asks again', async () => {
+    const limits: AbortController[] = [];
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const limit = new AbortController();
+      limits.push(limit);
+      return limit.signal;
+    });
+    const asked: string[] = [];
+    const hung: typeof fetch = (input, init) => {
+      asked.push(String(input));
+      return new Promise((_, reject) =>
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
+      );
+    };
+    try {
+      const shared = sharingFlights(hung);
+      const first = shared(detail);
+      limits[0]!.abort(new DOMException('timed out', 'TimeoutError'));
+      await expect(first).rejects.toThrow('timed out');
+      void shared(detail).catch(() => undefined);
+      expect(asked, 'asked again, not joined to the one that hung').toHaveLength(2);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('leaves everything but a TMDB GET alone', async () => {
