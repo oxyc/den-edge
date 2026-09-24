@@ -1094,7 +1094,7 @@ fn minted_native(path: &str) -> bool {
 ///
 /// It takes no in-flight slot. Those bound what is happening at once against a box of one addon, and a
 /// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
-async fn stream(state: &AppState, req: Request, target: String, rid: &str, guest: bool) -> Response {
+async fn stream(state: &Arc<AppState>, req: Request, target: String, rid: &str, guest: bool) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [
         header::RANGE,
@@ -1126,13 +1126,14 @@ async fn stream(state: &AppState, req: Request, target: String, rid: &str, guest
     let (parts, body) = answer.into_parts();
     // A guest's bytes are counted as they leave, not estimated from a header: a range request, a
     // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
-    // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling.
+    // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling. Each is counted on the
+    // day it leaves: a stream begun before UTC midnight that kept its first day reset the new day's count.
     let body = if guest {
-        let spent = Arc::clone(&state.media_spent);
-        let day = (state.clock)() / 86_400_000;
+        let state = Arc::clone(state);
         Body::new(body.map_frame(move |frame| {
             if let Some(data) = frame.data_ref() {
-                let mut spent = crate::lock(&spent);
+                let day = (state.clock)() / 86_400_000;
+                let mut spent = crate::lock(&state.media_spent);
                 if spent.0 != day {
                     *spent = (day, 0);
                 }
@@ -2108,6 +2109,52 @@ mod tests {
         let segment =
             h.send("GET", "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx&native=1", None, &[]).await;
         assert_eq!(segment.status(), StatusCode::SERVICE_UNAVAILABLE, "a segment is still carried");
+    }
+
+    /// A reel that answers every request with `sent` bytes of a 1 MiB body and then holds the connection open, so the
+    /// stream is still running when a test looks.
+    async fn reel_mid_stream(sent: usize) -> Harness {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let _ = conn.read(&mut [0; 4096]).await;
+                    let head =
+                        "HTTP/1.1 200 OK\r\ncontent-type: video/mp2t\r\ncontent-length: 1048576\r\n\r\n";
+                    conn.write_all(head.as_bytes()).await.unwrap();
+                    conn.write_all(&vec![0; sent]).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                });
+            }
+        });
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel=http://{addr}"));
+        state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        h
+    }
+
+    const SEGMENT: &str = "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx";
+
+    /// A guest's bytes are counted on the day they leave. A stream begun before UTC midnight used to put its later
+    /// bytes on the day it began, and in doing so wiped the new day's count back to zero.
+    #[tokio::test]
+    async fn a_guests_bytes_after_midnight_count_toward_the_new_day() {
+        use http_body_util::BodyExt;
+        let h = reel_mid_stream(1000).await;
+        let resp = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        h.advance(86_400_000);
+        *crate::lock(&h.state.media_spent) = (1, 500);
+        let mut body = resp.into_body();
+        let mut got = 0;
+        while got < 1000 {
+            got += body.frame().await.unwrap().unwrap().into_data().unwrap().len();
+        }
+        assert_eq!(*crate::lock(&h.state.media_spent), (1, 1500));
     }
 
     /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.
