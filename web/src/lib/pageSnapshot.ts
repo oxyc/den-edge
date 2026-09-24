@@ -1,3 +1,14 @@
+/** Marks a copy's root: everything under it is held still by one rule (`frozenStyle`), not per node. */
+const FROZEN = 'data-page-snapshot';
+let frozenStyled = false;
+function frozenStyle(): void {
+  if (frozenStyled) return;
+  frozenStyled = true;
+  const style = document.createElement('style');
+  style.textContent = `[${FROZEN}], [${FROZEN}] * { animation: none !important; transition: none !important; scroll-behavior: auto !important; scroll-snap-type: none !important; }`;
+  document.head.append(style);
+}
+
 /** A detached, inert copy of the visible route, at its current viewport and rail positions. */
 export interface PageSnapshot {
   show(): HTMLElement;
@@ -16,12 +27,31 @@ export function capturePage(
   const offsets = new Map(
     copies.map((node, i) => [node, { x: originals[i]!.scrollLeft, y: originals[i]!.scrollTop }]),
   );
+  // Reading every node's computed style is what this cost on the tap path: 1,500 nodes took ~55 ms
+  // at 4x CPU throttling in headless Chromium, against 3-14 ms reading only these. A node that paints
+  // nowhere in the viewport can't be seen in the copy, and one that isn't animated computes the same
+  // values there as here — except for state the copy lacks (`:hover`, focus), which is on screen.
+  const animated = new Set(
+    source.getAnimations({ subtree: true }).map((animation) => {
+      const effect = animation.effect;
+      return effect instanceof KeyframeEffect ? effect.target : null;
+    }),
+  );
+  const seen = (node: HTMLElement) => {
+    if (animated.has(node)) return true;
+    const box = node.getBoundingClientRect();
+    // An empty box can still hold what paints (a wrapper, a zero-height positioning parent).
+    if (box.width === 0 || box.height === 0) return true;
+    return box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth;
+  };
+  copy.setAttribute(FROZEN, '');
+  frozenStyle();
   copies.forEach((node, i) => {
     node.removeAttribute('id');
     node.removeAttribute('data-route-page');
     node.removeAttribute('data-active');
     const original = originals[i];
-    if (original) {
+    if (original && seen(original)) {
       // A paused clone starts at animation time zero. Freeze the source's painted values instead,
       // including the billboard's scroll-driven transform and any in-flight artwork fades.
       const painted = getComputedStyle(original);
@@ -37,10 +67,6 @@ export function capturePage(
         node.style.setProperty(property, painted.getPropertyValue(property), 'important');
       }
     }
-    node.style.setProperty('animation', 'none', 'important');
-    node.style.setProperty('transition', 'none', 'important');
-    node.style.setProperty('scroll-behavior', 'auto', 'important');
-    node.style.setProperty('scroll-snap-type', 'none', 'important');
     if (node instanceof HTMLInputElement && original instanceof HTMLInputElement) {
       node.value = original.value;
       node.checked = original.checked;
