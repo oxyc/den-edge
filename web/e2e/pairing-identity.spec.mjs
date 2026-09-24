@@ -42,6 +42,14 @@ test('two browsers pair and join their stable identities through encrypted link 
       inboxes.set(key, [...(inboxes.get(key) ?? []), { sealed: body.sealed }]);
       return json(route, 200, { appended: true });
     }
+    if (url.pathname === '/inbox/drain' && request.method() === 'POST') {
+      const queues = body.keys.map((key) => {
+        const messages = inboxes.get(key) ?? [];
+        inboxes.delete(key);
+        return messages;
+      });
+      return json(route, 200, { queues });
+    }
     if (url.pathname === '/inbox/drain') {
       const key = request.headers()['x-den-link'];
       const messages = inboxes.get(key) ?? [];
