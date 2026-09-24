@@ -98,3 +98,23 @@ it("keeps this tab's current link when another tab makes a different one current
   elsewhere((other) => other.remove('a'.repeat(16)));
   expect(tab.current?.name).toBe('Bedroom');
 });
+
+/** A removal storage refused to keep came back with the next reread, as a refused addition once went missing. */
+it('keeps a link removed while storage was full removed, through the next change', () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  tab.add('b'.repeat(16), { ...KEYS, name: 'Bedroom' });
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => kept.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (key === 'den.links') throw new DOMException('full', 'QuotaExceededError');
+      kept.set(key, value);
+    },
+    removeItem: (key: string) => void kept.delete(key),
+  });
+  tab.remove('b'.repeat(16));
+  elsewhere(() => undefined);
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room']);
+  tab.makeCurrent('a'.repeat(16));
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room']);
+});

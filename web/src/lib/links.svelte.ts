@@ -103,6 +103,11 @@ function overlay<T>(fresh: T[], unsaved: T[], same: (a: T, b: T) => boolean): T[
   ];
 }
 
+/** `list` without the records `dropped` has its own copy of. */
+function without<T>(list: T[], dropped: T[], same: (a: T, b: T) => boolean): T[] {
+  return list.filter((item) => !dropped.some((gone) => same(gone, item)));
+}
+
 /** The records of `list` that storage does not hold as they are: what a write storage refused left in this tab only. */
 function unsavedOf<T>(list: T[], stored: T[]): T[] {
   const kept = new Set(stored.map((item) => JSON.stringify(item)));
@@ -190,6 +195,9 @@ export class Links {
    */
   private unsavedLinks: Link[] = [];
   private unsavedShared: Shared[] = [];
+  /** And the records this tab removed that storage still holds, which a reread would otherwise bring back. */
+  private goneLinks: Link[] = [];
+  private goneShared: Shared[] = [];
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -202,10 +210,17 @@ export class Links {
   /** Take up what storage holds now, which another tab may have changed, with what this tab couldn't keep there. */
   private reread(): void {
     const list = readList(STORAGE_KEY, isLink);
-    if (list) this.list = reconcile(this.list, overlay(list, this.unsavedLinks, sameLink));
+    if (list)
+      this.list = reconcile(
+        this.list,
+        overlay(without(list, this.goneLinks, sameLink), this.unsavedLinks, sameLink),
+      );
     const shared = readList(SHARED_KEY, isShared);
     if (shared)
-      this.shared = reconcile(this.shared, overlay(shared, this.unsavedShared, sameShared));
+      this.shared = reconcile(
+        this.shared,
+        overlay(without(shared, this.goneShared, sameShared), this.unsavedShared, sameShared),
+      );
     if (readBrowsing()) this.browsing = true;
     this.settle();
   }
@@ -217,11 +232,15 @@ export class Links {
   }
 
   private saveLinks(): void {
-    this.unsavedLinks = writeLinks(this.list) ? [] : unsavedOf(this.list, readLinks());
+    const stored = writeLinks(this.list) ? this.list : readLinks();
+    this.unsavedLinks = unsavedOf(this.list, stored);
+    this.goneLinks = without(stored, this.list, sameLink);
   }
 
   private saveShared(): void {
-    this.unsavedShared = writeShared(this.shared) ? [] : unsavedOf(this.shared, readShared());
+    const stored = writeShared(this.shared) ? this.shared : readShared();
+    this.unsavedShared = unsavedOf(this.shared, stored);
+    this.goneShared = without(stored, this.shared, sameShared);
   }
 
   get current(): Link | undefined {
