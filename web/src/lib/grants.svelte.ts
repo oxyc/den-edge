@@ -20,6 +20,12 @@ export interface GuestGrant {
 export type RedeemFailure = 'malformed' | 'invalid' | 'throttled' | 'unreachable';
 
 const KEY = 'den.grants';
+/**
+ * The secret each code is being redeemed with, by code, until den-edge answers. den-edge keeps the first hash a code
+ * is redeemed with and answers a retry only with the same one, and an invite lets one device in: an answer lost on
+ * the way, followed by a reload, made a new secret that den-edge refused, and the guest was locked out.
+ */
+const PENDING_KEY = 'den.grants.pending';
 
 function storage(): Storage | undefined {
   try {
@@ -43,11 +49,42 @@ function isGuestGrant(value: unknown): value is GuestGrant {
   );
 }
 
+/** The secrets kept under `PENDING_KEY`, by code. */
+function keptSecrets(): Record<string, string> {
+  try {
+    const kept = JSON.parse(storage()?.getItem(PENDING_KEY) ?? '{}') as unknown;
+    return kept && typeof kept === 'object' && !Array.isArray(kept)
+      ? Object.fromEntries(
+          Object.entries(kept).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string',
+          ),
+        )
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Keep `secret` as the one `code` is redeemed with, or with null forget it: den-edge answered for good. */
+function keepSecret(code: string, secret: string | null): void {
+  try {
+    const { [code]: _, ...rest } = keptSecrets();
+    const next = secret === null ? rest : { ...rest, [code]: secret };
+    if (Object.keys(next).length) storage()?.setItem(PENDING_KEY, JSON.stringify(next));
+    else storage()?.removeItem(PENDING_KEY);
+  } catch {
+    // Held for this visit only (`pending`).
+  }
+}
+
 export class GuestGrants {
   list = $state<GuestGrant[]>([]);
   /** An invite code that arrived in the address (`#invite=…`), waiting for the viewer to redeem it. */
   invite = $state<string | null>(null);
-  /** The secret a code was first redeemed with, so a retry after a lost response sends the same hash. */
+  /**
+   * The secret a code was first redeemed with, so a retry after a lost response sends the same hash: kept in storage
+   * too (`PENDING_KEY`), which is what a reload reads, and here for a visit whose storage is refused.
+   */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Bookkeeping for a retry; nothing renders from it.
   private readonly pending = new Map<string, string>();
 
@@ -86,17 +123,21 @@ export class GuestGrants {
   ): Promise<GuestGrant | RedeemFailure> {
     const code = parseInvite(input);
     if (!code) return 'malformed';
-    const secret = this.pending.get(code) ?? newSecret();
+    const secret = this.pending.get(code) ?? keptSecrets()[code] ?? newSecret();
     this.pending.set(code, secret);
+    // Kept before it is sent: the answer can be lost, and the page reloaded, after den-edge has taken it.
+    keepSecret(code, secret);
     const reply = await redeem(code, secret, fetchImpl);
     if (!reply.ok) {
       if (reply.status === 404) {
         this.pending.delete(code);
+        keepSecret(code, null);
         return 'invalid';
       }
       return reply.status === 429 ? 'throttled' : 'unreachable';
     }
     this.pending.delete(code);
+    keepSecret(code, null);
     const { gid, name, addons, expiresAt } = reply.value;
     const grant: GuestGrant = {
       gid,

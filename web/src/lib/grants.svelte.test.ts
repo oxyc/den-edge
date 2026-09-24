@@ -13,6 +13,7 @@ function stubStorage() {
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => kept.get(key) ?? null,
     setItem: (key: string, value: string) => void kept.set(key, value),
+    removeItem: (key: string) => void kept.delete(key),
   });
 }
 
@@ -85,6 +86,24 @@ test('a retry after a lost answer redeems with the same secret', async () => {
   lost = false;
   expect(await grants.redeem(CODE, fetchImpl)).toMatchObject({ gid: GID });
   expect(hashes[0]).toBe(hashes[1]);
+});
+
+test('a retry after a lost answer and a reload redeems with the same secret', async () => {
+  const hashes: string[] = [];
+  let lost = true;
+  const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    hashes.push(JSON.parse(String(init?.body)).secretHash);
+    if (lost) throw new TypeError('offline');
+    return redeemed();
+  });
+  expect(await new GuestGrants().redeem(CODE, fetchImpl)).toBe('unreachable');
+  lost = false;
+  const reloaded = new GuestGrants();
+  expect(await reloaded.redeem(CODE, fetchImpl)).toMatchObject({ gid: GID });
+  expect(hashes[0]).toBe(hashes[1]);
+  expect(kept.has('den.grants.pending'), 'forgotten once redeemed').toBe(false);
+  // The grant holds the secret den-edge has the hash of.
+  expect(reloaded.list[0]?.secret).toBeTruthy();
 });
 
 test('a bad or refused code says which, and stores nothing', async () => {
