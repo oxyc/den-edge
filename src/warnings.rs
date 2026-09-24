@@ -17,12 +17,13 @@
 //! spent.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::tmdb::Failed;
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::Full;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -299,27 +300,23 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
-    let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            eprintln!("warnings: {e}");
-            return Err(refused(StatusCode::BAD_GATEWAY, "warnings_unreachable"));
-        }
-        Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "warnings_timeout")),
-    };
-    let status = answer.status();
+    let (status, headers, bytes) =
+        match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "warnings").await {
+            Ok(answer) => answer,
+            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "warnings_unreachable")),
+            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "warnings_timeout")),
+            Err(Failed::TooLarge | Failed::Unreadable) => {
+                return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
+            }
+        };
     let number = |name: &str| {
-        answer.headers().get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok())
+        headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok())
     };
     let month_left = number("x-ratelimit-remaining-month");
     let wait_ms = number("retry-after").map_or(60_000, |secs| secs.saturating_mul(1000));
     if key.household && month_left.is_some_and(|left| left < MONTH_RESERVE) {
         rest(state, now + DAY.as_millis() as u64, "its month is nearly spent");
     }
-    let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
-    else {
-        return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
-    };
     match status {
         s if s.is_success() => serde_json::from_slice(&bytes)
             .map_err(|_| refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable")),

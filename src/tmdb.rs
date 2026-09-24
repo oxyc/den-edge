@@ -53,6 +53,56 @@ pub fn client() -> TmdbClient {
     Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(90)).build(https)
 }
 
+/// Why an upstream exchange gave no answer to read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Failed {
+    /// No answer at all: the connection could not be made or was refused.
+    Unreachable,
+    /// The whole exchange, headers and body, took longer than it was given.
+    Timeout,
+    /// The body ran past the limit it was read with.
+    TooLarge,
+    /// The body broke off partway.
+    Unreadable,
+}
+
+/// One question to an upstream on the shared client (`client`), answered whole — status, headers and the body read
+/// to the end — inside `timeout`, or not at all.
+///
+/// The timeout covers the body as well as the headers. It used to cover only the headers, and a body read has no
+/// timer of its own: an upstream that sent its headers and then stalled held its caller for as long as the socket
+/// stayed open, and a background refresh left its key marked "refreshing" (`refresh_behind`), so that key was never
+/// refreshed again until a restart. `who` names the upstream in the log; the error names the host, never the query
+/// a key may be in.
+pub(crate) async fn exchange<C>(
+    client: &Client<C, Full<Bytes>>,
+    out: axum::http::Request<Full<Bytes>>,
+    limit: usize,
+    timeout: Duration,
+    who: &str,
+) -> Result<(StatusCode, HeaderMap, Bytes), Failed>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+{
+    let whole = async {
+        let answer = client.request(out).await.map_err(|e| {
+            eprintln!("{who}: {e}");
+            Failed::Unreachable
+        })?;
+        let (parts, body) = answer.into_parts();
+        let bytes = Limited::new(body, limit).collect().await.map_err(|e| {
+            if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                Failed::TooLarge
+            } else {
+                eprintln!("{who}: the answer broke off: {e}");
+                Failed::Unreadable
+            }
+        })?;
+        Ok((parts.status, parts.headers, bytes.to_bytes()))
+    };
+    tokio::time::timeout(timeout, whole).await.unwrap_or(Err(Failed::Timeout))
+}
+
 const HOST: &str = "https://api.themoviedb.org";
 /// TMDB's terms cap cached content at six months. Nothing here is kept past it, fresh or not.
 const RETENTION: Duration = Duration::from_secs(180 * 86_400);
@@ -852,24 +902,19 @@ async fn send(
     let Ok(out) = out.body(Full::new(Bytes::new())) else {
         return Err(refused(StatusCode::BAD_REQUEST, "bad_request"));
     };
-    let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            eprintln!("tmdb: {e}");
-            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable"));
+    let (status, headers, bytes) = match exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "tmdb").await {
+        Ok(answer) => answer,
+        Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable")),
+        Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
+        Err(Failed::TooLarge | Failed::Unreadable) => {
+            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"))
         }
-        Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
     };
-    let status = answer.status();
     if status == StatusCode::NOT_MODIFIED && etag.is_some() {
         refund(state);
         return Ok(Fetched::Unchanged);
     }
-    let tag = answer.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
-    else {
-        return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
-    };
+    let tag = headers.get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
     if !status.is_success() {
         // TMDB's own refusal, passed on as ours without its body: it may name the key.
         return Err(refused(
@@ -1020,6 +1065,7 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
     }
     let state = Arc::clone(state);
     tokio::spawn(async move {
+        let _refreshing = Refreshing { set: &state.tmdb_refreshing, key: asking.cached.clone() };
         // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
         let (path, query, key) = (&asking.path, asking.query.as_deref(), &asking.key);
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
@@ -1042,8 +1088,20 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
             }
             Err(_) => {}
         }
-        crate::lock(&state.tmdb_refreshing).remove(&asking.cached);
     });
+}
+
+/// A refresh's mark in its `*_refreshing` set, cleared when the refresh ends however it ends, a panic included:
+/// a key left marked is never refreshed again until a restart.
+pub(crate) struct Refreshing<'a> {
+    pub(crate) set: &'a std::sync::Mutex<std::collections::HashSet<String>>,
+    pub(crate) key: String,
+}
+
+impl Drop for Refreshing<'_> {
+    fn drop(&mut self) {
+        crate::lock(self.set).remove(&self.key);
+    }
 }
 
 /// How long a browser may keep a fresh answer. A title's details: exactly what is left of the six months, and not
@@ -1258,6 +1316,47 @@ mod tests {
             cache_key("/3/search/multi", Some("query=blade+runner")),
             "/3/search/multi?query=blade runner&"
         );
+    }
+
+    /// An upstream that sends its headers and then stalls used to hold the exchange for as long as the socket stayed
+    /// open: the timeout covered only the headers. It covers the whole answer now, and a body that is too large is
+    /// told apart from one that broke off.
+    #[tokio::test]
+    async fn a_stalled_body_times_out_with_the_exchange() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Each connection is answered by what its request asks for: a stalled body, one too large, one cut off.
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut asked = vec![0; 1024];
+                    let n = socket.read(&mut asked).await.unwrap_or(0);
+                    let asked = String::from_utf8_lossy(&asked[..n]).into_owned();
+                    let head = |length: usize| format!("HTTP/1.1 200 OK\r\ncontent-length: {length}\r\n\r\n");
+                    if asked.starts_with("GET /stall") {
+                        let _ = socket.write_all(format!("{}ab", head(100)).as_bytes()).await;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    } else if asked.starts_with("GET /large") {
+                        let _ = socket.write_all(format!("{}{}", head(64), "x".repeat(64)).as_bytes()).await;
+                    } else {
+                        let _ = socket.write_all(format!("{}ab", head(100)).as_bytes()).await;
+                    }
+                });
+            }
+        });
+        let client: Client<HttpConnector, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+        let ask = |path: &str| {
+            let out = axum::http::Request::get(format!("http://{addr}{path}"))
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            exchange(&client, out, 32, Duration::from_millis(300), "test")
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(ask("/stall").await.unwrap_err(), Failed::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(ask("/large").await.unwrap_err(), Failed::TooLarge);
+        assert_eq!(ask("/cut").await.unwrap_err(), Failed::Unreadable);
     }
 
     #[test]

@@ -15,13 +15,14 @@
 //! already kept, and nobody is shown nothing because a refresh failed.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::tmdb::Failed;
 use crate::warnings::{callers_key, spendable, valid_imdb, Key};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::Full;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,6 +132,7 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
     }
     let state = Arc::clone(state);
     tokio::spawn(async move {
+        let _refreshing = crate::tmdb::Refreshing { set: &state.ratings_refreshing, key: imdb.clone() };
         match lookup(&state, &imdb, &key, "refresh").await {
             Ok(Some(body)) => {
                 crate::tmdb::write(&file, &body).await;
@@ -141,7 +143,6 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
             // Refused, rested or unreachable, and already said so: what is kept stays, and is asked again later.
             Err(_) => {}
         }
-        crate::lock(&state.ratings_refreshing).remove(&imdb);
     });
 }
 
@@ -169,20 +170,15 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
-    let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            // The error names the host, never the query the key is in.
-            eprintln!("ratings: {e}");
-            return Err(refused(StatusCode::BAD_GATEWAY, "ratings_unreachable"));
-        }
-        Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "ratings_timeout")),
-    };
-    let status = answer.status();
-    let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
-    else {
-        return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"));
-    };
+    let (status, _, bytes) =
+        match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "ratings").await {
+            Ok(answer) => answer,
+            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "ratings_unreachable")),
+            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "ratings_timeout")),
+            Err(Failed::TooLarge | Failed::Unreadable) => {
+                return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"))
+            }
+        };
     // OMDb says why in its body: a refused key or a spent day as a 401, a title it doesn't have as a 200. The
     // body itself never travels.
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);

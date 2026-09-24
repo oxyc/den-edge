@@ -20,13 +20,14 @@
 //! viewer.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::tmdb::Failed;
 use crate::warnings::valid_imdb;
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::Full;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -169,19 +170,15 @@ async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>,
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
-    let answer = match tokio::time::timeout(TIMEOUT, client.request(out)).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            eprintln!("skipdb: {e}");
-            return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable"));
-        }
-        Err(_) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "skipdb_timeout")),
-    };
-    let status = answer.status();
-    let Ok(bytes) = Limited::new(answer.into_body(), MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes())
-    else {
-        return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"));
-    };
+    let (status, _, bytes) =
+        match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "skipdb").await {
+            Ok(answer) => answer,
+            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable")),
+            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "skipdb_timeout")),
+            Err(Failed::TooLarge | Failed::Unreadable) => {
+                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
+            }
+        };
     if !status.is_success() {
         // A 404 means SkipDB has nothing for this title, which is an answer worth keeping rather than an error
         // to repeat on every play.
