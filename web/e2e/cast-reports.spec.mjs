@@ -26,6 +26,8 @@ const web = fileURLToPath(new URL('..', import.meta.url));
 const cors = { 'access-control-allow-origin': '*' };
 /** What den-remux was told, by the fixture's media server. */
 const heard = { reports: [], ended: [] };
+/** Whether the media server drops the connection a request for `file` came on, as a line that went away does. */
+let dropping = () => false;
 
 /**
  * den-remux on `MEDIA`, as a real https server rather than a Playwright route: the cast page's last report and its
@@ -78,6 +80,7 @@ function mediaServer(dir) {
           return res.writeHead(204, cors).end();
         }
         const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
+        if (dropping(file)) return req.socket.destroy();
         try {
           const content = await readFile(new URL(file, hls));
           const type = file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4';
@@ -109,9 +112,10 @@ test.afterAll(() => {
 test.beforeEach(() => {
   heard.reports.length = 0;
   heard.ended.length = 0;
+  dropping = () => false;
 });
 
-async function open() {
+async function open({ grants = [] } = {}) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: [
@@ -147,6 +151,10 @@ async function open() {
     }),
   );
   await page.route(`${ORIGIN}/remux/releases`, (r) => r.fulfill({ json: { releases: [] } }));
+  await page.route(`${ORIGIN}/remux/grant`, (r) => {
+    grants.push(r.request().postDataJSON());
+    return r.fulfill({ status: 204 });
+  });
   await context.route(`${MEDIA}/**`, (r) => r.continue());
   await context.route(`${CAST}/**`, async (r) => {
     const path = new URL(r.request().url()).pathname;
@@ -212,6 +220,40 @@ test('a failure in the cast page is reported to den-remux by the cast page itsel
       .locator('video')
       .evaluate((v) => v.dispatchEvent(new Event('error')));
     await expect.poll(() => heard.reports.map((r) => r.message)).toContain('Playback failed');
+  } finally {
+    await browser.close();
+  }
+});
+
+// Away from home the cast page plays, from the public media address, whose listener lets in only the address the
+// session started from. A viewer whose connection dropped may be back on another (Wi-Fi to mobile), so while its
+// segments fail the cast page has the player ask den-edge to let this browser in again — only the player's page can —
+// and plays on from the same second when they arrive.
+test('a connection that drops is waited out in the cast page, which has the player let it in again', async () => {
+  test.setTimeout(90_000);
+  let downUntil;
+  dropping = (file) => {
+    const n = Number(/^seg(\d+)\.m4s$/.exec(file)?.[1] ?? -1);
+    if (n < 4) return false;
+    downUntil ??= Date.now() + 12_000;
+    return Date.now() < downUntil;
+  };
+  const grants = [];
+  const { browser, page } = await open({ grants });
+  try {
+    await playingPast(page, 1);
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    await expect(frame.getByText('Reconnecting…')).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => grants.length).toBeGreaterThan(0);
+    expect(grants[0]).toEqual({
+      playlist: `${PATH}/master.m3u8`,
+      scout: 'http://scout.test/config',
+    });
+    await playingPast(page, 10);
+    expect(Date.now()).toBeGreaterThanOrEqual(downUntil);
+    await expect(frame.getByText('Reconnecting…')).toBeHidden();
+    expect(heard.reports.filter((r) => !r.stats)).toEqual([]);
+    expect(heard.ended).toEqual([]);
   } finally {
     await browser.close();
   }
