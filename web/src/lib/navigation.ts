@@ -9,6 +9,26 @@ export const routeKey = (route: Route): string =>
         ? `service/${route.id}/${route.country}`
         : route.page;
 
+/**
+ * How many title, person and service pages stay mounted besides the one on screen, nearest in history first. Each is
+ * a whole live page plus its frozen copy for swipes (`pageSnapshot.ts`), so a long session of Home → title → Home →
+ * title kept every one of them until it reloaded.
+ */
+export const KEPT_DETAILS = 4;
+
+const isDetail = (route: Route) =>
+  route.page === 'title' || route.page === 'person' || route.page === 'service';
+
+/** History's page keys, nearest to `position` first, and Back's side first at an equal distance. */
+export function nearest(
+  entries: ReadonlyMap<number, { pageKey: string }>,
+  position: number,
+): string[] {
+  return [...entries]
+    .sort(([a], [b]) => Math.abs(a - position) - Math.abs(b - position) || a - b)
+    .map(([, entry]) => entry.pageKey);
+}
+
 /** Retained page state: details own a history visit; top-level tabs reuse their browsing surface. */
 export interface PageVisit {
   key: string;
@@ -37,18 +57,20 @@ export class Navigation {
     }
     return (this.current = page);
   }
-  /** Discarded browser branches cannot be reached again. Keep tabs as reusable browsing surfaces. */
-  prune(retained: ReadonlySet<string>) {
+  /**
+   * Keep tabs as reusable browsing surfaces, and of the detail pages only the `KEPT_DETAILS` nearest in history
+   * (`nearest`): one on a discarded branch can't be reached again, and one further back is opened afresh if Back
+   * ever reaches it.
+   */
+  prune(nearby: readonly string[]) {
+    const kept = new Set<string>();
+    for (const key of nearby) {
+      const page = this.pages.get(key);
+      if (kept.size >= KEPT_DETAILS) break;
+      if (page && page !== this.current && isDetail(page.route)) kept.add(key);
+    }
     for (const [key, page] of this.pages) {
-      if (
-        page !== this.current &&
-        !retained.has(key) &&
-        (page.route.page === 'title' ||
-          page.route.page === 'person' ||
-          page.route.page === 'service')
-      ) {
-        this.pages.delete(key);
-      }
+      if (page !== this.current && isDetail(page.route) && !kept.has(key)) this.pages.delete(key);
     }
   }
   save(x: number, y: number) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appPath, Navigation } from './navigation';
+import { appPath, KEPT_DETAILS, Navigation, nearest } from './navigation';
 
 describe('retained routes', () => {
   it('restores Home through nested title/person visits and tab navigation', () => {
@@ -109,8 +109,35 @@ it('releases discarded detail branches while retaining reachable visits and tab 
   nav.visit('/movie/1', 'discarded');
   const kept = nav.visit('/person/7', 'reachable');
   nav.visit('/movie/2', 'current');
-  nav.prune(new Set(['reachable', 'current']));
+  nav.prune(['current', 'reachable']);
   expect(nav.pages.has('discarded')).toBe(false);
   expect(nav.pages.get('reachable')).toBe(kept);
   expect(nav.pages.get('library')).toBe(home);
+});
+
+describe('kept pages', () => {
+  it('keeps only the detail pages nearest in history, and every tab', () => {
+    const nav = new Navigation('/');
+    const entries = new Map<number, { pageKey: string }>([[0, { pageKey: 'library' }]]);
+    // Home → title → Home → title …, as the router records it: each title visit its own page.
+    for (let i = 1; i <= 8; i++) {
+      nav.visit('/', 'library');
+      entries.set(2 * i - 1, { pageKey: 'library' });
+      nav.visit(`/movie/${i}`, `visit-${i}`);
+      entries.set(2 * i, { pageKey: `visit-${i}` });
+      nav.prune(nearest(entries, 2 * i));
+    }
+    nav.visit('/settings');
+    entries.set(17, { pageKey: 'settings' });
+    nav.prune(nearest(entries, 17));
+    expect([...nav.pages.keys()].sort()).toEqual(
+      ['library', 'settings', 'visit-5', 'visit-6', 'visit-7', 'visit-8'].sort(),
+    );
+    expect(KEPT_DETAILS).toBe(4);
+  });
+
+  it('keeps the entries either side of the current one first', () => {
+    const entries = new Map([0, 1, 2, 3, 4].map((at) => [at, { pageKey: `p${at}` }]));
+    expect(nearest(entries, 2)).toEqual(['p2', 'p1', 'p3', 'p0', 'p4']);
+  });
 });

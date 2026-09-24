@@ -9,7 +9,7 @@
   import { swipeHistory } from './lib/swipeBack';
   import LoadingSnapshot from './components/LoadingSnapshot.svelte';
   import RoutePage from './components/RoutePage.svelte';
-  import { Navigation, appPath, routeKey } from './lib/navigation';
+  import { Navigation, appPath, nearest, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
 
   let {
@@ -190,7 +190,7 @@
         if (push && (current.route.page === 'title' || current.route.page === 'person')) {
           navigation.save(0, 0);
         }
-        navigation.prune(new Set(Array.from(entries.values(), (entry) => entry.pageKey)));
+        navigation.prune(nearest(entries, position));
         for (const key of snapshots.keys()) if (!navigation.pages.has(key)) snapshots.delete(key);
         pages = [...navigation.pages.values()];
         onchange(current.route);
