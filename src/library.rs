@@ -45,6 +45,9 @@ const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
 /// `<id>:<token>` of a library the caller already holds, when it starts another (`NewLibraries::Members`).
 pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
+/// Libraries an address may start a minute. A household starts one per TV and another when it moves to a new key;
+/// every one is new storage, which anyone may ask for while `NEW_LIBRARIES=open`.
+const NEW_PER_WINDOW: u32 = 5;
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
 /// A sealed record is under a kilobyte; this is room for any, not a target.
@@ -280,6 +283,7 @@ fn moved() -> Response {
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
     let member = req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let body = match read_json(req, BATCH_MAX_BODY_BYTES).await {
         Ok(body) => body,
@@ -306,6 +310,9 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
                 Ok(false) => return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed")),
                 Err(e) => return read_error(e),
             }
+        }
+        if let Some(wait) = crate::link::throttled_at(state, &format!("lib-new:{ip}"), NEW_PER_WINDOW) {
+            return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
         }
     }
     let fresh = Library {
@@ -1036,6 +1043,30 @@ mod tests {
         assert_eq!(start(&h, other, "new", Some(&format!("{LIB}:{TOKEN}"))).await, StatusCode::OK);
         assert_eq!(start(&h, other, "new", None).await, StatusCode::OK, "once it exists, no proof");
         assert_eq!(start(&h, LIB, TOKEN, None).await, StatusCode::OK, "nor for a library that already was");
+    }
+
+    /// Anyone may start a library while `NEW_LIBRARIES=open`, and a library is new storage: an address starts a few a
+    /// minute at most. A library already started takes its writes as before.
+    #[tokio::test]
+    async fn starting_libraries_is_limited_per_address() {
+        let h = Harness::new();
+        let id = |n: u32| format!("{n:032x}");
+        for n in 0..super::NEW_PER_WINDOW {
+            assert_eq!(start(&h, &id(n), TOKEN, None).await, StatusCode::OK, "{n}");
+        }
+        let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "v" }] }).to_string();
+        let over = h
+            .send("POST", &format!("/lib/{}/batch", id(99)), Some(body), &[("x-den-library-token", TOKEN)])
+            .await;
+        assert_eq!(over.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(over.headers().contains_key("retry-after"));
+        assert_eq!(
+            start(&h, &id(0), TOKEN, None).await,
+            StatusCode::OK,
+            "an existing library still takes writes"
+        );
+        h.advance(60_000);
+        assert_eq!(start(&h, &id(99), TOKEN, None).await, StatusCode::OK, "the window clears");
     }
 
     /// A library has a row cap; rewriting a row it already holds is always fine.

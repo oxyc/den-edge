@@ -83,7 +83,8 @@ sessions live in memory: a restart costs a pairing in progress, which the TV sta
 
 The whole store holds at most `STORE_CAP_BYTES`: a write that would pass it is refused with `507`, so whoever
 can reach den-edge can't fill the host's disk. The inbox, where anyone may start a queue, holds at most a quarter
-of it, so a filled inbox leaves the rest for libraries, grants and connections. A library holds at most 50,000 rows and an 8 MiB memory charge
+of it, so a filled inbox leaves the rest for libraries, grants and connections. An address may start 5 libraries a
+minute (`429` with `Retry-After` past that). A library holds at most 50,000 rows and an 8 MiB memory charge
 (`413 library_full`). The charge includes twice the key/value byte lengths plus row/map overhead. The
 combined library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
 their durable logs. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
