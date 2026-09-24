@@ -90,6 +90,31 @@ describe('cachingFetch', () => {
     }
   });
 
+  it('shows the answer it keeps rather than a rate limit, and does not report one', async () => {
+    const waits: number[] = [];
+    const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
+    waits.length = 0; // What an earlier test left in force.
+    const { entries, store } = memory();
+    entries.set('https://api.themoviedb.org/3/discover/movie?page=1', {
+      body: '{"page":1}',
+      fetchedAt: 0,
+    });
+    const refused: typeof fetch = async () =>
+      new Response('{"error":"rate_limited"}', {
+        status: 429,
+        headers: { 'retry-after': '17' },
+      });
+    try {
+      // Past fresh and past stale: asked, refused, and the kept answer still shows.
+      const res = await cachingFetch(store, refused, () => 30 * 24 * HOUR)(discover);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('{"page":1}');
+      expect(waits).toEqual([]);
+    } finally {
+      stop();
+    }
+  });
+
   it('retains the longest active rate limit for a listener that mounts late', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2100-01-01T00:00:00Z'));

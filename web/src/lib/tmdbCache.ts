@@ -232,8 +232,10 @@ export function cachingFetch(
     try {
       const res = await network(asked, init);
       if (!res.ok) {
+        // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
+        if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body);
         if (res.status === 429) announceThrottle(res);
-        return kept && res.status >= 500 ? answer(kept.body) : res;
+        return res;
       }
       const body = await res.text();
       const fetched = entry(res, body);
