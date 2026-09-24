@@ -67,13 +67,34 @@ function isLink(value: unknown): value is Link {
 
 /** Storage can throw outright (a private window, blocked site data), so every access is guarded. */
 export function readLinks(storage: Storage | undefined = globalThis.localStorage): Link[] {
+  return readList(STORAGE_KEY, isLink, storage) ?? [];
+}
+
+/** The list kept under `key`; undefined where nothing can be read, and this tab's own copy is all there is. */
+function readList<T>(
+  key: string,
+  valid: (value: unknown) => value is T,
+  storage: Storage | undefined = globalThis.localStorage,
+): T[] | undefined {
   try {
-    const raw = storage?.getItem(STORAGE_KEY);
+    if (!storage) return undefined;
+    const raw = storage.getItem(key);
     const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(isLink) : [];
+    return Array.isArray(parsed) ? parsed.filter(valid) : [];
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** `fresh`, with each of `current`'s records it holds unchanged kept as the same object, so what holds one finds it. */
+function reconcile<T>(current: T[], fresh: T[]): T[] {
+  const unchanged = new Map(current.map((item) => [JSON.stringify(item), item]));
+  return fresh.map((item) => unchanged.get(JSON.stringify(item)) ?? item);
+}
+
+/** The same record of a device given the library, whichever copy of it: neither field is ever changed. */
+function sameShared(a: Shared, b: Shared): boolean {
+  return a === b || (a.at === b.at && a.libraryKey === b.libraryKey);
 }
 
 function writeLinks(list: Link[], storage: Storage | undefined = globalThis.localStorage): void {
@@ -85,13 +106,7 @@ function writeLinks(list: Link[], storage: Storage | undefined = globalThis.loca
 }
 
 export function readShared(storage: Storage | undefined = globalThis.localStorage): Shared[] {
-  try {
-    const raw = storage?.getItem(SHARED_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(isShared) : [];
-  } catch {
-    return [];
-  }
+  return readList(SHARED_KEY, isShared, storage) ?? [];
 }
 
 function writeShared(list: Shared[], storage: Storage | undefined = globalThis.localStorage): void {
@@ -119,7 +134,12 @@ function writeBrowsing(storage: Storage | undefined = globalThis.localStorage): 
   }
 }
 
-class Links {
+/**
+ * The links and shared devices, as every tab of this browser keeps them. Each change starts from what storage holds
+ * now, and a change made in another tab is taken up as it lands (`storage`). Each tab used to write its own copy from
+ * when it loaded, so a TV paired in one tab was dropped by the next change another tab made, and gone on reload.
+ */
+export class Links {
   list = $state<Link[]>(readLinks());
   /** The devices this browser gave its library to. */
   shared = $state<Shared[]>(readShared());
@@ -131,6 +151,23 @@ class Links {
   /** The TV a link was forgotten for because it reset its library key, until this browser links again. */
   moved = $state<string | null>(null);
 
+  constructor() {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('storage', (event) => {
+      if (event.key === null || [STORAGE_KEY, SHARED_KEY, BROWSING_KEY].includes(event.key))
+        this.reread();
+    });
+  }
+
+  /** Take up what storage holds now, which another tab may have changed. */
+  private reread(): void {
+    const list = readList(STORAGE_KEY, isLink);
+    if (list) this.list = reconcile(this.list, list);
+    const shared = readList(SHARED_KEY, isShared);
+    if (shared) this.shared = reconcile(this.shared, shared);
+    if (readBrowsing()) this.browsing = true;
+  }
+
   get current(): Link | undefined {
     return this.list[0];
   }
@@ -140,6 +177,7 @@ class Links {
     details: { name?: string; libraryKey: string; linkKey: string; deviceId?: string },
     now = Date.now(),
   ): void {
+    this.reread();
     if (this.list.some((l) => l.inboxKey === inboxKey)) return;
     const name =
       details.name ?? (this.list.length ? `Apple TV ${this.list.length + 1}` : 'Apple TV');
@@ -160,6 +198,7 @@ class Links {
 
   /** Open `inboxKey`'s library from now on: the link first, so it's the one the app starts with. */
   makeCurrent(inboxKey: string): void {
+    this.reread();
     const chosen = this.list.find((l) => l.inboxKey === inboxKey);
     if (!chosen || this.list[0] === chosen) return;
     this.list = [chosen, ...this.list.filter((l) => l !== chosen)];
@@ -180,38 +219,47 @@ class Links {
     now = Date.now(),
   ): Shared {
     const entry: Shared = { name, at: now, libraryKey, ...pairing };
+    this.reread();
     this.shared = [...this.shared, entry];
     writeShared(this.shared);
     return entry;
   }
 
   identifyShared(entry: Shared, name: string, deviceId?: string): void {
-    if (
-      !this.shared.includes(entry) ||
-      (deviceId !== undefined && !/^[0-9a-f]{16}$/.test(deviceId))
-    )
-      return;
-    entry.name = name;
-    if (deviceId) entry.deviceId = deviceId;
+    if (deviceId !== undefined && !/^[0-9a-f]{16}$/.test(deviceId)) return;
+    this.reread();
+    const kept = this.shared.find((s) => sameShared(s, entry));
+    if (!kept) return;
+    for (const record of kept === entry ? [kept] : [kept, entry]) {
+      record.name = name;
+      if (deviceId) record.deviceId = deviceId;
+    }
     this.shared = [...this.shared];
     writeShared(this.shared);
   }
 
   identityDelivered(entry: Link, name: string, deviceId: string): void {
-    if (!/^[0-9a-f]{16}$/.test(deviceId) || !this.list.includes(entry)) return;
-    entry.sentIdentityName = name;
-    entry.sentIdentityDeviceId = deviceId;
+    if (!/^[0-9a-f]{16}$/.test(deviceId)) return;
+    this.reread();
+    const kept = this.list.find((l) => l.inboxKey === entry.inboxKey);
+    if (!kept) return;
+    for (const record of kept === entry ? [kept] : [kept, entry]) {
+      record.sentIdentityName = name;
+      record.sentIdentityDeviceId = deviceId;
+    }
     this.list = [...this.list];
     writeLinks(this.list);
   }
 
   /** Drop that record. The device keeps the library it was given; this only stops listing it. */
   forgetShared(entry: Shared): void {
-    this.shared = this.shared.filter((s) => s !== entry);
+    this.reread();
+    this.shared = this.shared.filter((s) => !sameShared(s, entry));
     writeShared(this.shared);
   }
 
   remove(inboxKey: string): void {
+    this.reread();
     const gone = this.list.find((l) => l.inboxKey === inboxKey);
     this.list = this.list.filter((l) => l.inboxKey !== inboxKey);
     writeLinks(this.list);
