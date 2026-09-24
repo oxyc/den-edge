@@ -769,7 +769,7 @@ async fn detail_answer(
     key: &str,
     rid: &str,
 ) -> Response {
-    let _asking = match detail.kept().await {
+    let mut asking = match detail.kept().await {
         Kept::Hit(body, fresh, age, modified) => {
             return answer(body, &fresh_policy(fresh, fresh.saturating_sub(age)), "hit", modified, asked)
         }
@@ -789,7 +789,10 @@ async fn detail_answer(
             if let Some(refusal) = over_allowance(state, ip, asked).await {
                 return refusal;
             }
-            let asking = one_asking(&detail.whole().1).await;
+            let asking = match one_asking(&detail.whole().1, "tmdb").await {
+                Ok(asking) => asking,
+                Err(refusal) => return *refusal,
+            };
             // A question about this title that got here first has kept its answer by now.
             match detail.kept().await {
                 Kept::Hit(body, fresh, age, modified) => {
@@ -812,7 +815,10 @@ async fn detail_answer(
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
             answer(detail.narrowed(whole).await, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
-        Err(response) => *response,
+        Err(response) => match &mut asking {
+            Some(asking) => *asking.failed(response).await,
+            None => *response,
+        },
     }
 }
 
@@ -820,10 +826,34 @@ async fn detail_answer(
 static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<Turn>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-/// One file's question: whose turn it is to ask.
+/// One file's question: whose turn it is to ask, and how the last ask ended.
 #[derive(Default)]
 struct Turn {
     ask: Arc<tokio::sync::Mutex<()>>,
+    /// How many asks have ended since the entry was made, and the last one's refusal with whose key it was asked
+    /// on; `None` when it did not fail.
+    ended: std::sync::Mutex<(u64, Option<(String, Failure)>)>,
+}
+
+/// An upstream's refusal as a caller was answered it, kept to be given again to the callers that waited on it.
+#[derive(Clone)]
+struct Failure {
+    status: StatusCode,
+    headers: HeaderMap,
+    code: Option<crate::handler::ErrorCode>,
+    body: Bytes,
+}
+
+impl Failure {
+    fn response(&self) -> Box<Response> {
+        let mut resp = Response::new(Body::from(self.body.clone()));
+        *resp.status_mut() = self.status;
+        *resp.headers_mut() = self.headers.clone();
+        if let Some(code) = &self.code {
+            resp.extensions_mut().insert(code.clone());
+        }
+        Box::new(resp)
+    }
 }
 
 /// The one question for `file` in flight, held until it is dropped. A cold question used to be asked once per
@@ -831,19 +861,58 @@ struct Turn {
 /// OMDb, or doesthedogdie) that many times and spent that many units of the day's budget. Whoever holds this asks;
 /// whoever waits for it looks at what was kept first. Shared by `ratings.rs` and `warnings.rs`, whose answers are
 /// kept in files too.
-pub(crate) async fn one_asking(file: &Path) -> Asking {
-    let place = {
+///
+/// A caller that waited on an ask that failed is given that failure (`Err`) rather than asking again: each asked in
+/// turn, so the k-th caller behind an upstream that was down waited k timeouts, and spent k questions. Only an ask
+/// on the same key (`whose`) answers for it — one key refused, rested or spent says nothing about another — and
+/// only an ask that ended after this caller joined, so whoever comes later asks afresh.
+pub(crate) async fn one_asking(file: &Path, whose: &str) -> Result<Asking, Box<Response>> {
+    let (place, joined) = {
         let mut asking = crate::lock(&ASKING);
-        Place { file: file.to_owned(), turn: Some(Arc::clone(asking.entry(file.to_owned()).or_default())) }
+        let turn = Arc::clone(asking.entry(file.to_owned()).or_default());
+        let joined = crate::lock(&turn.ended).0;
+        (Place { file: file.to_owned(), turn: Some(turn) }, joined)
     };
     let ask = Arc::clone(&place.turn().ask);
-    Asking { _held: ask.lock_owned().await, _place: place }
+    let held = ask.lock_owned().await;
+    let ended = crate::lock(&place.turn().ended).clone();
+    if let (true, Some((asker, failure))) = (ended.0 > joined, ended.1) {
+        if asker == whose {
+            return Err(failure.response());
+        }
+    }
+    Ok(Asking { _held: held, place, whose: whose.to_owned(), failure: None })
 }
 
 pub(crate) struct Asking {
     // Let go of first, so the turn passes on before the place is given up.
     _held: tokio::sync::OwnedMutexGuard<()>,
-    _place: Place,
+    place: Place,
+    whose: String,
+    failure: Option<Failure>,
+}
+
+impl Asking {
+    /// This ask failed with `refusal`: kept for the callers waiting on it, and handed back to answer this one.
+    pub(crate) async fn failed(&mut self, refusal: Box<Response>) -> Box<Response> {
+        let (parts, body) = refusal.into_parts();
+        // A refusal is a line of JSON; one that cannot be read whole is given on, and not kept.
+        let Ok(body) = axum::body::to_bytes(body, 64 * 1024).await else {
+            return Box::new(Response::from_parts(parts, Body::empty()));
+        };
+        let code = parts.extensions.get::<crate::handler::ErrorCode>().cloned();
+        let failure = Failure { status: parts.status, headers: parts.headers, code, body };
+        let refusal = failure.response();
+        self.failure = Some(failure);
+        refusal
+    }
+}
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        let mut ended = crate::lock(&self.place.turn().ended);
+        *ended = (ended.0 + 1, self.failure.take().map(|failure| (std::mem::take(&mut self.whose), failure)));
+    }
 }
 
 /// A caller's place in a file's turn, from joining it to leaving it however it leaves: with its answer, or
@@ -887,13 +956,19 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             Kept::Hit(body, ..) => body,
             Kept::Absent => return None,
             Kept::Stale(..) | Kept::Nothing => {
-                let _asking = one_asking(&detail.whole().1).await;
+                let mut asking = one_asking(&detail.whole().1, "tmdb").await.ok()?;
                 match detail.kept().await {
                     Kept::Hit(body, ..) => body,
                     Kept::Absent => return None,
                     Kept::Stale(..) | Kept::Nothing => {
                         preview_allowed(state)?;
-                        detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0).await
+                        match detail.ask(state, key, "meta").await {
+                            Ok((whole, ..)) => detail.narrowed(whole).await,
+                            Err(refusal) => {
+                                asking.failed(refusal).await;
+                                return None;
+                            }
+                        }
                     }
                 }
             }
@@ -1558,7 +1633,7 @@ mod tests {
         assert!(url.contains("language=en-US"), "{url}");
     }
 
-    use crate::handler::tests::{body_text, temp_dir, Harness};
+    use crate::handler::tests::{body_json, body_text, temp_dir, Harness};
 
     fn lending(cache: &Path, daily_max: Option<u32>) -> Harness {
         let cache = cache.to_path_buf();
@@ -1992,16 +2067,74 @@ mod tests {
         );
     }
 
+    /// When the one asking failed, each caller behind it asked TMDB again in turn, so the k-th waited k timeouts. A
+    /// caller that waited behind a failed ask is given its answer, a link preview's included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn callers_behind_a_failed_ask_are_given_its_answer() {
+        let cache = temp_dir();
+        let h = Arc::new(lending_as(&cache, "failing-slowly"));
+        let asked = Arc::new(std::sync::Mutex::new(0));
+        let seen = Arc::clone(&asked);
+        let slow: Upstream = Arc::new(move |_: &str| {
+            *crate::lock(&seen) += 1;
+            std::thread::sleep(Duration::from_millis(300));
+            Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout"))
+        });
+        crate::lock(&UPSTREAMS).push(("failing-slowly".to_owned(), slow));
+        let started = std::time::Instant::now();
+        let callers: Vec<_> = (0..3)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                tokio::spawn(async move { h.send("GET", "/tmdb/3/movie/551", None, &[]).await })
+            })
+            .collect();
+        let preview = {
+            let h = Arc::clone(&h);
+            tokio::spawn(async move { ask(&h.state, "/3/movie/551", None).await })
+        };
+        for caller in callers {
+            let resp = caller.await.unwrap();
+            assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(body_json(resp).await["error"], "tmdb_timeout");
+        }
+        assert!(preview.await.unwrap().is_none());
+        assert_eq!(*crate::lock(&asked), 1, "asked once");
+        assert!(started.elapsed() < Duration::from_millis(550), "one ask's wait: {:?}", started.elapsed());
+
+        // A caller arriving after the failure asks again.
+        assert_eq!(h.send("GET", "/tmdb/3/movie/551", None, &[]).await.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(*crate::lock(&asked), 2);
+    }
+
+    /// A failed ask answers only for the callers that waited on it with the same key: a made-up key refused says
+    /// nothing about the household's, and whoever comes after the failure asks again.
+    #[tokio::test]
+    async fn a_failed_ask_answers_only_for_its_own_key_and_its_own_waiters() {
+        let file = cache_path(&temp_dir(), "/3/movie/552?");
+        let mut holder = one_asking(&file, "made-up").await.ok().unwrap();
+        let waiter = |whose: &'static str| {
+            let file = file.clone();
+            tokio::spawn(async move { one_asking(&file, whose).await.map(drop).map_err(|r| r.status()) })
+        };
+        let (same, other) = (waiter("made-up"), waiter("household"));
+        tokio::task::yield_now().await;
+        let _ = holder.failed(refused(StatusCode::UNAUTHORIZED, "key_refused")).await;
+        drop(holder);
+        assert_eq!(same.await.unwrap(), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(other.await.unwrap(), Ok(()), "another key asks for itself");
+        assert!(one_asking(&file, "made-up").await.is_ok(), "a caller after the failure asks again");
+    }
+
     /// A waiter dropped between the holder letting go and its own first look — a preview past its budget, a page
     /// closed — held the entry's last reference but no turn, so the holder saw one reference too many and the file
     /// stayed in `ASKING` for good.
     #[tokio::test]
     async fn a_waiter_that_stops_waiting_leaves_nothing_in_flight() {
         let file = cache_path(&temp_dir(), "/3/movie/550?");
-        let holder = one_asking(&file).await;
+        let holder = one_asking(&file, "tmdb").await;
         let waiter = {
             let file = file.clone();
-            tokio::spawn(async move { drop(one_asking(&file).await) })
+            tokio::spawn(async move { drop(one_asking(&file, "tmdb").await) })
         };
         tokio::task::yield_now().await;
         // The turn passes to the waiter, which is stopped before it is run again.

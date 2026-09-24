@@ -107,9 +107,12 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     let Some(key) = spendable(state, member.as_deref(), own, state.ratings_key.as_ref()).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
-    let _asking = match &file {
+    let mut asking = match &file {
         Some(file) => {
-            let asking = crate::tmdb::one_asking(file).await;
+            let asking = match crate::tmdb::one_asking(file, &key.whose()).await {
+                Ok(asking) => asking,
+                Err(refusal) => return *refusal,
+            };
             // A question for this title that got here first has kept its answer by now.
             if let Some((body, age, modified)) = crate::tmdb::read(file).await {
                 if body.as_ref() == ABSENT && age < ABSENT_TTL {
@@ -136,7 +139,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             }
             crate::warnings::absent()
         }
-        Err(refused) => *refused,
+        Err(refused) => match &mut asking {
+            Some(asking) => *asking.failed(refused).await,
+            None => *refused,
+        },
     }
 }
 

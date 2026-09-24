@@ -118,9 +118,12 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     let Some(key) = spendable(state, member.as_deref(), own, state.warnings_key.as_ref()).await else {
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
-    let _asking = match &file {
+    let mut asking = match &file {
         Some(file) => {
-            let asking = crate::tmdb::one_asking(file).await;
+            let asking = match crate::tmdb::one_asking(file, &key.whose()).await {
+                Ok(asking) => asking,
+                Err(refusal) => return *refusal,
+            };
             // A question for this title that got here first has kept its answer by now.
             if let Some((body, age, modified)) = crate::tmdb::read(file).await {
                 match verdict(body.as_ref() == ABSENT, age) {
@@ -136,7 +139,10 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     match lookup(state, &imdb, &key, rid).await {
         Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss", asked).await,
         Ok(None) => forget(file.as_deref()).await,
-        Err(refused) => *refused,
+        Err(refused) => match &mut asking {
+            Some(asking) => *asking.failed(refused).await,
+            None => *refused,
+        },
     }
 }
 
@@ -179,6 +185,17 @@ pub(crate) struct Key {
     pub(crate) value: String,
     /// The household's, which is rested when the service says so and never blamed on the caller.
     pub(crate) household: bool,
+}
+
+impl Key {
+    /// Whose key this is, without the key: the household's, or a caller's by a digest of it.
+    pub(crate) fn whose(&self) -> String {
+        if self.household {
+            "household".to_owned()
+        } else {
+            crate::hex(&Sha256::digest(self.value.as_bytes())[..8])
+        }
+    }
 }
 
 /// Settings' "Save & validate": the caller's key, asked their cheapest question. 204 when it works.
@@ -227,9 +244,9 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
             }
         }
     }
-    let _asking = match &file {
+    let mut asking = match &file {
         Some(file) => {
-            let asking = crate::tmdb::one_asking(file).await;
+            let asking = crate::tmdb::one_asking(file, &key.whose()).await?;
             // Every cold title needs the table, so a burst of them asked for it at once, two questions apiece.
             if let Some((body, age, _)) = crate::tmdb::read(file).await {
                 if age < FRESH {
@@ -242,14 +259,22 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
         }
         None => None,
     };
-    let topics = ask(state, "/topics", key, rid).await?;
-    let categories = ask(state, "/topiccategories", key, rid).await?;
-    let table = topic_table(&topics, &categories);
-    // A table naming no topic is not an answer: doesthedogdie names hundreds. Kept, a bad answer (an error in a
-    // 200, a changed shape) named every title's warnings by nothing but their own field for 30 days.
-    if table.as_object().is_none_or(Map::is_empty) {
-        return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
-    }
+    let asked = async {
+        let topics = ask(state, "/topics", key, rid).await?;
+        let categories = ask(state, "/topiccategories", key, rid).await?;
+        let table = topic_table(&topics, &categories);
+        // A table naming no topic is not an answer: doesthedogdie names hundreds. Kept, a bad answer (an error in a
+        // 200, a changed shape) named every title's warnings by nothing but their own field for 30 days.
+        if table.as_object().is_none_or(Map::is_empty) {
+            return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
+        }
+        Ok(table)
+    };
+    let table = match (asked.await, &mut asking) {
+        (Ok(table), _) => table,
+        (Err(refused), Some(asking)) => return Err(asking.failed(refused).await),
+        (Err(refused), None) => return Err(refused),
+    };
     if let Some(file) = &file {
         crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
     }
