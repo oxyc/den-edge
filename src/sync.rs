@@ -3,16 +3,19 @@
 //!
 //!   DELETE /sync/{id}  → { deleted: true }
 
-use crate::handler::{error, internal, json_reply};
+use crate::handler::{error, internal, json_reply, method_not_allowed};
 use crate::AppState;
 use axum::extract::Request;
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use serde_json::json;
 
 const NS: &str = "sync";
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
+    if req.method() != Method::DELETE {
+        return method_not_allowed();
+    }
     let id = req.uri().path().strip_prefix("/sync/").unwrap_or("").to_owned();
     if !(16..=128).contains(&id.len()) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_sync_id"));
@@ -52,5 +55,17 @@ mod tests {
             h.call("PUT", &format!("/sync/{ID}"), Some(json!({ "ciphertext": "A", "nonce": "n" }))).await;
         assert_eq!(put.0, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(h.call("GET", &format!("/sync/{ID}"), None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+        // A preflight from an origin not on the list reaches the router, and must not erase anything.
+        for method in ["HEAD", "OPTIONS"] {
+            let preflight =
+                [("origin", "https://elsewhere.example"), ("access-control-request-method", "DELETE")];
+            let resp = h.send(method, &format!("/sync/{ID}"), None, &preflight).await;
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        }
+        h.state.store.put("sync", ID, b"{}").await.unwrap();
+        for method in ["HEAD", "OPTIONS"] {
+            h.send(method, &format!("/sync/{ID}"), None, &[]).await;
+        }
+        assert!(h.state.store.get("sync", ID).await.unwrap().is_some(), "only a DELETE erases");
     }
 }

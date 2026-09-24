@@ -47,12 +47,13 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
         "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
-        "/inbox/drain" => {
+        "/inbox/drain" if req.method() == Method::GET => {
             if let Some(wait) = drain_budget(state, &crate::handler::client_ip(state, &req), 1) {
                 return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
             }
             drain(state, link_key(&req)).await
         }
+        "/inbox/drain" => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
     }
 }
@@ -231,6 +232,24 @@ mod tests {
         assert_eq!(append(&h, "BAUG").await, StatusCode::OK);
         assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAECAw-_" }), json!({ "sealed": "BAUG" })]);
         assert!(drain(&h).await.is_empty(), "a drain empties the queue");
+    }
+
+    /// A drain empties the queue, so only the methods that ask for one drain. A HEAD or OPTIONS used to pass the
+    /// method allowlist and then drain, handing the messages to nobody: a HEAD answer has no body.
+    #[tokio::test]
+    async fn a_head_or_options_never_drains() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        for method in ["HEAD", "OPTIONS"] {
+            let origin = [
+                ("x-den-link", KEY),
+                ("origin", "https://elsewhere.example"),
+                ("access-control-request-method", "GET"),
+            ];
+            let resp = h.send(method, "/inbox/drain", None, &origin).await;
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        }
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "still there for the GET");
     }
 
     /// A TV with several linked devices drains all of their queues in one request, in the order it named them,

@@ -178,8 +178,10 @@ fn preflight() -> Response {
 async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid: &str) -> Response {
     if let Some(allowed) = allowed_methods(route) {
         let m = req.method();
-        // A preflight or a HEAD probe never reaches a handler that changes anything.
-        if m != Method::OPTIONS && m != Method::HEAD && !allowed.contains(m) {
+        // A HEAD is a GET without the body, so it passes only where a GET does. Neither it nor an OPTIONS passes
+        // anywhere else: `/inbox/drain` took any method but POST for a drain and `/sync/{id}` any method for a
+        // delete, so a HEAD emptied a queue and a preflight from an origin not on the list erased a backup.
+        if !(allowed.contains(m) || m == Method::HEAD && allowed.contains(&Method::GET)) {
             return bare_json(StatusCode::METHOD_NOT_ALLOWED, &error("method_not_allowed"));
         }
     }
@@ -1307,8 +1309,10 @@ pub mod tests {
         assert_eq!(h.call("GET", "/plugins", None).await.0, StatusCode::NOT_FOUND, "a retired route is gone");
         // An unknown route is the router's 404, whatever the method.
         assert_eq!(h.call("DELETE", "/nope", None).await.0, StatusCode::NOT_FOUND);
-        // A preflight and a HEAD probe pass the allowlist; HEAD carries no body.
-        assert_eq!(h.call("OPTIONS", "/health", None).await.0, StatusCode::OK);
+        // A HEAD probe passes where a GET does, and carries no body; an OPTIONS the preflight did not answer passes
+        // nowhere.
+        assert_eq!(h.call("OPTIONS", "/health", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(h.send("HEAD", "/link", None, &[]).await.status(), StatusCode::METHOD_NOT_ALLOWED);
         let head = h.send("HEAD", "/health", None, &[]).await;
         assert_eq!(head.status(), StatusCode::OK);
         assert_eq!(body_text(head).await, "");
