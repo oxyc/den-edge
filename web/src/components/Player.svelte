@@ -406,6 +406,8 @@
       hls?.destroy();
       hls = undefined;
       endSession(replacing);
+      // The one it replaces may have failed (another release picked after "couldn't play"): the video comes back.
+      failure = null;
     }
     started = at;
     askedMaxBitrate = maxBitrate;
