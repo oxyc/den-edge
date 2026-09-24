@@ -82,12 +82,20 @@ interface KeptWork {
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
 const SNAPSHOT = 'log.v1';
 
+/**
+ * Under what a first read of the log keeps the pages it has read so far, so a read cut off on a slow link goes on
+ * from there on the next visit instead of from the start. Never opened as the library: only `SNAPSHOT` is whole.
+ */
+const PARTIAL = 'log-partial.v1';
+
 /** How long a log den-edge refused to start waits before its kept work is sent again (`refused`). */
 const RECHECK_MS = 10 * 60_000;
 
 /**
- * How long one request to den-edge may take, its body included. Refresh and writes share one queue (`writes`), so
- * a request that never answers would otherwise hold every later save and every refresh behind it until a reload.
+ * How long den-edge may take to start answering a request, and then between one piece of its answer and the next.
+ * Refresh and writes share one queue (`writes`), so a request that never answers would otherwise hold every later
+ * save and every refresh behind it until a reload. Not a limit on the whole answer: a 512 KiB page of `/changes` on
+ * a slow link, still arriving, takes as long as it takes.
  */
 const REQUEST_MS = 20_000;
 
@@ -294,6 +302,15 @@ export class LibraryLog {
     await log.registerMember();
     useLibraryCredential(keys);
     let since = 0;
+    const partial = await log.kept<Snapshot>(PARTIAL);
+    if (partial) {
+      log.generation = partial.generation;
+      log.head = since = partial.head;
+      for (const [name, seq, row] of partial.entries) {
+        log.acknowledged.set(name, { seq, row });
+        log.entries.set(name, { seq, row });
+      }
+    }
     for (;;) {
       let res: Response;
       try {
@@ -306,17 +323,24 @@ export class LibraryLog {
       await policy;
       if (res.status === 404) {
         if (!(await log.stageRecovery())) return null;
+        log.forgetPartial();
         log.memberRegistered = false;
         log.head = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
         return log.restoreJournal();
       }
       if (res.status === 410) {
+        log.forgetPartial();
         log.moved = true;
         return log;
       }
       if (!res.ok) return null;
-      const page = (await res.json()) as Page;
+      let page: Page;
+      try {
+        page = (await res.json()) as Page;
+      } catch {
+        return null;
+      }
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (!(await log.stageRecovery())) return null;
         log.memberRegistered = false;
@@ -345,8 +369,10 @@ export class LibraryLog {
       if (!page.more || page.entries.length === 0) {
         log.dirty = true;
         log.persist();
+        log.forgetPartial();
         return log.restoreJournal();
       }
+      log.keepPartial();
       since = page.entries.at(-1)?.seq ?? page.head;
     }
   }
@@ -486,12 +512,7 @@ export class LibraryLog {
   private persist(): void {
     if (!this.dirty || !this.local) return;
     this.dirty = false;
-    const snapshot: Snapshot = {
-      generation: this.generation,
-      head: this.head,
-      memberRegistered: this.memberRegistered,
-      entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
-    };
+    const snapshot = this.snapshot();
     this.saving = this.saving
       .then(() =>
         snapshot.entries.length
@@ -502,6 +523,30 @@ export class LibraryLog {
         this.dirty = true;
         console.warn('den: the library could not be kept for the next visit', error);
       });
+  }
+
+  private snapshot(): Snapshot {
+    return {
+      generation: this.generation,
+      head: this.head,
+      memberRegistered: this.memberRegistered,
+      entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
+    };
+  }
+
+  /** The pages a first read has read so far (`PARTIAL`); a failure only costs the next visit those pages. */
+  private keepPartial(): void {
+    if (!this.local) return;
+    const snapshot = this.snapshot();
+    this.saving = this.saving.then(() => this.keep(PARTIAL, snapshot)).catch(() => undefined);
+  }
+
+  private forgetPartial(): void {
+    const local = this.local;
+    if (!local) return;
+    this.saving = this.saving
+      .then(() => local.vault.remove(`${this.keys.id}:${PARTIAL}`))
+      .catch(() => undefined);
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
@@ -616,9 +661,50 @@ export class LibraryLog {
     console.warn(`den: den-edge refused a library write (${res.status} ${code ?? ''})`);
   }
 
-  /** A request to den-edge that gives up after `REQUEST_MS`. */
-  private send(path: string, init: RequestInit = {}): Promise<Response> {
-    return this.fetchImpl(path, { ...init, signal: AbortSignal.timeout(REQUEST_MS) });
+  /**
+   * A request to den-edge that gives up when it has not started answering after `REQUEST_MS`, or when its body then
+   * stops arriving for as long. The body is read through here, so a stall fails the read even where aborting the
+   * request would not end it.
+   */
+  private async send(path: string, init: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timedOut = () => new DOMException('den-edge stopped answering', 'TimeoutError');
+    const deadline = setTimeout(() => controller.abort(timedOut()), REQUEST_MS);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(path, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(deadline);
+    }
+    if (!res.body) return res;
+    const reader = res.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(stream) {
+        let stall: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const next = await Promise.race([
+            reader.read(),
+            new Promise<never>((_, reject) => {
+              stall = setTimeout(() => reject(timedOut()), REQUEST_MS);
+            }),
+          ]);
+          if (next.done) stream.close();
+          else stream.enqueue(next.value);
+        } catch (error) {
+          controller.abort(error);
+          void reader.cancel(error).catch(() => undefined);
+          stream.error(error);
+        } finally {
+          clearTimeout(stall);
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    });
+    return new Response(body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   }
 
   private headers(): Record<string, string> {

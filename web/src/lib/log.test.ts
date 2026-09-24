@@ -221,12 +221,6 @@ describe('LibraryLog', () => {
   /** Refresh and writes share one queue: a read den-edge never answered held every later save behind it. */
   it('gives up on a request den-edge never answers, and saves after it', async () => {
     const server = await edge([row(1)]);
-    const timeouts: AbortController[] = [];
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
-      const controller = new AbortController();
-      timeouts.push(controller);
-      return controller.signal;
-    });
     let stall = false;
     const connection: typeof fetch = (url, init) =>
       stall && init?.method !== 'POST'
@@ -234,18 +228,111 @@ describe('LibraryLog', () => {
             init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
           )
         : server.fetchImpl(url, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
       stall = true;
       const refreshed = log.refresh();
       const saved = log.write(row(2));
-      await vi.waitFor(() => expect(timeouts.length).toBeGreaterThan(1));
-      timeouts.at(-1)!.abort(new DOMException('timed out', 'TimeoutError'));
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(await refreshed).toBe(false);
       expect(await saved).not.toBeNull();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same limit covered the whole body: a large page of `/changes` on a slow link, arriving all along, was cut off
+   * at 20 seconds every time. It now limits only the wait for den-edge to start answering, and each stall after.
+   */
+  it('reads an answer that keeps arriving for longer than a request may wait, and gives up on one that stops', async () => {
+    const server = await edge([row(1)]);
+    let slow = false;
+    let stopAfter = Infinity;
+    // Each piece of the answer 10 s after the last, and none after `stopAfter` pieces.
+    const connection: typeof fetch = async (url, init) => {
+      const res = await server.fetchImpl(url, init);
+      if (!slow || init?.method) return res;
+      const text = await res.text();
+      const pieces = [text.slice(0, 10), text.slice(10, 20), text.slice(20)];
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull: (stream) =>
+          new Promise<void>((resolve, reject) => {
+            if (sent >= stopAfter) return;
+            const next = setTimeout(() => {
+              const piece = pieces[sent++];
+              if (piece === undefined) stream.close();
+              else stream.enqueue(new TextEncoder().encode(piece));
+              resolve();
+            }, 10_000);
+            init?.signal?.addEventListener('abort', () => {
+              clearTimeout(next);
+              reject(init.signal!.reason);
+            });
+          }),
+      });
+      return new Response(body, { status: res.status });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    await tv.write(row(2));
+    // A limit on the whole request, as before, on the same clock as the answer.
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      slow = true;
+      const refreshed = log.refresh();
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(await refreshed, 'arrived over 40 s').toBe(true);
+      expect(log.title({ type: 'movie', id: 2 })).toBeDefined();
+
+      await tv.write(row(3));
+      stopAfter = 1;
+      const stalled = log.refresh();
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(await stalled, 'stopped after its first piece').toBe(false);
+    } finally {
+      vi.useRealTimers();
       vi.restoreAllMocks();
     }
+  });
+
+  /** A first read cut off part way started again from the first page on every visit, and on a slow link never ended. */
+  it('goes on with a first read from the last page it kept', async () => {
+    const { data, vault } = memoryVault();
+    const server = await edge([row(1), row(2), row(3), row(4), row(5)]);
+    const asked: string[] = [];
+    let failAt = 2;
+    const connection: typeof fetch = async (url, init) => {
+      if (!init?.method) {
+        asked.push(String(url));
+        if (asked.length === failAt) throw new TypeError('offline');
+      }
+      return server.fetchImpl(url, init);
+    };
+    expect(await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault)).toBeNull();
+    await vi.waitFor(() => expect(data.size).toBe(1));
+    asked.length = 0;
+    failAt = 0;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    expect(log.fromCache).toBe(false);
+    expect(asked[0]).toContain('since=2');
+    expect(log.rows()).toHaveLength(5);
+    await vi.waitFor(async () => {
+      expect(data.size, 'only the whole copy is kept').toBe(1);
+      const next = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      expect(next.fromCache).toBe(true);
+      expect(next.rows()).toHaveLength(5);
+    });
   });
 
   it('shows the kept copy without waiting on den-edge, and sends kept work on the refresh after', async () => {
