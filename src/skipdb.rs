@@ -80,8 +80,11 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         Some(file) => crate::tmdb::read(file).await,
         None => None,
     };
-    // Where an answer to this may be written: over what is kept, or under a new name while today allows one.
-    let keep = file.filter(|_| kept.is_some() || new_name(state));
+    // Where an answer to this may be written: over what is kept, or under a new name while today allows one. Asked
+    // only once there is an answer to write: counted before SkipDB was asked, questions refused as busy or failed
+    // spent the day's new names and kept nothing.
+    let known = kept.is_some();
+    let keep = || file.as_ref().filter(|_| known || new_name(state));
     if let Some((body, age, modified)) = kept {
         let absent = body.as_ref() == ABSENT;
         if absent && age < ABSENT_TTL {
@@ -96,19 +99,19 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     }
     match lookup(state, &asked_for, rid).await {
         Ok(Some(body)) => {
-            if let Some(file) = &keep {
+            if let Some(file) = keep() {
                 crate::tmdb::write(file, &body).await;
                 let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
-            if let (Some(file), Some((body, modified))) = (&keep, stale) {
+            if let (Some(file), Some((body, modified))) = (&file, stale) {
                 if !gone(file).await {
                     return answer(body, STALE_MAX_AGE, "stale", modified, asked);
                 }
             }
-            if let Some(file) = &keep {
+            if let Some(file) = keep() {
                 crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
             }
             crate::warnings::absent()
@@ -484,5 +487,29 @@ mod tests {
         assert!(crate::tmdb::read(&kept).await.unwrap().1 < Duration::from_secs(60), "written over");
         h.advance(DAY * 1000);
         assert!(new_name(&h.state), "tomorrow starts over");
+    }
+
+    /// A new name was counted against the day before SkipDB was asked, so questions refused as busy, or failed,
+    /// spent the day's new names with nothing kept.
+    #[tokio::test]
+    async fn only_an_answer_kept_spends_a_new_name() {
+        let cache = crate::handler::tests::temp_dir();
+        let dir = cache.clone();
+        let h =
+            crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), move |state| {
+                state.skipdb_cache_dir = Some(dir);
+            });
+        let (answers, _asked) = skipdb("tt0000303");
+        *crate::lock(&answers) = (StatusCode::BAD_GATEWAY, "");
+        for n in 1..=UPSTREAM_PER_MINUTE + 10 {
+            let resp = h.send("GET", &format!("/skipdb/tt0000303/1/{n}"), None, &[]).await;
+            assert!(resp.status().is_server_error(), "{n}");
+        }
+        assert_eq!(crate::lock(&h.state.skipdb_kept_new).1, 0, "nothing kept, nothing spent");
+        h.advance(61_000);
+        *crate::lock(&answers) = (StatusCode::OK, NAMED);
+        assert_eq!(h.send("GET", "/skipdb/tt0000303/2/1", None, &[]).await.status(), StatusCode::OK);
+        assert_eq!(crate::lock(&h.state.skipdb_kept_new).1, 1);
+        assert!(cache.join("tt0000303-s2e1.json").exists());
     }
 }
