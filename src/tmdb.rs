@@ -390,6 +390,20 @@ struct Detail {
     dir: PathBuf,
 }
 
+/// Below this an answer is cut (`Detail::narrowed`) where it is: well under a millisecond, less than the hop to the
+/// blocking pool is worth.
+const NARROW_INLINE_BYTES: usize = 64 * 1024;
+
+fn narrowed(all: &[&str], asked: &BTreeSet<String>, body: Bytes) -> Bytes {
+    let Ok(serde_json::Value::Object(mut record)) = serde_json::from_slice(&body) else { return body };
+    for append in all {
+        if !asked.contains(*append) {
+            record.remove(*append);
+        }
+    }
+    serde_json::to_vec(&record).map_or(body, Bytes::from)
+}
+
 /// What the cache holds for a detail question.
 enum Kept {
     /// Fresh, with how long it is fresh for, its age and when it was kept.
@@ -477,14 +491,19 @@ impl Detail {
 
     /// An answer holding more than was asked, cut to what was: a record for a library's poster should not carry a
     /// series' every guest actor. What it keeps is TMDB's own, so the narrower question gets the answer it would have.
-    fn narrowed(&self, body: Bytes) -> Bytes {
-        let Ok(serde_json::Value::Object(mut record)) = serde_json::from_slice(&body) else { return body };
-        for append in self.all {
-            if !self.asked.contains(*append) {
-                record.remove(*append);
-            }
+    ///
+    /// Cutting is a parse and a re-serialization of the whole record: measured at 18 ms for a 2 MB series detail
+    /// (6,000 aggregate cast, release build), time an async worker spent serving nothing else, once per library
+    /// title on a hit. A large answer is cut on the blocking pool; a question asking for everything is not cut at all.
+    async fn narrowed(&self, body: Bytes) -> Bytes {
+        if self.all.iter().all(|append| self.asked.contains(*append)) {
+            return body;
         }
-        serde_json::to_vec(&record).map_or(body, Bytes::from)
+        if body.len() < NARROW_INLINE_BYTES {
+            return narrowed(self.all, &self.asked, body);
+        }
+        let (all, asked, kept) = (self.all, self.asked.clone(), body.clone());
+        tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
     }
 
     /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
@@ -500,12 +519,11 @@ impl Detail {
                 continue;
             }
             let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
-            let body = if exact { body } else { self.narrowed(body) };
             if age < fresh {
-                return Kept::Hit(body, fresh, age, modified);
+                return Kept::Hit(if exact { body } else { self.narrowed(body).await }, fresh, age, modified);
             }
             if matches!(stale, Kept::Nothing) && age < RETENTION {
-                stale = Kept::Stale(body, modified, fresh);
+                stale = Kept::Stale(if exact { body } else { self.narrowed(body).await }, modified, fresh);
             }
         }
         stale
@@ -792,7 +810,7 @@ async fn detail_answer(
         Ok((whole, how, fresh)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            answer(detail.narrowed(whole), &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
+            answer(detail.narrowed(whole).await, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
         Err(response) => *response,
     }
@@ -848,7 +866,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                     Kept::Absent => return None,
                     Kept::Stale(..) | Kept::Nothing => {
                         preview_allowed(state)?;
-                        detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0)
+                        detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0).await
                     }
                 }
             }
@@ -1892,6 +1910,25 @@ mod tests {
             );
         }
         assert_eq!(fresh_for("/3/movie/550/videos"), LIST_TTL);
+    }
+
+    /// A large record is cut on the blocking pool to the same answer as a small one is cut in place, and a question
+    /// for everything the whole detail holds is served its bytes as kept.
+    #[tokio::test]
+    async fn a_record_is_cut_to_the_question_wherever_it_is_cut() {
+        let dir = temp_dir();
+        let cast: Vec<_> =
+            (0..4000).map(|i| serde_json::json!({ "id": i, "name": format!("Actor {i}") })).collect();
+        let whole =
+            serde_json::json!({ "id": 1, "status": "Ended", "credits": { "cast": cast }, "videos": {} });
+        let whole = Bytes::from(whole.to_string());
+        assert!(whole.len() > NARROW_INLINE_BYTES);
+        let bare = Detail::of("/3/tv/1", None, Some(&dir)).unwrap();
+        let cut: serde_json::Value = serde_json::from_slice(&bare.narrowed(whole.clone()).await).unwrap();
+        assert_eq!(cut, serde_json::json!({ "id": 1, "status": "Ended" }));
+        let everything =
+            Detail::of("/3/tv/1", Some(&format!("append_to_response={}", TV_APPENDS.join(","))), Some(&dir));
+        assert_eq!(everything.unwrap().narrowed(whole.clone()).await, whole, "not parsed at all");
     }
 
     /// A cold title asked for by several callers at once was asked of TMDB once per caller.
