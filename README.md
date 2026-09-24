@@ -16,7 +16,7 @@ the rest is small JSON it validates and bounds.
 | `GET /config` | the TV's kill-switch and update gate. Addresses live in `/routes` alone (den #16) |
 | `GET /routes` | every address for each service, in order — LAN, tailnet, public (`ROUTES`, [den-spec routes-v1](https://github.com/oxyc/den-spec/blob/main/wire/routes-v1.md)) — the whole table on every name, since a client away from home still matches its LAN install URLs against it |
 | `GET /metrics` | Prometheus text, behind `METRICS_TOKEN` (404 without it) |
-| `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes) |
+| `POST /pair/new` `{sid}` | a TV opens a pairing session ([den-spec pairing v1](https://github.com/oxyc/den-spec/blob/main/wire/pairing-v1.md)): `{nameplate, expiresAt}` (ten minutes). An address holds at most 10 live sessions (`429` with `Retry-After` past that) |
 | `POST /pair/open` `{nameplate}` | the joining device gets `{sid}`, once; `409` already opened, `410` unknown or expired |
 | `PUT`/`GET /pair/{sid}/{a–d}` `{m}` | the four CPace messages, each written once; `202` until written, `410` once the session is over |
 | `DELETE /pair/{sid}` | either side ends a pairing |

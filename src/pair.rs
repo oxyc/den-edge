@@ -18,6 +18,9 @@ const SLOTS: [&str; 4] = ["a", "b", "c", "d"];
 const MAX_MESSAGE_CHARS: usize = 2731;
 /// Live sessions at most. Each holds four small messages for ten minutes, and `new` is limited per address.
 const MAX_SESSIONS: usize = 10_000;
+/// Live sessions one address may hold. A TV pairs one device at a time, and a code it gives up on lives on for its
+/// ten minutes; ten covers that many times over, and makes the table a thousand addresses' work to fill.
+const MAX_SESSIONS_PER_ADDRESS: usize = 10;
 /// What to tell a caller turned away because the table is full, or because every nameplate it drew was taken.
 /// Sessions live ten minutes, so a minute is long enough not to be a busy-wait and short enough that someone
 /// standing at their TV is not left holding a code that has since expired.
@@ -25,6 +28,8 @@ const BUSY_RETRY_MS: u64 = 60_000;
 
 pub struct Session {
     nameplate: String,
+    /// The address that opened it, for `MAX_SESSIONS_PER_ADDRESS`.
+    owner: String,
     opened: bool,
     slots: [Option<String>; 4],
     expires_at: u64,
@@ -50,7 +55,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 
 /// The host opens a session under a `sid` it generated, and gets the nameplate to show.
 async fn create(state: &AppState, req: Request) -> Response {
-    if let Some(wait) = throttled(state, &format!("mint:{}", client_ip(state, &req))) {
+    let ip = client_ip(state, &req);
+    if let Some(wait) = throttled(state, &format!("mint:{ip}")) {
         return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     let body = match read_json(req, MAX_BODY_BYTES).await {
@@ -66,6 +72,12 @@ async fn create(state: &AppState, req: Request) -> Response {
     pairs.retain(|_, session| session.expires_at > now);
     if pairs.contains_key(sid) {
         return json_reply(StatusCode::CONFLICT, &error("sid_taken"));
+    }
+    let held: Vec<u64> = pairs.values().filter(|s| s.owner == ip).map(|s| s.expires_at).collect();
+    if held.len() >= MAX_SESSIONS_PER_ADDRESS {
+        // Until the first of them ends.
+        let wait = held.iter().min().map_or(TTL_MS, |end| end.saturating_sub(now));
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
     if pairs.len() >= MAX_SESSIONS {
         return crate::handler::retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("busy"), BUSY_RETRY_MS);
@@ -86,8 +98,13 @@ async fn create(state: &AppState, req: Request) -> Response {
         );
     }
     let expires_at = now + TTL_MS;
-    let session =
-        Session { nameplate: nameplate.clone(), opened: false, slots: Default::default(), expires_at };
+    let session = Session {
+        nameplate: nameplate.clone(),
+        owner: ip,
+        opened: false,
+        slots: Default::default(),
+        expires_at,
+    };
     pairs.insert(sid.to_owned(), session);
     json_reply(StatusCode::OK, &json!({ "nameplate": nameplate, "expiresAt": expires_at }))
 }
@@ -228,6 +245,30 @@ mod tests {
             assert_eq!(open_as(&direct, &format!("203.0.113.{i}")).await, StatusCode::GONE);
         }
         assert_eq!(open_as(&direct, "198.51.100.1").await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The table is shared by everyone, so one address holds only a few live sessions of it: filling it takes a
+    /// thousand addresses, not a few hundred. One that ends makes room again.
+    #[tokio::test]
+    async fn an_address_holds_only_a_few_live_sessions() {
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        let new = |n: usize, visitor: &'static str| {
+            let h = &h;
+            async move {
+                let body = json!({ "sid": format!("{n:032x}") }).to_string();
+                h.send("POST", "/pair/new", Some(body), &[("cf-connecting-ip", visitor)]).await
+            }
+        };
+        for n in 0..super::MAX_SESSIONS_PER_ADDRESS {
+            assert_eq!(new(n, "203.0.113.5").await.status(), StatusCode::OK, "{n}");
+        }
+        let refused = new(100, "203.0.113.5").await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.headers().contains_key("retry-after"));
+        assert_eq!(new(101, "203.0.113.6").await.status(), StatusCode::OK, "another address still pairs");
+        assert_eq!(h.call("DELETE", &format!("/pair/{:032x}", 0), None).await.0, StatusCode::OK);
+        assert_eq!(new(102, "203.0.113.5").await.status(), StatusCode::OK, "an ended session makes room");
     }
 
     #[tokio::test]
