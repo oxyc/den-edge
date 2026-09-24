@@ -55,6 +55,9 @@ const MAX_DURATION: u64 = 24 * 3600;
 /// A play asks one, and every runtime, season and episode is a question of its own, so the per-address limit alone
 /// let a few addresses make this box ask SkipDB as fast as they liked.
 const UPSTREAM_PER_MINUTE: u32 = 30;
+/// One address's share of `UPSTREAM_PER_MINUTE`: a third, so no one address spends the minute for everyone. A play
+/// asks one question; ten a minute is a viewer skipping through a season.
+const UPSTREAM_PER_ADDRESS: u32 = 10;
 /// Answers kept a day under a name not kept before. Each runtime, season and episode is a name, and each is kept
 /// for `RETENTION`; without a ceiling, asking for made-up ones filled the disk with files for three months. Past it
 /// an answer is still given, and is not kept.
@@ -97,7 +100,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             stale = Some((body, modified));
         }
     }
-    match lookup(state, &asked_for, rid).await {
+    match lookup(state, &asked_for, &ip, rid).await {
         Ok(Some(body)) => {
             if let Some(file) = keep() {
                 crate::tmdb::write(file, &body).await;
@@ -224,8 +227,11 @@ impl Ask {
 
 /// SkipDB's answer as it is kept: `Some` body, or `None` where it names no segment at all. Every other refusal
 /// is already the response to give.
-async fn lookup(state: &AppState, ask: &Ask, rid: &str) -> Result<Option<Bytes>, Box<Response>> {
-    if let Some(wait) = crate::link::throttled_per_minute(state, "skipdb:upstream", UPSTREAM_PER_MINUTE) {
+async fn lookup(state: &AppState, ask: &Ask, ip: &str, rid: &str) -> Result<Option<Bytes>, Box<Response>> {
+    let busy =
+        crate::link::throttled_per_minute(state, &format!("skipdb:upstream:{ip}"), UPSTREAM_PER_ADDRESS)
+            .or_else(|| crate::link::throttled_per_minute(state, "skipdb:upstream", UPSTREAM_PER_MINUTE));
+    if let Some(wait) = busy {
         return Err(Box::new(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("skipdb_busy"), wait)));
     }
     #[cfg(test)]
@@ -450,13 +456,18 @@ mod tests {
         let h =
             crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), move |state| {
                 state.skipdb_cache_dir = Some(dir);
+                state.trusted_proxies = vec![std::net::IpAddr::from([192, 168, 1, 9])];
             });
         let (answers, asked) = skipdb("tt0000202");
+        // Several addresses, each within its own share.
+        let addresses = ["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"];
         for n in 1..=UPSTREAM_PER_MINUTE {
-            let resp = h.send("GET", &format!("/skipdb/tt0000202/1/{n}"), None, &[]).await;
+            let from = [("x-forwarded-for", addresses[(n % 3) as usize])];
+            let resp = h.send("GET", &format!("/skipdb/tt0000202/1/{n}"), None, &from).await;
             assert_eq!(resp.status(), StatusCode::OK, "{n}");
         }
-        let resp = h.send("GET", "/skipdb/tt0000202/1/999", None, &[]).await;
+        let from = [("x-forwarded-for", addresses[3])];
+        let resp = h.send("GET", "/skipdb/tt0000202/1/999", None, &from).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(resp.headers().contains_key(header::RETRY_AFTER));
         assert_eq!(
@@ -487,6 +498,29 @@ mod tests {
         assert!(crate::tmdb::read(&kept).await.unwrap().1 < Duration::from_secs(60), "written over");
         h.advance(DAY * 1000);
         assert!(new_name(&h.state), "tomorrow starts over");
+    }
+
+    /// The minute's SkipDB questions were one allowance for everyone, so one address asking made-up questions spent
+    /// it and every other viewer's uncached title was `skipdb_busy` behind it.
+    #[tokio::test]
+    async fn one_address_cannot_spend_everyones_skipdb_minute() {
+        let h = crate::handler::tests::Harness::in_dir_with(crate::handler::tests::temp_dir(), |state| {
+            state.skipdb_cache_dir = Some(crate::handler::tests::temp_dir());
+            state.trusted_proxies = vec![std::net::IpAddr::from([192, 168, 1, 9])];
+        });
+        let (_answers, asked) = skipdb("tt0000404");
+        let from = |ip: &'static str| [("x-forwarded-for", ip)];
+        let mut answered = 0;
+        for n in 1..=UPSTREAM_PER_MINUTE {
+            let resp = h.send("GET", &format!("/skipdb/tt0000404/1/{n}"), None, &from("203.0.113.7")).await;
+            if resp.status() == StatusCode::OK {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered, UPSTREAM_PER_ADDRESS, "one address's share");
+        let resp = h.send("GET", "/skipdb/tt0000404/9/9", None, &from("198.51.100.20")).await;
+        assert_eq!(resp.status(), StatusCode::OK, "another viewer is still asked for");
+        assert_eq!(*crate::lock(&asked), UPSTREAM_PER_ADDRESS + 1);
     }
 
     /// A new name was counted against the day before SkipDB was asked, so questions refused as busy, or failed,
