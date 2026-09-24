@@ -326,6 +326,8 @@ interface JoinOptions {
   deviceId?: string;
   fetchImpl?: typeof fetch;
   wait?: (ms: number) => Promise<void>;
+  /** Ends the wait for the other side: the session is deleted, and the result is `failed`. */
+  signal?: AbortSignal;
   /** A fixed scalar, for tests. */
   y?: Bytes;
 }
@@ -339,6 +341,8 @@ interface JoinOptions {
 const secureContext = (): boolean => typeof crypto !== 'undefined' && crypto.subtle !== undefined;
 
 const POLL_MS = 1000;
+/** How long one request to den-edge may take; a slot that never answered held the wait past its ten minutes. */
+const REQUEST_MS = 15_000;
 /** A session's whole life on den-edge: past it, a slot never fills. */
 const SESSION_MS = 10 * 60 * 1000;
 
@@ -349,16 +353,31 @@ const OPEN_ERRORS: Record<number, JoinError> = { 409: 'claimed', 410: 'expired',
  * user to allow this device. A failed check, a declined prompt and an expired session all end as `failed`, and
  * the session is deleted, so the TV shows a new code.
  */
-/** The four slots at den-edge, as either side uses them: write yours, wait for theirs, give up together. */
-function relay(sid: string, fetchImpl: typeof fetch, wait: (ms: number) => Promise<void>) {
-  const session = `/pair/${sid}`;
-  const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
+/** Requests to den-edge, each given up after `REQUEST_MS`: null when it failed or took too long. */
+function requests(fetchImpl: typeof fetch) {
+  const call = (path: string, init?: RequestInit) =>
+    fetchImpl(path, { ...init, signal: AbortSignal.timeout(REQUEST_MS) }).catch(() => null);
   const send = (path: string, method: string, body: unknown) =>
     call(path, {
       method,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
+  return { call, send };
+}
+
+/**
+ * The four slots at den-edge, as either side uses them: write yours, wait for theirs, give up together. `signal` ends
+ * the wait, as the page that started the pairing going away does; it went on asking once a second for ten minutes.
+ */
+function relay(
+  sid: string,
+  fetchImpl: typeof fetch,
+  wait: (ms: number) => Promise<void>,
+  signal?: AbortSignal,
+) {
+  const session = `/pair/${sid}`;
+  const { call, send } = requests(fetchImpl);
   return {
     call,
     send,
@@ -367,6 +386,7 @@ function relay(sid: string, fetchImpl: typeof fetch, wait: (ms: number) => Promi
     /** The slot's message once the other side writes it; null when the session ends or the ten minutes run out. */
     read: async (slot: string): Promise<Bytes | null> => {
       for (let waited = 0; waited < SESSION_MS; waited += POLL_MS) {
+        if (signal?.aborted) return null;
         const res = await call(`${session}/${slot}`);
         if (res?.status === 200) {
           const m = ((await res.json().catch(() => null)) as { m?: unknown } | null)?.m;
@@ -389,13 +409,7 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   if (options.deviceId !== undefined && !isStampDeviceId(options.deviceId))
     return { error: 'failed' };
   if (!secureContext()) return { error: 'insecure' };
-  const call = (path: string, init?: RequestInit) => fetchImpl(path, init).catch(() => null);
-  const send = (path: string, method: string, body: unknown) =>
-    call(path, {
-      method,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  const { send } = requests(fetchImpl);
 
   const opened = await send('/pair/open', 'POST', { nameplate: parsed.nameplate });
   if (!opened) return { error: 'unreachable' };
@@ -403,7 +417,7 @@ export async function join(code: string, options: JoinOptions = {}): Promise<Joi
   const sid = ((await opened.json().catch(() => null)) as { sid?: unknown } | null)?.sid;
   if (typeof sid !== 'string' || !/^[0-9a-f]{32}$/.test(sid)) return { error: 'unreachable' };
 
-  const { put, read, end } = relay(sid, fetchImpl, wait);
+  const { put, read, end } = relay(sid, fetchImpl, wait, options.signal);
   const fail = async (): Promise<JoinResult> => {
     await end();
     return { error: 'failed' };
@@ -449,6 +463,8 @@ export interface HostOptions {
   allow: (joiner: string) => Promise<boolean>;
   fetchImpl?: typeof fetch;
   wait?: (ms: number) => Promise<void>;
+  /** Ends the wait for the joiner: the session is deleted, and the result is `failed`. */
+  signal?: AbortSignal;
   /** Fixed for tests. */
   sid?: string;
   secret?: string;
@@ -477,7 +493,7 @@ export async function host(options: HostOptions): Promise<HostResult> {
     return { error: 'failed' };
   const sid = options.sid ?? randomSid();
   const secret = options.secret ?? randomSecret();
-  const { send, put, read, end } = relay(sid, fetchImpl, wait);
+  const { send, put, read, end } = relay(sid, fetchImpl, wait, options.signal);
 
   const made = await send('/pair/new', 'POST', { sid });
   if (!made) return { error: 'unreachable' };

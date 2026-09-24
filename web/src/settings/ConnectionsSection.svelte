@@ -265,6 +265,12 @@
   };
   /** Whether the code shown was put on the clipboard, so the page can say so. */
   let codeCopied = $state(false);
+  /** Ends a pairing this page started, hosting or joining, when the page goes. */
+  const leaving = new AbortController();
+  onMount(() => () => {
+    leaving.abort();
+    answer?.(false);
+  });
   /**
    * Put `text` on the clipboard. Safari only allows a write that starts inside the tap, so a code that
    * arrives later goes in as a promised item started now; a browser that refuses leaves the code on screen.
@@ -301,6 +307,7 @@
     );
     const libraryKey = Uint8Array.from(atob(link.libraryKey), (c) => c.charCodeAt(0));
     const result = await host({
+      signal: leaving.signal,
       libraryKey,
       label: thisDevice.name,
       deviceId: selfId,
@@ -359,7 +366,11 @@
   async function joinLibrary() {
     joining = true;
     joinProblem = null;
-    const result = await join(joinCode, { label: thisDevice.name, deviceId: selfId });
+    const result = await join(joinCode, {
+      label: thisDevice.name,
+      deviceId: selfId,
+      signal: leaving.signal,
+    });
     joining = false;
     if ('error' in result) {
       joinProblem = joinFailures[result.error];
