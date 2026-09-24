@@ -47,10 +47,12 @@
     videoCodecsOf,
   } from '../lib/remux';
   import {
+    nothingFits,
     optionLabel,
     releaseAfterMeasure,
     restartAfterMeasure,
     swapNotice,
+    unchangedNotice,
   } from '../lib/releaseVerdicts';
   import { aheadIn, reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
   import { Link, wasInterrupted } from '../lib/resumingLoader';
@@ -306,7 +308,7 @@
   /**
    * Start a session: the release den-remux picks, or the one `pick` names — in another audio track, perhaps. `extra`
    * is what a switch adds to the request. With `replacing`, the session playing now is kept until the new one has
-   * started, and kept for good when none does: true when one did.
+   * started, and kept for good when none does: true when one did, den-remux's refusal when it refused one, else false.
    */
   async function begin(
     pick: { audioTrack?: number; filename: string } | undefined = filename
@@ -314,7 +316,7 @@
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
-  ): Promise<boolean> {
+  ): Promise<boolean | Failure> {
     clearTimeout(retry);
     if (!replacing) failure = null;
     swapped = null;
@@ -391,7 +393,13 @@
       return false;
     }
     if ('failure' in result) {
-      if (replacing) return false;
+      if (replacing) {
+        // Said nowhere else: the viewer sees what plays carry on, and the caller decides what to tell them.
+        console.warn(
+          `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
+        );
+        return result.failure;
+      }
       failure = result.failure;
       if (result.failure === 'busy' || result.failure === 'transcode')
         // What it asked for, where it said: a converting GPU can mean minutes, and knocking every
@@ -453,9 +461,12 @@
    * Move the playing session to another release that plays copied, from the second it is at (`switchPolicy`): for a
    * decoder that can't go on, narrowing what this browser claims; for a link that can't carry this one, one that fits
    * the rate it is really getting. Never a transcode, and the release playing now keeps playing until the other has
-   * started — or for good, where none will do. True when it moved.
+   * started — or for good, where none will do. True when it moved, and den-remux's refusal when it refused.
    */
-  async function switchAway(reason: 'decode' | 'delivery', rate?: number): Promise<boolean> {
+  async function switchAway(
+    reason: 'decode' | 'delivery',
+    rate?: number,
+  ): Promise<boolean | Failure> {
     const current = session;
     if (!current || switching) return false;
     switching = true;
@@ -469,7 +480,7 @@
         switchAsk(reason, current.release.filename, excluded, rate),
         current,
       );
-      if (moved) excluded = [...excluded, current.release.filename];
+      if (moved === true) excluded = [...excluded, current.release.filename];
       else startAt = null;
       return moved;
     } finally {
@@ -500,11 +511,11 @@
     const signal = { kind: 'delivery' as const, wait, measuredMs: live.spanMs };
     if (!shouldSwitch(signal, { playedSecs, shownFrame: played })) return;
     void switchAway('delivery', live.bitsPerSecond).then((moved) => {
-      // Nothing fits the link as it is: this release plays on, and the viewer is told why it pauses.
-      if (!moved && session === current) {
-        deliveryGaveUp = true;
-        struggling = true;
-      }
+      if (moved === true || session !== current) return;
+      // This release plays on. Only where nothing fits the link as it is is the viewer told that is why it pauses; a
+      // den-remux out of reach or busy said nothing about the link.
+      deliveryGaveUp = true;
+      struggling = typeof moved !== 'string' || nothingFits(moved);
     });
   }
 
@@ -1019,8 +1030,13 @@
     // It was copied because this browser said it could take it, and it couldn't: another release, copied, that it
     // does take, from the same second (`switchPolicy`). Never this one converted — a transcode is chosen before
     // playback or not at all — and with no such copy, playback stops here and says so.
-    if (kind === 'decode' && (await switchAway('decode'))) return;
-    if (session === current && !failure) failure = 'playback';
+    const moved = kind === 'decode' ? await switchAway('decode') : false;
+    if (moved === true) return;
+    // A refusal that says nothing about this browser — den-remux out of reach, a login gone, access ended — is said as
+    // itself. A busy den-remux is not: its note promises a wait that nothing here would then retry.
+    if (session === current && !failure)
+      failure =
+        typeof moved === 'string' && !nothingFits(moved) && moved !== 'busy' ? moved : 'playback';
   }
 
   /** Where playback stopped: the end of what was buffered, else the play head. */
@@ -1267,10 +1283,11 @@
     if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
     if (played) {
       void begin(pick, { transcode: 'never' }, current).then((moved) => {
-        if (moved || session !== current) return;
+        // False is a player closed, or a session replaced, meanwhile: nothing to say.
+        if (typeof moved !== 'string' || session !== current) return;
         startAt = null;
         undo?.();
-        unchanged = 'That can’t be played here as it is, so this carries on as it was.';
+        unchanged = unchangedNotice(moved, guestGrants.endedText());
       });
       return;
     }

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Release, Session } from './remux';
 import {
+  nothingFits,
   optionLabel,
   releaseAfterMeasure,
   restartAfterMeasure,
   swapNotice,
+  unchangedNotice,
   unplayable,
 } from './releaseVerdicts';
 
@@ -102,5 +104,35 @@ describe('optionLabel', () => {
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'no' })).toBe('a — can’t play here');
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'convert' })).toBe('a — converted');
     expect(optionLabel({ label: 'a', filename: 'a', plays: 'yes' })).toBe('a');
+  });
+});
+
+describe('unchangedNotice', () => {
+  it('says a change could not be made as a copy only when no copy would do', () => {
+    for (const failure of ['none', 'noCopy', 'noFit', 'transcode'] as const) {
+      expect(nothingFits(failure)).toBe(true);
+      expect(unchangedNotice(failure)).toBe(
+        'That can’t be played here as it is, so this carries on as it was.',
+      );
+    }
+  });
+
+  it('gives den-remux’s own reason for any other refusal', () => {
+    for (const failure of [
+      'unreachable',
+      'busy',
+      'login',
+      'ended',
+      'public',
+      'ipv6',
+      'cast',
+    ] as const)
+      expect(nothingFits(failure), failure).toBe(false);
+    expect(unchangedNotice('unreachable')).toContain('Couldn’t reach Den’s player');
+    expect(unchangedNotice('busy')).toContain('already playing two things');
+    expect(unchangedNotice('login')).toContain('key');
+    expect(unchangedNotice('ended', 'Your access to Kim’s library ended')).toBe(
+      'Your access to Kim’s library ended, so this carries on as it was.',
+    );
   });
 });

@@ -1,7 +1,7 @@
 // What den-remux says of the releases a title offers, and what the player owes a viewer when it opened a
 // different one from the one they picked.
 
-import type { Release, Session } from './remux';
+import { guestLimits, type Failure, type Release, type Session } from './remux';
 
 /**
  * The line to show when the session opened another release than the one asked for, or null when it opened that one
@@ -71,4 +71,37 @@ export function optionLabel(release: Release): string {
   if (release.plays === 'no') return `${release.label} — can’t play here`;
   if (release.plays === 'convert') return `${release.label} — converted`;
   return release.label;
+}
+
+/** Whether a refusal says no copy would do — as opposed to den-remux being out of reach, busy, or not letting this in. */
+export function nothingFits(failure: Failure): boolean {
+  return (
+    failure === 'none' || failure === 'noCopy' || failure === 'noFit' || failure === 'transcode'
+  );
+}
+
+/**
+ * What the player says when a change asked for mid-film (another track, another release, casting) was refused and the
+ * session playing carries on: the refusal's own reason, so an unreachable or busy den-remux does not read as a release
+ * that can't be played. `ended` is the guest's own line for access that ran out (`guestGrants.endedText()`).
+ */
+export function unchangedNotice(failure: Failure, ended?: string | null): string {
+  const carriesOn = 'this carries on as it was.';
+  switch (failure) {
+    case 'unreachable':
+      return `Couldn’t reach Den’s player for that, so ${carriesOn}`;
+    case 'busy':
+      return `Den is already playing two things, so ${carriesOn}`;
+    case 'login':
+      return `Den’s player wants this browser’s key again, so ${carriesOn}`;
+    case 'ended':
+      return `${ended ?? 'Your access ended'}, so ${carriesOn}`;
+    case 'public':
+      return `Playback isn’t available from this network yet, so ${carriesOn}`;
+    case 'ipv6':
+    case 'cast':
+      return `${guestLimits[failure]} This carries on as it was.`;
+    default:
+      return `That can’t be played here as it is, so ${carriesOn}`;
+  }
 }
