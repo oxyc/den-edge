@@ -71,3 +71,59 @@ it("moves this tab's rows into the library another tab's key keeps, and goes on 
   await new Promise((resolve) => setTimeout(resolve, 10));
   expect(rekeyed).toEqual([kept]);
 });
+
+/**
+ * Two tabs open this browser's own library, each with its own copy of it, and each saves its copy whole. The tab that
+ * saved last kept only its own rows, and a row the other tab had saved was gone on the next visit.
+ */
+it("keeps both tabs' rows when two tabs save one library", async () => {
+  const { vault } = memoryVault();
+  const [one, two] = [
+    (await LibraryLog.openLocal(key(1), vault))!,
+    (await LibraryLog.openLocal(key(1), vault))!,
+  ];
+  expect(await one.writeRows([row(1)])).toBe(true);
+  expect(await two.writeRows([row(2)])).toBe(true);
+
+  const next = (await LibraryLog.openLocal(key(1), vault))!;
+  expect(next.title({ type: 'movie', id: 1 }), "the first tab's row").toBeDefined();
+  expect(next.title({ type: 'movie', id: 2 })).toBeDefined();
+  expect(
+    two.title({ type: 'movie', id: 1 }),
+    "the second tab took up the first tab's row",
+  ).toBeDefined();
+});
+
+/** The same, with both saves under way at once: `navigator.locks` takes them one at a time. */
+it("keeps both tabs' rows when two tabs save one library at once", async () => {
+  const { vault } = memoryVault();
+  let held = Promise.resolve();
+  const names: string[] = [];
+  vi.stubGlobal('navigator', {
+    locks: {
+      request: (name: string, work: () => Promise<unknown>) => {
+        names.push(name);
+        const run = held.then(work);
+        held = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        return run;
+      },
+    },
+  });
+  try {
+    const [one, two] = [
+      (await LibraryLog.openLocal(key(1), vault))!,
+      (await LibraryLog.openLocal(key(1), vault))!,
+    ];
+    await Promise.all([one.writeRows([row(1)]), two.writeRows([row(2)])]);
+
+    const next = (await LibraryLog.openLocal(key(1), vault))!;
+    expect(next.title({ type: 'movie', id: 1 })).toBeDefined();
+    expect(next.title({ type: 'movie', id: 2 })).toBeDefined();
+    expect(new Set(names).size, 'one lock for the library').toBe(1);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

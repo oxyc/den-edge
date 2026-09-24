@@ -389,7 +389,7 @@ export class LibraryLog {
    * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
    */
   async refresh(): Promise<boolean> {
-    // Nothing else writes a library kept only here.
+    // Nothing else writes a library kept only here but another tab, whose rows each save takes up (`takeKept`).
     if (this.offline) return false;
     // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
     const run = this.writes.then(async (): Promise<true | null> => {
@@ -510,21 +510,43 @@ export class LibraryLog {
     }
   }
 
-  /** Keep den-edge's rows for the next visit, in the order they changed; a failure only costs that visit a full read. */
+  /**
+   * Keep den-edge's rows for the next visit, in the order they changed; a failure only costs that visit a full read.
+   * A library kept only here is saved whole by each tab that has it open, so what another tab saved is merged in
+   * first (`takeKept`), under one lock per library where the browser has `navigator.locks`.
+   */
   private persist(): void {
     if (!this.dirty || !this.local) return;
     this.dirty = false;
-    const snapshot = this.snapshot();
+    const snapshot = this.offline ? undefined : this.snapshot();
+    const save = (kept: Snapshot) =>
+      kept.entries.length
+        ? this.keep(SNAPSHOT, kept)
+        : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`);
     this.saving = this.saving
       .then(() =>
-        snapshot.entries.length
-          ? this.keep(SNAPSHOT, snapshot)
-          : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`),
+        snapshot
+          ? save(snapshot)
+          : exclusive(`den.library.${this.keys.id}`, async () => {
+              await this.takeKept();
+              await save(this.snapshot());
+            }),
       )
       .catch((error: unknown) => {
         this.dirty = true;
         console.warn('den: the library could not be kept for the next visit', error);
       });
+  }
+
+  /** Every row another tab kept of this library kept only here, merged with this tab's the way a write is merged. */
+  private async takeKept(): Promise<void> {
+    const saved = await this.kept<Snapshot>(SNAPSHOT);
+    for (const [name, , row] of saved?.entries ?? []) {
+      const ours = this.acknowledged.get(name)?.row;
+      const merged = ours ? merge(row, ours) : row;
+      this.entries.set(name, { seq: 0, row: merged });
+      this.acknowledged.set(name, { seq: 0, row: merged });
+    }
   }
 
   private snapshot(): Snapshot {
@@ -1113,6 +1135,12 @@ function canonical(value: unknown): string {
       ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
       : v,
   );
+}
+
+/** `work` under the lock `name` in every tab of this browser; with no `navigator.locks`, just `work`. */
+function exclusive<T>(name: string, work: () => Promise<T>): Promise<T> {
+  const locks = globalThis.navigator?.locks;
+  return locks ? locks.request(name, work) : work();
 }
 
 function merge(theirs: Row, ours: Row): Row {
