@@ -1,6 +1,19 @@
 import { SvelteMap } from 'svelte/reactivity';
 import { prepareSource, type Preparation, type TitleSource } from './titleSources';
 
+/** How soon a download still preparing is asked about again. */
+export const POLL_MS = 5_000;
+/** The longest a job that has stopped changing waits between asks. */
+export const POLL_MAX_MS = 60_000;
+
+/**
+ * The wait before the next status ask, after `quiet` asks in a row that changed nothing: POLL_MS while a download
+ * moves, doubling to POLL_MAX_MS while it sits queued or stalled.
+ */
+export function pollDelay(quiet: number): number {
+  return Math.min(POLL_MS * 2 ** Math.max(0, quiet), POLL_MAX_MS);
+}
+
 /** Page-independent jobs: navigation must never turn a status poll into another download request. */
 export class DownloadQueue {
   readonly states = new SvelteMap<string, Preparation>();

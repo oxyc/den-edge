@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import Loading from './Loading.svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import { downloads } from '../lib/downloadQueue.svelte';
+  import { downloads, pollDelay } from '../lib/downloadQueue.svelte';
   import { ageOf, fetchSourceList, type SourceAnswer, type TitleSource } from '../lib/titleSources';
   import { playable } from '../lib/playable';
   import { listReleases, videoCodecsOf } from '../lib/remux';
@@ -88,15 +88,21 @@
       if (asked === which) refused = unplayable(list);
     })().catch(() => undefined);
   });
+  /** Asks in a row whose answers changed nothing, and what they last said (`pollDelay`). */
+  let quiet = 0;
+  let lastSaid = '';
   $effect(() => {
     if (!active || !sources) return;
     const pending = sources.filter((source) =>
       ['preparing', 'unknown'].includes(jobState(source)?.state ?? ''),
     );
     if (!pending.length) return;
+    const said = JSON.stringify(pending.map((source) => [key(source), jobState(source)]));
+    quiet = said === lastSaid ? quiet + 1 : 0;
+    lastSaid = said;
     const timer = setTimeout(() => {
       for (const source of pending) void downloads.poll(key(source), source);
-    }, 5000);
+    }, pollDelay(quiet));
     return () => clearTimeout(timer);
   });
   export async function show() {
