@@ -18,6 +18,10 @@ import { tmdbKeyOf } from './tmdb';
 
 /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
 const SERVICES = 'services.v1';
+/** What discovery reads, so asking again with the same inputs starts nothing. */
+const inputs = (library: boolean, tmdbKey: string, plugins: string[], remux: string | null) =>
+  JSON.stringify([library, tmdbKey, plugins, remux]);
+
 type Kept = {
   routes: Routes;
   scout: Addon | null;
@@ -77,7 +81,7 @@ export class SessionServices {
     const tmdbKey = tmdbKeyOf(opened?.settings('keys'));
     const plugins = [...(opened ? readPlugins(opened.settings('plugins')) : []), ...shared];
     const kept = readPrivateAddresses(opened?.settings(ADDRESSES));
-    const wanted = JSON.stringify([opened !== null, tmdbKey, plugins, kept.remux ?? null]);
+    const wanted = inputs(opened !== null, tmdbKey, plugins, kept.remux ?? null);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
     this.#for = wanted;
@@ -133,8 +137,14 @@ export class SessionServices {
                     if (current) this.remuxBlocked = refused;
                   });
                 }
-                // Where it answered, kept for the visit that will be shown no private address.
-                void this.#remember(opened, 'remux', found);
+                // Where it answered, kept for the visit that will be shown no private address. That write is a
+                // settings change, and the address it keeps is one this run already reached: not a reason to
+                // discover again, so the run counts as started for it.
+                void this.#remember(opened, 'remux', found).then((stored) => {
+                  if (stored === undefined) return;
+                  if (current) this.#for = inputs(opened !== null, tmdbKey, plugins, stored);
+                  this.changed();
+                });
                 this.#settled(opened);
               },
             }
@@ -189,9 +199,13 @@ export class SessionServices {
    * but only what a device has reached for itself, and only from a face that could see it.
    *
    * Quiet on purpose. Nobody asked for this write, and a household that cannot reach its own library has a larger
-   * problem than an address the next visit will discover again.
+   * problem than an address the next visit will discover again. The address as kept, once it was written.
    */
-  async #remember(opened: LibraryLog | null, service: string, reached: string | null) {
+  async #remember(
+    opened: LibraryLog | null,
+    service: string,
+    reached: string | null,
+  ): Promise<string | null | undefined> {
     if (!opened) return;
     const change = healed(readPrivateAddresses(opened.settings(ADDRESSES)), service, reached);
     if (!change) return;
@@ -207,7 +221,8 @@ export class SessionServices {
       const at = this.#clock.issue();
       const values = { ...base.values };
       for (const [key, value] of Object.entries(change)) values[key] = { value, at };
-      if (await opened.write({ ...base, values })) this.changed();
+      if (await opened.write({ ...base, values }))
+        return readPrivateAddresses(opened.settings(ADDRESSES))[service] ?? null;
     } catch {
       // Rediscovered next visit; not worth a word to someone who asked for none of it.
     }

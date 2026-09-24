@@ -1,22 +1,31 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryLog } from './log';
+import type { SettingsRow } from './wire';
 import { SessionServices } from './sessionServices.svelte';
 
 vi.mock('./discoverServices', () => ({
   discoverServices: (
     _installed: string[],
     _routes: unknown,
-    publish: { atlas: (value: { base: string } | null) => void },
+    publish: {
+      atlas: (value: { base: string } | null) => void;
+      remux?: (value: string | null) => void;
+    },
   ) => {
     discoveries++;
     queueMicrotask(() => publish.atlas({ base: `/atlas-${discoveries}` }));
+    const remux = reaches;
+    if (remux) queueMicrotask(() => publish.remux?.(remux));
     return () => undefined;
   },
 }));
+vi.mock('./syncLoader', () => ({ ensureSyncPolicy: async () => undefined }));
 vi.mock('./grants.svelte', () => ({
   guestGrants: { refresh: async () => undefined, pluginUrls: () => [] },
 }));
 let discoveries = 0;
+/** Where the mocked discovery finds den-remux; undefined publishes nothing for it. */
+let reaches: string | undefined;
 
 const logWith = (plugins: string[]) =>
   ({
@@ -64,6 +73,33 @@ describe('SessionServices', () => {
     expect(services.atlas).toBe('/atlas-1');
     await vi.waitFor(() => expect(services.atlas).toBe('/atlas-2'));
     expect(asked).toBe(2);
+    services.stop();
+  });
+
+  it('keeps where den-remux answered without discovering again for that write', async () => {
+    discoveries = 0;
+    reaches = 'https://den-remux.tail1234.ts.net';
+    let stored: SettingsRow | undefined;
+    const log = {
+      settings: (name: string) => (name === 'addresses' ? stored : undefined),
+      newestStamp: () => [0, 0, 'x'],
+      write: async (row: SettingsRow) => ((stored = row), true),
+      kept: async () => undefined,
+      keep: async () => undefined,
+    } as unknown as LibraryLog;
+    let changes = 0;
+    const services: SessionServices = new SessionServices(
+      async () => ({}),
+      // As the session does: the settings revision moves, and every page configures again.
+      () => (changes++, services.configure(log)),
+    );
+    services.configure(log);
+    await vi.waitFor(() => expect(changes).toBe(1));
+    expect(Object.keys(stored?.values ?? {})).toEqual(['remux']);
+    expect(services.remux).toBe('https://den-remux.tail1234.ts.net');
+    await Promise.resolve();
+    expect(discoveries).toBe(1);
+    reaches = undefined;
     services.stop();
   });
 });
