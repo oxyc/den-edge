@@ -791,7 +791,10 @@ async fn relay_with(
         out = out.header(name, value);
     }
     let Ok(out) = out.body(Full::new(body)) else { return json(StatusCode::BAD_REQUEST, "bad_request") };
-    let answer = match tokio::time::timeout(TIMEOUT, state.relay_client.request(out)).await {
+    // One deadline for the head and the body: an addon that answered its head and then stalled held a relay slot
+    // for as long as it stayed silent.
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let answer = match tokio::time::timeout_at(deadline, state.relay_client.request(out)).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(e)) => {
             eprintln!("relay: {e}");
@@ -800,8 +803,9 @@ async fn relay_with(
         Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
     };
     let (parts, body) = answer.into_parts();
-    let Ok(mut bytes) = Limited::new(body, MAX_ANSWER_BYTES).collect().await.map(|c| c.to_bytes()) else {
-        return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
+    let mut bytes = match collect_by(body, deadline).await {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused,
     };
     if let Some(g) = &grant {
         // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
@@ -918,6 +922,19 @@ async fn relay_with(
         resp.headers_mut().insert(TITLE_METADATA, axum::http::HeaderValue::from_static("kept"));
     }
     resp
+}
+
+/// An addon's answer body, whole and within `MAX_ANSWER_BYTES`, by `deadline`.
+async fn collect_by<B>(body: B, deadline: tokio::time::Instant) -> Result<Bytes, Response>
+where
+    B: http_body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match tokio::time::timeout_at(deadline, Limited::new(body, MAX_ANSWER_BYTES).collect()).await {
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+        Ok(Err(_)) => Err(json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable")),
+        Err(_) => Err(json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout")),
+    }
 }
 
 /// On a relayed atlas chart: den-edge keeps what it says about its titles (`title_metadata::observe_atlas`), so the
@@ -2154,6 +2171,33 @@ mod tests {
         state.relays = crate::parse_relays(&format!("/reel=http://{addr}"));
         state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
         h
+    }
+
+    /// An addon that sends its head and part of its body, then goes silent, is given up on at the deadline rather than
+    /// holding the relay slot for as long as it stays silent.
+    #[tokio::test]
+    async fn an_answer_that_stalls_mid_body_is_given_up_on() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let _ = conn.read(&mut [0; 4096]).await;
+            conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let ask = axum::http::Request::get(format!("http://{addr}/x"))
+            .body(http_body_util::Full::new(axum::body::Bytes::new()))
+            .unwrap();
+        let answer = super::client().request(ask).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        let given_up = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::collect_by(answer.into_body(), deadline),
+        )
+        .await
+        .expect("still waiting on the body");
+        assert_eq!(given_up.unwrap_err().status(), StatusCode::GATEWAY_TIMEOUT);
     }
 
     const SEGMENT: &str = "/reel/hls/seg?u=https%3A%2F%2Fr1.googlevideo.com%2Fx";
