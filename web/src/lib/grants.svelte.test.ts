@@ -106,6 +106,25 @@ test('a retry after a lost answer and a reload redeems with the same secret', as
   expect(reloaded.list[0]?.secret).toBeTruthy();
 });
 
+test('gives up on a redeem den-edge never answers', async () => {
+  const hung = vi.fn(
+    (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) =>
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
+      ),
+  );
+  const limit = new AbortController();
+  vi.spyOn(AbortSignal, 'timeout').mockReturnValue(limit.signal);
+  try {
+    const redeeming = new GuestGrants().redeem(CODE, hung);
+    await vi.waitFor(() => expect(hung).toHaveBeenCalled());
+    limit.abort(new DOMException('timed out', 'TimeoutError'));
+    expect(await redeeming).toBe('unreachable');
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
 test('a bad or refused code says which, and stores nothing', async () => {
   const grants = new GuestGrants();
   expect(await grants.redeem('nonsense')).toBe('malformed');

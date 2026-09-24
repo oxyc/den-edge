@@ -172,13 +172,16 @@ export async function hashInstalls(
   );
 }
 
+/** How long a grant request may take; one den-edge never answered left its screen waiting until a reload. */
+const ASK_MS = 15_000;
+
 async function ask(
   fetchImpl: typeof fetch,
   url: string,
   init?: RequestInit,
 ): Promise<Reply<unknown>> {
   try {
-    const res = await fetchImpl(url, init);
+    const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(ASK_MS) });
     const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
     if (res.ok) return { ok: true, value: body };
     return {

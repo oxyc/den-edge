@@ -26,6 +26,8 @@ const REPLAY_KEY = 'den.inboxReplay.v1';
 const SEAL_WINDOW = 7 * 24 * 60 * 60 * 1000;
 const SEAL_AHEAD = 24 * 60 * 60 * 1000;
 const visitReplay = new Map<string, number>();
+/** How long a request to den-edge's inbox may take. */
+const REQUEST_MS = 15_000;
 
 function replayEntries(storage: Storage | undefined, now: number): Record<string, number> {
   try {
@@ -127,6 +129,7 @@ async function appendSealed(
   const body = { sealed: await sealMessage(enc, message) };
   try {
     const res = await fetchImpl('/inbox/append', {
+      signal: AbortSignal.timeout(REQUEST_MS),
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-den-link': inbox },
       body: JSON.stringify(body),
@@ -154,6 +157,7 @@ export async function receiveDeviceIdentity(
 ): Promise<DeviceIdentity | null> {
   try {
     const response = await fetchImpl('/inbox/drain', {
+      signal: AbortSignal.timeout(REQUEST_MS),
       headers: { 'x-den-link': link.inboxKey },
       cache: 'no-store',
     });
@@ -187,6 +191,7 @@ export async function receiveDeviceIdentities(
     const batch = unique.slice(at, at + DRAIN_AT_ONCE);
     try {
       const response = await fetchImpl('/inbox/drain', {
+        signal: AbortSignal.timeout(REQUEST_MS),
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keys: batch.map((link) => link.inboxKey) }),

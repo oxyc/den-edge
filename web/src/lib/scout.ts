@@ -102,7 +102,7 @@ function configOf(install: string, mount: string): string | null {
 
 async function manifestIs(manifest: string, id: string, fetchImpl: typeof fetch): Promise<boolean> {
   try {
-    const res = await fetchImpl(manifest);
+    const res = await fetchImpl(manifest, { signal: AbortSignal.timeout(10_000) });
     return res.ok && ((await res.json()) as { id?: unknown }).id === id;
   } catch {
     return false; // out of reach, or not an addon at all
