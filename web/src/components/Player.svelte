@@ -1397,7 +1397,13 @@
       element.currentTime = Math.max(0, total ? Math.min(to, total) : to);
     };
     const handlers: Parameters<typeof media.setActionHandler>[] = [
-      ['play', () => void element.play()],
+      [
+        'play',
+        () =>
+          void element
+            .play()
+            .catch((error: unknown) => console.warn('The system’s Play was refused.', error)),
+      ],
       ['pause', () => element.pause()],
       ['seekbackward', (d) => seek(element.currentTime - (d.seekOffset ?? SKIP_SECS))],
       ['seekforward', (d) => seek(element.currentTime + (d.seekOffset ?? SKIP_SECS))],
