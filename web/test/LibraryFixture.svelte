@@ -15,6 +15,7 @@
   import type { Route } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
+  import { SessionServices } from '../src/lib/sessionServices.svelte';
   import { trackerEvent } from '../src/lib/trackerEvents';
   import {
     rowName,
@@ -115,6 +116,7 @@
     log,
     opened: Promise.resolve(log),
     routes: fetchRoutes,
+    services: new SessionServices(fetchRoutes, () => session.changed(true)),
   }) as unknown as LibrarySession;
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>

@@ -3,6 +3,7 @@
   import Library from '../src/Library.svelte';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
+  import { SessionServices } from '../src/lib/sessionServices.svelte';
   import '../src/app.css';
   const noop = () => {};
   const log = {
@@ -26,6 +27,7 @@
     log,
     opened: Promise.resolve(log),
     routes: fetchRoutes,
+    services: new SessionServices(fetchRoutes, () => {}),
   } as unknown as LibrarySession;
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>

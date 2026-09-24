@@ -26,11 +26,15 @@
   const session = untrack(
     () => new LibrarySession(link?.libraryKey ?? ownKey, !link && ownKey !== null),
   );
-  onMount(() =>
-    session.start(() => {
+  onMount(() => {
+    const stop = session.start(() => {
       if (link) links.forgetMoved(link);
-    }),
-  );
+    });
+    return () => {
+      stop();
+      session.services.stop();
+    };
+  });
 </script>
 
 <Router

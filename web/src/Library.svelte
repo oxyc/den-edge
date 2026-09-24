@@ -1,7 +1,7 @@
 <script lang="ts">
   import Loading from './components/Loading.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
-  import { onMount, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import PosterCard from './components/PosterCard.svelte';
@@ -53,14 +53,11 @@
   import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
-  import { ADDRESSES, ahead, healed, readPrivateAddresses } from './lib/privateAddresses';
-  import { availability } from './lib/availability.svelte';
-  import { isHidden, readApiKey, readPlugins, readPrefs, readDetailPrefs } from './lib/prefs';
+  import { isHidden, readApiKey, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
   import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
   import { titleHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
-  import { discoverServices } from './lib/discoverServices';
   import {
     atlasCatalogs,
     GUEST_PICKS,
@@ -72,12 +69,10 @@
   } from './lib/services';
   import { fetchServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
-  import { localNetworkRefused } from './lib/remux';
-  import type { Routes } from './lib/routes';
   import { guestGrants } from './lib/grants.svelte';
   import { sharedInstallOf } from './lib/grants';
-  import { installsOf, type Addon } from './lib/scout';
-  import { fetchDetails, fetchTitle, tmdbKeyOf } from './lib/tmdb';
+  import { installsOf } from './lib/scout';
+  import { fetchDetails, fetchTitle } from './lib/tmdb';
   import { nameSlides, recommend, recommendBody, type RecommendedTitle } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
@@ -105,20 +100,9 @@
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
-  /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
-  const SERVICES = 'services.v1';
-  type Services = {
-    routes: Routes;
-    scout: Addon | null;
-    atlas: string | null;
-    reel: string | null;
-    remux: string | null;
-  };
   const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
-  /** The TMDB key the library shares (`set:keys`). */
-  let tmdbKey = $state('');
   /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
   let shelvesReady = $state(false);
   const clock = browserClock();
@@ -129,56 +113,22 @@
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
-  /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */
-  let plugins = $state<string[]>([]);
-  let scout = $state<Addon | null>(null);
-  /** Where this page reaches atlas, search's indexes; null where it can't. */
-  let atlas = $state<string | null>(null);
-  /** Distinguishes "Atlas discovery still running" from its settled no-Atlas answer. */
-  let atlasReady = $state(false);
-  /** Where this page reaches reel, the billboard's trailers; null where it can't. */
-  let reel = $state<string | null>(null);
-  /** den-edge's routes table: which installs are Den's own, and where den-remux answers (den-spec routes-v1). */
-  let routes = $state<Routes>({});
-  /** Where den-remux answers for this page (`findRemux`), so a title can play here; null where no route reaches it. */
-  let remux = $state<string | null>(null);
-  /** This visit's discovery answered, and no route reaches den-remux from here: away from home and off the tailnet. */
-  let remuxAway = $state(false);
-  /** …and this browser refused the home network itself (`localNetworkRefused`), which is a different thing to say. */
-  let remuxBlocked = $state(false);
-
   /**
-   * Keep where a service actually answered, when the library doesn't already say so.
-   *
-   * den-edge's public name serves a table naming nothing private, so a viewer on Tailscale is told
-   * nothing about den-remux even though it is a hostname away. The library is sealed and can hold
-   * what the table won't publish — but only what a device has reached for itself, and only from a
-   * face that could see it.
-   *
-   * Quiet on purpose. Nobody asked for this write, and a household that cannot reach its own library
-   * has a larger problem than an address the next visit will discover again.
+   * Where the library's services answer, found once for the session and shared by every page. The parent keys this
+   * whole tree by its library, so the session is fixed for its life.
    */
-  async function rememberAddress(service: string, reached: string | null) {
-    const opened = log;
-    if (!opened) return;
-    const change = healed(readPrivateAddresses(opened.settings(ADDRESSES)), service, reached);
-    if (!change) return;
-    try {
-      await ensureSyncPolicy();
-      const base = opened.settings(ADDRESSES) ?? {
-        kind: 'set' as const,
-        schema: 2,
-        name: ADDRESSES,
-        values: {},
-      };
-      const at = clock.issue();
-      const values = { ...base.values };
-      for (const [key, value] of Object.entries(change)) values[key] = { value, at };
-      if (await opened.write({ ...base, values })) session.changed(true);
-    } catch {
-      // Rediscovered next visit; not worth a word to someone who asked for none of it.
-    }
-  }
+  const discovered = untrack(() => session.services);
+  const tmdbKey = $derived(discovered.tmdbKey);
+  /** The library's addons (`set:plugins`), and scout among them — what playing here needs. */
+  const plugins = $derived(discovered.plugins);
+  const scout = $derived(discovered.scout);
+  const atlas = $derived(discovered.atlas);
+  const atlasReady = $derived(discovered.atlasReady);
+  const reel = $derived(discovered.reel);
+  const routes = $derived(discovered.routes);
+  const remux = $derived(discovered.remux);
+  const remuxAway = $derived(discovered.remuxAway);
+  const remuxBlocked = $derived(discovered.remuxBlocked);
 
   type Target = { title: Title; season?: number; episode?: number; filename?: string };
   /** What's playing in this browser. */
@@ -193,22 +143,18 @@
     void session.settingsRevision;
     const opened = log;
     // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
-    // the discovery below: atlas gives them rows and reel gives them trailers, both on this origin.
+    // the discovery: atlas gives them rows and reel gives them trailers, both on this origin.
     if (opened === undefined) return;
-    // The addons shared with this browser join the library's own for lookups; nothing writes them back to it.
-    const shared = guestGrants.pluginUrls();
+    // The shared grants are read here so a grant that arrives or ends asks again (`guestGrants.list` is state).
+    void guestGrants.pluginUrls();
     let disposed = false;
-    let stopDiscovery: (() => void) | undefined;
     // Only the shared settings revision and opened log trigger reconfiguration.
-    // Service state below is an output, not a dependency of this effect.
+    // Service state is an output, not a dependency of this effect.
     untrack(() => {
-      // A device with no key of its own borrows den-edge's (`tmdbKeyOf`), so a guest — and a household that
-      // never set one — sees titles rather than an empty page. What Settings reports as set stays the
-      // library's own key: borrowing one is not the same as having one.
-      tmdbKey = tmdbKeyOf(opened?.settings('keys'));
+      discovered.configure(opened);
       // Naming the library is still only the paired case: it reads the log itself.
-      if (tmdbKey && opened) {
-        const key = tmdbKey;
+      const key = discovered.tmdbKey;
+      if (key && opened) {
         const raw = applyLog(emptyLibrary(), opened.rows());
         const priority = shelfTitleRefs(raw, opened.rows());
         const reserved = new Set(priority.map(titleKey));
@@ -225,80 +171,10 @@
           });
         });
       } else shelvesReady = true;
-      plugins = [...(opened ? readPlugins(opened.settings('plugins')) : []), ...shared];
-      atlasReady = false;
-      const [key, installed] = [tmdbKey, plugins];
-      // Where the last visit found the addons, used until this visit's discovery answers. A guest keeps
-      // nothing between visits — what is kept lives in the library — so there is nothing to restore.
-      let live = false;
-      if (opened)
-        void opened.kept<Services>(SERVICES).then((saved) => {
-          if (disposed || live || !saved) return;
-          ({ routes, scout, atlas, reel, remux } = saved);
-          availability.connect(saved.scout, key);
-        });
-      void (async () => {
-        const foundRoutes = await session.routes();
-        if (disposed) return;
-        live = true;
-        routes = foundRoutes;
-        // The household's own tailnet address for den-remux, tried ahead of the table's entries: on
-        // the public name the table names none at all, and this is the only thing that reaches it.
-        const kept = readPrivateAddresses(opened?.settings(ADDRESSES));
-        const forDiscovery = { ...foundRoutes, remux: ahead(kept.remux, foundRoutes.remux) };
-        stopDiscovery = discoverServices(installed, forDiscovery, {
-          // A guest holding no shared grant is handed neither publisher, so those probes are never issued
-          // and the playback services cannot be discovered at all. Structural, rather than a callback
-          // someone has to remember to leave out. A guest holding a grant plays through the shared scout
-          // and den-remux, so it is handed both.
-          ...(opened || shared.length > 0
-            ? {
-                scout: (found: Addon | null) => {
-                  scout = found;
-                  availability.connect(found, key);
-                },
-                remux: (found: string | null) => {
-                  remux = found;
-                  remuxAway = found === null;
-                  // Asked only once nothing answered, and never waited on: what is said under the actions
-                  // is corrected when the browser replies, rather than holding the page for a permission.
-                  remuxBlocked = false;
-                  if (found === null) {
-                    void localNetworkRefused().then((refused) => {
-                      if (!disposed) remuxBlocked = refused;
-                    });
-                  }
-                  // Where it answered, kept for the visit that will be shown no private address.
-                  void rememberAddress('remux', found);
-                },
-              }
-            : {}),
-          atlas: (found) => {
-            atlas = found?.base ?? null;
-            atlasReady = true;
-          },
-          reel: (found) => {
-            reel = found?.base ?? null;
-          },
-        });
-      })();
     });
     return () => {
       disposed = true;
-      stopDiscovery?.();
     };
-  });
-
-  // A grant's name, end date or ended state as den-edge holds it now.
-  onMount(() => void guestGrants.refresh());
-
-  // What discovery found, kept for the next visit once it has settled for a moment.
-  $effect(() => {
-    const opened = log;
-    const found: Services = $state.snapshot({ routes, scout, atlas, reel, remux });
-    if (!opened || !Object.keys(found.routes).length) return;
-    const timer = setTimeout(() => void opened.keep(SERVICES, found).catch(warnKeep), 1000);
-    return () => clearTimeout(timer);
   });
 
   /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */

@@ -6,6 +6,7 @@
   import { parseRoute, type Explore, type PeopleView } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
+  import { SessionServices } from '../src/lib/sessionServices.svelte';
   import '../src/app.css';
   let route = $state(parseRoute(location.pathname + location.search));
   // As App does it: the address owns the query, but the field keeps what was typed while a result is open.
@@ -49,6 +50,7 @@
     log,
     opened: Promise.resolve(log),
     routes: fetchRoutes,
+    services: new SessionServices(fetchRoutes, () => {}),
   } as unknown as LibrarySession;
   const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>

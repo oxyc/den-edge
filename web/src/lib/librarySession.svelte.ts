@@ -2,6 +2,7 @@ import { LibraryLog } from './log';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
+import { SessionServices } from './sessionServices.svelte';
 
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
 export class LibrarySession {
@@ -15,6 +16,11 @@ export class LibrarySession {
   private refreshing?: Promise<void>;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
   private early?: Promise<Routes> = fetchRoutes();
+  /** Where the library's services answer, found once for every page (`sessionServices.svelte.ts`). */
+  readonly services = new SessionServices(
+    () => this.routes(),
+    () => this.changed(true),
+  );
   /**
    * A session with no key never opens a library: `log` is null from the outset and stays there. That is the
    * guest — someone browsing without having paired — and it is the whole of the difference, because
