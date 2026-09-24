@@ -82,7 +82,8 @@ including abandoned links, and their bytes are returned to the shared storage qu
 sessions live in memory: a restart costs a pairing in progress, which the TV starts again.
 
 The whole store holds at most `STORE_CAP_BYTES`: a write that would pass it is refused with `507`, so whoever
-can reach den-edge can't fill the host's disk. A library holds at most 50,000 rows and an 8 MiB memory charge
+can reach den-edge can't fill the host's disk. The inbox, where anyone may start a queue, holds at most a quarter
+of it, so a filled inbox leaves the rest for libraries, grants and connections. A library holds at most 50,000 rows and an 8 MiB memory charge
 (`413 library_full`). The charge includes twice the key/value byte lengths plus row/map overhead. The
 combined library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
 their durable logs. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
@@ -102,7 +103,7 @@ a configured public name into the LAN fallback. Malformed or duplicate Host fiel
 |---|---|---|
 | `PORT` | `8080` | the port to listen on |
 | `DATA_DIR` | `data` (the image sets `/data`) | where the state lives |
-| `STORE_CAP_BYTES` | `1073741824` (1 GiB) | the most the state may take on disk |
+| `STORE_CAP_BYTES` | `1073741824` (1 GiB) | the most the state may take on disk; the inbox a quarter of it |
 | `METRICS_TOKEN` | unset | bearer token for `/metrics`; unset turns it off |
 | `WEB_DIR` | unset (the image sets `/web`) | the Den web app's built files, served at `/` — see below |
 | `WEB_ORIGINS` | unset | origins a browser may call from (comma-separated) — the Den web app; answers their CORS preflights. Unset sends no CORS headers |

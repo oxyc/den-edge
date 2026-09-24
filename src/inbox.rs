@@ -416,7 +416,8 @@ mod tests {
     #[tokio::test]
     async fn sweep_reclaims_abandoned_queues_and_keeps_refreshed_queues() {
         let h = Harness::in_dir_with(crate::handler::tests::temp_dir(), |s| {
-            s.store = crate::store::Store::open(&crate::handler::tests::temp_dir(), 700).unwrap();
+            // The inbox's share of it, a quarter, is 700 bytes.
+            s.store = crate::store::Store::open(&crate::handler::tests::temp_dir(), 2800).unwrap();
         });
         assert_eq!(append(&h, &"x".repeat(200)).await, StatusCode::OK);
         h.advance(super::TTL_MS - 1000);

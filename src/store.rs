@@ -7,7 +7,8 @@
 //! it would put it in every directory listing and bound nothing about its length.
 //!
 //! The store holds at most `cap` bytes: a write that would grow it past that fails as `StorageFull`, so
-//! whoever can reach den-edge can't fill the host's disk (issue #8, audit #5).
+//! whoever can reach den-edge can't fill the host's disk (issue #8, audit #5). The inbox, where anyone may start
+//! a queue, holds at most a share of it, so filling the inbox leaves room for libraries, grants and connections.
 
 use sha2::{Digest, Sha256};
 use std::io;
@@ -19,9 +20,14 @@ pub struct Store {
     dir: PathBuf,
     /// Bytes on disk across every namespace.
     used: AtomicU64,
+    /// Bytes on disk in the inbox, which is also in `used`.
+    inbox_used: AtomicU64,
     cap: u64,
     generation: String,
 }
+
+/// The inbox holds at most this part of the cap: a quarter.
+const INBOX_SHARE: u64 = 4;
 
 /// The file holding the store's generation, beside the namespaces.
 const GENERATION: &str = "generation";
@@ -52,6 +58,7 @@ pub const DEFAULT_CAP: u64 = 1 << 30;
 impl Store {
     pub fn open(dir: &Path, cap: u64) -> io::Result<Store> {
         let mut used = 0;
+        let mut inbox_used = 0;
         for ns in NAMESPACES {
             std::fs::create_dir_all(dir.join(ns))?;
             // Guest grants hold a bearer copy of a host's addon installs (`grants.rs`); the assistants' connections
@@ -62,29 +69,50 @@ impl Store {
                 std::fs::set_permissions(dir.join(ns), std::fs::Permissions::from_mode(0o700))?;
             }
             for entry in std::fs::read_dir(dir.join(ns))? {
-                used += entry?.metadata()?.len();
+                let len = entry?.metadata()?.len();
+                used += len;
+                if ns == "inbox" {
+                    inbox_used += len;
+                }
             }
         }
         let generation = load_generation(dir)?;
-        Ok(Store { dir: dir.to_owned(), used: AtomicU64::new(used), cap, generation })
+        Ok(Store {
+            dir: dir.to_owned(),
+            used: AtomicU64::new(used),
+            inbox_used: AtomicU64::new(inbox_used),
+            cap,
+            generation,
+        })
     }
 
     pub fn generation(&self) -> &str {
         &self.generation
     }
 
-    /// Refuses a file growing from `old` to `new` bytes when that takes the store past its cap.
-    fn check(&self, old: u64, new: u64) -> io::Result<()> {
-        if new > old && self.used.load(Ordering::Relaxed) + (new - old) > self.cap {
-            return Err(io::Error::new(io::ErrorKind::StorageFull, "den-edge's storage cap is reached"));
+    /// Takes `bytes` of room in `ns` before they are written, or refuses them when that takes the store past its
+    /// cap, or the inbox past its share. Taken in one step, not checked and counted later: writers in different
+    /// namespaces hold different locks, and two that each saw room for one would both have written.
+    fn reserve(&self, ns: &str, bytes: u64) -> io::Result<()> {
+        let full = || io::Error::new(io::ErrorKind::StorageFull, "den-edge's storage cap is reached");
+        if ns == "inbox" && !take(&self.inbox_used, bytes, self.cap / INBOX_SHARE) {
+            return Err(full());
+        }
+        if !take(&self.used, bytes, self.cap) {
+            if ns == "inbox" {
+                give_back(&self.inbox_used, bytes);
+            }
+            return Err(full());
         }
         Ok(())
     }
 
-    /// Counts a file that went from `old` to `new` bytes.
-    fn account(&self, old: u64, new: u64) {
-        self.used.fetch_add(new, Ordering::Relaxed);
-        self.used.fetch_sub(old, Ordering::Relaxed);
+    /// Gives back `bytes` of `ns`: a file shrank or went, or a write that reserved them failed.
+    fn release(&self, ns: &str, bytes: u64) {
+        give_back(&self.used, bytes);
+        if ns == "inbox" {
+            give_back(&self.inbox_used, bytes);
+        }
     }
 
     fn path(&self, ns: &str, key: &str, ext: &str) -> PathBuf {
@@ -122,10 +150,20 @@ impl Store {
     /// onto.
     pub async fn append_file(&self, ns: &str, key: &str, ext: &str, bytes: &[u8]) -> io::Result<()> {
         let len = bytes.len() as u64;
-        self.check(0, len)?;
-        let mut file =
-            tokio::fs::OpenOptions::new().create(true).append(true).open(self.path(ns, key, ext)).await?;
-        let before = file.metadata().await?.len();
+        self.reserve(ns, len)?;
+        let opened = async {
+            let file =
+                tokio::fs::OpenOptions::new().create(true).append(true).open(self.path(ns, key, ext)).await?;
+            let before = file.metadata().await?.len();
+            Ok::<_, io::Error>((file, before))
+        };
+        let (mut file, before) = match opened.await {
+            Ok(opened) => opened,
+            Err(e) => {
+                self.release(ns, len);
+                return Err(e);
+            }
+        };
         let written = async {
             file.write_all(bytes).await?;
             file.sync_data().await
@@ -135,26 +173,34 @@ impl Store {
                 Ok(()) => before,
                 Err(_) => file.metadata().await.map_or(before + len, |m| m.len()),
             };
-            self.account(before, after);
+            self.release(ns, (before + len).saturating_sub(after));
             return Err(e);
         }
-        self.account(0, len);
         Ok(())
     }
 
     pub async fn replace_file(&self, ns: &str, key: &str, ext: &str, value: &[u8]) -> io::Result<()> {
         let path = self.path(ns, key, ext);
         let old = file_len(&path).await;
-        self.check(old, value.len() as u64)?;
+        let new = value.len() as u64;
+        self.reserve(ns, new.saturating_sub(old))?;
         // One temporary name per key is enough: writes are serialised, and a leftover from a crash is
         // simply overwritten by the next write.
         let tmp = path.with_extension(format!("{ext}.tmp"));
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(value).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, &path).await?;
-        self.account(old, value.len() as u64);
+        let written = async {
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            file.write_all(value).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&tmp, &path).await
+        };
+        if let Err(e) = written.await {
+            // The temporary file is not counted, so it does not stay.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            self.release(ns, new.saturating_sub(old));
+            return Err(e);
+        }
+        self.release(ns, old.saturating_sub(new));
         Ok(())
     }
 
@@ -174,7 +220,7 @@ impl Store {
         match tokio::fs::remove_file(path).await {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => {
-                self.account(old, 0);
+                self.release(ns, old);
                 Ok(())
             }
         }
@@ -201,12 +247,27 @@ impl Store {
                 .is_none_or(|expiry| expiry <= now);
             if expired {
                 tokio::fs::remove_file(&path).await?;
-                self.account(size, 0);
+                self.release("inbox", size);
                 removed += 1;
             }
         }
         Ok(removed)
     }
+}
+
+/// Adds `bytes` to `counter` unless that passes `limit`; whether it did.
+fn take(counter: &AtomicU64, bytes: u64, limit: u64) -> bool {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            used.checked_add(bytes).filter(|total| bytes == 0 || *total <= limit)
+        })
+        .is_ok()
+}
+
+/// Takes `bytes` off `counter`, never below nothing: a count that drifted must not wrap around to "full".
+fn give_back(counter: &AtomicU64, bytes: u64) {
+    let _ =
+        counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(bytes)));
 }
 
 /// A file's size, or 0 when there is none.
@@ -223,17 +284,44 @@ mod tests {
     async fn a_write_past_the_cap_is_refused_and_freed_room_is_counted() {
         let dir = crate::handler::tests::temp_dir();
         let store = Store::open(&dir, 10).unwrap();
-        store.put("inbox", "a", b"12345678").await.unwrap();
-        assert_eq!(store.put("inbox", "b", b"123").await.unwrap_err().kind(), StorageFull);
-        store.put("inbox", "a", b"1").await.unwrap();
-        store.put("inbox", "b", b"123").await.unwrap();
-        store.delete("inbox", "a").await.unwrap();
+        store.put("settings", "a", b"12345678").await.unwrap();
+        assert_eq!(store.put("settings", "b", b"123").await.unwrap_err().kind(), StorageFull);
+        store.put("settings", "a", b"1").await.unwrap();
+        store.put("settings", "b", b"123").await.unwrap();
+        store.delete("settings", "a").await.unwrap();
         store.append_file("lib", "c", "log", b"123456").await.unwrap();
         assert_eq!(store.append_file("lib", "c", "log", b"12").await.unwrap_err().kind(), StorageFull);
 
         // Reopened, it counts what is on disk: 3 + 6 bytes.
         let reopened = Store::open(&dir, 10).unwrap();
-        assert_eq!(reopened.put("inbox", "d", b"12").await.unwrap_err().kind(), StorageFull);
+        assert_eq!(reopened.put("settings", "d", b"12").await.unwrap_err().kind(), StorageFull);
+        reopened.put("settings", "d", b"1").await.unwrap();
+    }
+
+    /// Anyone may start an inbox queue, so the inbox has a share of the cap and not the whole of it: filled, it
+    /// leaves the rest for the libraries, grants and connections. Its share is counted again on reopening.
+    #[tokio::test]
+    async fn the_inbox_cannot_take_more_than_its_share() {
+        let dir = crate::handler::tests::temp_dir();
+        let store = Store::open(&dir, 40).unwrap();
+        store.put("inbox", "a", b"12345678").await.unwrap();
+        assert_eq!(store.put("inbox", "b", b"123").await.unwrap_err().kind(), StorageFull);
+        store.put("inbox", "b", b"12").await.unwrap();
+        store.append_file("lib", "c", "log", &[b'x'; 30]).await.unwrap();
+
+        let reopened = Store::open(&dir, 40).unwrap();
+        assert_eq!(reopened.put("inbox", "d", b"1").await.unwrap_err().kind(), StorageFull);
+        reopened.delete("inbox", "a").await.unwrap();
         reopened.put("inbox", "d", b"1").await.unwrap();
+    }
+
+    /// Writers in different namespaces hold different locks, so two may be at the store at once. Room is taken
+    /// before either writes: of two that each fit alone but not together, one is refused.
+    #[tokio::test]
+    async fn two_writes_at_once_cannot_both_take_the_last_room() {
+        let store = Store::open(&crate::handler::tests::temp_dir(), 10).unwrap();
+        let (a, b) = tokio::join!(store.put("settings", "a", b"123456"), store.put("sync", "b", b"123456"));
+        assert!(a.is_ok() != b.is_ok(), "{a:?} {b:?}");
+        assert_eq!(store.put("settings", "c", b"12345").await.unwrap_err().kind(), StorageFull);
     }
 }
