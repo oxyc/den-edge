@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
+  import { nameTab } from '../lib/tabName.svelte';
   import { servicePage } from '../lib/services';
   import type { RowDef } from '../lib/catalog';
   import type { Routes } from '../lib/routes';
@@ -27,6 +28,7 @@
     reel = null,
     routes = {},
     shown,
+    active = true,
   }: {
     /** The provider id, as TMDB and atlas both name it. */
     id: number;
@@ -46,6 +48,8 @@
     /** The routes table, for the address the trailer's video loads from. */
     routes?: Routes;
     shown: (title: Title) => boolean;
+    /** The page on screen, rather than one kept behind it. */
+    active?: boolean;
   } = $props();
 
   let directory = $state<Service[] | null>(null);
@@ -126,9 +130,7 @@
 
   // The tab, the bookmark and the history entry name the service once the directory has named it; until then the
   // route's own "Service · Den" stands (`pageTitle`).
-  $effect(() => {
-    if (service) document.title = named(service.name);
-  });
+  nameTab(() => (active && service ? named(service.name) : null));
 </script>
 
 {#if service}

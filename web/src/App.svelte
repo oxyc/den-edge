@@ -10,6 +10,7 @@
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
+  import { tabName } from './lib/tabName.svelte';
   import { parseRoute, type Explore, type PeopleView } from './lib/route';
   import { LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
@@ -115,10 +116,10 @@
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });
-  // A title's and a person's page name themselves once they know what they are showing, so this sets what can
-  // be known from the address and leaves those two to overwrite it.
+  // A title's, a person's and a service's page name themselves once they know what they are showing
+  // (`tabName`); until then, and on every other page, the tab says what the address can.
   $effect(() => {
-    document.title = pageTitle(route);
+    document.title = tabName() ?? pageTitle(route);
   });
 </script>
 

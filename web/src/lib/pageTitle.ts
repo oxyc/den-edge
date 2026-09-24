@@ -4,7 +4,8 @@
 // tab and nowhere else: a second tab, a bookmark made months ago, and the history menu all read the same word,
 // and the one place a title is worth having is exactly where someone is looking for the page again.
 //
-// A title's and a person's page are named by the page itself (`named`), once it knows what it is showing.
+// A title's, a person's and a service's page are named by the page itself (`named`, `nameTab`), once it knows
+// what it is showing.
 
 import type { Route } from './route';
 

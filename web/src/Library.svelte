@@ -1230,6 +1230,7 @@
     {reel}
     {routes}
     shown={browseShown}
+    {active}
   />
 {:else if route.page === 'search'}
   <SearchScreen.current

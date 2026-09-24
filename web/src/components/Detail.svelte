@@ -34,6 +34,7 @@
   import type { Addon } from '../lib/scout';
   import { navigateBack } from '../lib/navigation';
   import { named } from '../lib/pageTitle';
+  import { nameTab } from '../lib/tabName.svelte';
   import { titleHref } from '../lib/route';
 
   type Reaction = TitleRow['reaction']['value'];
@@ -273,9 +274,9 @@
 
   // The page names itself once TMDB has answered. Until then the tab reads "Den", which is all the address
   // can say: a bookmark or a second tab full of titles is otherwise twenty pages with the same name.
-  $effect(() => {
-    if (detail?.title.title) document.title = named(detail.title.title, detail.title.year);
-  });
+  nameTab(() =>
+    active && detail?.title.title ? named(detail.title.title, detail.title.year) : null,
+  );
 
   const series = $derived(detail ? seriesPresentation(detail, episodes, row) : null);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);

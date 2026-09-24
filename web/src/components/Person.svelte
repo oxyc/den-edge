@@ -12,6 +12,7 @@
   } from '../lib/detail';
   import type { Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
+  import { nameTab } from '../lib/tabName.svelte';
 
   let {
     id,
@@ -26,9 +27,7 @@
   const panel = $props.id();
   let person = $state<PersonDetail | null | undefined>();
   // The page names itself once it knows whose it is; until then the address is all anything has to go on.
-  $effect(() => {
-    if (person?.name) document.title = named(person.name);
-  });
+  nameTab(() => (active && person?.name ? named(person.name) : null));
   let films = $state<FilmCredit[] | null | undefined>();
   let expanded = $state(false);
   let department = $state<string | null>(null);

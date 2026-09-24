@@ -1,7 +1,12 @@
 <script lang="ts">
   import type { Route } from '../src/lib/route';
   import { navigate } from '../src/lib/navigation';
-  let { route }: { route: Route; active: boolean } = $props();
+  import { nameTab } from '../src/lib/tabName.svelte';
+  let { route, active }: { route: Route; active: boolean } = $props();
+  // A title names itself as Detail does, once it has "loaded".
+  let loaded = $state(false);
+  setTimeout(() => (loaded = true), 30);
+  nameTab(() => (active && loaded && route.page === 'title' ? `Title ${route.id}` : null));
   let query = $state('');
   let count = $state(6);
 </script>
