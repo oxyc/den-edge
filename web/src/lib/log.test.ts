@@ -162,6 +162,23 @@ describe('LibraryLog', () => {
     });
   });
 
+  /**
+   * `LibrarySession` bumps its revision on a refresh that returns true, and every page built from the library is
+   * rebuilt on that. A 30-second poll that found nothing returned true, and rebuilt them all every 30 seconds.
+   */
+  it('says a refresh changed something only when a row arrived', async () => {
+    const server = await edge([row(1)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    expect(await log.refresh(), 'an empty page').toBe(false);
+    await log.write(row(2));
+    expect(await log.refresh(), 'its own write read back').toBe(false);
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    await tv.write(row(3));
+    expect(await log.refresh(), "the TV's write").toBe(true);
+    expect(log.title({ type: 'movie', id: 3 })).toBeDefined();
+    expect(await log.refresh()).toBe(false);
+  });
+
   it('a copy kept for another library key opens nothing, and the log is read whole', async () => {
     const { data, vault } = memoryVault();
     const server = await edge([row(1)]);
@@ -392,7 +409,7 @@ describe('LibraryLog', () => {
     expect(log.refused).toBe(true);
     expect(hasLibraryCredential(), 'no log, so no membership to claim').toBe(false);
     const tried = batches;
-    for (let i = 0; i < 3; i++) expect(await log.refresh()).toBe(true);
+    for (let i = 0; i < 3; i++) expect(await log.refresh(), 'nothing changed').toBe(false);
     expect(batches, 'refreshes read, and send nothing again').toBe(tried);
     expect(log.pendingActions).toBe(1);
 
@@ -445,14 +462,14 @@ describe('LibraryLog', () => {
       expect(log.refused).toBe(true);
       const tried = batches;
       open = true; // NEW_LIBRARIES=open
-      expect(await log.refresh()).toBe(true);
+      expect(await log.refresh()).toBe(false);
       expect(batches, 'not straight away').toBe(tried);
 
       vi.setSystemTime(Date.now() + 11 * 60_000);
       expect(await log.refresh()).toBe(true);
       expect(batches).toBeGreaterThan(tried);
       expect(log.pendingActions).toBe(0);
-      expect(await log.refresh()).toBe(true);
+      expect(await log.refresh(), 'its own write read back is no change').toBe(false);
       expect(log.refused).toBe(false);
       expect(hasLibraryCredential(), 'the log is there, and so is the membership').toBe(true);
     } finally {

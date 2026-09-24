@@ -296,11 +296,17 @@ export class LibraryLog {
     return [...this.entries.values()].map((e) => e.row);
   }
 
-  /** Incremental foreground refresh. Uses the same serialization boundary as writes. */
+  /**
+   * Incremental foreground refresh. Uses the same serialization boundary as writes. True only when it changed what
+   * this browser holds: a row arrived, the log was reset, or kept work reached den-edge. A poll that finds nothing
+   * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
+   */
   async refresh(): Promise<boolean> {
     // Nothing else writes a library kept only here.
     if (this.offline) return false;
-    const run = this.writes.then(async () => {
+    // Null when den-edge couldn't be read; otherwise whether a row arrived or the log was reset.
+    const run = this.writes.then(async (): Promise<boolean | null> => {
+      let changed = false;
       try {
         for (;;) {
           const res = await this.fetchImpl(
@@ -309,15 +315,17 @@ export class LibraryLog {
           );
           if (res.status === 410) this.moved = true;
           if (res.status === 404) {
-            if (!(await this.stageRecovery())) return false;
+            // Only the first 404 has rows den-edge acknowledged to put back; an empty relay answers it every time.
+            const staged = [...this.entries.values()].some((entry) => entry.seq > 0);
+            if (!(await this.stageRecovery())) return null;
             this.memberRegistered = false;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
             this.dirty = true;
-            return true; // A first offline action must be able to create the log on reconnect.
+            return staged; // A first offline action must be able to create the log on reconnect: `replay` sends it.
           }
-          if (!res.ok) return false;
+          if (!res.ok) return null;
           // The log is here again (or always was): a refused start is over, and the membership stands again.
           if (this.refused || !hasLibraryCredential()) {
             this.refused = false;
@@ -328,7 +336,7 @@ export class LibraryLog {
             (this.generation && page.generation && this.generation !== page.generation) ||
             page.head < this.head
           ) {
-            if (!(await this.stageRecovery())) return false;
+            if (!(await this.stageRecovery())) return null;
             this.memberRegistered = false;
             await this.registerMember();
             this.generation = page.generation;
@@ -336,6 +344,7 @@ export class LibraryLog {
             for (const entry of this.entries.values()) entry.seq = 0;
             this.acknowledged.clear();
             this.dirty = true;
+            changed = true;
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
@@ -343,11 +352,13 @@ export class LibraryLog {
             try {
               const row = believe(await open(this.keys, entry.k, entry.v));
               const previous = this.entries.get(rowName(row));
-              if (!previous || entry.seq > previous.seq)
+              if (!previous || entry.seq > previous.seq) {
                 this.entries.set(rowName(row), {
                   seq: entry.seq,
                   row: previous ? merge(previous.row, row) : row,
                 });
+                changed = true;
+              }
               // Compared with den-edge's own copy, not `entries`: this browser's write already carries its seq there.
               if (entry.seq > (this.acknowledged.get(rowName(row))?.seq ?? 0)) {
                 this.acknowledged.set(rowName(row), { seq: entry.seq, row });
@@ -358,19 +369,19 @@ export class LibraryLog {
             }
           }
           this.head = page.entries.at(-1)?.seq ?? page.head;
-          if (!page.more || page.entries.length === 0) return true;
+          if (!page.more || page.entries.length === 0) return changed;
         }
       } catch {
-        return false;
+        return null;
       }
     });
-    this.writes = run.catch(() => false);
-    const refreshed = await run;
-    if (refreshed) {
-      this.persist();
-      await this.restoreJournal();
-    }
-    return refreshed;
+    this.writes = run.catch(() => null);
+    const changed = await run;
+    if (changed === null) return false;
+    this.persist();
+    // Rows that arrived may carry actions to project; with none, the projections already stand.
+    if (changed) this.projectJournal();
+    return (await this.replay()) || changed;
   }
 
   /**
@@ -689,15 +700,27 @@ export class LibraryLog {
   }
 
   private async restoreJournal(): Promise<LibraryLog> {
-    // Projections are recoverable from immutable accepted events, including after server compaction.
+    this.projectJournal();
+    await this.replay();
+    return this;
+  }
+
+  /** Projections are recoverable from immutable accepted events, including after server compaction. */
+  private projectJournal(): void {
     for (const { row } of [...this.entries.values()]) {
       const event = trackerEvent(row);
       if (event) this.project(event.after);
     }
+  }
+
+  /** Send the work kept in this browser (`pendingPrefix`). True when some of it reached den-edge. */
+  private async replay(): Promise<boolean> {
     // Kept, and sent once a read finds the log again (`refresh`).
-    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS) return this;
+    if (this.refused && Date.now() - this.refusedAt < RECHECK_MS) return false;
     // Tried again: refused once more, it waits another `RECHECK_MS`.
     this.refused = false;
+    const waiting = this.pendingActions;
+    let delivered = false;
     if (this.storage) {
       const keys: string[] = [];
       for (let i = 0; i < this.storage.length; i++) {
@@ -758,10 +781,12 @@ export class LibraryLog {
           rows.filter(trackerEvent),
           rows.filter((row) => !trackerEvent(row)),
         ])
-      )
+      ) {
+        delivered = true;
         this.recoveryRows = undefined;
+      }
     }
-    return this;
+    return delivered || this.pendingActions < waiting;
   }
 }
 
