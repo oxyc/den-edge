@@ -158,7 +158,8 @@
     | 'ipv6'
     | 'cast'
     | 'noCopy'
-    | 'noFit',
+    | 'noFit'
+    | 'engine',
     string
   > = {
     public: 'Playback isn’t available from this network yet.',
@@ -173,6 +174,7 @@
     noCopy: 'This can’t be played on this device right now. Try it on your TV.',
     noFit:
       'No release of this fits this connection as it is. Try it again on a faster one, or on your TV.',
+    engine: 'Couldn’t load the player. Check the connection, then try again.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
   const waits: Record<'busy' | 'transcode', string> = {
@@ -214,7 +216,9 @@
   let session = $state<Session | null>(null);
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
-  let failure = $state<Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | null>(
+  let failure = $state<
+    Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
+  >(
     null,
   );
   /**
@@ -674,7 +678,7 @@
     // stop it loading into a video that is no longer there.
     let gone = false;
     let engine: Hls | undefined;
-    void import('hls.js').then(({ default: Hls }) => {
+    const starting = import('hls.js').then(({ default: Hls }) => {
       if (gone || ended || session !== current) return;
       if (!Hls.isSupported()) {
         failure = 'unsupported';
@@ -737,6 +741,13 @@
       hls.on(Hls.Events.MANIFEST_PARSED, applySubtitles);
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
+    });
+    // hls.js is its own chunk, fetched only now: offline, or after a release replaced it, it never comes — and the
+    // video sat black with nothing said. The same for an engine that throws as it is set up.
+    void starting.catch((error: unknown) => {
+      console.warn('hls.js could not be started.', error);
+      if (gone || ended || session !== current) return;
+      failure = 'engine';
     });
     return () => {
       gone = true;
