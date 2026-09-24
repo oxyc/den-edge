@@ -60,6 +60,8 @@ const ABSENT: &[u8] = b"{\"den_absent\":true}";
 /// Below this many questions left in their month, the household key is rested for a day, so the last of the
 /// month's allowance stays with the callers who bring their own.
 const MONTH_RESERVE: u64 = 100;
+/// How long a browser keeps a title's warnings that were not kept here.
+const UNKEPT_MAX_AGE: Duration = Duration::from_secs(60);
 /// The topic names and categories every title's votes are joined with.
 const TOPICS_FILE: &str = "topics.json";
 
@@ -146,7 +148,9 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         None => None,
     };
     match lookup(state, &imdb, &key, rid).await {
-        Ok(Some(fresh)) => keep(file.as_deref(), fresh, "miss", asked).await,
+        Ok(Some((fresh, true))) => keep(file.as_deref(), fresh, "miss", asked).await,
+        // Named without the topic table: shown now, and asked for again rather than kept for 30 days without it.
+        Ok(Some((fresh, false))) => answer(fresh, UNKEPT_MAX_AGE, "miss", SystemTime::now(), asked),
         Ok(None) => forget(file.as_deref()).await,
         Err(refused) => match &mut asking {
             Some(asking) => *asking.failed(refused).await,
@@ -216,9 +220,15 @@ async fn check(state: &AppState, own: Option<String>, rid: &str) -> Response {
     }
 }
 
-/// One title's warnings, joined with the topic names: `Some` body to keep, `None` when doesthedogdie has no title
-/// with this IMDb id.
-async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Option<Bytes>, Box<Response>> {
+/// One title's warnings, joined with the topic names: `Some` body, and whether it may be kept — not when the topic
+/// table named nothing, so it lacks every category and spoiler flag — or `None` when doesthedogdie has no title with
+/// this IMDb id.
+async fn lookup(
+    state: &AppState,
+    imdb: &str,
+    key: &Key,
+    rid: &str,
+) -> Result<Option<(Bytes, bool)>, Box<Response>> {
     let found = ask(state, &format!("/items?imdb={imdb}"), key, rid).await?;
     let Some(id) = item_id(&found, imdb) else { return Ok(None) };
     let topics = topics(state, key, rid).await?;
@@ -226,7 +236,7 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
     if item.is_null() {
         return Ok(None);
     }
-    Ok(Some(Bytes::from(normalize(id, &item, &topics).to_string())))
+    Ok(Some((Bytes::from(normalize(id, &item, &topics).to_string()), named(&topics))))
 }
 
 /// The search answer's item for exactly this IMDb id. Their search is an array; an `items` object is taken too.
@@ -271,23 +281,26 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
     let asked = async {
         let topics = ask(state, "/topics", key, rid).await?;
         let categories = ask(state, "/topiccategories", key, rid).await?;
-        let table = topic_table(&topics, &categories);
-        // A table naming no topic is not an answer: doesthedogdie names hundreds. Kept, a bad answer (an error in a
-        // 200, a changed shape) named every title's warnings by nothing but their own field for 30 days.
-        if table.as_object().is_none_or(Map::is_empty) {
-            return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
-        }
-        Ok(table)
+        Ok(topic_table(&topics, &categories))
     };
     let table = match (asked.await, &mut asking) {
         (Ok(table), _) => table,
         (Err(refused), Some(asking)) => return Err(asking.failed(refused).await),
         (Err(refused), None) => return Err(refused),
     };
-    if let Some(file) = &file {
-        crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
+    // A table naming no topic is not an answer: doesthedogdie names hundreds. Kept, a bad answer (an error in a 200, a
+    // changed shape) named every title's warnings by nothing but their own field for 30 days. It is used for the
+    // title asking, which is named by its votes' own names (`normalize`) and not kept either (`lookup`).
+    if named(&table) {
+        if let Some(file) = &file {
+            crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
+        }
     }
     Ok(table)
+}
+
+fn named(table: &Value) -> bool {
+    table.as_object().is_some_and(|table| !table.is_empty())
 }
 
 fn topic_table(topics: &Value, categories: &Value) -> Value {
@@ -698,9 +711,11 @@ mod tests {
         crate::lock(&DTDDS).iter().find(|(k, _)| k == key).map(|(_, dtdd)| std::sync::Arc::clone(dtdd))
     }
 
-    /// A `/topics` answer that named nothing (an error object in a 200) was kept as the topic table for 30 days.
+    /// A `/topics` answer that named nothing (an error object in a 200) was kept as the topic table for 30 days; then
+    /// it failed every cold title with a 502 for as long as doesthedogdie answered so. The title is named by its votes'
+    /// own names, and neither it nor the table is kept.
     #[tokio::test]
-    async fn a_topic_list_naming_nothing_is_not_kept() {
+    async fn a_topic_list_naming_nothing_names_the_title_by_its_votes_and_keeps_neither() {
         let cache = temp_dir();
         let h = Harness::in_dir_with(temp_dir(), |state| state.warnings_cache_dir = Some(cache.clone()));
         let good = std::sync::Arc::new(std::sync::Mutex::new(false));
@@ -709,18 +724,29 @@ mod tests {
             Ok(match (path, *crate::lock(&answers)) {
                 ("/topics", false) => json!({ "error": "try again" }),
                 ("/topics", true) => json!([{ "id": 153, "name": "a dog dies", "topicCategoryId": 56 }]),
-                (_, _) => json!([{ "id": 56, "name": "Animal Injury or Death" }]),
+                ("/topiccategories", _) => json!([{ "id": 56, "name": "Animal Injury or Death" }]),
+                ("/items?imdb=tt0000601", _) => json!([{ "id": 7, "imdbId": "tt0000601" }]),
+                (_, _) => {
+                    json!({ "topicItemStats": [{ "topicId": 153, "topicName": "a dog dies", "yesSum": 1 }] })
+                }
             })
         });
         crate::lock(&DTDDS).push(("topics-key".to_owned(), dtdd));
-        let key = Key { value: "topics-key".into(), household: false };
+        let get = || h.send("GET", "/warnings/imdb/tt0000601", None, &[("x-api-key", "topics-key")]);
 
-        let refused = topics(&h.state, &key, "t").await.err().unwrap();
-        assert_eq!(refused.status(), StatusCode::BAD_GATEWAY);
-        assert!(!cache.join(TOPICS_FILE).exists(), "nothing was kept");
+        let resp = get().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        let named = body_json(resp).await;
+        assert_eq!(named["warnings"][0]["name"], "a dog dies", "{named}");
+        assert_eq!(named["warnings"][0]["category"], Value::Null);
+        assert!(!cache.join(TOPICS_FILE).exists(), "the table was not kept");
+        assert!(!cache.join("tt0000601.json").exists(), "nor the title named without it");
+
         *crate::lock(&good) = true;
-        assert_eq!(topics(&h.state, &key, "t").await.unwrap()["153"]["name"], "a dog dies");
-        assert!(cache.join(TOPICS_FILE).exists());
+        let named = body_json(get().await).await;
+        assert_eq!(named["warnings"][0]["category"], "Animal Injury or Death", "{named}");
+        assert!(cache.join(TOPICS_FILE).exists() && cache.join("tt0000601.json").exists());
     }
 
     /// Every cold title needs the topic table, and a burst of them each asked doesthedogdie for it, twice over.
