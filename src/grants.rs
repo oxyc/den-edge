@@ -1908,6 +1908,8 @@ mod tests {
         let got = body_json(answered).await;
         let metas = got["metas"].as_str().unwrap();
         assert!(!metas.contains(SCOUT) && metas.contains(&format!("~{gid}")), "scrubbed as before");
+        // Given back by the task that holds it, once that task has run.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(budget.available_permits(), crate::relay::COLLECT_BUDGET_BYTES, "and back once sent");
     }
 

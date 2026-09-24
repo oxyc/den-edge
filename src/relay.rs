@@ -976,14 +976,9 @@ async fn relay_with(
         }
     }
     drop(slot);
-    // The charge is carried by the body, so it comes back once the answer has been sent, not when it was made.
-    let body = Full::new(bytes).map_frame(move |frame| {
-        let _ = &charge;
-        frame
-    });
     answer_response(
         &parts,
-        Body::new(body),
+        collected_body(bytes, charge, deadline),
         public_session || playground || speed,
         member_only || grant.is_some(),
         scope,
@@ -1103,6 +1098,37 @@ where
     }
 }
 
+/// Holds `permit` until the returned sender is dropped or `deadline` passes, whichever is first, on a timer of its
+/// own: a body nobody polls still gives it back.
+fn hold_until(
+    deadline: tokio::time::Instant,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> tokio::sync::oneshot::Sender<()> {
+    let (held, ended) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout_at(deadline, ended).await;
+        drop(permit);
+    });
+    held
+}
+
+/// A collected answer's body, carrying its charge against `COLLECT_BUDGET_BYTES` until it has been sent or dropped —
+/// or until the call's `deadline`, whichever is first. Held for as long as the body lived, a browser that stopped
+/// reading kept its charge for as long as its connection stayed open (the server has no write timeout), and a few of
+/// them could hold the whole budget and refuse every other rewritten answer. So past the deadline the bytes of a
+/// reader that slow are no longer counted, and what is held can briefly exceed the budget by them.
+fn collected_body(
+    bytes: Bytes,
+    charge: Option<tokio::sync::OwnedSemaphorePermit>,
+    deadline: tokio::time::Instant,
+) -> Body {
+    let held = charge.map(|charge| hold_until(deadline, charge));
+    Body::new(Full::new(bytes).map_frame(move |frame| {
+        let _ = &held;
+        frame
+    }))
+}
+
 /// An addon's answer passed on to the browser as it arrives, never whole in memory.
 ///
 /// Its relay slot is held until the answer ends, is dropped, or reaches the deadline the whole call was given —
@@ -1127,11 +1153,7 @@ impl<B> Passed<B> {
         idle_for: Duration,
         slot: tokio::sync::OwnedSemaphorePermit,
     ) -> Self {
-        let (held, ended) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout_at(deadline, ended).await;
-            drop(slot);
-        });
+        let held = hold_until(deadline, slot);
         Passed {
             body,
             sent: 0,
@@ -2616,6 +2638,28 @@ mod tests {
         assert_eq!(budget.available_permits(), 1024 * 1024, "the refused one's part came back");
         drop(charge);
         assert_eq!(budget.available_permits(), 3 * 1024 * 1024);
+    }
+
+    /// A collected answer nobody reads gives its budget charge back at the call's deadline, as a relay slot does, so
+    /// browsers that stop reading cannot hold the budget and refuse everyone else's rewritten answers.
+    #[tokio::test]
+    async fn an_unread_collected_answer_gives_its_charge_back_at_the_deadline() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(1024));
+        let charge = Arc::clone(&budget).try_acquire_many_owned(1024).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        let unread = super::collected_body(axum::body::Bytes::from_static(b"{}"), Some(charge), deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(budget.available_permits(), 0, "held while the answer may still be sent");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert_eq!(budget.available_permits(), 1024, "given back without a read");
+        drop(unread);
+
+        // Sent before then, it comes back as soon as the body is done with.
+        let charge = Arc::clone(&budget).try_acquire_many_owned(1024).unwrap();
+        let far = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let read = super::collected_body(axum::body::Bytes::from_static(b"{}"), Some(charge), far);
+        assert_eq!(axum::body::to_bytes(read, usize::MAX).await.unwrap(), "{}");
+        assert_eq!(slots_back(&budget).await, 1024);
     }
 
     /// A player keeps asking for segments for as long as it plays, and the budget is per minute. Counted in a window
