@@ -512,9 +512,9 @@ async fn relay_with(
     let target = if speed { speed_target(&target) } else { Some(target) };
     let Some(target) = target else { return json(StatusCode::BAD_REQUEST, "bad_request") };
     // A guest has been through its grant already (`guest`) and is never a member, so none of this is asked of it.
-    let member_only = grant.is_none()
-        && face == crate::handler::Face::Web
-        && (req.uri().path().starts_with("/scout/") || remux);
+    // `/scout` itself and `/scout?…` are relayed to scout's `/` (`target`), so they are scout's too.
+    let scout = req.uri().path() == "/scout" || req.uri().path().starts_with("/scout/");
+    let member_only = grant.is_none() && face == crate::handler::Face::Web && (scout || remux);
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -1992,6 +1992,11 @@ mod tests {
 
         let guest = h.send("GET", "/scout/manifest.json", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(guest.status(), StatusCode::NOT_FOUND, "and nothing says what is being hidden");
+        // `/scout` and `/scout?…` are relayed to scout's own `/`, and are scout's as much as the rest.
+        for bare in ["/scout", "/scout?x=1"] {
+            let guest = h.send("GET", bare, None, &[("host", "d.oxy.fi")]).await;
+            assert_eq!(guest.status(), StatusCode::NOT_FOUND, "{bare}");
+        }
 
         // The LAN and tailnet names are untouched: a TV reaches scout directly, never through here.
         let lan = h.send("GET", "/scout/manifest.json", None, &[]).await;
