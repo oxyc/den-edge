@@ -278,10 +278,12 @@
   let excluded: string[] = [];
   let switching = false;
   /**
-   * The session `broke` is already judging. A video's `error` and a fatal hls.js error, or the cast page's `den-error`
-   * twice, can arrive for one failure; the second would find the first's switch under way and call it unplayable.
+   * The session `broke` is already judging, and whether a decoder refused it. A video's `error` and a fatal hls.js
+   * error, the stuck watch, or the cast page's `den-error` twice, can arrive for one failure; the second would find the
+   * first's switch under way and call it unplayable. A decoder's refusal among them still counts: it is what moves the
+   * session to another copy.
    */
-  let breaking: Session | null = null;
+  let breaking: { session: Session; decode: boolean } | null = null;
   /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was. */
   let playedSecs = 0;
   let lastPosition: number | undefined;
@@ -1049,9 +1051,13 @@
     message = video?.error?.message ?? '',
     kind: 'decode' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
   ) {
-    if (!session || failure || breaking === session) return;
+    if (!session || failure) return;
+    if (breaking?.session === session) {
+      if (kind === 'decode') breaking.decode = true;
+      return;
+    }
     const current = session;
-    breaking = current;
+    const judging = (breaking = { session: current, decode: kind === 'decode' });
     watcher?.spent();
     reportFailure(current, code, message);
     // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
@@ -1076,7 +1082,7 @@
     // It was copied because this browser said it could take it, and it couldn't: another release, copied, that it
     // does take, from the same second (`switchPolicy`). Never this one converted — a transcode is chosen before
     // playback or not at all — and with no such copy, playback stops here and says so.
-    const moved = kind === 'decode' ? await switchAway('decode') : false;
+    const moved = judging.decode ? await switchAway('decode') : false;
     if (moved === true) return;
     // A refusal that says nothing about this browser — den-remux out of reach, a login gone, access ended — is said as
     // itself. A busy den-remux is not: its note promises a wait that nothing here would then retry.
