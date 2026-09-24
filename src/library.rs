@@ -476,12 +476,13 @@ fn gzipped(page: &Value) -> Option<Response> {
     Some(resp)
 }
 
-/// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
-/// started proves nothing.
 /// Whether `member` (`<id>:<token>`, the `MEMBER_HEADER` a device sends) names a library here and holds its
 /// token. What the relay's budget is tiered on: a household that has paired a TV is a known caller and gets
 /// room to browse, where an anonymous visitor gets a visitor's allowance. It proves possession of a token
 /// den-edge only ever stored the hash of, so it can't be forged from anything readable here.
+///
+/// Asked on every relayed request, so a library not in memory is answered from its log's header
+/// (`holds_member_hash`), not replayed whole under every library's lock.
 pub async fn is_member(state: &AppState, member: Option<&str>) -> bool {
     let Some((id, token)) = member.and_then(|m| m.split_once(':')) else {
         return false;
@@ -489,14 +490,10 @@ pub async fn is_member(state: &AppState, member: Option<&str>) -> bool {
     if !valid_hex_id(id) || token.is_empty() || token.len() > 256 {
         return false;
     }
-    let mut libs = state.libraries.lock().await;
-    if load(state, &mut libs, id).await.is_err() {
-        return false;
-    }
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    libs.get(id).is_some_and(|lib| {
-        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
-        constant_time_eq(expected, &hash)
+    holds_member_hash(state, id, &hash).await.unwrap_or_else(|e| {
+        eprintln!("library member check: {e}");
+        false
     })
 }
 
@@ -527,6 +524,8 @@ async fn header_of(state: &AppState, id: &str) -> io::Result<Option<([u8; 32], O
     read_header(&mut BufReader::new(file)).await
 }
 
+/// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
+/// started proves nothing.
 async fn holds_another(
     state: &AppState,
     libs: &mut HashMap<String, Library>,
@@ -938,6 +937,11 @@ mod tests {
 
         let restarted = Harness::in_dir(h.dir.clone());
         assert!(super::is_member(&restarted.state, Some(&claim)).await);
+        assert!(!super::is_member(&restarted.state, Some(&format!("{LIB}:{TOKEN}"))).await);
+        assert!(
+            restarted.state.libraries.lock().await.is_empty(),
+            "a member check reads the header, and loads no library"
+        );
         let replaced = restarted
             .send(
                 "PUT",
