@@ -407,25 +407,38 @@
   /**
    * Drain sealed pairing identities while Settings is open. A linked device can resend after an upgrade, rename, or
    * stamp-id change, so learning the first id must not stop later authenticated updates from being applied.
+   *
+   * One drain per device per check. Only a device handed the library in the last few minutes gets quick retries,
+   * since its message may still be on the way; every other device has either sent it already or never will, so
+   * retrying them only multiplies the requests an open tab makes. A queue den-edge no longer has is not asked again
+   * this visit, and a hidden tab doesn't check at all.
    */
-  // This is deliberately non-reactive: starting or finishing a request must not retrigger the effect below.
+  const FRESH_PAIRING_MS = 10 * 60_000;
+  // These are deliberately non-reactive: starting or finishing a request must not retrigger the effect below.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const learningIdentities = new Set<string>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const goneQueues = new Set<string>();
   const identityKey = (entry: Shared) => entry.inboxKey ?? `${entry.at}:${entry.name}`;
   async function learnIdentity(entry: Shared) {
     if (!entry.inboxKey || !entry.linkKey) return;
     const key = identityKey(entry);
-    if (learningIdentities.has(key)) return;
+    if (learningIdentities.has(key) || goneQueues.has(key)) return;
     learningIdentities.add(key);
     const credential = { inboxKey: entry.inboxKey, linkKey: entry.linkKey };
+    const attempts = !entry.deviceId && Date.now() - entry.at < FRESH_PAIRING_MS ? 8 : 1;
     try {
-      for (let attempt = 0; attempt < 8; attempt++) {
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
         const identity = await receiveDeviceIdentity(credential);
+        if (identity === 'gone') {
+          goneQueues.add(key);
+          return;
+        }
         if (identity) {
           links.identifyShared(entry, identity.name, identity.deviceId);
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
       }
     } finally {
       learningIdentities.delete(key);
@@ -434,7 +447,9 @@
   function learnIdentities(entries: Shared[]) {
     for (const entry of entries) void learnIdentity(entry);
   }
-  const checkIdentities = () => learnIdentities(links.shared);
+  const checkIdentities = () => {
+    if (document.visibilityState === 'visible') learnIdentities(links.shared);
+  };
   $effect(() => {
     learnIdentities(links.shared);
   });
