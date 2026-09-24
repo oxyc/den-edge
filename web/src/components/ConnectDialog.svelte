@@ -10,6 +10,7 @@
   import { answer, consentRequest, consentRequestId, type ConsentRequest } from '../lib/oauth';
   import { canProve } from '../lib/relayFetch';
   import { LinkScreen } from '../lib/screens.svelte';
+  import ScreenLoading from './ScreenLoading.svelte';
 
   let dialog = $state<HTMLDialogElement>();
   let id = $state<string | null>(null);
@@ -138,7 +139,7 @@
       {#if LinkScreen.current}
         <LinkScreen.current embedded />
       {:else}
-        <p role="status">Loading…</p>
+        <ScreenLoading screen={LinkScreen} page={false} />
       {/if}
       <div class="actions">
         <button type="button" class="quiet" onclick={() => (linking = false)}>Back</button>

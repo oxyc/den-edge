@@ -293,3 +293,24 @@ test('a request that expired while linking says to start again from the assistan
     await browser.close();
   }
 });
+
+// The link screen is its own chunk, fetched when Link this browser is pressed. One that can't be had is said, with
+// another try, rather than a "Loading…" that never ends.
+test('a link screen that could not be loaded says so, with a Try again', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const { context } = await consentContext(browser);
+    const page = await context.newPage();
+    await page.route(/\/src\/LinkTV\.svelte/, (r) => r.abort('internetdisconnected'));
+    await page.goto(`${ORIGIN}/connect?request=${ID}`);
+    const dialog = page.getByRole('dialog', { name: 'Connect claude.ai to Den?' });
+    await dialog.getByRole('button', { name: 'Link this browser' }).click();
+    await expect(dialog.getByText('Couldn’t load this page.')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Try again' })).toBeVisible();
+    await expect(dialog.getByRole('status')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});

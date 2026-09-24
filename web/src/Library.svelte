@@ -1195,7 +1195,14 @@
   {/if}
 {/if}
 
-{#if playing && scout && remux !== null && PlayerScreen.current}
+{#if playing && scout && remux !== null && !PlayerScreen.current}
+  <!-- Over the page as the player would be, which it has made inactive: without this a player whose chunk couldn't
+       be had left Play doing nothing, and the page's trailer stopped. -->
+  <div class="player-screen" role="dialog" aria-modal="true" aria-label={playing.title.title}>
+    <ScreenLoading screen={PlayerScreen} />
+    <button class="close" onclick={() => (playing = null)}>Close</button>
+  </div>
+{:else if playing && scout && remux !== null && PlayerScreen.current}
   {@const target = playing}
   {@const after = following}
   <!-- A session names one source: a shared scout goes with the shared subtitles, a library's with its own. -->
@@ -1229,5 +1236,29 @@
 <style>
   .note {
     color: var(--muted);
+  }
+
+  .player-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 8px;
+    padding: 0 var(--gutter);
+    background: #000;
+    color: #fff;
+    text-align: center;
+  }
+
+  .close {
+    min-height: 44px;
+    padding: 8px 16px;
+    border: 1px solid rgb(255 255 255 / 0.3);
+    border-radius: 999px;
+    background: none;
+    color: inherit;
+    cursor: pointer;
   }
 </style>

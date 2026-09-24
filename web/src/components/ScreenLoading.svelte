@@ -3,14 +3,21 @@
 <script lang="ts">
   import Loading from './Loading.svelte';
 
-  let { screen }: { screen: { failed: boolean; load(): Promise<void> } } = $props();
+  let {
+    screen,
+    page = true,
+  }: {
+    screen: { failed: boolean; load(): Promise<void> };
+    /** Over the whole page (`Loading`'s `page`), or in place, as inside a dialog. */
+    page?: boolean;
+  } = $props();
 </script>
 
 {#if screen.failed}
   <p class="note">Couldn’t load this page. Check that this device is online.</p>
   <button class="more" onclick={() => void screen.load()}>Try again</button>
 {:else}
-  <Loading label="Loading" page />
+  <Loading label="Loading" {page} />
 {/if}
 
 <style>
