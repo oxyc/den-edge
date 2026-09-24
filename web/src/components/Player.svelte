@@ -694,7 +694,9 @@
     const starting = import('hls.js').then(({ default: Hls }) => {
       if (gone || ended || session !== current) return;
       if (!Hls.isSupported()) {
+        // Nothing this browser is offered will play, so the session den-remux holds for it goes now, not at close.
         failure = 'unsupported';
+        letGo();
         return;
       }
       hls = engine = new Hls(hlsConfig(started, 'page', connection));
