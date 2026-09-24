@@ -187,6 +187,24 @@ describe('startSession', () => {
     );
   });
 
+  it('reads a session it cannot parse as out of reach, rather than throwing', async () => {
+    const plain = { ...want, subtitleLanguages: [] };
+    const cutOff = async () => new Response('{"playlist":', { status: 201 });
+    expect(await startSession(plain, cutOff)).toEqual({ failure: 'unreachable' });
+  });
+
+  it('gives den-remux a deadline for the session and the release list', async () => {
+    const signals: unknown[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      signals.push(init?.signal);
+      return answer(201, { ...session, releases: [] });
+    };
+    await startSession({ ...want, subtitleLanguages: [] }, fetchImpl);
+    await listReleases({ imdb: 'tt1', scout: want.scout }, fetchImpl);
+    expect(signals).toHaveLength(2);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('says a guest’s revoked grant ended, and that a session has no public address for this network', async () => {
     vi.stubGlobal('location', { href: 'https://den.example/', origin: 'https://den.example' });
     try {
@@ -1071,6 +1089,18 @@ describe('sourceFailed', () => {
 
   it('is no verdict past the end of the playlist', async () => {
     expect(await sourceFailed(session, 9_999, serving(502))).toBe(false);
+  });
+
+  it('asks every request under a deadline, so a hung segment is no verdict rather than no answer', async () => {
+    const signals: unknown[] = [];
+    const inner = serving(502);
+    const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
+      signals.push(init?.signal);
+      return inner(input, init);
+    }) as typeof fetch;
+    await sourceFailed(session, 7, fetchImpl);
+    expect(signals).toHaveLength(3);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
   });
 });
 

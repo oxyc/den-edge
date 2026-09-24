@@ -157,6 +157,13 @@ export interface Refused {
 /** A direct LAN/tailnet probe must finish even when an unreachable route silently drops packets. */
 export const REMUX_PROBE_TIMEOUT_MS = 3_000;
 
+/**
+ * How long a session, a release list or a failed-source check may take to answer before it counts as out of reach.
+ * den-edge's relay gives den-remux 30 s for an answer's head, after up to 5 s waiting for a slot (relay.rs), so a
+ * relayed call hears the relay's own refusal first; a direct route has no bound of its own but this one.
+ */
+export const REMUX_ANSWER_MS = 60_000;
+
 // A cross-site remux cannot rely on cookies. Keep its short-lived signed credential in this page's
 // memory, scoped to exactly the service that issued it; never persist the browser's login key.
 const browserTokens = new Map<string, string>();
@@ -596,14 +603,21 @@ export async function startSession(
         method: 'POST',
         headers: browserHeaders(base),
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REMUX_ANSWER_MS),
       });
     } catch {
       return { failure: 'unreachable' };
     }
     if (res.status === 201) {
+      let session: Session;
+      try {
+        session = (await res.json()) as Session;
+      } catch {
+        // A body cut off, or past the deadline: nothing to play, and the same answer as no answer.
+        return { failure: 'unreachable' };
+      }
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
-      const session = (await res.json()) as Session;
       const mediaBase = session.publicBase ?? (/^https?:/.test(base) ? base : undefined);
       return mediaBase
         ? {
@@ -714,6 +728,7 @@ export async function listReleases(
       method: 'POST',
       headers: browserHeaders(base),
       body: JSON.stringify(claims ? { ...title, ...claims } : title),
+      signal: AbortSignal.timeout(REMUX_ANSWER_MS),
     });
     forgetRefusedToken(base, res);
     if (!res.ok) return null;
@@ -837,15 +852,17 @@ export async function sourceFailed(
   at: number,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
+  // One deadline for the whole check: past it, not knowing is the answer.
+  const signal = AbortSignal.timeout(REMUX_ANSWER_MS);
   try {
     const master = new URL(session.playlist, globalThis.location?.href ?? 'https://den.invalid/');
-    const variant = (await (await fetchImpl(master.href)).text())
+    const variant = (await (await fetchImpl(master.href, { signal })).text())
       .split('\n')
       .map((line) => line.trim())
       .find((line) => line && !line.startsWith('#'));
     if (!variant) return false;
     const media = new URL(variant, master);
-    const lines = (await (await fetchImpl(media.href)).text())
+    const lines = (await (await fetchImpl(media.href, { signal })).text())
       .split('\n')
       .map((line) => line.trim());
     let start = 0;
@@ -861,7 +878,7 @@ export async function sourceFailed(
       start += span;
     }
     if (!stalled) return false;
-    const answer = await fetchImpl(new URL(stalled, media).href, { cache: 'no-store' });
+    const answer = await fetchImpl(new URL(stalled, media).href, { cache: 'no-store', signal });
     // The body is never read: a segment is tens of megabytes and the status is the whole answer.
     void answer.body?.cancel();
     return answer.status === 502;
