@@ -3,6 +3,7 @@
   import InviteDialog from './components/InviteDialog.svelte';
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
+  import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
@@ -156,6 +157,8 @@
     <RoutedLibrary link={null} {query} {explore} {people} onchange={(next) => (route = next)} />
   {:else if LinkScreen.current}
     <LinkScreen.current />
+  {:else if LinkScreen.failed}
+    <ScreenLoading screen={LinkScreen} />
   {/if}
 </main>
 

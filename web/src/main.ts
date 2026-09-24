@@ -39,9 +39,10 @@ function reloadOnce(): void {
 }
 
 // A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has. Offline, the file is
-// simply out of reach, and reloading would not bring it back.
-window.addEventListener('vite:preloadError', (event) => {
-  event.preventDefault();
+// simply out of reach, and reloading would not bring it back. The event is left uncancelled: cancelling it makes
+// Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8), and the screen that asked
+// for it then never learns it failed. Rejected, it says so and offers another try (`screens.svelte.ts`).
+window.addEventListener('vite:preloadError', () => {
   if (navigator.onLine) reloadOnce();
 });
 

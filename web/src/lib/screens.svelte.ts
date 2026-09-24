@@ -5,20 +5,27 @@ import type { Component } from 'svelte';
 
 /** A component loaded on first use and kept, so every page that shows it after that renders it at once. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- any component, whose own props type flows through
-function lazy<C extends Component<any, any, any>>(load: () => Promise<{ default: C }>) {
+export function lazy<C extends Component<any, any, any>>(load: () => Promise<{ default: C }>) {
   let component = $state.raw<C | null>(null);
+  let failed = $state(false);
   let loading: Promise<void> | undefined;
   return {
     get current() {
       return component;
     },
+    /** The last try failed and none is running: the page says so and offers another (`ScreenLoading`). */
+    get failed() {
+      return failed;
+    },
     load(): Promise<void> {
+      failed = false;
       loading ??= load().then(
         (module) => {
           component = module.default;
         },
         (error: unknown) => {
           loading = undefined;
+          failed = true;
           console.warn('den: a screen could not be loaded', error);
         },
       );
@@ -43,7 +50,11 @@ export function preloadScreens(): void {
   if (preloading) return;
   preloading = true;
   const load = () => {
-    if (!navigator.onLine) return;
+    // Offline the chunks are out of reach; they are fetched when the browser is back rather than never.
+    if (!navigator.onLine) {
+      window.addEventListener('online', load, { once: true });
+      return;
+    }
     for (const screen of [
       DetailScreen,
       PersonScreen,

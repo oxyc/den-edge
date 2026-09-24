@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import Router from './Router.svelte';
   import Library from './Library.svelte';
-  import Loading from './components/Loading.svelte';
+  import ScreenLoading from './components/ScreenLoading.svelte';
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
   import { localLibraryKey } from './lib/localLibrary';
@@ -48,12 +48,12 @@
         {#if SettingsScreen.current}
           <SettingsScreen.current {link} {session} />
         {:else}
-          <Loading label="Loading" page />
+          <ScreenLoading screen={SettingsScreen} />
         {/if}
       {:else if LinkScreen.current}
         <LinkScreen.current />
       {:else}
-        <Loading label="Loading" page />
+        <ScreenLoading screen={LinkScreen} />
       {/if}
     {:else}
       <Library {link} {session} {route} {active} {query} {explore} {people} />

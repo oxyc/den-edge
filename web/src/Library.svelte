@@ -1,5 +1,6 @@
 <script lang="ts">
   import Loading from './components/Loading.svelte';
+  import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
@@ -1171,7 +1172,7 @@
     {/if}
   </p>
 {:else if page && !DetailScreen.current}
-  <Loading label="Loading" page />
+  <ScreenLoading screen={DetailScreen} />
 {:else if page}
   <!-- The player opens over this page rather than as a route of its own, so the page stays mounted
        and in front of the viewer as far as it knows: without `!playing` its trailer plays on under
@@ -1209,12 +1210,14 @@
     onepisode={markEpisodeSeen}
     shown={relatedShown}
   />
-{:else if (route.page === 'person' && !PersonScreen.current) || (route.page === 'search' && !SearchScreen.current)}
-  <Loading label="Loading" page />
+{:else if route.page === 'person' && !PersonScreen.current}
+  <ScreenLoading screen={PersonScreen} />
+{:else if route.page === 'search' && !SearchScreen.current}
+  <ScreenLoading screen={SearchScreen} />
 {:else if route.page === 'person'}
   <PersonScreen.current id={route.id} {tmdbKey} {active} />
 {:else if route.page === 'service' && !ServiceScreen.current}
-  <Loading label="Loading" page />
+  <ScreenLoading screen={ServiceScreen} />
 {:else if route.page === 'service'}
   <ServiceScreen.current
     id={route.id}
@@ -1240,7 +1243,7 @@
     owned={seeds.owned}
   />
 {:else if route.page === 'people' && !PeopleScreen.current}
-  <Loading label="Loading" page />
+  <ScreenLoading screen={PeopleScreen} />
 {:else if route.page === 'people'}
   <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
 {:else if route.page === 'watchlist'}
