@@ -1,7 +1,9 @@
 //! The durable state: one file per key, under a directory per kind of record. A write goes to a temporary
 //! file, is synced, and is renamed over the old one, so a reader sees the old value or the new one and a
-//! crash leaves one of them whole. Every mutation happens under `AppState::write_lock`, so there is one
-//! writer at a time.
+//! crash leaves one of them whole. Each read-modify-write happens under its owner's lock — the inbox and `/sync`
+//! under `AppState::write_lock`, a library under `AppState::libraries`, grants, OAuth and title metadata under their
+//! own — so one record has one writer at a time, but different owners write at once. What they share is the cap,
+//! and room under it is reserved atomically before a write and given back if the write fails.
 //!
 //! File names are the SHA-256 of the key, not the key: an inbox key is a credential, and a name made from
 //! it would put it in every directory listing and bound nothing about its length.
