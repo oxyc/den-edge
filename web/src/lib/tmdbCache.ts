@@ -50,6 +50,16 @@ const SHARED_MS = 20_000;
  * measured), so this bounds the store to some tens of megabytes.
  */
 export const MOST_KEPT = 2_000;
+/**
+ * How many answers one prune drops at most before it lets other reads and writes of the store go ahead: a prune is
+ * one read-write transaction, and every read of the store waits behind it. The first prune after the cap came in
+ * had a backlog of up to six months of answers to drop.
+ */
+export const PRUNE_BATCH = 100;
+/** How long a prune waits between batches, and after the first TMDB question of the page before it starts. */
+export const PRUNE_PAUSE_MS = 1_000;
+/** A tab kept open prunes again after this many answers kept, not only once per page load. */
+export const PRUNE_EVERY = 200;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
 export const STALE_FOR = 7 * DAY;
 
@@ -63,8 +73,11 @@ export interface Entry {
 export interface Store {
   get(key: string): Promise<Entry | undefined>;
   put(key: string, entry: Entry): Promise<void>;
-  /** Drop what was fetched before `cutoff`, and the oldest beyond the `most` newest. */
-  prune(cutoff: number, most: number): Promise<void>;
+  /**
+   * Drop what was fetched before `cutoff`, and the oldest beyond the `most` newest: at most `batch` of them, oldest
+   * first. True when it dropped that many, and more may be left.
+   */
+  prune(cutoff: number, most: number, batch: number): Promise<boolean>;
   clear(): Promise<void>;
 }
 
@@ -197,16 +210,32 @@ export function cachingFetch(
   network: typeof fetch = relayFetch,
   now: () => number = Date.now,
 ): typeof fetch {
-  let pruned = false;
+  /** Answers kept since the last prune started; undefined until the first one has. */
+  let keptSince: number | undefined;
+  let pruning = false;
+  /** Prune in batches (`PRUNE_BATCH`), each after a pause, so reads of the store are not held behind all of it. */
+  const prune = () => {
+    if (!store || pruning) return;
+    pruning = true;
+    keptSince = 0;
+    const pause = () => new Promise((resolve) => setTimeout(resolve, PRUNE_PAUSE_MS));
+    void (async () => {
+      do await pause();
+      while (await store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH));
+    })()
+      .catch(() => undefined)
+      .finally(() => (pruning = false));
+  };
+  const keep = async (key: string, entry: Entry) => {
+    await store?.put(key, entry);
+    if (keptSince !== undefined && ++keptSince >= PRUNE_EVERY) prune();
+  };
   const refreshing = new Set<string>();
   return async (input, init) => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!store || !href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET')
       return network(input, init);
-    if (!pruned) {
-      pruned = true;
-      void store.prune(now() - RETENTION, MOST_KEPT).catch(() => undefined);
-    }
+    if (keptSince === undefined) prune();
     const url = new URL(href);
     const key = keyOf(url);
     // What is kept is keyed by the question, so a browser that later gets its own key reads the answers it
@@ -238,7 +267,7 @@ export function cachingFetch(
           .then(async (res) => {
             if (!res.ok) return;
             const refreshed = entry(res, await res.text());
-            if (refreshed) await store.put(key, refreshed);
+            if (refreshed) await keep(key, refreshed);
           })
           .catch(() => undefined)
           .finally(() => refreshing.delete(key));
@@ -256,7 +285,7 @@ export function cachingFetch(
       const body = await res.text();
       const fetched = entry(res, body);
       // What it says about its titles den-edge kept as it fetched it (`src/title_metadata.rs`).
-      if (fetched) void store.put(key, fetched).catch(() => undefined);
+      if (fetched) void keep(key, fetched).catch(() => undefined);
       return answer(body);
     } catch (error) {
       if (kept) return answer(kept.body);
@@ -286,8 +315,10 @@ function indexedStore(): Store | null {
     put: async (key, entry) => {
       await run('readwrite', (answers) => answers.put(entry, key));
     },
-    prune: async (cutoff, most) => {
+    prune: async (cutoff, most, batch) => {
+      let dropped = 0;
       await run('readwrite', (answers) => {
+        dropped = 0;
         const count = answers.count();
         count.onsuccess = () => {
           let over = count.result - most;
@@ -295,13 +326,15 @@ function indexedStore(): Store | null {
           const cursor = answers.index('fetchedAt').openCursor();
           cursor.onsuccess = () => {
             const at = cursor.result;
-            if (!at || (over <= 0 && (at.key as number) >= cutoff)) return;
+            if (!at || dropped >= batch || (over <= 0 && (at.key as number) >= cutoff)) return;
             at.delete();
+            dropped++;
             over--;
             at.continue();
           };
         };
       });
+      return dropped >= batch;
     },
     clear: async () => {
       await run('readwrite', (answers) => answers.clear());

@@ -4,6 +4,9 @@ import {
   freshFor,
   MOST_KEPT,
   onTmdbThrottle,
+  PRUNE_BATCH,
+  PRUNE_EVERY,
+  PRUNE_PAUSE_MS,
   RETENTION,
   sharingFlights,
   TMDB_PROXY_KEY,
@@ -15,14 +18,19 @@ const HOUR = 3_600_000;
 
 function memory() {
   const entries = new Map<string, Entry>();
-  const pruned: [number, number][] = [];
+  const pruned: [number, number, number][] = [];
+  /** How many more prunes find a full batch to drop. */
+  const backlog = { batches: 0 };
   const store: Store = {
     get: async (key) => entries.get(key),
     put: async (key, entry) => void entries.set(key, entry),
-    prune: async (cutoff, most) => void pruned.push([cutoff, most]),
+    prune: async (cutoff, most, batch) => {
+      pruned.push([cutoff, most, batch]);
+      return backlog.batches-- > 0;
+    },
     clear: async () => entries.clear(),
   };
-  return { entries, pruned, store };
+  return { entries, pruned, backlog, store };
 }
 
 function network() {
@@ -220,13 +228,51 @@ describe('cachingFetch', () => {
   it('leaves everything but TMDB alone, and prunes past the retention limit once', async () => {
     const { entries, pruned, store } = memory();
     const net = network();
-    const cached = cachingFetch(store, net.fetchImpl, () => RETENTION + 5);
-    await cached('/scout/cfg/availability', { method: 'POST' });
-    await cached('/atlas/catalog/movie/den-titles.json');
-    expect(entries.size).toBe(0);
-    await cached(detail);
-    await cached(discover);
-    expect(pruned).toEqual([[5, MOST_KEPT]]);
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const cached = cachingFetch(store, net.fetchImpl, () => RETENTION + 5);
+      await cached('/scout/cfg/availability', { method: 'POST' });
+      await cached('/atlas/catalog/movie/den-titles.json');
+      expect(entries.size).toBe(0);
+      await cached(detail);
+      await cached(discover);
+      await vi.advanceTimersByTimeAsync(10 * PRUNE_PAUSE_MS);
+      expect(pruned).toEqual([[5, MOST_KEPT, PRUNE_BATCH]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The one prune a page load made was a single transaction over the whole backlog, which every read of the store
+   * waited behind as the page first painted; and a tab kept open for days never pruned again.
+   */
+  it('prunes after the first answers are read, a batch at a time, and again in a tab kept open', async () => {
+    const { pruned, backlog, store } = memory();
+    const net = network();
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      backlog.batches = 2;
+      const cached = cachingFetch(store, net.fetchImpl, () => RETENTION + 5);
+      await cached(detail);
+      expect(pruned, 'not before the first read').toEqual([]);
+      await vi.advanceTimersByTimeAsync(PRUNE_PAUSE_MS);
+      expect(pruned).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(PRUNE_PAUSE_MS);
+      expect(pruned, 'a pause between batches').toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(10 * PRUNE_PAUSE_MS);
+      expect(pruned, 'until a batch is not full').toHaveLength(3);
+      // The first answer was one; the last below makes `PRUNE_EVERY`.
+      for (let page = 1; page < PRUNE_EVERY - 1; page++)
+        await cached(`https://api.themoviedb.org/3/discover/movie?page=${page}&api_key=secret`);
+      await vi.advanceTimersByTimeAsync(10 * PRUNE_PAUSE_MS);
+      expect(pruned).toHaveLength(3);
+      await cached(`https://api.themoviedb.org/3/discover/movie?page=${PRUNE_EVERY}&api_key=x`);
+      await vi.advanceTimersByTimeAsync(10 * PRUNE_PAUSE_MS);
+      expect(pruned, 'again after as many answers kept').toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /**
