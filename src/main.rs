@@ -65,6 +65,8 @@ pub struct AppState {
     /// Proxies whose report of the visitor's address counts (env `TRUSTED_PROXIES`, comma-separated IPs):
     /// `cloudflared` and `tailscale serve` connect from their own address (`handler::client_ip`).
     pub trusted_proxies: Vec<std::net::IpAddr>,
+    /// The ones among them whose `CF-Connecting-IP` counts: entries written `cf:<ip>`, for `cloudflared`.
+    pub cloudflare_proxies: Vec<std::net::IpAddr>,
     /// The web app's public names (env `WEB_HOSTS`, comma-separated). They sit behind Cloudflare Access, and a
     /// request for one gets the web app and none of the device API (`handler::Face`, oxyc/den#15).
     pub web_hosts: Vec<String>,
@@ -206,6 +208,7 @@ impl AppState {
             web_dir: None,
             web_files: web::Files::default(),
             trusted_proxies: Vec::new(),
+            cloudflare_proxies: Vec::new(),
             web_hosts: Vec::new(),
             api_hosts: Vec::new(),
             relays: Vec::new(),
@@ -294,7 +297,8 @@ async fn main() {
         .map(|v| v.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect())
         .unwrap_or_default();
     state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
-    state.trusted_proxies = env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
+    (state.trusted_proxies, state.cloudflare_proxies) =
+        env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
     state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
     state.api_hosts = env_opt("API_HOSTS").map(|v| parse_hosts("API_HOSTS", &v)).unwrap_or_default();
     state.relays = env_opt("ADDON_RELAY").map(|v| parse_relays(&v)).unwrap_or_default();
@@ -415,21 +419,23 @@ async fn main() {
     }
 }
 
-/// `TRUSTED_PROXIES`: comma-separated IP addresses. A malformed entry is said and skipped — trusting it would mean
-/// guessing what was meant.
-fn parse_proxies(value: &str) -> Vec<std::net::IpAddr> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| {
-            let parsed = p.parse().ok();
-            if parsed.is_none() {
-                eprintln!("TRUSTED_PROXIES: {p:?} is not an IP address — skipping it");
-            }
-            parsed
-        })
-        .collect()
+/// `TRUSTED_PROXIES`: comma-separated IP addresses, the trusted ones and, second, those written `cf:<ip>` — the
+/// proxies that set `CF-Connecting-IP` rather than pass on what the visitor wrote in it. A malformed entry is said
+/// and skipped — trusting it would mean guessing what was meant.
+fn parse_proxies(value: &str) -> (Vec<std::net::IpAddr>, Vec<std::net::IpAddr>) {
+    let (mut trusted, mut cloudflare) = (Vec::new(), Vec::new());
+    for p in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (cf, address) = p.strip_prefix("cf:").map_or((false, p), |a| (true, a.trim()));
+        let Ok(ip) = address.parse() else {
+            eprintln!("TRUSTED_PROXIES: {p:?} is not an IP address — skipping it");
+            continue;
+        };
+        trusted.push(ip);
+        if cf {
+            cloudflare.push(ip);
+        }
+    }
+    (trusted, cloudflare)
 }
 
 /// `WEB_HOSTS` / `API_HOSTS`: comma-separated host names, lower-cased, compared whole against a request's

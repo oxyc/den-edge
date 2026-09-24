@@ -620,9 +620,10 @@ pub fn link_key(req: &Request) -> String {
 
 /// The visitor's address, for the per-address limits. den-edge is reached directly on the LAN, or through
 /// `tailscale serve` and `cloudflared`, which connect from their own address — so behind a proxy listed in
-/// `TRUSTED_PROXIES` the address is the one that proxy reports: `CF-Connecting-IP` (Cloudflare), else the last
-/// `X-Forwarded-For` entry, the one the proxy added. From anyone else those headers are ignored: they could say
-/// anything.
+/// `TRUSTED_PROXIES` the address is the one that proxy reports: `CF-Connecting-IP` from one listed as `cf:`
+/// (Cloudflare sets it), else the last `X-Forwarded-For` entry, the one the proxy added. From anyone else those
+/// headers are ignored: they could say anything. `tailscale serve` is one of those for `CF-Connecting-IP`: it
+/// passes on whatever a tailnet peer wrote there.
 pub fn client_ip(state: &AppState, req: &Request) -> String {
     client_addr(state, req).map_or_else(|| "unknown".to_owned(), rate_limit_key)
 }
@@ -632,7 +633,11 @@ pub fn client_ip(state: &AppState, req: &Request) -> String {
 pub fn client_addr(state: &AppState, req: &Request) -> Option<std::net::IpAddr> {
     let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip())?;
     if state.trusted_proxies.contains(&peer) {
-        let reported = header_value(req, "cf-connecting-ip")
+        let reported = state
+            .cloudflare_proxies
+            .contains(&peer)
+            .then(|| header_value(req, "cf-connecting-ip"))
+            .flatten()
             .or_else(|| header_value(req, "x-forwarded-for").and_then(|v| v.rsplit(',').next()))
             .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
         if reported.is_some() {
@@ -1221,6 +1226,33 @@ pub mod tests {
             body_json(h.send("GET", "/config", None, &[("host", "192.168.86.193:8094")]).await).await;
         assert_eq!(config["minSupportedVersion"], "0.1.0");
         assert!(config.get("lan").is_none() && config.get("access").is_none(), "{config}");
+    }
+
+    /// `CF-Connecting-IP` is Cloudflare's to set, so it counts only from a proxy listed as `cf:`. `tailscale serve`
+    /// passes whatever a tailnet peer wrote in it, and a peer choosing its own address chose its own limit.
+    #[test]
+    fn cf_connecting_ip_counts_only_from_the_proxy_that_sets_it() {
+        let h = Harness::new();
+        let mut state = Arc::try_unwrap(h.state).ok().unwrap();
+        let (trusted, cloudflare) = crate::parse_proxies("192.168.1.9, cf:192.168.1.8, cf:nope");
+        assert_eq!(
+            trusted,
+            ["192.168.1.9".parse::<std::net::IpAddr>().unwrap(), "192.168.1.8".parse().unwrap()]
+        );
+        assert_eq!(cloudflare, ["192.168.1.8".parse::<std::net::IpAddr>().unwrap()]);
+        (state.trusted_proxies, state.cloudflare_proxies) = (trusted, cloudflare);
+        let from = |peer: [u8; 4]| {
+            let mut req = axum::http::Request::builder()
+                .header("cf-connecting-ip", "203.0.113.1")
+                .header("x-forwarded-for", "198.51.100.7, 198.51.100.2")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from((peer, 5000))));
+            client_ip(&state, &req)
+        };
+        assert_eq!(from([192, 168, 1, 8]), "203.0.113.1", "cloudflared");
+        assert_eq!(from([192, 168, 1, 9]), "198.51.100.2", "tailscale serve: the entry it added");
+        assert_eq!(from([192, 168, 1, 7]), "192.168.1.7", "anyone else: the socket");
     }
 
     #[tokio::test]

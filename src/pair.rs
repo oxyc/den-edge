@@ -232,7 +232,8 @@ mod tests {
     #[tokio::test]
     async fn behind_a_trusted_proxy_each_visitor_is_limited_on_their_own() {
         let mut h = Harness::new();
-        Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        (state.trusted_proxies, state.cloudflare_proxies) = crate::parse_proxies("cf:192.168.1.9");
         for _ in 0..crate::link::CLAIMS_PER_WINDOW {
             assert_eq!(open_as(&h, "203.0.113.5").await, StatusCode::GONE);
         }
