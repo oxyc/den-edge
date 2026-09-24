@@ -670,13 +670,17 @@
       watcher = watchPlayback({ video: element, reportUrl });
       return stopWatching;
     }
+    // The engine this run made. A failure unmounts the element with the session unchanged, and nothing else would
+    // stop it loading into a video that is no longer there.
+    let gone = false;
+    let engine: Hls | undefined;
     void import('hls.js').then(({ default: Hls }) => {
-      if (ended || session !== current) return;
+      if (gone || ended || session !== current) return;
       if (!Hls.isSupported()) {
         failure = 'unsupported';
         return;
       }
-      hls = new Hls(hlsConfig(started, 'page', connection));
+      hls = engine = new Hls(hlsConfig(started, 'page', connection));
       // A request starting is no progress; its bytes, counted as they come in (`arrived`), are.
       hls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
         if (data.frag.type !== 'subtitle') loading = data.frag.stats;
@@ -734,7 +738,15 @@
       hls.loadSource(current.playlist);
       hls.attachMedia(element);
     });
-    return stopWatching;
+    return () => {
+      gone = true;
+      stopWatching();
+      // Unless a replacement or the close already did.
+      if (engine && hls === engine) {
+        engine.destroy();
+        hls = undefined;
+      }
+    };
   });
 
   // A start that needs a head start (`prebuffer`) waits for it, paused, rather than starting and then stalling — with a
@@ -1340,6 +1352,7 @@
     watcher?.stop();
     watcher = undefined;
     hls?.destroy();
+    hls = undefined;
     // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
     if (session && !casting) endSession(session);
   }
