@@ -830,7 +830,7 @@ async fn relay_with(
     let (parts, body) = answer.into_parts();
     let mut bytes = match collect_by(body, deadline).await {
         Ok(bytes) => bytes,
-        Err(refused) => return refused,
+        Err((status, code)) => return json(status, code),
     };
     if let Some(g) = &grant {
         // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
@@ -949,16 +949,16 @@ async fn relay_with(
     resp
 }
 
-/// An addon's answer body, whole and within `MAX_ANSWER_BYTES`, by `deadline`.
-async fn collect_by<B>(body: B, deadline: tokio::time::Instant) -> Result<Bytes, Response>
+/// An addon's answer body, whole and within `MAX_ANSWER_BYTES`, by `deadline`; else the status and error to answer.
+async fn collect_by<B>(body: B, deadline: tokio::time::Instant) -> Result<Bytes, (StatusCode, &'static str)>
 where
     B: http_body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     match tokio::time::timeout_at(deadline, Limited::new(body, MAX_ANSWER_BYTES).collect()).await {
         Ok(Ok(collected)) => Ok(collected.to_bytes()),
-        Ok(Err(_)) => Err(json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable")),
-        Err(_) => Err(json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout")),
+        Ok(Err(_)) => Err((StatusCode::BAD_GATEWAY, "addon_answer_unreadable")),
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "addon_timeout")),
     }
 }
 
@@ -2223,7 +2223,7 @@ mod tests {
         )
         .await
         .expect("still waiting on the body");
-        assert_eq!(given_up.unwrap_err().status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(given_up.unwrap_err().0, StatusCode::GATEWAY_TIMEOUT);
     }
 
     /// A player keeps asking for segments for as long as it plays, and the budget is per minute. Counted in a window
