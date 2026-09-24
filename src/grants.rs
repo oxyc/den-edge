@@ -1873,6 +1873,44 @@ mod tests {
         assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
     }
 
+    /// About 1.2 MiB of JSON naming the host's install throughout, which a guest's answer is scrubbed of.
+    fn large_catalog(_: &str) -> (StatusCode, &'static str, String) {
+        let names = format!("/{SCOUT}/").repeat(40_000);
+        (StatusCode::OK, "application/json", json!({ "metas": names }).to_string())
+    }
+
+    /// A guest's answer is collected to be rewritten, and so charged to the relay's one budget for collected answers:
+    /// past it the guest is told to come back, rather than one more answer held. An answer passed on as it arrives is
+    /// never charged.
+    #[tokio::test]
+    async fn a_rewritten_answer_past_the_collect_budget_is_refused() {
+        let (h, _) = relaying(large_catalog, None).await;
+        let (gid, header) = redeemed(&h, json!({})).await;
+        let budget = &h.state.relay_collect_budget;
+        let taken = Arc::clone(budget)
+            .try_acquire_many_owned((crate::relay::COLLECT_BUDGET_BYTES - 2 * 1024 * 1024) as u32)
+            .unwrap();
+        let path = format!("/scout/~{gid}/availability");
+        let refused = h.send("POST", &path, Some("{}".into()), &grant_headers(&header)).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(refused.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(body_json(refused).await["error"], "relay_busy");
+        assert_eq!(budget.available_permits(), 2 * 1024 * 1024, "what it had taken came back");
+
+        let member = h.send("GET", "/scout/catalog/movie/top.json", None, &[]).await;
+        assert_eq!(member.status(), StatusCode::OK, "an answer passed on is never charged");
+        assert!(axum::body::to_bytes(member.into_body(), usize::MAX).await.unwrap().len() > 1024 * 1024);
+
+        drop(taken);
+        let answered = h.send("POST", &path, Some("{}".into()), &grant_headers(&header)).await;
+        assert_eq!(answered.status(), StatusCode::OK);
+        assert!(budget.available_permits() < crate::relay::COLLECT_BUDGET_BYTES, "held while unsent");
+        let got = body_json(answered).await;
+        let metas = got["metas"].as_str().unwrap();
+        assert!(!metas.contains(SCOUT) && metas.contains(&format!("~{gid}")), "scrubbed as before");
+        assert_eq!(budget.available_permits(), crate::relay::COLLECT_BUDGET_BYTES, "and back once sent");
+    }
+
     #[tokio::test]
     async fn a_guest_is_never_a_member_and_has_a_budget_per_grant() {
         let (h, _) = relaying(ok_json, None).await;

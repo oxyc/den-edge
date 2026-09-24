@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::{header, Method, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,16 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// An addon's JSON answer — a catalog page, an index slice — is far under this. An answer passed on as it arrives
 /// (`Passed`) is cut off past it, and one collected to be rewritten is refused.
 const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
+/// Bytes of addon answers collected whole (`collect_by`) that may be held at once, across every call: past it a call
+/// is refused `503 relay_busy` rather than held. Sixteen slots of answers up to `MAX_ANSWER_BYTES` would otherwise be
+/// 128 MiB, twice the 64 MiB container the README names. This is as much as the library cache's own cap, which
+/// leaves those two under half the container between them; it still holds one maximal answer being rewritten
+/// (charged twice) or two passed through whole, and the answers actually collected — a guest's catalog page, an
+/// atlas chart — are kilobytes.
+pub(crate) const COLLECT_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+/// What a call refused by that budget is told to wait: it frees as collected answers are sent, well within a second
+/// for the size they usually are.
+const COLLECT_BUSY_RETRY_MS: u64 = 1_000;
 /// How long an answer passed on as it arrives may wait on the addon for its next bytes. An addon sends its body in
 /// one go once it has built it (inferred from how they answer, not measured), so a wait this long is a stall.
 const ANSWER_IDLE: Duration = Duration::from_secs(10);
@@ -375,14 +385,12 @@ impl Guest {
         if headers.get(header::CONTENT_ENCODING).is_some_and(|e| e != "identity") {
             return None;
         }
-        let mut text = std::str::from_utf8(body).ok()?.to_owned();
-        if self.scrub {
-            text = text.replace(segment.as_str(), &format!("~{}", self.gid));
-        }
+        let text = std::str::from_utf8(body).ok()?;
+        let scrubbed = self.scrub.then(|| text.replace(segment.as_str(), &format!("~{}", self.gid)));
         if !self.manifest {
-            return Some(Bytes::from(text));
+            return Some(scrubbed.map_or_else(|| body.clone(), Bytes::from));
         }
-        let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let mut value: serde_json::Value = serde_json::from_str(scrubbed.as_deref().unwrap_or(text)).ok()?;
         crate::grants::strip_manifest(&mut value);
         serde_json::to_vec(&value).ok().map(Bytes::from)
     }
@@ -871,9 +879,8 @@ async fn relay_with(
         && state.title_metadata_cache_dir.is_some();
     // Only an answer something here reads or rewrites is collected whole. Every other one — most of them — is passed
     // on as it arrives: collected, sixteen slots' answers of up to eight megabytes each could be in memory at once.
-    let collect = observe
-        || (public_session && parts.status == StatusCode::CREATED)
-        || grant.as_ref().is_some_and(|g| g.rewrites(&parts.headers));
+    let rewrites = grant.as_ref().is_some_and(|g| g.rewrites(&parts.headers));
+    let collect = observe || (public_session && parts.status == StatusCode::CREATED) || rewrites;
     if !collect {
         let passed = Passed::new(body, deadline, ANSWER_IDLE, slot);
         return answer_response(
@@ -885,8 +892,20 @@ async fn relay_with(
             false,
         );
     }
-    let mut bytes = match collect_by(body, deadline).await {
-        Ok(bytes) => bytes,
+    // A session remux has already started is never refused for want of budget: ending it needs this very answer (a
+    // small JSON object from den-remux), and one neither handed on nor ended would outlive the call.
+    let budget =
+        (!(public_session && parts.status == StatusCode::CREATED)).then_some(&state.relay_collect_budget);
+    let (mut bytes, charge) = match collect_by(body, deadline, budget, if rewrites { 2 } else { 1 }).await {
+        Ok(collected) => collected,
+        Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
+            eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
+            return crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error(code),
+                COLLECT_BUSY_RETRY_MS,
+            );
+        }
         Err((status, code)) => return json(status, code),
     };
     if let Some(g) = &grant {
@@ -957,9 +976,14 @@ async fn relay_with(
         }
     }
     drop(slot);
+    // The charge is carried by the body, so it comes back once the answer has been sent, not when it was made.
+    let body = Full::new(bytes).map_frame(move |frame| {
+        let _ = &charge;
+        frame
+    });
     answer_response(
         &parts,
-        Body::from(bytes),
+        Body::new(body),
         public_session || playground || speed,
         member_only || grant.is_some(),
         scope,
@@ -1020,14 +1044,61 @@ fn answer_response(
 }
 
 /// An addon's answer body, whole and within `MAX_ANSWER_BYTES`, by `deadline`; else the status and error to answer.
-async fn collect_by<B>(body: B, deadline: tokio::time::Instant) -> Result<Bytes, (StatusCode, &'static str)>
+///
+/// With a `budget`, every byte collected is charged to it `per_byte` times as it arrives, and the charge comes back
+/// with the answer: once it has been sent, or dropped unsent. An answer the budget cannot take is a `503 relay_busy`.
+async fn collect_by<B>(
+    body: B,
+    deadline: tokio::time::Instant,
+    budget: Option<&Arc<tokio::sync::Semaphore>>,
+    per_byte: usize,
+) -> Result<(Bytes, Option<tokio::sync::OwnedSemaphorePermit>), (StatusCode, &'static str)>
 where
     B: http_body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    match tokio::time::timeout_at(deadline, Limited::new(body, MAX_ANSWER_BYTES).collect()).await {
-        Ok(Ok(collected)) => Ok(collected.to_bytes()),
-        Ok(Err(_)) => Err((StatusCode::BAD_GATEWAY, "addon_answer_unreadable")),
+    let unreadable = || (StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
+    let collect = async {
+        let mut body = std::pin::pin!(body);
+        let declared = usize::try_from(body.size_hint().lower()).unwrap_or(MAX_ANSWER_BYTES);
+        if declared > MAX_ANSWER_BYTES {
+            return Err(unreadable());
+        }
+        let mut whole = Vec::with_capacity(declared);
+        let mut charge: Option<tokio::sync::OwnedSemaphorePermit> = None;
+        let mut charged = 0;
+        // Charged up to `len` bytes: a declared length at once, before anything is read, so answers arriving side by
+        // side do not each take part of the budget and together leave none of them room to finish.
+        let mut charge_to = |len: usize| {
+            let Some(budget) = budget.filter(|_| len > charged) else { return true };
+            let taken = u32::try_from((len - charged) * per_byte)
+                .ok()
+                .and_then(|n| Arc::clone(budget).try_acquire_many_owned(n).ok());
+            let Some(taken) = taken else { return false };
+            charged = len;
+            match &mut charge {
+                Some(charge) => charge.merge(taken),
+                None => charge = Some(taken),
+            }
+            true
+        };
+        if !charge_to(declared) {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "relay_busy"));
+        }
+        while let Some(frame) = body.frame().await {
+            let Ok(data) = frame.map_err(|_| unreadable())?.into_data() else { continue };
+            if whole.len() + data.len() > MAX_ANSWER_BYTES {
+                return Err(unreadable());
+            }
+            if !charge_to(whole.len() + data.len()) {
+                return Err((StatusCode::SERVICE_UNAVAILABLE, "relay_busy"));
+            }
+            whole.extend_from_slice(&data);
+        }
+        Ok((Bytes::from(whole), charge))
+    };
+    match tokio::time::timeout_at(deadline, collect).await {
+        Ok(collected) => collected,
         Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "addon_timeout")),
     }
 }
@@ -2397,7 +2468,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
         let given_up = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            super::collect_by(answer.into_body(), deadline),
+            super::collect_by(answer.into_body(), deadline, None, 1),
         )
         .await
         .expect("still waiting on the body");
@@ -2521,6 +2592,30 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert_eq!(slots.available_permits(), 1, "given back without a read");
         drop(unread);
+    }
+
+    /// An answer with no declared length is charged as it arrives, and refused where it passes the budget.
+    #[tokio::test]
+    async fn a_collected_answer_of_unknown_length_is_charged_as_it_arrives() {
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; 2 * 1024 * 1024], false).await;
+        let target = &h.state.relays[0].1;
+        let ask = |_| {
+            let ask = axum::http::Request::get(format!("{target}/x"))
+                .body(http_body_util::Full::new(axum::body::Bytes::new()))
+                .unwrap();
+            super::client().request(ask)
+        };
+        let budget = Arc::new(tokio::sync::Semaphore::new(3 * 1024 * 1024));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let once = super::collect_by(ask(()).await.unwrap().into_body(), deadline, Some(&budget), 1).await;
+        let (bytes, charge) = once.unwrap();
+        assert_eq!(bytes.len(), 2 * 1024 * 1024);
+        assert_eq!(budget.available_permits(), 1024 * 1024, "held with the answer");
+        let twice = super::collect_by(ask(()).await.unwrap().into_body(), deadline, Some(&budget), 1).await;
+        assert_eq!(twice.unwrap_err(), (StatusCode::SERVICE_UNAVAILABLE, "relay_busy"));
+        assert_eq!(budget.available_permits(), 1024 * 1024, "the refused one's part came back");
+        drop(charge);
+        assert_eq!(budget.available_permits(), 3 * 1024 * 1024);
     }
 
     /// A player keeps asking for segments for as long as it plays, and the budget is per minute. Counted in a window

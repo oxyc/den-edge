@@ -85,6 +85,8 @@ pub struct AppState {
     pub relay_body_slots: Arc<tokio::sync::Semaphore>,
     /// Of those, the ones atlas's tuning playground may hold at once (`relay::PLAYGROUND_IN_FLIGHT`).
     pub playground_slots: Arc<tokio::sync::Semaphore>,
+    /// Bytes of relayed answers collected whole that may be held at once (`relay::COLLECT_BUDGET_BYTES`).
+    pub relay_collect_budget: Arc<tokio::sync::Semaphore>,
     /// Every address for each service, in order (env `ROUTES`, den-spec routes-v1): served as `GET /routes`.
     pub routes: routes::Routes,
     /// The table served on the web app's public name instead of `routes` (env `ROUTES_PUBLIC`). The full table
@@ -221,6 +223,7 @@ impl AppState {
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
             relay_body_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_BODY_IN_FLIGHT)),
+            relay_collect_budget: Arc::new(tokio::sync::Semaphore::new(relay::COLLECT_BUDGET_BYTES)),
             playground_slots: Arc::new(tokio::sync::Semaphore::new(relay::PLAYGROUND_IN_FLIGHT)),
             routes: Vec::new(),
             routes_public: None,
