@@ -362,6 +362,11 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     }
     if !out.is_empty() {
         if let Err(e) = state.store.append_file(NS, id, EXT, out.as_bytes()).await {
+            // The store cuts a failed append back, but that can fail too, and then some of this batch's lines are
+            // on disk that memory does not hold: kept, the next batch reused their sequence numbers. Dropped, the
+            // next request replays the log as it is, as a restart would.
+            libs.remove(id);
+            eprintln!("library write failed: its library is dropped from memory, to be read again from disk");
             return internal("library write", e);
         }
         // A new log's name is on disk only once the directory is synced. The writes are in the log already, so a
@@ -1147,6 +1152,26 @@ mod tests {
         );
         let again = Harness::in_dir(h.dir.clone());
         assert_eq!(changes(&again, TOKEN, "").await.1["head"], 3, "the log was rewritten whole");
+    }
+
+    /// A failed append whose cut-back failed too leaves lines on disk that nobody was told landed. Memory must not
+    /// go on without them: the next batch reused their sequence numbers, and a restart found two writes at one.
+    #[tokio::test]
+    async fn a_failed_append_leaves_memory_to_what_the_log_holds() {
+        let dir = crate::handler::tests::temp_dir();
+        let h = Harness::in_dir_with(dir.clone(), |state| {
+            state.store = crate::store::Store::open(&dir, 4096).unwrap();
+        });
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "whole" }])).await.0, StatusCode::OK);
+        let (status, _) = batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "x".repeat(8192) }])).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+        // What a cut-back that failed leaves behind: the batch's line, whole.
+        let mut log = std::fs::OpenOptions::new().append(true).open(log_path(&h)).unwrap();
+        std::io::Write::write_all(&mut log, super::log_line(2, K2, "landed").as_bytes()).unwrap();
+
+        let (status, answer) = batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "again" }])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["conflicts"], json!([{ "k": K2, "seq": 2, "v": "landed" }]), "{answer}");
     }
 
     /// A first write that never finished leaves an empty log or a torn header. Nobody was told it landed, so the
