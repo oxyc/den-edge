@@ -4,6 +4,7 @@
      Nothing is capped. Each row pages on as it is scrolled, and a row that comes back empty hides itself, so the page
      ends up exactly as deep as the service is rather than promising a catalogue it doesn't have. -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { MediaType, Title } from '../lib/library';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
@@ -80,6 +81,8 @@
   const both = $derived(!!service?.movies && !!service.series);
   const only = $derived(tab ?? undefined);
   let rows = $state<RowDef[]>([]);
+  /** Which build `rows` are: a rebuilt row keeps its id, and must still start its own loader afresh (`Browse`). */
+  let build = $state(0);
   /**
    * The page's own hero, as the TV's channel page opens with one rather than with a list (`ServiceChannelView`):
    * the head of this page's leading row (`serviceHero`). It is asked for beside the rows, not after them, so it
@@ -88,17 +91,31 @@
   let featured = $state<Title[]>([]);
   /** Until the hero has answered, its place shows that something is coming rather than a dark, empty frame. */
   let heroLoading = $state(true);
+  /**
+   * The excluded languages by value. Settings are re-read into a new Set whenever the library refreshes, and a new
+   * Set with the same languages must not rebuild the page.
+   */
+  const languagesKey = $derived([...excludedLanguages].sort().join(','));
+  /** Which service, country and tab the rows on screen are for. */
+  let shownFor = '';
   $effect(() => {
     const selected = service;
     const here = atlas;
     const addonsSettled = atlasReady;
     const mediaType = only;
     const year = minYear;
-    const languages = excludedLanguages;
+    void languagesKey;
+    const languages = untrack(() => excludedLanguages);
     let current = true;
-    rows = [];
-    featured = [];
-    heroLoading = true;
+    // A different service or tab starts empty. The same one rebuilt — atlas found, a rule changed — keeps what it
+    // shows until the rebuilt rows answer, so the page doesn't blank and shorten under someone reading it.
+    const showing = selected ? `${selected.id}:${country}:${mediaType ?? ''}` : '';
+    if (showing !== shownFor) {
+      shownFor = showing;
+      rows = [];
+      featured = [];
+      heroLoading = true;
+    }
     if (!selected || !addonsSettled) return;
     // A tile's hover may already have asked all of this (`primeServicePage`); asking again joins it.
     const page = servicePage(selected, country, tmdbKey, here, {
@@ -109,7 +126,9 @@
       shown: (title) => shown(title),
     });
     void page.rows.then((settled) => {
-      if (current) rows = settled;
+      if (!current) return;
+      build++;
+      rows = settled;
     });
     void page.hero
       .then(
@@ -165,7 +184,7 @@
       <TypeFilter value={tab} onchange={(value) => (tab = value)} label="Show on this service" />
     </div>
   {/if}
-  <Browse {rows} {shown} />
+  <Browse {rows} {shown} {build} />
 {:else if unreachable}
   <p class="note">Couldn’t reach the service directory. Check your connection and try again.</p>
 {:else if directory}

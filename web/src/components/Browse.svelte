@@ -5,7 +5,19 @@
   import type { Title } from '../lib/library';
   import BrowseRow from './BrowseRow.svelte';
 
-  let { rows, shown }: { rows: RowDef[]; shown: (title: Title) => boolean } = $props();
+  let {
+    rows,
+    shown,
+    build = 0,
+  }: {
+    rows: RowDef[];
+    shown: (title: Title) => boolean;
+    /**
+     * Bumped by a caller that rebuilds its rows in place: each row then starts its own loader afresh, holding its
+     * height with `BrowseRow`'s placeholders, while the screen keeps how far down it has shown.
+     */
+    build?: number;
+  } = $props();
 
   const STEP = 6;
   let count = $state(STEP);
@@ -30,7 +42,7 @@
   });
 </script>
 
-{#each rows.slice(0, count) as row (row.id)}
+{#each rows.slice(0, count) as row (`${build}:${row.id}`)}
   <BrowseRow {row} {shown} />
 {/each}
 <div bind:this={bottom} class="bottom" aria-hidden="true"></div>

@@ -705,9 +705,9 @@
     return featured.find(here) ?? session.displays.find(here);
   });
 
-  /** The TV's hide rules, from the log's `set:prefs`. */
+  /** The TV's hide rules, from the log's `set:prefs`: re-read when settings change, not on every refresh. */
   const prefs = $derived.by(() => {
-    void version;
+    void session.settingsRevision;
     return readPrefs(log?.settings('prefs'));
   });
   const detailPrefs = $derived.by(() => {
@@ -1242,6 +1242,7 @@
     shown={browseShown}
     seeds={[...seeds.watched, ...seeds.watchlisted]}
     owned={seeds.owned}
+    {active}
   />
 {:else if route.page === 'people' && !PeopleScreen.current}
   <ScreenLoading screen={PeopleScreen} />

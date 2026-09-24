@@ -66,7 +66,10 @@
   };
   const prefs = $derived(readSyncedPrefs(group('prefs')));
   const keys = $derived(group('keys'));
-  const plugins = $derived(readPlugins(group('plugins')));
+  // Kept by content: a re-read list is a new array each time the library refreshes, and what reads it (the addon
+  // credits below, Sharing's escrow) asks the network again for a new one.
+  const pluginsKey = $derived(JSON.stringify(readPlugins(group('plugins'))));
+  const plugins = $derived(JSON.parse(pluginsKey) as string[]);
   const servers = $derived(readServers(group('servers')));
   const trust = $derived(readTrust(group('trust')));
   const devicesRow = $derived(group('devices'));

@@ -56,6 +56,7 @@
     shown = () => true,
     seeds = [],
     owned = new Set(),
+    active = true,
   }: {
     query: string;
     /** What Explore is browsing, from the address. */
@@ -69,6 +70,8 @@
     seeds?: Title[];
     /** Every title the library holds, by `type:id`. */
     owned?: ReadonlySet<string>;
+    /** The page on screen, rather than one kept behind it. */
+    active?: boolean;
   } = $props();
 
   const sources = $derived(searchSources(tmdbKey, undefined, atlas));
@@ -80,6 +83,8 @@
     ]),
   );
   const typing = $derived(query.trim().length >= 2);
+  /** The year floor by value: `prefs` is a new object whenever it is re-read, and the feed must not restart for that. */
+  const minYear = $derived(prefs.minReleaseYear);
 
   // Explore and typed results both show every type until one is chosen: one `type` in the address for both.
   const exploreType = $derived<ExploreType>(explore.type ?? 'all');
@@ -197,7 +202,7 @@
       atlas,
       seeds: untrack(() => seeds),
       owned: untrack(() => owned),
-      minYear: prefs.minReleaseYear,
+      minYear,
       title: sources.title,
       key: tmdbKey,
     });
@@ -219,7 +224,7 @@
   $effect(() => {
     if (selected === lastSelected) return;
     lastSelected = selected;
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    if (untrack(() => active)) window.scrollTo({ top: 0, behavior: 'instant' });
   });
 
   let hits = $state<Hit[] | null>(null);

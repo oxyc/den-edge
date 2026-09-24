@@ -107,9 +107,11 @@
     await reuploadInstalls(id, listed.value, installs);
   }
 
-  // Listed once the library is open, and again whenever what would be escrowed changes.
+  // Listed once the library is open, and again whenever what would be escrowed changes: its content, as a string,
+  // since a list re-read from the log is a new array with the same installs every time the library refreshes.
+  const installsKey = $derived(JSON.stringify(installs));
   $effect(() => {
-    void JSON.stringify(installs);
+    void installsKey;
     if (ready && link) untrack(() => void refresh());
   });
 

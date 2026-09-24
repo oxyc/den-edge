@@ -132,3 +132,21 @@ test('resting on a service tile starts loading its page before the press', async
   await page.waitForTimeout(300);
   expect(asked.length).toBe(before);
 });
+
+test('settings re-read with nothing changed leave the page as it is', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  const asked = await serveNetflix(page);
+  await page.goto(`${FIXTURE}?page`);
+
+  const cards = page.locator('a[href^="/movie/10"]:not(.billboard *)');
+  await expect(cards.first()).toBeVisible();
+  const shown = await cards.count();
+  await cards.evaluateAll((all) => all.forEach((card) => (card.dataset.kept = '')));
+  const before = asked.length;
+
+  await page.evaluate(() => window.reread());
+  await page.waitForTimeout(300);
+  await expect(page.locator('a[data-kept]')).toHaveCount(shown);
+  expect(asked.length, 'nothing is asked again').toBe(before);
+});

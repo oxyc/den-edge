@@ -6,6 +6,9 @@
   import '../src/app.css';
 
   const page = new URLSearchParams(location.search).has('page');
+  // Settings re-read as the library refreshes: the same languages, in a new Set.
+  let languages = $state(new Set<string>());
+  (window as unknown as { reread: () => void }).reread = () => (languages = new Set(languages));
   const netflix = {
     id: 8,
     name: 'Netflix',
@@ -19,7 +22,14 @@
 
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if page}
-    <ServicePage id={8} country="US" tmdbKey="fixture-key" atlas="/atlas" shown={() => true} />
+    <ServicePage
+      id={8}
+      country="US"
+      tmdbKey="fixture-key"
+      atlas="/atlas"
+      excludedLanguages={languages}
+      shown={() => true}
+    />
   {:else}
     <ServicesRow
       services={[{ pick: { id: 8, country: 'US' }, service: netflix }]}
