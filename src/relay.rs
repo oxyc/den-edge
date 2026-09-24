@@ -15,7 +15,7 @@ use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -180,24 +180,45 @@ const MEDIA_BUSY_RETRY_MS: u64 = 30_000;
 ///
 /// Admission is decided once — at the master playlist, or at a first `/play` for a video with nothing
 /// open — and everything that follows rides on it. A guest's lease shares one of `guest_media_slots`
-/// with every body it is streaming; the slot comes back once the lease has idled out and the last of
-/// those bodies has ended. Held by the lease alone, a trailer streaming past the idle time outlived it.
+/// with every body it is streaming; the slot comes back once the lease has idled out and none of those
+/// bodies has sent a frame for as long. Held by the lease alone, a trailer streaming past the idle time
+/// outlived it; held by the bodies until they ended, a paused progressive trailer, a phone gone off
+/// Wi-Fi or a stalled addon kept a slot for as long as its connection stayed open.
 pub struct Lease {
     until: u64,
-    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    slot: Option<Arc<Slot>>,
+}
+
+/// A guest's slot, shared by its lease and every body the lease admitted.
+pub(crate) struct Slot {
+    /// Taken out when the lease ends. A body still open then streams on, but no longer holds a slot.
+    permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    /// When a body of this lease last sent a frame.
+    sent: std::sync::atomic::AtomicU64,
 }
 
 impl Lease {
-    /// Idle, and no body of this lease still streaming.
+    /// No request, and no frame from a body of this lease, for the idle time.
     fn over(&self, now: u64) -> bool {
-        self.until <= now && self.slot.as_ref().is_none_or(|slot| Arc::strong_count(slot) == 1)
+        self.until <= now
+            && self.slot.as_ref().is_none_or(|slot| {
+                slot.sent.load(std::sync::atomic::Ordering::Relaxed).saturating_add(LEASE_IDLE_MS) <= now
+            })
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            crate::lock(&slot.permit).take();
+        }
     }
 }
 
 /// What admission decided.
 enum Admitted {
-    /// Play on. A guest's bytes count against the guest ceiling, and its body holds `slot` while it streams.
-    Yes { slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>> },
+    /// Play on. A guest's bytes count against the guest ceiling, and its body keeps `slot` while it sends.
+    Yes { slot: Option<Arc<Slot>> },
     /// Every guest slot is taken.
     Busy,
     /// Today's guest allowance is gone.
@@ -262,7 +283,7 @@ async fn admit(state: &AppState, claim: Option<&str>, bucket: &str) -> Admitted 
             return Admitted::Spent;
         }
         match Arc::clone(&state.guest_media_slots).try_acquire_owned() {
-            Ok(slot) => Some(Arc::new(slot)),
+            Ok(permit) => Some(Arc::new(Slot { permit: Mutex::new(Some(permit)), sent: 0.into() })),
             Err(_) => return Admitted::Busy,
         }
     };
@@ -1132,7 +1153,7 @@ async fn stream(
     req: Request,
     target: String,
     rid: &str,
-    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    slot: Option<Arc<Slot>>,
 ) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [
@@ -1170,9 +1191,10 @@ async fn stream(
     let body = if let Some(slot) = slot {
         let state = Arc::clone(state);
         Body::new(body.map_frame(move |frame| {
-            let _held = &slot;
+            let now = (state.clock)();
+            slot.sent.store(now, std::sync::atomic::Ordering::Relaxed);
             if let Some(data) = frame.data_ref() {
-                let day = (state.clock)() / 86_400_000;
+                let day = now / 86_400_000;
                 let mut spent = crate::lock(&state.media_spent);
                 if spent.0 != day {
                     *spent = (day, 0);
@@ -2247,21 +2269,46 @@ mod tests {
     /// guest in past the cap.
     #[tokio::test]
     async fn a_guest_slot_is_held_while_its_trailer_streams() {
+        use http_body_util::BodyExt;
         let mut h = reel_mid_stream(10).await;
         Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
         let first = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
         assert_eq!(first.status(), StatusCode::OK);
-        h.advance(super::LEASE_IDLE_MS + 1);
+        let mut body = first.into_body();
+        h.advance(super::LEASE_IDLE_MS - 1);
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap().len(), 10);
+        h.advance(2);
 
         let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(other.status(), StatusCode::SERVICE_UNAVAILABLE, "the first guest is still watching");
         let same = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
         assert_eq!(same.status(), StatusCode::OK, "and still holds its own slot");
 
-        drop((first, same));
+        drop((body, same));
         h.advance(super::LEASE_IDLE_MS + 1);
         let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(other.status(), StatusCode::OK, "the slot came back once it stopped");
+    }
+
+    /// A body that stops sending — a paused trailer, a phone gone off Wi-Fi, a stalled addon — gives its slot back
+    /// once it has been silent for the idle time, though its connection is still open; it used to hold the slot for
+    /// as long as it stayed open. The stream itself is not cut.
+    #[tokio::test]
+    async fn a_guest_slot_comes_back_from_a_stream_that_went_silent() {
+        use http_body_util::BodyExt;
+        let mut h = reel_mid_stream(10).await;
+        Arc::get_mut(&mut h.state).unwrap().guest_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let mut body = first.into_body();
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap().len(), 10);
+        h.advance(super::LEASE_IDLE_MS + 1);
+
+        let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        assert_eq!(other.status(), StatusCode::OK, "the silent stream gave its slot back");
+        let again = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE, "and its address starts over for one");
+        drop(body);
     }
 
     /// An addon that says its answer may be kept by anyone, and echoes the validator it was sent.

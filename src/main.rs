@@ -174,8 +174,8 @@ pub struct AppState {
     /// A session is admitted once, at its master playlist (or at a first `/play` for a video nothing has
     /// opened yet), and every request that follows belongs to that admission — segments are never refused,
     /// because a refusal mid-playback is a stall rather than a clean fall back to the embed. A guest's
-    /// lease holds one of `guest_media_slots`, which comes back when the lease expires and nothing it admitted is
-    /// still streaming.
+    /// lease holds one of `guest_media_slots`, which comes back once neither a request nor a frame of a body it
+    /// admitted has passed for the idle time.
     pub media_leases: Mutex<HashMap<String, relay::Lease>>,
     /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
     pub grants: grants::Grants,
