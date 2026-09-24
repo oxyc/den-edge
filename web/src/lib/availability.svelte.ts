@@ -11,6 +11,7 @@ import type { Title } from './library';
 import type { Addon } from './scout';
 import { fetchImdbId } from './tmdb';
 import { relayFetch } from './relayFetch';
+import { retryAfterMs } from './retryAfter';
 import { tmdbFetch } from './tmdbCache';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
@@ -27,6 +28,8 @@ const RETRIES = 3;
 /** How long a verdict from an earlier visit fades a poster before scout has been asked again. */
 export const KEPT_MS = 24 * 60 * 60 * 1000;
 const STORAGE_KEY = 'den.availability';
+/** How long scout may take to answer a page of posters. */
+const ANSWER_MS = 15_000;
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
@@ -45,6 +48,11 @@ export class Availability {
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Retry bookkeeping; only verdict changes are observable.
   private readonly tries = new Map<number, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Scout said "not now" (429) until then: nothing is asked before it. A refusal used to count as "still checking",
+   * so each poster was asked again 10 s later, three times, and then never — whatever the wait scout gave.
+   */
+  private pausedUntil = 0;
   private scout: { base: string; tmdbKey: string; fetch: typeof fetch } | null = null;
 
   /**
@@ -108,10 +116,13 @@ export class Availability {
 
   private gather(): void {
     if (!this.scout || this.timer || this.wanted.size === 0) return;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      void this.ask();
-    }, GATHER_MS);
+    this.timer = setTimeout(
+      () => {
+        this.timer = undefined;
+        void this.ask();
+      },
+      Math.max(GATHER_MS, this.pausedUntil - this.now()),
+    );
   }
 
   private async ask(): Promise<void> {
@@ -131,25 +142,33 @@ export class Availability {
     });
 
     let answer: Record<string, Verdict> = {};
+    let refused = false;
     if (byImdb.size > 0) {
       try {
         const res = await scout.fetch(`${scout.base}/availability`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ids: [...byImdb.keys()] }),
+          signal: AbortSignal.timeout(ANSWER_MS),
         });
-        if (res.ok)
+        if (res.status === 429) {
+          refused = true;
+          this.pausedUntil = this.now() + retryAfterMs(res, RETRY_MS, this.now);
+        } else if (res.ok)
           answer =
             ((await res.json()) as { availability?: Record<string, Verdict> }).availability ?? {};
       } catch {
         // Out of reach: every movie stays unknown, and is asked again.
       }
     }
-    for (const [imdb, id] of byImdb) {
-      const verdict = answer[imdb] ?? 'unknown';
-      if (verdict === 'unknown') again.push(id);
-      else this.settle(id, verdict);
-    }
+    // Not an answer about any of them, and no try spent: asked again once the wait is over.
+    if (refused) for (const id of byImdb.values()) this.wanted.add(id);
+    else
+      for (const [imdb, id] of byImdb) {
+        const verdict = answer[imdb] ?? 'unknown';
+        if (verdict === 'unknown') again.push(id);
+        else this.settle(id, verdict);
+      }
     this.keep();
     this.later(again);
     this.gather();

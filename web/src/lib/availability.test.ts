@@ -52,6 +52,28 @@ describe('Availability', () => {
     expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(true);
   });
 
+  it('waits as long as scout says when it refuses, and spends no try on the refusal', async () => {
+    let busy = true;
+    const { calls, fetchImpl: answers } = fake(() => ({ tt0000001: 'unavailable' }));
+    const fetchImpl: typeof fetch = async (input, init) =>
+      busy && String(input).endsWith('/availability')
+        ? (calls.push({ url: String(input) }),
+          new Response('{"error":"busy"}', { status: 429, headers: { 'retry-after': '60' } }))
+        : answers(input, init);
+    const availability = new Availability(fetchImpl);
+    availability.connect(SCOUT, 'key', fetchImpl);
+    availability.want({ type: 'movie', id: 1 });
+    const asked = () => calls.filter((c) => c.url.endsWith('/availability')).length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(asked()).toBe(1);
+    busy = false;
+    await vi.advanceTimersByTimeAsync(4 * RETRY_MS);
+    expect(asked(), 'not before the minute scout asked for').toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(asked()).toBe(2);
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
+  });
+
   it('fades what the last day found at once, still asks scout, and keeps its answer', async () => {
     const data = new Map<string, string>();
     const storage = {
