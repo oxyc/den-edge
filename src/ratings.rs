@@ -133,15 +133,11 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let _refreshing = crate::tmdb::Refreshing { set: &state.ratings_refreshing, key: imdb.clone() };
-        match lookup(&state, &imdb, &key, "refresh").await {
-            Ok(Some(body)) => {
-                crate::tmdb::write(&file, &body).await;
-            }
-            Ok(None) => {
-                crate::tmdb::write(&file, &Bytes::from_static(ABSENT)).await;
-            }
-            // Refused, rested or unreachable, and already said so: what is kept stays, and is asked again later.
-            Err(_) => {}
+        // Only ratings are written. OMDb saying it has no such title, about a title it gave ratings for, is taken as
+        // a bad answer rather than news: written over them, it hid a title's ratings for a week. What is kept stays,
+        // as it does when OMDb is refused, rested or unreachable, and the next stale read asks again.
+        if let Ok(Some(body)) = lookup(&state, &imdb, &key, "refresh").await {
+            crate::tmdb::write(&file, &body).await;
         }
     });
 }
@@ -155,6 +151,10 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
             &error("ratings_budget_spent"),
             until_tomorrow(state),
         )));
+    }
+    #[cfg(test)]
+    if let Some(omdb) = tests::stand_in(imdb) {
+        return omdb();
     }
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "ratings_off"));
@@ -377,5 +377,39 @@ mod tests {
 
         assert_eq!(h.send("GET", "/ratings/check", None, &[]).await.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(h.send("GET", "/ratings/imdb/nm1", None, &[]).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    type Omdb = Arc<dyn Fn() -> Result<Option<Bytes>, Box<Response>> + Send + Sync>;
+    /// A stand-in OMDb per IMDb id, so tests running at once each get their own.
+    static OMDBS: std::sync::Mutex<Vec<(String, Omdb)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn stand_in(imdb: &str) -> Option<Omdb> {
+        crate::lock(&OMDBS).iter().find(|(id, _)| id == imdb).map(|(_, omdb)| Arc::clone(omdb))
+    }
+
+    /// A kept title's refresh answered "not found" used to write that over its ratings, and the title showed none
+    /// for a week.
+    #[tokio::test]
+    async fn a_refresh_that_finds_nothing_keeps_the_ratings_kept() {
+        let cache = temp_dir();
+        let h = Harness::in_dir_with(temp_dir(), |state| state.ratings_cache_dir = Some(cache.clone()));
+        crate::lock(&OMDBS).push(("tt0000303".to_owned(), Arc::new(|| Ok(None)) as Omdb));
+        let file = cache.join("tt0000303.json");
+        let kept = json!({ "Response": "True", "imdbRating": "8.8" }).to_string();
+        crate::tmdb::write(&file, &Bytes::from(kept.clone())).await;
+        let aged = SystemTime::now() - FRESH - Duration::from_secs(86_400);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(aged).unwrap();
+
+        let own = [("x-api-key", "caller")];
+        let resp = h.send("GET", "/ratings/imdb/tt0000303", None, &own).await;
+        assert_eq!(resp.headers()["x-den-ratings"], "stale");
+        for _ in 0..200 {
+            if crate::lock(&h.state.ratings_refreshing).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(crate::lock(&h.state.ratings_refreshing).is_empty(), "the refresh finished");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), kept, "and what was kept stays");
     }
 }

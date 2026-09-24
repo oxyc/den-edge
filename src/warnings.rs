@@ -215,6 +215,11 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
     let topics = ask(state, "/topics", key, rid).await?;
     let categories = ask(state, "/topiccategories", key, rid).await?;
     let table = topic_table(&topics, &categories);
+    // A table naming no topic is not an answer: doesthedogdie names hundreds. Kept, a bad answer (an error in a
+    // 200, a changed shape) named every title's warnings by nothing but their own field for 30 days.
+    if table.as_object().is_none_or(Map::is_empty) {
+        return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
+    }
     if let Some(file) = &file {
         crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
     }
@@ -297,6 +302,10 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
     };
     if let Some(wait) = crate::link::throttled_at(state, &bucket, UPSTREAM_PER_MINUTE) {
         return Err(Box::new(retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("warnings_busy"), wait)));
+    }
+    #[cfg(test)]
+    if let Some(dtdd) = tests::stand_in(&key.value) {
+        return dtdd(path);
     }
     let Some(client) = state.tmdb_client.as_ref() else {
         return Err(refused(StatusCode::NOT_FOUND, "warnings_off"));
@@ -591,5 +600,38 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "a key check needs a key");
         let resp = h.send("GET", "/warnings/check", None, &[("x-api-key", "has spaces")]).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    type Dtdd = std::sync::Arc<dyn Fn(&str) -> Result<Value, Box<Response>> + Send + Sync>;
+    /// A stand-in doesthedogdie per key, so tests running at once each get their own.
+    static DTDDS: std::sync::Mutex<Vec<(String, Dtdd)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn stand_in(key: &str) -> Option<Dtdd> {
+        crate::lock(&DTDDS).iter().find(|(k, _)| k == key).map(|(_, dtdd)| std::sync::Arc::clone(dtdd))
+    }
+
+    /// A `/topics` answer that named nothing (an error object in a 200) was kept as the topic table for 30 days.
+    #[tokio::test]
+    async fn a_topic_list_naming_nothing_is_not_kept() {
+        let cache = temp_dir();
+        let h = Harness::in_dir_with(temp_dir(), |state| state.warnings_cache_dir = Some(cache.clone()));
+        let good = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let answers = std::sync::Arc::clone(&good);
+        let dtdd: Dtdd = std::sync::Arc::new(move |path: &str| {
+            Ok(match (path, *crate::lock(&answers)) {
+                ("/topics", false) => json!({ "error": "try again" }),
+                ("/topics", true) => json!([{ "id": 153, "name": "a dog dies", "topicCategoryId": 56 }]),
+                (_, _) => json!([{ "id": 56, "name": "Animal Injury or Death" }]),
+            })
+        });
+        crate::lock(&DTDDS).push(("topics-key".to_owned(), dtdd));
+        let key = Key { value: "topics-key".into(), household: false };
+
+        let refused = topics(&h.state, &key, "t").await.err().unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_GATEWAY);
+        assert!(!cache.join(TOPICS_FILE).exists(), "nothing was kept");
+        *crate::lock(&good) = true;
+        assert_eq!(topics(&h.state, &key, "t").await.unwrap()["153"]["name"], "a dog dies");
+        assert!(cache.join(TOPICS_FILE).exists());
     }
 }
