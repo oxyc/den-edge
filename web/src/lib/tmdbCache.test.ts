@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   cachingFetch,
   freshFor,
+  MOST_KEPT,
   onTmdbThrottle,
   RETENTION,
   sharingFlights,
@@ -14,11 +15,11 @@ const HOUR = 3_600_000;
 
 function memory() {
   const entries = new Map<string, Entry>();
-  const pruned: number[] = [];
+  const pruned: [number, number][] = [];
   const store: Store = {
     get: async (key) => entries.get(key),
     put: async (key, entry) => void entries.set(key, entry),
-    prune: async (cutoff) => void pruned.push(cutoff),
+    prune: async (cutoff, most) => void pruned.push([cutoff, most]),
     clear: async () => entries.clear(),
   };
   return { entries, pruned, store };
@@ -201,6 +202,21 @@ describe('cachingFetch', () => {
     );
   });
 
+  it('keeps an answer marked as checked, and reads it back without parsing it again', async () => {
+    const { entries, store } = memory();
+    const net = network();
+    const cached = cachingFetch(store, net.fetchImpl, () => 0);
+    await cached(discover);
+    expect([...entries.values()][0]?.checked).toBe(true);
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      await cached(discover);
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it('leaves everything but TMDB alone, and prunes past the retention limit once', async () => {
     const { entries, pruned, store } = memory();
     const net = network();
@@ -210,7 +226,7 @@ describe('cachingFetch', () => {
     expect(entries.size).toBe(0);
     await cached(detail);
     await cached(discover);
-    expect(pruned).toEqual([5]);
+    expect(pruned).toEqual([[5, MOST_KEPT]]);
   });
 
   /**

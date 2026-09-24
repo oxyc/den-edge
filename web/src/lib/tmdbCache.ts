@@ -44,19 +44,27 @@ export const RETENTION = 180 * DAY;
  * which stayed unanswered — a title without its name or poster — until a reload.
  */
 const SHARED_MS = 20_000;
+/**
+ * The most answers kept. Age alone (`RETENTION`) let the store grow with every title and page ever browsed for six
+ * months; past this the oldest go first. An answer is some kilobytes to tens of kilobytes (estimated, not
+ * measured), so this bounds the store to some tens of megabytes.
+ */
+export const MOST_KEPT = 2_000;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
 export const STALE_FOR = 7 * DAY;
 
 export interface Entry {
   body: string;
   fetchedAt: number;
+  /** Checked as it was kept (`keepable`), so it is not parsed again on every read. */
+  checked?: true;
 }
 
 export interface Store {
   get(key: string): Promise<Entry | undefined>;
   put(key: string, entry: Entry): Promise<void>;
-  /** Drop what was fetched before `cutoff`. */
-  prune(cutoff: number): Promise<void>;
+  /** Drop what was fetched before `cutoff`, and the oldest beyond the `most` newest. */
+  prune(cutoff: number, most: number): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -200,7 +208,7 @@ export function cachingFetch(
       return network(input, init);
     if (!pruned) {
       pruned = true;
-      void store.prune(now() - RETENTION).catch(() => undefined);
+      void store.prune(now() - RETENTION, MOST_KEPT).catch(() => undefined);
     }
     const url = new URL(href);
     const key = keyOf(url);
@@ -210,13 +218,17 @@ export function cachingFetch(
     const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
     const entry = (res: Response, body: string): Entry | undefined => {
       const fetchedAt = fetchedAtOf(res, lent, now());
-      return keepable(body) && now() - fetchedAt < RETENTION ? { body, fetchedAt } : undefined;
+      return keepable(body) && now() - fetchedAt < RETENTION
+        ? { body, fetchedAt, checked: true }
+        : undefined;
     };
     const stored = await store.get(key).catch(() => undefined);
     // Anything unusable is treated as absent, which also heals what an earlier version kept. So is anything
     // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
     const kept =
-      stored && keepable(stored.body) && now() - stored.fetchedAt < RETENTION ? stored : undefined;
+      stored && (stored.checked || keepable(stored.body)) && now() - stored.fetchedAt < RETENTION
+        ? stored
+        : undefined;
     // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
     const fresh = freshFor(url.pathname, kept?.body, url.searchParams.get('append_to_response'));
     const age = kept ? now() - kept.fetchedAt : Infinity;
@@ -277,13 +289,20 @@ function indexedStore(): Store | null {
     put: async (key, entry) => {
       await run('readwrite', (answers) => answers.put(entry, key));
     },
-    prune: async (cutoff) => {
+    prune: async (cutoff, most) => {
       await run('readwrite', (answers) => {
-        const cursor = answers.index('fetchedAt').openCursor(IDBKeyRange.upperBound(cutoff, true));
-        cursor.onsuccess = () => {
-          if (!cursor.result) return;
-          cursor.result.delete();
-          cursor.result.continue();
+        const count = answers.count();
+        count.onsuccess = () => {
+          let over = count.result - most;
+          // Oldest first: past the cutoff, or beyond the newest `most`.
+          const cursor = answers.index('fetchedAt').openCursor();
+          cursor.onsuccess = () => {
+            const at = cursor.result;
+            if (!at || (over <= 0 && (at.key as number) >= cutoff)) return;
+            at.delete();
+            over--;
+            at.continue();
+          };
         };
       });
     },
