@@ -145,18 +145,20 @@ export interface DeviceIdentity {
 /**
  * Drain a hosted pairing's inbox for the joiner's authenticated stable identity. Browser hosts keep the link key
  * until this arrives; old joiners simply leave the record name-only for the conservative legacy fallback.
+ * `'gone'` is a queue den-edge no longer has (404 or 410): asking again can't bring an identity.
  */
 export async function receiveDeviceIdentity(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   fetchImpl: typeof fetch = fetch,
   now = Date.now(),
   storage: Storage | undefined = globalThis.localStorage,
-): Promise<DeviceIdentity | null> {
+): Promise<DeviceIdentity | 'gone' | null> {
   try {
     const response = await fetchImpl('/inbox/drain', {
       headers: { 'x-den-link': link.inboxKey },
       cache: 'no-store',
     });
+    if (response.status === 404 || response.status === 410) return 'gone';
     if (!response.ok) return null;
     const body = (await response.json()) as { messages?: { sealed?: unknown }[] };
     if (!Array.isArray(body.messages)) return null;
