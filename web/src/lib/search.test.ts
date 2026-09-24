@@ -337,6 +337,23 @@ describe('searchSources', () => {
     expect(films.map((t) => t.id)).toEqual([550, 807]);
   });
 
+  it('asks again for a title TMDB could not name, and once for one it did', async () => {
+    let down = true;
+    let asked = 0;
+    const fetchImpl = (async () => {
+      asked++;
+      if (down) throw new TypeError('offline');
+      return new Response(JSON.stringify({ id: 603, title: 'The Matrix' }), { status: 200 });
+    }) as typeof fetch;
+    const s = searchSources('k', fetchImpl);
+    const ref = { type: 'movie', id: 603 } as const;
+    expect(await s.title(ref)).toBeNull();
+    down = false;
+    expect((await s.title(ref))?.title).toBe('The Matrix');
+    await s.title(ref);
+    expect(asked).toBe(2);
+  });
+
   it('reads atlas’s people and hits, leaving out a person with no TMDB id, and rejects an answer with no hits', async () => {
     const s = searchSources(
       'k',

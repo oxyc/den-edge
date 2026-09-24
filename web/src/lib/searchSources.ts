@@ -211,13 +211,19 @@ export function searchSources(
         .map((id) => ({ type: ref.type, id }));
     },
 
-    // One detail fetch per title per visit: popular titles recur across queries.
+    // One detail fetch per title per visit: popular titles recur across queries. A title TMDB couldn't name is asked
+    // again next time: `fetchTitle` says null for a failed request as much as for a missing title, and one that
+    // failed once stayed unnamed for the visit.
     title(ref) {
       const key = `${ref.type}-${ref.id}`;
       let pending = cache.get(key);
       if (!pending) {
-        pending = fetchTitle(ref, tmdbKey, fetchImpl);
-        cache.set(key, pending);
+        const asked = fetchTitle(ref, tmdbKey, fetchImpl);
+        pending = asked;
+        cache.set(key, asked);
+        void asked.then((title) => {
+          if (!title && cache.get(key) === asked) cache.delete(key);
+        });
       }
       return pending;
     },

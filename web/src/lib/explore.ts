@@ -1110,9 +1110,13 @@ const SEEDS = 3;
  * recommended, it is the tail alone.
  */
 function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
+  // Kept only when every seed answered: a seed that failed is asked again the next time the feed starts, rather
+  // than its recommendations being missing for as long as the feed is kept.
   let personal: Promise<Title[]> | undefined;
-  const recommended = () =>
-    (personal ??= Promise.all(
+  const recommended = () => {
+    if (personal) return personal;
+    let failed = false;
+    const asked = Promise.all(
       seeds
         .filter((seed) => seed.type === type)
         .slice(0, SEEDS)
@@ -1124,24 +1128,36 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
                 `${seed.type}:${seed.id}`,
                 error,
               );
+              failed = true;
               return [];
             },
           ),
         ),
-    ).then((lists) =>
-      appendUniqueTitles([], interleave(lists)).filter((t) => !owned.has(`${t.type}:${t.id}`)),
-    ));
+    ).then((lists) => {
+      if (failed && personal === asked) personal = undefined;
+      return appendUniqueTitles([], interleave(lists)).filter(
+        (t) => !owned.has(`${t.type}:${t.id}`),
+      );
+    });
+    personal = asked;
+    return asked;
+  };
   const tail = (page: number) =>
     type === 'tv'
       ? pages('/tv/top_rated', 'tv', {}, page)
       : pages('/movie/popular', 'movie', {}, page);
+  /** Whether this run of the feed's first page was the recommendations, which shifts the tail a page on. */
+  let led = false;
   return {
     id: `${FOR_YOU}-${type}`,
     title: 'For You',
     load: async (page) => {
-      const mine = await recommended();
-      if (!mine.length) return tail(page);
-      return page === 1 ? mine : tail(page - 1);
+      if (page === 1) {
+        const mine = await recommended();
+        led = mine.length > 0;
+        if (led) return mine;
+      }
+      return tail(led ? page - 1 : page);
     },
   };
 }
@@ -1205,34 +1221,48 @@ function allFeed(set: readonly string[], sources: FeedSources): RowDef {
   return filterFirst(sources.atlas, 'all', items, local, sources, id);
 }
 
+/** How many times running a side of an interleaved feed may fail before the other goes on alone. */
+const SIDE_TRIES = 2;
+
 /**
  * Films and series as one feed: each type's own feed, a page of each in turn, interleaved title by title and each
- * title once. A side that runs out or fails leaves the other to go on, and the feed ends when both have. Each card is
- * narrowed by its own type's feed (`filter`): a series by the series feed's shelf, never the films'.
+ * title once. A side that runs out, or fails `SIDE_TRIES` times running, leaves the other to go on, and the feed ends
+ * when both have; a page a side failed on is asked again, not skipped. Asked for its first page, the feed starts
+ * over. Each card is narrowed by its own type's feed (`filter`): a series by the series feed's shelf, never the
+ * films'.
  */
 export function interleaveFeeds(id: string, sides: { type: MediaType; row: RowDef }[]): RowDef {
   const ended = sides.map(() => false);
+  /** The page each side is asked for next. */
+  const next = sides.map(() => 1);
+  const failures = sides.map(() => 0);
   const given = new Set<string>();
-  let page = 0;
   return {
     id,
     title: '',
     filter: (title) => sides.find((side) => side.type === title.type)?.row.filter?.(title) ?? true,
     // Pages are the sides' own: a page that holds only titles already given reads on rather than ending the feed.
-    load: async () => {
+    load: async (page) => {
+      if (page === 1) {
+        ended.fill(false);
+        next.fill(1);
+        failures.fill(0);
+        given.clear();
+      }
       let failure: unknown;
       while (ended.includes(false)) {
-        page++;
         const pages = await Promise.all(
           sides.map(async ({ row }, at) => {
             if (ended[at]) return [];
             try {
-              const titles = await row.load(page);
+              const titles = await row.load(next[at]!);
+              next[at]!++;
+              failures[at] = 0;
               if (!titles.length) ended[at] = true;
               return titles;
             } catch (error) {
               console.warn('explore: one side of All failed, the other goes on:', row.id, error);
-              ended[at] = true;
+              if (++failures[at]! >= SIDE_TRIES) ended[at] = true;
               failure = error;
               return [];
             }

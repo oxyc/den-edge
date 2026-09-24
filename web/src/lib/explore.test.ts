@@ -631,6 +631,28 @@ describe('Explore feeds', () => {
     expect(calls.at(-1)).toMatchObject({ path: '/movie/popular', page: 1 });
   });
 
+  it('asks a seed that failed again when For You starts over, and leads with it then', async () => {
+    let down = true;
+    const flaky: Pages = async (path, type, params, page) => {
+      if (down && path.endsWith('/recommendations')) throw new Error('offline');
+      return pages(path, type, params, page);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const row = exploreFeed([], 'movie', { ...sources([film(1)]), pages: flaky });
+      expect((await row.load(1)).map((t) => t.id)).toEqual([100]);
+      expect(
+        (await row.load(2)).map((t) => t.id),
+        'the tail, not a page skipped',
+      ).toEqual([200]);
+      down = false;
+      expect((await row.load(1)).map((t) => t.id)).toEqual([1001]);
+      expect((await row.load(2)).map((t) => t.id)).toEqual([100]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('is the tail alone for a guest, top-rated for series', async () => {
     calls.length = 0;
     await exploreFeed([], 'tv', sources()).load(1);
@@ -868,6 +890,39 @@ describe('All: films and series together', () => {
         { type: 'tv', row: { ...broken, id: 'b2' } },
       ]);
       await expect(none.load(1)).rejects.toThrow('down');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('asks a side for the page it failed on again, and starts over from the first page', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const asked: number[] = [];
+      let fail = true;
+      const flaky = {
+        id: 'f',
+        title: '',
+        load: async (p: number) => {
+          asked.push(p);
+          if (p === 2 && fail) {
+            fail = false;
+            throw new Error('blip');
+          }
+          return p <= 3 ? [film(p)] : [];
+        },
+      };
+      const steady = { id: 's', title: '', load: async (p: number) => [film(p, 'tv')] };
+      const row = interleaveFeeds('mixed', [
+        { type: 'movie', row: flaky },
+        { type: 'tv', row: steady },
+      ]);
+      const keys = (titles: Title[]) => titles.map((x) => `${x.type}:${x.id}`);
+      expect(keys(await row.load(1))).toEqual(['movie:1', 'tv:1']);
+      expect(keys(await row.load(2)), 'films failed once').toEqual(['tv:2']);
+      expect(keys(await row.load(3)), 'and page 2 is asked again').toEqual(['movie:2', 'tv:3']);
+      expect(asked).toEqual([1, 2, 2]);
+      expect(keys(await row.load(1)), 'a new start').toEqual(['movie:1', 'tv:1']);
     } finally {
       warn.mockRestore();
     }
