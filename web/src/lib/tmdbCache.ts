@@ -4,6 +4,7 @@
 // a return visit never waits on TMDB for what it showed last time; an older one TMDB can't refresh is served stale
 // rather than not at all, and nothing is kept past TMDB's six-month limit on cached content.
 
+import { transactions } from './localVault';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
 
@@ -264,29 +265,13 @@ function indexedStore(): Store | null {
   } catch {
     return null;
   }
-  let db: Promise<IDBDatabase> | undefined;
-  const open = () =>
-    (db ??= new Promise((resolve, reject) => {
-      const req = factory.open('den-tmdb', 1);
-      req.onupgradeneeded = () =>
-        req.result.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt');
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    }));
-  const run = <T>(
-    mode: IDBTransactionMode,
-    work: (answers: IDBObjectStore) => IDBRequest<T> | void,
-  ) =>
-    open().then(
-      (database) =>
-        new Promise<T | undefined>((resolve, reject) => {
-          const tx = database.transaction('answers', mode);
-          const req = work(tx.objectStore('answers'));
-          tx.oncomplete = () => resolve(req ? req.result : undefined);
-          tx.onerror = () => reject(tx.error);
-          tx.onabort = () => reject(tx.error);
-        }),
-    );
+  const run = transactions(
+    factory,
+    'den-tmdb',
+    1,
+    (database) => database.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt'),
+    'answers',
+  );
   return {
     get: (key) => run('readonly', (answers) => answers.get(key) as IDBRequest<Entry | undefined>),
     put: async (key, entry) => {

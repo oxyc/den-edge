@@ -11,6 +11,76 @@ export interface Vault {
   remove(prefix: string): Promise<void>;
 }
 
+/** A transaction on one object store, with the request `work` makes in it: its result once the transaction is done. */
+export type Transact = <T>(
+  mode: IDBTransactionMode,
+  work: (store: IDBObjectStore) => IDBRequest<T> | void,
+) => Promise<T | undefined>;
+
+/**
+ * Transactions on the object store `store` of the database `name`, over one connection opened on first use and
+ * opened again when it is lost. A connection that failed to open, that the browser closed (`close`), or that another
+ * tab's newer version asked to be closed (`versionchange`) was kept for the life of the page, and every read and
+ * write after it failed until a reload.
+ */
+export function transactions(
+  factory: IDBFactory,
+  name: string,
+  version: number,
+  upgrade: (database: IDBDatabase) => void,
+  store: string,
+): Transact {
+  let db: Promise<IDBDatabase> | undefined;
+  const connect = () => {
+    if (db) return db;
+    const opening = new Promise<IDBDatabase>((resolve, reject) => {
+      const req = factory.open(name, version);
+      req.onupgradeneeded = () => upgrade(req.result);
+      req.onsuccess = () => {
+        const database = req.result;
+        database.onclose = () => {
+          if (db === opening) db = undefined;
+        };
+        database.onversionchange = () => {
+          database.close();
+          if (db === opening) db = undefined;
+        };
+        resolve(database);
+      };
+      req.onerror = () => reject(req.error);
+    });
+    db = opening;
+    opening.catch(() => {
+      if (db === opening) db = undefined;
+    });
+    return opening;
+  };
+  const once = <T>(
+    database: IDBDatabase,
+    mode: IDBTransactionMode,
+    work: (store: IDBObjectStore) => IDBRequest<T> | void,
+  ) =>
+    new Promise<T | undefined>((resolve, reject) => {
+      const tx = database.transaction(store, mode);
+      const req = work(tx.objectStore(store));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  return async (mode, work) => {
+    const opening = connect();
+    const database = await opening;
+    try {
+      return await once(database, mode, work);
+    } catch (error) {
+      // A connection closed under it without saying so: opened again, and tried once more.
+      if (!(error instanceof DOMException && error.name === 'InvalidStateError')) throw error;
+      if (db === opening) db = undefined;
+      return once(await connect(), mode, work);
+    }
+  };
+}
+
 /** This browser's IndexedDB, or null where there is none or it is refused (a private window, blocked site data). */
 function indexedVault(): Vault | null {
   let factory: IDBFactory;
@@ -20,25 +90,13 @@ function indexedVault(): Vault | null {
   } catch {
     return null;
   }
-  let db: Promise<IDBDatabase> | undefined;
-  const open = () =>
-    (db ??= new Promise((resolve, reject) => {
-      const req = factory.open('den-library', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('kept');
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    }));
-  const run = <T>(mode: IDBTransactionMode, work: (kept: IDBObjectStore) => IDBRequest<T>) =>
-    open().then(
-      (database) =>
-        new Promise<T>((resolve, reject) => {
-          const tx = database.transaction('kept', mode);
-          const req = work(tx.objectStore('kept'));
-          tx.oncomplete = () => resolve(req.result);
-          tx.onerror = () => reject(tx.error);
-          tx.onabort = () => reject(tx.error);
-        }),
-    );
+  const run = transactions(
+    factory,
+    'den-library',
+    1,
+    (database) => database.createObjectStore('kept'),
+    'kept',
+  );
   return {
     get: (key) => run('readonly', (kept) => kept.get(key) as IDBRequest<Uint8Array | undefined>),
     put: async (key, value) => {
