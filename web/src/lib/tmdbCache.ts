@@ -104,14 +104,12 @@ function announceThrottle(res: Response): void {
  * A title's details are kept for as long as TMDB's terms allow, which is also how long den-edge keeps them
  * (`tmdb.rs`): what a film is called, when it came out and who was in it does not change, and asking again
  * every month bought nothing but a wait. Lists and search still move, and keep their hours — and so does a title
- * whose `appends` (`append_to_response`) carry one of them: where it streams (`watch/providers`) and what is like it
- * (`recommendations`) move like any list. The detail page asks for both, and was kept for six months.
+ * whose `appends` (`append_to_response`) carry one of them: where it streams (`watch/providers`), what is like it
+ * (`recommendations`) and its trailers (`videos`) move like any list, as den-edge keeps them (`tmdb.rs` `MOVING`).
+ * The detail page asks for them, and was kept for six months.
  */
 export function freshFor(path: string, body?: string, appends?: string | null): number {
-  if (
-    /\/(credits|external_ids|keywords|videos|combined_credits)$/.test(path) ||
-    path.includes('/season/')
-  )
+  if (/\/(credits|external_ids|keywords|combined_credits)$/.test(path) || path.includes('/season/'))
     return RETENTION;
   if (/^\/3\/(movie|tv|person)\/\d+$/.test(path))
     return unfinished(path, body) || moving(appends) ? DAY / 4 : RETENTION;
@@ -125,7 +123,6 @@ const SETTLED = new Set([
   'combined_credits',
   'external_ids',
   'keywords',
-  'videos',
   'images',
   'release_dates',
   'content_ratings',

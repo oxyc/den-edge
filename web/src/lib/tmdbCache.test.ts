@@ -327,6 +327,12 @@ describe('cachingFetch', () => {
     expect(freshFor('/3/tv/1399', undefined, 'watch/providers')).toBe(6 * HOUR);
   });
 
+  /** den-edge keeps a title's trailers for hours (`tmdb.rs` `MOVING`); this browser kept them for six months. */
+  it('keeps trailers for hours, as den-edge does', () => {
+    expect(freshFor('/3/movie/603/videos')).toBe(6 * HOUR);
+    expect(freshFor('/3/movie/603', undefined, 'credits,videos')).toBe(6 * HOUR);
+  });
+
   it('asks again the same day for a title asked with where it streams', async () => {
     const withProviders =
       'https://api.themoviedb.org/3/movie/603?api_key=secret&append_to_response=credits,watch/providers';
