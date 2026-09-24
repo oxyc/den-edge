@@ -132,7 +132,6 @@
     }
   }
 
-  let first = true;
   $effect(() => {
     const load = feed;
     untrack(() => {
@@ -143,11 +142,19 @@
       done = load === null;
       page = 0;
       loading = false;
-      // A new selection starts at the top of the page, as a new page would.
-      if (!first) window.scrollTo({ top: 0, behavior: 'instant' });
-      first = false;
       void more();
     });
+  });
+
+  // A new selection starts at the top of the page, as a new page would. On what was picked, not on the feed: the
+  // feed is also rebuilt when atlas answers, and this page stays mounted, hidden, under a title or person opened
+  // from it, so a scroll on that would move whichever page is on screen.
+  const selected = $derived(`${type}:${chipsKey}:${traitsKey}:${order}`);
+  let lastSelected = untrack(() => selected);
+  $effect(() => {
+    if (selected === lastSelected) return;
+    lastSelected = selected;
+    window.scrollTo({ top: 0, behavior: 'instant' });
   });
 
   // Each person's photo, from TMDB as a person's page and search draw them.

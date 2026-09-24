@@ -211,11 +211,14 @@
     if (!typing && feed.pager.page === 0) void feed.pager.more();
   });
 
-  // A new chip starts at the top of the page, as a new page would.
-  let lastFeed = untrack(() => feed);
+  // A new chip starts at the top of the page, as a new page would. On what was picked, not on the feed: the feed is
+  // also rebuilt when atlas answers and after every library sync that brings a row, and this page stays mounted,
+  // hidden, under a title opened from it — so a scroll on data arriving moved the title page back to its top.
+  const selected = $derived(`${exploreType}:${selectionKey}`);
+  let lastSelected = untrack(() => selected);
   $effect(() => {
-    if (feed === lastFeed) return;
-    lastFeed = feed;
+    if (selected === lastSelected) return;
+    lastSelected = selected;
     window.scrollTo({ top: 0, behavior: 'instant' });
   });
 
