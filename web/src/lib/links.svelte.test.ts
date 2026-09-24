@@ -58,3 +58,43 @@ it('names and forgets a shared device another tab has reread, found by the recor
   tab.forgetShared(phone);
   expect(readShared()).toEqual([]);
 });
+
+/** Each change rereads storage first: a TV paired while storage was full was dropped by the next change. */
+it('keeps a link storage refused to keep, through the next change', () => {
+  const full = (key: string, value: string) => {
+    if (key === 'den.links') throw new DOMException('full', 'QuotaExceededError');
+    kept.set(key, value);
+  };
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => kept.get(key) ?? null,
+    setItem: full,
+    removeItem: (key: string) => void kept.delete(key),
+  });
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  tab.add('b'.repeat(16), { ...KEYS, name: 'Bedroom' });
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room', 'Bedroom']);
+  expect(tab.current?.name).toBe('Living room');
+  tab.remove('b'.repeat(16));
+  elsewhere(() => undefined);
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room']);
+});
+
+/** The app is keyed on the current link: pairing in one tab restarted every other tab, a film playing included. */
+it("keeps this tab's current link when another tab makes a different one current", () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  elsewhere((other) => {
+    other.add('b'.repeat(16), { ...KEYS, name: 'Bedroom' });
+    other.makeCurrent('b'.repeat(16));
+  });
+  expect(tab.list.map((link) => link.name)).toEqual(['Bedroom', 'Living room']);
+  expect(tab.current?.name, 'still open here').toBe('Living room');
+  // A change this tab makes keeps the other tab's choice for the next load.
+  tab.identityDelivered(tab.current!, 'Phone', '0123456789abcdef');
+  expect(readLinks()[0]?.name).toBe('Bedroom');
+  expect(new Links().current?.name).toBe('Bedroom');
+  // Gone from under this tab, it opens the one left.
+  elsewhere((other) => other.remove('a'.repeat(16)));
+  expect(tab.current?.name).toBe('Bedroom');
+});

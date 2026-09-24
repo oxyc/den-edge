@@ -92,16 +92,39 @@ function reconcile<T>(current: T[], fresh: T[]): T[] {
   return fresh.map((item) => unchanged.get(JSON.stringify(item)) ?? item);
 }
 
+/**
+ * `fresh`, with this tab's records storage refused to keep (`unsaved`) over it: each in place of its own record, or
+ * added where storage has none.
+ */
+function overlay<T>(fresh: T[], unsaved: T[], same: (a: T, b: T) => boolean): T[] {
+  return [
+    ...fresh.map((item) => unsaved.find((kept) => same(kept, item)) ?? item),
+    ...unsaved.filter((kept) => !fresh.some((item) => same(kept, item))),
+  ];
+}
+
+/** The records of `list` that storage does not hold as they are: what a write storage refused left in this tab only. */
+function unsavedOf<T>(list: T[], stored: T[]): T[] {
+  const kept = new Set(stored.map((item) => JSON.stringify(item)));
+  return list.filter((item) => !kept.has(JSON.stringify(item)));
+}
+
 /** The same record of a device given the library, whichever copy of it: neither field is ever changed. */
 function sameShared(a: Shared, b: Shared): boolean {
   return a === b || (a.at === b.at && a.libraryKey === b.libraryKey);
 }
 
-function writeLinks(list: Link[], storage: Storage | undefined = globalThis.localStorage): void {
+function sameLink(a: Link, b: Link): boolean {
+  return a.inboxKey === b.inboxKey;
+}
+
+/** False when storage refused it (full, or blocked): the list is then this tab's, for this visit (`unsavedLinks`). */
+function writeLinks(list: Link[], storage: Storage | undefined = globalThis.localStorage): boolean {
   try {
     storage?.setItem(STORAGE_KEY, JSON.stringify(list));
+    return true;
   } catch {
-    // Nothing persists in this browser; the link still works for this visit.
+    return false;
   }
 }
 
@@ -109,11 +132,16 @@ export function readShared(storage: Storage | undefined = globalThis.localStorag
   return readList(SHARED_KEY, isShared, storage) ?? [];
 }
 
-function writeShared(list: Shared[], storage: Storage | undefined = globalThis.localStorage): void {
+/** As `writeLinks`, for the shared devices (`unsavedShared`). */
+function writeShared(
+  list: Shared[],
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
   try {
     storage?.setItem(SHARED_KEY, JSON.stringify(list));
+    return true;
   } catch {
-    // Nothing persists in this browser; the list is this visit's.
+    return false;
   }
 }
 
@@ -150,6 +178,18 @@ export class Links {
   browsing = $state<boolean>(readBrowsing());
   /** The TV a link was forgotten for because it reset its library key, until this browser links again. */
   moved = $state<string | null>(null);
+  /**
+   * The link this tab has open (`current`), by its inbox key. Another tab making a different link current changes
+   * what the next load opens, not this tab: the app is keyed on the current link, so pairing a TV in one tab
+   * restarted every other tab, a film playing in it included. Only removing this link moves this tab off it.
+   */
+  private opened = $state<string | undefined>(this.list[0]?.inboxKey);
+  /**
+   * Records this tab changed that storage refused to keep (full, or blocked). Each change rereads storage first, so
+   * without them a TV paired while storage was full was dropped by the next change, in the same visit.
+   */
+  private unsavedLinks: Link[] = [];
+  private unsavedShared: Shared[] = [];
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -159,17 +199,33 @@ export class Links {
     });
   }
 
-  /** Take up what storage holds now, which another tab may have changed. */
+  /** Take up what storage holds now, which another tab may have changed, with what this tab couldn't keep there. */
   private reread(): void {
     const list = readList(STORAGE_KEY, isLink);
-    if (list) this.list = reconcile(this.list, list);
+    if (list) this.list = reconcile(this.list, overlay(list, this.unsavedLinks, sameLink));
     const shared = readList(SHARED_KEY, isShared);
-    if (shared) this.shared = reconcile(this.shared, shared);
+    if (shared)
+      this.shared = reconcile(this.shared, overlay(shared, this.unsavedShared, sameShared));
     if (readBrowsing()) this.browsing = true;
+    this.settle();
+  }
+
+  /** A tab whose open link is gone opens the first one left. */
+  private settle(): void {
+    if (!this.list.some((link) => link.inboxKey === this.opened))
+      this.opened = this.list[0]?.inboxKey;
+  }
+
+  private saveLinks(): void {
+    this.unsavedLinks = writeLinks(this.list) ? [] : unsavedOf(this.list, readLinks());
+  }
+
+  private saveShared(): void {
+    this.unsavedShared = writeShared(this.shared) ? [] : unsavedOf(this.shared, readShared());
   }
 
   get current(): Link | undefined {
-    return this.list[0];
+    return this.list.find((link) => link.inboxKey === this.opened) ?? this.list[0];
   }
 
   add(
@@ -193,16 +249,19 @@ export class Links {
       },
     ];
     this.moved = null;
-    writeLinks(this.list);
+    this.settle();
+    this.saveLinks();
   }
 
   /** Open `inboxKey`'s library from now on: the link first, so it's the one the app starts with. */
   makeCurrent(inboxKey: string): void {
     this.reread();
     const chosen = this.list.find((l) => l.inboxKey === inboxKey);
-    if (!chosen || this.list[0] === chosen) return;
+    if (!chosen) return;
+    this.opened = inboxKey;
+    if (this.list[0] === chosen) return;
     this.list = [chosen, ...this.list.filter((l) => l !== chosen)];
-    writeLinks(this.list);
+    this.saveLinks();
   }
 
   /** Look around without pairing. */
@@ -221,7 +280,7 @@ export class Links {
     const entry: Shared = { name, at: now, libraryKey, ...pairing };
     this.reread();
     this.shared = [...this.shared, entry];
-    writeShared(this.shared);
+    this.saveShared();
     return entry;
   }
 
@@ -235,7 +294,7 @@ export class Links {
       if (deviceId) record.deviceId = deviceId;
     }
     this.shared = [...this.shared];
-    writeShared(this.shared);
+    this.saveShared();
   }
 
   identityDelivered(entry: Link, name: string, deviceId: string): void {
@@ -248,21 +307,24 @@ export class Links {
       record.sentIdentityDeviceId = deviceId;
     }
     this.list = [...this.list];
-    writeLinks(this.list);
+    this.saveLinks();
   }
 
   /** Drop that record. The device keeps the library it was given; this only stops listing it. */
   forgetShared(entry: Shared): void {
     this.reread();
     this.shared = this.shared.filter((s) => !sameShared(s, entry));
-    writeShared(this.shared);
+    this.unsavedShared = this.unsavedShared.filter((s) => !sameShared(s, entry));
+    this.saveShared();
   }
 
   remove(inboxKey: string): void {
     this.reread();
     const gone = this.list.find((l) => l.inboxKey === inboxKey);
     this.list = this.list.filter((l) => l.inboxKey !== inboxKey);
-    writeLinks(this.list);
+    this.unsavedLinks = this.unsavedLinks.filter((l) => l.inboxKey !== inboxKey);
+    this.settle();
+    this.saveLinks();
     // What this browser kept of the library goes with the last link that reaches it.
     if (gone && !this.list.some((l) => l.libraryKey === gone.libraryKey))
       void forgetLibrary(gone.libraryKey).catch((error: unknown) =>
