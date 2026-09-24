@@ -120,6 +120,11 @@ const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// A paired household gets room to name a large library; an anonymous visitor gets enough to browse.
 const GUEST_PER_WINDOW: u32 = 120;
 const MEMBER_PER_WINDOW: u32 = 600;
+/// Questions a minute that link previews (`ask`) may send to TMDB, from everyone together. Every app-shell request
+/// for `/movie/<id>` or `/person/<id>` builds a preview, unauthenticated and with no per-address limit of its own,
+/// so any id not yet kept cost a unit of the household's budget — and the budget is unlimited unless
+/// `TMDB_DAILY_MAX` is set. A kept title costs nothing and is not counted; past this a preview is the generic one.
+const PREVIEWS_PER_MINUTE: u32 = 30;
 
 /// How long an answer to `path` stays fresh — the same split the app makes in `tmdbCache.ts`.
 /// A body this exact size and shape means "TMDB says there is no such thing". It is stored like any other
@@ -830,6 +835,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                     Kept::Hit(body, ..) => body,
                     Kept::Absent => return None,
                     Kept::Stale(..) | Kept::Nothing => {
+                        preview_allowed(state)?;
                         detail.narrowed(detail.ask(state, key, "meta").await.ok()?.0)
                     }
                 }
@@ -860,6 +866,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // one URL, requested in a loop by anyone, drained TMDB_DAILY_MAX at one unit per request, unauthenticated
     // and unthrottled, and that budget is shared with the /tmdb proxy the app browses through. Draining it
     // took out browsing, not just link previews.
+    preview_allowed(state)?;
     let fetched = match (&file, &stale) {
         (Some(file), Some(_)) => revalidate(state, path, query, key, "meta", file).await,
         _ => fetch(state, path, query, key, "meta").await.map(|(body, etag)| Fetched::Answer(body, etag)),
@@ -886,6 +893,11 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             None
         }
     }
+}
+
+/// `Some` while link previews may ask TMDB this minute (`PREVIEWS_PER_MINUTE`), counting the question.
+fn preview_allowed(state: &AppState) -> Option<()> {
+    crate::link::throttled_per_minute(state, "tmdb:preview", PREVIEWS_PER_MINUTE).is_none().then_some(())
 }
 
 /// What TMDB said to a question.
@@ -1065,17 +1077,26 @@ pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
 /// The temporary file is this write's own. With one shared name, two writes of the same key at once — two cold
 /// questions for one title, now that a title's questions share one key — wrote into the same file, and the rename
 /// could put a mix of both in place, to be served as a hit for months.
+///
+/// One blocking task, from the directory to the rename. As separate awaits, a caller that stopped waiting between
+/// them — a link preview past its `meta::BUDGET` — left the temporary file behind: the blocking write it had started ran
+/// on, and nothing renamed or removed what it wrote. A blocking task runs to its end whoever is still waiting.
 pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
-    let Some(dir) = file.parent() else { return false };
-    if tokio::fs::create_dir_all(dir).await.is_err() {
-        return false;
-    }
+    let (file, body) = (file.to_owned(), body.clone());
     let temp = file.with_extension(format!("{}.tmp", crate::hex(&crate::random_bytes::<8>())));
-    if tokio::fs::write(&temp, body).await.is_ok() && tokio::fs::rename(&temp, file).await.is_ok() {
-        return true;
-    }
-    let _ = tokio::fs::remove_file(&temp).await;
-    false
+    tokio::task::spawn_blocking(move || {
+        let Some(dir) = file.parent() else { return false };
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
+        if std::fs::write(&temp, &body).is_ok() && std::fs::rename(&temp, &file).is_ok() {
+            return true;
+        }
+        let _ = std::fs::remove_file(&temp);
+        false
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// An answer kept with the ETag TMDB gave it, beside it as `<name>.etag`, or with none — so a revalidation never
@@ -1852,6 +1873,84 @@ mod tests {
         assert!(
             crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
             "nothing is left in flight"
+        );
+    }
+
+    /// A link preview gives up on TMDB after its budget, and the question used to be dropped with it after it was
+    /// paid for, so a title TMDB was slow to answer cost a unit on every preview and was never kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_preview_that_stops_waiting_still_keeps_what_it_paid_for() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "slow-preview");
+        let asked = tmdb_answering("slow-preview-inner", "Ended");
+        let inner = stand_in("slow-preview-inner").unwrap();
+        let slow: Upstream = Arc::new(move |url: &str| {
+            std::thread::sleep(Duration::from_millis(600));
+            inner(url)
+        });
+        crate::lock(&UPSTREAMS).push(("slow-preview".to_owned(), slow));
+        let shell = b"<head><!--den:meta--><title>Den</title><!--/den:meta--></head>";
+        let mut host = HeaderMap::new();
+        host.insert(header::HOST, HeaderValue::from_static("d.oxy.fi"));
+
+        let preview = crate::meta::rewrite(&h.state, shell, "/movie/550", None, &host).await;
+        assert!(preview.is_none(), "the page went out with the generic block");
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let preview = crate::meta::rewrite(&h.state, shell, "/movie/550", None, &host).await;
+        assert!(preview.expect("kept, so a hit").contains("<title>T · Den</title>"));
+        assert_eq!(crate::lock(&asked).len(), 1, "paid for once");
+    }
+
+    /// Every app-shell request for a title builds a preview, with no limit of its own, so a crawl of ids spent the
+    /// household's budget without end. A kept title costs nothing and is still described.
+    #[tokio::test]
+    async fn previews_ask_tmdb_only_so_often() {
+        let h = lending_as(&temp_dir(), "previews");
+        let asked = tmdb_answering("previews", "Ended");
+        for id in 1..=PREVIEWS_PER_MINUTE {
+            assert!(ask(&h.state, &format!("/3/movie/{id}"), None).await.is_some(), "{id}");
+        }
+        assert!(ask(&h.state, "/3/movie/9999", None).await.is_none(), "past the minute's questions");
+        assert!(ask(&h.state, "/3/person/9999", None).await.is_none());
+        assert_eq!(crate::lock(&asked).len(), PREVIEWS_PER_MINUTE as usize);
+        assert!(ask(&h.state, "/3/movie/1", None).await.is_some(), "a kept title is still described");
+        h.advance(60_001);
+        assert!(ask(&h.state, "/3/movie/9999", None).await.is_some(), "and the next minute asks again");
+    }
+
+    /// A write its caller stopped waiting for — a preview past its budget — left its temporary file behind.
+    #[tokio::test]
+    async fn a_write_nobody_waits_for_still_finishes_and_leaves_nothing_behind() {
+        let dir = temp_dir();
+        let file = cache_path(&dir, "/3/tv/1399?");
+        let body = Bytes::from(vec![b'x'; 64 * 1024 * 1024]);
+        let writing = {
+            let (file, body) = (file.clone(), body.clone());
+            tokio::spawn(async move { write(&file, &body).await })
+        };
+        let temp = || {
+            std::fs::read_dir(&dir)
+                .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".tmp")))
+                .unwrap_or(false)
+        };
+        for _ in 0..5000 {
+            if temp() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        writing.abort();
+        for _ in 0..500 {
+            if file.exists() && !temp() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!temp(), "no temporary file is left behind");
+        assert_eq!(
+            std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+            body.len() as u64,
+            "the write finished"
         );
     }
 

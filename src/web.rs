@@ -96,7 +96,7 @@ fn public_media(media: &[String]) -> Vec<String> {
 pub struct Served(pub &'static str);
 
 pub async fn serve(
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
     path: &str,
     query: Option<&str>,
     headers: &HeaderMap,
@@ -108,7 +108,7 @@ pub async fn serve(
 }
 
 async fn serve_file(
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
     path: &str,
     query: Option<&str>,
     headers: &HeaderMap,

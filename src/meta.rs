@@ -13,6 +13,7 @@
 
 use crate::AppState;
 use axum::http::{header, HeaderMap};
+use std::sync::Arc;
 use std::time::Duration;
 
 const START: &str = "<!--den:meta-->";
@@ -20,7 +21,7 @@ const END: &str = "<!--/den:meta-->";
 
 /// How long a page load will wait on TMDB before going out with the generic block. A cache hit takes none of
 /// it; this bounds only the first look at a title, and a reader waiting on a page beats a perfect preview.
-const BUDGET: Duration = Duration::from_secs(3);
+const BUDGET: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 3000 });
 
 /// The pages worth describing. Everything else — Home, an unknown path — keeps the fallback block.
 enum Page {
@@ -123,11 +124,11 @@ fn artwork(value: &serde_json::Value) -> Option<String> {
 }
 
 /// The head block for this page, or `None` to leave the fallback alone.
-async fn block(state: &AppState, path: &str, query: Option<&str>, origin: &str) -> Option<String> {
+async fn block(state: &Arc<AppState>, path: &str, query: Option<&str>, origin: &str) -> Option<String> {
     let (name, description, image, kind) = match page(path, query)? {
         Page::Title { kind, id } => {
             let asked = if kind == "video.movie" { format!("/3/movie/{id}") } else { format!("/3/tv/{id}") };
-            let details = crate::tmdb::ask(state, &asked, None).await?;
+            let details = asked_behind(state, asked).await?;
             let name = details
                 .get("title")
                 .or_else(|| details.get("name"))
@@ -152,7 +153,7 @@ async fn block(state: &AppState, path: &str, query: Option<&str>, origin: &str) 
             )
         }
         Page::Person { id } => {
-            let person = crate::tmdb::ask(state, &format!("/3/person/{id}"), None).await?;
+            let person = asked_behind(state, format!("/3/person/{id}")).await?;
             let name =
                 person.get("name").and_then(|v| v.as_str()).filter(|n| !n.trim().is_empty())?.to_owned();
             let known = person.get("known_for_department").and_then(|v| v.as_str()).unwrap_or("");
@@ -204,11 +205,20 @@ async fn block(state: &AppState, path: &str, query: Option<&str>, origin: &str) 
     ))
 }
 
+/// `tmdb::ask`, in a task of its own. A page gives up waiting after `BUDGET`, and the question used to be dropped
+/// with it — after `fetch` had spent a unit of the day's budget, and before the answer was kept — so a title TMDB was
+/// slow to answer was paid for again on every preview of it. Now the question runs to the end and keeps its answer,
+/// and the next preview of the title is a hit.
+async fn asked_behind(state: &Arc<AppState>, path: String) -> Option<serde_json::Value> {
+    let state = Arc::clone(state);
+    tokio::spawn(async move { crate::tmdb::ask(&state, &path, None).await }).await.ok()?
+}
+
 /// The shell with this page's head block in place of the fallback, or `None` to serve it untouched — an
 /// unknown path, no marked block, no origin to build absolute URLs from, or TMDB taking too long to be worth
 /// a reader's wait.
 pub async fn rewrite(
-    state: &AppState,
+    state: &Arc<AppState>,
     html: &[u8],
     path: &str,
     query: Option<&str>,
