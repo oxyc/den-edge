@@ -243,6 +243,11 @@ fn allowed(path: &str) -> bool {
 
 /// What an answer is kept under: the question without its key, parameters in order. The same question from a
 /// TV, a browser and a phone is one entry.
+///
+/// Each name and value is written with `%`, `&` and `=` escaped, so the key names exactly the pairs `upstream`
+/// asks TMDB: joined as they were decoded, `a%3Db%26c=d` (one parameter) and `a=b&c=d` (two) were one key, and an
+/// answer to the first was served for the second. Nothing else is escaped, so a question with none of those three
+/// characters keeps the key it has always had and what is already kept still answers it.
 fn cache_key(path: &str, query: Option<&str>) -> String {
     let mut params: Vec<(String, String)> = query
         .map(|q| {
@@ -253,7 +258,8 @@ fn cache_key(path: &str, query: Option<&str>) -> String {
         })
         .unwrap_or_default();
     params.sort();
-    let rest: String = params.iter().map(|(n, v)| format!("{n}={v}&")).collect();
+    let escaped = |text: &str| text.replace('%', "%25").replace('&', "%26").replace('=', "%3D");
+    let rest: String = params.iter().map(|(n, v)| format!("{}={}&", escaped(n), escaped(v))).collect();
     format!("{path}?{rest}")
 }
 
@@ -1218,6 +1224,40 @@ mod tests {
         assert_eq!(a, b);
         assert!(!a.contains("aaa"), "{a}");
         assert_ne!(a, cache_key("/3/movie/550", Some("language=fi")));
+    }
+
+    /// A key is the question TMDB is asked, and nothing else is. Pairs were joined unescaped, so one parameter
+    /// whose value carried `=` and `&` keyed as two: `sort_by%3Dpopularity.desc%26with_genres=18` reaches TMDB as a
+    /// single unknown parameter (an unfiltered list) and was kept under the real filter's key, served to everyone
+    /// who asked for dramas.
+    #[test]
+    fn a_question_is_kept_under_its_own_key_and_no_other() {
+        let real = cache_key("/3/discover/movie", Some("sort_by=popularity.desc&with_genres=18"));
+        let planted = cache_key("/3/discover/movie", Some("sort_by%3Dpopularity.desc%26with_genres=18"));
+        assert_ne!(real, planted);
+        assert_ne!(
+            upstream("/3/discover/movie", Some("sort_by=popularity.desc&with_genres=18"), "k"),
+            upstream("/3/discover/movie", Some("sort_by%3Dpopularity.desc%26with_genres=18"), "k"),
+            "and TMDB is asked two different questions"
+        );
+        assert_ne!(
+            cache_key("/3/search/multi", Some("query=a%26b%3Dc")),
+            cache_key("/3/search/multi", Some("b=c&query=a")),
+        );
+        // An escape in a value is not the character it escapes.
+        assert_ne!(
+            cache_key("/3/search/multi", Some("query=%2526")),
+            cache_key("/3/search/multi", Some("query=%26"))
+        );
+        // What is on disk stays where it is: a question with nothing to escape keeps the key it always had.
+        assert_eq!(
+            cache_key("/3/movie/550", Some("append_to_response=credits,watch/providers&language=en-US")),
+            "/3/movie/550?append_to_response=credits,watch/providers&language=en-US&"
+        );
+        assert_eq!(
+            cache_key("/3/search/multi", Some("query=blade+runner")),
+            "/3/search/multi?query=blade runner&"
+        );
     }
 
     #[test]
