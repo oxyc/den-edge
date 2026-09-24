@@ -13,6 +13,7 @@ import { lanReachable } from './lan';
 import { castErrorAction, castIdleAction, castingTo, PLAYING_HERE, statusShown } from './lifecycle';
 import { signedLinkLimit, usableLinkLimit } from './link';
 import { signedMedia } from './media';
+import { keepProfile, keptProfile } from './profile';
 import './style.css';
 
 interface Media {
@@ -170,12 +171,10 @@ function playUrl(id: string, media: Media): string {
   return media.lanUrl && onLan.has(id) ? media.lanUrl : media.url;
 }
 
-const storedProfile = localStorage.getItem('den.cast.profile');
-const keptProfile = storedProfile === 'google-tv' ? 'google-tv-4k' : storedProfile;
-if (keptProfile && [...profile.options].some((option) => option.value === keptProfile))
-  profile.value = keptProfile;
+const kept = keptProfile();
+if (kept && [...profile.options].some((option) => option.value === kept)) profile.value = kept;
 profile.addEventListener('change', () => {
-  localStorage.setItem('den.cast.profile', profile.value);
+  keepProfile(profile.value);
   if (castContext?.getCurrentSession()) tell('den-cast-request', { profile: profile.value });
 });
 
