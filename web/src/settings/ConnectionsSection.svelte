@@ -428,13 +428,19 @@
   const QUICK_TRIES = 8;
   // Deliberately non-reactive: starting or finishing a check must not retrigger the effect below.
   let learning = false;
+  // A check asked for while one runs (a device shared meanwhile) runs once that one ends, rather than not at all.
+  let again = false;
   const onScreen = () =>
     document.visibilityState === 'visible' &&
     !document.getElementById('connections')?.closest('[hidden]');
   const credentialOf = (entry: Shared) =>
     entry.inboxKey && entry.linkKey ? { inboxKey: entry.inboxKey, linkKey: entry.linkKey } : null;
   async function learnIdentities() {
-    if (learning || !onScreen()) return;
+    if (!onScreen()) return;
+    if (learning) {
+      again = true;
+      return;
+    }
     learning = true;
     try {
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one check; nothing renders from it.
@@ -459,6 +465,10 @@
       }
     } finally {
       learning = false;
+      if (again) {
+        again = false;
+        void learnIdentities();
+      }
     }
   }
   $effect(() => {

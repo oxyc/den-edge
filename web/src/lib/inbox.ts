@@ -28,6 +28,37 @@ const SEAL_AHEAD = 24 * 60 * 60 * 1000;
 const visitReplay = new Map<string, number>();
 /** How long a request to den-edge's inbox may take. */
 const REQUEST_MS = 15_000;
+/**
+ * How long a drain may wait for den-edge to start answering, and then again for the rest of its answer. den-edge
+ * empties a queue as it answers the drain (inbox.rs), so a drain given up on after that loses what the queue held: a
+ * joiner's identity, which it does not send again until its name or id changes. Longer than `REQUEST_MS` for that
+ * reason; a limit still, so a check that never ends does not stop every later one.
+ */
+const DRAIN_MS = 60_000;
+
+/** `/inbox/drain`'s answer, read under `DRAIN_MS`; null when den-edge refused the drain. */
+async function drainRequest(fetchImpl: typeof fetch, init: RequestInit): Promise<unknown> {
+  const controller = new AbortController();
+  const limit = () =>
+    setTimeout(
+      () => controller.abort(new DOMException('den-edge stopped answering', 'TimeoutError')),
+      DRAIN_MS,
+    );
+  let timer = limit();
+  try {
+    const response = await fetchImpl('/inbox/drain', {
+      ...init,
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    timer = limit();
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function replayEntries(storage: Storage | undefined, now: number): Record<string, number> {
   try {
@@ -156,13 +187,10 @@ export async function receiveDeviceIdentity(
   storage: Storage | undefined = globalThis.localStorage,
 ): Promise<DeviceIdentity | null> {
   try {
-    const response = await fetchImpl('/inbox/drain', {
-      signal: AbortSignal.timeout(REQUEST_MS),
+    const body = (await drainRequest(fetchImpl, {
       headers: { 'x-den-link': link.inboxKey },
-      cache: 'no-store',
-    });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { messages?: unknown };
+    })) as { messages?: unknown } | null;
+    if (!body) return null;
     return await identityIn(body.messages, link, now, storage);
   } catch {
     // The record stays pending and can retry when Settings opens again.
@@ -190,15 +218,12 @@ export async function receiveDeviceIdentities(
   for (let at = 0; at < unique.length; at += DRAIN_AT_ONCE) {
     const batch = unique.slice(at, at + DRAIN_AT_ONCE);
     try {
-      const response = await fetchImpl('/inbox/drain', {
-        signal: AbortSignal.timeout(REQUEST_MS),
+      const body = (await drainRequest(fetchImpl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keys: batch.map((link) => link.inboxKey) }),
-        cache: 'no-store',
-      });
-      if (!response.ok) continue;
-      const { queues } = (await response.json()) as { queues?: unknown };
+      })) as { queues?: unknown } | null;
+      const queues = body?.queues;
       if (!Array.isArray(queues)) continue;
       for (const [i, link] of batch.entries())
         found.set(link.inboxKey, await identityIn(queues[i], link, now, storage));

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { linkKeys, receiveDeviceIdentities, sealMessage } from './inbox';
 
 // inbox.test.ts checks the sealing against den-spec's vectors; this needs none, so it runs without spec/.
@@ -53,4 +53,40 @@ describe('receiveDeviceIdentities', () => {
     expect(sizes).toEqual([16, 4]);
     expect(found.size).toBe(16);
   });
+});
+
+/**
+ * den-edge empties a queue as it answers the drain, so a drain given up on after that loses the joiner's identity for
+ * good. It was given up on at 15 s, as any inbox request.
+ */
+it('waits longer for a drain than for other inbox requests, since giving up on one loses what it held', async () => {
+  const now = 1_800_000_000_000;
+  const phone = link(1);
+  const sealed = await identity(1, 'Phone', 'c'.repeat(32), now);
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms);
+    return controller.signal;
+  });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    // den-edge answers after 20 s, having emptied the queue.
+    const fetchImpl = ((_: string, init?: RequestInit) =>
+      new Promise((resolve, reject) => {
+        const answer = setTimeout(
+          () => resolve(new Response(JSON.stringify({ queues: [[{ sealed }]] }))),
+          20_000,
+        );
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(answer);
+          reject(init.signal!.reason);
+        });
+      })) as typeof fetch;
+    const found = receiveDeviceIdentities([phone], fetchImpl, now);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await found).toEqual(new Map([[phone.inboxKey, { name: 'Phone' }]]));
+  } finally {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  }
 });
