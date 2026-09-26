@@ -14,7 +14,8 @@ use axum::body::Bytes;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::backends::FileBackend;
+use redb::{BackendError, Database, ReadableDatabase, ReadableTable, StorageBackend, TableDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ops::Bound;
@@ -191,6 +192,71 @@ pub struct Store {
     path: PathBuf,
 }
 
+/// redb grows geometrically, so observing its current length before a transaction is not a hard limit. This
+/// backend refuses a resize or write beyond the quota plus reserved commit headroom. The ordinary preflight below
+/// stops at the lower limit; this is the final guard against an unexpectedly large allocator growth step.
+#[derive(Debug)]
+struct QuotaBackend<B> {
+    inner: B,
+    max: u64,
+}
+
+impl<B: StorageBackend> StorageBackend for QuotaBackend<B> {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        if len > self.max {
+            return Err(std::io::ErrorKind::StorageFull.into());
+        }
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.max) {
+            return Err(std::io::ErrorKind::StorageFull.into());
+        }
+        self.inner.write(offset, data)
+    }
+
+    fn close(&self) -> Result<(), std::io::Error> {
+        self.inner.close()
+    }
+
+    fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        self.inner.try_lock_range(start, end)
+    }
+
+    fn try_lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        self.inner.try_lock_shared_range(start, end)
+    }
+
+    fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.lock_range(start, end)
+    }
+
+    fn lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.lock_shared_range(start, end)
+    }
+
+    fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.unlock_range(start, end)
+    }
+
+    fn query_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        self.inner.query_lock_range(start, end)
+    }
+}
+
 trait ProjectionStore {
     fn merge_batch(&self, observations: Vec<Observation>, now: u64) -> Result<(), StoreError>;
     fn query_batch(&self, titles: Vec<MediaRef>, now: u64) -> Result<Vec<Entry>, StoreError>;
@@ -203,7 +269,16 @@ impl Store {
         let path = dir.join(STORE_FILE);
         let mut builder = Database::builder();
         builder.set_cache_size(STORE_CACHE_BYTES);
-        let database = builder.create(&path).map_err(StoreError::redb)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(StoreError::io)?;
+        let inner = FileBackend::new(file).map_err(StoreError::redb)?;
+        let backend = QuotaBackend { inner, max: STORE_MAX_BYTES + STORE_COMMIT_HEADROOM };
+        let database = builder.create_with_backend(backend).map_err(StoreError::redb)?;
         let store = Self { database, path };
         store.import_legacy(dir, now)?;
         Ok(store)
@@ -651,10 +726,20 @@ async fn sweep(state: &AppState) {
 mod tests {
     use super::*;
     use crate::handler::tests::{body_json, Harness};
+    use redb::backends::InMemoryBackend;
     use std::sync::atomic::Ordering;
 
     const LIB: &str = "0123456789abcdef";
     const TOKEN: &str = "metadata-writer";
+
+    #[test]
+    fn the_store_backend_cannot_grow_or_write_past_its_hard_quota() {
+        let backend = QuotaBackend { inner: InMemoryBackend::new(), max: 64 };
+        backend.set_len(64).unwrap();
+        assert_eq!(backend.set_len(65).unwrap_err().kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(backend.write(63, &[1, 2]).unwrap_err().kind(), std::io::ErrorKind::StorageFull);
+        backend.write(62, &[1, 2]).unwrap();
+    }
 
     async fn harness() -> Harness {
         let mut h = Harness::new();
