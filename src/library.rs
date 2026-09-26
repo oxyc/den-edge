@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -132,7 +133,7 @@ impl NewLibraries {
     }
 }
 
-pub struct Library {
+struct Library {
     token_hash: [u8; 32],
     member_hash: Option<[u8; 32]>,
     head: u64,
@@ -142,9 +143,188 @@ pub struct Library {
     sequence: BTreeMap<u64, String>,
     /// Write lines in the log file, superseded ones included.
     lines: usize,
-    /// When a request last used it, for dropping idle libraries from memory.
-    last_used: u64,
     bytes: usize,
+}
+
+/// A short-held registry points at independently locked libraries. Disk replay, append, compaction, snapshot
+/// selection, and deletion for one household therefore never hold the registry or another household's lock.
+/// The registry still owns aggregate cache accounting so the process keeps its hard memory bound.
+#[derive(Default)]
+pub struct Libraries {
+    registry: std::sync::Mutex<Registry>,
+}
+
+#[derive(Default)]
+struct Registry {
+    slots: HashMap<String, Arc<LibrarySlot>>,
+    bytes: usize,
+    loaded: usize,
+}
+
+struct LibrarySlot {
+    library: tokio::sync::Mutex<Option<Library>>,
+    last_used: AtomicU64,
+}
+
+impl LibrarySlot {
+    fn new(now: u64) -> Self {
+        Self { library: tokio::sync::Mutex::new(None), last_used: AtomicU64::new(now) }
+    }
+}
+
+impl Libraries {
+    fn slot(&self, id: &str, now: u64) -> Arc<LibrarySlot> {
+        let mut registry = crate::lock(&self.registry);
+        let removable: Vec<String> = registry
+            .slots
+            .iter()
+            .filter(|(_, slot)| {
+                Arc::strong_count(slot) == 1
+                    && (now.saturating_sub(slot.last_used.load(Ordering::Relaxed)) >= IDLE_MS
+                        || slot.library.try_lock().is_ok_and(|library| library.is_none()))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for removable_id in removable {
+            let stale = registry.slots.remove(&removable_id).expect("the removable slot is registered");
+            let mut library = stale.library.try_lock().expect("an inactive slot is unlocked");
+            if let Some(library) = library.take() {
+                registry.bytes = registry.bytes.saturating_sub(library.bytes);
+                registry.loaded -= 1;
+            }
+        }
+        let slot = Arc::clone(
+            registry.slots.entry(id.to_owned()).or_insert_with(|| Arc::new(LibrarySlot::new(now))),
+        );
+        slot.last_used.store(now, Ordering::Relaxed);
+        slot
+    }
+
+    /// Reserve the exact charged size for `id`, evicting only inactive libraries. The caller holds this slot's
+    /// lock, so its old charge cannot change concurrently. The returned guard restores the old charge if an async
+    /// write/replay is cancelled or returns early; commit it only after memory matches the durable state.
+    fn reserve<'a>(
+        &'a self,
+        id: &str,
+        slot: &Arc<LibrarySlot>,
+        old: usize,
+        needed: usize,
+        limits: Limits,
+    ) -> io::Result<Reservation<'a>> {
+        self.adjust(id, slot, old, needed, limits)?;
+        Ok(Reservation {
+            libraries: self,
+            id: id.to_owned(),
+            slot: Arc::clone(slot),
+            old,
+            current: needed,
+            limits,
+            committed: false,
+        })
+    }
+
+    fn adjust(
+        &self,
+        id: &str,
+        slot: &Arc<LibrarySlot>,
+        old: usize,
+        needed: usize,
+        limits: Limits,
+    ) -> io::Result<()> {
+        if needed > limits.library_bytes || needed > limits.cache_bytes {
+            return Err(full());
+        }
+        let mut registry = crate::lock(&self.registry);
+        if !registry.slots.get(id).is_some_and(|registered| Arc::ptr_eq(registered, slot)) {
+            return Err(io::Error::other("library slot left its registry"));
+        }
+        registry
+            .bytes
+            .checked_sub(old)
+            .ok_or_else(|| io::Error::other("library cache accounting underflow"))?;
+        let adding = usize::from(old == 0 && needed != 0);
+        while registry.bytes - old + needed > limits.cache_bytes
+            || registry.loaded + adding > MAX_CACHED_LIBRARIES
+        {
+            let candidate = registry
+                .slots
+                .iter()
+                .filter(|(key, candidate)| key.as_str() != id && Arc::strong_count(candidate) == 1)
+                .min_by_key(|(_, candidate)| candidate.last_used.load(Ordering::Relaxed))
+                .map(|(key, _)| key.clone())
+                .ok_or_else(full)?;
+            let candidate = registry.slots.remove(&candidate).expect("the eviction candidate is registered");
+            let mut library = candidate.library.try_lock().map_err(|_| full())?;
+            if let Some(library) = library.take() {
+                registry.bytes = registry.bytes.saturating_sub(library.bytes);
+                registry.loaded -= 1;
+            }
+        }
+        registry.bytes = registry.bytes - old + needed;
+        registry.loaded = registry.loaded + adding - usize::from(old != 0 && needed == 0);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn cached_len(&self) -> usize {
+        crate::lock(&self.registry).loaded
+    }
+
+    #[cfg(test)]
+    async fn cached_bytes(&self) -> usize {
+        crate::lock(&self.registry).bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn contains_cached(&self, id: &str) -> bool {
+        let slot = {
+            let registry = crate::lock(&self.registry);
+            registry.slots.get(id).cloned()
+        };
+        let Some(slot) = slot else { return false };
+        let cached = slot.library.lock().await.is_some();
+        cached
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn clear(&self) {
+        let mut registry = crate::lock(&self.registry);
+        registry.slots.clear();
+        registry.bytes = 0;
+        registry.loaded = 0;
+    }
+}
+
+struct Reservation<'a> {
+    libraries: &'a Libraries,
+    id: String,
+    slot: Arc<LibrarySlot>,
+    old: usize,
+    current: usize,
+    limits: Limits,
+    committed: bool,
+}
+
+impl Reservation<'_> {
+    fn resize(&mut self, needed: usize) -> io::Result<()> {
+        self.libraries.adjust(&self.id, &self.slot, self.current, needed, self.limits)?;
+        self.current = needed;
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.libraries
+                .adjust(&self.id, &self.slot, self.current, self.old, self.limits)
+                .expect("rolling back a library cache reservation cannot fail");
+        }
+    }
 }
 
 struct Row {
@@ -216,11 +396,12 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_member"));
     }
     let member_hash: [u8; 32] = Sha256::digest(member.as_bytes()).into();
-    let mut libs = state.libraries.lock().await;
-    if let Err(e) = load(state, &mut libs, id).await {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    if let Err(e) = load(state, &slot, &mut library, id).await {
         return read_error(e);
     }
-    let Some(lib) = libs.get_mut(id) else {
+    let Some(lib) = library.as_mut() else {
         return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
     };
     if !constant_time_eq(&lib.token_hash, &token_hash) {
@@ -243,9 +424,10 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
 /// are gone, and the id is retired: a device still holding the old key gets `410 library_moved` rather than
 /// quietly starting the library over (den #12, S5).
 async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
-    let mut libs = state.libraries.lock().await;
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
     // An oversized legacy log can still be deleted by its owner without replaying it.
-    let stored_token = if let Some(lib) = libs.get(id) {
+    let stored_token = if let Some(lib) = library.as_ref() {
         lib.token_hash
     } else {
         let file = match state.store.open_file(NS, id, EXT).await {
@@ -273,12 +455,17 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     if let Err(e) = state.store.delete_file(NS, id, EXT).await {
         return internal("library delete", e);
     }
-    libs.remove(id);
+    let charged = library.take().map_or(0, |library| library.bytes);
+    state
+        .libraries
+        .reserve(id, &slot, charged, 0, state.library_limits)
+        .expect("a deleted library always releases its cache charge")
+        .commit();
     // So the retirement cannot be undone by a power loss. Both are done; a failure is reported, not answered.
     if let Err(e) = state.store.sync_dir(NS).await {
         eprintln!("library retire: {e}");
     }
-    drop(libs);
+    drop(library);
     for gid in revoked {
         crate::grants::end_sessions(state, &gid).await;
     }
@@ -304,20 +491,19 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     let Some(writes) = parse_writes(&body) else {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
     };
-    let mut libs = state.libraries.lock().await;
-    if let Err(e) = load(state, &mut libs, id).await {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    if let Err(e) = load(state, &slot, &mut library, id).await {
         return read_error(e);
     }
-    let now = state.now();
-    touch(&mut libs, id, now);
-    if !libs.contains_key(id) {
+    if library.is_none() {
         match retired(state, id).await {
             Ok(true) => return moved(),
             Ok(false) => {}
             Err(e) => return read_error(e),
         }
         if state.new_libraries == NewLibraries::Members {
-            match holds_another(state, &mut libs, id, member.as_deref()).await {
+            match holds_another(state, id, member.as_deref()).await {
                 Ok(true) => {}
                 Ok(false) => return json_reply(StatusCode::FORBIDDEN, &error("new_libraries_closed")),
                 Err(e) => return read_error(e),
@@ -334,10 +520,9 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         rows: HashMap::new(),
         sequence: BTreeMap::new(),
         lines: 0,
-        last_used: now,
         bytes: LIBRARY_OVERHEAD,
     };
-    let existing = libs.get(id);
+    let existing = library.as_ref();
     if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
@@ -372,27 +557,32 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     if next_bytes > state.library_limits.library_bytes {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
     }
-    if let Err(e) = reserve_cache(&mut libs, id, next_bytes, state.library_limits) {
-        return read_error(e);
-    }
+    let old_bytes = existing.map_or(0, |library| library.bytes);
+    // Do not expose room from a shrinking batch until memory has adopted it: a cancelled append can then restore
+    // the old charge without exceeding the cap even if another library reserves concurrently.
+    let mut reservation = match state.libraries.reserve(
+        id,
+        &slot,
+        old_bytes,
+        old_bytes.max(next_bytes),
+        state.library_limits,
+    ) {
+        Ok(reservation) => reservation,
+        Err(e) => return read_error(e),
+    };
     if !out.is_empty() {
         if let Err(e) = state.store.append_file(NS, id, EXT, out.as_bytes()).await {
             // The store cuts a failed append back, but that can fail too, and then some of this batch's lines are
             // on disk that memory does not hold: kept, the next batch reused their sequence numbers. Dropped, the
             // next request replays the log as it is, as a restart would.
-            libs.remove(id);
+            reservation.resize(0).expect("releasing a failed library write cannot fail");
+            reservation.commit();
+            *library = None;
             eprintln!("library write failed: its library is dropped from memory, to be read again from disk");
             return internal("library write", e);
         }
-        // A new log's name is on disk only once the directory is synced. The writes are in the log already, so a
-        // failure here is reported and the batch still answered: memory must match the log.
-        if creating {
-            if let Err(e) = state.store.sync_dir(NS).await {
-                eprintln!("library create: {e}");
-            }
-        }
     }
-    let lib = libs.entry(id.to_owned()).or_insert(fresh);
+    let lib = library.get_or_insert(fresh);
     let applied: Vec<Value> = applied
         .into_iter()
         .map(|(k, seq, v, fragment)| {
@@ -407,6 +597,15 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         .collect();
     lib.head = head;
     lib.bytes = next_bytes;
+    reservation.resize(next_bytes).expect("a completed write fits its reservation");
+    reservation.commit();
+    // A new log's name is on disk only once the directory is synced. Memory already matches the appended log, so
+    // cancellation or a sync failure cannot leave cache accounting ahead of the in-memory library.
+    if creating {
+        if let Err(e) = state.store.sync_dir(NS).await {
+            eprintln!("library create: {e}");
+        }
+    }
     if lib.lines > 2 * lib.rows.len() + COMPACT_SLACK {
         // The log already holds every write; a failed rewrite only leaves it longer than it needs to be.
         if let Err(e) = compact(state, id, lib).await {
@@ -456,12 +655,12 @@ async fn changes(
     limit: usize,
     gzip: bool,
 ) -> Response {
-    let mut libs = state.libraries.lock().await;
-    if let Err(e) = load(state, &mut libs, id).await {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    if let Err(e) = load(state, &slot, &mut library, id).await {
         return read_error(e);
     }
-    touch(&mut libs, id, state.now());
-    let Some(lib) = libs.get(id) else {
+    let Some(lib) = library.as_mut() else {
         return match retired(state, id).await {
             Ok(true) => moved(),
             // A store that lost its data answers here, so the generation goes with it.
@@ -497,7 +696,7 @@ async fn changes(
         more = ordered.next().is_some();
     }
     let head = lib.head;
-    drop(libs);
+    drop(library);
 
     let mut body = changes_body(&entries, head, more, state.store.generation());
     if gzip && body.len() >= 1024 {
@@ -564,12 +763,12 @@ pub async fn holds_member_hash(state: &AppState, id: &str, hash: &[u8; 32]) -> i
         return Ok(false);
     }
     // Loaded: answered from memory.
-    {
-        let libs = state.libraries.lock().await;
-        if let Some(lib) = libs.get(id) {
-            return Ok(constant_time_eq(lib.member_hash.as_ref().unwrap_or(&lib.token_hash), hash));
-        }
+    let slot = state.libraries.slot(id, state.now());
+    let library = slot.library.lock().await;
+    if let Some(library) = library.as_ref() {
+        return Ok(constant_time_eq(library.member_hash.as_ref().unwrap_or(&library.token_hash), hash));
     }
+    drop(library);
     // Not loaded: its log's first line says whose it is, without replaying the log into memory (and holding every
     // library's lock while it does) for a question the header alone answers. An MCP call asks this every time.
     Ok(header_of(state, id).await?.is_some_and(|(token_hash, member_hash)| {
@@ -585,60 +784,17 @@ async fn header_of(state: &AppState, id: &str) -> io::Result<Option<([u8; 32], O
 
 /// Whether `member` (`<id>:<token>`) names another library on this store and its token. Naming the library being
 /// started proves nothing.
-async fn holds_another(
-    state: &AppState,
-    libs: &mut HashMap<String, Library>,
-    id: &str,
-    member: Option<&str>,
-) -> io::Result<bool> {
+async fn holds_another(state: &AppState, id: &str, member: Option<&str>) -> io::Result<bool> {
     let Some((other, token)) = member.and_then(|m| m.split_once(':')) else {
         return Ok(false);
     };
     if other == id || !valid_hex_id(other) || token.is_empty() || token.len() > 256 {
         return Ok(false);
     }
-    load(state, libs, other).await?;
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    Ok(libs.get(other).is_some_and(|lib| {
-        let expected = lib.member_hash.as_ref().unwrap_or(&lib.token_hash);
-        constant_time_eq(expected, &hash)
+    Ok(header_of(state, other).await?.is_some_and(|(token_hash, member_hash)| {
+        constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
     }))
-}
-
-/// Mark `id` used now, and let every library idle for an hour go from memory: a relay that kept every library it
-/// ever loaded would grow without bound. Their logs stay on disk, and `load` brings one back when it's asked for.
-fn touch(libs: &mut HashMap<String, Library>, id: &str, now: u64) {
-    libs.retain(|key, lib| key == id || now.saturating_sub(lib.last_used) < IDLE_MS);
-    if let Some(lib) = libs.get_mut(id) {
-        lib.last_used = now;
-    }
-}
-
-/// Make room before loading or growing a library. Eviction drops only a memory copy; disk is authoritative.
-fn reserve_cache(
-    libs: &mut HashMap<String, Library>,
-    id: &str,
-    needed: usize,
-    limits: Limits,
-) -> io::Result<()> {
-    if needed > limits.library_bytes || needed > limits.cache_bytes {
-        return Err(full());
-    }
-    loop {
-        let other_bytes: usize =
-            libs.iter().filter(|(key, _)| key.as_str() != id).map(|(_, lib)| lib.bytes).sum();
-        let count = libs.len() + usize::from(!libs.contains_key(id));
-        if other_bytes + needed <= limits.cache_bytes && count <= MAX_CACHED_LIBRARIES {
-            return Ok(());
-        }
-        let oldest = libs
-            .iter()
-            .filter(|(key, _)| key.as_str() != id)
-            .min_by_key(|(_, lib)| lib.last_used)
-            .map(|(key, _)| key.clone())
-            .ok_or_else(full)?;
-        libs.remove(&oldest);
-    }
 }
 
 /// Read one bounded log line. Even a corrupt/no-newline log cannot allocate its whole file.
@@ -684,17 +840,43 @@ fn log_header(line: &[u8]) -> io::Result<([u8; 32], Option<[u8; 32]>)> {
 
 /// Replay incrementally under the same byte limit as writes. Historical versions are discarded
 /// as they are replaced, and other cached libraries leave room before replay begins.
-async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -> io::Result<()> {
-    touch(libs, id, state.now());
-    if libs.contains_key(id) {
+async fn load(
+    state: &AppState,
+    slot: &Arc<LibrarySlot>,
+    loaded: &mut Option<Library>,
+    id: &str,
+) -> io::Result<()> {
+    if loaded.is_some() {
         return Ok(());
     }
     let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(()) };
-    reserve_cache(libs, id, state.library_limits.library_bytes, state.library_limits)?;
+    // Charge the worst-case library before replay starts. Distinct cold libraries may replay concurrently, but
+    // their temporary row maps still fit the same aggregate cap; the reservation shrinks to the exact charge.
+    let reserved = state.library_limits.library_bytes;
+    let mut reservation = state.libraries.reserve(id, slot, 0, reserved, state.library_limits)?;
+    let replayed = replay(state, id, file).await;
+    match replayed {
+        Ok(Some(library)) => {
+            reservation.resize(library.bytes)?;
+            *loaded = Some(library);
+            reservation.commit();
+            Ok(())
+        }
+        Ok(None) => {
+            reservation.resize(0)?;
+            reservation.commit();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn replay(state: &AppState, id: &str, file: tokio::fs::File) -> io::Result<Option<Library>> {
     let mut reader = BufReader::new(file);
     let Some((token_hash, member_hash)) = read_header(&mut reader).await? else {
         // Left by a first write that never finished; the library was never started.
-        return state.store.delete_file(NS, id, EXT).await;
+        state.store.delete_file(NS, id, EXT).await?;
+        return Ok(None);
     };
     let mut lib = Library {
         token_hash,
@@ -703,7 +885,6 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
         rows: HashMap::new(),
         sequence: BTreeMap::new(),
         lines: 0,
-        last_used: state.now(),
         bytes: LIBRARY_OVERHEAD,
     };
     let mut repair = false;
@@ -751,8 +932,7 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
     if repair {
         compact(state, id, &mut lib).await?;
     }
-    libs.insert(id.to_owned(), lib);
-    Ok(())
+    Ok(Some(lib))
 }
 
 /// The write in a line that begins with the fragment of an append that failed part-way, before appends were cut
@@ -834,6 +1014,7 @@ mod tests {
     use serde_json::{json, Value};
 
     const LIB: &str = "0123456789abcdef0123456789abcdef";
+    const LIB2: &str = "fedcba9876543210fedcba9876543210";
     const TOKEN: &str = "the-write-token";
     const K1: &str = "aaaaaaaaaaaaaaaa";
     const K2: &str = "bbbbbbbbbbbbbbbb";
@@ -906,6 +1087,66 @@ mod tests {
 
         let reopened = Harness::in_dir(h.dir.clone());
         assert_eq!(changes(&reopened, TOKEN, "").await.1["entries"][0]["v"], value);
+    }
+
+    #[tokio::test]
+    async fn one_library_never_waits_for_another_librarys_work() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "first" }])).await;
+        let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "second" }] }).to_string();
+        assert_eq!(
+            h.send("POST", &format!("/lib/{LIB2}/batch"), Some(body), &[("x-den-library-token", TOKEN)])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let first = h.state.libraries.slot(LIB, h.state.now());
+        let held = first.library.lock().await;
+        let other_path = format!("/lib/{LIB2}/changes");
+        let other = h.send("GET", &other_path, None, &[("x-den-library-token", TOKEN)]);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), other).await.unwrap().status(),
+            StatusCode::OK,
+            "a different library does not share the held lock"
+        );
+
+        let mut same = Box::pin(changes(&h, TOKEN, ""));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut same).await.is_err(),
+            "operations on the same library remain serialized"
+        );
+        drop(held);
+        assert_eq!(same.await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_cache_reservation_restores_the_exact_charge() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "first" }])).await;
+        let before = h.state.libraries.cached_bytes().await;
+        let slot = h.state.libraries.slot(LIB, h.state.now());
+        let held = slot.library.lock().await;
+        let old = held.as_ref().unwrap().bytes;
+        {
+            let _cancelled =
+                h.state.libraries.reserve(LIB, &slot, old, old + 128, h.state.library_limits).unwrap();
+            assert_eq!(h.state.libraries.cached_bytes().await, before + 128);
+        }
+        assert_eq!(h.state.libraries.cached_bytes().await, before);
+        drop(held);
+
+        let cold = h.state.libraries.slot(LIB2, h.state.now());
+        {
+            let _cancelled = h
+                .state
+                .libraries
+                .reserve(LIB2, &cold, 0, h.state.library_limits.library_bytes, h.state.library_limits)
+                .unwrap();
+            assert_eq!(h.state.libraries.cached_len().await, 2);
+        }
+        assert_eq!(h.state.libraries.cached_bytes().await, before);
+        assert_eq!(h.state.libraries.cached_len().await, 1);
     }
 
     /// The store's generation survives a restart; a store that comes back without it — restored from a backup,
@@ -1016,7 +1257,7 @@ mod tests {
         assert!(super::is_member(&restarted.state, Some(&claim)).await);
         assert!(!super::is_member(&restarted.state, Some(&format!("{LIB}:{TOKEN}"))).await);
         assert!(
-            restarted.state.libraries.lock().await.is_empty(),
+            restarted.state.libraries.cached_len().await == 0,
             "a member check reads the header, and loads no library"
         );
         let replaced = restarted
@@ -1164,7 +1405,7 @@ mod tests {
         let other = "fedcba9876543210fedcba9876543210";
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "x" }] }).to_string();
         h.send("POST", &format!("/lib/{other}/batch"), Some(body), &[("x-den-library-token", "other")]).await;
-        assert_eq!(h.state.libraries.lock().await.len(), 1, "the idle library was dropped");
+        assert_eq!(h.state.libraries.cached_len().await, 1, "the idle library was dropped");
         assert_eq!(changes(&h, TOKEN, "").await.1["entries"][0]["v"], "kept");
     }
 
@@ -1303,9 +1544,9 @@ mod tests {
                 .status(),
                 StatusCode::OK
             );
-            assert!(h.state.libraries.lock().await.values().map(|l| l.bytes).sum::<usize>() <= 2000);
+            assert!(h.state.libraries.cached_bytes().await <= 2000);
         }
-        assert!(h.state.libraries.lock().await.len() < 4);
+        assert!(h.state.libraries.cached_len().await < 4);
         let path = "/lib/0000000000000000/changes";
         assert_eq!(
             h.send("GET", path, None, &[("x-den-library-token", "wrong")]).await.status(),
@@ -1328,7 +1569,7 @@ mod tests {
         let original = root.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap();
         let h = bounded(&root, 1024, 2048);
         assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(h.state.libraries.lock().await.is_empty());
+        assert_eq!(h.state.libraries.cached_len().await, 0);
         assert_eq!(h.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap(), original);
         assert_eq!(delete(&h, "wrong").await, StatusCode::FORBIDDEN);
         assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);

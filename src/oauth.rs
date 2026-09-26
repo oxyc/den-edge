@@ -2257,11 +2257,11 @@ mod tests {
     #[tokio::test]
     async fn checking_a_member_does_not_load_their_library() {
         let h = harness().await;
-        h.state.libraries.lock().await.clear();
+        h.state.libraries.clear().await;
         let hash: [u8; 32] = Sha256::digest(TOKEN.as_bytes()).into();
         assert!(crate::library::holds_member_hash(&h.state, LIB, &hash).await.unwrap());
         assert!(!crate::library::holds_member_hash(&h.state, LIB, &[0u8; 32]).await.unwrap());
-        assert!(!h.state.libraries.lock().await.contains_key(LIB), "the library was not loaded to answer");
+        assert!(!h.state.libraries.contains_cached(LIB).await, "the library was not loaded to answer");
         // Loaded, it is answered from memory the same way.
         let claim = member();
         connect(&h, &[("x-den-library-member", &claim)]).await;
@@ -2665,7 +2665,7 @@ mod tests {
                 ("client_id", tokens["client_id"].as_str().unwrap()),
             ];
             // The record is there but reading it fails: a directory stands in its place.
-            h.state.libraries.lock().await.clear();
+            h.state.libraries.clear().await;
             let aside = record.with_extension("aside");
             std::fs::rename(&record, &aside).unwrap();
             std::fs::create_dir(&record).unwrap();
