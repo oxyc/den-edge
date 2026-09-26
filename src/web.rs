@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::task::{ready, Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
@@ -125,8 +125,16 @@ async fn serve_file(
     };
     let Some(relative) = relative(path) else { return ("404", not_found()) };
     let asked = if relative.as_os_str().is_empty() { dir.join("index.html") } else { dir.join(&relative) };
+    let immutable = path.starts_with("/assets/");
+    if immutable {
+        if let Some(resp) =
+            prepared(&state.web_files, &asked, media, state.cast_origin.as_deref(), headers).await
+        {
+            return ("asset", resp);
+        }
+    }
     let (mut opened, file, immutable) = match open(&asked).await {
-        Some(opened) => (opened, asked, path.starts_with("/assets/")),
+        Some(opened) => (opened, asked, immutable),
         // A route in the app, not a file: the app's shell renders it.
         None if !path.rsplit('/').next().unwrap_or("").contains('.') => {
             let index = dir.join("index.html");
@@ -167,6 +175,66 @@ async fn serve_file(
     (if shell { "shell" } else { "asset" }, resp)
 }
 
+/// Serve a startup-indexed immutable asset. Validators are resolved before the chosen file is opened, so a 304
+/// performs no filesystem I/O; a 200 opens exactly the bytes it streams and never holds the whole body in memory.
+async fn prepared(
+    files: &Files,
+    file: &Path,
+    media: &[String],
+    cast_origin: Option<&str>,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let (br, gzip, identity) = encodings(headers);
+    let selected = {
+        let all = files.prepared.get()?;
+        let plain = all.get(file)?.clone();
+        let mut offered = [("br", ".br", br), ("gzip", ".gz", gzip)];
+        offered.sort_by_key(|&(_, _, weight)| std::cmp::Reverse(weight));
+        let compressed = offered.into_iter().find_map(|(coding, extension, weight)| {
+            if weight == 0 || weight < identity {
+                return None;
+            }
+            let sidecar = sidecar(file, extension);
+            let representation = all.get(&sidecar)?;
+            let fresh = match (plain.modified, representation.modified) {
+                (Some(original), Some(compressed)) => compressed >= original,
+                _ => false,
+            };
+            fresh.then(|| (sidecar, representation.clone(), Some(coding)))
+        });
+        compressed.or_else(|| (identity != 0).then(|| (file.to_owned(), plain, None)))
+    };
+    let Some((selected, representation, coding)) = selected else {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
+        response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+        return Some(response);
+    };
+    let mut response =
+        respond(Body::empty(), representation.len, representation.etag, file, true, media, cast_origin);
+    if let Some(coding) = coding {
+        response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static(coding));
+    }
+    response = crate::cache::revalidate(response, headers);
+    if response.status() == StatusCode::NOT_MODIFIED {
+        return Some(response);
+    }
+    files.count_prepared_open();
+    let body = tokio::fs::File::open(selected)
+        .await
+        .ok()
+        .map(|file| Body::new(FileBody::new((file, representation.len, representation.modified))))?;
+    *response.body_mut() = body;
+    Some(response)
+}
+
+fn sidecar(file: &Path, extension: &str) -> PathBuf {
+    let mut sidecar = file.as_os_str().to_os_string();
+    sidecar.push(extension);
+    PathBuf::from(sidecar)
+}
+
 /// A regular file, opened, with the length and modification time `fstat` gives for it. Both come from the
 /// handle that is then read, so an answer's `Content-Length`, `ETag` and bytes all describe the same file even
 /// if a new one is renamed into its place meanwhile.
@@ -204,9 +272,22 @@ fn stamp(len: u64, modified: Option<SystemTime>) -> Option<Stamp> {
 pub struct Files {
     etags: Mutex<HashMap<PathBuf, (Stamp, HeaderValue)>>,
     shell: Mutex<Option<(PathBuf, Stamp, Bytes, HeaderValue)>>,
+    /// Vite's content-named assets, indexed once when the process starts. A request can select and validate one
+    /// without touching the filesystem; a 200 opens only the representation it is about to stream.
+    prepared: OnceLock<HashMap<PathBuf, Prepared>>,
     /// Whole-file reads: a hash for an ETag, or the shell read into memory.
     #[cfg(test)]
     reads: std::sync::atomic::AtomicUsize,
+    /// Body-file opens after startup preparation.
+    #[cfg(test)]
+    prepared_opens: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone)]
+struct Prepared {
+    len: u64,
+    modified: Option<SystemTime>,
+    etag: HeaderValue,
 }
 
 impl Files {
@@ -218,15 +299,48 @@ impl Files {
     #[cfg(not(test))]
     fn count_read(&self) {}
 
-    /// The file's strong ETag: from the cache while its `Stamp` holds, otherwise hashed from the open handle,
-    /// which is then rewound for the body.
-    async fn etag(&self, path: &Path, (file, len, modified): &mut Opened) -> io::Result<HeaderValue> {
-        let stamp = stamp(*len, *modified);
-        if let Some((kept, etag)) = crate::lock(&self.etags).get(path) {
-            if Some(*kept) == stamp {
-                return Ok(etag.clone());
+    #[cfg(test)]
+    fn count_prepared_open(&self) {
+        self.prepared_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    fn count_prepared_open(&self) {}
+
+    /// Index the immutable, content-named part of a Vite build. The directory is finite and small; keeping only
+    /// paths, lengths, dates and digests costs no body-sized memory and removes open/stat/sidecar probes from the
+    /// hot path. Deployments replace the container, so these files cannot change during this process's lifetime.
+    pub async fn prepare(&self, web: &Path) -> io::Result<usize> {
+        let root = web.join("assets");
+        let mut dirs = vec![root];
+        let mut prepared = HashMap::new();
+        while let Some(dir) = dirs.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let kind = entry.file_type().await?;
+                if kind.is_dir() {
+                    dirs.push(entry.path());
+                    continue;
+                }
+                if !kind.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Some(mut opened) = open(&path).await else { continue };
+                let etag = self.hash(&mut opened).await?;
+                prepared.insert(path, Prepared { len: opened.1, modified: opened.2, etag });
             }
         }
+        let count = prepared.len();
+        let _ = self.prepared.set(prepared);
+        Ok(self.prepared.get().map_or(count, HashMap::len))
+    }
+
+    async fn hash(&self, (file, _, _): &mut Opened) -> io::Result<HeaderValue> {
         self.count_read();
         let mut hasher = Sha256::new();
         let mut buf = vec![0; CHUNK];
@@ -238,7 +352,19 @@ impl Files {
             hasher.update(&buf[..n]);
         }
         file.rewind().await?;
-        let etag = quoted(&hasher.finalize());
+        Ok(quoted(&hasher.finalize()))
+    }
+
+    /// The file's strong ETag: from the cache while its `Stamp` holds, otherwise hashed from the open handle,
+    /// which is then rewound for the body.
+    async fn etag(&self, path: &Path, opened: &mut Opened) -> io::Result<HeaderValue> {
+        let stamp = stamp(opened.1, opened.2);
+        if let Some((kept, etag)) = crate::lock(&self.etags).get(path) {
+            if Some(*kept) == stamp {
+                return Ok(etag.clone());
+            }
+        }
+        let etag = self.hash(opened).await?;
         if let Some(stamp) = stamp {
             let mut etags = crate::lock(&self.etags);
             if etags.len() >= ETAGS_MAX && !etags.contains_key(path) {
@@ -814,6 +940,40 @@ mod tests {
 
     fn reads(h: &Harness) -> usize {
         h.state.web_files.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn prepared_opens(h: &Harness) -> usize {
+        h.state.web_files.prepared_opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Immutable assets are completely described at startup. A 200 opens only the selected body; once a caller
+    /// presents that representation's tag, the 304 is answered from the small manifest with no file operation.
+    #[tokio::test]
+    async fn a_prepared_asset_is_validated_before_its_body_is_opened() {
+        let h = with_app();
+        let web = h.state.web_dir.as_deref().unwrap();
+        std::fs::write(web.join("assets/index-abc123.js.gz"), "compressed").unwrap();
+        assert_eq!(h.state.web_files.prepare(web).await.unwrap(), 2);
+        assert_eq!(reads(&h), 2, "both representations are hashed at preparation");
+
+        let first = h.send("GET", "/assets/index-abc123.js", None, &[("accept-encoding", "gzip")]).await;
+        assert_eq!(first.headers()[header::CONTENT_ENCODING], "gzip");
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(body_text(first).await, "compressed");
+        assert_eq!(prepared_opens(&h), 1, "the selected 200 body is opened once");
+
+        let held = h
+            .send(
+                "GET",
+                "/assets/index-abc123.js",
+                None,
+                &[("accept-encoding", "gzip"), ("if-none-match", &etag)],
+            )
+            .await;
+        assert_eq!(held.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(held.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(prepared_opens(&h), 1, "a matching validator performs no body open");
+        assert_eq!(reads(&h), 2, "requests never hash a prepared representation again");
     }
 
     /// An asset larger than one piece arrives as several frames, with the length and type it was announced with.
