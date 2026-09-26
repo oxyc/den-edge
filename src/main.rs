@@ -171,12 +171,18 @@ pub struct AppState {
     /// SIMKL's public client id (env `SIMKL_CLIENT_ID`), served as part of `/config`. Not a secret: SIMKL's
     /// PIN flow runs in the browser and needs only this. `None` leaves it out, and the app hides its sign-in.
     pub simkl_client_id: Option<String>,
+    /// Every trailer response currently proxied, member or guest (`relay::MEDIA_STREAMS`). The permit follows the
+    /// response body, bounding upstream sockets and Hyper buffers even for authenticated household clients.
+    pub media_slots: Arc<tokio::sync::Semaphore>,
+    /// The member share of `media_slots` (`relay::MEMBER_MEDIA_STREAMS`). Guests do not take these permits, so a
+    /// burst of household clients cannot consume the capacity reserved for guest sessions already admitted.
+    pub member_media_slots: Arc<tokio::sync::Semaphore>,
     /// Guest trailer streams that may be in flight at once (`relay::GUEST_MEDIA_STREAMS`).
     ///
     /// The per-address budgets bound requests per minute, which is not the thing the household feels: what
-    /// hurts is several 1080p streams running at the same moment, saturating the upload the TVs also live on.
-    /// A permit is held for the life of a streamed response, so this counts what is actually flowing rather
-    /// than how often it was asked for. Members never take one.
+    /// hurts is several 1080p viewers running at the same moment, saturating the upload the TVs also live on.
+    /// A permit follows the guest's idle lease, while `media_slots` separately bounds each active response body.
+    /// Members never take a guest permit.
     pub guest_media_slots: Arc<tokio::sync::Semaphore>,
     /// Bytes of trailer a guest may be served in a day (env `MEDIA_DAILY_MAX_BYTES`); `None` is no ceiling.
     /// The kill switch the concurrency cap cannot be: three streams running all day is still three streams.
@@ -269,6 +275,8 @@ impl AppState {
             ratings_spent: Mutex::new((0, 0)),
             ratings_refreshing: Mutex::new(std::collections::HashSet::new()),
             simkl_client_id: None,
+            media_slots: Arc::new(tokio::sync::Semaphore::new(relay::MEDIA_STREAMS)),
+            member_media_slots: Arc::new(tokio::sync::Semaphore::new(relay::MEMBER_MEDIA_STREAMS)),
             guest_media_slots: Arc::new(tokio::sync::Semaphore::new(relay::GUEST_MEDIA_STREAMS)),
             media_daily_max: None,
             media_spent: Arc::new(Mutex::new((0, 0))),
