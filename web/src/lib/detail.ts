@@ -35,6 +35,11 @@ export interface Season {
   episodeCount: number;
 }
 
+export interface NamedFacet<T extends number | string = string> {
+  id: T;
+  name: string;
+}
+
 export interface TitleDetail {
   title: Title;
   overview?: string;
@@ -42,7 +47,7 @@ export interface TitleDetail {
   backdropPath?: string;
   /** Minutes: a movie's runtime, or a series' usual episode. */
   runtime?: number;
-  genres: string[];
+  genres: NamedFacet<number>[];
   status?: string;
   lastAirDate?: string;
   lastAired?: { season: number; episode: number };
@@ -55,8 +60,8 @@ export interface TitleDetail {
   certifications: Record<string, string>;
   providers: { id: number; name: string; logoPath?: string }[];
   watchLink?: string;
-  languages: string[];
-  countries: string[];
+  languages: NamedFacet[];
+  countries: NamedFacet[];
   studios: string[];
   budget?: number;
   revenue?: number;
@@ -231,12 +236,16 @@ export function parseDetail(
       )
       .filter((p, i, all) => all.findIndex((other) => other.id === p.id) === i),
     watchLink: text(providers.link)?.startsWith('https://') ? String(providers.link) : undefined,
-    languages: list(body.spoken_languages).flatMap(
-      (l) => text(l.english_name) ?? text(l.name) ?? [],
-    ),
-    countries: list(body.production_countries).flatMap(
-      (c) => text(c.name)?.replace('United States of America', 'United States') ?? [],
-    ),
+    languages: list(body.spoken_languages).flatMap((l): NamedFacet[] => {
+      const id = text(l.iso_639_1)?.toLowerCase();
+      const name = text(l.english_name) ?? text(l.name);
+      return id && name ? [{ id, name }] : [];
+    }),
+    countries: list(body.production_countries).flatMap((c): NamedFacet[] => {
+      const id = text(c.iso_3166_1)?.toUpperCase();
+      const name = text(c.name)?.replace('United States of America', 'United States');
+      return id && name ? [{ id, name }] : [];
+    }),
     studios: list(ref.type === 'tv' ? body.networks : body.production_companies).flatMap(
       (c) => text(c.name) ?? [],
     ),
@@ -249,7 +258,11 @@ export function parseDetail(
     directors,
     writers,
     creators,
-    genres: list(body.genres).flatMap((g) => text(g.name) ?? []),
+    genres: list(body.genres).flatMap((g): NamedFacet<number>[] => {
+      const id = num(g.id);
+      const name = text(g.name);
+      return id !== undefined && Number.isInteger(id) && name ? [{ id, name }] : [];
+    }),
     seasons,
     cast,
     more: more.filter(

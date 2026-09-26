@@ -61,6 +61,7 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   made: { mode: 'and', id: 'qid' },
   cast: { mode: 'and', id: 'qid' },
   company: { mode: 'and', id: 'qid' },
+  studio: { mode: 'and', id: 'qid' },
   network: { mode: 'and', id: 'qid' },
   subject: { mode: 'and', id: 'qid' },
   place: { mode: 'and', id: 'qid' },

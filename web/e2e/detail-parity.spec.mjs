@@ -18,7 +18,10 @@ const series = {
   external_ids: { imdb_id: 'tt9' },
   vote_average: 7.6,
   vote_count: 1250,
-  genres: [{ name: 'Drama' }, { name: 'Mystery' }],
+  genres: [
+    { id: 18, name: 'Drama' },
+    { id: 9648, name: 'Mystery' },
+  ],
   seasons: [
     { season_number: 1, name: 'Season 1', episode_count: 2 },
     { season_number: 2, name: 'Season 2', episode_count: 2 },
@@ -26,8 +29,8 @@ const series = {
   ],
   last_episode_to_air: { season_number: 2, episode_number: 1 },
   aggregate_credits: credits,
-  spoken_languages: [{ english_name: 'Swedish' }],
-  production_countries: [{ name: 'Sweden' }],
+  spoken_languages: [{ iso_639_1: 'sv', english_name: 'Swedish' }],
+  production_countries: [{ iso_3166_1: 'SE', name: 'Sweden' }],
   networks: [{ name: 'Netflix' }],
   content_ratings: { results: [{ iso_3166_1: 'FI', rating: '16' }] },
   'watch/providers': {
@@ -186,7 +189,34 @@ for (const width of [390, 834, 1280])
       expect((await active.locator('.hero').boundingBox()).height).toBe(before.height);
       await expect(active.getByText('2020–2024', { exact: true })).toBeVisible();
       await expect(active.getByText('16', { exact: true })).toBeVisible();
-      await expect(active.getByRole('link', { name: /Streaming on Netflix/ })).toBeVisible();
+      await expect(active.getByRole('link', { name: '2020–2024' })).toHaveAttribute(
+        'href',
+        '/search?c=decade-2020',
+      );
+      await expect(active.getByRole('link', { name: 'Series' })).toHaveAttribute(
+        'href',
+        '/search?type=tv',
+      );
+      await expect(active.getByRole('link', { name: 'Drama' })).toHaveAttribute(
+        'href',
+        '/search?type=tv&c=genre-18',
+      );
+      await expect(active.getByRole('link', { name: 'Swedish' })).toHaveAttribute(
+        'href',
+        '/search?c=lang-sv',
+      );
+      await expect(active.getByRole('link', { name: 'Sweden' })).toHaveAttribute(
+        'href',
+        '/search?c=country-SE',
+      );
+      await expect(active.getByRole('link', { name: 'Browse Netflix' })).toHaveAttribute(
+        'href',
+        '/service/8-fi-netflix',
+      );
+      await expect(active.getByRole('link', { name: 'JustWatch' })).toHaveAttribute(
+        'href',
+        'https://www.themoviedb.org/tv/9/watch',
+      );
       const row = active.locator('.episode').first();
       await row.scrollIntoViewIfNeeded();
       await expect(row.locator('.still img')).toBeVisible();

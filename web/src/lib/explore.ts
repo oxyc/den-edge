@@ -68,6 +68,7 @@ export type ChipGroup =
   | 'like'
   | 'people'
   | 'company'
+  | 'studio'
   | 'network'
   | 'subject'
   | 'place'
@@ -109,7 +110,8 @@ export const KIND: Record<ChipGroup, string> = {
   rating: 'rating',
   like: 'like',
   people: 'person',
-  company: 'studio',
+  company: 'company',
+  studio: 'studio',
   network: 'network',
   subject: 'subject',
   place: 'place',
@@ -1390,6 +1392,7 @@ function valueLabel(kind: string, id: string): string {
 const FILTER_GROUPS: [FilterOnlyKind, ChipGroup][] = [
   ['person', 'people'],
   ['company', 'company'],
+  ['studio', 'studio'],
   ['network', 'network'],
   ['subject', 'subject'],
   ['place', 'place'],

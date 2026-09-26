@@ -43,6 +43,11 @@ describe('canonical filter addresses', () => {
         ],
       }),
     ).toBe('/atlas/index/filter/movie/titles.json?sel=genre:28,region:nordic');
+    expect(
+      filterUrl('/atlas', 'all', 'titles', {
+        items: [{ kind: 'studio', id: 'q159846' }],
+      }),
+    ).toBe('/atlas/index/filter/all/titles.json?sel=studio:Q159846');
   });
 
   it('asks for films and series together at `all`, a "Like" there by its typed id', () => {

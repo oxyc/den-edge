@@ -2,6 +2,7 @@
   import ContentWarnings from './ContentWarnings.svelte';
   import type { TitleDetail } from '../lib/detail';
   import { titleFacts, type Ratings } from '../lib/detailPresentation';
+  import { searchHref, serviceHref } from '../lib/route';
   let {
     detail: d,
     ratings = null,
@@ -9,6 +10,7 @@
     pending = false,
     warningKey = '',
     warningCategories = [],
+    region = 'US',
   }: {
     detail: TitleDetail;
     ratings?: Ratings | null;
@@ -16,6 +18,7 @@
     pending?: boolean;
     warningKey?: string;
     warningCategories?: string[];
+    region?: string;
   } = $props();
   const imdb = $derived(enabled.includes('imdb') ? ratings?.imdb : undefined);
   const tmdb = $derived(
@@ -31,6 +34,13 @@
   const primaryHref = $derived(imdb !== undefined ? imdbHref : tmdbHref);
   const compact = (n: number) =>
     new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+  const facts = $derived(titleFacts(d));
+  const factHref = (fact: string, index: number) => {
+    if (index === 0 && d.title.year && /^\d{4}/.test(fact))
+      return searchHref('', { chips: [`decade-${Math.floor(d.title.year / 10) * 10}`] });
+    if (index === facts.length - 1)
+      return searchHref('', { type: d.title.type === 'tv' ? 'tv' : 'movie' });
+  };
 </script>
 
 {#if primary !== undefined || pending || (ratings && enabled.length)}
@@ -65,33 +75,68 @@
   </div>
 {/if}
 <div class="facts">
-  {#each titleFacts(d) as fact, i (`${i}:${fact}`)}{#if i}<span aria-hidden="true">·</span
-      >{/if}<span>{fact}</span>{/each}
+  {#each facts as fact, i (`${i}:${fact}`)}{#if i}<span aria-hidden="true">·</span
+      >{/if}{#if factHref(fact, i)}<a class="filter-link" href={factHref(fact, i)}>{fact}</a
+      >{:else}<span>{fact}</span>{/if}{/each}
   {#if d.certification}<span class="chip">{d.certification}</span>{/if}
   <ContentWarnings detail={d} apiKey={warningKey} categories={warningCategories} />
   {#if d.providers.length}
-    <a
+    <span
       class="providers"
-      href={d.watchLink ?? 'https://www.justwatch.com/'}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={`Streaming on ${d.providers.map((p) => p.name).join(', ')}. Availability from JustWatch`}
+      aria-label={`Streaming on ${d.providers.map((p) => p.name).join(', ')}`}
     >
       {#each d.providers as provider (provider.id)}
-        {#if provider.logoPath}<img
-            src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
-            alt={provider.name}
-            title={provider.name}
-            width="26"
-            height="26"
-          />{/if}
-      {/each}<span class="attribution">JustWatch</span>
-    </a>
+        <a
+          class="provider"
+          href={serviceHref(provider.id, region, provider.name)}
+          aria-label={`Browse ${provider.name}`}
+          title={`Browse ${provider.name}`}
+          >{#if provider.logoPath}<img
+              src={`https://image.tmdb.org/t/p/w92${provider.logoPath}`}
+              alt=""
+              width="26"
+              height="26"
+            />{:else}{provider.name}{/if}</a
+        >
+      {/each}<a
+        class="attribution"
+        href={d.watchLink ?? 'https://www.justwatch.com/'}
+        target="_blank"
+        rel="noopener noreferrer">JustWatch</a
+      >
+    </span>
   {/if}
 </div>
-{#if d.genres.length}<p class="genres">{d.genres.join(' · ')}</p>{/if}
+{#if d.genres.length}<p class="genres">
+    {#each d.genres as genre, i (genre.id)}{#if i}<span aria-hidden="true"> · </span>{/if}<a
+        class="filter-link"
+        href={searchHref('', {
+          type: d.title.type === 'tv' ? 'tv' : 'movie',
+          chips: [`genre-${genre.id}`],
+        })}>{genre.name}</a
+      >{/each}
+  </p>{/if}
 
 <style>
+  .filter-link,
+  .attribution {
+    color: inherit;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+  }
+
+  .attribution {
+    font-size: 10px;
+  }
+
+  .filter-link:hover,
+  .filter-link:focus-visible,
+  .attribution:hover,
+  .attribution:focus-visible {
+    color: var(--fg);
+    text-decoration-color: currentcolor;
+  }
+
   .ratings {
     display: flex;
     align-items: baseline;
@@ -162,14 +207,17 @@
     text-decoration: none;
   }
 
+  .provider {
+    display: inline-flex;
+    align-items: center;
+    color: inherit;
+    text-decoration: none;
+  }
+
   .providers img {
     width: 26px;
     height: 26px;
     border-radius: 6px;
-  }
-
-  .attribution {
-    font-size: 10px;
   }
 
   @media (width <= 759px) {
