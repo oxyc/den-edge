@@ -8,6 +8,8 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct Metrics {
     requests: Mutex<BTreeMap<(&'static str, u16), u64>>,
+    request_admission: Mutex<RequestAdmission>,
+    connection_admission: Mutex<ConnectionAdmission>,
     /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
     /// over rows (or one keeps writing from an old base).
     library_writes: Mutex<(u64, u64)>,
@@ -24,6 +26,21 @@ pub struct Metrics {
     public_media_hint_rejected: Mutex<BTreeMap<&'static str, u64>>,
     /// Session starts from an IPv6 visitor sent back for an `ipv4Hint` (`ipv4_hint_wanted`), by who asked.
     public_media_hint_wanted: Mutex<BTreeMap<&'static str, u64>>,
+}
+
+#[derive(Default)]
+struct RequestAdmission {
+    active: [usize; 2],
+    high_water: [usize; 2],
+    waited: [u64; 2],
+    refused: [u64; 2],
+}
+
+#[derive(Default)]
+struct ConnectionAdmission {
+    active: usize,
+    high_water: usize,
+    waited: u64,
 }
 
 /// The codes a guest's session start can be refused with, each always rendered, so a limit never met reads 0.
@@ -44,6 +61,41 @@ pub const HINT_REJECTIONS: [&str; 3] = ["malformed", "not_global", "limit"];
 impl Metrics {
     pub fn record(&self, route: &'static str, status: u16) {
         *lock(&self.requests).entry((route, status)).or_default() += 1;
+    }
+
+    pub fn request_admitted(&self, bulk: bool, waited: bool) {
+        let class = usize::from(bulk);
+        let mut admission = lock(&self.request_admission);
+        admission.active[class] += 1;
+        admission.high_water[class] = admission.high_water[class].max(admission.active[class]);
+        admission.waited[class] += u64::from(waited);
+    }
+
+    pub fn request_released(&self, bulk: bool) {
+        let class = usize::from(bulk);
+        let mut admission = lock(&self.request_admission);
+        debug_assert!(admission.active[class] > 0);
+        admission.active[class] = admission.active[class].saturating_sub(1);
+    }
+
+    pub fn request_refused(&self, bulk: bool) {
+        lock(&self.request_admission).refused[usize::from(bulk)] += 1;
+    }
+
+    pub fn connection_waited(&self) {
+        lock(&self.connection_admission).waited += 1;
+    }
+
+    pub fn connection_admitted(&self) {
+        let mut admission = lock(&self.connection_admission);
+        admission.active += 1;
+        admission.high_water = admission.high_water.max(admission.active);
+    }
+
+    pub fn connection_released(&self) {
+        let mut admission = lock(&self.connection_admission);
+        debug_assert!(admission.active > 0);
+        admission.active = admission.active.saturating_sub(1);
     }
 
     pub fn record_library_writes(&self, applied: usize, conflicts: usize) {
@@ -85,6 +137,44 @@ impl Metrics {
         for ((route, status), n) in lock(&self.requests).iter() {
             out.push_str(&format!("den_edge_requests_total{{route=\"{route}\",status=\"{status}\"}} {n}\n"));
         }
+        out.push_str(
+            "# HELP den_edge_request_admission_active Requests whose handler or response body is live, by class.\n\
+             # TYPE den_edge_request_admission_active gauge\n\
+             # HELP den_edge_request_admission_high_water Highest simultaneous admitted requests, by class.\n\
+             # TYPE den_edge_request_admission_high_water gauge\n\
+             # HELP den_edge_request_admission_waited_total Requests that had to wait for admission, by class.\n\
+             # TYPE den_edge_request_admission_waited_total counter\n\
+             # HELP den_edge_request_admission_refused_total Requests refused after the admission wait, by class.\n\
+             # TYPE den_edge_request_admission_refused_total counter\n",
+        );
+        let admission = lock(&self.request_admission);
+        for (class, label) in ["control", "bulk"].into_iter().enumerate() {
+            out.push_str(&format!(
+                "den_edge_request_admission_active{{class=\"{label}\"}} {}\n\
+                 den_edge_request_admission_high_water{{class=\"{label}\"}} {}\n\
+                 den_edge_request_admission_waited_total{{class=\"{label}\"}} {}\n\
+                 den_edge_request_admission_refused_total{{class=\"{label}\"}} {}\n",
+                admission.active[class],
+                admission.high_water[class],
+                admission.waited[class],
+                admission.refused[class]
+            ));
+        }
+        drop(admission);
+        let connections = lock(&self.connection_admission);
+        out.push_str(&format!(
+            "# HELP den_edge_connection_admission_active Accepted HTTP connections currently live.\n\
+             # TYPE den_edge_connection_admission_active gauge\n\
+             den_edge_connection_admission_active {}\n\
+             # HELP den_edge_connection_admission_high_water Highest simultaneous accepted HTTP connections.\n\
+             # TYPE den_edge_connection_admission_high_water gauge\n\
+             den_edge_connection_admission_high_water {}\n\
+             # HELP den_edge_connection_admission_waited_total Times the accept loop waited for connection capacity.\n\
+             # TYPE den_edge_connection_admission_waited_total counter\n\
+             den_edge_connection_admission_waited_total {}\n",
+            connections.active, connections.high_water, connections.waited
+        ));
+        drop(connections);
         let (applied, conflicts) = *lock(&self.library_writes);
         out.push_str(&format!(
             "# HELP den_edge_library_writes_total Record-log writes, applied or refused as stale.\n\

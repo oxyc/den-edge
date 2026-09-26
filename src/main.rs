@@ -53,7 +53,13 @@ pub struct AppState {
     /// Unix milliseconds. A field so a test can move time.
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
     pub gen_nameplate: Box<dyn Fn() -> String + Send + Sync>,
-    pub metrics: metrics::Metrics,
+    pub metrics: Arc<metrics::Metrics>,
+    /// Requests whose handlers or response bodies are live. The permit follows the response body, so a slow
+    /// receiver remains admitted until it finishes or disconnects rather than becoming unaccounted work.
+    pub request_slots: Arc<tokio::sync::Semaphore>,
+    /// The bulk share of `request_slots`. Small control/state routes do not take this permit, leaving
+    /// `handler::CONTROL_REQUESTS` positions they can still use while files, relays, and large reads are busy.
+    pub bulk_request_slots: Arc<tokio::sync::Semaphore>,
     /// Bearer token for `/metrics` (env `METRICS_TOKEN`). `None` turns the route off.
     pub metrics_token: Option<String>,
     /// One stderr line per request (env `LOG_REQUESTS`), naming the route and never a key.
@@ -226,7 +232,9 @@ impl AppState {
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_nameplate: Box::new(pair::gen_nameplate),
-            metrics: metrics::Metrics::default(),
+            metrics: Arc::new(metrics::Metrics::default()),
+            request_slots: Arc::new(tokio::sync::Semaphore::new(handler::REQUESTS)),
+            bulk_request_slots: Arc::new(tokio::sync::Semaphore::new(handler::BULK_REQUESTS)),
             metrics_token,
             log_requests,
             web_origins: Vec::new(),
@@ -453,7 +461,7 @@ async fn main() {
         ),
     );
     let limits = Limits { grace: DRAIN_GRACE, header_read: HEADER_READ_TIMEOUT };
-    let outcome = serve_until(listener, app, shutdown, limits).await;
+    let outcome = serve_until(listener, app, Arc::clone(&state.metrics), shutdown, limits).await;
     eprintln!("{}", outcome.describe());
 }
 
@@ -609,6 +617,12 @@ struct Limits {
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const _: () = assert!(HEADER_READ_TIMEOUT.as_secs() > 90);
 
+/// Accepted HTTP/1 connections, including idle keep-alives and clients still sending their request head. At the
+/// 16 KiB Hyper read-buffer ceiling this has a 4 MiB protocol-buffer upper bound instead of an unbounded task/FD
+/// count with roughly 400 KiB available to each connection.
+const CONNECTIONS: usize = 256;
+const CONNECTION_READ_BUFFER: usize = 16 * 1024;
+
 /// Serve until `shutdown` resolves, then drain for at most `limits.grace` — den-atlas's bounded drain: hyper waits
 /// on a connection that is mid-request, so without the bound a client holding half a request head decides
 /// how long a restart takes.
@@ -618,6 +632,7 @@ const _: () = assert!(HEADER_READ_TIMEOUT.as_secs() > 90);
 async fn serve_until(
     listener: tokio::net::TcpListener,
     app: axum::Router,
+    metrics: Arc<metrics::Metrics>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     limits: Limits,
 ) -> Outcome {
@@ -628,10 +643,28 @@ async fn serve_until(
     // browsers never do, and `tailscale serve` and `cloudflared` default to HTTP/1.1 towards an http origin (their
     // documented defaults, not checked on the box).
     let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http1_only();
-    builder.http1().timer(TokioTimer::new()).header_read_timeout(limits.header_read);
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_read)
+        .max_buf_size(CONNECTION_READ_BUFFER);
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let connections = Arc::new(tokio::sync::Semaphore::new(CONNECTIONS));
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
+        // Take capacity before accept. Once all userspace connection tasks are occupied, the kernel listen
+        // backlog supplies bounded backpressure without allocating another Tokio task or Hyper buffer per peer.
+        let connection = match Arc::clone(&connections).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                metrics.connection_waited();
+                tokio::select! {
+                    permit = Arc::clone(&connections).acquire_owned() => permit.expect("connection semaphore is never closed"),
+                    () = &mut shutdown => break,
+                }
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => unreachable!("connection semaphore is never closed"),
+        };
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok(accepted) => accepted,
@@ -650,7 +683,12 @@ async fn serve_until(
             app.clone().layer(axum::Extension(axum::extract::ConnectInfo(peer))),
         );
         let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
-        tokio::spawn(conn);
+        metrics.connection_admitted();
+        let connection = ConnectionAdmission { _permit: connection, metrics: Arc::clone(&metrics) };
+        tokio::spawn(async move {
+            let _connection = connection;
+            let _ = conn.await;
+        });
     }
     drop(listener);
     tokio::select! {
@@ -659,6 +697,17 @@ async fn serve_until(
             "drain deadline ({:?}) reached with requests still in flight",
             limits.grace
         )),
+    }
+}
+
+struct ConnectionAdmission {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    metrics: Arc<metrics::Metrics>,
+}
+
+impl Drop for ConnectionAdmission {
+    fn drop(&mut self) {
+        self.metrics.connection_released();
     }
 }
 
@@ -726,12 +775,14 @@ mod tests {
             None,
             false,
         ));
+        let metrics = Arc::clone(&state.metrics);
         let app = axum::Router::new().fallback(handler::handle).with_state(state);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let grace = Duration::from_millis(300);
         let limits = Limits { grace, header_read: HEADER_READ_TIMEOUT };
-        let server =
-            tokio::spawn(async move { serve_until(l, app, async { rx.await.unwrap_or(()) }, limits).await });
+        let server = tokio::spawn(async move {
+            serve_until(l, app, metrics, async { rx.await.unwrap_or(()) }, limits).await
+        });
 
         let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
         sock.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n").await.unwrap();
@@ -762,12 +813,16 @@ mod tests {
             false,
         );
         state.relays = parse_relays(&format!("/atlas=http://{addon}"));
-        let app = axum::Router::new().fallback(handler::handle).with_state(Arc::new(state));
+        let state = Arc::new(state);
+        let metrics = Arc::clone(&state.metrics);
+        let app = axum::Router::new().fallback(handler::handle).with_state(state);
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let limits = Limits { grace: Duration::from_millis(100), header_read };
-        tokio::spawn(async move { serve_until(l, app, async { rx.await.unwrap_or(()) }, limits).await });
+        tokio::spawn(
+            async move { serve_until(l, app, metrics, async { rx.await.unwrap_or(()) }, limits).await },
+        );
         (addr, tx)
     }
 
