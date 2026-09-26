@@ -40,6 +40,47 @@ fn config(state: &AppState) -> String {
     config.to_string()
 }
 
+/// Immutable public discovery answers. Configuration cannot change after `AppState` is shared, so serialize and
+/// hash these three small representations once instead of doing both again on every client startup.
+pub(crate) struct PreparedPublicJson {
+    config: PreparedJson,
+    routes: PreparedJson,
+    routes_public: Option<PreparedJson>,
+}
+
+struct PreparedJson {
+    body: Bytes,
+    etag: HeaderValue,
+}
+
+impl PreparedJson {
+    fn new(body: String) -> Self {
+        let body = Bytes::from(body);
+        let etag = crate::cache::tag(&body);
+        Self { body, etag }
+    }
+}
+
+impl PreparedPublicJson {
+    pub(crate) fn new(state: &AppState) -> Self {
+        Self {
+            config: PreparedJson::new(config(state)),
+            routes: PreparedJson::new(crate::routes::to_json(&state.routes).to_string()),
+            routes_public: state
+                .routes_public
+                .as_ref()
+                .map(|routes| PreparedJson::new(crate::routes::to_json(routes).to_string())),
+        }
+    }
+
+    fn routes(&self, face: Face) -> &PreparedJson {
+        match (face, &self.routes_public) {
+            (Face::Web | Face::Api, Some(public)) => public,
+            _ => &self.routes,
+        }
+    }
+}
+
 pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let started = Instant::now();
     // In the answer and in the log line, so a device's report can be matched to this request.
@@ -252,7 +293,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     match path.as_str() {
         "/health" => bare_json(StatusCode::OK, &json!({ "status": "ok" })),
         "/version" => bare_json(StatusCode::OK, &json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "/config" => revalidated(config(state), req.headers()),
+        "/config" => state.prepared_public_json.as_ref().map_or_else(
+            || revalidated(config(state), req.headers()),
+            |prepared| revalidated_prepared(&prepared.config, req.headers()),
+        ),
         // Both public names get the public table when the deployment built one: a stranger at either has no use
         // for the LAN addresses or the tailnet name, and publishing the homelab's shape to anyone who asks is
         // not part of answering them. The LAN and the tailnet keep the whole table, which is what a TV at home
@@ -272,6 +316,9 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
         // bootstrap a device with no stored table has, and the only fallback when the LAN cannot be reached:
         // losing it strands a TV, where losing reel would only cost it a trailer.
         "/routes" => {
+            if let Some(prepared) = &state.prepared_public_json {
+                return revalidated_prepared(prepared.routes(face), req.headers());
+            }
             let table = match (face, &state.routes_public) {
                 (Face::Web | Face::Api, Some(public)) => public,
                 _ => &state.routes,
@@ -547,6 +594,18 @@ fn revalidated(body: String, request: &HeaderMap) -> Response {
     let mut resp = raw_json(StatusCode::OK, Body::from(body.clone()), false);
     resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     crate::cache::validated(resp, body.as_bytes(), None, request)
+}
+
+fn revalidated_prepared(prepared: &PreparedJson, request: &HeaderMap) -> Response {
+    // Validate an empty response first. A matching request never even clones the body Bytes into a Hyper body.
+    let mut resp = raw_json(StatusCode::OK, Body::empty(), false);
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp.headers_mut().insert(header::ETAG, prepared.etag.clone());
+    let mut resp = crate::cache::revalidate(resp, request);
+    if resp.status() == StatusCode::OK {
+        *resp.body_mut() = Body::from(prepared.body.clone());
+    }
+    resp
 }
 
 /// Router answers must not pin health, a credential refusal, or an error in an intermediary cache.
@@ -921,6 +980,11 @@ pub mod tests {
         h
     }
 
+    fn prepare_public_json(h: &mut Harness) {
+        let prepared = PreparedPublicJson::new(&h.state);
+        Arc::get_mut(&mut h.state).unwrap().prepared_public_json = Some(prepared);
+    }
+
     /// With a public table built for it, the web app's public name serves that and nothing else: the LAN
     /// addresses and the tailnet name are the homelab's shape, and a browser out there couldn't use them anyway.
     #[tokio::test]
@@ -1182,6 +1246,7 @@ pub mod tests {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().simkl_client_id = Some("simkl-public-id".to_owned());
         Arc::get_mut(&mut h.state).unwrap().cast_origin = Some("https://cast.example".to_owned());
+        prepare_public_json(&mut h);
         let answer = h.send("GET", "/config", None, &[("host", "d.oxy.fi")]).await;
         assert_eq!(answer.status(), StatusCode::OK);
         let config = body_json(answer).await;
@@ -1199,7 +1264,8 @@ pub mod tests {
     /// unchanged is a 304 carrying the same policy and tag rather than the whole table again.
     #[tokio::test]
     async fn config_and_routes_are_revalidated_every_time() {
-        let h = split_harness();
+        let mut h = split_harness();
+        prepare_public_json(&mut h);
         for path in ["/config", "/routes"] {
             let first = h.send("GET", path, None, &[("host", "d.oxy.fi")]).await;
             assert_eq!(first.status(), StatusCode::OK, "{path}");
@@ -1215,6 +1281,7 @@ pub mod tests {
         let mut h = split_harness();
         Arc::get_mut(&mut h.state).unwrap().routes_public =
             Some(crate::routes::parse("edge=https://d-api.oxy.fi"));
+        prepare_public_json(&mut h);
         let public = h.send("GET", "/routes", None, &[("host", "d.oxy.fi")]).await;
         let lan = h.send("GET", "/routes", None, &[("host", "192.168.86.193:8094")]).await;
         assert_ne!(public.headers()[header::ETAG], lan.headers()[header::ETAG]);

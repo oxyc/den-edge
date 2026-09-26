@@ -93,6 +93,9 @@ pub struct AppState {
     /// names the LAN addresses and the tailnet, which a public visitor has no use for and shouldn't be handed;
     /// `None` serves the full table everywhere, as before.
     pub routes_public: Option<routes::Routes>,
+    /// The immutable `/config` and face-specific `/routes` bodies and validators. Built after environment
+    /// configuration is complete, so their 304 path neither serializes nor hashes on each client startup.
+    pub(crate) prepared_public_json: Option<handler::PreparedPublicJson>,
     /// The https origins the web app's CSP lets it fetch video from: den-remux's, for a title playing here,
     /// and den-reel's, for a trailer. Reel's were missing, so the policy refused every trailer on the public
     /// and tailnet names.
@@ -230,6 +233,7 @@ impl AppState {
             playground_slots: Arc::new(tokio::sync::Semaphore::new(relay::PLAYGROUND_IN_FLIGHT)),
             routes: Vec::new(),
             routes_public: None,
+            prepared_public_json: None,
             media_origins: Vec::new(),
             public_media_base: None,
             lan_media_base: None,
@@ -376,6 +380,7 @@ async fn main() {
     // No key to gate this one on: SkipDB's read API is open, so the only question is where to keep the answers.
     state.skipdb_cache_dir = Some(std::path::Path::new(&dir).join("skipdb"));
     state.oauth = oauth_config();
+    state.prepared_public_json = Some(handler::PreparedPublicJson::new(&state));
     let state = Arc::new(state);
     inbox::sweep(&state).await;
     tokio::spawn(inbox::sweep_forever(Arc::clone(&state)));
