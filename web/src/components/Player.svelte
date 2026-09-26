@@ -220,9 +220,7 @@
   let sessionRoute: string | undefined;
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
-  >(
-    null,
-  );
+  >(null);
   /**
    * The playing session's connection as its segments see it (`resumingLoader`): down while they fail for want of one,
    * which is waited out rather than acted on. One per hls.js instance.

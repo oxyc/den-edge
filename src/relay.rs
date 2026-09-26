@@ -48,6 +48,10 @@ pub(crate) const GRANT_PER_WINDOW: u32 = 300;
 /// Relayed fetches in flight at once, across everyone. The addons are one small box: without this a handful of
 /// visitors on a public name can hold every upstream socket and starve the TVs that actually live here.
 pub(crate) const MAX_IN_FLIGHT: usize = 16;
+/// Request bodies accepted at once. Separate from `MAX_IN_FLIGHT`: a slow upload must not hold an upstream slot,
+/// but buffering bodies before admission without another global bound can exceed the container's memory limit.
+/// Twice the upstream cap leaves room for ordinary bodyless requests while every upstream slot is busy.
+pub(crate) const MAX_BODY_IN_FLIGHT: usize = MAX_IN_FLIGHT * 2;
 /// Media fetches per address per minute, counted apart from the JSON above.
 ///
 /// One playback is many requests, not one: a video element opens a range, seeks, and opens another. Charging
@@ -667,14 +671,28 @@ async fn relay_with(
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
     let control = req.uri().path().to_owned();
-    // Read before a relay slot is taken, and within `TIMEOUT`: sixteen uploads that never finished their body held
-    // every slot for as long as their sockets stayed open, and the relay was busy for everyone.
+    // Read before an upstream slot is taken, and within `TIMEOUT`: a slow upload must not hold the addons' slots.
+    // It takes its own admission slot first, so arbitrarily many callers cannot each buffer 256 KiB outside every
+    // global cap and exceed this container's memory limit.
+    let body_slot = Arc::clone(&state.relay_body_slots).try_acquire_owned();
+    let body_slot = match body_slot {
+        Ok(permit) => permit,
+        Err(_) => {
+            guest_refused("relay_busy");
+            return crate::handler::retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &error("relay_busy"),
+                SLOT_WAIT.as_millis() as u64,
+            );
+        }
+    };
     let body =
         match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES)).await {
             Ok(Ok(body)) => body,
             Ok(Err(_)) => return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Err(_) => return json(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
         };
+    drop(body_slot);
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let _slot = match slot {
@@ -2024,6 +2042,20 @@ mod tests {
         assert_eq!(tuned.headers()["cache-control"], "no-store");
         let browsing = h.send("GET", "/atlas/recommend", None, &[]).await;
         assert_eq!(browsing.headers()["cache-control"], "public, max-age=300, stale-while-revalidate=60");
+    }
+
+    #[tokio::test]
+    async fn request_bodies_past_the_ingress_cap_are_refused_before_they_are_read() {
+        let h = harness();
+        let held = h
+            .state
+            .relay_body_slots
+            .try_acquire_many(super::MAX_BODY_IN_FLIGHT as u32)
+            .unwrap();
+        let busy = h.send("GET", "/scout/manifest.json", None, &[]).await;
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(busy.headers().contains_key("retry-after"));
+        drop(held);
     }
 
     #[test]

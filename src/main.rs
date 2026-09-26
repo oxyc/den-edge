@@ -80,6 +80,9 @@ pub struct AppState {
     /// Relayed fetches allowed in flight at once (`relay::MAX_IN_FLIGHT`), so the addons behind this origin can't
     /// be swamped through it.
     pub relay_slots: Arc<tokio::sync::Semaphore>,
+    /// Relayed request bodies being received (`relay::MAX_BODY_IN_FLIGHT`). Kept apart from `relay_slots`, so slow
+    /// uploads cannot occupy every upstream slot, while their bounded bodies cannot accumulate without a cap.
+    pub relay_body_slots: Arc<tokio::sync::Semaphore>,
     /// Of those, the ones atlas's tuning playground may hold at once (`relay::PLAYGROUND_IN_FLIGHT`).
     pub playground_slots: Arc<tokio::sync::Semaphore>,
     /// Every address for each service, in order (env `ROUTES`, den-spec routes-v1): served as `GET /routes`.
@@ -217,6 +220,7 @@ impl AppState {
             relays: Vec::new(),
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
+            relay_body_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_BODY_IN_FLIGHT)),
             playground_slots: Arc::new(tokio::sync::Semaphore::new(relay::PLAYGROUND_IN_FLIGHT)),
             routes: Vec::new(),
             routes_public: None,

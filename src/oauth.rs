@@ -120,11 +120,15 @@ pub struct OAuth {
     lock: tokio::sync::Mutex<()>,
     /// `/mcp` calls relayed at once (`MCP_IN_FLIGHT`), held until den-mcp's answer has been passed on or has idled out.
     mcp_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// `/mcp` request bodies arriving at once. Separate from `mcp_slots`, so a slow upload does not occupy a call
+    /// slot, but many bounded bodies still cannot accumulate without a global cap.
+    mcp_body_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 /// The most `/mcp` calls relayed to den-mcp at once. den-mcp answers a call in milliseconds and runs 32 at a time
 /// itself; this keeps a flood from reaching it and holding this server's connections open while it waits.
 const MCP_IN_FLIGHT: usize = 32;
+const MCP_BODY_IN_FLIGHT: usize = MCP_IN_FLIGHT;
 
 impl OAuth {
     /// `seed` is the Ed25519 private key's 32 bytes.
@@ -141,6 +145,7 @@ impl OAuth {
             codes: Mutex::default(),
             lock: tokio::sync::Mutex::new(()),
             mcp_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MCP_IN_FLIGHT)),
+            mcp_body_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MCP_BODY_IN_FLIGHT)),
         }
     }
 
@@ -1073,8 +1078,10 @@ async fn refresh(state: &AppState, oauth: &OAuth, token: Option<&str>, client_id
     let secret = b64url(&crate::random_bytes::<32>());
     let replaced = std::mem::replace(&mut session.refresh_hash, sha(secret.as_bytes()));
     if retry {
-        // The secret the lost answer carried is never valid; the one presented stays the grace's.
+        // The secret the lost answer carried is never valid, and the retry allowance is consumed: accepting the
+        // same old token repeatedly would let it retire each newly issued token throughout the grace window.
         session.retired.push(replaced);
+        session.retired.extend(session.previous_hash.take());
     } else {
         session.retired.extend(session.previous_hash.replace(replaced));
         session.rotated_at = now;
@@ -1359,8 +1366,19 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
     if let Some(limited) = gate_steady(state, format!("mcp-gate:{ip}"), MCP_GATE_PER_WINDOW) {
         return limited;
     }
-    // A CORS preflight carries no token, by design; it is still relayed, so it is counted and takes a slot.
-    if req.method() != Method::OPTIONS {
+    // A real CORS preflight carries no token, by design; it is still relayed, so it is counted and takes a slot.
+    // A bare OPTIONS is not a preflight and must not become an unauthenticated body-buffering path.
+    let preflight = req.method() == Method::OPTIONS
+        && req.headers().contains_key(header::ORIGIN)
+        && req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|m| matches!(m, "GET" | "POST"));
+    if req.method() == Method::OPTIONS && !preflight {
+        return json_reply(StatusCode::METHOD_NOT_ALLOWED, &error("method_not_allowed"));
+    }
+    if !preflight {
         let authorization = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
         let Some(sid) = session_of(oauth, authorization, state.now() / 1000) else {
             return unauthorized(oauth, authorization.is_some());
@@ -1379,7 +1397,11 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
             return limited;
         }
     }
-    // The body is read before a slot is taken, and in bounded time: one sent slowly must not hold a slot.
+    // The body is read before a call slot is taken, and in bounded time: one sent slowly must not hold a call slot.
+    // Its separate admission permit bounds how many bodies can be buffered or stalled at once.
+    let Ok(body_slot) = std::sync::Arc::clone(&oauth.mcp_body_slots).try_acquire_owned() else {
+        return retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("busy"), 2_000);
+    };
     let (parts, body) = req.into_parts();
     let body = match tokio::time::timeout(
         MCP_BODY_TIMEOUT,
@@ -1391,6 +1413,7 @@ async fn gate_mcp(state: &AppState, oauth: &OAuth, req: Request, rid: &str) -> R
         Ok(Err(_)) => return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("payload_too_large")),
         Err(_) => return json_reply(StatusCode::REQUEST_TIMEOUT, &error("request_timeout")),
     };
+    drop(body_slot);
     let req = Request::from_parts(parts, Body::from(body));
     // At most `MCP_IN_FLIGHT` calls at den-mcp at once from here, whoever makes them: past that, come back shortly.
     let Ok(slot) = std::sync::Arc::clone(&oauth.mcp_slots).try_acquire_owned() else {
@@ -2103,6 +2126,39 @@ mod tests {
         assert_eq!(refresh(next).await.1["error"], "invalid_grant", "ended for its holder too");
     }
 
+    /// The grace is for one lost answer, not a minute in which an old token can keep retiring every new one.
+    #[tokio::test]
+    async fn a_lost_refresh_token_is_accepted_only_once() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let client = tokens["client_id"].as_str().unwrap().to_owned();
+        let first = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let refresh = |token: String| {
+            let (h, client) = (&h, client.clone());
+            async move {
+                post_form(
+                    h,
+                    "/oauth/token",
+                    &[("grant_type", "refresh_token"), ("refresh_token", &token), ("client_id", &client)],
+                )
+                .await
+            }
+        };
+        let (_, lost) = refresh(first.clone()).await;
+        h.advance(5_000);
+        let (status, retry) = refresh(first.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        let current = retry["refresh_token"].as_str().unwrap().to_owned();
+
+        assert_eq!(refresh(first).await.1["error"], "invalid_grant", "the one retry was consumed");
+        assert_eq!(refresh(current).await.1["error"], "invalid_grant", "reuse ended the session");
+        assert_eq!(
+            refresh(lost["refresh_token"].as_str().unwrap().to_owned()).await.1["error"],
+            "invalid_grant"
+        );
+    }
+
     /// A public client names itself on every refresh, and only the client a session is for can refresh it.
     #[tokio::test]
     async fn a_refresh_names_its_client() {
@@ -2301,7 +2357,8 @@ mod tests {
         }
     }
 
-    /// A call's body is read before it takes a slot, and in bounded time, so one sent slowly holds nothing.
+    /// A call's body is read before it takes an upstream slot, and in bounded time. It holds only one of the
+    /// separately bounded body-ingress slots while it arrives.
     #[tokio::test]
     async fn a_slow_body_holds_no_slot() {
         let h = harness().await;
@@ -2320,8 +2377,23 @@ mod tests {
         tokio::time::sleep(MCP_BODY_TIMEOUT / 2).await;
         let oauth = h.state.oauth.as_ref().unwrap();
         assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT, "no slot while the body arrives");
+        assert_eq!(oauth.mcp_body_slots.available_permits(), MCP_BODY_IN_FLIGHT - 1);
         assert_eq!(call.await.unwrap().status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(oauth.mcp_slots.available_permits(), MCP_IN_FLIGHT);
+        assert_eq!(oauth.mcp_body_slots.available_permits(), MCP_BODY_IN_FLIGHT);
+    }
+
+    #[tokio::test]
+    async fn mcp_bodies_past_the_ingress_cap_are_refused_before_they_are_read() {
+        let h = harness().await;
+        let claim = member();
+        let tokens = connect(&h, &[("x-den-library-member", &claim)]).await;
+        let oauth = h.state.oauth.as_ref().unwrap();
+        let held = oauth.mcp_body_slots.try_acquire_many(MCP_BODY_IN_FLIGHT as u32).unwrap();
+        let busy = call_mcp(&h, tokens["access_token"].as_str().unwrap()).await;
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(busy.headers().contains_key(header::RETRY_AFTER));
+        drop(held);
     }
 
     async fn preflight(h: &Harness) -> Response {
@@ -2344,6 +2416,17 @@ mod tests {
             preflight(&h).await;
         }
         assert_eq!(preflight(&h).await.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_bare_options_is_not_an_unauthenticated_mcp_call() {
+        let h = harness().await;
+        assert_eq!(h.send("OPTIONS", "/mcp", Some("{}".into()), &[]).await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let only_origin = [("origin", "https://claude.ai")];
+        assert_eq!(
+            h.send("OPTIONS", "/mcp", None, &only_origin).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 
     /// The relay reads the bearer scheme in any case, and takes only an access token.
