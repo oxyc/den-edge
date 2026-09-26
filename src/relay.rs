@@ -23,7 +23,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub type RelayClient = Client<HttpConnector, Full<Bytes>>;
 
 pub fn client() -> RelayClient {
-    Client::builder(TokioExecutor::new()).build_http()
+    // Hyper otherwise lets each HTTP/1 connection's adaptive read buffer grow to roughly 400 KiB. Relays move
+    // bodies under backpressure, so 64 KiB keeps sixteen media plus sixteen JSON connections inexpensive without
+    // making socket reads tiny; the protocol minimum is 8 KiB.
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder.http1_max_buf_size(64 * 1024);
+    builder.build_http()
 }
 
 /// Past scout's scrape timeout on a slow indexer (8 s), with its answer still to come.
@@ -194,6 +199,12 @@ async fn discard_failed_public_session(state: &AppState, target: &str, body: &[u
 /// Guest trailer streams that may run at once. Small on purpose: the household's upload is what a
 /// stranger's stream spends, and the TVs in the house are on the other side of it.
 pub(crate) const GUEST_MEDIA_STREAMS: usize = 3;
+/// Upstream media responses and their downstream bodies, across members and guests. Sixteen allows the six-core
+/// origin and a high uplink to stay busy without letting credentials create unbounded sockets and Hyper buffers.
+pub(crate) const MEDIA_STREAMS: usize = 16;
+/// Members may occupy at most this share of `MEDIA_STREAMS`; four total slots remain reachable by guests. Guest
+/// viewer admission is separately and more tightly bounded by `GUEST_MEDIA_STREAMS`.
+pub(crate) const MEMBER_MEDIA_STREAMS: usize = 12;
 /// How long an admitted session stands with no request before its slot comes back. Long enough to
 /// cover the gap between segments — a player fetches one every few seconds and pauses between them —
 /// and short enough that a closed tab does not hold a slot for long.
@@ -201,6 +212,11 @@ const LEASE_IDLE_MS: u64 = 30_000;
 /// What a refused guest is told to wait. A slot frees when someone stops watching, not on a timer, so
 /// this is a polite interval rather than a promise.
 const MEDIA_BUSY_RETRY_MS: u64 = 30_000;
+/// A proxied media source or receiver silent this long is abandoned so it cannot pin one of the finite upstream
+/// sockets forever. Test values stay short enough to prove permit recovery without slowing the suite.
+const MEDIA_IDLE: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
+const MEDIA_LIFETIME: Duration =
+    if cfg!(test) { Duration::from_millis(250) } else { Duration::from_secs(2 * 60 * 60) };
 
 /// One admitted trailer session.
 ///
@@ -273,10 +289,10 @@ fn media_video(path: &str) -> Option<&str> {
 /// Let this request in, or say why not.
 ///
 /// A lease belongs to an ADDRESS, not to a video. A household member is admitted free; a guest takes
-/// one slot and must be inside the day's allowance, and everything that address asks for afterwards
-/// — the next slide's trailer, every segment, every range — takes that lease over rather than
-/// opening a second. It is never refused once open, because a stall mid-trailer is worse than a
-/// clean refusal at the start, which the page turns into YouTube's embed.
+/// one viewer slot and must be inside the day's allowance, and everything that address asks for afterwards
+/// — the next slide's trailer, every segment, every range — takes that lease over rather than opening another
+/// viewer. Individual upstream responses still meet the larger total media cap: bounded sockets take precedence
+/// over accepting unlimited overlapping ranges from an already admitted viewer.
 ///
 /// Keyed per video, as it first was, one viewer on Home held two slots at once: the slide playing
 /// now and the one before it, still idling out with no bytes flowing — Home changes slide every
@@ -625,8 +641,34 @@ async fn relay_with(
         // Read here rather than inside `admit`: an async fn holding a `&Request` is not `Send`, and
         // this one is awaited inside the handler.
         let claim = if grant.is_some() { None } else { member_claim(&req) };
+        let total = match Arc::clone(&state.media_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("media_busy"),
+                    MEDIA_BUSY_RETRY_MS,
+                )
+            }
+        };
         return match admit(state, claim.as_deref(), &ip).await {
-            Admitted::Yes { slot } => stream(state, req, target, rid, slot).await,
+            Admitted::Yes { slot } => {
+                let member = if slot.is_none() {
+                    match Arc::clone(&state.member_media_slots).try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            return crate::handler::retry_after(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                &error("media_busy"),
+                                MEDIA_BUSY_RETRY_MS,
+                            )
+                        }
+                    }
+                } else {
+                    None
+                };
+                stream(state, req, target, rid, slot, total, member).await
+            }
             // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
             // part-way through one: that would be a stall, and a player would simply keep asking.
             Admitted::Busy => crate::handler::retry_after(
@@ -1254,6 +1296,41 @@ impl http_body::Body for Passed {
     }
 }
 
+struct MediaPassed {
+    passed: Passed,
+    state: Arc<AppState>,
+    slot: Option<Arc<Slot>>,
+}
+
+impl http_body::Body for MediaPassed {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+        let polled = std::pin::Pin::new(&mut self.passed).poll_frame(cx);
+        if let std::task::Poll::Ready(Some(Ok(frame))) = &polled {
+            if let (Some(slot), Some(data)) = (&self.slot, frame.data_ref()) {
+                let now = (self.state.clock)();
+                slot.sent.store(now, std::sync::atomic::Ordering::Relaxed);
+                let day = now / 86_400_000;
+                let mut spent = crate::lock(&self.state.media_spent);
+                if spent.0 != day {
+                    *spent = (day, 0);
+                }
+                spent.1 = spent.1.saturating_add(data.len() as u64);
+            }
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.passed.is_end_stream()
+    }
+}
+
 /// Which listener grant a public session needs, as the request log names it: `browser` for the visitor's own
 /// address, else the wide scope and why. The media base is an IPv4 literal. A visitor Cloudflare saw over IPv6
 /// fetches it from an address this process never sees (dual-stack, NAT64, carrier NAT), so an exact-address grant
@@ -1420,6 +1497,71 @@ fn minted_native(path: &str) -> bool {
     })
 }
 
+/// Pump one media response through a one-frame window. The task owns both admission permits and the upstream body,
+/// so downstream cancellation, either side stalling, or the hard lifetime drops every scarce resource together.
+fn media_body<B>(
+    mut body: B,
+    state: Arc<AppState>,
+    slot: Option<Arc<Slot>>,
+    total: tokio::sync::OwnedSemaphorePermit,
+    member: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Body
+where
+    B: http_body::Body<Data = Bytes> + Unpin + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+{
+    let (send, frames) = tokio::sync::mpsc::channel(1);
+    let terminal = Arc::new(Mutex::new(None));
+    let failed = Arc::clone(&terminal);
+    tokio::spawn(async move {
+        let _admission = (total, member);
+        let deadline = tokio::time::Instant::now() + MEDIA_LIFETIME;
+        loop {
+            // Reserve the sole downstream frame before reading another upstream frame. A non-reading client can
+            // therefore retain one frame only, and loses the stream after the same bounded idle interval.
+            let ready = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    *crate::lock(&failed) = Some("the media lifetime ended");
+                    break;
+                }
+                permit = tokio::time::timeout(MEDIA_IDLE, send.reserve()) => match permit {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        *crate::lock(&failed) = Some("the media receiver went silent");
+                        break;
+                    }
+                },
+            };
+            let next = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    *crate::lock(&failed) = Some("the media lifetime ended");
+                    break;
+                }
+                _ = send.closed() => break,
+                next = tokio::time::timeout(MEDIA_IDLE, body.frame()) => next,
+            };
+            let frame = match next {
+                Err(_) => {
+                    *crate::lock(&failed) = Some("the media source went silent");
+                    break;
+                }
+                Ok(Some(Ok(frame))) => frame,
+                Ok(Some(Err(error))) => {
+                    eprintln!("relay media: {}", axum::Error::new(error));
+                    *crate::lock(&failed) = Some("the media source failed");
+                    break;
+                }
+                Ok(None) => break,
+            };
+            ready.send(frame);
+        }
+    });
+    Body::new(MediaPassed { passed: Passed { frames, terminal }, state, slot })
+}
+
 /// Media, passed through as it arrives.
 ///
 /// Nothing here collects the body: a trailer is tens of megabytes and the JSON path's ceiling is eight, so
@@ -1427,14 +1569,16 @@ fn minted_native(path: &str) -> bool {
 /// range headers travel in both directions, because a video element opens a range, seeks, and opens another,
 /// and a player denied `Accept-Ranges` cannot seek at all.
 ///
-/// It takes no in-flight slot. Those bound what is happening at once against a box of one addon, and a
-/// trailer playing for two minutes would hold one for two minutes — sixteen viewers would be the whole pool.
+/// It takes no JSON relay slot: a trailer playing for two minutes must not consume the pool used by small addon
+/// calls. It instead carries total and, for a member, member-media permits in its response body until completion.
 async fn stream(
     state: &Arc<AppState>,
     req: Request,
     target: String,
     rid: &str,
     slot: Option<Arc<Slot>>,
+    total: tokio::sync::OwnedSemaphorePermit,
+    member: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [
@@ -1469,24 +1613,7 @@ async fn stream(
     // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
     // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling. Each is counted on the
     // day it leaves: a stream begun before UTC midnight that kept its first day reset the new day's count.
-    let body = if let Some(slot) = slot {
-        let state = Arc::clone(state);
-        Body::new(body.map_frame(move |frame| {
-            let now = (state.clock)();
-            slot.sent.store(now, std::sync::atomic::Ordering::Relaxed);
-            if let Some(data) = frame.data_ref() {
-                let day = now / 86_400_000;
-                let mut spent = crate::lock(&state.media_spent);
-                if spent.0 != day {
-                    *spent = (day, 0);
-                }
-                spent.1 = spent.1.saturating_add(data.len() as u64);
-            }
-            frame
-        }))
-    } else {
-        Body::new(body)
-    };
+    let body = media_body(body, Arc::clone(state), slot, total, member);
     let mut resp = Response::new(body);
     *resp.status_mut() = parts.status;
     for name in [
@@ -2472,6 +2599,24 @@ mod tests {
         assert_eq!(guest.status(), StatusCode::SERVICE_UNAVAILABLE, "a guest still needs one");
     }
 
+    #[tokio::test]
+    async fn the_member_ceiling_leaves_total_media_capacity_for_a_guest() {
+        let mut h = reel();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        state.member_media_slots = Arc::new(tokio::sync::Semaphore::new(0));
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+
+        let member = format!("{LIB}:{TOKEN}");
+        let refused = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(crate::handler::tests::body_json(refused).await, json!({ "error": "media_busy" }));
+
+        let guest = h.send("GET", SEGMENT, None, &[]).await;
+        assert_eq!(guest.status(), StatusCode::BAD_GATEWAY, "the member refusal consumed no total slot");
+    }
+
     /// The ceiling the concurrency cap cannot be: three streams running all day is still three streams.
     #[tokio::test]
     async fn a_spent_daily_allowance_turns_a_guest_away_but_not_a_member() {
@@ -2796,6 +2941,70 @@ mod tests {
         h.advance(super::LEASE_IDLE_MS + 1);
         let other = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(other.status(), StatusCode::OK, "the slot came back once it stopped");
+    }
+
+    #[tokio::test]
+    async fn a_total_media_slot_follows_the_response_body() {
+        let mut h = reel_mid_stream(10).await;
+        Arc::get_mut(&mut h.state).unwrap().media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(h.state.media_slots.available_permits(), 0, "the unread body owns the slot");
+
+        let refused = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(refused.headers().contains_key("retry-after"));
+        drop(first);
+        assert_eq!(slots_back(&h.state.media_slots).await, 1);
+
+        let admitted = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
+        assert_eq!(admitted.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_silent_media_source_returns_every_admission_slot() {
+        let mut h = reel_mid_stream(0).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        state.member_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        let member = format!("{LIB}:{TOKEN}");
+
+        let response = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(h.state.media_slots.available_permits(), 0);
+        assert_eq!(h.state.member_media_slots.available_permits(), 0);
+        tokio::time::sleep(super::MEDIA_IDLE + std::time::Duration::from_millis(20)).await;
+        assert_eq!(slots_back(&h.state.media_slots).await, 1);
+        assert_eq!(slots_back(&h.state.member_media_slots).await, 1);
+        assert!(axum::body::to_bytes(response.into_body(), usize::MAX).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_member_media_slot_follows_the_response_body() {
+        let mut h = reel_mid_stream(10).await;
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.media_slots = Arc::new(tokio::sync::Semaphore::new(2));
+        state.member_media_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let body = json!({ "writes": [{ "k": "aaaaaaaaaaaaaaaa", "base": 0, "v": "c1" }] }).to_string();
+        h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)]).await;
+        let member = format!("{LIB}:{TOKEN}");
+
+        let first = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(h.state.member_media_slots.available_permits(), 0);
+        assert_eq!(h.state.media_slots.available_permits(), 1);
+
+        let refused = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(h.state.media_slots.available_permits(), 1, "the refused member returned its total slot");
+        drop(first);
+        assert_eq!(slots_back(&h.state.member_media_slots).await, 1);
+        assert_eq!(slots_back(&h.state.media_slots).await, 2);
+
+        let admitted = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
+        assert_eq!(admitted.status(), StatusCode::OK);
     }
 
     /// A body that stops sending — a paused trailer, a phone gone off Wi-Fi, a stalled addon — gives its slot back
