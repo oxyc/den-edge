@@ -9,7 +9,16 @@ use axum::response::Response;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// A request remains charged until its response body's final frame. The bulk share leaves sixteen positions for
+/// small control/state work while still allowing the concurrency-64 throughput harness to queue briefly rather
+/// than multiplying memory under a burst.
+pub const REQUESTS: usize = 64;
+pub const BULK_REQUESTS: usize = 48;
+pub const CONTROL_REQUESTS: usize = REQUESTS - BULK_REQUESTS;
+const _: () = assert!(CONTROL_REQUESTS > 0);
+const ADMISSION_WAIT: Duration = Duration::from_millis(25);
 
 /// Body ceiling for every route that takes one except a library batch: clears every real inbox and pairing body
 /// with room to spare.
@@ -88,14 +97,22 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let method = req.method().clone();
     let route = route_label(req.uri().path());
     let origin = allowed_origin(&state, &req);
-    let mut resp = match &origin {
-        Some(_)
-            if method == Method::OPTIONS
-                && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
-        {
-            preflight()
-        }
-        _ => dispatch(&state, req, route, &rid).await,
+    let bulk = !is_control(route);
+    let admission = admit(&state, bulk).await;
+    if admission.is_err() {
+        state.metrics.request_refused(bulk);
+    }
+    let mut resp = match admission.as_ref() {
+        Err(()) => retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("server_busy"), 1_000),
+        Ok(_) => match &origin {
+            Some(_)
+                if method == Method::OPTIONS
+                    && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
+            {
+                preflight()
+            }
+            _ => dispatch(&state, req, route, &rid).await,
+        },
     };
     if method == Method::HEAD {
         *resp.body_mut() = Body::empty();
@@ -125,7 +142,130 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
         let ms = started.elapsed().as_millis();
         eprintln!("{}", log_line(&method, route, status, ms, &rid, &tags));
     }
+    if let Ok(admission) = admission {
+        resp = resp.map(|body| Body::new(Admitted { body, admission: Some(admission) }));
+    }
     resp
+}
+
+struct Admission {
+    _request: tokio::sync::OwnedSemaphorePermit,
+    _bulk: Option<tokio::sync::OwnedSemaphorePermit>,
+    metrics: Arc<crate::metrics::Metrics>,
+    bulk: bool,
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.metrics.request_released(self.bulk);
+    }
+}
+
+/// Control is deliberately an allowlist. An unknown path, a newly added route, or a typo must not inherit the
+/// reserved lane merely because it was not classified yet.
+fn is_control(route: &str) -> bool {
+    matches!(
+        route,
+        "/health"
+            | "/version"
+            | "/config"
+            | "/routes"
+            | "/metrics"
+            | "/link"
+            | "/inbox/append"
+            | "/inbox/drain"
+            | "/pair/new"
+            | "/pair/open"
+            | "/pair/:sid"
+            | "/pair/:sid/:slot"
+            | "/sync/:id"
+            | "/grant/redeem"
+            | "/grant/addons"
+            | "/grant/:gid"
+            | "/lib/:id/grants"
+            | "/lib/:id/grants/:gid"
+            | "/lib/:id"
+            | "/oauth/authorize"
+            | "/oauth/register"
+            | "/oauth/token"
+            | "/oauth/revoke"
+            | "/oauth/connections"
+            | "/oauth/connections/:sid"
+            | "/oauth/request"
+            | "/.well-known/oauth"
+    )
+}
+
+async fn permit(
+    semaphore: &Arc<tokio::sync::Semaphore>,
+) -> Result<(tokio::sync::OwnedSemaphorePermit, bool), ()> {
+    match Arc::clone(semaphore).try_acquire_owned() {
+        Ok(permit) => Ok((permit, false)),
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            tokio::time::timeout(ADMISSION_WAIT, Arc::clone(semaphore).acquire_owned())
+                .await
+                .map_err(|_| ())?
+                .map(|permit| (permit, true))
+                .map_err(|_| ())
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => Err(()),
+    }
+}
+
+async fn admit(state: &AppState, bulk: bool) -> Result<Admission, ()> {
+    // Take the subcap first: bulk waiters must never occupy the positions reserved for control work.
+    let (bulk_permit, bulk_waited) = if bulk {
+        let (permit, waited) = permit(&state.bulk_request_slots).await?;
+        (Some(permit), waited)
+    } else {
+        (None, false)
+    };
+    let (request, request_waited) = permit(&state.request_slots).await?;
+    state.metrics.request_admitted(bulk, bulk_waited || request_waited);
+    Ok(Admission { _request: request, _bulk: bulk_permit, metrics: Arc::clone(&state.metrics), bulk })
+}
+
+/// The admission guard is part of the response body rather than the handler future. Hyper may spend far longer
+/// delivering a file or stream than constructing its headers, and dropping an unread body releases both permits.
+struct Admitted {
+    body: Body,
+    admission: Option<Admission>,
+}
+
+impl Admitted {
+    fn release(&mut self) {
+        drop(self.admission.take());
+    }
+}
+
+impl http_body::Body for Admitted {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(frame, std::task::Poll::Ready(None | Some(Err(_)))) {
+            self.release();
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// An error answer's `error` code, carried on the response for the request log. An extension, not a header: it
@@ -1453,6 +1593,59 @@ pub mod tests {
             text.contains(r#"route="/sync/:id",status="200""#) && !text.contains("0123456789abcdef"),
             "{text}"
         );
+        assert!(text.contains(r#"den_edge_request_admission_active{class="control"}"#), "{text}");
+        assert!(text.contains(r#"den_edge_request_admission_refused_total{class="bulk"}"#), "{text}");
+    }
+
+    #[test]
+    fn only_known_small_routes_use_the_control_lane() {
+        for route in ["/health", "/inbox/append", "/pair/:sid/:slot", "/lib/:id", "/oauth/token"] {
+            assert!(is_control(route), "{route}");
+        }
+        for route in ["other", "/atlas", "/mcp", "/lib/:id/batch", "/lib/:id/changes", "/tmdb"] {
+            assert!(!is_control(route), "{route}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_cannot_take_the_reserved_control_lane() {
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.request_slots = Arc::new(tokio::sync::Semaphore::new(2));
+        state.bulk_request_slots = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let bulk = admit(&h.state, true).await.unwrap();
+        assert_eq!(h.state.request_slots.available_permits(), 1);
+        assert_eq!(h.state.bulk_request_slots.available_permits(), 0);
+        let control = admit(&h.state, false).await.unwrap();
+        assert_eq!(h.state.request_slots.available_permits(), 0);
+        assert!(admit(&h.state, true).await.is_err());
+
+        drop(control);
+        assert_eq!(h.state.request_slots.available_permits(), 1);
+        assert_eq!(h.state.bulk_request_slots.available_permits(), 0);
+        drop(bulk);
+        assert_eq!(h.state.request_slots.available_permits(), 2);
+        assert_eq!(h.state.bulk_request_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn admission_follows_the_response_body_and_overload_is_stable() {
+        let h = Harness::new();
+        let admission = admit(&h.state, true).await.unwrap();
+        let body = Admitted { body: Body::from("still held"), admission: Some(admission) };
+        assert_eq!(h.state.request_slots.available_permits(), REQUESTS - 1);
+        assert_eq!(h.state.bulk_request_slots.available_permits(), BULK_REQUESTS - 1);
+        drop(body);
+        assert_eq!(h.state.request_slots.available_permits(), REQUESTS);
+        assert_eq!(h.state.bulk_request_slots.available_permits(), BULK_REQUESTS);
+
+        let held = Arc::clone(&h.state.request_slots).acquire_many_owned(REQUESTS as u32).await.unwrap();
+        let resp = h.send("GET", "/health", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(body_json(resp).await, error("server_busy"));
+        drop(held);
     }
 
     #[tokio::test]
