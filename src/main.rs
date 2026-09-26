@@ -39,6 +39,9 @@ pub struct AppState {
     /// The record logs loaded so far, by library id — one household's, a few MB at most. Held across a batch
     /// or a read, so each library's compare-and-set is one step.
     pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
+    /// CPU-heavy library gzip jobs. A busy pool falls back to identity so compression cannot occupy every Tokio
+    /// worker or queue without bound; Cloudflare can compress public delivery at its edge.
+    pub library_compression_slots: Arc<tokio::sync::Semaphore>,
     /// Memory budgets include keys and conservative allocation overhead, not only ciphertext.
     pub library_limits: library::Limits,
     /// Every per-address budget's count (`link::throttled_at`, `link::throttled_per_minute`): a pairing's guesses,
@@ -211,6 +214,7 @@ impl AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
             libraries: tokio::sync::Mutex::new(HashMap::new()),
+            library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_limits: library::Limits::default(),
             claims: Mutex::new(link::Throttles::default()),
             pairs: Mutex::new(HashMap::new()),
