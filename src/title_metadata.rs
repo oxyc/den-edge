@@ -16,7 +16,8 @@ use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use redb::backends::FileBackend;
 use redb::{BackendError, Database, ReadableDatabase, ReadableTable, StorageBackend, TableDefinition};
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -619,13 +620,19 @@ async fn merge(state: &AppState, entries: Vec<Observation>) -> Result<(), Unstor
         .map_err(Unstored::from)
 }
 
-/// Observations being worked out and written at once, past which a new answer's are not recorded. A page asks for
-/// a row of titles at once, so a burst of misses is dozens; this bounds the work behind it, never the answers.
-pub const OBSERVING: usize = 64;
+/// Retained TMDB answer bytes plus parsing/output headroom for background observations. A full 4 MiB upstream
+/// answer takes the whole budget; small answers are charged at least 256 KiB, preserving the old 64-task ceiling.
+pub const OBSERVATION_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+const OBSERVATION_MIN_CHARGE_BYTES: usize = OBSERVATION_BUDGET_BYTES / 64;
+
+fn observation_charge(body_bytes: usize) -> Option<u32> {
+    let charge = body_bytes.saturating_mul(4).max(OBSERVATION_MIN_CHARGE_BYTES);
+    (charge <= OBSERVATION_BUDGET_BYTES).then_some(charge as u32)
+}
 
 /// What a TMDB answer den-edge just fetched says about its titles (`tmdb.rs`), kept as source `tmdb` — what a
 /// browser used to send back with `PUT` after receiving it through this proxy. Worked out and written behind the
-/// answer: spawned, bounded by `OBSERVING`, and unable to slow or fail it. An answer served from the cache is
+/// answer: spawned, byte-bounded, and unable to slow or fail it. An answer served from the cache is
 /// not observed again; it was when it was fetched, and is again each time TMDB confirms it (a 304), so a title
 /// seen only through a cached detail does not expire here.
 pub fn observe_tmdb(state: &Arc<AppState>, path: &str, body: &Bytes) {
@@ -633,7 +640,7 @@ pub fn observe_tmdb(state: &Arc<AppState>, path: &str, body: &Bytes) {
     record(state, body, move |body| tmdb_observations(&path, body));
 }
 
-/// Whether the observation was taken on: false with no store, or with `OBSERVING` already at work.
+/// Whether the observation was taken on: false with no store, or without enough retained-byte budget.
 fn record(
     state: &Arc<AppState>,
     body: &Bytes,
@@ -642,11 +649,22 @@ fn record(
     if state.title_metadata_cache_dir.is_none() {
         return false;
     }
-    let Ok(permit) = Arc::clone(&state.title_metadata_observing).try_acquire_owned() else { return false };
+    let Some(charge) = observation_charge(body.len()) else { return false };
+    let Ok(permit) = Arc::clone(&state.title_metadata_observation_budget).try_acquire_many_owned(charge)
+    else {
+        return false;
+    };
     let (state, body) = (Arc::clone(state), body.clone());
     tokio::spawn(async move {
         let _permit = permit;
-        let entries = read(&body);
+        // A 4 MiB JSON parse is blocking CPU work. Keep it off Tokio's network workers as well as byte-bounded.
+        let entries = match tokio::task::spawn_blocking(move || read(&body)).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("title metadata observation task: {error}");
+                return;
+            }
+        };
         if entries.is_empty() {
             return;
         }
@@ -662,20 +680,73 @@ fn record(
 /// (`/3/trending/all/week`). The web app's `metadataIn` did this before; unlike it, the top-level record counts
 /// only on a title's own path and for its own id, because a season (`/3/tv/1399/season/1`) carries an id and a
 /// rating of its own that are not the series'.
+#[derive(Deserialize)]
+struct TmdbProjection {
+    id: Option<Value>,
+    vote_average: Option<Value>,
+    vote_count: Option<Value>,
+    poster_path: Option<Value>,
+    #[serde(default, deserialize_with = "bounded_results")]
+    results: Vec<TmdbItem>,
+}
+
+#[derive(Deserialize)]
+struct TmdbItem {
+    id: Option<Value>,
+    vote_average: Option<Value>,
+    vote_count: Option<Value>,
+    poster_path: Option<Value>,
+    media_type: Option<Value>,
+}
+
+fn bounded_results<'de, D>(deserializer: D) -> Result<Vec<TmdbItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Results;
+    impl<'de> Visitor<'de> for Results {
+        type Value = Vec<TmdbItem>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a TMDB results array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut results = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX_PUBLISH_ENTRIES));
+            while results.len() < MAX_PUBLISH_ENTRIES {
+                let Some(item) = sequence.next_element()? else { return Ok(results) };
+                results.push(item);
+            }
+            while sequence.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(results)
+        }
+    }
+    deserializer.deserialize_seq(Results)
+}
+
 fn tmdb_observations(path: &str, body: &[u8]) -> Vec<Observation> {
-    let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(body) else { return Vec::new() };
+    // Deserialize only the projection we keep. Unknown detail/credit fields are skipped by serde as it reads,
+    // instead of materializing a second body-sized `Value` tree behind the response.
+    let Ok(parsed) = serde_json::from_slice::<TmdbProjection>(body) else { return Vec::new() };
     let segments: Vec<&str> = path.split('/').skip(1).collect();
     let fixed = segments.iter().copied().find(|s| matches!(*s, "movie" | "tv"));
     let mut found: Vec<Observation> = Vec::new();
-    let mut add = |kind: &str, item: &serde_json::Map<String, Value>| {
-        let Some(id) = item.get("id").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) else {
+    let mut add = |kind: &str,
+                   id: &Option<Value>,
+                   rating: &Option<Value>,
+                   votes: &Option<Value>,
+                   poster: &Option<Value>| {
+        let Some(id) = id.as_ref().and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) else {
             return;
         };
         let fields = InputFields {
-            rating: item.get("vote_average").and_then(Value::as_f64).filter(|r| valid_rating(*r)),
-            vote_count: item.get("vote_count").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
-            poster_path: item
-                .get("poster_path")
+            rating: rating.as_ref().and_then(Value::as_f64).filter(|r| valid_rating(*r)),
+            vote_count: votes.as_ref().and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
+            poster_path: poster
+                .as_ref()
                 .and_then(Value::as_str)
                 .filter(|p| valid_poster(p))
                 .map(str::to_owned),
@@ -686,16 +757,14 @@ fn tmdb_observations(path: &str, body: &[u8]) -> Vec<Observation> {
         }
     };
     if let ["3", kind @ ("movie" | "tv"), id] = segments.as_slice() {
-        if parsed.get("id").and_then(Value::as_u64).is_some_and(|own| id.parse() == Ok(own)) {
-            add(kind, &parsed);
+        if parsed.id.as_ref().and_then(Value::as_u64).is_some_and(|own| id.parse() == Ok(own)) {
+            add(kind, &parsed.id, &parsed.vote_average, &parsed.vote_count, &parsed.poster_path);
         }
     }
-    if let Some(Value::Array(results)) = parsed.get("results") {
-        for item in results.iter().filter_map(Value::as_object) {
-            let kind = fixed.or_else(|| item.get("media_type").and_then(Value::as_str));
-            if let Some(kind @ ("movie" | "tv")) = kind {
-                add(kind, item);
-            }
+    for item in &parsed.results {
+        let kind = fixed.or_else(|| item.media_type.as_ref().and_then(Value::as_str));
+        if let Some(kind @ ("movie" | "tv")) = kind {
+            add(kind, &item.id, &item.vote_average, &item.vote_count, &item.poster_path);
         }
     }
     found.truncate(MAX_PUBLISH_ENTRIES);
@@ -1026,6 +1095,39 @@ mod tests {
         for junk in [&b"not json"[..], b"[1,2]", br#"{"id":550}"#, br#"{"id":550,"vote_average":11}"#] {
             assert!(tmdb_observations("/3/movie/550", junk).is_empty(), "{}", String::from_utf8_lossy(junk));
         }
+    }
+
+    #[tokio::test]
+    async fn background_observation_is_bounded_by_retained_bytes() {
+        let h = harness().await;
+        let body = Bytes::from(vec![b' '; 4 * 1024 * 1024]);
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        assert!(record(&h.state, &body, move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Vec::new()
+        }));
+        tokio::time::timeout(Duration::from_secs(1), entered_rx.recv()).await.unwrap().unwrap();
+
+        assert_eq!(h.state.title_metadata_observation_budget.available_permits(), 0);
+        assert!(!record(&h.state, &Bytes::from_static(b"{}"), |_| Vec::new()));
+        release_tx.send(()).unwrap();
+
+        for _ in 0..100 {
+            if h.state.title_metadata_observation_budget.available_permits() == OBSERVATION_BUDGET_BYTES {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the completed observation did not release its byte budget");
+    }
+
+    #[test]
+    fn observation_accounting_keeps_the_task_count_bounded_too() {
+        assert_eq!(observation_charge(1), Some((OBSERVATION_BUDGET_BYTES / 64) as u32));
+        assert_eq!(observation_charge(4 * 1024 * 1024), Some(OBSERVATION_BUDGET_BYTES as u32));
+        assert_eq!(observation_charge(4 * 1024 * 1024 + 1), None);
     }
 
     /// Atlas catalogs stay on the relay's streaming path. With no `kept` header, the web client's existing bounded
