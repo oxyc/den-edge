@@ -35,6 +35,11 @@ const KEY_HEADER: &str = "x-api-key";
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Their largest answer here is one title's topic votes, or the topic list.
 const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
+/// A normalized answer can contain material from both bounded upstream answers: the title and the topic table.
+const MAX_CACHE_BYTES: usize = 2 * MAX_ANSWER_BYTES;
+/// A fresh answer larger than the durable-cache ceiling is still useful to its caller, but constructing or sending
+/// one must remain bounded even when many stats repeat one enormous topic name. Past this it is refused.
+const MAX_RESPONSE_BYTES: usize = 2 * MAX_CACHE_BYTES;
 /// Questions per address per minute, kept or not. A detail page asks one.
 const PER_WINDOW: u32 = 60;
 /// Questions that may leave the box in a minute on one key. Counted per key, because a caller's key is whatever it
@@ -114,13 +119,14 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     let asked = req.headers();
     let file = state.warnings_cache_dir.as_ref().map(|dir| dir.join(format!("{imdb}.json")));
     let kept = match &file {
-        Some(file) => crate::tmdb::read(file).await,
+        Some(file) => crate::cache::open_json(file, MAX_CACHE_BYTES).await,
         None => None,
     };
-    if let Some((body, age, modified)) = kept {
-        match verdict(body.as_ref() == ABSENT, age) {
+    if let Some(body) = kept {
+        let age = body.age();
+        match verdict(body.matches(ABSENT), age) {
             Kept::Absent => return absent(),
-            Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit", modified, asked),
+            Kept::Fresh => return answer_file(body, FRESH.saturating_sub(age), "hit", asked),
             Kept::Cold => {}
         }
     }
@@ -136,10 +142,11 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
                 Err(refusal) => return *refusal,
             };
             // A question for this title that got here first has kept its answer by now.
-            if let Some((body, age, modified)) = crate::tmdb::read(file).await {
-                match verdict(body.as_ref() == ABSENT, age) {
+            if let Some(body) = crate::cache::open_json(file, MAX_CACHE_BYTES).await {
+                let age = body.age();
+                match verdict(body.matches(ABSENT), age) {
                     Kept::Absent => return absent(),
-                    Kept::Fresh => return answer(body, FRESH.saturating_sub(age), "hit", modified, asked),
+                    Kept::Fresh => return answer_file(body, FRESH.saturating_sub(age), "hit", asked),
                     Kept::Cold => {}
                 }
             }
@@ -236,7 +243,10 @@ async fn lookup(
     if item.is_null() {
         return Ok(None);
     }
-    Ok(Some((Bytes::from(normalize(id, &item, &topics).to_string()), named(&topics))))
+    let Some(body) = normalized_bytes(id, &item, &topics, MAX_RESPONSE_BYTES) else {
+        return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_too_large"));
+    };
+    Ok(Some((body, named(&topics))))
 }
 
 /// The search answer's item for exactly this IMDb id. Their search is an array; an `items` object is taken too.
@@ -332,31 +342,55 @@ fn topic_table(topics: &Value, categories: &Value) -> Value {
 }
 
 /// What is kept and served for a title: its doesthedogdie id and each topic's votes, named. Nothing else of theirs.
-fn normalize(id: u64, item: &Value, topics: &Value) -> Value {
-    let warnings: Vec<Value> = item
-        .get("topicItemStats")
+fn warning(stat: &Value, topics: &Value) -> Option<Value> {
+    let topic_id = stat.get("topicId").and_then(Value::as_u64)?;
+    let topic = topics.get(topic_id.to_string());
+    let name = topic
+        .and_then(|t| t.get("name"))
+        .or_else(|| stat.get("topicName"))
+        .and_then(Value::as_str)
+        .filter(|n| !n.trim().is_empty())?;
+    Some(json!({
+        "id": topic_id,
+        "name": name,
+        "category": topic.and_then(|t| t.get("category")).cloned().unwrap_or(Value::Null),
+        "spoiler": topic.and_then(|t| t.get("spoiler")).and_then(Value::as_bool).unwrap_or(false),
+        "yes": stat.get("yesSum").and_then(Value::as_u64).unwrap_or(0),
+        "no": stat.get("noSum").and_then(Value::as_u64).unwrap_or(0),
+    }))
+}
+
+fn warnings<'a>(item: &'a Value, topics: &'a Value) -> impl Iterator<Item = Value> + 'a {
+    item.get("topicItemStats")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|stat| {
-            let topic_id = stat.get("topicId").and_then(Value::as_u64)?;
-            let topic = topics.get(topic_id.to_string());
-            let name = topic
-                .and_then(|t| t.get("name"))
-                .or_else(|| stat.get("topicName"))
-                .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())?;
-            Some(json!({
-                "id": topic_id,
-                "name": name,
-                "category": topic.and_then(|t| t.get("category")).cloned().unwrap_or(Value::Null),
-                "spoiler": topic.and_then(|t| t.get("spoiler")).and_then(Value::as_bool).unwrap_or(false),
-                "yes": stat.get("yesSum").and_then(Value::as_u64).unwrap_or(0),
-                "no": stat.get("noSum").and_then(Value::as_u64).unwrap_or(0),
-            }))
-        })
-        .collect();
-    json!({ "id": id, "warnings": warnings })
+        .filter_map(move |stat| warning(stat, topics))
+}
+
+#[cfg(test)]
+fn normalize(id: u64, item: &Value, topics: &Value) -> Value {
+    json!({ "id": id, "warnings": warnings(item, topics).collect::<Vec<_>>() })
+}
+
+/// Serialize without first building a potentially amplified JSON tree. Each temporary is one warning and the
+/// output never grows past `max`, so repeated references to a large topic name cannot turn two bounded upstream
+/// bodies into an unbounded allocation.
+fn normalized_bytes(id: u64, item: &Value, topics: &Value, max: usize) -> Option<Bytes> {
+    let mut out = format!("{{\"id\":{id},\"warnings\":[").into_bytes();
+    for (index, warning) in warnings(item, topics).enumerate() {
+        let warning = serde_json::to_vec(&warning).ok()?;
+        let extra = usize::from(index != 0).checked_add(warning.len())?;
+        if out.len().checked_add(extra)?.checked_add(2)? > max {
+            return None;
+        }
+        if index != 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(&warning);
+    }
+    out.extend_from_slice(b"]}");
+    (out.len() <= max).then(|| Bytes::from(out))
 }
 
 /// Ask doesthedogdie. A 404 is `Null` — "no such thing" is an answer — and every other refusal is already the
@@ -450,15 +484,16 @@ fn rest(state: &AppState, until: u64, why: &str) {
 }
 
 async fn keep(file: Option<&Path>, body: Bytes, how: &'static str, asked: &HeaderMap) -> Response {
-    if let Some(file) = file {
-        crate::tmdb::write(file, &body).await;
+    let kept = body.len() <= MAX_CACHE_BYTES;
+    if let Some(file) = file.filter(|_| kept) {
+        crate::cache::write_json(file, &body).await;
     }
-    answer(body, FRESH, how, SystemTime::now(), asked)
+    answer(body, if kept { FRESH } else { UNKEPT_MAX_AGE }, how, SystemTime::now(), asked)
 }
 
 async fn forget(file: Option<&Path>) -> Response {
     if let Some(file) = file {
-        crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
+        crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
     }
     absent()
 }
@@ -479,6 +514,21 @@ fn answer(
     }
     headers.insert("x-den-warnings", HeaderValue::from_static(how));
     crate::cache::validated(resp, &body, Some(modified), asked)
+}
+
+fn answer_file(
+    body: crate::cache::JsonFile,
+    remaining: Duration,
+    how: &'static str,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = body.response();
+    let headers = resp.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&policy(remaining)) {
+        headers.insert(header::CACHE_CONTROL, value);
+    }
+    headers.insert("x-den-warnings", HeaderValue::from_static(how));
+    crate::cache::revalidate(resp, asked)
 }
 
 fn policy(remaining: Duration) -> String {
@@ -567,14 +617,29 @@ mod tests {
                 { "topicId": 778, "yesSum": 2, "noSum": 1 },
             ],
         });
-        assert_eq!(
-            normalize(10752, &item, &topics),
-            json!({ "id": 10752, "warnings": [
-                { "id": 153, "name": "a dog dies", "category": "Animal Injury or Death", "spoiler": false, "yes": 57, "no": 3 },
-                { "id": 9, "name": "a sad ending", "category": "Sad & Stressful Themes", "spoiler": true, "yes": 4, "no": 0 },
-                { "id": 777, "name": "a topic the table has not heard of", "category": null, "spoiler": false, "yes": 2, "no": 1 },
-            ]})
-        );
+        let expected = json!({ "id": 10752, "warnings": [
+            { "id": 153, "name": "a dog dies", "category": "Animal Injury or Death", "spoiler": false, "yes": 57, "no": 3 },
+            { "id": 9, "name": "a sad ending", "category": "Sad & Stressful Themes", "spoiler": true, "yes": 4, "no": 0 },
+            { "id": 777, "name": "a topic the table has not heard of", "category": null, "spoiler": false, "yes": 2, "no": 1 },
+        ]});
+        assert_eq!(normalize(10752, &item, &topics), expected);
+        let bytes = normalized_bytes(10752, &item, &topics, MAX_RESPONSE_BYTES).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), expected);
+        assert!(normalized_bytes(10752, &item, &topics, 32).is_none(), "the serializer stops at its cap");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_normalized_answer_is_served_briefly_but_not_cached() {
+        use http_body_util::BodyExt;
+
+        let dir = temp_dir();
+        let file = dir.join("tt0050798.json");
+        let body = Bytes::from(vec![b' '; MAX_CACHE_BYTES + 1]);
+        let response = keep(Some(&file), body.clone(), "miss", &HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=60");
+        assert!(!file.exists(), "an answer outside the durable ceiling is never kept");
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes().len(), body.len());
     }
 
     fn aged(file: &Path, age: Duration) {

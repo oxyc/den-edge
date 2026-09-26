@@ -80,7 +80,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     // Segments past their freshness but inside `RETENTION`: asked for again, and served when SkipDB cannot say.
     let mut stale = None;
     let kept = match &file {
-        Some(file) => crate::tmdb::read(file).await,
+        Some(file) => crate::cache::open_json(file, MAX_ANSWER_BYTES).await,
         None => None,
     };
     // Where an answer to this may be written: over what is kept, or under a new name while today allows one. Asked
@@ -88,40 +88,41 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     // spent the day's new names and kept nothing.
     let known = kept.is_some();
     let keep = || file.as_ref().filter(|_| known || new_name(state));
-    if let Some((body, age, modified)) = kept {
-        let absent = body.as_ref() == ABSENT;
+    if let Some(body) = kept {
+        let age = body.age();
+        let absent = body.matches(ABSENT);
         if absent && age < ABSENT_TTL {
             return crate::warnings::absent();
         }
         if !absent && age < FRESH {
-            return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
+            return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
-            stale = Some((body, modified));
+            stale = Some(body);
         }
     }
     match lookup(state, &asked_for, &ip, rid).await {
         Ok(Some(body)) => {
             if let Some(file) = keep() {
-                crate::tmdb::write(file, &body).await;
+                crate::cache::write_json(file, &body).await;
                 let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
-            if let (Some(file), Some((body, modified))) = (&file, stale) {
+            if let (Some(file), Some(body)) = (&file, stale) {
                 if !gone(file).await {
-                    return answer(body, STALE_MAX_AGE, "stale", modified, asked);
+                    return answer_file(body, STALE_MAX_AGE, "stale", asked);
                 }
             }
             if let Some(file) = keep() {
-                crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
+                crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
             }
             crate::warnings::absent()
         }
         // SkipDB down, slow or refusing: the segments kept are still the best answer there is.
         Err(refused) => match stale {
-            Some((body, modified)) => answer(body, STALE_MAX_AGE, "stale", modified, asked),
+            Some(body) => answer_file(body, STALE_MAX_AGE, "stale", asked),
             None => *refused,
         },
     }
@@ -317,6 +318,22 @@ fn answer(
     }
     headers.insert("x-den-skipdb", HeaderValue::from_static(how));
     crate::cache::validated(resp, &body, Some(modified), asked)
+}
+
+fn answer_file(
+    body: crate::cache::JsonFile,
+    remaining: Duration,
+    how: &'static str,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = body.response();
+    let headers = resp.headers_mut();
+    let max_age = remaining.min(Duration::from_secs(DAY)).as_secs();
+    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
+        headers.insert(header::CACHE_CONTROL, value);
+    }
+    headers.insert("x-den-skipdb", HeaderValue::from_static(how));
+    crate::cache::revalidate(resp, asked)
 }
 
 /// Delete what is past `RETENTION`, so the directory holds only what may still be served.
