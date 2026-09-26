@@ -151,8 +151,9 @@ pub struct AppState {
     pub title_metadata_store: tokio::sync::OnceCell<Arc<title_metadata::Store>>,
     /// Serializes publish batches so simultaneous partial observations cannot erase fields.
     pub title_metadata_writes: tokio::sync::Mutex<()>,
-    /// Observations of proxied and relayed answers being recorded behind them (`title_metadata::OBSERVING`).
-    pub title_metadata_observing: Arc<tokio::sync::Semaphore>,
+    /// Retained bytes and parsing headroom for TMDB title-metadata observations. This is weighted by body size,
+    /// so large background answers cannot multiply memory merely because task slots remain.
+    pub title_metadata_observation_budget: Arc<tokio::sync::Semaphore>,
     /// Questions the household key may ask OMDb in a UTC day (env `OMDB_DAILY_MAX`); `None` is no ceiling of ours.
     pub ratings_daily_max: Option<u32>,
     /// Today (as a day number) and what the household key has spent of it.
@@ -255,7 +256,9 @@ impl AppState {
             title_metadata_cache_dir: None,
             title_metadata_store: tokio::sync::OnceCell::new(),
             title_metadata_writes: tokio::sync::Mutex::new(()),
-            title_metadata_observing: Arc::new(tokio::sync::Semaphore::new(title_metadata::OBSERVING)),
+            title_metadata_observation_budget: Arc::new(tokio::sync::Semaphore::new(
+                title_metadata::OBSERVATION_BUDGET_BYTES,
+            )),
             skipdb_cache_dir: None,
             skipdb_kept_new: Mutex::new((0, 0)),
             ratings_daily_max: None,
