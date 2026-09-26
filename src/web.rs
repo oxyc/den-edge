@@ -402,16 +402,22 @@ impl Files {
 /// An opened file as a response body, read a `CHUNK` at a time as the connection takes it. It ends after the
 /// length `fstat` gave, which is what `Content-Length` promised; a file cut short under it fails the body
 /// rather than sending fewer bytes than were announced.
-struct FileBody {
+pub(crate) struct FileBody {
     file: tokio::fs::File,
     left: u64,
-    buf: Box<[u8]>,
+    /// Allocated only on the first body poll. Conditional and HEAD responses construct and then discard this body
+    /// without paying for a 64 KiB buffer they will never read.
+    buf: Option<Box<[u8]>>,
 }
 
 impl FileBody {
     fn new((file, left, _): Opened) -> Self {
-        let buf = vec![0; usize::try_from(left).unwrap_or(CHUNK).min(CHUNK)].into_boxed_slice();
-        FileBody { file, left, buf }
+        Self::from_file(file, left)
+    }
+
+    /// Stream an already-open file from its current position, ending after exactly `left` bytes.
+    pub(crate) fn from_file(file: tokio::fs::File, left: u64) -> Self {
+        FileBody { file, left, buf: None }
     }
 }
 
@@ -424,8 +430,11 @@ impl http_body::Body for FileBody {
         if this.left == 0 {
             return Poll::Ready(None);
         }
-        let want = this.buf.len().min(usize::try_from(this.left).unwrap_or(usize::MAX));
-        let mut read = ReadBuf::new(&mut this.buf[..want]);
+        let buf = this.buf.get_or_insert_with(|| {
+            vec![0; usize::try_from(this.left).unwrap_or(CHUNK).min(CHUNK)].into_boxed_slice()
+        });
+        let want = buf.len().min(usize::try_from(this.left).unwrap_or(usize::MAX));
+        let mut read = ReadBuf::new(&mut buf[..want]);
         ready!(Pin::new(&mut this.file).poll_read(cx, &mut read))?;
         let filled = read.filled();
         if filled.is_empty() {
@@ -995,6 +1004,18 @@ mod tests {
         }
         assert_eq!(got, wasm);
         assert_eq!(frames, 3, "read a piece at a time, not as one buffer");
+    }
+
+    #[tokio::test]
+    async fn a_file_body_allocates_its_chunk_only_when_polled() {
+        use http_body_util::BodyExt;
+
+        let h = with_app();
+        let file = h.dir.join("web/assets/index-abc123.js");
+        let mut body = super::FileBody::new(super::open(&file).await.unwrap());
+        assert!(body.buf.is_none(), "HEAD and 304 may discard this body without allocating a chunk");
+        assert!(body.frame().await.unwrap().is_ok());
+        assert!(body.buf.is_some(), "a streaming 200 allocates on its first poll");
     }
 
     /// A file is hashed once for its ETag; after that, requests for it read none of it until it changes. The

@@ -82,16 +82,17 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     let asked = req.headers();
     let file = state.ratings_cache_dir.as_ref().map(|dir| dir.join(format!("{imdb}.json")));
     let kept = match &file {
-        Some(file) => crate::tmdb::read(file).await,
+        Some(file) => crate::cache::open_json(file, MAX_ANSWER_BYTES).await,
         None => None,
     };
-    if let Some((body, age, modified)) = kept {
-        let absent = body.as_ref() == ABSENT;
+    if let Some(body) = kept {
+        let age = body.age();
+        let absent = body.matches(ABSENT);
         if absent && age < ABSENT_TTL {
             return crate::warnings::absent();
         }
         if !absent && age < FRESH {
-            return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
+            return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
             // Served as it is, now. A caller who may ask starts the refresh; the next one sees its answer.
@@ -100,7 +101,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             {
                 refresh_behind(state, imdb, key, file);
             }
-            return answer(body, STALE_MAX_AGE, "stale", modified, asked);
+            return answer_file(body, STALE_MAX_AGE, "stale", asked);
         }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked.
@@ -114,12 +115,13 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 Err(refusal) => return *refusal,
             };
             // A question for this title that got here first has kept its answer by now.
-            if let Some((body, age, modified)) = crate::tmdb::read(file).await {
-                if body.as_ref() == ABSENT && age < ABSENT_TTL {
+            if let Some(body) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
+                let age = body.age();
+                if body.matches(ABSENT) && age < ABSENT_TTL {
                     return crate::warnings::absent();
                 }
-                if body.as_ref() != ABSENT && age < FRESH {
-                    return answer(body, FRESH.saturating_sub(age), "hit", modified, asked);
+                if !body.matches(ABSENT) && age < FRESH {
+                    return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
                 }
             }
             Some(asking)
@@ -129,13 +131,13 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     match lookup(state, &imdb, &key, rid).await {
         Ok(Some(body)) => {
             if let Some(file) = &file {
-                crate::tmdb::write(file, &body).await;
+                crate::cache::write_json(file, &body).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
             if let Some(file) = &file {
-                crate::tmdb::write(file, &Bytes::from_static(ABSENT)).await;
+                crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
             }
             crate::warnings::absent()
         }
@@ -159,7 +161,7 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
         // a bad answer rather than news: written over them, it hid a title's ratings for a week. What is kept stays,
         // as it does when OMDb is refused, rested or unreachable, and the next stale read asks again.
         if let Ok(Some(body)) = lookup(&state, &imdb, &key, "refresh").await {
-            crate::tmdb::write(&file, &body).await;
+            crate::cache::write_json(&file, &body).await;
         }
     });
 }
@@ -292,6 +294,24 @@ fn answer(
     }
     headers.insert("x-den-ratings", HeaderValue::from_static(how));
     crate::cache::validated(resp, &body, Some(modified), asked)
+}
+
+/// A cache hit already carries its body length, digest and modification time. Revalidation therefore touches only
+/// the fixed-size response sidecar, while a 200 streams the open file rather than materialising another `Bytes`.
+fn answer_file(
+    body: crate::cache::JsonFile,
+    remaining: Duration,
+    how: &'static str,
+    asked: &HeaderMap,
+) -> Response {
+    let mut resp = body.response();
+    let headers = resp.headers_mut();
+    let max_age = remaining.min(Duration::from_millis(DAY_MS)).as_secs();
+    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
+        headers.insert(header::CACHE_CONTROL, value);
+    }
+    headers.insert("x-den-ratings", HeaderValue::from_static(how));
+    crate::cache::revalidate(resp, asked)
 }
 
 /// Delete what is past `RETENTION`, so the directory holds only what may still be served.
