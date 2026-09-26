@@ -46,6 +46,7 @@ export const FILTER_ONLY = [
   'made',
   'cast',
   'company',
+  'studio',
   'network',
   'subject',
   'place',

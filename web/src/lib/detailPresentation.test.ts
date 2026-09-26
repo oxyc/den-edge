@@ -74,8 +74,8 @@ describe('detail presentation', () => {
     expect(
       productionFacts(
         detail({
-          spoken_languages: [{ english_name: 'Swedish' }],
-          production_countries: [{ name: 'Sweden' }],
+          spoken_languages: [{ iso_639_1: 'sv', english_name: 'Swedish' }],
+          production_countries: [{ iso_3166_1: 'SE', name: 'Sweden' }],
           networks: [{ name: 'Netflix' }],
         }),
       ),

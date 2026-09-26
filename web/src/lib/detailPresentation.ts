@@ -89,8 +89,14 @@ export function productionFacts(d: TitleDetail): string {
   const money = (n: number) =>
     '$' + new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   return [
-    d.languages.slice(0, 3).join(', '),
-    d.countries.slice(0, 2).join(', '),
+    d.languages
+      .slice(0, 3)
+      .map((item) => item.name)
+      .join(', '),
+    d.countries
+      .slice(0, 2)
+      .map((item) => item.name)
+      .join(', '),
     d.revenue && d.revenue > 0
       ? `${money(d.revenue)} box office`
       : d.budget && d.budget > 0

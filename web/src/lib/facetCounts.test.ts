@@ -42,6 +42,7 @@ describe('facetParts', () => {
     expect(facetParts('like-movie-949', 'movie')).toEqual([['like', '949']]);
     expect(facetParts('like-tv-1396', 'movie')).toEqual([]);
     expect(facetParts('person-Q25191', 'movie')).toEqual([['person', 'Q25191']]);
+    expect(facetParts('studio-Q159846', 'movie')).toEqual([['studio', 'Q159846']]);
     expect(facetParts('runtime-under-90', 'movie')).toEqual([['runtime', 'under-90']]);
     expect(facetParts('technique-live_action', 'movie')).toEqual([['technique', 'live_action']]);
   });

@@ -49,7 +49,10 @@ describe('title pages', () => {
       '/b.jpg',
       'Why are they here?',
       116,
-      ['Drama', 'Science Fiction'],
+      [
+        { id: 18, name: 'Drama' },
+        { id: 878, name: 'Science Fiction' },
+      ],
     ]);
     expect(detail.cast).toEqual([
       { id: 1, name: 'Amy Adams', role: 'Louise', profilePath: '/p.jpg' },

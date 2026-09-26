@@ -9,7 +9,6 @@
     episodeProgress,
     fetchRatings,
     markableEpisodes,
-    productionFacts,
     seriesPresentation,
     type Ratings,
   } from '../lib/detailPresentation';
@@ -20,6 +19,7 @@
   import PosterRow from './PosterRow.svelte';
   import TitleActions from './TitleActions.svelte';
   import TitleMetadata from './TitleMetadata.svelte';
+  import ProductionMetadata from './ProductionMetadata.svelte';
   import DetailTabs from './DetailTabs.svelte';
   import EpisodeCard from './EpisodeCard.svelte';
   import SeasonDownload from './SeasonDownload.svelte';
@@ -36,6 +36,7 @@
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref } from '../lib/route';
+  import { fetchIconicStudios, type IconicStudio } from '../lib/iconicStudios';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -184,6 +185,7 @@
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
+  let iconicStudios = $state<IconicStudio[]>([]);
   /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
@@ -233,6 +235,17 @@
     return () => {
       live = false;
     };
+  });
+
+  $effect(() => {
+    const [base, type, id] = [atlas, ref.type, ref.id];
+    iconicStudios = [];
+    if (!active || !base) return;
+    const controller = new AbortController();
+    void fetchIconicStudios(base, { type, id }, controller.signal).then((loaded) => {
+      if (!controller.signal.aborted) iconicStudios = loaded;
+    });
+    return () => controller.abort();
   });
 
   $effect(() => {
@@ -395,11 +408,12 @@
             pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
             {warningKey}
             {warningCategories}
+            {region}
           />
           {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
-          {#if productionFacts(d)}<p class="production desktop-overview">
-              {productionFacts(d)}
-            </p>{/if}
+          <div class="desktop-overview">
+            <ProductionMetadata detail={d} studios={iconicStudios} />
+          </div>
           {#if d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
               {ratings?.awards ? ratings.awards : ''}
             </p>{/if}
@@ -458,7 +472,7 @@
   {/if}
   <div class="mobile-overview">
     {#if d.overview}<p class="overview">{d.overview}</p>{/if}
-    {#if productionFacts(d)}<p class="production">{productionFacts(d)}</p>{/if}
+    <ProductionMetadata detail={d} studios={iconicStudios} />
     {#if d.imdbId}<p class="awards" title={ratings?.awards}>
         {ratings?.awards ?? ''}
       </p>{/if}
@@ -734,12 +748,6 @@
     line-height: 1.55;
   }
 
-  .production {
-    color: var(--muted);
-    font-size: 14px;
-    margin: 20px 0 0;
-  }
-
   .awards {
     height: 22px;
     overflow: hidden;
@@ -990,10 +998,6 @@
 
     .overview {
       margin: 12px 0 0;
-    }
-
-    .production {
-      margin-top: 16px;
     }
 
     .episodes {

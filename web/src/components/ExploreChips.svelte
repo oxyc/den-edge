@@ -24,7 +24,8 @@
     ['rating', 'Rating'],
     // Listed only where atlas's filter answers, from its counts: a quiet tail, each its strongest few.
     ['people', 'People'],
-    ['company', 'Studios'],
+    ['studio', 'Iconic studios'],
+    ['company', 'Companies'],
     ['network', 'Networks'],
     ['subject', 'Subjects'],
     ['place', 'Places'],

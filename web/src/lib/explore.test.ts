@@ -531,6 +531,12 @@ describe('the kinds only atlas’s filter knows', () => {
         labels: { Q3: 'Cy' },
         selected: ['Q3'],
       },
+      studio: {
+        mode: 'and',
+        complete: true,
+        values: { Q159846: 4 },
+        labels: { Q159846: 'A24' },
+      },
     },
   };
 
@@ -546,6 +552,10 @@ describe('the kinds only atlas’s filter knows', () => {
     // An id the address can't carry isn't offered.
     expect(chips.some((c) => c.id.includes('hand'))).toBe(false);
     expect(chips.find((c) => c.id === 'runtime-under-90')?.label).toBe('Under 90 min');
+    expect(chips.find((c) => c.id === 'studio-Q159846')).toMatchObject({
+      label: 'A24',
+      group: 'studio',
+    });
   });
 
   it('names a pick before the counts do', () => {
