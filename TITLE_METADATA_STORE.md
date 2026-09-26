@@ -40,8 +40,9 @@ page-shaped batches are the workload this store is selected for.
   400 KiB in this build (4.1 MiB to 4.5 MiB).
 
 The store has a 256 MiB file ceiling with 4 MiB of commit headroom. Expiry scans use 512-key transactions so scan
-memory is bounded and readers keep using stable snapshots. Legacy JSON files are imported in the same transaction
-as an import marker and retained as a rollback copy; no schema or binary upgrade purges them.
+memory is bounded and readers keep using stable snapshots. Legacy JSON import also commits at most 512 records at
+a time. Its marker is written only after the complete scan; an interrupted import resumes idempotently before the
+store is exposed to requests. Old JSON files remain as a rollback copy, and no schema or binary upgrade purges them.
 
 Run the fixture with:
 

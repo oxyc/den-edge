@@ -209,47 +209,75 @@ impl Store {
         Ok(store)
     }
 
-    /// Existing JSON records remain in place as a rollback copy. The marker is committed in the same transaction
-    /// as every imported record, so a crash retries the import instead of exposing a half-migrated store.
+    /// Existing JSON records remain in place as a rollback copy. Bounded transactions leave resumable progress;
+    /// the marker is committed only after the complete scan, and `Store::open` returns nothing before then, so a
+    /// crash retries missing records instead of exposing a half-migrated store to requests.
     fn import_legacy(&self, dir: &Path, now: u64) -> Result<(), StoreError> {
         let transaction = self.database.begin_write().map_err(StoreError::redb)?;
         {
-            let mut meta = transaction.open_table(META).map_err(StoreError::redb)?;
+            let meta = transaction.open_table(META).map_err(StoreError::redb)?;
             if meta.get(LEGACY_IMPORTED).map_err(StoreError::redb)?.is_some() {
                 return Ok(());
             }
-            drop(meta);
-            let mut table = transaction.open_table(ENTRIES).map_err(StoreError::redb)?;
-            let files = std::fs::read_dir(dir).map_err(StoreError::io)?;
-            for file in files {
-                let file = file.map_err(StoreError::io)?;
-                if file.path().extension().and_then(|value| value.to_str()) != Some("json") {
-                    continue;
-                }
-                let Ok(bytes) = std::fs::read(file.path()) else { continue };
-                let Ok(mut entry) = serde_json::from_slice::<Entry>(&bytes) else { continue };
-                if !valid_ref(&entry.kind, entry.id) || !valid_source(&entry.source) {
-                    continue;
-                }
-                let expected_name = format!("{}-{}-{}.json", entry.kind, entry.id, entry.source);
-                if file.file_name().to_str() != Some(expected_name.as_str()) {
-                    continue;
-                }
-                sanitize(&mut entry.fields, &entry.source, now);
-                if empty(&entry.fields) {
-                    continue;
-                }
-                let record_key = key(&entry.kind, entry.id, &entry.source);
-                if table.get(record_key.as_str()).map_err(StoreError::redb)?.is_none() {
-                    let value = serde_json::to_vec(&entry).map_err(|error| StoreError::Failed(error.to_string()))?;
-                    table.insert(record_key.as_str(), value.as_slice()).map_err(StoreError::redb)?;
-                }
+            transaction.open_table(ENTRIES).map_err(StoreError::redb)?;
+        }
+        transaction.commit().map_err(StoreError::redb)?;
+
+        let mut batch = Vec::with_capacity(SWEEP_BATCH);
+        for file in std::fs::read_dir(dir).map_err(StoreError::io)? {
+            let file = file.map_err(StoreError::io)?;
+            if file.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
             }
-            drop(table);
-            meta = transaction.open_table(META).map_err(StoreError::redb)?;
+            let Ok(bytes) = std::fs::read(file.path()) else { continue };
+            let Ok(mut entry) = serde_json::from_slice::<Entry>(&bytes) else { continue };
+            if !valid_ref(&entry.kind, entry.id) || !valid_source(&entry.source) {
+                continue;
+            }
+            let expected_name = format!("{}-{}-{}.json", entry.kind, entry.id, entry.source);
+            if file.file_name().to_str() != Some(expected_name.as_str()) {
+                continue;
+            }
+            sanitize(&mut entry.fields, &entry.source, now);
+            if empty(&entry.fields) {
+                continue;
+            }
+            let record_key = key(&entry.kind, entry.id, &entry.source);
+            let value = serde_json::to_vec(&entry).map_err(|error| StoreError::Failed(error.to_string()))?;
+            batch.push((record_key, value));
+            if batch.len() == SWEEP_BATCH {
+                self.import_batch(&mut batch)?;
+            }
+        }
+        self.import_batch(&mut batch)?;
+
+        let transaction = self.database.begin_write().map_err(StoreError::redb)?;
+        {
+            let mut meta = transaction.open_table(META).map_err(StoreError::redb)?;
             meta.insert(LEGACY_IMPORTED, &now).map_err(StoreError::redb)?;
         }
         transaction.commit().map_err(StoreError::redb)
+    }
+
+    fn import_batch(&self, records: &mut Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        if !self.within_quota()? {
+            return Err(StoreError::Full);
+        }
+        let transaction = self.database.begin_write().map_err(StoreError::redb)?;
+        {
+            let mut table = transaction.open_table(ENTRIES).map_err(StoreError::redb)?;
+            for (record_key, value) in records.iter() {
+                if table.get(record_key.as_str()).map_err(StoreError::redb)?.is_none() {
+                    table.insert(record_key.as_str(), value.as_slice()).map_err(StoreError::redb)?;
+                }
+            }
+        }
+        transaction.commit().map_err(StoreError::redb)?;
+        records.clear();
+        Ok(())
     }
 
     fn within_quota(&self) -> Result<bool, StoreError> {
@@ -289,13 +317,10 @@ impl ProjectionStore for Store {
                 if let Some(value) = observation.fields.poster_path {
                     fields.poster_path = Some(Observed { value, observed_at: now });
                 }
-                let entry = Entry {
-                    kind: observation.kind,
-                    id: observation.id,
-                    source: observation.source,
-                    fields,
-                };
-                let value = serde_json::to_vec(&entry).map_err(|error| StoreError::Failed(error.to_string()))?;
+                let entry =
+                    Entry { kind: observation.kind, id: observation.id, source: observation.source, fields };
+                let value =
+                    serde_json::to_vec(&entry).map_err(|error| StoreError::Failed(error.to_string()))?;
                 table.insert(record_key.as_str(), value.as_slice()).map_err(StoreError::redb)?;
             }
         }
@@ -351,7 +376,9 @@ impl ProjectionStore for Store {
             {
                 let mut table = transaction.open_table(ENTRIES).map_err(StoreError::redb)?;
                 for record_key in keys {
-                    let Some(value) = table.get(record_key.as_str()).map_err(StoreError::redb)? else { continue };
+                    let Some(value) = table.get(record_key.as_str()).map_err(StoreError::redb)? else {
+                        continue;
+                    };
                     let original = value.value();
                     let update = if let Ok(mut entry) = serde_json::from_slice::<Entry>(original) {
                         sanitize(&mut entry.fields, &entry.source, now);
@@ -687,9 +714,15 @@ mod tests {
                     id: 1 + ((round * 211 + index) % 10_000) as u32,
                     source: if index % 4 == 0 { "justwatch-imdb" } else { "tmdb" }.to_owned(),
                     fields: if index % 4 == 0 {
-                        InputFields { rating: Some(5.0 + (index % 50) as f64 / 10.0), ..InputFields::default() }
+                        InputFields {
+                            rating: Some(5.0 + (index % 50) as f64 / 10.0),
+                            ..InputFields::default()
+                        }
                     } else if index % 2 == 0 {
-                        InputFields { poster_path: Some(format!("/poster-{index}.jpg")), ..InputFields::default() }
+                        InputFields {
+                            poster_path: Some(format!("/poster-{index}.jpg")),
+                            ..InputFields::default()
+                        }
                     } else {
                         InputFields {
                             rating: Some(5.0 + (index % 50) as f64 / 10.0),
@@ -954,11 +987,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
 
-        let titles = |count: usize| {
-            (1..=count)
-                .map(|id| json!({"type":"movie","id":id}))
-                .collect::<Vec<_>>()
-        };
+        let titles = |count: usize| (1..=count).map(|id| json!({"type":"movie","id":id})).collect::<Vec<_>>();
         assert_eq!(
             h.send(
                 "POST",
@@ -1026,15 +1055,10 @@ mod tests {
         });
         std::fs::write(dir.join("unexpected.json"), misplaced.to_string()).unwrap();
         let first = Store::open(&dir, 2_000).unwrap();
-        let found = first
-            .query_batch(vec![MediaRef { kind: "movie".into(), id: 550 }], 2_000)
-            .unwrap();
+        let found = first.query_batch(vec![MediaRef { kind: "movie".into(), id: 550 }], 2_000).unwrap();
         assert_eq!(found[0].fields.rating.as_ref().unwrap().value, 8.4);
         assert!(
-            first
-                .query_batch(vec![MediaRef { kind: "movie".into(), id: 551 }], 2_000)
-                .unwrap()
-                .is_empty(),
+            first.query_batch(vec![MediaRef { kind: "movie".into(), id: 551 }], 2_000).unwrap().is_empty(),
             "a record under an invalid legacy path is ignored"
         );
         assert!(legacy.exists(), "migration keeps the rollback copy");
@@ -1042,9 +1066,7 @@ mod tests {
 
         std::fs::write(&legacy, b"not-json").unwrap();
         let reopened = Store::open(&dir, 3_000).unwrap();
-        let found = reopened
-            .query_batch(vec![MediaRef { kind: "movie".into(), id: 550 }], 3_000)
-            .unwrap();
+        let found = reopened.query_batch(vec![MediaRef { kind: "movie".into(), id: 550 }], 3_000).unwrap();
         assert_eq!(found[0].fields.rating.as_ref().unwrap().value, 8.4, "the import marker prevents replay");
     }
 }
