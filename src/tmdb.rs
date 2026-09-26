@@ -2342,35 +2342,50 @@ mod tests {
             state.title_metadata_cache_dir = Some(meta);
         });
         let asked = tmdb_answering("observed", "Ended");
-        let record = metadata.join("movie-550-tmdb.json");
         let recorded = || async {
             for _ in 0..200 {
-                if record.exists() {
-                    return true;
+                let response = h
+                    .send(
+                        "POST",
+                        "/metadata/title/query",
+                        Some(serde_json::json!({"titles":[{"type":"movie","id":550}]}).to_string()),
+                        &[],
+                    )
+                    .await;
+                let body = crate::handler::tests::body_json(response).await;
+                if body["entries"].as_array().is_some_and(|entries| !entries.is_empty()) {
+                    return Some(body);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            false
+            None
         };
 
         assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "miss");
-        assert!(recorded().await, "the miss was recorded");
-        let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-        assert_eq!(kept["fields"]["rating"]["value"], 7.5);
+        let kept = recorded().await.expect("the miss was recorded");
+        assert_eq!(kept["entries"][0]["fields"]["rating"]["value"], 7.5);
+        let observed_at = kept["entries"][0]["fields"]["rating"]["observedAt"].clone();
 
-        std::fs::remove_file(&record).unwrap();
         assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "hit");
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!record.exists(), "a hit is not recorded again");
+        let kept = recorded().await.expect("the original observation remains");
+        assert_eq!(
+            kept["entries"][0]["fields"]["rating"]["observedAt"], observed_at,
+            "a hit is not recorded again"
+        );
 
         // A season's own id and rating are not a title's.
         h.send("GET", "/tmdb/3/tv/1399/season/1", None, &[]).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            std::fs::read_dir(&metadata).map(|d| d.count()).unwrap_or(0),
-            0,
-            "nothing else was recorded"
-        );
+        let season = h
+            .send(
+                "POST",
+                "/metadata/title/query",
+                Some(serde_json::json!({"titles":[{"type":"tv","id":3624}]}).to_string()),
+                &[],
+            )
+            .await;
+        assert_eq!(crate::handler::tests::body_json(season).await, serde_json::json!({"entries":[]}));
         assert_eq!(crate::lock(&asked).len(), 2);
     }
 
@@ -2397,14 +2412,22 @@ mod tests {
         aged(&whole, DETAILS_TTL + Duration::from_secs(60));
 
         assert_eq!(detail(&h, "/tmdb/3/movie/550").await.0, "revalidated");
-        let record = metadata.join("movie-550-tmdb.json");
         for _ in 0..200 {
-            if record.exists() {
-                break;
+            let response = h
+                .send(
+                    "POST",
+                    "/metadata/title/query",
+                    Some(serde_json::json!({"titles":[{"type":"movie","id":550}]}).to_string()),
+                    &[],
+                )
+                .await;
+            let body = crate::handler::tests::body_json(response).await;
+            if body["entries"].as_array().is_some_and(|entries| !entries.is_empty()) {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(record.exists(), "the confirmed answer was recorded");
+        panic!("the confirmed answer was recorded");
     }
 
     #[tokio::test]

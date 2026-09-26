@@ -143,7 +143,10 @@ pub struct AppState {
     /// Allowlisted title metadata observed by paired clients, with TMDB and Atlas/IMDb provenance kept apart.
     /// This shared index exists even when the household has no TMDB key configured.
     pub title_metadata_cache_dir: Option<std::path::PathBuf>,
-    /// Serializes the small read/merge/write records so simultaneous partial observations cannot erase fields.
+    /// The batch store is opened and imports the legacy JSON files on first use. A failed/corrupt open is retried;
+    /// it never causes the durable cache to be deleted.
+    pub title_metadata_store: tokio::sync::OnceCell<Arc<title_metadata::Store>>,
+    /// Serializes publish batches so simultaneous partial observations cannot erase fields.
     pub title_metadata_writes: tokio::sync::Mutex<()>,
     /// Observations of proxied and relayed answers being recorded behind them (`title_metadata::OBSERVING`).
     pub title_metadata_observing: Arc<tokio::sync::Semaphore>,
@@ -246,6 +249,7 @@ impl AppState {
             ratings_key: None,
             ratings_cache_dir: None,
             title_metadata_cache_dir: None,
+            title_metadata_store: tokio::sync::OnceCell::new(),
             title_metadata_writes: tokio::sync::Mutex::new(()),
             title_metadata_observing: Arc::new(tokio::sync::Semaphore::new(title_metadata::OBSERVING)),
             skipdb_cache_dir: None,
