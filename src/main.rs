@@ -36,9 +36,9 @@ pub struct AppState {
     /// each happen as one step. Workers KV could not do this, which is how its inbox lost messages when two
     /// arrived at once. One household never contends on it.
     pub write_lock: tokio::sync::Mutex<()>,
-    /// The record logs loaded so far, by library id — one household's, a few MB at most. Held across a batch
-    /// or a read, so each library's compare-and-set is one step.
-    pub libraries: tokio::sync::Mutex<HashMap<String, library::Library>>,
+    /// A short-held registry of independently locked record logs. One household's batch remains atomic without
+    /// making its disk I/O or snapshot selection block another household.
+    pub libraries: library::Libraries,
     /// CPU-heavy library gzip jobs. A busy pool falls back to identity so compression cannot occupy every Tokio
     /// worker or queue without bound; Cloudflare can compress public delivery at its edge.
     pub library_compression_slots: Arc<tokio::sync::Semaphore>,
@@ -213,7 +213,7 @@ impl AppState {
         AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
-            libraries: tokio::sync::Mutex::new(HashMap::new()),
+            libraries: library::Libraries::default(),
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_limits: library::Limits::default(),
             claims: Mutex::new(link::Throttles::default()),
