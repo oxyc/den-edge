@@ -644,11 +644,12 @@ async fn relay_with(
         let total = match Arc::clone(&state.media_slots).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                state.metrics.media_refused("total");
                 return crate::handler::retry_after(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &error("media_busy"),
                     MEDIA_BUSY_RETRY_MS,
-                )
+                );
             }
         };
         return match admit(state, claim.as_deref(), &ip).await {
@@ -657,30 +658,42 @@ async fn relay_with(
                     match Arc::clone(&state.member_media_slots).try_acquire_owned() {
                         Ok(permit) => Some(permit),
                         Err(_) => {
+                            state.metrics.media_refused("member");
                             return crate::handler::retry_after(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 &error("media_busy"),
                                 MEDIA_BUSY_RETRY_MS,
-                            )
+                            );
                         }
                     }
                 } else {
                     None
                 };
-                stream(state, req, target, rid, slot, total, member).await
+                let permits = MediaPermits {
+                    _admission: state.metrics.media_admitted(member.is_some()),
+                    _total: total,
+                    _member: member,
+                };
+                stream(state, req, target, rid, slot, permits).await
             }
             // Said at the start of a trailer, where the page can turn it into YouTube's embed. Never
             // part-way through one: that would be a stall, and a player would simply keep asking.
-            Admitted::Busy => crate::handler::retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &error("media_busy"),
-                MEDIA_BUSY_RETRY_MS,
-            ),
-            Admitted::Spent => crate::handler::retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &error("media_daily_spent"),
-                MEDIA_BUSY_RETRY_MS,
-            ),
+            Admitted::Busy => {
+                state.metrics.media_refused("guest");
+                crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("media_busy"),
+                    MEDIA_BUSY_RETRY_MS,
+                )
+            }
+            Admitted::Spent => {
+                state.metrics.media_refused("daily");
+                crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("media_daily_spent"),
+                    MEDIA_BUSY_RETRY_MS,
+                )
+            }
         };
     }
     // A grant's calls are counted against the grant (`guest`), not against the address they come from, so a
@@ -1499,13 +1512,13 @@ fn minted_native(path: &str) -> bool {
 
 /// Pump one media response through a one-frame window. The task owns both admission permits and the upstream body,
 /// so downstream cancellation, either side stalling, or the hard lifetime drops every scarce resource together.
-fn media_body<B>(
-    mut body: B,
-    state: Arc<AppState>,
-    slot: Option<Arc<Slot>>,
-    total: tokio::sync::OwnedSemaphorePermit,
-    member: Option<tokio::sync::OwnedSemaphorePermit>,
-) -> Body
+struct MediaPermits {
+    _admission: crate::metrics::MediaAdmission,
+    _total: tokio::sync::OwnedSemaphorePermit,
+    _member: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+fn media_body<B>(mut body: B, state: Arc<AppState>, slot: Option<Arc<Slot>>, permits: MediaPermits) -> Body
 where
     B: http_body::Body<Data = Bytes> + Unpin + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -1514,7 +1527,7 @@ where
     let terminal = Arc::new(Mutex::new(None));
     let failed = Arc::clone(&terminal);
     tokio::spawn(async move {
-        let _admission = (total, member);
+        let _admission = permits;
         let deadline = tokio::time::Instant::now() + MEDIA_LIFETIME;
         loop {
             // Reserve the sole downstream frame before reading another upstream frame. A non-reading client can
@@ -1577,8 +1590,7 @@ async fn stream(
     target: String,
     rid: &str,
     slot: Option<Arc<Slot>>,
-    total: tokio::sync::OwnedSemaphorePermit,
-    member: Option<tokio::sync::OwnedSemaphorePermit>,
+    permits: MediaPermits,
 ) -> Response {
     let method = req.method().clone();
     let asked: Vec<_> = [
@@ -1613,7 +1625,7 @@ async fn stream(
     // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
     // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling. Each is counted on the
     // day it leaves: a stream begun before UTC midnight that kept its first day reset the new day's count.
-    let body = media_body(body, Arc::clone(state), slot, total, member);
+    let body = media_body(body, Arc::clone(state), slot, permits);
     let mut resp = Response::new(body);
     *resp.status_mut() = parts.status;
     for name in [
@@ -2597,6 +2609,11 @@ mod tests {
 
         let guest = h.send("GET", "/reel/hls/bbbbbbbbbbb.m3u8", None, &[]).await;
         assert_eq!(guest.status(), StatusCode::SERVICE_UNAVAILABLE, "a guest still needs one");
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_refused_total{reason=\"guest\"} 1\n"));
     }
 
     #[tokio::test]
@@ -2627,6 +2644,11 @@ mod tests {
 
         let guest = h.send("GET", "/reel/hls/aaaaaaaaaaa.m3u8", None, &[]).await;
         assert_eq!(guest.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_refused_total{reason=\"daily\"} 1\n"));
 
         let member = format!("{LIB}:{TOKEN}");
         let mine =
@@ -2950,12 +2972,24 @@ mod tests {
         let first = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.1")]).await;
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(h.state.media_slots.available_permits(), 0, "the unread body owns the slot");
+        assert!(h.state.metrics.render().contains("den_edge_media_admission_active{audience=\"guest\"} 1\n"));
 
         let refused = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(refused.headers().contains_key("retry-after"));
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_refused_total{reason=\"total\"} 1\n"));
         drop(first);
         assert_eq!(slots_back(&h.state.media_slots).await, 1);
+        assert!(h.state.metrics.render().contains("den_edge_media_admission_active{audience=\"guest\"} 0\n"));
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_high_water{audience=\"guest\"} 1\n"));
 
         let admitted = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(admitted.status(), StatusCode::OK);
@@ -2978,6 +3012,11 @@ mod tests {
         tokio::time::sleep(super::MEDIA_IDLE + std::time::Duration::from_millis(20)).await;
         assert_eq!(slots_back(&h.state.media_slots).await, 1);
         assert_eq!(slots_back(&h.state.member_media_slots).await, 1);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_active{audience=\"member\"} 0\n"));
         assert!(axum::body::to_bytes(response.into_body(), usize::MAX).await.is_err());
     }
 
@@ -2995,13 +3034,28 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(h.state.member_media_slots.available_permits(), 0);
         assert_eq!(h.state.media_slots.available_permits(), 1);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_active{audience=\"member\"} 1\n"));
 
         let refused = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(h.state.media_slots.available_permits(), 1, "the refused member returned its total slot");
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_refused_total{reason=\"member\"} 1\n"));
         drop(first);
         assert_eq!(slots_back(&h.state.member_media_slots).await, 1);
         assert_eq!(slots_back(&h.state.media_slots).await, 2);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains("den_edge_media_admission_active{audience=\"member\"} 0\n"));
 
         let admitted = h.send("GET", SEGMENT, None, &[("x-den-library-member", &member)]).await;
         assert_eq!(admitted.status(), StatusCode::OK);

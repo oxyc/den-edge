@@ -3,13 +3,14 @@
 
 use crate::lock;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub struct Metrics {
     requests: Mutex<BTreeMap<(&'static str, u16), u64>>,
     request_admission: Mutex<RequestAdmission>,
     connection_admission: Mutex<ConnectionAdmission>,
+    media_admission: Mutex<MediaAdmissionState>,
     /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
     /// over rows (or one keeps writing from an old base).
     library_writes: Mutex<(u64, u64)>,
@@ -41,6 +42,28 @@ struct ConnectionAdmission {
     active: usize,
     high_water: usize,
     waited: u64,
+}
+
+#[derive(Default)]
+struct MediaAdmissionState {
+    active: [usize; 2],
+    high_water: [usize; 2],
+    refused: BTreeMap<&'static str, u64>,
+}
+
+/// Keeps the media gauge tied to the same lifetime as the permits and upstream body. Dropping an answer before
+/// polling it, downstream cancellation, and every error path therefore return the gauge as well as capacity.
+pub struct MediaAdmission {
+    metrics: Arc<Metrics>,
+    audience: usize,
+}
+
+impl Drop for MediaAdmission {
+    fn drop(&mut self) {
+        let mut admission = lock(&self.metrics.media_admission);
+        debug_assert!(admission.active[self.audience] > 0);
+        admission.active[self.audience] = admission.active[self.audience].saturating_sub(1);
+    }
 }
 
 /// The codes a guest's session start can be refused with, each always rendered, so a limit never met reads 0.
@@ -96,6 +119,20 @@ impl Metrics {
         let mut admission = lock(&self.connection_admission);
         debug_assert!(admission.active > 0);
         admission.active = admission.active.saturating_sub(1);
+    }
+
+    pub fn media_admitted(self: &Arc<Self>, member: bool) -> MediaAdmission {
+        let audience = usize::from(member);
+        let mut admission = lock(&self.media_admission);
+        admission.active[audience] += 1;
+        admission.high_water[audience] = admission.high_water[audience].max(admission.active[audience]);
+        drop(admission);
+        MediaAdmission { metrics: Arc::clone(self), audience }
+    }
+
+    pub fn media_refused(&self, reason: &'static str) {
+        debug_assert!(["total", "member", "guest", "daily"].contains(&reason));
+        *lock(&self.media_admission).refused.entry(reason).or_default() += 1;
     }
 
     pub fn record_library_writes(&self, applied: usize, conflicts: usize) {
@@ -175,6 +212,27 @@ impl Metrics {
             connections.active, connections.high_water, connections.waited
         ));
         drop(connections);
+        let media = lock(&self.media_admission);
+        out.push_str(
+            "# HELP den_edge_media_admission_active Admitted media exchanges currently holding capacity, by audience.\n\
+             # TYPE den_edge_media_admission_active gauge\n\
+             # HELP den_edge_media_admission_high_water Highest simultaneous admitted media exchanges holding capacity, by audience.\n\
+             # TYPE den_edge_media_admission_high_water gauge\n\
+             # HELP den_edge_media_admission_refused_total Media admissions refused, by bounded resource.\n\
+             # TYPE den_edge_media_admission_refused_total counter\n",
+        );
+        for (audience, label) in ["guest", "member"].into_iter().enumerate() {
+            out.push_str(&format!(
+                "den_edge_media_admission_active{{audience=\"{label}\"}} {}\n\
+                 den_edge_media_admission_high_water{{audience=\"{label}\"}} {}\n",
+                media.active[audience], media.high_water[audience]
+            ));
+        }
+        for reason in ["total", "member", "guest", "daily"] {
+            let count = media.refused.get(reason).copied().unwrap_or(0);
+            out.push_str(&format!("den_edge_media_admission_refused_total{{reason=\"{reason}\"}} {count}\n"));
+        }
+        drop(media);
         let (applied, conflicts) = *lock(&self.library_writes);
         out.push_str(&format!(
             "# HELP den_edge_library_writes_total Record-log writes, applied or refused as stale.\n\
