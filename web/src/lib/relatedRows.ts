@@ -3,6 +3,8 @@
 
 import { tmdbPages, type RowDef } from './catalog';
 import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
+import { filterTitles } from './filterRoutes';
+import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import { likeId, personHref, searchHref } from './route';
 import { fetchTitle } from './tmdb';
@@ -189,6 +191,51 @@ export async function firstScreen(
     }
   }
   return null;
+}
+
+/** Every indexed title from one curated studio, films and series together, except the title already open. */
+export function studioRow(
+  studio: IconicStudio,
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef {
+  return {
+    id: `studio-${studio.id}`,
+    title: `More from ${studio.name}`,
+    headingLink: {
+      before: 'More from ',
+      label: studio.name,
+      after: '',
+      href: searchHref('', { chips: [`studio-${studio.id}`] }),
+    },
+    filter: (title) => keyOf(title) !== keyOf(self),
+    load: filterTitles(atlas, 'all', [{ kind: 'studio', id: studio.id }], { fetchImpl }),
+  };
+}
+
+/** More titles in a non-English original language, kept low on the page as a regional discovery row. */
+export function languageRow(
+  language: { id: string; name: string },
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef {
+  const label = `in ${language.name}`;
+  return {
+    id: `language-${language.id}`,
+    title: `More ${label}`,
+    headingLink: {
+      before: 'More ',
+      label,
+      after: '',
+      href: searchHref('', { type: self.type, chips: [`lang-${language.id}`] }),
+    },
+    // Atlas's broad language facts may contain several languages; its card's single original language is the
+    // stricter meaning this row promises.
+    filter: (title) => keyOf(title) !== keyOf(self) && title.originalLanguage === language.id,
+    load: filterTitles(atlas, self.type, [{ kind: 'language', id: language.id }], { fetchImpl }),
+  };
 }
 
 /** The franchise a film belongs to, in release order: one fetch, one page. */

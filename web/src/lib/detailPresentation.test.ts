@@ -81,6 +81,17 @@ describe('detail presentation', () => {
       ),
     ).toBe('Swedish · Sweden · Netflix');
   });
+  it('presents origin country, not every co-production country', () => {
+    const otto = detail({
+      origin_country: ['US'],
+      production_countries: [
+        { iso_3166_1: 'SE', name: 'Sweden' },
+        { iso_3166_1: 'US', name: 'United States of America' },
+      ],
+    });
+    expect(otto.countries).toEqual([{ id: 'US', name: 'United States' }]);
+    expect(productionFacts(otto)).toBe('United States');
+  });
   it('includes episode runtime and strips redundant episode labels without deleting ordinary prose', () => {
     const e = parseSeason({
       episodes: [{ episode_number: 1, runtime: 51, overview: 'Episode 1: The search begins.' }],

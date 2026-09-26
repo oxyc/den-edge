@@ -758,6 +758,10 @@ function clash(a: string, b: string, type: ExploreType, filtered = false): boole
   const tmdbOnly = (id: string) =>
     slotOf(id) === 'recipe' && !recipeParts(id.slice('recipe-'.length), genreType(type));
   if (filtered) {
+    // Atlas's country facts include every co-production country. Country browsing stays on TMDB's stricter
+    // origin-country query, so it cannot be combined with a facet only Atlas can answer.
+    const origin = (slot: Slot | undefined) => slot === 'country' || slot === 'region';
+    if ((origin(sa) && fromAtlas(sb)) || (origin(sb) && fromAtlas(sa))) return true;
     if ((tmdbOnly(a) && fromAtlas(sb)) || (tmdbOnly(b) && fromAtlas(sa))) return true;
   } else if (fromAtlas(sa) || fromAtlas(sb)) {
     const [feed, other] = fromAtlas(sa) ? [sa, sb] : [sb, sa];
@@ -915,8 +919,8 @@ export function facetQuery(
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
   const recipe = set.find((id) => slotOf(id) === 'recipe');
   const language = set.find((id) => slotOf(id) === 'language');
-  const country = set.find((id) => slotOf(id) === 'country');
-  const region = set.find((id) => slotOf(id) === 'region');
+  const countries = set.filter((id) => slotOf(id) === 'country');
+  const regions = set.filter((id) => slotOf(id) === 'region');
   const decade = set.find((id) => slotOf(id) === 'decade');
   const rating = set.find((id) => slotOf(id) === 'rating');
   const preset = recipe ? recipeQuery(recipe, type) : undefined;
@@ -937,8 +941,11 @@ export function facetQuery(
   }
   if (language) query.originalLanguage = codeOf(language);
   // A region is any of its countries (TMDB ORs them); a country picked beside it is narrower, and is all that's asked.
-  if (country) query.originCountry = [codeOf(country)];
-  else if (region) query.originCountry = [...(regionOf(region)?.countries ?? [])];
+  if (countries.length) query.originCountry = [...new Set(countries.map(codeOf))];
+  else if (regions.length)
+    query.originCountry = [
+      ...new Set(regions.flatMap((region) => regionOf(region)?.countries ?? [])),
+    ];
   if (decade) {
     const start = decadeOf(decade);
     query.releaseDateGte = `${Math.max(start, minYear ?? start)}-01-01`;
@@ -1186,7 +1193,10 @@ export function exploreFeed(
   if (!set.length) return forYou(type, sources);
   const id = `facets-${[...set].sort().join('+')}-${type}`;
   const local = localFeed(set, type, sources, id);
-  const items = sources.atlas ? filterItems(set, type) : undefined;
+  // Atlas's P495 facts include every co-production country (for example A Man Called Otto is US + SE), while
+  // TMDB discover's origin-country field identifies it as US. Country Search must use the latter.
+  const strictOrigin = set.some((id) => slotOf(id) === 'country' || slotOf(id) === 'region');
+  const items = sources.atlas && !strictOrigin ? filterItems(set, type) : undefined;
   if (!sources.atlas || !items) return local;
   return filterFirst(sources.atlas, type, items, local, sources, id);
 }
@@ -1218,7 +1228,11 @@ function allFeed(set: readonly string[], sources: FeedSources): RowDef {
         ? { ...exploreFeed(sides[0].set, sides[0].type, sources), id }
         : nothing(id);
   // One type's pick can't be asked of both at once: its type's feed alone is the answer.
-  const items = sources.atlas && (like || sides.length === 2) ? filterItems(set, 'all') : undefined;
+  const strictOrigin = set.some((pick) => slotOf(pick) === 'country' || slotOf(pick) === 'region');
+  const items =
+    sources.atlas && !strictOrigin && (like || sides.length === 2)
+      ? filterItems(set, 'all')
+      : undefined;
   if (!sources.atlas || !items) return local;
   return filterFirst(sources.atlas, 'all', items, local, sources, id);
 }

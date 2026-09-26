@@ -4,13 +4,16 @@
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
+  import type { IconicStudio } from '../lib/iconicStudios';
   import { titleKey, type Title } from '../lib/library';
   import {
     collectionRow,
     firstScreen,
+    languageRow,
     moreLikeThisRow,
     personRow,
     personRows,
+    studioRow,
   } from '../lib/relatedRows';
   import BrowseRow from './BrowseRow.svelte';
 
@@ -18,6 +21,7 @@
     detail,
     tmdbKey,
     atlas = null,
+    studios = [],
     active,
     shown,
   }: {
@@ -25,6 +29,8 @@
     tmdbKey: string;
     /** Where this page reaches atlas, for the titles its index finds closest; null where it can't. */
     atlas?: string | null;
+    /** Curated studios credited on this title; ordinary production companies never get a row. */
+    studios?: IconicStudio[];
     active: boolean;
     shown: (t: Title) => boolean;
   } = $props();
@@ -57,15 +63,22 @@
     const options = { key: tmdbKey };
     const self = detail.title;
     const key = titleKey(self);
+    const originalLanguage = detail.title.originalLanguage;
+    const regionalLanguage =
+      originalLanguage && originalLanguage !== 'en'
+        ? detail.languages.find((language) => language.id === originalLanguage)
+        : undefined;
     if (key !== rowsFor) {
       rows = [];
       rowsFor = key;
     }
     const defined = [
       ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
+      ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
       // Films and series together: a series' closest titles include the films that share its world, and back.
       moreLikeThisRow(detail, atlas, { ...options, mixed: true }),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
+      ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
     ];
     let live = true;
     void Promise.all(defined.map((row) => firstScreen(row, shown))).then((found) => {

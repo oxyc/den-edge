@@ -133,13 +133,17 @@ export function toTitle(
     ...ids(credited?.crew, 1, (entry) => entry.job === 'Director'),
     ...ids(credited?.cast, 3),
   ];
-  // A film names its production countries; a series names the country it originates in.
-  const made = Array.isArray(details.production_countries)
-    ? (details.production_countries as { iso_3166_1?: unknown }[]).flatMap((c) =>
-        typeof c?.iso_3166_1 === 'string' ? [c.iso_3166_1] : [],
-      )
-    : Array.isArray(details.origin_country)
-      ? details.origin_country.filter((c): c is string => typeof c === 'string')
+  // Origin is nationality; production countries include financing/co-production and can be much broader. Older
+  // responses without origin_country retain the production-country fallback.
+  const origins = Array.isArray(details.origin_country)
+    ? details.origin_country.filter((c): c is string => typeof c === 'string')
+    : [];
+  const made = origins.length
+    ? origins
+    : Array.isArray(details.production_countries)
+      ? (details.production_countries as { iso_3166_1?: unknown }[]).flatMap((c) =>
+          typeof c?.iso_3166_1 === 'string' ? [c.iso_3166_1] : [],
+        )
       : [];
   const externalIds = details.external_ids as { imdb_id?: unknown } | null | undefined;
   const imdb = typeof details.imdb_id === 'string' ? details.imdb_id : externalIds?.imdb_id;

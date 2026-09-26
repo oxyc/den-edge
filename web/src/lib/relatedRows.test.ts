@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
 import type { RowDef } from './catalog';
-import { collectionRow, firstScreen, moreLikeThisRow, personRow, personRows } from './relatedRows';
+import {
+  collectionRow,
+  firstScreen,
+  languageRow,
+  moreLikeThisRow,
+  personRow,
+  personRows,
+  studioRow,
+} from './relatedRows';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });
@@ -340,6 +348,101 @@ describe('collectionRow', () => {
     expect((await row.load(1)).map((t) => t.id)).toEqual([1, 2]);
     expect(await row.load(2)).toEqual([]);
     expect(row.title).toBe('The Saga');
+  });
+});
+
+describe('studioRow', () => {
+  it('pages films and series from the curated studio filter and links its heading to Search', async () => {
+    const asked: string[] = [];
+    const row = studioRow(
+      { id: 'Q174811', name: 'Studio Ghibli' },
+      self,
+      '/atlas',
+      answering(
+        {
+          '/atlas/index/filter/all/titles.json?sel=studio:Q174811': {
+            order: 'votes',
+            titles: [
+              { type: 'movie', id: 550, title: 'Fight Club' },
+              { type: 'movie', id: 129, title: 'Spirited Away' },
+              { type: 'series', id: 123, title: 'A Series' },
+            ],
+          },
+          '/atlas/index/filter/all/titles.json?sel=studio:Q174811&skip=24': {
+            order: 'votes',
+            titles: [],
+          },
+        },
+        asked,
+      ),
+    );
+
+    expect(row.title).toBe('More from Studio Ghibli');
+    expect(row.headingLink).toEqual({
+      before: 'More from ',
+      label: 'Studio Ghibli',
+      after: '',
+      href: '/search?c=studio-Q174811',
+    });
+    expect((await row.load(1)).map((title) => `${title.type}:${title.id}`)).toEqual([
+      'movie:550',
+      'movie:129',
+      'tv:123',
+    ]);
+    expect(row.filter?.(self)).toBe(false);
+    expect(row.filter?.({ type: 'tv', id: 123, title: 'A Series' })).toBe(true);
+    expect(await row.load(2)).toEqual([]);
+    expect(asked).toEqual([
+      '/atlas/index/filter/all/titles.json?sel=studio:Q174811',
+      '/metadata/title/query',
+      '/atlas/index/filter/all/titles.json?sel=studio:Q174811&skip=24',
+    ]);
+  });
+});
+
+describe('languageRow', () => {
+  it('keeps the title type, links Search, and excludes the title already open', async () => {
+    const asked: string[] = [];
+    const row = languageRow(
+      { id: 'sv', name: 'Swedish' },
+      { type: 'tv', id: 9, title: 'The Series' },
+      '/atlas',
+      answering(
+        {
+          '/atlas/index/filter/series/titles.json?sel=language:sv': {
+            order: 'votes',
+            titles: [
+              { type: 'series', id: 9, title: 'The Series', originalLanguage: 'sv' },
+              { type: 'series', id: 10, title: 'Another Series', originalLanguage: 'sv' },
+              { type: 'series', id: 11, title: 'English Co-production', originalLanguage: 'en' },
+            ],
+          },
+        },
+        asked,
+      ),
+    );
+
+    expect(row.title).toBe('More in Swedish');
+    expect(row.headingLink).toEqual({
+      before: 'More ',
+      label: 'in Swedish',
+      after: '',
+      href: '/search?type=tv&c=lang-sv',
+    });
+    expect((await row.load(1)).map((title) => title.id)).toEqual([9, 10, 11]);
+    expect(row.filter?.({ type: 'tv', id: 9, title: 'The Series', originalLanguage: 'sv' })).toBe(
+      false,
+    );
+    expect(
+      row.filter?.({ type: 'tv', id: 10, title: 'Another Series', originalLanguage: 'sv' }),
+    ).toBe(true);
+    expect(
+      row.filter?.({ type: 'tv', id: 11, title: 'English Co-production', originalLanguage: 'en' }),
+    ).toBe(false);
+    expect(asked).toEqual([
+      '/atlas/index/filter/series/titles.json?sel=language:sv',
+      '/metadata/title/query',
+    ]);
   });
 });
 

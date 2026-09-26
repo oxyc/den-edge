@@ -208,6 +208,21 @@ export function parseDetail(
   const runtime = [num(body.runtime), ...episodeRuns.map(num)].find(
     (m) => m !== undefined && m > 0,
   );
+  const productionCountries = list(body.production_countries);
+  const origins = Array.isArray(body.origin_country)
+    ? body.origin_country.flatMap((value) =>
+        typeof value === 'string' && /^[a-z]{2}$/i.test(value) ? [value.toUpperCase()] : [],
+      )
+    : [];
+  const countryFacts = origins.length
+    ? origins.map((id) => {
+        const named = productionCountries.find(
+          (country) => text(country.iso_3166_1)?.toUpperCase() === id,
+        );
+        const display = new Intl.DisplayNames(['en'], { type: 'region' }).of(id);
+        return { iso_3166_1: id, name: text(named?.name) ?? display ?? id };
+      })
+    : productionCountries;
   return {
     title,
     overview: text(body.overview),
@@ -241,7 +256,7 @@ export function parseDetail(
       const name = text(l.english_name) ?? text(l.name);
       return id && name ? [{ id, name }] : [];
     }),
-    countries: list(body.production_countries).flatMap((c): NamedFacet[] => {
+    countries: countryFacts.flatMap((c): NamedFacet[] => {
       const id = text(c.iso_3166_1)?.toUpperCase();
       const name = text(c.name)?.replace('United States of America', 'United States');
       return id && name ? [{ id, name }] : [];
