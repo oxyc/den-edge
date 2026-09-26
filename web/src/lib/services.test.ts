@@ -242,9 +242,8 @@ describe('atlas rows', () => {
     );
   });
 
-  // den-edge keeps what a chart it relays says (`x-den-title-metadata: kept`); sending it back would be the same
-  // write twice. Only a chart atlas answered directly — the tailnet's `/atlas` — is sent from here.
-  it('sends nothing back for a chart den-edge kept itself', async () => {
+  // Under a rolling upgrade an older den-edge may still say it kept a relayed chart itself. Do not write it twice.
+  it('sends nothing back for a chart an older den-edge says it kept itself', async () => {
     useLibraryCredential({ id: 'a', member: 'b' });
     const writes: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {

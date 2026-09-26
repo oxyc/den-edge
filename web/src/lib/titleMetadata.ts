@@ -46,11 +46,10 @@ const validObserved = <T>(
   Date.now() - field.observedAt < RETENTION_MS &&
   value(field.value);
 
-// What this browser sends back to `/metadata/title`: only what den-edge did not see itself. Every TMDB answer comes
-// through den-edge's proxy (`tmdbCache.ts`) and every atlas chart relayed through it, and den-edge keeps what those say
-// as it passes them on (`src/title_metadata.rs`). An atlas chart answered by atlas directly — the tailnet's `/atlas`,
-// which `tailscale serve` hands straight to atlas — is the one den-edge never sees; its answer carries no
-// `x-den-title-metadata`, and its ratings are sent from here.
+// What this browser sends back to `/metadata/title`. TMDB answers are observed from den-edge's durable proxy cache;
+// Atlas catalogs remain streamed through the relay, so their small rating projection is batched here whether the
+// chart came through den-edge or directly from the tailnet. `x-den-title-metadata: kept` remains understood during a
+// rolling upgrade from a server that still observed a chart itself.
 
 /** How long observations gather before they go, so a page of charts is one request rather than one per chart. */
 const FLUSH_MS = 250;
@@ -173,7 +172,7 @@ export function rememberAtlasMetadata(titles: Title[], fetchImpl: typeof fetch =
   publish(entries, fetchImpl);
 }
 
-/** Whether den-edge kept what this atlas answer says itself, so it need not be sent back. */
+/** Whether an older den-edge kept what this Atlas answer says itself, so it need not be sent back twice. */
 export const keptByEdge = (res: Response): boolean =>
   res.headers.get('x-den-title-metadata') === 'kept';
 
