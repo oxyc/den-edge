@@ -34,8 +34,10 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
+use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 const NS: &str = "lib";
@@ -68,6 +70,9 @@ const ROW_OVERHEAD: usize = 192;
 const MAX_LOG_LINE: usize = 6 * (MAX_VALUE + 128) + 128;
 const MAX_CACHED_LIBRARIES: usize = 128;
 const PAGE_BYTES: usize = 512 * 1024;
+/// Leave networking and small control work cores while large sync pages are compressed. When both are busy a
+/// caller receives identity; compression is a representation choice, not a reason to queue or reject the page.
+pub(crate) const COMPRESSION_JOBS: usize = 4;
 
 /// Sized for the shipped 64 MiB container, leaving room for requests, serialization and compaction.
 /// The charge includes twice the string lengths plus map/row overhead, rather than claiming to
@@ -84,8 +89,8 @@ impl Default for Limits {
     }
 }
 
-fn row_bytes(k: &str, v: &str) -> usize {
-    2 * (k.len() + v.len()) + ROW_OVERHEAD
+fn row_bytes(k: &str, v: &str, fragment_bytes: usize) -> usize {
+    2 * (k.len() + v.len()) + fragment_bytes + ROW_OVERHEAD
 }
 
 fn full() -> io::Error {
@@ -132,6 +137,9 @@ pub struct Library {
     member_hash: Option<[u8; 32]>,
     head: u64,
     rows: HashMap<String, Row>,
+    /// Each live row's current sequence to its key. Changes can start at `since` without scanning and sorting
+    /// every row in the library; superseded sequences are removed when their key is replaced.
+    sequence: BTreeMap<u64, String>,
     /// Write lines in the log file, superseded ones included.
     lines: usize,
     /// When a request last used it, for dropping idle libraries from memory.
@@ -141,7 +149,11 @@ pub struct Library {
 
 struct Row {
     seq: u64,
-    v: String,
+    /// A changes snapshot clones this pointer under the state lock, not the ciphertext allocation.
+    v: Arc<str>,
+    /// Canonical response object, escaped once when the row is written or loaded. Unique pages copy already
+    /// serialized fragments rather than re-escaping every ciphertext value on every poll.
+    fragment: Arc<[u8]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -320,6 +332,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         member_hash: None,
         head: 0,
         rows: HashMap::new(),
+        sequence: BTreeMap::new(),
         lines: 0,
         last_used: now,
         bytes: LIBRARY_OVERHEAD,
@@ -346,13 +359,15 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         let current = lib.rows.get(&w.k);
         let current_seq = current.map_or(0, |r| r.seq);
         if current_seq != w.base {
-            conflicts.push(json!({ "k": w.k, "seq": current_seq, "v": current.map(|r| r.v.clone()) }));
+            conflicts.push(json!({ "k": w.k, "seq": current_seq, "v": current.map(|r| r.v.as_ref()) }));
             continue;
         }
-        next_bytes = next_bytes - current.map_or(0, |r| row_bytes(&w.k, &r.v)) + row_bytes(&w.k, &w.v);
         head += 1;
+        let fragment = row_fragment(head, &w.k, &w.v);
+        next_bytes = next_bytes - current.map_or(0, |r| row_bytes(&w.k, &r.v, r.fragment.len()))
+            + row_bytes(&w.k, &w.v, fragment.len());
         out.push_str(&log_line(head, &w.k, &w.v));
-        applied.push((w.k, head, w.v));
+        applied.push((w.k, head, w.v, fragment));
     }
     if next_bytes > state.library_limits.library_bytes {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
@@ -380,9 +395,12 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     let lib = libs.entry(id.to_owned()).or_insert(fresh);
     let applied: Vec<Value> = applied
         .into_iter()
-        .map(|(k, seq, v)| {
+        .map(|(k, seq, v, fragment)| {
             let entry = json!({ "k": k, "seq": seq });
-            lib.rows.insert(k, Row { seq, v });
+            if let Some(previous) = lib.rows.insert(k.clone(), Row { seq, v: Arc::from(v), fragment }) {
+                lib.sequence.remove(&previous.seq);
+            }
+            lib.sequence.insert(seq, k);
             lib.lines += 1;
             entry
         })
@@ -402,17 +420,32 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     )
 }
 
-/// Encoded UTF-8 length, including JSON quotes. Most values are encrypted base64; charging the
-/// worst-case six bytes for every byte made 512 KiB pages only ~85 KiB and multiplied sync round trips.
-fn json_string_bytes(value: &str) -> usize {
-    2 + value
-        .bytes()
-        .map(|byte| match byte {
-            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 2,
-            0..=31 => 6,
-            _ => 1,
-        })
-        .sum::<usize>()
+#[derive(Serialize)]
+struct ResponseRow<'a> {
+    k: &'a str,
+    seq: u64,
+    v: &'a str,
+}
+
+fn row_fragment(seq: u64, k: &str, v: &str) -> Arc<[u8]> {
+    Arc::from(serde_json::to_vec(&ResponseRow { k, seq, v }).expect("a library row always serializes"))
+}
+
+fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let entries_bytes: usize = entries.iter().map(|entry| entry.len()).sum();
+    let mut body = Vec::with_capacity(entries_bytes + entries.len() + 96);
+    body.extend_from_slice(br#"{"entries":["#);
+    for (at, entry) in entries.iter().enumerate() {
+        if at > 0 {
+            body.push(b',');
+        }
+        body.extend_from_slice(entry);
+    }
+    write!(body, r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#)
+        .expect("writing JSON to memory cannot fail");
+    body
 }
 
 async fn changes(
@@ -442,50 +475,64 @@ async fn changes(
     if !constant_time_eq(&lib.token_hash, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
-    let mut rows: Vec<(&String, &Row)> = lib.rows.iter().filter(|(_, r)| r.seq > since).collect();
-    rows.sort_by_key(|(_, r)| r.seq);
-    // Page by bytes as well as rows: 1,000 maximum-sized values do not fit the container.
-    let mut page_bytes = 0;
-    let count = rows
-        .iter()
-        .take(limit)
-        .take_while(|(k, r)| {
-            let cost = json_string_bytes(k) + json_string_bytes(&r.v) + 128;
-            if page_bytes > 0 && page_bytes + cost > PAGE_BYTES {
-                return false;
+    // Snapshot only a page of shared row values while the state is locked. Serialization and optional compression
+    // happen after release, so a large response cannot serialize every other library behind it.
+    let mut page_bytes = 128;
+    let mut entries = Vec::with_capacity(limit.min(lib.rows.len()));
+    let mut ordered = lib.sequence.range((Excluded(since), Unbounded));
+    let mut more = false;
+    while entries.len() < limit {
+        let Some((&seq, key)) = ordered.next() else { break };
+        let row = lib.rows.get(key).expect("the sequence index names a live row");
+        debug_assert_eq!(row.seq, seq);
+        let cost = row.fragment.len() + usize::from(!entries.is_empty());
+        if !entries.is_empty() && page_bytes + cost > PAGE_BYTES {
+            more = true;
+            break;
+        }
+        page_bytes += cost;
+        entries.push(Arc::clone(&row.fragment));
+    }
+    if !more {
+        more = ordered.next().is_some();
+    }
+    let head = lib.head;
+    drop(libs);
+
+    let mut body = changes_body(&entries, head, more, state.store.generation());
+    if gzip && body.len() >= 1024 {
+        if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
+            let compressed = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let compressed = gzip_bytes(&body);
+                (body, compressed)
+            })
+            .await;
+            match compressed {
+                Ok((_, Some(compressed))) => {
+                    let mut resp = raw_json(StatusCode::OK, Body::from(compressed), true);
+                    resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                    resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+                    return resp;
+                }
+                Ok((identity, None)) => body = identity,
+                Err(error) => return internal("library compression", io::Error::other(error)),
             }
-            page_bytes += cost;
-            true
-        })
-        .count();
-    let more = rows.len() > count;
-    let entries: Vec<Value> =
-        rows.iter().take(count).map(|(k, r)| json!({ "k": k, "seq": r.seq, "v": r.v })).collect();
-    let page =
-        json!({ "entries": entries, "head": lib.head, "more": more, "generation": state.store.generation() });
-    if gzip {
-        if let Some(response) = gzipped(&page) {
-            return response;
         }
     }
-    json_reply(StatusCode::OK, &page)
+    raw_json(StatusCode::OK, Body::from(body), true)
 }
 
 /// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
 /// request is echoed into them, so compression reveals nothing about what they say.
-fn gzipped(page: &Value) -> Option<Response> {
+fn gzip_bytes(body: &[u8]) -> Option<Vec<u8>> {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write as _;
-    let body = page.to_string();
-    if body.len() < 1024 {
-        return None;
-    }
-    let mut encoder = GzEncoder::new(Vec::with_capacity(body.len() / 2), Compression::default());
-    encoder.write_all(body.as_bytes()).ok()?;
-    let mut resp = raw_json(StatusCode::OK, Body::from(encoder.finish().ok()?), true);
-    resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-    Some(resp)
+    // These are usually unique sync pages and Cloudflare may recompress public delivery. Fast gzip gives direct
+    // clients most of the byte reduction without spending several cores chasing the final few percent.
+    let mut encoder = GzEncoder::new(Vec::with_capacity(body.len() / 2), Compression::fast());
+    encoder.write_all(body).ok()?;
+    encoder.finish().ok()
 }
 
 /// Whether `member` (`<id>:<token>`, the `MEMBER_HEADER` a device sends) names a library here and holds its
@@ -654,6 +701,7 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
         member_hash,
         head: 0,
         rows: HashMap::new(),
+        sequence: BTreeMap::new(),
         lines: 0,
         last_used: state.now(),
         bytes: LIBRARY_OVERHEAD,
@@ -681,8 +729,9 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
         if !valid_hex_id(&line.k) || line.v.len() > MAX_VALUE {
             return Err(full());
         }
-        let previous = lib.rows.get(&line.k).map_or(0, |r| row_bytes(&line.k, &r.v));
-        let needed = lib.bytes - previous + row_bytes(&line.k, &line.v);
+        let fragment = row_fragment(line.s, &line.k, &line.v);
+        let previous = lib.rows.get(&line.k).map_or(0, |r| row_bytes(&line.k, &r.v, r.fragment.len()));
+        let needed = lib.bytes - previous + row_bytes(&line.k, &line.v, fragment.len());
         if needed > state.library_limits.library_bytes
             || (!lib.rows.contains_key(&line.k) && lib.rows.len() >= MAX_ROWS)
         {
@@ -690,7 +739,12 @@ async fn load(state: &AppState, libs: &mut HashMap<String, Library>, id: &str) -
         }
         lib.bytes = needed;
         lib.head = lib.head.max(line.s);
-        lib.rows.insert(line.k, Row { seq: line.s, v: line.v });
+        if let Some(previous) =
+            lib.rows.insert(line.k.clone(), Row { seq: line.s, v: Arc::from(line.v), fragment })
+        {
+            lib.sequence.remove(&previous.seq);
+        }
+        lib.sequence.insert(line.s, line.k);
         lib.lines += 1;
         repair |= !bytes.ends_with(b"\n");
     }
@@ -841,6 +895,17 @@ mod tests {
             json!({ "entries": [{ "k": K1, "seq": 1, "v": "c1" }, { "k": K2, "seq": 2, "v": "c2" }],
                     "head": 2, "more": false, "generation": generation })
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_row_fragments_preserve_every_json_escape() {
+        let h = Harness::new();
+        let value = "quote \" slash \\ controls \n\r\t unicode å日本🎬";
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": value }])).await.0, StatusCode::OK);
+        assert_eq!(changes(&h, TOKEN, "").await.1["entries"][0]["v"], value);
+
+        let reopened = Harness::in_dir(h.dir.clone());
+        assert_eq!(changes(&reopened, TOKEN, "").await.1["entries"][0]["v"], value);
     }
 
     /// The store's generation survives a restart; a store that comes back without it — restored from a backup,
@@ -1203,7 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn byte_limit_refuses_growth_atomically_but_allows_shrinking_and_reload() {
         let root = Harness::new();
-        let h = bounded(&root, 1600, 3200);
+        let h = bounded(&root, 1900, 3800);
         let two = json!([{ "k": K1, "base": 0, "v": "x".repeat(100) },
             { "k": K2, "base": 0, "v": "y".repeat(100) }]);
         assert_eq!(batch(&h, TOKEN, two).await.0, StatusCode::OK);
@@ -1216,14 +1281,14 @@ mod tests {
             batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(50) }])).await.0,
             StatusCode::OK
         );
-        let reopened = bounded(&root, 1600, 3200);
+        let reopened = bounded(&root, 1900, 3800);
         assert_eq!(changes(&reopened, TOKEN, "").await.1["head"], 4);
     }
 
     #[tokio::test]
     async fn cached_libraries_are_evicted_by_bytes_and_reload_with_their_auth_intact() {
         let root = Harness::new();
-        let h = bounded(&root, 1024, 1800);
+        let h = bounded(&root, 1200, 2000);
         for n in 0..4 {
             let id = format!("{n:016x}");
             let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "x".repeat(100) }] });
@@ -1238,7 +1303,7 @@ mod tests {
                 .status(),
                 StatusCode::OK
             );
-            assert!(h.state.libraries.lock().await.values().map(|l| l.bytes).sum::<usize>() <= 1800);
+            assert!(h.state.libraries.lock().await.values().map(|l| l.bytes).sum::<usize>() <= 2000);
         }
         assert!(h.state.libraries.lock().await.len() < 4);
         let path = "/lib/0000000000000000/changes";
@@ -1267,19 +1332,6 @@ mod tests {
         assert_eq!(h.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap(), original);
         assert_eq!(delete(&h, "wrong").await, StatusCode::FORBIDDEN);
         assert_eq!(delete(&h, TOKEN).await, StatusCode::OK);
-    }
-
-    #[test]
-    fn json_string_budget_matches_the_serializer() {
-        for text in [
-            String::new(),
-            "opaque-base64+/=".into(),
-            "å日本🎬".into(),
-            "\"\\\n\r\t".into(),
-            (0_u8..32).map(char::from).collect(),
-        ] {
-            assert_eq!(super::json_string_bytes(&text), serde_json::to_vec(&text).unwrap().len());
-        }
     }
 
     #[tokio::test]
@@ -1320,6 +1372,15 @@ mod tests {
         std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut text).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), plain);
         assert!(bytes.len() < text.len() / 4, "{} of {}", bytes.len(), text.len());
+
+        let held = std::sync::Arc::clone(&h.state.library_compression_slots)
+            .acquire_many_owned(super::COMPRESSION_JOBS as u32)
+            .await
+            .unwrap();
+        let busy = ask("gzip").await;
+        assert!(!busy.headers().contains_key("content-encoding"), "busy compression falls back to identity");
+        assert_eq!(body_json(busy).await, plain);
+        drop(held);
 
         assert!(!ask("gzip;q=0").await.headers().contains_key("content-encoding"));
     }
