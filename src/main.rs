@@ -308,6 +308,12 @@ async fn main() {
         .map(|v| v.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect())
         .unwrap_or_default();
     state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
+    if let Some(web) = state.web_dir.as_deref() {
+        match state.web_files.prepare(web).await {
+            Ok(count) => eprintln!("prepared {count} immutable web assets"),
+            Err(e) => eprintln!("could not prepare immutable web assets: {e}; using per-request file checks"),
+        }
+    }
     (state.trusted_proxies, state.cloudflare_proxies) =
         env_opt("TRUSTED_PROXIES").map(|v| parse_proxies(&v)).unwrap_or_default();
     state.web_hosts = env_opt("WEB_HOSTS").map(|v| parse_hosts("WEB_HOSTS", &v)).unwrap_or_default();
