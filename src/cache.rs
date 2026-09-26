@@ -165,6 +165,7 @@ async fn open_json_file(file: &Path, max_bytes: usize) -> io::Result<(tokio::fs:
 /// the open file in 64 KiB pieces under socket backpressure and a 304 drops it without reading body bytes.
 pub(crate) struct JsonFile {
     file: tokio::fs::File,
+    stamp: Stamp,
     len: u64,
     modified: SystemTime,
     age: Duration,
@@ -180,8 +181,57 @@ impl JsonFile {
         self.digest == Sha256::digest(body)[..16]
     }
 
+    pub(crate) fn digest(&self) -> [u8; 16] {
+        self.digest
+    }
+
+    pub(crate) fn modified(&self) -> SystemTime {
+        self.modified
+    }
+
+    pub(crate) async fn bytes(mut self) -> Option<Bytes> {
+        let capacity = usize::try_from(self.len).ok()?;
+        let mut bytes = Vec::with_capacity(capacity);
+        self.file.read_to_end(&mut bytes).await.ok()?;
+        Some(Bytes::from(bytes))
+    }
+
+    /// Advance this exact open generation, never whatever inode may now occupy `path`. The pathname check only
+    /// decides whether response metadata may be republished for future opens; a concurrent replacement cannot turn
+    /// a 304 for this generation into renewed bytes from another one.
+    pub(crate) async fn renew(mut self, path: &Path, modified: SystemTime) -> Self {
+        let _turn = json_hash_lock(path).lock().await;
+        let same_path = tokio::fs::metadata(path).await.ok().and_then(|m| stamp(&m)) == Some(self.stamp);
+        if let Ok(cloned) = self.file.try_clone().await {
+            let cloned = cloned.into_std().await;
+            if matches!(tokio::task::spawn_blocking(move || cloned.set_modified(modified)).await, Ok(Ok(())))
+            {
+                if let Ok(metadata) = self.file.metadata().await {
+                    if let Some(next) = stamp(&metadata) {
+                        self.stamp = next;
+                        let now = SystemTime::now();
+                        self.modified = (UNIX_EPOCH + Duration::new(next.seconds, next.nanos)).min(now);
+                        self.age = now.duration_since(self.modified).unwrap_or_default();
+                        if same_path
+                            && tokio::fs::metadata(path).await.ok().and_then(|m| stamp(&m)) == Some(next)
+                        {
+                            write_json_meta(path, next, &self.digest).await;
+                        }
+                    }
+                }
+            }
+        }
+        self
+    }
+
     /// Build the canonical identity response. Callers add cache policy and diagnostics before `revalidate`.
     pub(crate) fn response(self) -> Response {
+        let modified = self.modified;
+        self.response_at(modified)
+    }
+
+    /// Build this representation with the timestamp of the canonical source it was derived from.
+    pub(crate) fn response_at(self, modified: SystemTime) -> Response {
         let mut response = crate::handler::raw_json(
             StatusCode::OK,
             Body::new(crate::web::FileBody::from_file(self.file, self.len)),
@@ -191,7 +241,7 @@ impl JsonFile {
             response.headers_mut().insert(header::CONTENT_LENGTH, length);
         }
         response.headers_mut().insert(header::ETAG, tag_digest(&self.digest));
-        if let Ok(modified) = HeaderValue::from_str(&http_date(self.modified)) {
+        if let Ok(modified) = HeaderValue::from_str(&http_date(modified)) {
             response.headers_mut().insert(header::LAST_MODIFIED, modified);
         }
         response
@@ -201,9 +251,28 @@ impl JsonFile {
 /// Atomically keep a canonical JSON body and prepare its response metadata while the bytes are already resident.
 /// Ratings uses this for misses and refreshes, so the first later hit does not have to hash the body from disk.
 pub(crate) async fn write_json(file: &Path, body: &Bytes) -> bool {
+    write_json_at(file, body, None).await
+}
+
+/// Keep a prepared representation, optionally with its canonical source timestamp. Backdating before writing the
+/// response sidecar makes a derived file expire with its source and leaves its first repeat hit metadata-only.
+pub(crate) async fn write_json_at(file: &Path, body: &Bytes, modified: Option<SystemTime>) -> bool {
     let _turn = json_hash_lock(file).lock().await;
     if !crate::tmdb::write(file, body).await {
         return false;
+    }
+    if let Some(modified) = modified {
+        if let Ok(opened) = tokio::fs::File::options().write(true).open(file).await {
+            let opened = opened.into_std().await;
+            if !matches!(tokio::task::spawn_blocking(move || opened.set_modified(modified)).await, Ok(Ok(())))
+            {
+                let _ = tokio::fs::remove_file(file).await;
+                return false;
+            }
+        } else {
+            let _ = tokio::fs::remove_file(file).await;
+            return false;
+        }
     }
     let Ok((_, stamp, _)) = open_json_file(file, body.len()).await else { return true };
     let digest = Sha256::digest(body);
@@ -253,6 +322,7 @@ pub(crate) async fn open_json(file: &Path, max_bytes: usize) -> Option<JsonFile>
     modified = modified.min(now);
     Some(JsonFile {
         file: opened,
+        stamp: found,
         len: found.len,
         modified,
         age: now.duration_since(modified).unwrap_or_default(),
