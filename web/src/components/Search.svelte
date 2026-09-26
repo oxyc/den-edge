@@ -368,6 +368,13 @@
     const key = `${type}|${selectionKey}`;
     const set = selectionKey ? selectionKey.split(',') : [];
     if (!here || typing) return;
+    // Country results use TMDB's strict origin-country query. Atlas counts use every Wikidata co-production
+    // country, so showing them beside this selection would describe a different result set.
+    if (set.some((id) => slotOf(id) === 'country' || slotOf(id) === 'region')) {
+      filterAnswer = null;
+      filtered = false;
+      return;
+    }
     const ask = new AbortController();
     const signal = ask.signal;
     const timer = setTimeout(async () => {

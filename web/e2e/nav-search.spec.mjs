@@ -610,12 +610,12 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
     page.on('request', (r) => {
       if (r.url().includes('/discover/')) discovered.push(r.url());
     });
-    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=decade-1990')}`);
     const grid = active(page).locator('.grid');
     await expect(grid.getByRole('link', { name: 'Atlas 500 2020' })).toBeVisible();
     // All, the default: both types in one question.
-    expect(asked).toContain('/index/filter/all/titles.json?sel=country:SE');
-    await expect.poll(() => asked).toContain('/index/filter/all/counts.json?sel=country:SE');
+    expect(asked).toContain('/index/filter/all/titles.json?sel=decade:1990');
+    await expect.poll(() => asked).toContain('/index/filter/all/counts.json?sel=decade:1990');
 
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const genres = rail.getByRole('group', { name: 'Genres' });
@@ -634,7 +634,7 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
       .getByRole('group', { name: 'People' })
       .getByRole('button', { name: 'Bob Actor', exact: true })
       .click();
-    await expect(page).toHaveURL(/\/search\?c=country-SE,person-Q2$/);
+    await expect(page).toHaveURL(/\/search\?c=decade-1990,person-Q2$/);
     await expect(
       active(page)
         .getByRole('group', { name: 'Selected' })
@@ -642,7 +642,7 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
     ).toBeVisible();
     await expect
       .poll(() => asked)
-      .toContain('/index/filter/all/titles.json?sel=country:SE,person:Q2');
+      .toContain('/index/filter/all/titles.json?sel=decade:1990,person:Q2');
     // Nothing of this went to TMDB discover.
     expect(discovered).toEqual([]);
   } finally {
@@ -650,7 +650,7 @@ test('atlas’s filter feeds the grid, judges the options and lists its people, 
   }
 });
 
-test('a region is picked from the rail’s Regions, asks atlas for region:<slug>, and a second is either-or', async () => {
+test('a region is picked from the rail and uses strict TMDB origin countries', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -661,6 +661,10 @@ test('a region is picked from the rail’s Regions, asks atlas for region:<slug>
     });
     await setup(page, { atlasGate: Promise.resolve() });
     const asked = await serveFilter(page);
+    const discovered = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/discover/')) discovered.push(r.url());
+    });
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search')}`);
     const rail = active(page).getByRole('navigation', { name: 'Browse by category' });
     const regions = rail.getByRole('group', { name: 'Regions' });
@@ -678,13 +682,10 @@ test('a region is picked from the rail’s Regions, asks atlas for region:<slug>
         name: 'Remove Nordic',
       }),
     ).toBeVisible();
-    await expect.poll(() => asked).toContain('/index/filter/all/titles.json?sel=region:nordic');
-    // Another region stays offered, and joins the first as either-or: one item, atlas's values sorted.
-    await regions.getByRole('button', { name: 'East Asian', exact: true }).click();
-    await expect(page).toHaveURL(/\/search\?c=region-nordic,region-east-asian$/);
     await expect
-      .poll(() => asked)
-      .toContain('/index/filter/all/titles.json?sel=region:east-asian|nordic');
+      .poll(() => discovered.some((url) => url.includes('with_origin_country=SE')))
+      .toBe(true);
+    expect(asked.some((path) => path.includes('sel=region:nordic'))).toBe(false);
   } finally {
     await browser.close();
   }
@@ -747,7 +748,7 @@ test('the search field finds people and characters through atlas, and a person p
   }
 });
 
-test('where atlas’s filter has no titles route, All is each type’s TMDB discover, interleaved', async () => {
+test('country Search uses each type’s strict TMDB origin discovery, interleaved', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -768,14 +769,8 @@ test('where atlas’s filter has no titles route, All is each type’s TMDB disc
     // A film, then a series, then a film: each type's page in turn, each card opening its own type's page.
     await expect(cards.nth(1)).toHaveAttribute('href', '/tv/700-series-700');
     await expect(cards.nth(2)).toHaveAttribute('href', '/movie/101-film-101');
-    // atlas asked for both types at once first, then each type alone; then TMDB, each type's.
-    expect(asked).toEqual(
-      expect.arrayContaining([
-        '/index/filter/all/titles.json?sel=country:SE',
-        '/index/filter/movie/titles.json?sel=country:SE',
-        '/index/filter/series/titles.json?sel=country:SE',
-      ]),
-    );
+    // Country browsing never asks Atlas's broader co-production-country index.
+    expect(asked.some((path) => path.includes('/titles.json?sel=country:SE'))).toBe(false);
     for (const type of ['movie', 'tv'])
       expect(
         discovered.some(

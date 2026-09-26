@@ -65,6 +65,7 @@
           ref={{ type: route.type, id: route.id }}
           {active}
           tmdbKey="fixture-key"
+          atlas="/atlas"
           omdbKey="fixture-omdb"
           region="FI"
           {scout}

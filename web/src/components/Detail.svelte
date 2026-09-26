@@ -613,7 +613,7 @@
       <span use:castEnd class="cast-end" aria-hidden="true"></span>
     </PosterRow>
   {/if}
-  <RelatedTitles detail={d} {tmdbKey} {atlas} {active} {shown} />
+  <RelatedTitles detail={d} {tmdbKey} {atlas} studios={iconicStudios} {active} {shown} />
 {/if}
 
 <style>

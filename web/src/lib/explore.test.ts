@@ -320,11 +320,19 @@ describe('facets', () => {
   });
 
   it('where atlas’s filter answers, take a second value of a kind beside the first, as either-or', () => {
-    const set = ['lang-sv', 'country-SE', 'decade-1990', 'mood-cozy', 'genre-35', 'rating-7'];
-    for (const other of ['lang-da', 'country-DK', 'decade-2000', 'mood-dark', 'genre-18']) {
+    const set = ['lang-sv', 'decade-1990', 'mood-cozy', 'genre-35', 'rating-7'];
+    for (const other of ['lang-da', 'decade-2000', 'mood-dark', 'genre-18']) {
       expect(offered(set, other, 'movie', true), other).toBe(true);
       expect(applyPick(set, other, 'movie', true)).toEqual({ set: [...set, other], removed: [] });
     }
+    expect(applyPick(set, 'country-DK', 'movie', true)).toEqual({
+      set: ['lang-sv', 'decade-1990', 'genre-35', 'rating-7', 'country-DK'],
+      removed: ['mood-cozy'],
+    });
+    expect(applyPick(['country-SE', 'genre-35'], 'country-DK', 'movie', true)).toEqual({
+      set: ['country-SE', 'genre-35', 'country-DK'],
+      removed: [],
+    });
     // One rating floor, one "Like", one recipe.
     expect(offered(set, 'rating-8', 'movie', true)).toBe(false);
     expect(offered(['like-movie-949'], 'like-movie-680', 'movie', true)).toBe(false);
@@ -437,7 +445,7 @@ describe('facets', () => {
     expect(offered(['region-nordic'], 'region-slavic', 'movie')).toBe(false);
     expect(applyPick(['region-nordic'], 'country-SE', 'movie').removed).toEqual([]);
     expect(applyPick(['mood-cozy'], 'region-nordic', 'movie').removed).toEqual(['mood-cozy']);
-    expect(applyPick(['mood-cozy'], 'region-nordic', 'movie', true).removed).toEqual([]);
+    expect(applyPick(['mood-cozy'], 'region-nordic', 'movie', true).removed).toEqual(['mood-cozy']);
     // A recipe's own countries rule out a region that names none of them.
     expect(offered(['recipe-k-drama'], 'region-east-asian', 'tv')).toBe(true);
     expect(offered(['recipe-k-drama'], 'region-nordic', 'tv')).toBe(false);
@@ -571,7 +579,7 @@ describe('the kinds only atlas’s filter knows', () => {
     ]);
     // Without the filter a mood takes no country; with it, they stand together.
     expect(applyPick(['mood-cozy'], 'country-SE', 'movie').removed).toEqual(['mood-cozy']);
-    expect(applyPick(['mood-cozy'], 'country-SE', 'movie', true).removed).toEqual([]);
+    expect(applyPick(['mood-cozy'], 'country-SE', 'movie', true).removed).toEqual(['mood-cozy']);
     // A recipe atlas has no form of still can't stand beside a kind only atlas knows.
     expect(applyPick(['person-Q1'], 'recipe-nordic-noir', 'movie', true).removed).toEqual([
       'person-Q1',
@@ -677,7 +685,7 @@ describe('Explore feeds', () => {
 
   it('asks atlas’s filter for the whole selection, and narrows nothing more itself', async () => {
     const asked: string[] = [];
-    const row = exploreFeed(['mood-cozy', 'genre-35', 'country-SE', 'rating-7'], 'movie', {
+    const row = exploreFeed(['mood-cozy', 'genre-35', 'rating-7'], 'movie', {
       ...sources(),
       atlas: '/atlas',
       fetchImpl: (async (input: RequestInfo | URL) => {
@@ -695,10 +703,26 @@ describe('Explore feeds', () => {
       }) as typeof fetch,
     });
     expect((await row.load(1)).map((t) => t.id)).toEqual([5]);
-    expect(asked[0]).toBe(
-      '/atlas/index/filter/movie/titles.json?sel=country:SE,genre:35,mood:Cozy,rating:7',
-    );
+    expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:35,mood:Cozy,rating:7');
     expect(row.filter?.({ ...film(9), genreIds: [18] })).toBe(true);
+  });
+
+  it('uses TMDB strict origin-country discovery even when Atlas is available', async () => {
+    calls.length = 0;
+    const asked: string[] = [];
+    await exploreFeed(['country-SE', 'country-DK'], 'movie', {
+      ...sources(),
+      atlas: '/atlas',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response('{}');
+      }) as typeof fetch,
+    }).load(1);
+    expect(asked).toEqual([]);
+    expect(calls[0]).toMatchObject({
+      path: '/discover/movie',
+      params: { with_origin_country: 'SE|DK' },
+    });
   });
 
   it('narrows a mood by the genre, language and decade beside it, where atlas has no filter', async () => {

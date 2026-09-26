@@ -9,6 +9,7 @@ const credits = {
 };
 const series = {
   name: 'The Series',
+  original_language: 'sv',
   first_air_date: '2020-01-01',
   last_air_date: '2024-02-01',
   status: 'Ended',
@@ -75,6 +76,61 @@ async function setup(
 ) {
   await guardNetwork(page);
   const requests = [];
+  await page.route('**/atlas/index/studios/*/*.json', (r) =>
+    r.fulfill({
+      json: {
+        studios: r.request().url().endsWith('/series/9.json')
+          ? [{ id: 'Q174811', name: 'Studio Ghibli' }]
+          : [],
+      },
+    }),
+  );
+  await page.route('**/atlas/index/similar/*/*.json', (r) =>
+    r.fulfill({ json: { ids: [], mixed: [] } }),
+  );
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ json: { entries: [] } }));
+  await page.route('**/atlas/index/filter/all/titles.json?*', (r) => {
+    const url = new URL(r.request().url());
+    if (url.searchParams.get('sel') !== 'studio:Q174811') return r.fallback();
+    return r.fulfill({
+      json: {
+        order: 'votes',
+        titles:
+          url.searchParams.get('skip') === '24'
+            ? []
+            : [
+                {
+                  type: 'movie',
+                  id: 129,
+                  title: 'Spirited Away',
+                  year: 2001,
+                  posterPath: '/spirited.jpg',
+                  rating: 8.5,
+                  votes: 19000,
+                },
+              ],
+      },
+    });
+  });
+  await page.route('**/atlas/index/filter/series/titles.json?*', (r) => {
+    const url = new URL(r.request().url());
+    if (url.searchParams.get('sel') !== 'language:sv') return r.fallback();
+    return r.fulfill({
+      json: {
+        order: 'votes',
+        titles: [
+          {
+            type: 'series',
+            id: 10,
+            title: 'Another Swedish Series',
+            year: 2022,
+            posterPath: '/swedish.jpg',
+            originalLanguage: 'sv',
+          },
+        ],
+      },
+    });
+  });
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({ contentType: 'image/svg+xml', body: art }),
   );
@@ -209,6 +265,9 @@ for (const width of [390, 834, 1280])
         'href',
         '/search?c=country-SE',
       );
+      await expect(
+        active.getByRole('link', { name: 'Studio Ghibli', exact: true }).first(),
+      ).toHaveAttribute('href', '/search?c=studio-Q174811');
       await expect(active.getByRole('link', { name: 'Browse Netflix' })).toHaveAttribute(
         'href',
         '/service/8-fi-netflix',
@@ -238,6 +297,22 @@ for (const width of [390, 834, 1280])
       await expect(upcoming.locator('.air-date')).toContainText('2099');
       await expect(upcoming.locator('.episode-play')).toBeDisabled();
       await expect(upcoming.locator('.overview')).toHaveCount(0);
+      await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+      const studioRow = active.getByRole('region', { name: 'More from Studio Ghibli' });
+      await expect(
+        studioRow.getByRole('heading').getByRole('link', { name: 'Studio Ghibli' }),
+      ).toHaveAttribute('href', '/search?c=studio-Q174811');
+      await expect(studioRow.getByRole('link', { name: /^Spirited Away/ })).toHaveAttribute(
+        'href',
+        '/movie/129-spirited-away',
+      );
+      const languageRow = active.getByRole('region', { name: 'More in Swedish' });
+      await expect(
+        languageRow.getByRole('heading').getByRole('link', { name: 'in Swedish' }),
+      ).toHaveAttribute('href', '/search?type=tv&c=lang-sv');
+      await expect(
+        languageRow.getByRole('link', { name: /^Another Swedish Series/ }),
+      ).toHaveAttribute('href', '/tv/10-another-swedish-series');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
       );
