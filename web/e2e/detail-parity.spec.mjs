@@ -268,6 +268,15 @@ for (const width of [390, 834, 1280])
       await expect(
         active.getByRole('link', { name: 'Studio Ghibli', exact: true }).first(),
       ).toHaveAttribute('href', '/search?c=studio-Q174811');
+      for (const separator of [
+        active.locator('.genres .separator').first(),
+        active.locator('.production .separator').first(),
+      ]) {
+        await expect(separator).toHaveCount(1);
+        expect(
+          await separator.evaluate((node) => parseFloat(getComputedStyle(node).marginInlineStart)),
+        ).toBeGreaterThan(0);
+      }
       await expect(active.getByRole('link', { name: 'Browse Netflix' })).toHaveAttribute(
         'href',
         '/service/8-fi-netflix',

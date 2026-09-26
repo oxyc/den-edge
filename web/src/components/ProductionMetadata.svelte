@@ -59,7 +59,7 @@
 {#if hasFacts}
   <p class={`production ${className}`.trim()}>
     {#each groups as group, groupIndex (group.map((item) => item.id).join(':'))}
-      {#if groupIndex}<span class="separator" aria-hidden="true"> · </span>{/if}
+      {#if groupIndex}<span class="separator" aria-hidden="true">·</span>{/if}
       {#each group as item, itemIndex (item.id)}
         {#if itemIndex}<span aria-hidden="true">, </span>{/if}
         {#if item.href}<a href={item.href}>{item.name}</a>{:else}<span>{item.name}</span>{/if}
@@ -73,6 +73,10 @@
     color: var(--muted);
     font-size: 14px;
     margin: 20px 0 0;
+  }
+
+  .separator {
+    margin-inline: 0.35em;
   }
 
   a {
