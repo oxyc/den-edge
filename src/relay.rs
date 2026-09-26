@@ -2047,11 +2047,7 @@ mod tests {
     #[tokio::test]
     async fn request_bodies_past_the_ingress_cap_are_refused_before_they_are_read() {
         let h = harness();
-        let held = h
-            .state
-            .relay_body_slots
-            .try_acquire_many(super::MAX_BODY_IN_FLIGHT as u32)
-            .unwrap();
+        let held = h.state.relay_body_slots.try_acquire_many(super::MAX_BODY_IN_FLIGHT as u32).unwrap();
         let busy = h.send("GET", "/scout/manifest.json", None, &[]).await;
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(busy.headers().contains_key("retry-after"));

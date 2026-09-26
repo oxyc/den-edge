@@ -2421,7 +2421,10 @@ mod tests {
     #[tokio::test]
     async fn a_bare_options_is_not_an_unauthenticated_mcp_call() {
         let h = harness().await;
-        assert_eq!(h.send("OPTIONS", "/mcp", Some("{}".into()), &[]).await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            h.send("OPTIONS", "/mcp", Some("{}".into()), &[]).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
         let only_origin = [("origin", "https://claude.ai")];
         assert_eq!(
             h.send("OPTIONS", "/mcp", None, &only_origin).await.status(),
