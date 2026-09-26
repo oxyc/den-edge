@@ -6,6 +6,7 @@
   import '../src/app.css';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import type { Explore, Route } from '../src/lib/route';
+  import { SessionServices } from '../src/lib/sessionServices.svelte';
   import type { Row } from '../src/lib/wire';
 
   const stamp = [1, 0, 'test'];
@@ -39,6 +40,10 @@
     writeAction: async (row: Row) => row,
   };
   let routesGate: (value: unknown) => void = () => {};
+  const fetchRoutes = () =>
+    new Promise((resolve) => {
+      routesGate = resolve;
+    });
   const session = $state({
     changed(settingsChanged = false) {
       this.revision++;
@@ -50,10 +55,8 @@
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
-    routes: () =>
-      new Promise((resolve) => {
-        routesGate = resolve;
-      }),
+    routes: fetchRoutes,
+    services: new SessionServices(fetchRoutes, () => session.changed(true)),
   }) as unknown as LibrarySession;
   // What Search browses, from the address, as `App.svelte` hands it down.
   let explore = $state<Explore>({});
