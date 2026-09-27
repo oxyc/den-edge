@@ -420,6 +420,16 @@ enum Kept {
     Nothing,
 }
 
+/// What the cache holds when an internal caller will parse the answer itself. Link previews do not benefit from a
+/// prepared HTTP representation: entering the globally bounded representation builder here could make an otherwise
+/// hot preview miss its deadline behind unrelated response work, only to parse the prepared bytes immediately.
+enum KeptBytes {
+    Hit(Bytes),
+    Absent,
+    Stale(Bytes),
+    Nothing,
+}
+
 enum Prepared {
     Bytes(Bytes),
     File(crate::cache::JsonFile),
@@ -836,6 +846,30 @@ impl Detail {
             }
             if matches!(stale, Kept::Nothing) && age < RETENTION {
                 stale = Kept::Stale(prepared, modified, fresh);
+            }
+        }
+        stale
+    }
+
+    /// The same lookup semantics as `kept`, without publication or the prepared-response queue. This is reserved for
+    /// internal consumers which need a JSON value rather than an HTTP body.
+    async fn kept_bytes(&self) -> KeptBytes {
+        let mut stale = KeptBytes::Nothing;
+        for (file, exact) in self.candidates() {
+            let Some((body, age, _)) = read_answer(&file).await else { continue };
+            if body == ABSENT {
+                if age < ABSENT_TTL {
+                    return KeptBytes::Absent;
+                }
+                continue;
+            }
+            let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
+            let body = if exact { body } else { self.narrowed(body).await };
+            if age < fresh {
+                return KeptBytes::Hit(body);
+            }
+            if matches!(stale, KeptBytes::Nothing) && age < RETENTION {
+                stale = KeptBytes::Stale(body);
             }
         }
         stale
@@ -1289,11 +1323,11 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // A title's record is the same question the app asks next (`Detail`): answered from what the app keeps, and a
     // cold one fetched whole, so the page this preview was built for opens on a hit.
     if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
-        let stale = match detail.kept().await {
-            Kept::Hit(body, ..) => return serde_json::from_slice(&body.bytes().await?).ok(),
-            Kept::Absent => return None,
-            Kept::Stale(body, ..) => body.bytes().await,
-            Kept::Nothing => None,
+        let stale = match detail.kept_bytes().await {
+            KeptBytes::Hit(body) => return serde_json::from_slice(&body).ok(),
+            KeptBytes::Absent => return None,
+            KeptBytes::Stale(body) => Some(body),
+            KeptBytes::Nothing => None,
         };
         // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
         let asked = 'asked: {
@@ -1302,10 +1336,10 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => return None,
                 Err(_) => break 'asked None,
             };
-            match detail.kept().await {
-                Kept::Hit(body, ..) => body.bytes().await,
-                Kept::Absent => return None,
-                Kept::Stale(..) | Kept::Nothing => {
+            match detail.kept_bytes().await {
+                KeptBytes::Hit(body) => Some(body),
+                KeptBytes::Absent => return None,
+                KeptBytes::Stale(..) | KeptBytes::Nothing => {
                     if preview_allowed(state).is_none() {
                         break 'asked None;
                     }
