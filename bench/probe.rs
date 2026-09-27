@@ -65,7 +65,10 @@ fn cpu_ticks() -> io::Result<u64> {
 
 fn tcp_established(path: &str) -> io::Result<usize> {
     Ok(fs::read_to_string(path)?
-        .lines().skip(1).filter(|line| line.split_whitespace().nth(3) == Some("01")).count())
+        .lines()
+        .skip(1)
+        .filter(|line| line.split_whitespace().nth(3) == Some("01"))
+        .count())
 }
 
 fn upstream_established(path: &str) -> io::Result<usize> {
@@ -99,7 +102,10 @@ fn main() -> io::Result<()> {
         println!("cgroup_events_{key}={}", events[key]);
     }
     println!("fd_count={fds}");
-    println!("tcp_established={}", tcp_established("/proc/1/net/tcp")? + tcp_established("/proc/1/net/tcp6")?);
+    println!(
+        "tcp_established={}",
+        tcp_established("/proc/1/net/tcp")? + tcp_established("/proc/1/net/tcp6")?
+    );
     println!(
         "upstream_established={}",
         upstream_established("/proc/1/net/tcp")? + upstream_established("/proc/1/net/tcp6")?
