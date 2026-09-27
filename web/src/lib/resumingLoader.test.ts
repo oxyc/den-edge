@@ -71,6 +71,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("keeps the outage cutoff aligned with den-remux's ten-minute session lifetime", () => {
+  expect(OUTAGE_MS).toBe(10 * 60_000);
+});
+
 describe('resumingLoader', () => {
   it('hands hls.js the segment as it came when nothing broke', async () => {
     fetching([() => whole()]);

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canOfferCast, castLook, fetchCastOrigin, returnsFromCast } from './castOffer';
+import {
+  canOfferCast,
+  CAST_DISCOVERY_MS,
+  CAST_PLAY_MS,
+  castLook,
+  fetchCastOrigin,
+  returnsFromCast,
+} from './castOffer';
 
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
@@ -15,6 +22,11 @@ const CHROME_IPHONE =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/153.0.0.0 Mobile/15E148 Safari/604.1';
 const FIREFOX =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0';
+
+it('keeps the production discovery and blank-playback budgets', () => {
+  expect(CAST_DISCOVERY_MS).toBe(6_000);
+  expect(CAST_PLAY_MS).toBe(45_000);
+});
 
 describe('canOfferCast', () => {
   it('is true where the Cast SDK exists: desktop and Android Chromium', () => {

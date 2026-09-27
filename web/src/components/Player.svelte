@@ -96,6 +96,8 @@
     resume,
     next,
     nextEpisode,
+    castDiscoveryMs = CAST_DISCOVERY_MS,
+    castPlayMs = CAST_PLAY_MS,
     onprogress,
     onnext,
     onclose,
@@ -124,6 +126,9 @@
     next?: string;
     /** That episode's own numbers, so it can be warmed before the advance (`shouldWarmNext`). */
     nextEpisode?: { season?: number; episode?: number };
+    /** Timer seams for the browser fixture; the app always uses the production defaults. */
+    castDiscoveryMs?: number;
+    castPlayMs?: number;
     onprogress: (fraction: number, seconds: number) => void;
     onnext?: () => void;
     onclose: () => void;
@@ -984,7 +989,7 @@
   // The cast page reports what it finds once it has looked; silence past the discovery window is taken as none.
   $effect(() => {
     if (castOffer !== 'looking') return;
-    const wait = setTimeout(() => look({ kind: 'deadline' }), CAST_DISCOVERY_MS);
+    const wait = setTimeout(() => look({ kind: 'deadline' }), castDiscoveryMs);
     return () => clearTimeout(wait);
   });
 
@@ -997,12 +1002,12 @@
     if (!current?.castOrigin || casting) return;
     const wait = setTimeout(() => {
       if (session !== current || played || casting) return;
-      const why = `nothing played in the cast page after ${CAST_PLAY_MS / 1000} s`;
+      const why = `nothing played in the cast page after ${castPlayMs / 1000} s`;
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
       } else if (!castOffered && !castMode) void broke(0, why, 'other');
-    }, CAST_PLAY_MS);
+    }, castPlayMs);
     return () => clearTimeout(wait);
   });
 
