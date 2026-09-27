@@ -54,10 +54,11 @@ named by the key's SHA-256 so no key is a file name. Writes go to a temporary fi
 renamed into place, and every read-modify-write — an inbox append, a drain, a versioned write — happens under
 one lock. So two messages arriving together are both kept, which Workers KV couldn't promise.
 
-A library is one append-only log under `lib/`: its token's hash, then a line per write, synced before the
-answer goes out, replayed into memory on first use and rewritten without superseded lines once they
-outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
-ciphertext the clients seal and merge.
+A library is one independently writable transactional database under `lib/`. Its current key/sequence indexes,
+canonical encrypted row fragments, credentials, and head commit atomically; replacing watched/progress state removes
+the superseded row in the same transaction, so startup needs no replay and normal operation needs no compaction.
+Old append logs migrate lazily on the first request with a crash-safe format marker. `/lib` requests carry
+`x-den-library-token`; the first write sets it. Values remain ciphertext only the clients can open and merge.
 
 Guest grants live under `grants/` (mode 0700): one file per grant and an index, holding only SHA-256 hashes of the
 invite code and each device's secret, plus the escrow — the host's config segment per shared addon, which is a

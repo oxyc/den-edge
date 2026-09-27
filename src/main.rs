@@ -40,9 +40,15 @@ pub struct AppState {
     /// A short-held registry of independently locked record logs. One household's batch remains atomic without
     /// making its disk I/O or snapshot selection block another household.
     pub libraries: library::Libraries,
+    /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
+    /// migrates none, so startup work is independent of library history length.
+    pub(crate) library_v3: Arc<library::v3::StoreManager>,
     /// CPU-heavy library gzip jobs. A busy pool falls back to identity so compression cannot occupy every Tokio
     /// worker or queue without bound; Cloudflare can compress public delivery at its edge.
     pub library_compression_slots: Arc<tokio::sync::Semaphore>,
+    /// Bytes retained by live library response bodies. A permit follows the body through a slow client or
+    /// cancellation, so many unique sync pages cannot silently exceed the aggregate library-memory budget.
+    pub library_response_bytes: Arc<tokio::sync::Semaphore>,
     /// Memory budgets include keys and conservative allocation overhead, not only ciphertext.
     pub library_limits: library::Limits,
     /// Every per-address budget's count (`link::throttled_at`, `link::throttled_per_minute`): a pairing's guesses,
@@ -229,12 +235,24 @@ pub struct AppState {
 impl AppState {
     pub fn new(store: store::Store, metrics_token: Option<String>, log_requests: bool) -> Self {
         let metrics = Arc::new(metrics::Metrics::default());
+        let library_limits = library::Limits::default();
+        let library_v3 = Arc::new(
+            library::v3::StoreManager::open_shared(
+                &store.namespace_dir("lib"),
+                library_limits.cache_bytes,
+                store.quota(),
+                64 * 1024 * 1024,
+            )
+            .expect("the library-v3 manager must share the already-open durable store"),
+        );
         AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
             libraries: library::Libraries::default(),
+            library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
-            library_limits: library::Limits::default(),
+            library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),
+            library_limits,
             claims: Mutex::new(link::Throttles::default()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),

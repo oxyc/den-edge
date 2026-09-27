@@ -1,7 +1,7 @@
 # Library v3 storage and wire invariants
 
-Status: design contract and executable model only. The production format remains v2 until every promotion gate in
-issue #140 passes.
+Status: implemented in the HTTP path with lazy v2 migration. Promotion still requires CI and the issue #140 Linux
+64 MiB mixed-workload gate; this status does not claim deployment.
 
 ## Authority and transaction
 
@@ -26,8 +26,8 @@ if its data model is otherwise correct.
 
 ## Bytes and response ownership
 
-The backend prototypes must report, rather than estimate away, fixed database/cache/mapping cost per open library,
-resident capacity of retained fragments, temporary migration memory, and copy-on-write slack. Existing limits remain
+The backend reports, rather than estimates away, fixed database/cache/mapping cost per open library,
+response ownership, temporary migration memory, and copy-on-write slack. Existing limits remain
 hard: 8 MiB per library, 16 MiB aggregate library cache, 32 KiB value, 50,000 live rows, 512 KiB page, and the 64 MiB
 container target. Reservations precede allocation and roll back on cancellation.
 
@@ -36,9 +36,10 @@ and the existing page-byte rule. It captures head and generation with that selec
 the transaction then closes before the client can become slow. The response owns immutable fragment storage until
 its last frame or cancellation and charges retained capacity, not just logical bytes.
 
-Identity output is an envelope, comma-separated canonical fragments, and suffix. Small fragments are coalesced into
-32–64 KiB chunks; a single larger fragment may be its own shared chunk. There is no whole-page assembly and no frame
-per row. HEAD and 304 remain metadata-only. Gzip uses the separately bounded compression path.
+Identity output is an envelope, comma-separated canonical fragments, and suffix, coalesced into chunks no larger
+than 64 KiB directly from one redb read transaction. There is no whole-page assembly and no frame per row. The
+response holds a 512 KiB aggregate-budget permit until its last frame or cancellation. Gzip keeps the existing
+separately bounded whole-page compression path and holds the same response permit.
 
 ## Format selection and compatibility
 
@@ -66,13 +67,11 @@ Before step 6, v2 alone is authoritative and any v3 file is ignored. After step 
 at any boundary therefore selects a complete old or complete new store, never two heads. Cleanup, retirement,
 generation reset, backup, and restore must use the selected format and tolerate every prefix of these steps.
 
-## Implementation and promotion order
+## Implemented and remaining promotion work
 
-1. Keep the executable pure model and generated v2-history equivalence test as the semantic oracle.
-2. Measure per-library redb against a minimal copy-on-write page file: open-library overhead, cache/mappings,
-   write+fsync p50/p99, range scans, repeated replacement growth/reclamation, and independent c4/c8 writers.
-3. Put the selected backend behind a library-store trait, with v2 still the production default.
-4. Inject failures at every transaction and migration boundary, including corrupt/truncated inputs.
-5. Add lazy migration and mixed v2/v3 operation, then bounded segmented bodies and slow-reader cancellation tests.
-6. Canary one library only after semantic, crash, allocation/frame, HTTP performance, disk-growth, and 64 MiB mixed
-   soak gates from issue #140 pass.
+Implemented: executable equivalence model, per-library redb selection, shared hard disk quota, exact live-row charge,
+lazy open/eviction, lazy v2 migration, mixed-format selection, retirement, membership credentials, bounded identity
+frames, response-lifetime admission, transaction abort tests, and migration-prefix recovery tests.
+
+Remaining before merge/deployment: full CI, target-amd64 HTTP/durable-write comparison, the 64 MiB migration/write/
+slow-reader/cancellation soak, and a documented canary/rollback decision in issue #140.

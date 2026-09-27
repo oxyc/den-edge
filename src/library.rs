@@ -19,9 +19,10 @@
 //! `generation` is the store's (`Store::generation`): a different one tells a client that remembers how far it
 //! read that this store was restored or started over, so it reads from 0 and writes back what it holds.
 //!
-//! On disk a library is one append-only log, `lib/<sha256(id)>.log`: a line with the token's hash, then a
-//! line per applied write, synced before the answer goes out. It is replayed into memory on first use and
-//! rewritten without its superseded lines once they outnumber the live ones.
+//! On disk, v3 is one transactional redb database per library. Its key index, sequence index, canonical row
+//! fragments, credentials and head change atomically, and superseded rows disappear in that same commit. A v2
+//! append log is migrated lazily under only its library lock; a durable marker selects exactly one authority, so
+//! startup neither replays nor migrates libraries and every crash prefix selects a complete v2 or complete v3 state.
 
 use crate::handler::{
     constant_time_eq, error, internal, json_reply, method_not_allowed, query_param, raw_json, read_json,
@@ -35,20 +36,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::Infallible;
 use std::io;
-use std::ops::Bound::{Excluded, Unbounded};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-#[cfg(feature = "library-v3")]
-#[allow(dead_code)] // Storage activation and migration deliberately follow in later #140 slices.
-mod v3;
+pub(crate) mod v3;
 #[cfg(test)]
 mod v3_model;
 
 const NS: &str = "lib";
 const EXT: &str = "log";
+const FORMAT_EXT: &str = "format";
+const FORMAT_V3: &[u8] = b"3\n";
+const AUTHORITY_UNKNOWN: u64 = 0;
+const AUTHORITY_V2: u64 = 1;
+const AUTHORITY_V3: u64 = 2;
+const AUTHORITY_MOVED: u64 = 3;
 /// A deleted library's marker: its id is retired.
 const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
@@ -64,8 +71,6 @@ const MAX_VALUE: usize = 32 * 1024;
 pub const BATCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1000;
-/// Superseded lines tolerated beyond the live ones before the log is rewritten.
-const COMPACT_SLACK: usize = if cfg!(test) { 8 } else { 1000 };
 /// Rows a library may hold: a long-time viewer's titles and episodes fit many times over; a stranger using the
 /// relay as free storage hits it (issue #8, #5).
 const MAX_ROWS: usize = if cfg!(test) { 8 } else { 50_000 };
@@ -170,11 +175,16 @@ struct Registry {
 struct LibrarySlot {
     library: tokio::sync::Mutex<Option<Library>>,
     last_used: AtomicU64,
+    authority: AtomicU64,
 }
 
 impl LibrarySlot {
     fn new(now: u64) -> Self {
-        Self { library: tokio::sync::Mutex::new(None), last_used: AtomicU64::new(now) }
+        Self {
+            library: tokio::sync::Mutex::new(None),
+            last_used: AtomicU64::new(now),
+            authority: AtomicU64::new(AUTHORITY_UNKNOWN),
+        }
     }
 }
 
@@ -404,24 +414,21 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
     let member_hash: [u8; 32] = Sha256::digest(member.as_bytes()).into();
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    if let Err(e) = load(state, &slot, &mut library, id).await {
-        return read_error(e);
-    }
-    let Some(lib) = library.as_mut() else {
-        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
-    };
-    if !constant_time_eq(&lib.token_hash, &token_hash) {
-        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-    }
-    if lib.member_hash.is_some_and(|stored| !constant_time_eq(&stored, &member_hash)) {
-        return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
-    }
-    if lib.member_hash.is_none() {
-        lib.member_hash = Some(member_hash);
-        if let Err(e) = compact(state, id, lib).await {
-            lib.member_hash = None;
-            return internal("member registration", e);
+    let store = match v3_store(state, id, token_hash, &slot, &mut library, false).await {
+        Ok(Some(store)) => store,
+        Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
+            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
         }
+        Err(reason) => return read_error(reason),
+    };
+    match tokio::task::spawn_blocking(move || store.register_member(member_hash)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(v3::StoreError::Invalid(message))) if message == "member_already_registered" => {
+            return json_reply(StatusCode::CONFLICT, &error("member_already_registered"));
+        }
+        Ok(Err(reason)) => return internal("member registration", v3_io(reason)),
+        Err(reason) => return internal("member registration task", io::Error::other(reason)),
     }
     json_reply(StatusCode::OK, &json!({ "registered": true }))
 }
@@ -432,8 +439,23 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
 async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    // An oversized legacy log can still be deleted by its owner without replaying it.
-    let stored_token = if let Some(lib) = library.as_ref() {
+    let selected_v3 = match authority(state, &slot, id).await {
+        Ok(AUTHORITY_MOVED) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        Ok(selected) => selected == AUTHORITY_V3,
+        Err(reason) => return read_error(reason),
+    };
+    // An oversized legacy log can still be deleted by its owner without replaying it. V3 reads only its fixed
+    // metadata and never reconstructs rows for deletion.
+    let stored_token = if selected_v3 {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        match tokio::task::spawn_blocking(move || manager.credentials(&owned_id)).await {
+            Ok(Ok(Some((token, _)))) => token,
+            Ok(Ok(None)) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+            Ok(Err(reason)) => return internal("library credentials", v3_io(reason)),
+            Err(reason) => return internal("library credentials task", io::Error::other(reason)),
+        }
+    } else if let Some(lib) = library.as_ref() {
         lib.token_hash
     } else {
         let file = match state.store.open_file(NS, id, EXT).await {
@@ -457,6 +479,22 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     };
     if let Err(e) = state.store.replace_file(NS, id, MOVED, b"").await {
         return internal("library retire", e);
+    }
+    if let Err(e) = state.store.sync_dir(NS).await {
+        return internal("library retire publish", e);
+    }
+    slot.authority.store(AUTHORITY_MOVED, Ordering::Release);
+    if selected_v3 {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        match tokio::task::spawn_blocking(move || manager.remove(&owned_id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => return internal("library database delete", v3_io(reason)),
+            Err(reason) => return internal("library database delete task", io::Error::other(reason)),
+        }
+        if let Err(e) = state.store.delete_file(NS, id, FORMAT_EXT).await {
+            return internal("library format delete", e);
+        }
     }
     if let Err(e) = state.store.delete_file(NS, id, EXT).await {
         return internal("library delete", e);
@@ -487,6 +525,104 @@ fn moved() -> Response {
     json_reply(StatusCode::GONE, &error("library_moved"))
 }
 
+fn v3_io(error: v3::StoreError) -> io::Error {
+    match error {
+        v3::StoreError::Full => full(),
+        v3::StoreError::Forbidden => io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"),
+        v3::StoreError::Invalid(message) | v3::StoreError::Failed(message) => io::Error::other(message),
+    }
+}
+
+/// `None` is deliberately v2, `3` is deliberately v3, and every other marker fails closed. A corrupt marker must
+/// never make the old log and new database compete as authorities.
+async fn format_v3(state: &AppState, id: &str) -> io::Result<bool> {
+    match state.store.get_file(NS, id, FORMAT_EXT).await? {
+        None => Ok(false),
+        Some(marker) if marker == FORMAT_V3 => Ok(true),
+        Some(_) => Err(io::Error::other("unsupported library format marker")),
+    }
+}
+
+async fn authority(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Result<u64> {
+    let selected = slot.authority.load(Ordering::Acquire);
+    if selected != AUTHORITY_UNKNOWN {
+        return Ok(selected);
+    }
+    let selected = if retired(state, id).await? {
+        AUTHORITY_MOVED
+    } else if format_v3(state, id).await? {
+        AUTHORITY_V3
+    } else {
+        AUTHORITY_V2
+    };
+    slot.authority.store(selected, Ordering::Release);
+    Ok(selected)
+}
+
+async fn publish_v3(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Result<()> {
+    state.store.replace_file(NS, id, FORMAT_EXT, FORMAT_V3).await?;
+    state.store.sync_dir(NS).await?;
+    slot.authority.store(AUTHORITY_V3, Ordering::Release);
+    Ok(())
+}
+
+/// Select one durable authority while holding this library's existing lock. Migration publishes a complete sibling
+/// database before the marker; every crash prefix therefore selects v2 or v3, never a mixture of their heads.
+async fn v3_store(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    slot: &Arc<LibrarySlot>,
+    loaded: &mut Option<Library>,
+    create: bool,
+) -> io::Result<Option<Arc<dyn v3::LibraryStore>>> {
+    match authority(state, slot, id).await? {
+        AUTHORITY_MOVED => return Ok(None),
+        AUTHORITY_V3 => {
+        if let Some(old) = loaded.take() {
+            state.libraries.reserve(id, slot, old.bytes, 0, state.library_limits)?.commit();
+        }
+        return Arc::clone(&state.library_v3).library(id, token_hash).map(Some).map_err(v3_io);
+        }
+        AUTHORITY_V2 => {}
+        _ => unreachable!("authority returns only known states"),
+    }
+
+    load(state, slot, loaded, id).await?;
+    if loaded.is_none() && !create {
+        return Ok(None);
+    }
+    let old_bytes = loaded.as_ref().map_or(0, |library| library.bytes);
+    let temporary = loaded.take().unwrap_or(Library {
+        token_hash,
+        member_hash: None,
+        head: 0,
+        rows: HashMap::new(),
+        sequence: BTreeMap::new(),
+        lines: 0,
+        bytes: LIBRARY_OVERHEAD,
+    });
+    if !constant_time_eq(&temporary.token_hash, &token_hash) {
+        *loaded = Some(temporary);
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"));
+    }
+    let manager = Arc::clone(&state.library_v3);
+    let owned_id = id.to_owned();
+    let imported = tokio::task::spawn_blocking(move || manager.import_v2(&owned_id, &temporary))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(v3_io);
+    if let Err(error) = imported {
+        // `temporary` moved into the blocking task. Reloading v2 on the next request is safe and bounded; release
+        // the old cache reservation now so a failed migration cannot strand aggregate memory accounting.
+        state.libraries.reserve(id, slot, old_bytes, 0, state.library_limits)?.commit();
+        return Err(error);
+    }
+    state.libraries.reserve(id, slot, old_bytes, 0, state.library_limits)?.commit();
+    publish_v3(state, slot, id).await?;
+    Arc::clone(&state.library_v3).library(id, token_hash).map(Some).map_err(v3_io)
+}
+
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     let member = req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -499,15 +635,17 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     };
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    if let Err(e) = load(state, &slot, &mut library, id).await {
-        return read_error(e);
-    }
-    if library.is_none() {
-        match retired(state, id).await {
-            Ok(true) => return moved(),
-            Ok(false) => {}
-            Err(e) => return read_error(e),
+    let selected_v3 = match authority(state, &slot, id).await {
+        Ok(AUTHORITY_MOVED) => return moved(),
+        Ok(selected) => selected == AUTHORITY_V3,
+        Err(reason) => return read_error(reason),
+    };
+    if !selected_v3 {
+        if let Err(error) = load(state, &slot, &mut library, id).await {
+            return read_error(error);
         }
+    }
+    if !selected_v3 && library.is_none() {
         if state.new_libraries == NewLibraries::Members {
             match holds_another(state, id, member.as_deref()).await {
                 Ok(true) => {}
@@ -519,109 +657,48 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
         }
     }
-    let fresh = Library {
-        token_hash,
-        member_hash: None,
-        head: 0,
-        rows: HashMap::new(),
-        sequence: BTreeMap::new(),
-        lines: 0,
-        bytes: LIBRARY_OVERHEAD,
-    };
-    let existing = library.as_ref();
-    if existing.is_some_and(|lib| !constant_time_eq(&lib.token_hash, &token_hash)) {
-        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-    }
-    let creating = existing.is_none();
-    let lib = existing.unwrap_or(&fresh);
-    let new_rows = writes.iter().filter(|w| !lib.rows.contains_key(&w.k)).count();
-    if lib.rows.len() + new_rows > MAX_ROWS {
-        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
-    }
-
-    // Decide every write against the state before this batch (keys are unique within it), write the
-    // applied ones to disk, and only then change what is in memory — a failed write changes nothing.
-    let mut next_bytes = lib.bytes;
-    let mut head = lib.head;
-    let mut out = if existing.is_none() { header_line(&token_hash, None) } else { String::new() };
-    let mut applied = Vec::new();
-    let mut conflicts = Vec::new();
-    for w in writes {
-        let current = lib.rows.get(&w.k);
-        let current_seq = current.map_or(0, |r| r.seq);
-        if current_seq != w.base {
-            conflicts.push(json!({ "k": w.k, "seq": current_seq, "v": current.map(|r| r.v.as_ref()) }));
-            continue;
+    let store = match v3_store(state, id, token_hash, &slot, &mut library, true).await {
+        Ok(Some(store)) => store,
+        Ok(None) => unreachable!("create=true always returns a store"),
+        Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
+            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
         }
-        head += 1;
-        let fragment = row_fragment(head, &w.k, &w.v);
-        next_bytes = next_bytes - current.map_or(0, |r| row_bytes(&w.k, &r.v, r.fragment.len()))
-            + row_bytes(&w.k, &w.v, fragment.len());
-        out.push_str(&log_line(head, &w.k, &w.v));
-        applied.push((w.k, head, w.v, fragment));
-    }
-    if next_bytes > state.library_limits.library_bytes {
-        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
-    }
-    let old_bytes = existing.map_or(0, |library| library.bytes);
-    // Do not expose room from a shrinking batch until memory has adopted it: a cancelled append can then restore
-    // the old charge without exceeding the cap even if another library reserves concurrently.
-    let mut reservation = match state.libraries.reserve(
-        id,
-        &slot,
-        old_bytes,
-        old_bytes.max(next_bytes),
-        state.library_limits,
-    ) {
-        Ok(reservation) => reservation,
-        Err(e) => return read_error(e),
+        Err(error) => return read_error(error),
     };
-    if !out.is_empty() {
-        if let Err(e) = state.store.append_file(NS, id, EXT, out.as_bytes()).await {
-            // The store cuts a failed append back, but that can fail too, and then some of this batch's lines are
-            // on disk that memory does not hold: kept, the next batch reused their sequence numbers. Dropped, the
-            // next request replays the log as it is, as a restart would.
-            reservation.resize(0).expect("releasing a failed library write cannot fail");
-            reservation.commit();
-            *library = None;
-            eprintln!("library write failed: its library is dropped from memory, to be read again from disk");
-            return internal("library write", e);
-        }
-    }
-    let lib = library.get_or_insert(fresh);
-    let applied: Vec<Value> = applied
+    let writes: Vec<_> = writes
         .into_iter()
-        .map(|(k, seq, v, fragment)| {
-            let entry = json!({ "k": k, "seq": seq });
-            if let Some(previous) = lib.rows.insert(k.clone(), Row { seq, v: Arc::from(v), fragment }) {
-                lib.sequence.remove(&previous.seq);
-            }
-            lib.sequence.insert(seq, k);
-            lib.lines += 1;
-            entry
+        .map(|write| v3::Write { key: write.k, base: write.base, value: write.v })
+        .collect();
+    let live_cap = state.library_limits.library_bytes;
+    let result = match tokio::task::spawn_blocking(move || store.apply_bounded(&writes, live_cap)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(v3::StoreError::Full)) => {
+            return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+        }
+        Ok(Err(v3::StoreError::Forbidden)) => {
+            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+        }
+        Ok(Err(error)) => return internal("library write", v3_io(error)),
+        Err(error) => return internal("library write task", io::Error::other(error)),
+    };
+    let applied: Vec<Value> =
+        result.applied.iter().map(|(key, seq)| json!({ "k": key, "seq": seq })).collect();
+    let conflicts: Vec<Value> = result
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            let (sequence, value) = conflict.current.as_ref().map_or((0, Value::Null), |row| {
+                let decoded: Value = serde_json::from_slice(&row.fragment)
+                    .expect("the v3 authority contains only canonical row fragments");
+                (row.sequence, decoded.get("v").cloned().unwrap_or(Value::Null))
+            });
+            json!({ "k": conflict.key, "seq": sequence, "v": value })
         })
         .collect();
-    lib.head = head;
-    lib.bytes = next_bytes;
-    reservation.resize(next_bytes).expect("a completed write fits its reservation");
-    reservation.commit();
-    // A new log's name is on disk only once the directory is synced. Memory already matches the appended log, so
-    // cancellation or a sync failure cannot leave cache accounting ahead of the in-memory library.
-    if creating {
-        if let Err(e) = state.store.sync_dir(NS).await {
-            eprintln!("library create: {e}");
-        }
-    }
-    if lib.lines > 2 * lib.rows.len() + COMPACT_SLACK {
-        // The log already holds every write; a failed rewrite only leaves it longer than it needs to be.
-        if let Err(e) = compact(state, id, lib).await {
-            eprintln!("library compaction: {e}");
-        }
-    }
     state.metrics.record_library_writes(applied.len(), conflicts.len());
     json_reply(
         StatusCode::OK,
-        &json!({ "head": head, "applied": applied, "conflicts": conflicts, "generation": state.store.generation() }),
+        &json!({ "head": result.head, "applied": applied, "conflicts": conflicts, "generation": state.store.generation() }),
     )
 }
 
@@ -653,6 +730,64 @@ fn changes_body(entries: &[Arc<[u8]>], head: u64, more: bool, generation: &str) 
     body
 }
 
+struct ChunkBody {
+    chunks: std::vec::IntoIter<axum::body::Bytes>,
+    left: usize,
+}
+
+struct HeldLibraryBody {
+    body: Body,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl http_body::Body for HeldLibraryBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+impl ChunkBody {
+    fn new(page: v3::ChunkPage) -> Self {
+        Self { chunks: page.chunks.into_iter(), left: page.len }
+    }
+}
+
+impl http_body::Body for ChunkBody {
+    type Data = axum::body::Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let Some(chunk) = self.chunks.next() else { return Poll::Ready(None) };
+        self.left -= chunk.len();
+        Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.left == 0
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.left as u64)
+    }
+}
+
 async fn changes(
     state: &AppState,
     id: &str,
@@ -663,48 +798,55 @@ async fn changes(
 ) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
-    if let Err(e) = load(state, &slot, &mut library, id).await {
-        return read_error(e);
+    match authority(state, &slot, id).await {
+        Ok(AUTHORITY_MOVED) => return moved(),
+        Ok(_) => {}
+        Err(reason) => return read_error(reason),
     }
-    let Some(lib) = library.as_mut() else {
-        return match retired(state, id).await {
-            Ok(true) => moved(),
-            // A store that lost its data answers here, so the generation goes with it.
-            Ok(false) => json_reply(
+    let store = match v3_store(state, id, token_hash, &slot, &mut library, false).await {
+        Ok(Some(store)) => store,
+        Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
+            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+        }
+        Err(reason) => return read_error(reason),
+        Ok(None) => {
+            return json_reply(
                 StatusCode::NOT_FOUND,
                 &json!({ "error": "not_found", "generation": state.store.generation() }),
-            ),
-            Err(e) => internal("library read", e),
-        };
-    };
-    if !constant_time_eq(&lib.token_hash, &token_hash) {
-        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-    }
-    // Snapshot only a page of shared row values while the state is locked. Serialization and optional compression
-    // happen after release, so a large response cannot serialize every other library behind it.
-    let mut page_bytes = 128;
-    let mut entries = Vec::with_capacity(limit.min(lib.rows.len()));
-    let mut ordered = lib.sequence.range((Excluded(since), Unbounded));
-    let mut more = false;
-    while entries.len() < limit {
-        let Some((&seq, key)) = ordered.next() else { break };
-        let row = lib.rows.get(key).expect("the sequence index names a live row");
-        debug_assert_eq!(row.seq, seq);
-        let cost = row.fragment.len() + usize::from(!entries.is_empty());
-        if !entries.is_empty() && page_bytes + cost > PAGE_BYTES {
-            more = true;
-            break;
+            );
         }
-        page_bytes += cost;
-        entries.push(Arc::clone(&row.fragment));
-    }
-    if !more {
-        more = ordered.next().is_some();
-    }
-    let head = lib.head;
+    };
     drop(library);
+    let response_permit = Arc::clone(&state.library_response_bytes)
+        .acquire_many_owned(PAGE_BYTES as u32)
+        .await
+        .expect("the library response budget is never closed");
+    if !gzip {
+        let generation = state.store.generation().to_owned();
+        let page =
+            match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation)).await {
+                Ok(Ok(page)) => page,
+                Ok(Err(reason)) => return internal("library read", v3_io(reason)),
+                Err(reason) => return internal("library read task", io::Error::other(reason)),
+            };
+        let length = page.len;
+        let body = Body::new(ChunkBody::new(page));
+        let mut response =
+            raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true);
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&length.to_string()).expect("a body length is a valid header"),
+        );
+        return response;
+    }
+    let page = match tokio::task::spawn_blocking(move || store.range(since, limit)).await {
+        Ok(Ok(page)) => page,
+        Ok(Err(reason)) => return internal("library read", v3_io(reason)),
+        Err(reason) => return internal("library read task", io::Error::other(reason)),
+    };
+    let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
 
-    let mut body = changes_body(&entries, head, more, state.store.generation());
+    let mut body = changes_body(&entries, page.head, page.more, state.store.generation());
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
             let job = state.metrics.compression_started();
@@ -718,7 +860,12 @@ async fn changes(
             .await;
             match compressed {
                 Ok((_, Some(compressed))) => {
-                    let mut resp = raw_json(StatusCode::OK, Body::from(compressed), true);
+                    let body = Body::from(compressed);
+                    let mut resp = raw_json(
+                        StatusCode::OK,
+                        Body::new(HeldLibraryBody { body, _permit: response_permit }),
+                        true,
+                    );
                     resp.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                     resp.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
                     return resp;
@@ -733,7 +880,8 @@ async fn changes(
             state.metrics.compression_busy();
         }
     }
-    raw_json(StatusCode::OK, Body::from(body), true)
+    let body = Body::from(body);
+    raw_json(StatusCode::OK, Body::new(HeldLibraryBody { body, _permit: response_permit }), true)
 }
 
 /// A sync page gzipped, when that is worth the bytes. The rows are ciphertext under random nonces and nothing of the
@@ -782,16 +930,32 @@ pub async fn holds_member_hash(state: &AppState, id: &str, hash: &[u8; 32]) -> i
     if let Some(library) = library.as_ref() {
         return Ok(constant_time_eq(library.member_hash.as_ref().unwrap_or(&library.token_hash), hash));
     }
-    drop(library);
     // Not loaded: its log's first line says whose it is, without replaying the log into memory (and holding every
     // library's lock while it does) for a question the header alone answers. An MCP call asks this every time.
-    Ok(header_of(state, id).await?.is_some_and(|(token_hash, member_hash)| {
+    Ok(header_of(state, &slot, id).await?.is_some_and(|(token_hash, member_hash)| {
         constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), hash)
     }))
 }
 
 /// A library's token and member hashes, from its log's header alone; `None` for a library there is no log of.
-async fn header_of(state: &AppState, id: &str) -> io::Result<Option<([u8; 32], Option<[u8; 32]>)>> {
+async fn header_of(
+    state: &AppState,
+    slot: &LibrarySlot,
+    id: &str,
+) -> io::Result<Option<([u8; 32], Option<[u8; 32]>)>> {
+    match authority(state, slot, id).await? {
+        AUTHORITY_MOVED => return Ok(None),
+        AUTHORITY_V3 => {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        return tokio::task::spawn_blocking(move || manager.credentials(&owned_id))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(v3_io);
+        }
+        AUTHORITY_V2 => {}
+        _ => unreachable!("authority returns only known states"),
+    }
     let Some(file) = state.store.open_file(NS, id, EXT).await? else { return Ok(None) };
     read_header(&mut BufReader::new(file)).await
 }
@@ -806,7 +970,8 @@ async fn holds_another(state: &AppState, id: &str, member: Option<&str>) -> io::
         return Ok(false);
     }
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    Ok(header_of(state, other).await?.is_some_and(|(token_hash, member_hash)| {
+    let slot = state.libraries.slot(other, state.now());
+    Ok(header_of(state, &slot, other).await?.is_some_and(|(token_hash, member_hash)| {
         constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
     }))
 }
@@ -1026,6 +1191,7 @@ mod tests {
     use crate::handler::tests::{body_json, Harness};
     use axum::http::StatusCode;
     use serde_json::{json, Value};
+    use sha2::Digest;
 
     const LIB: &str = "0123456789abcdef0123456789abcdef";
     const LIB2: &str = "fedcba9876543210fedcba9876543210";
@@ -1137,14 +1303,11 @@ mod tests {
     #[tokio::test]
     async fn an_abandoned_cache_reservation_restores_the_exact_charge() {
         let h = Harness::new();
-        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "first" }])).await;
         let before = h.state.libraries.cached_bytes().await;
         let slot = h.state.libraries.slot(LIB, h.state.now());
         let held = slot.library.lock().await;
-        let old = held.as_ref().unwrap().bytes;
         {
-            let _cancelled =
-                h.state.libraries.reserve(LIB, &slot, old, old + 128, h.state.library_limits).unwrap();
+            let _cancelled = h.state.libraries.reserve(LIB, &slot, 0, 128, h.state.library_limits).unwrap();
             assert_eq!(h.state.libraries.cached_bytes().await, before + 128);
         }
         assert_eq!(h.state.libraries.cached_bytes().await, before);
@@ -1157,10 +1320,10 @@ mod tests {
                 .libraries
                 .reserve(LIB2, &cold, 0, h.state.library_limits.library_bytes, h.state.library_limits)
                 .unwrap();
-            assert_eq!(h.state.libraries.cached_len().await, 2);
+            assert_eq!(h.state.libraries.cached_len().await, 1);
         }
         assert_eq!(h.state.libraries.cached_bytes().await, before);
-        assert_eq!(h.state.libraries.cached_len().await, 1);
+        assert_eq!(h.state.libraries.cached_len().await, 0);
     }
 
     /// The store's generation survives a restart; a store that comes back without it — restored from a backup,
@@ -1314,7 +1477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_log_survives_a_restart_and_compacts_without_losing_a_row() {
+    async fn the_v3_authority_survives_a_restart_without_superseded_rows() {
         let h = Harness::new();
         batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "kept" }])).await;
         let mut base = 0;
@@ -1322,9 +1485,19 @@ mod tests {
             let (_, got) = batch(&h, TOKEN, json!([{ "k": K1, "base": base, "v": format!("v{i}") }])).await;
             base = got["applied"][0]["seq"].as_u64().expect("each rewrite is based on the last");
         }
-        let log = std::fs::read_dir(h.dir.join("lib")).unwrap().next().unwrap().unwrap().path();
-        let lines = std::fs::read_to_string(&log).unwrap().lines().count();
-        assert!(lines < 20, "40 rewrites of one key left {lines} lines — the log was never compacted");
+        assert!(h.state.library_v3.path(LIB).exists());
+        assert_eq!(
+            h.state
+                .library_v3
+                .library(LIB, sha2::Sha256::digest(TOKEN.as_bytes()).into())
+                .unwrap()
+                .range(0, 500)
+                .unwrap()
+                .entries
+                .len(),
+            2,
+            "only the two current rows are authoritative"
+        );
 
         let restarted = Harness::in_dir(h.dir.clone());
         let (_, all) = changes(&restarted, TOKEN, "").await;
@@ -1333,6 +1506,38 @@ mod tests {
             json!([{ "k": K2, "seq": 1, "v": "kept" }, { "k": K1, "seq": 41, "v": "v39" }])
         );
         assert_eq!(all["head"], 41);
+    }
+
+    #[tokio::test]
+    async fn every_unpublished_migration_prefix_keeps_v2_authoritative() {
+        let fixture = Harness::new();
+        write_legacy(&fixture, &[(1, K1, "old")]);
+        let temporary = fixture.state.library_v3.path(LIB).with_extension("redb.tmp");
+        std::fs::write(&temporary, b"abandoned-before-publish").unwrap();
+        let first = Harness::in_dir(fixture.dir.clone());
+        assert_eq!(changes(&first, TOKEN, "").await.1["entries"][0]["v"], "old");
+        assert!(!temporary.exists(), "the abandoned temporary database was removed");
+
+        // Database rename completed but the marker did not: the stale v2 log must win and deterministically
+        // rebuild the database, never dual-read its head.
+        first.state.store.delete_file(super::NS, LIB, super::FORMAT_EXT).await.unwrap();
+        drop(first);
+        let second = Harness::in_dir(fixture.dir.clone());
+        assert_eq!(changes(&second, TOKEN, "").await.1["entries"][0]["v"], "old");
+        assert_eq!(
+            second.state.store.get_file(super::NS, LIB, super::FORMAT_EXT).await.unwrap(),
+            Some(super::FORMAT_V3.to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_published_retirement_beats_a_leftover_v3_marker_and_database() {
+        let h = Harness::new();
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "old" }])).await.0, StatusCode::OK);
+        h.state.store.replace_file(super::NS, LIB, super::MOVED, b"").await.unwrap();
+        h.state.store.sync_dir(super::NS).await.unwrap();
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::GONE);
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "new" }])).await.0, StatusCode::GONE);
     }
 
     async fn start(h: &Harness, id: &str, token: &str, member: Option<&str>) -> StatusCode {
@@ -1419,7 +1624,7 @@ mod tests {
         let other = "fedcba9876543210fedcba9876543210";
         let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "x" }] }).to_string();
         h.send("POST", &format!("/lib/{other}/batch"), Some(body), &[("x-den-library-token", "other")]).await;
-        assert_eq!(h.state.libraries.cached_len().await, 1, "the idle library was dropped");
+        assert_eq!(h.state.libraries.cached_len().await, 0, "v3 retains no replayed row map");
         assert_eq!(changes(&h, TOKEN, "").await.1["entries"][0]["v"], "kept");
     }
 
@@ -1428,8 +1633,8 @@ mod tests {
     #[tokio::test]
     async fn a_torn_last_line_is_dropped_and_the_log_stays_readable() {
         let h = Harness::new();
-        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "whole" }])).await;
-        let log = std::fs::read_dir(h.dir.join("lib")).unwrap().next().unwrap().unwrap().path();
+        write_legacy(&h, &[(1, K1, "whole")]);
+        let log = log_path(&h);
         let mut text = std::fs::read_to_string(&log).unwrap();
         text.push_str(r#"{"s":2,"k":"bbbbbbbbbbbbbbbb","v":"torn"#);
         std::fs::write(&log, text).unwrap();
@@ -1446,8 +1651,16 @@ mod tests {
     }
 
     fn log_path(h: &Harness) -> std::path::PathBuf {
-        use sha2::Digest;
         h.dir.join("lib").join(format!("{}.log", crate::hex(&sha2::Sha256::digest(LIB.as_bytes()))))
+    }
+
+    fn write_legacy(h: &Harness, rows: &[(u64, &str, &str)]) {
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let mut log = super::header_line(&token_hash, None);
+        for (sequence, key, value) in rows {
+            log.push_str(&super::log_line(*sequence, key, value));
+        }
+        std::fs::write(log_path(h), log).unwrap();
     }
 
     /// An append that failed part-way left its first bytes behind, and the next write was glued onto them: a
@@ -1456,7 +1669,7 @@ mod tests {
     #[tokio::test]
     async fn a_fragment_a_failed_append_left_mid_log_is_dropped_on_load() {
         let h = Harness::new();
-        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "whole" }])).await;
+        write_legacy(&h, &[(1, K1, "whole")]);
         let mut text = std::fs::read_to_string(log_path(&h)).unwrap();
         text.push_str(r#"{"s":2,"k":"bbbbbbbbbbbbbbbb","v":"fail"#);
         text.push_str(&super::log_line(2, K2, "glued"));
@@ -1472,26 +1685,6 @@ mod tests {
         );
         let again = Harness::in_dir(h.dir.clone());
         assert_eq!(changes(&again, TOKEN, "").await.1["head"], 3, "the log was rewritten whole");
-    }
-
-    /// A failed append whose cut-back failed too leaves lines on disk that nobody was told landed. Memory must not
-    /// go on without them: the next batch reused their sequence numbers, and a restart found two writes at one.
-    #[tokio::test]
-    async fn a_failed_append_leaves_memory_to_what_the_log_holds() {
-        let dir = crate::handler::tests::temp_dir();
-        let h = Harness::in_dir_with(dir.clone(), |state| {
-            state.store = crate::store::Store::open(&dir, 4096).unwrap();
-        });
-        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "whole" }])).await.0, StatusCode::OK);
-        let (status, _) = batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "x".repeat(8192) }])).await;
-        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
-        // What a cut-back that failed leaves behind: the batch's line, whole.
-        let mut log = std::fs::OpenOptions::new().append(true).open(log_path(&h)).unwrap();
-        std::io::Write::write_all(&mut log, super::log_line(2, K2, "landed").as_bytes()).unwrap();
-
-        let (status, answer) = batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "again" }])).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["conflicts"], json!([{ "k": K2, "seq": 2, "v": "landed" }]), "{answer}");
     }
 
     /// A first write that never finished leaves an empty log or a torn header. Nobody was told it landed, so the
@@ -1576,10 +1769,8 @@ mod tests {
     #[tokio::test]
     async fn oversized_legacy_logs_are_not_loaded_or_modified_and_the_owner_can_delete_them() {
         let root = Harness::new();
-        assert_eq!(
-            batch(&root, TOKEN, json!([{ "k": K1, "base": 0, "v": "x".repeat(1024) }])).await.0,
-            StatusCode::OK
-        );
+        let large = "x".repeat(1024);
+        write_legacy(&root, &[(1, K1, &large)]);
         let original = root.state.store.get_file(super::NS, LIB, super::EXT).await.unwrap();
         let h = bounded(&root, 1024, 2048);
         assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::PAYLOAD_TOO_LARGE);
@@ -1646,6 +1837,25 @@ mod tests {
         assert!(metrics.contains(r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="busy"} 1"#));
         assert!(!metrics.contains(r#"den_edge_compression_input_bytes_total{kind="library_gzip"} 0"#));
         assert!(!metrics.contains(r#"den_edge_compression_output_bytes_total{kind="library_gzip"} 0"#));
+    }
+
+    #[tokio::test]
+    async fn a_slow_changes_body_holds_and_releases_its_exact_response_admission() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "kept" }])).await;
+        let before = h.state.library_response_bytes.available_permits();
+        let response = h
+            .send(
+                "GET",
+                &format!("/lib/{LIB}/changes"),
+                None,
+                &[("x-den-library-token", TOKEN), ("accept-encoding", "identity")],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before - super::PAGE_BYTES);
+        drop(response);
+        assert_eq!(h.state.library_response_bytes.available_permits(), before);
     }
 
     #[tokio::test]
