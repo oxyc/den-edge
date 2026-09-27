@@ -141,8 +141,16 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
 
 async fn store(state: &AppState, file: Option<&std::path::Path>, body: &Bytes) {
     let result = match file {
-        Some(file) if crate::cache::write_json(file, body).await => CacheStore::Stored,
-        Some(_) => CacheStore::Failed,
+        Some(file) => {
+            let attempt = state.metrics.provider_store_started(Provider::Skipdb);
+            let result = if crate::cache::write_json(file, body).await {
+                CacheStore::Stored
+            } else {
+                CacheStore::Failed
+            };
+            attempt.finished(result);
+            return;
+        }
         None => CacheStore::Skipped,
     };
     state.metrics.provider_cache_store(Provider::Skipdb, result);
@@ -270,19 +278,20 @@ async fn lookup(state: &AppState, ask: &Ask, ip: &str, rid: &str) -> Result<Opti
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
+    let attempt = state.metrics.provider_upstream_started(Provider::Skipdb);
     let (status, headers, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "skipdb").await {
             Ok(answer) => answer,
             Err(Failed::Unreachable) => {
-                state.metrics.provider_upstream(Provider::Skipdb, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable"));
             }
             Err(Failed::Timeout) => {
-                state.metrics.provider_upstream(Provider::Skipdb, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::GATEWAY_TIMEOUT, "skipdb_timeout"));
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
-                state.metrics.provider_upstream(Provider::Skipdb, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
             }
         };
@@ -292,7 +301,7 @@ async fn lookup(state: &AppState, ask: &Ask, ip: &str, rid: &str) -> Result<Opti
         Ok(None) => ProviderUpstream::Negative,
         Err(_) => ProviderUpstream::Failed,
     };
-    state.metrics.provider_upstream(Provider::Skipdb, outcome);
+    attempt.finished(outcome);
     answer
 }
 

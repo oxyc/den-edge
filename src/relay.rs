@@ -1316,7 +1316,7 @@ where
         loop {
             // Reserve downstream room before reading upstream. Thus a stopped browser leaves at most the one frame
             // already queued, rather than that frame plus another one waiting to be sent.
-            let send = tokio::select! {
+            let ready = tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
                     let why = "past the deadline";
@@ -1330,7 +1330,13 @@ where
                 }
                 permit = send.reserve() => match permit {
                     Ok(permit) => permit,
-                    Err(_) => break,
+                    Err(_) => {
+                        metrics.stream_terminated(
+                            crate::metrics::StreamClass::Addon,
+                            crate::metrics::StreamTermination::ReceiverClosed,
+                        );
+                        break;
+                    }
                 },
             };
             let next = tokio::select! {
@@ -1343,6 +1349,13 @@ where
                     );
                     eprintln!("relay: answer cut off after {sent} bytes: {why}");
                     *crate::lock(&failed) = Some(why);
+                    break;
+                }
+                _ = send.closed() => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::ReceiverClosed,
+                    );
                     break;
                 }
                 next = tokio::time::timeout(idle, body.frame()) => next,
@@ -1381,7 +1394,7 @@ where
                 *crate::lock(&failed) = Some(why);
                 break;
             }
-            send.send(frame.map_data(|bytes| {
+            ready.send(frame.map_data(|bytes| {
                 metrics.stream_bytes(crate::metrics::StreamClass::Addon, bytes)
             }));
         }
@@ -1832,7 +1845,13 @@ where
                 }
                 permit = tokio::time::timeout(MEDIA_IDLE, send.reserve()) => match permit {
                     Ok(Ok(permit)) => permit,
-                    Ok(Err(_)) => break,
+                    Ok(Err(_)) => {
+                        metrics.stream_terminated(
+                            crate::metrics::StreamClass::Media,
+                            crate::metrics::StreamTermination::ReceiverClosed,
+                        );
+                        break;
+                    }
                     Err(_) => {
                         metrics.stream_terminated(
                             crate::metrics::StreamClass::Media,
@@ -1853,7 +1872,13 @@ where
                     *crate::lock(&failed) = Some("the media lifetime ended");
                     break;
                 }
-                _ = send.closed() => break,
+                _ = send.closed() => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::ReceiverClosed,
+                    );
+                    break;
+                }
                 next = tokio::time::timeout(MEDIA_IDLE, body.frame()) => next,
             };
             let frame = match next {
@@ -3337,6 +3362,42 @@ mod tests {
             axum::body::to_bytes(unread, usize::MAX).await.is_err(),
             "the queued frame is followed by the deadline error"
         );
+    }
+
+    /// Once the browser has taken one frame, dropping it wakes a pump that is blocked on a silent upstream.
+    #[tokio::test]
+    async fn a_closed_passed_answer_promptly_releases_its_slot() {
+        use http_body_util::BodyExt;
+
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; 64 * 1024], true).await;
+        let target = &h.state.relays[0].1;
+        let ask = axum::http::Request::get(format!("{target}/x"))
+            .body(http_body_util::Full::new(axum::body::Bytes::new()))
+            .unwrap();
+        let answer = super::client().request(ask).await.unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
+        let mut passed = super::passed_body(
+            answer.into_body(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            slot,
+            Arc::clone(&metrics),
+        );
+        assert!(passed.frame().await.unwrap().unwrap().is_data());
+        drop(passed);
+        tokio::time::timeout(std::time::Duration::from_millis(500), slots.acquire())
+            .await
+            .expect("the relay slot remained held after its receiver closed")
+            .unwrap()
+            .forget();
+        let rendered = metrics.render();
+        assert!(rendered.contains(
+            r#"den_edge_stream_terminated_total{class="addon",reason="receiver_closed"} 1"#
+        ));
+        assert!(rendered.contains(r#"den_edge_stream_active{class="addon"} 0"#));
+        assert!(rendered.contains(r#"den_edge_stream_retained_bytes{class="addon"} 0"#));
     }
 
     /// An answer with no declared length reserves its full route limit before it is read, so concurrent chunked

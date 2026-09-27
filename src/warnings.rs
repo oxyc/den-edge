@@ -324,12 +324,13 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
     // title asking, which is named by its votes' own names (`normalize`) and not kept either (`lookup`).
     if named(&table) {
         if let Some(file) = &file {
+            let attempt = state.metrics.provider_store_started(Provider::Warnings);
             let result = if crate::tmdb::write(file, &Bytes::from(table.to_string())).await {
                 CacheStore::Stored
             } else {
                 CacheStore::Failed
             };
-            state.metrics.provider_cache_store(Provider::Warnings, result);
+            attempt.finished(result);
         } else {
             state.metrics.provider_cache_store(Provider::Warnings, CacheStore::Skipped);
         }
@@ -457,19 +458,20 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
+    let attempt = state.metrics.provider_upstream_started(Provider::Warnings);
     let (status, headers, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "warnings").await {
             Ok(answer) => answer,
             Err(Failed::Unreachable) => {
-                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "warnings_unreachable"));
             }
             Err(Failed::Timeout) => {
-                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::GATEWAY_TIMEOUT, "warnings_timeout"));
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
-                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
             }
         };
@@ -484,32 +486,32 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
     match status {
         s if s.is_success() => match serde_json::from_slice(&bytes) {
             Ok(value) => {
-                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Updated);
+                attempt.finished(ProviderUpstream::Updated);
                 Ok(value)
             }
             Err(_) => {
-                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
             }
         },
         StatusCode::NOT_FOUND => {
-            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Negative);
+            attempt.finished(ProviderUpstream::Negative);
             Ok(Value::Null)
         }
         // Their body never travels: it may name the key.
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if !key.household => {
-            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             Err(refused(StatusCode::UNAUTHORIZED, "key_refused"))
         }
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             eprintln!(
                 "warnings: doesthedogdie refused the household key ({status}) — check DOESTHEDOGDIE_KEY"
             );
             Err(refused(StatusCode::BAD_GATEWAY, "warnings_refused"))
         }
         StatusCode::TOO_MANY_REQUESTS => {
-            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             if key.household {
                 rest(state, now + wait_ms, "it is rate-limited");
             }
@@ -520,7 +522,7 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
             )))
         }
         _ => {
-            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             Err(refused(StatusCode::BAD_GATEWAY, "warnings_refused"))
         }
     }
@@ -562,8 +564,16 @@ async fn keep_counted(
 
 async fn cache_store(state: &AppState, file: Option<&Path>, body: &Bytes) {
     let result = match file {
-        Some(file) if crate::cache::write_json(file, body).await => CacheStore::Stored,
-        Some(_) => CacheStore::Failed,
+        Some(file) => {
+            let attempt = state.metrics.provider_store_started(Provider::Warnings);
+            let result = if crate::cache::write_json(file, body).await {
+                CacheStore::Stored
+            } else {
+                CacheStore::Failed
+            };
+            attempt.finished(result);
+            return;
+        }
         None => CacheStore::Skipped,
     };
     state.metrics.provider_cache_store(Provider::Warnings, result);

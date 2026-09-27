@@ -1440,7 +1440,10 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
         let asked = 'asked: {
             let mut asking = match one_asking(&detail.whole().1, "tmdb").await {
                 Ok(asking) => asking,
-                Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => return None,
+                Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
+                    return None;
+                }
                 Err(_) => break 'asked None,
             };
             match detail.kept_bytes().await {
@@ -1462,6 +1465,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                             let absent = refusal.status() == StatusCode::NOT_FOUND;
                             asking.failed(refusal).await;
                             if absent {
+                                state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
                                 return None;
                             }
                             break 'asked None;
@@ -1694,43 +1698,41 @@ async fn send(
     let Ok(out) = out.body(Full::new(Bytes::new())) else {
         return Err(refused(StatusCode::BAD_REQUEST, "bad_request"));
     };
+    let attempt = state.metrics.provider_upstream_started(Provider::Tmdb);
     let (status, headers, bytes) = match exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "tmdb").await {
         Ok(answer) => answer,
         Err(Failed::Unreachable) => {
-            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable"));
         }
         Err(Failed::Timeout) => {
-            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout"));
         }
         Err(Failed::TooLarge) => {
-            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             return Err(refused(StatusCode::BAD_GATEWAY, TOO_LARGE));
         }
         Err(Failed::Unreadable) => {
-            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            attempt.finished(ProviderUpstream::Failed);
             return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
         }
     };
     if status == StatusCode::NOT_MODIFIED && etag.is_some() {
         refund(state);
-        state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::NotModified);
+        attempt.finished(ProviderUpstream::NotModified);
         return Ok(Fetched::Unchanged);
     }
     let tag = headers.get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
     if !status.is_success() {
-        state.metrics.provider_upstream(
-            Provider::Tmdb,
-            if status == StatusCode::NOT_FOUND {
-                ProviderUpstream::Negative
-            } else {
-                ProviderUpstream::Failed
-            },
-        );
+        attempt.finished(if status == StatusCode::NOT_FOUND {
+            ProviderUpstream::Negative
+        } else {
+            ProviderUpstream::Failed
+        });
         return Err(refusal(state, status, &headers));
     }
-    state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Updated);
+    attempt.finished(ProviderUpstream::Updated);
     Ok(Fetched::Answer(bytes, tag))
 }
 
@@ -1866,45 +1868,109 @@ async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) -> bool {
 }
 
 async fn keep_counted(state: &AppState, file: &Path, body: &Bytes, etag: Option<&str>) {
+    let attempt = state.metrics.provider_store_started(Provider::Tmdb);
     let stored = keep(file, body, etag).await;
-    state.metrics.provider_cache_store(
-        Provider::Tmdb,
-        if stored { CacheStore::Stored } else { CacheStore::Failed },
-    );
+    attempt.finished(if stored { CacheStore::Stored } else { CacheStore::Failed });
 }
 
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path, metrics: &crate::metrics::Metrics) {
     let Some(mut inventory) = sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await else {
+        metrics.provider_cache_scan(Provider::Tmdb, false);
         return;
     };
-    let Some(prepared) = sweep_prepared(dir, RETENTION, metrics).await else { return };
+    let Some(prepared) = sweep_prepared(dir, RETENTION, metrics).await else {
+        metrics.provider_cache_scan(Provider::Tmdb, false);
+        return;
+    };
     inventory.add(prepared);
-    metrics.provider_cache_inventory(Provider::Tmdb, inventory.bytes, inventory.entries);
+    metrics.provider_cache_inventory(
+        Provider::Tmdb,
+        inventory.bytes,
+        inventory.entries,
+        inventory.oldest_age_seconds(),
+    );
+    metrics.provider_cache_scan(Provider::Tmdb, inventory.successful);
 }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CacheInventory {
     bytes: u64,
     entries: u64,
+    oldest_modified: Option<SystemTime>,
+    successful: bool,
 }
 
 impl CacheInventory {
+    fn empty() -> Self {
+        Self { successful: true, ..Self::default() }
+    }
+
     fn add(&mut self, other: CacheInventory) {
         self.bytes = self.bytes.saturating_add(other.bytes);
         self.entries = self.entries.saturating_add(other.entries);
+        self.oldest_modified = match (self.oldest_modified, other.oldest_modified) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        self.successful &= other.successful;
     }
 
-    fn record(&mut self, path: &Path, len: u64, provider: Provider) {
+    fn record_bytes(&mut self, len: u64) {
         self.bytes = self.bytes.saturating_add(len);
+    }
+
+    fn record(&mut self, path: &Path, metadata: &std::fs::Metadata, provider: Provider) {
         let excluded = match provider {
             Provider::Warnings => path.file_name().is_some_and(|name| name == "topics.json"),
             _ => false,
         };
         let serveable = path.extension().is_some_and(|extension| extension == "json") && !excluded;
-        self.entries = self.entries.saturating_add(u64::from(serveable));
+        self.record_file(metadata, serveable);
     }
+
+    fn record_prepared(&mut self, path: &Path, metadata: &std::fs::Metadata) {
+        let serveable = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+            name.ends_with(".tmdb.json")
+        });
+        self.record_file(metadata, serveable);
+    }
+
+    fn record_file(&mut self, metadata: &std::fs::Metadata, serveable: bool) {
+        self.record_bytes(metadata.len());
+        self.entries = self.entries.saturating_add(u64::from(serveable));
+        if serveable {
+            if let Ok(modified) = metadata.modified() {
+                self.oldest_modified = Some(self.oldest_modified.map_or(modified, |oldest| oldest.min(modified)));
+            }
+        }
+    }
+
+    fn oldest_age_seconds(&self) -> u64 {
+        self.oldest_modified
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn deletion_failed(&mut self, provider: Provider, path: &Path, error: &std::io::Error) {
+        self.successful = false;
+        eprintln!("{} cache sweep: could not remove {}: {error}", provider_name(provider), path.display());
+    }
+}
+
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Tmdb => "tmdb",
+        Provider::Ratings => "ratings",
+        Provider::Warnings => "warnings",
+        Provider::Skipdb => "skipdb",
+    }
+}
+
+fn scan_failed(provider: Provider, path: &Path, error: &std::io::Error) {
+    eprintln!("{} cache inventory: could not scan {}: {error}", provider_name(provider), path.display());
 }
 
 async fn sweep_prepared(
@@ -1913,30 +1979,43 @@ async fn sweep_prepared(
     metrics: &crate::metrics::Metrics,
 ) -> Option<CacheInventory> {
     let root = dir.join(".tmdb-prepared");
-    let mut inventory = CacheInventory::default();
+    let mut inventory = CacheInventory::empty();
     let mut sources = match tokio::fs::read_dir(&root).await {
         Ok(sources) => sources,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(inventory),
-        Err(_) => return None,
+        Err(error) => {
+            scan_failed(Provider::Tmdb, &root, &error);
+            return None;
+        }
     };
     loop {
         let source = match sources.next_entry().await {
             Ok(Some(source)) => source,
             Ok(None) => break,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(Provider::Tmdb, &root, &error);
+                return None;
+            }
         };
         let kind = match source.file_type().await {
             Ok(kind) => kind,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(Provider::Tmdb, &source.path(), &error);
+                return None;
+            }
         };
         if kind.is_file() {
             let metadata = match source.metadata().await {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
+                Err(error) => {
+                    scan_failed(Provider::Tmdb, &source.path(), &error);
+                    return None;
+                }
             };
-            inventory.record(&source.path(), metadata.len(), Provider::Tmdb);
+            // Files directly under `.tmdb-prepared` are artifacts, never representations the serving path opens.
+            inventory.record_bytes(metadata.len());
             continue;
         }
         if !kind.is_dir() {
@@ -1945,18 +2024,27 @@ async fn sweep_prepared(
         let mut entries = match tokio::fs::read_dir(source.path()).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(Provider::Tmdb, &source.path(), &error);
+                return None;
+            }
         };
         loop {
             let entry = match entries.next_entry().await {
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,
-                Err(_) => return None,
+                Err(error) => {
+                    scan_failed(Provider::Tmdb, &source.path(), &error);
+                    return None;
+                }
             };
             let kind = match entry.file_type().await {
                 Ok(kind) => kind,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
+                Err(error) => {
+                    scan_failed(Provider::Tmdb, &entry.path(), &error);
+                    return None;
+                }
             };
             if !kind.is_file() {
                 continue;
@@ -1978,10 +2066,13 @@ async fn sweep_prepared(
                         metrics.provider_cache_store(Provider::Tmdb, CacheStore::Expired);
                     }
                     Ok(()) => {}
-                    Err(_) => inventory.record(&path, metadata.len(), Provider::Tmdb),
+                    Err(error) => {
+                        inventory.deletion_failed(Provider::Tmdb, &path, &error);
+                        inventory.record_prepared(&path, &metadata);
+                    }
                 }
             } else {
-                inventory.record(&entry.path(), metadata.len(), Provider::Tmdb);
+                inventory.record_prepared(&entry.path(), &metadata);
             }
         }
         let _ = tokio::fs::remove_dir(source.path()).await;
@@ -1997,22 +2088,31 @@ pub(crate) async fn sweep_older_than(
     metrics: &crate::metrics::Metrics,
     provider: Provider,
 ) -> Option<CacheInventory> {
-    let mut inventory = CacheInventory::default();
+    let mut inventory = CacheInventory::empty();
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(inventory),
-        Err(_) => return None,
+        Err(error) => {
+            scan_failed(provider, dir, &error);
+            return None;
+        }
     };
     loop {
         let entry = match entries.next_entry().await {
             Ok(Some(entry)) => entry,
             Ok(None) => break,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(provider, dir, &error);
+                return None;
+            }
         };
         let kind = match entry.file_type().await {
             Ok(kind) => kind,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(provider, &entry.path(), &error);
+                return None;
+            }
         };
         if !kind.is_file() {
             continue;
@@ -2020,7 +2120,10 @@ pub(crate) async fn sweep_older_than(
         let metadata = match entry.metadata().await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            Err(error) => {
+                scan_failed(provider, &entry.path(), &error);
+                return None;
+            }
         };
         let expired = metadata
             .modified()
@@ -2034,10 +2137,13 @@ pub(crate) async fn sweep_older_than(
                     metrics.provider_cache_store(provider, CacheStore::Expired);
                 }
                 Ok(()) => {}
-                Err(_) => inventory.record(&path, metadata.len(), provider),
+                Err(error) => {
+                    inventory.deletion_failed(provider, &path, &error);
+                    inventory.record(&path, &metadata, provider);
+                }
             }
         } else {
-            inventory.record(&entry.path(), metadata.len(), provider);
+            inventory.record(&entry.path(), &metadata, provider);
         }
     }
     Some(inventory)
@@ -2050,7 +2156,15 @@ pub(crate) async fn sweep_provider_cache(
     provider: Provider,
 ) {
     if let Some(inventory) = sweep_older_than(dir, max_age, metrics, provider).await {
-        metrics.provider_cache_inventory(provider, inventory.bytes, inventory.entries);
+        metrics.provider_cache_inventory(
+            provider,
+            inventory.bytes,
+            inventory.entries,
+            inventory.oldest_age_seconds(),
+        );
+        metrics.provider_cache_scan(provider, inventory.successful);
+    } else {
+        metrics.provider_cache_scan(provider, false);
     }
 }
 
@@ -2568,6 +2682,27 @@ mod tests {
         assert_eq!(crate::lock(&unlimited.state.tmdb_spent).1, 0, "nothing to give back without a ceiling");
     }
 
+    #[test]
+    fn provider_attempt_guards_count_cancellation_and_completion_once() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        drop(metrics.provider_upstream_started(Provider::Tmdb));
+        metrics
+            .provider_upstream_started(Provider::Tmdb)
+            .finished(ProviderUpstream::Updated);
+        drop(metrics.provider_store_started(Provider::Tmdb));
+        metrics.provider_store_started(Provider::Tmdb).finished(CacheStore::Stored);
+
+        let rendered = metrics.render();
+        for row in [
+            r#"den_edge_provider_upstream_total{provider="tmdb",result="cancelled"} 1"#,
+            r#"den_edge_provider_upstream_total{provider="tmdb",result="updated"} 1"#,
+            r#"den_edge_provider_cache_store_total{provider="tmdb",result="cancelled"} 1"#,
+            r#"den_edge_provider_cache_store_total{provider="tmdb",result="stored"} 1"#,
+        ] {
+            assert!(rendered.contains(row), "missing {row}");
+        }
+    }
+
     type Upstream = Arc<dyn Fn(&str) -> Result<Fetched, Box<Response>> + Send + Sync>;
     /// A stand-in TMDB per lent key, so tests running at once each get their own.
     static UPSTREAMS: std::sync::Mutex<Vec<(String, Upstream)>> = std::sync::Mutex::new(Vec::new());
@@ -2600,6 +2735,19 @@ mod tests {
         });
         crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
         asked
+    }
+
+    #[tokio::test]
+    async fn a_cold_preview_404_is_counted_before_its_early_return() {
+        let h = lending_as(&temp_dir(), "missing-preview");
+        let tmdb: Upstream = Arc::new(|_| Err(refused(StatusCode::NOT_FOUND, "not_found")));
+        crate::lock(&UPSTREAMS).push(("missing-preview".to_owned(), tmdb));
+
+        assert!(ask(&h.state, "/3/movie/999999999", None).await.is_none());
+
+        assert!(h.state.metrics.render().contains(
+            r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#
+        ));
     }
 
     /// A TMDB whose whole series detail is too large to take (`MAX_ANSWER_BYTES`), as a long series' every-season
@@ -3077,6 +3225,7 @@ mod tests {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("canonical.json"), b"body").unwrap();
+        aged(&dir.join("canonical.json"), Duration::from_secs(2 * 3600));
         std::fs::write(dir.join("canonical.response"), b"meta").unwrap();
         std::fs::write(dir.join("canonical.etag"), b"tag").unwrap();
         std::fs::write(dir.join("write.tmp"), b"temporary").unwrap();
@@ -3086,8 +3235,10 @@ mod tests {
         let source = prepared.join("source");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("variant.tmdb.json"), b"variant").unwrap();
+        std::fs::write(source.join("marker.json"), b"marker").unwrap();
         std::fs::write(source.join("variant.tmdb.json.response"), b"sidecar").unwrap();
         std::fs::write(prepared.join("orphan.response"), b"orphan").unwrap();
+        std::fs::write(prepared.join("orphan.json"), b"root-json").unwrap();
 
         let outside = temp_dir();
         std::fs::create_dir_all(&outside).unwrap();
@@ -3098,11 +3249,23 @@ mod tests {
         let metrics = crate::metrics::Metrics::default();
         sweep(&dir, &metrics).await;
         let rendered = metrics.render();
-        let expected_bytes = 4 + 4 + 3 + 9 + 1 + 7 + 7 + 6;
+        let expected_bytes = 4 + 4 + 3 + 9 + 1 + 7 + 6 + 7 + 6 + 9;
         assert!(rendered.contains(&format!(
             r#"den_edge_provider_cache_bytes{{provider="tmdb"}} {expected_bytes}"#
         )));
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 2"#));
+        let oldest = rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(r#"den_edge_provider_cache_oldest_age_seconds{provider="tmdb"} "#)
+            })
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!((7100..=7300).contains(&oldest), "unexpected oldest age: {oldest}");
+        assert!(rendered.contains(
+            r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="success"} 1"#
+        ));
 
         let warnings = temp_dir();
         std::fs::create_dir_all(&warnings).unwrap();
@@ -3113,6 +3276,26 @@ mod tests {
         let rendered = metrics.render();
         assert!(rendered.contains(r#"den_edge_provider_cache_bytes{provider="warnings"} 22"#));
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="warnings"} 1"#));
+        assert!(rendered.contains(
+            r#"den_edge_provider_cache_scan_total{provider="warnings",outcome="success"} 1"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_inventory_is_reported_and_does_not_publish_partial_totals() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("canonical.json"), b"body").unwrap();
+        std::fs::write(dir.join(".tmdb-prepared"), b"not a directory").unwrap();
+        let metrics = crate::metrics::Metrics::default();
+
+        sweep(&dir, &metrics).await;
+
+        let rendered = metrics.render();
+        assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 0"#));
+        assert!(rendered.contains(
+            r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="failed"} 1"#
+        ));
     }
 
     #[tokio::test]

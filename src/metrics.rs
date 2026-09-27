@@ -17,9 +17,10 @@ pub struct Metrics {
     streams: Mutex<StreamState>,
     compression: Mutex<CompressionState>,
     provider_access: [[AtomicU64; 4]; 4],
-    provider_upstream: [[AtomicU64; 4]; 4],
-    provider_store: [[AtomicU64; 4]; 4],
-    provider_inventory: [[AtomicU64; 2]; 4],
+    provider_upstream: [[AtomicU64; 5]; 4],
+    provider_store: [[AtomicU64; 5]; 4],
+    provider_inventory: [[AtomicU64; 3]; 4],
+    provider_inventory_scan: [[AtomicU64; 2]; 4],
     tmdb_prepared: [AtomicU64; 4],
     title_metadata: [[AtomicU64; 7]; 3],
     /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
@@ -76,7 +77,7 @@ struct StreamState {
     high_water: [usize; 2],
     retained: [usize; 2],
     retained_high_water: [usize; 2],
-    terminated: [[u64; 5]; 2],
+    terminated: [[u64; 6]; 2],
 }
 
 #[derive(Default)]
@@ -129,11 +130,18 @@ pub enum StreamTermination {
     ReceiverIdle = 2,
     Lifetime = 3,
     UpstreamError = 4,
+    ReceiverClosed = 5,
 }
 
 impl StreamTermination {
-    const LABELS: [&'static str; 5] =
-        ["route_limit", "source_idle", "receiver_idle", "lifetime", "upstream_error"];
+    const LABELS: [&'static str; 6] = [
+        "route_limit",
+        "source_idle",
+        "receiver_idle",
+        "lifetime",
+        "upstream_error",
+        "receiver_closed",
+    ];
 }
 
 pub struct StreamAdmission {
@@ -225,10 +233,12 @@ pub enum ProviderUpstream {
     NotModified = 1,
     Negative = 2,
     Failed = 3,
+    Cancelled = 4,
 }
 
 impl ProviderUpstream {
-    const LABELS: [&'static str; 4] = ["updated", "not_modified", "negative", "failed"];
+    const LABELS: [&'static str; 5] =
+        ["updated", "not_modified", "negative", "failed", "cancelled"];
 }
 
 #[derive(Clone, Copy)]
@@ -237,10 +247,54 @@ pub enum CacheStore {
     Skipped = 1,
     Failed = 2,
     Expired = 3,
+    Cancelled = 4,
 }
 
 impl CacheStore {
-    const LABELS: [&'static str; 4] = ["stored", "skipped_policy", "failed", "expired"];
+    const LABELS: [&'static str; 5] =
+        ["stored", "skipped_policy", "failed", "expired", "cancelled"];
+}
+
+pub struct ProviderUpstreamAttempt {
+    metrics: Arc<Metrics>,
+    provider: Provider,
+    finished: bool,
+}
+
+impl ProviderUpstreamAttempt {
+    pub fn finished(mut self, result: ProviderUpstream) {
+        self.metrics.provider_upstream(self.provider, result);
+        self.finished = true;
+    }
+}
+
+impl Drop for ProviderUpstreamAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.metrics.provider_upstream(self.provider, ProviderUpstream::Cancelled);
+        }
+    }
+}
+
+pub struct ProviderStoreAttempt {
+    metrics: Arc<Metrics>,
+    provider: Provider,
+    finished: bool,
+}
+
+impl ProviderStoreAttempt {
+    pub fn finished(mut self, result: CacheStore) {
+        self.metrics.provider_cache_store(self.provider, result);
+        self.finished = true;
+    }
+}
+
+impl Drop for ProviderStoreAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.metrics.provider_cache_store(self.provider, CacheStore::Cancelled);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -439,14 +493,35 @@ impl Metrics {
         self.provider_upstream[provider as usize][result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn provider_upstream_started(self: &Arc<Self>, provider: Provider) -> ProviderUpstreamAttempt {
+        ProviderUpstreamAttempt { metrics: Arc::clone(self), provider, finished: false }
+    }
+
     pub fn provider_cache_store(&self, provider: Provider, result: CacheStore) {
         self.provider_store[provider as usize][result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn provider_store_started(self: &Arc<Self>, provider: Provider) -> ProviderStoreAttempt {
+        ProviderStoreAttempt { metrics: Arc::clone(self), provider, finished: false }
+    }
+
     /// Replace the last bounded background inventory snapshot. This is never called from a request path.
-    pub fn provider_cache_inventory(&self, provider: Provider, bytes: u64, entries: u64) {
+    pub fn provider_cache_inventory(
+        &self,
+        provider: Provider,
+        bytes: u64,
+        entries: u64,
+        oldest_age_seconds: u64,
+    ) {
         self.provider_inventory[provider as usize][0].store(bytes, Ordering::Relaxed);
         self.provider_inventory[provider as usize][1].store(entries, Ordering::Relaxed);
+        self.provider_inventory[provider as usize][2]
+            .store(oldest_age_seconds, Ordering::Relaxed);
+    }
+
+    pub fn provider_cache_scan(&self, provider: Provider, success: bool) {
+        self.provider_inventory_scan[provider as usize][usize::from(!success)]
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn tmdb_prepared(&self, result: TmdbPrepared) {
@@ -564,9 +639,9 @@ impl Metrics {
         }
         drop(media);
         out.push_str(
-            "# HELP den_edge_byte_admission_used_bytes Bytes currently retained under a fixed memory pool.\n\
+            "# HELP den_edge_byte_admission_used_bytes Bytes of capacity currently reserved under a fixed memory pool.\n\
              # TYPE den_edge_byte_admission_used_bytes gauge\n\
-             # HELP den_edge_byte_admission_high_water_bytes Highest bytes retained under a fixed memory pool.\n\
+             # HELP den_edge_byte_admission_high_water_bytes Highest bytes of capacity reserved under a fixed memory pool.\n\
              # TYPE den_edge_byte_admission_high_water_bytes gauge\n\
              # HELP den_edge_byte_admission_waited_total Admissions that waited for byte capacity.\n\
              # TYPE den_edge_byte_admission_waited_total counter\n\
@@ -589,9 +664,9 @@ impl Metrics {
              # TYPE den_edge_stream_active gauge\n\
              # HELP den_edge_stream_high_water Highest simultaneous response pumps, by fixed traffic class.\n\
              # TYPE den_edge_stream_high_water gauge\n\
-             # HELP den_edge_stream_retained_bytes Body-frame bytes currently retained by den-edge.\n\
+             # HELP den_edge_stream_retained_bytes Logical bytes in body frames retained by den-edge; backing allocations may be shared.\n\
              # TYPE den_edge_stream_retained_bytes gauge\n\
-             # HELP den_edge_stream_retained_high_water_bytes Highest body-frame bytes retained by den-edge.\n\
+             # HELP den_edge_stream_retained_high_water_bytes Highest logical bytes in retained body frames; backing allocations may be shared.\n\
              # TYPE den_edge_stream_retained_high_water_bytes gauge\n\
              # HELP den_edge_stream_terminated_total Streams terminated before normal completion, by bounded reason.\n\
              # TYPE den_edge_stream_terminated_total counter\n",
@@ -654,7 +729,11 @@ impl Metrics {
              # HELP den_edge_provider_cache_bytes Regular-file bytes in the last background inventory.\n\
              # TYPE den_edge_provider_cache_bytes gauge\n\
              # HELP den_edge_provider_cache_entries Serveable JSON bodies in the last background inventory.\n\
-             # TYPE den_edge_provider_cache_entries gauge\n",
+             # TYPE den_edge_provider_cache_entries gauge\n\
+             # HELP den_edge_provider_cache_oldest_age_seconds Age of the oldest serveable JSON body in the last successful background inventory.\n\
+             # TYPE den_edge_provider_cache_oldest_age_seconds gauge\n\
+             # HELP den_edge_provider_cache_scan_total Background provider-cache inventories by bounded outcome.\n\
+             # TYPE den_edge_provider_cache_scan_total counter\n",
         );
         for (provider, provider_label) in Provider::LABELS.into_iter().enumerate() {
             for (result, result_label) in CacheAccess::LABELS.into_iter().enumerate() {
@@ -677,10 +756,18 @@ impl Metrics {
             }
             let bytes = self.provider_inventory[provider][0].load(Ordering::Relaxed);
             let entries = self.provider_inventory[provider][1].load(Ordering::Relaxed);
+            let oldest_age = self.provider_inventory[provider][2].load(Ordering::Relaxed);
             out.push_str(&format!(
                 "den_edge_provider_cache_bytes{{provider=\"{provider_label}\"}} {bytes}\n\
-                 den_edge_provider_cache_entries{{provider=\"{provider_label}\"}} {entries}\n"
+                 den_edge_provider_cache_entries{{provider=\"{provider_label}\"}} {entries}\n\
+                 den_edge_provider_cache_oldest_age_seconds{{provider=\"{provider_label}\"}} {oldest_age}\n"
             ));
+            for (outcome, outcome_label) in ["success", "failed"].into_iter().enumerate() {
+                let n = self.provider_inventory_scan[provider][outcome].load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "den_edge_provider_cache_scan_total{{provider=\"{provider_label}\",outcome=\"{outcome_label}\"}} {n}\n"
+                ));
+            }
         }
         out.push_str(
             "# HELP den_edge_tmdb_prepared_total TMDB prepared-response reuse and build outcomes.\n\
@@ -690,13 +777,26 @@ impl Metrics {
             let n = self.tmdb_prepared[result].load(Ordering::Relaxed);
             out.push_str(&format!("den_edge_tmdb_prepared_total{{result=\"{label}\"}} {n}\n"));
         }
-        for (metric, name) in ["query", "publish", "observation"].into_iter().enumerate() {
+        for (metric, name) in ["query", "publish"].into_iter().enumerate() {
             out.push_str(&format!(
                 "# HELP den_edge_title_metadata_{name}_total Title-metadata {name} outcomes.\n\
                  # TYPE den_edge_title_metadata_{name}_total counter\n"
             ));
             for (result, label) in TITLE_METADATA_LABELS[metric].iter().enumerate() {
                 let n = self.title_metadata[metric][result].load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"
+                ));
+            }
+        }
+        for (name, range) in [("observation_admission", 0..4), ("observation_completion", 4..7)] {
+            out.push_str(&format!(
+                "# HELP den_edge_title_metadata_{name}_total Title-metadata {name} outcomes.\n\
+                 # TYPE den_edge_title_metadata_{name}_total counter\n"
+            ));
+            for result in range {
+                let label = TITLE_METADATA_LABELS[2][result];
+                let n = self.title_metadata[2][result].load(Ordering::Relaxed);
                 out.push_str(&format!(
                     "den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"
                 ));
@@ -776,14 +876,18 @@ mod tests {
             r#"den_edge_byte_admission_refused_total{pool="tmdb_derived"} 0"#,
             r#"den_edge_stream_retained_bytes{class="addon"} 0"#,
             r#"den_edge_stream_terminated_total{class="media",reason="receiver_idle"} 0"#,
+            r#"den_edge_stream_terminated_total{class="addon",reason="receiver_closed"} 0"#,
             r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="busy"} 0"#,
             r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 0"#,
             r#"den_edge_provider_upstream_total{provider="ratings",result="failed"} 0"#,
             r#"den_edge_provider_cache_store_total{provider="warnings",result="expired"} 0"#,
             r#"den_edge_provider_cache_bytes{provider="skipdb"} 0"#,
             r#"den_edge_provider_cache_entries{provider="tmdb"} 0"#,
+            r#"den_edge_provider_cache_oldest_age_seconds{provider="tmdb"} 0"#,
+            r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="failed"} 0"#,
             r#"den_edge_tmdb_prepared_total{result="transient_built"} 0"#,
-            r#"den_edge_title_metadata_observation_total{result="busy"} 0"#,
+            r#"den_edge_title_metadata_observation_admission_total{result="busy"} 0"#,
+            r#"den_edge_title_metadata_observation_completion_total{result="stored"} 0"#,
         ] {
             assert!(rendered.contains(row), "missing {row}");
         }
@@ -817,7 +921,8 @@ mod tests {
         metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
         metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
         metrics.provider_cache_store(Provider::Warnings, CacheStore::Expired);
-        metrics.provider_cache_inventory(Provider::Skipdb, 8192, 7);
+        metrics.provider_cache_inventory(Provider::Skipdb, 8192, 7, 3600);
+        metrics.provider_cache_scan(Provider::Skipdb, true);
         metrics.tmdb_prepared(TmdbPrepared::FileBuilt);
         metrics.stream_terminated(StreamClass::Media, StreamTermination::Lifetime);
         metrics.compression_busy();
@@ -830,6 +935,8 @@ mod tests {
             r#"den_edge_provider_cache_store_total{provider="warnings",result="expired"} 1"#,
             r#"den_edge_provider_cache_bytes{provider="skipdb"} 8192"#,
             r#"den_edge_provider_cache_entries{provider="skipdb"} 7"#,
+            r#"den_edge_provider_cache_oldest_age_seconds{provider="skipdb"} 3600"#,
+            r#"den_edge_provider_cache_scan_total{provider="skipdb",outcome="success"} 1"#,
             r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#,
             r#"den_edge_stream_terminated_total{class="media",reason="lifetime"} 1"#,
             r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#,

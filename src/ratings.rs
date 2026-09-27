@@ -175,8 +175,16 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
 
 async fn store(state: &AppState, file: Option<&std::path::Path>, body: &Bytes) {
     let result = match file {
-        Some(file) if crate::cache::write_json(file, body).await => CacheStore::Stored,
-        Some(_) => CacheStore::Failed,
+        Some(file) => {
+            let attempt = state.metrics.provider_store_started(Provider::Ratings);
+            let result = if crate::cache::write_json(file, body).await {
+                CacheStore::Stored
+            } else {
+                CacheStore::Failed
+            };
+            attempt.finished(result);
+            return;
+        }
         None => CacheStore::Skipped,
     };
     state.metrics.provider_cache_store(Provider::Ratings, result);
@@ -210,19 +218,20 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
+    let attempt = state.metrics.provider_upstream_started(Provider::Ratings);
     let (status, _, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "ratings").await {
             Ok(answer) => answer,
             Err(Failed::Unreachable) => {
-                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "ratings_unreachable"));
             }
             Err(Failed::Timeout) => {
-                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::GATEWAY_TIMEOUT, "ratings_timeout"));
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
-                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+                attempt.finished(ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"))
             }
         };
@@ -231,14 +240,14 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let why = body.get("Error").and_then(Value::as_str).unwrap_or("");
     if status.is_success() && body.get("Response").and_then(Value::as_str) == Some("True") {
-        state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Updated);
+        attempt.finished(ProviderUpstream::Updated);
         return Ok(Some(Bytes::from(kept(&body).to_string())));
     }
     if status.is_success() && (why.contains("not found") || why.contains("Incorrect IMDb ID")) {
-        state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Negative);
+        attempt.finished(ProviderUpstream::Negative);
         return Ok(None);
     }
-    state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+    attempt.finished(ProviderUpstream::Failed);
     if why.contains("limit") {
         if key.household {
             rest(state);

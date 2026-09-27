@@ -1166,9 +1166,15 @@ mod tests {
         assert!(metrics.contains(r#"den_edge_byte_admission_used_bytes{pool="title_observation"} 0"#));
         assert!(metrics.contains(r#"den_edge_byte_admission_high_water_bytes{pool="title_observation"} 16777216"#));
         assert!(metrics.contains(r#"den_edge_byte_admission_refused_total{pool="title_observation"} 1"#));
-        assert!(metrics.contains(r#"den_edge_title_metadata_observation_total{result="accepted"} 1"#));
-        assert!(metrics.contains(r#"den_edge_title_metadata_observation_total{result="busy"} 1"#));
-        assert!(metrics.contains(r#"den_edge_title_metadata_observation_total{result="empty"} 1"#));
+        assert!(metrics.contains(
+            r#"den_edge_title_metadata_observation_admission_total{result="accepted"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_title_metadata_observation_admission_total{result="busy"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_title_metadata_observation_completion_total{result="empty"} 1"#
+        ));
     }
 
     #[test]
