@@ -472,7 +472,7 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
                 attempt.finished(ProviderUpstream::Failed);
-                return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
+                return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"));
             }
         };
     let number = |name: &str| {
@@ -792,15 +792,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a claim to membership is checked, not believed");
 
         let metrics = h.state.metrics.render();
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="warnings",result="cold"} 2"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="warnings",result="fresh"} 3"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="warnings",result="negative"} 2"#
-        ));
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="warnings",result="cold"} 2"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="warnings",result="fresh"} 3"#)
+        );
+        assert!(metrics
+            .contains(r#"den_edge_provider_cache_access_total{provider="warnings",result="negative"} 2"#));
     }
 
     /// Anyone could send any string as a key, and every question on one spent the same minute's allowance the

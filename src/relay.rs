@@ -1020,17 +1020,17 @@ async fn relay_with(
     };
     let (mut bytes, collected_charge) =
         match collect_by(body, deadline, budget, multiplier, limit, Some(&state.metrics)).await {
-        Ok(collected) => collected,
-        Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
-            eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
-            return crate::handler::retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &error(code),
-                COLLECT_BUSY_RETRY_MS,
-            );
-        }
-        Err((status, code)) => return json(status, code),
-    };
+            Ok(collected) => collected,
+            Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
+                eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error(code),
+                    COLLECT_BUSY_RETRY_MS,
+                );
+            }
+            Err((status, code)) => return json(status, code),
+        };
     let charge = if public_session { session_charge.take() } else { collected_charge };
     if let Some(g) = &grant {
         // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
@@ -1200,9 +1200,8 @@ where
                 }
                 return false;
             };
-            let accounting = metrics.map(|metrics| {
-                metrics.byte_admitted(crate::metrics::BytePool::RelayCollect, delta, false)
-            });
+            let accounting = metrics
+                .map(|metrics| metrics.byte_admitted(crate::metrics::BytePool::RelayCollect, delta, false));
             charged = len;
             match &mut charge {
                 Some(charge) => {
@@ -1210,10 +1209,8 @@ where
                     charge._accounting.extend(accounting);
                 }
                 None => {
-                    charge = Some(CollectedCharge {
-                        permit: taken,
-                        _accounting: accounting.into_iter().collect(),
-                    })
+                    charge =
+                        Some(CollectedCharge { permit: taken, _accounting: accounting.into_iter().collect() })
                 }
             }
             true
@@ -1394,9 +1391,9 @@ where
                 *crate::lock(&failed) = Some(why);
                 break;
             }
-            ready.send(frame.map_data(|bytes| {
-                metrics.stream_bytes(crate::metrics::StreamClass::Addon, bytes)
-            }));
+            ready.send(
+                frame.map_data(|bytes| metrics.stream_bytes(crate::metrics::StreamClass::Addon, bytes)),
+            );
         }
     });
     Body::new(Passed { frames, terminal })
@@ -1902,9 +1899,9 @@ where
                 }
                 Ok(None) => break,
             };
-            ready.send(frame.map_data(|bytes| {
-                metrics.stream_bytes(crate::metrics::StreamClass::Media, bytes)
-            }));
+            ready.send(
+                frame.map_data(|bytes| metrics.stream_bytes(crate::metrics::StreamClass::Media, bytes)),
+            );
         }
     });
     Body::new(MediaPassed { passed: Passed { frames, terminal }, state, slot })
@@ -3302,9 +3299,11 @@ mod tests {
         let cut = axum::body::to_bytes(answer.into_body(), usize::MAX).await;
         assert!(cut.is_err(), "the body ends in an error rather than whole");
         assert_eq!(slots_back(&h.state.relay_slots).await, super::MAX_IN_FLIGHT);
-        assert!(h.state.metrics.render().contains(
-            r#"den_edge_stream_terminated_total{class="addon",reason="route_limit"} 1"#
-        ));
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_stream_terminated_total{class="addon",reason="route_limit"} 1"#));
     }
 
     /// An answer passed on that goes silent part-way is ended at the idle deadline, and gives its slot back.
@@ -3347,14 +3346,13 @@ mod tests {
         let slots = Arc::new(tokio::sync::Semaphore::new(1));
         let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
-        let unread =
-            super::passed_body(
-                answer.into_body(),
-                deadline,
-                std::time::Duration::from_secs(60),
-                slot,
-                std::sync::Arc::new(crate::metrics::Metrics::default()),
-            );
+        let unread = super::passed_body(
+            answer.into_body(),
+            deadline,
+            std::time::Duration::from_secs(60),
+            slot,
+            std::sync::Arc::new(crate::metrics::Metrics::default()),
+        );
         assert_eq!(slots.available_permits(), 0);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert_eq!(slots.available_permits(), 1, "given back without a read");
@@ -3393,9 +3391,8 @@ mod tests {
             .unwrap()
             .forget();
         let rendered = metrics.render();
-        assert!(rendered.contains(
-            r#"den_edge_stream_terminated_total{class="addon",reason="receiver_closed"} 1"#
-        ));
+        assert!(rendered
+            .contains(r#"den_edge_stream_terminated_total{class="addon",reason="receiver_closed"} 1"#));
         assert!(rendered.contains(r#"den_edge_stream_active{class="addon"} 0"#));
         assert!(rendered.contains(r#"den_edge_stream_retained_bytes{class="addon"} 0"#));
     }

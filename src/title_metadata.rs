@@ -681,11 +681,8 @@ fn record(
         state.metrics.title_observation(crate::metrics::TitleObservation::Busy);
         return false;
     };
-    let accounting = state.metrics.byte_admitted(
-        crate::metrics::BytePool::TitleObservation,
-        permit.num_permits(),
-        false,
-    );
+    let accounting =
+        state.metrics.byte_admitted(crate::metrics::BytePool::TitleObservation, permit.num_permits(), false);
     state.metrics.title_observation(crate::metrics::TitleObservation::Accepted);
     let (state, body) = (Arc::clone(state), body.clone());
     tokio::spawn(async move {
@@ -1164,17 +1161,14 @@ mod tests {
         assert!(released, "the completed observation did not release its byte budget");
         let metrics = h.state.metrics.render();
         assert!(metrics.contains(r#"den_edge_byte_admission_used_bytes{pool="title_observation"} 0"#));
-        assert!(metrics.contains(r#"den_edge_byte_admission_high_water_bytes{pool="title_observation"} 16777216"#));
+        assert!(metrics
+            .contains(r#"den_edge_byte_admission_high_water_bytes{pool="title_observation"} 16777216"#));
         assert!(metrics.contains(r#"den_edge_byte_admission_refused_total{pool="title_observation"} 1"#));
-        assert!(metrics.contains(
-            r#"den_edge_title_metadata_observation_admission_total{result="accepted"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_title_metadata_observation_admission_total{result="busy"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_title_metadata_observation_completion_total{result="empty"} 1"#
-        ));
+        assert!(
+            metrics.contains(r#"den_edge_title_metadata_observation_admission_total{result="accepted"} 1"#)
+        );
+        assert!(metrics.contains(r#"den_edge_title_metadata_observation_admission_total{result="busy"} 1"#));
+        assert!(metrics.contains(r#"den_edge_title_metadata_observation_completion_total{result="empty"} 1"#));
     }
 
     #[test]

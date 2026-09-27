@@ -134,14 +134,8 @@ pub enum StreamTermination {
 }
 
 impl StreamTermination {
-    const LABELS: [&'static str; 6] = [
-        "route_limit",
-        "source_idle",
-        "receiver_idle",
-        "lifetime",
-        "upstream_error",
-        "receiver_closed",
-    ];
+    const LABELS: [&'static str; 6] =
+        ["route_limit", "source_idle", "receiver_idle", "lifetime", "upstream_error", "receiver_closed"];
 }
 
 pub struct StreamAdmission {
@@ -237,8 +231,7 @@ pub enum ProviderUpstream {
 }
 
 impl ProviderUpstream {
-    const LABELS: [&'static str; 5] =
-        ["updated", "not_modified", "negative", "failed", "cancelled"];
+    const LABELS: [&'static str; 5] = ["updated", "not_modified", "negative", "failed", "cancelled"];
 }
 
 #[derive(Clone, Copy)]
@@ -251,8 +244,7 @@ pub enum CacheStore {
 }
 
 impl CacheStore {
-    const LABELS: [&'static str; 5] =
-        ["stored", "skipped_policy", "failed", "expired", "cancelled"];
+    const LABELS: [&'static str; 5] = ["stored", "skipped_policy", "failed", "expired", "cancelled"];
 }
 
 pub struct ProviderUpstreamAttempt {
@@ -424,12 +416,7 @@ impl Metrics {
         *lock(&self.media_admission).refused.entry(reason).or_default() += 1;
     }
 
-    pub fn byte_admitted(
-        self: &Arc<Self>,
-        pool: BytePool,
-        bytes: usize,
-        waited: bool,
-    ) -> ByteAdmission {
+    pub fn byte_admitted(self: &Arc<Self>, pool: BytePool, bytes: usize, waited: bool) -> ByteAdmission {
         let pool = pool as usize;
         let mut admission = lock(&self.byte_admission);
         admission.active[pool] = admission.active[pool].saturating_add(bytes);
@@ -459,8 +446,7 @@ impl Metrics {
         let len = bytes.len();
         let mut streams = lock(&self.streams);
         streams.retained[class] = streams.retained[class].saturating_add(len);
-        streams.retained_high_water[class] =
-            streams.retained_high_water[class].max(streams.retained[class]);
+        streams.retained_high_water[class] = streams.retained_high_water[class].max(streams.retained[class]);
         drop(streams);
         Bytes::from_owner(StreamBytes { bytes, metrics: Arc::clone(self), class, len })
     }
@@ -515,8 +501,7 @@ impl Metrics {
     ) {
         self.provider_inventory[provider as usize][0].store(bytes, Ordering::Relaxed);
         self.provider_inventory[provider as usize][1].store(entries, Ordering::Relaxed);
-        self.provider_inventory[provider as usize][2]
-            .store(oldest_age_seconds, Ordering::Relaxed);
+        self.provider_inventory[provider as usize][2].store(oldest_age_seconds, Ordering::Relaxed);
     }
 
     pub fn provider_cache_scan(&self, provider: Provider, success: bool) {
@@ -730,7 +715,7 @@ impl Metrics {
              # TYPE den_edge_provider_cache_bytes gauge\n\
              # HELP den_edge_provider_cache_entries Serveable JSON bodies in the last background inventory.\n\
              # TYPE den_edge_provider_cache_entries gauge\n\
-             # HELP den_edge_provider_cache_oldest_age_seconds Age of the oldest serveable JSON body in the last successful background inventory.\n\
+             # HELP den_edge_provider_cache_oldest_age_seconds Age of the oldest serveable JSON body in the last complete background inventory.\n\
              # TYPE den_edge_provider_cache_oldest_age_seconds gauge\n\
              # HELP den_edge_provider_cache_scan_total Background provider-cache inventories by bounded outcome.\n\
              # TYPE den_edge_provider_cache_scan_total counter\n",
@@ -784,9 +769,7 @@ impl Metrics {
             ));
             for (result, label) in TITLE_METADATA_LABELS[metric].iter().enumerate() {
                 let n = self.title_metadata[metric][result].load(Ordering::Relaxed);
-                out.push_str(&format!(
-                    "den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"
-                ));
+                out.push_str(&format!("den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"));
             }
         }
         for (name, range) in [("observation_admission", 0..4), ("observation_completion", 4..7)] {
@@ -797,9 +780,7 @@ impl Metrics {
             for result in range {
                 let label = TITLE_METADATA_LABELS[2][result];
                 let n = self.title_metadata[2][result].load(Ordering::Relaxed);
-                out.push_str(&format!(
-                    "den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"
-                ));
+                out.push_str(&format!("den_edge_title_metadata_{name}_total{{result=\"{label}\"}} {n}\n"));
             }
         }
         let (applied, conflicts) = *lock(&self.library_writes);

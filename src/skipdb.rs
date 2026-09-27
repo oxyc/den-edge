@@ -292,7 +292,7 @@ async fn lookup(state: &AppState, ask: &Ask, ip: &str, rid: &str) -> Result<Opti
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
                 attempt.finished(ProviderUpstream::Failed);
-                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
+                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"));
             }
         };
     let answer = said(status, &headers, &bytes);
@@ -505,15 +505,15 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), ABSENT);
         assert_eq!(*crate::lock(&asked), 4);
         let metrics = h.state.metrics.render();
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="skipdb",result="cold"} 2"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="skipdb",result="stale"} 2"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_store_total{provider="skipdb",result="stored"} 2"#
-        ));
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="skipdb",result="cold"} 2"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="skipdb",result="stale"} 2"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_store_total{provider="skipdb",result="stored"} 2"#)
+        );
     }
 
     /// Every runtime, season and episode is a question of its own and a file kept for 90 days, so made-up ones

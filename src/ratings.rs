@@ -232,7 +232,7 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
             }
             Err(Failed::TooLarge | Failed::Unreadable) => {
                 attempt.finished(ProviderUpstream::Failed);
-                return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"))
+                return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"));
             }
         };
     // OMDb says why in its body: a refused key or a spent day as a 401, a title it doesn't have as a 200. The
@@ -456,18 +456,17 @@ mod tests {
         assert_eq!(h.send("GET", "/ratings/imdb/nm1", None, &[]).await.status(), StatusCode::NOT_FOUND);
 
         let metrics = h.state.metrics.render();
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="ratings",result="cold"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="ratings",result="fresh"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="ratings",result="stale"} 2"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="ratings",result="negative"} 1"#
-        ));
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="ratings",result="cold"} 1"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="ratings",result="fresh"} 1"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="ratings",result="stale"} 2"#)
+        );
+        assert!(metrics
+            .contains(r#"den_edge_provider_cache_access_total{provider="ratings",result="negative"} 1"#));
     }
 
     type Omdb = Arc<dyn Fn() -> Result<Option<Bytes>, Box<Response>> + Send + Sync>;

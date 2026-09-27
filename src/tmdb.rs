@@ -910,9 +910,8 @@ impl Detail {
                 };
                 found
             } else {
-                let Some(found) = self
-                    .prepared_variant_with(&file, source, self.durable_variant(), metrics.clone())
-                    .await
+                let Some(found) =
+                    self.prepared_variant_with(&file, source, self.durable_variant(), metrics.clone()).await
                 else {
                     continue;
                 };
@@ -1118,7 +1117,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                         "hit",
                         modified,
                         asked,
-                    )
+                    );
                 }
                 // A list or a search moves, but the one kept is a better page than a wait on TMDB: served at
                 // once, and asked again behind it. A title's details are never here inside the six months.
@@ -1223,7 +1222,7 @@ async fn detail_answer(
                 "hit",
                 modified,
                 asked,
-            )
+            );
         }
         Kept::Absent => {
             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
@@ -1262,7 +1261,7 @@ async fn detail_answer(
                         "hit",
                         modified,
                         asked,
-                    )
+                    );
                 }
                 Kept::Absent => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
@@ -1474,7 +1473,9 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 }
             }
         };
-        let access = if asked.is_some() { CacheAccess::Cold } else if stale.is_some() {
+        let access = if asked.is_some() {
+            CacheAccess::Cold
+        } else if stale.is_some() {
             CacheAccess::Stale
         } else {
             CacheAccess::Cold
@@ -1931,9 +1932,8 @@ impl CacheInventory {
     }
 
     fn record_prepared(&mut self, path: &Path, metadata: &std::fs::Metadata) {
-        let serveable = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-            name.ends_with(".tmdb.json")
-        });
+        let serveable =
+            path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".tmdb.json"));
         self.record_file(metadata, serveable);
     }
 
@@ -1942,7 +1942,8 @@ impl CacheInventory {
         self.entries = self.entries.saturating_add(u64::from(serveable));
         if serveable {
             if let Ok(modified) = metadata.modified() {
-                self.oldest_modified = Some(self.oldest_modified.map_or(modified, |oldest| oldest.min(modified)));
+                self.oldest_modified =
+                    Some(self.oldest_modified.map_or(modified, |oldest| oldest.min(modified)));
             }
         }
     }
@@ -2052,7 +2053,10 @@ async fn sweep_prepared(
             let metadata = match entry.metadata().await {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
+                Err(error) => {
+                    scan_failed(Provider::Tmdb, &entry.path(), &error);
+                    return None;
+                }
             };
             let expired = metadata
                 .modified()
@@ -2686,9 +2690,7 @@ mod tests {
     fn provider_attempt_guards_count_cancellation_and_completion_once() {
         let metrics = Arc::new(crate::metrics::Metrics::default());
         drop(metrics.provider_upstream_started(Provider::Tmdb));
-        metrics
-            .provider_upstream_started(Provider::Tmdb)
-            .finished(ProviderUpstream::Updated);
+        metrics.provider_upstream_started(Provider::Tmdb).finished(ProviderUpstream::Updated);
         drop(metrics.provider_store_started(Provider::Tmdb));
         metrics.provider_store_started(Provider::Tmdb).finished(CacheStore::Stored);
 
@@ -2745,9 +2747,11 @@ mod tests {
 
         assert!(ask(&h.state, "/3/movie/999999999", None).await.is_none());
 
-        assert!(h.state.metrics.render().contains(
-            r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#
-        ));
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#));
     }
 
     /// A TMDB whose whole series detail is too large to take (`MAX_ANSWER_BYTES`), as a long series' every-season
@@ -2925,12 +2929,8 @@ mod tests {
         assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="transient_built"} 1"#));
         assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#));
         assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_hit"} 1"#));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 2"#
-        ));
+        assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#));
+        assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 2"#));
 
         let replacement = Bytes::from_static(
             br#"{"id":550,"title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
@@ -2946,13 +2946,11 @@ mod tests {
         let metrics = Arc::new(crate::metrics::Metrics::default());
         let charge = derived_response_charge(Some(&metrics)).await.unwrap();
         let body = charged_derived(Bytes::from_static(b"{}"), charge);
-        assert!(metrics.render().contains(
-            r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 4194304"#
-        ));
-        drop(body);
         assert!(metrics
             .render()
-            .contains(r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 0"#));
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 4194304"#));
+        drop(body);
+        assert!(metrics.render().contains(r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 0"#));
     }
 
     #[tokio::test]
@@ -3250,9 +3248,8 @@ mod tests {
         sweep(&dir, &metrics).await;
         let rendered = metrics.render();
         let expected_bytes = 4 + 4 + 3 + 9 + 1 + 7 + 6 + 7 + 6 + 9;
-        assert!(rendered.contains(&format!(
-            r#"den_edge_provider_cache_bytes{{provider="tmdb"}} {expected_bytes}"#
-        )));
+        assert!(rendered
+            .contains(&format!(r#"den_edge_provider_cache_bytes{{provider="tmdb"}} {expected_bytes}"#)));
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 2"#));
         let oldest = rendered
             .lines()
@@ -3263,9 +3260,9 @@ mod tests {
             .parse::<u64>()
             .unwrap();
         assert!((7100..=7300).contains(&oldest), "unexpected oldest age: {oldest}");
-        assert!(rendered.contains(
-            r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="success"} 1"#
-        ));
+        assert!(
+            rendered.contains(r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="success"} 1"#)
+        );
 
         let warnings = temp_dir();
         std::fs::create_dir_all(&warnings).unwrap();
@@ -3276,9 +3273,8 @@ mod tests {
         let rendered = metrics.render();
         assert!(rendered.contains(r#"den_edge_provider_cache_bytes{provider="warnings"} 22"#));
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="warnings"} 1"#));
-        assert!(rendered.contains(
-            r#"den_edge_provider_cache_scan_total{provider="warnings",outcome="success"} 1"#
-        ));
+        assert!(rendered
+            .contains(r#"den_edge_provider_cache_scan_total{provider="warnings",outcome="success"} 1"#));
     }
 
     #[tokio::test]
@@ -3293,9 +3289,9 @@ mod tests {
 
         let rendered = metrics.render();
         assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 0"#));
-        assert!(rendered.contains(
-            r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="failed"} 1"#
-        ));
+        assert!(
+            rendered.contains(r#"den_edge_provider_cache_scan_total{provider="tmdb",outcome="failed"} 1"#)
+        );
     }
 
     #[tokio::test]
