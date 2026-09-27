@@ -7,8 +7,8 @@ holds the plugin list and settings older links shared. It also serves the Den we
 It never interprets what it stores: library rows, the backup and the inbox are ciphertext sealed on the devices,
 and the rest is small JSON it validates and bounds.
 
-See [Architecture](docs/ARCHITECTURE.md) for the current request and storage flows and
-[Performance](docs/PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
+See [Architecture](ARCHITECTURE.md) for the current request and storage flows and
+[Performance](PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
 
 ## Routes
 
