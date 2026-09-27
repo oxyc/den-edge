@@ -6,6 +6,7 @@ import {
   fetchFilterCounts,
   fetchPeopleCounts,
   filterPeople,
+  filterCountSplit,
   filterTitles,
   FilterUnavailable,
   filterUrl,
@@ -212,11 +213,25 @@ describe('fetching', () => {
       fetchImpl: async () =>
         answer({
           total: 3,
-          kinds: { genre: { mode: 'and', complete: true, values: { '28': 3 } } },
+          confident: 2,
+          likely: 1,
+          kinds: {
+            genre: { mode: 'and', complete: true, values: { '28': 3 }, likely: { '28': 1 } },
+          },
           ignored: [],
         }),
     });
     expect(counts?.kinds.genre?.values).toEqual({ '28': 3 });
+    expect(counts?.kinds.genre?.likely).toEqual({ '28': 1 });
+    expect(counts).toMatchObject({ total: 3, confident: 2, likely: 1 });
+    expect(filterCountSplit([counts!])).toBe('3 catalog matches: 2 confident, 1 likely.');
+    expect(
+      filterCountSplit([
+        counts!,
+        { total: 1, confident: 1, likely: 0, kinds: {}, ignored: [], kindsUnavailable: [] },
+      ]),
+    ).toBe('4 catalog matches: 3 confident, 1 likely.');
+    expect(filterCountSplit([{ total: 3, kinds: {}, ignored: [], kindsUnavailable: [] }])).toBe('');
     expect(
       await fetchFilterCounts('/atlas', 'movie', [], { fetchImpl: async () => answer({}, 404) }),
     ).toBeNull();

@@ -409,7 +409,7 @@ describe('rows atlas’s filter answers', () => {
 
   it('draws a card atlas has no poster for from TMDB', async () => {
     const atlas = atlasFake(() =>
-      json({ titles: [card(7, { posterPath: null })], order: 'o', ignored: [] }),
+      json({ titles: [card(7, { posterPath: null, likely: true })], order: 'o', ignored: [] }),
     );
     const [row] = homeRows(tmdbFake().pages, {
       atlas: {
@@ -418,7 +418,7 @@ describe('rows atlas’s filter answers', () => {
         title: async (ref) => ({ ...ref, title: 'Drawn', posterPath: '/drawn.jpg' }),
       },
     }).filter((r) => r.id === 'recipe-romantic-comedy-atlas');
-    expect(await row!.load(1)).toMatchObject([{ id: 7, posterPath: '/drawn.jpg' }]);
+    expect(await row!.load(1)).toMatchObject([{ id: 7, posterPath: '/drawn.jpg', likely: true }]);
     expect(atlas.asked).toEqual([
       '/atlas/index/filter/movie/titles.json?sel=subgenre:Romantic%20Comedy',
     ]);

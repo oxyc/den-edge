@@ -874,7 +874,11 @@ export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
             : title(t)
                 .then((full) =>
                   full
-                    ? { ...full, primaryGenreName: t.primaryGenreName ?? full.primaryGenreName }
+                    ? {
+                        ...full,
+                        primaryGenreName: t.primaryGenreName ?? full.primaryGenreName,
+                        likely: t.likely,
+                      }
                     : t,
                 )
                 .catch((error: unknown) => {

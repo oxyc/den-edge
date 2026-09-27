@@ -437,6 +437,8 @@ export interface FilterKindCounts {
   /** Whether every value the kind holds beside the selection is listed: a value missing from it has none. */
   complete: boolean;
   values: Record<string, number>;
+  /** Of each value's count, titles that need a tentative plot-facet value for the active selection. */
+  likely?: Record<string, number>;
   /** Names, for the kinds whose ids aren't (people, studios, characters…). */
   labels?: Record<string, string>;
   selected?: string[];
@@ -445,6 +447,10 @@ export interface FilterKindCounts {
 
 export interface FilterCounts {
   total: number;
+  /** Present when the store carries Atlas's tentative plot-facet tier. */
+  confident?: number;
+  /** Present when the store carries Atlas's tentative plot-facet tier. */
+  likely?: number;
   kinds: Record<string, FilterKindCounts>;
   /** Kinds in the selection atlas left out of the answer: unknown to it, or unavailable. */
   ignored: string[];
@@ -487,6 +493,8 @@ export async function fetchFilterCounts(
     }
     return {
       total: typeof body.total === 'number' ? body.total : 0,
+      confident: typeof body.confident === 'number' ? body.confident : undefined,
+      likely: typeof body.likely === 'number' ? body.likely : undefined,
       kinds: kinds as Record<string, FilterKindCounts>,
       ignored: strings(body.ignored),
       kindsUnavailable: strings(body.kindsUnavailable),
@@ -495,6 +503,19 @@ export async function fetchFilterCounts(
     unanswered(url, error);
     return null;
   }
+}
+
+/** The active Atlas answers' confident/tentative split, or nothing for a pre-tier store. */
+export function filterCountSplit(answers: FilterCounts[]): string {
+  if (
+    !answers.length ||
+    answers.some((answer) => answer.confident === undefined || answer.likely === undefined)
+  )
+    return '';
+  const total = answers.reduce((sum, answer) => sum + answer.total, 0);
+  const confident = answers.reduce((sum, answer) => sum + answer.confident!, 0);
+  const likely = answers.reduce((sum, answer) => sum + answer.likely!, 0);
+  return `${total.toLocaleString()} catalog ${total === 1 ? 'match' : 'matches'}: ${confident.toLocaleString()} confident, ${likely.toLocaleString()} likely.`;
 }
 
 /**

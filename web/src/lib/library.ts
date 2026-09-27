@@ -53,6 +53,8 @@ export interface Title {
    * millions, so anything outside the corpus has none.
    */
   primaryGenreName?: string;
+  /** Atlas's tentative plot-facet tier: the card matches, but not through a publication-gated confident value. */
+  likely?: boolean;
   originalLanguage?: string;
   adult?: boolean;
   /** Its IMDb id where whatever named it said so — scout keys availability by it, so no lookup is needed. */
@@ -65,6 +67,14 @@ export interface Title {
   arrivesAt?: number;
   /** Which services a pooled row found it on, named for the card's caption ("Netflix", "Max"). */
   services?: string[];
+}
+
+/** A poster's short second line, including Atlas's confidence tier when the card came from a plot-facet answer. */
+export function titleCaption(title: Title, caption?: string): string | undefined {
+  const ordinary = caption ?? (title.year ? String(title.year) : undefined);
+  return (
+    [ordinary, title.likely ? 'Likely match' : undefined].filter(Boolean).join(' · ') || undefined
+  );
 }
 
 type Status = 'none' | 'watchlist' | 'inProgress' | 'watched';

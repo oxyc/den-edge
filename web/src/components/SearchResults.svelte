@@ -6,7 +6,7 @@
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
 
-  import type { Title } from '../lib/library';
+  import { titleCaption, type Title } from '../lib/library';
 
   let {
     hits,
@@ -49,7 +49,7 @@
     {#if hit.kind === 'title'}
       <PosterCard
         title={hit.title}
-        caption={hit.title.year ? String(hit.title.year) : undefined}
+        caption={titleCaption(hit.title)}
         href={titleHref(hit.title)}
         {onopen}
         action={onlike && {

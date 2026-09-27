@@ -34,6 +34,7 @@
   import { countItems, filterItems, groupKind } from '../lib/facetCounts';
   import {
     fetchFilterCounts,
+    filterCountSplit,
     mergeFilterValues,
     searchFilterValues,
     type FilterCounts,
@@ -408,6 +409,7 @@
     filterAnswer?.key === `${exploreType}|${selectionKey}` ? filterAnswer : null,
   );
   const counts = $derived(current && !current.sides ? (current.answers[0]?.kinds ?? null) : null);
+  const split = $derived(selection.length && current ? filterCountSplit(current.answers) : '');
   const counted = $derived.by(() => {
     const sides = current?.sides?.map((side) => ({
       type: side.type,
@@ -590,7 +592,7 @@
       {/if}
       <!-- The picks, over what they pick, at every width: quiet, since the grid is what they are about. -->
       <Picks picks={picked} onremove={(id) => pick(id, typing)} onclear={clearAll} />
-      <p class="status" role="status">{[status, scope].filter(Boolean).join(' ')}</p>
+      <p class="status" role="status">{[status, scope, split].filter(Boolean).join(' ')}</p>
       {#if typing}
         <!-- Picking one turns the query into it: the query goes, the pick stays, Back brings the query back. -->
         <FacetSuggestions chips={browse} {query} onpick={pickFound} />

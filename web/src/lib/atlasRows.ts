@@ -159,6 +159,7 @@ export function titlesOf(body: unknown): Title[] {
         imdbId: typeof t.imdbId === 'string' ? t.imdbId : undefined,
         primaryGenreName:
           typeof t.primaryGenre === 'string' && t.primaryGenre ? t.primaryGenre : undefined,
+        likely: t.likely === true ? true : undefined,
       },
     ];
   });
