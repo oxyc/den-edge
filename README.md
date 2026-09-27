@@ -87,8 +87,9 @@ can reach den-edge can't fill the host's disk. The inbox, where anyone may start
 of it, so a filled inbox leaves the rest for libraries, grants and connections. An address may start 5 libraries a
 minute (`429` with `Retry-After` past that). A library holds at most 50,000 rows and an 8 MiB memory charge
 (`413 library_full`). The charge includes twice the key/value byte lengths plus row/map overhead. The
-combined library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
-their durable logs. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
+combined legacy-library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
+their durable logs. V3 admits 16 concurrently leased per-library databases and retains only two idle handles;
+ordinary startup opens none. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
 preserved on disk and refused, rather than loaded into the 64 MiB container; their owner can still delete
 them. Changes pages are bounded by bytes as well as the requested row count, so follow `more` until done.
 

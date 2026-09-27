@@ -239,7 +239,7 @@ impl AppState {
         let library_v3 = Arc::new(
             library::v3::StoreManager::open_shared(
                 &store.namespace_dir("lib"),
-                library_limits.cache_bytes,
+                16 * library::v3::OPEN_DATABASE_BYTES,
                 store.quota(),
                 64 * 1024 * 1024,
             )

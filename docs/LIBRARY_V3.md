@@ -31,6 +31,10 @@ response ownership, temporary migration memory, and copy-on-write slack. Existin
 hard: 8 MiB per library, 16 MiB aggregate library cache, 32 KiB value, 50,000 live rows, 512 KiB page, and the 64 MiB
 container target. Reservations precede allocation and roll back on cancellation.
 
+V3 admits at most 16 simultaneously leased databases (charged at 112 KiB apiece) and trims back to the two most
+recent idle handles as soon as request leases end. Active libraries are never evicted. This preserves independent
+writers during a burst while preventing a high-cardinality cold walk from retaining mappings and file descriptors.
+
 A changes read holds one consistent snapshot while selecting sequences greater than `since`, bounded by row count
 and the existing page-byte rule. It captures head and generation with that selection. Where the backend permits,
 the transaction then closes before the client can become slow. The response owns immutable fragment storage until
@@ -70,8 +74,9 @@ generation reset, backup, and restore must use the selected format and tolerate 
 ## Implemented and remaining promotion work
 
 Implemented: executable equivalence model, per-library redb selection, shared hard disk quota, exact live-row charge,
-lazy open/eviction, lazy v2 migration, mixed-format selection, retirement, membership credentials, bounded identity
-frames, response-lifetime admission, transaction abort tests, and migration-prefix recovery tests.
+lease-bound open admission and idle-handle recovery, lazy v2 migration, mixed-format selection, retirement,
+membership credentials, bounded identity frames, response-lifetime admission, transaction abort tests, and
+migration-prefix recovery tests.
 
 Remaining before merge/deployment: full CI, target-amd64 HTTP/durable-write comparison, the 64 MiB migration/write/
 slow-reader/cancellation soak, and a documented canary/rollback decision in issue #140.

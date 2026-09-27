@@ -579,10 +579,13 @@ async fn v3_store(
     match authority(state, slot, id).await? {
         AUTHORITY_MOVED => return Ok(None),
         AUTHORITY_V3 => {
-        if let Some(old) = loaded.take() {
-            state.libraries.reserve(id, slot, old.bytes, 0, state.library_limits)?.commit();
-        }
-        return Arc::clone(&state.library_v3).library(id, token_hash).map(Some).map_err(v3_io);
+            if let Some(old) = loaded.take() {
+                state.libraries.reserve(id, slot, old.bytes, 0, state.library_limits)?.commit();
+            }
+            return Arc::clone(&state.library_v3)
+                .existing_library(id, token_hash)
+                .map(Some)
+                .map_err(v3_io);
         }
         AUTHORITY_V2 => {}
         _ => unreachable!("authority returns only known states"),
@@ -620,7 +623,10 @@ async fn v3_store(
     }
     state.libraries.reserve(id, slot, old_bytes, 0, state.library_limits)?.commit();
     publish_v3(state, slot, id).await?;
-    Arc::clone(&state.library_v3).library(id, token_hash).map(Some).map_err(v3_io)
+    Arc::clone(&state.library_v3)
+        .existing_library(id, token_hash)
+        .map(Some)
+        .map_err(v3_io)
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
@@ -946,12 +952,12 @@ async fn header_of(
     match authority(state, slot, id).await? {
         AUTHORITY_MOVED => return Ok(None),
         AUTHORITY_V3 => {
-        let manager = Arc::clone(&state.library_v3);
-        let owned_id = id.to_owned();
-        return tokio::task::spawn_blocking(move || manager.credentials(&owned_id))
-            .await
-            .map_err(io::Error::other)?
-            .map_err(v3_io);
+            let manager = Arc::clone(&state.library_v3);
+            let owned_id = id.to_owned();
+            return tokio::task::spawn_blocking(move || manager.credentials(&owned_id))
+                .await
+                .map_err(io::Error::other)?
+                .map_err(v3_io);
         }
         AUTHORITY_V2 => {}
         _ => unreachable!("authority returns only known states"),
@@ -1528,6 +1534,24 @@ mod tests {
             second.state.store.get_file(super::NS, LIB, super::FORMAT_EXT).await.unwrap(),
             Some(super::FORMAT_V3.to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn a_published_or_unknown_marker_never_falls_back_to_the_v2_log() {
+        let h = Harness::new();
+        write_legacy(&h, &[(1, K1, "old")]);
+        h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, b"99\n").await.unwrap();
+        h.state.store.sync_dir(super::NS).await.unwrap();
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, super::FORMAT_V3).await.unwrap();
+        h.state.store.sync_dir(super::NS).await.unwrap();
+        assert!(!h.state.library_v3.path(LIB).exists());
+        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        h.state.store.delete_file(super::NS, LIB, super::FORMAT_EXT).await.unwrap();
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(changes(&restarted, TOKEN, "").await.1["entries"][0]["v"], "old");
     }
 
     #[tokio::test]

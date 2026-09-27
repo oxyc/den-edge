@@ -21,7 +21,8 @@ use std::sync::{OnceLock, Weak};
 
 const FORMAT_VERSION: u64 = 3;
 pub(super) const DATABASE_CACHE_BYTES: usize = 64 * 1024;
-pub(super) const OPEN_DATABASE_BYTES: usize = 112 * 1024;
+pub(crate) const OPEN_DATABASE_BYTES: usize = 112 * 1024;
+const RETAINED_DATABASES: usize = 2;
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("keys-v3");
 /// The exact v2-compatible memory charge of each live row. Keeping this beside the key index lets a write enforce
 /// the same 8 MiB semantic library bound without parsing canonical JSON or confusing redb's cache with live data.
@@ -570,11 +571,85 @@ struct Registry {
     bytes: usize,
 }
 
+struct StoreLease {
+    store: Arc<RedbLibrary>,
+    registry: Arc<Mutex<Registry>>,
+}
+
+impl Drop for StoreLease {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap();
+        while registry.bytes > RETAINED_DATABASES * OPEN_DATABASE_BYTES {
+            let mut candidates: Vec<_> = registry
+                .slots
+                .iter()
+                .map(|(id, slot)| (id.clone(), Arc::clone(slot)))
+                .collect();
+            candidates.sort_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed));
+            let mut removed = false;
+            for (id, slot) in candidates {
+                let Ok(mut stored) = slot.store.try_lock() else { continue };
+                let evictable = stored.as_ref().is_some_and(|store| {
+                    Arc::strong_count(store) == 1
+                        || Arc::ptr_eq(store, &self.store) && Arc::strong_count(store) == 2
+                });
+                if evictable {
+                    stored.take();
+                    registry.slots.remove(&id);
+                    registry.bytes -= OPEN_DATABASE_BYTES;
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                break;
+            }
+        }
+    }
+}
+
+impl LibraryStore for StoreLease {
+    fn apply_bounded(&self, writes: &[Write], live_cap: usize) -> Result<BatchResult, StoreError> {
+        self.store.apply_bounded(writes, live_cap)
+    }
+
+    #[cfg(test)]
+    fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError> {
+        self.store.latest(key)
+    }
+
+    fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
+        self.store.range(since, limit)
+    }
+
+    fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
+        self.store.range_chunks(since, limit, generation)
+    }
+
+    #[cfg(test)]
+    fn disk_bytes(&self) -> Result<u64, StoreError> {
+        self.store.disk_bytes()
+    }
+
+    #[cfg(test)]
+    fn live_bytes(&self) -> Result<usize, StoreError> {
+        self.store.live_bytes()
+    }
+
+    fn credentials(&self) -> Credentials {
+        self.store.credentials()
+    }
+
+    fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError> {
+        self.store.register_member(member_hash)
+    }
+}
+
 /// Lazily opens independent databases and charges their measured fixed residency before opening. An active lease
 /// pins only its library. Eviction closes an inactive database without blocking another library's writer.
 pub(crate) struct StoreManager {
     root: PathBuf,
-    registry: Mutex<Registry>,
+    registry: Arc<Mutex<Registry>>,
     clock: AtomicU64,
     memory_cap: usize,
     file_cap: u64,
@@ -582,6 +657,10 @@ pub(crate) struct StoreManager {
 }
 
 impl StoreManager {
+    fn lease(&self, store: Arc<RedbLibrary>) -> Arc<dyn LibraryStore> {
+        Arc::new(StoreLease { store, registry: Arc::clone(&self.registry) })
+    }
+
     #[cfg(test)]
     pub(super) fn open(
         root: &Path,
@@ -604,7 +683,7 @@ impl StoreManager {
         }
         Ok(Self {
             root: root.to_owned(),
-            registry: Mutex::new(Registry { slots: HashMap::new(), bytes: 0 }),
+            registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
             clock: AtomicU64::new(1),
             memory_cap,
             file_cap,
@@ -626,7 +705,7 @@ impl StoreManager {
         }
         Ok(Self {
             root: root.to_owned(),
-            registry: Mutex::new(Registry { slots: HashMap::new(), bytes: 0 }),
+            registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
             clock: AtomicU64::new(1),
             memory_cap,
             file_cap,
@@ -783,8 +862,7 @@ impl StoreManager {
             if !store.accepts(&token_hash) {
                 return Err(StoreError::Forbidden);
             }
-            let store: Arc<dyn LibraryStore> = Arc::clone(store) as Arc<dyn LibraryStore>;
-            return Ok(store);
+            return Ok(self.lease(Arc::clone(store)));
         }
         let path = self.path(id);
         self.remove_path(&path.with_extension("redb.tmp"))?;
@@ -808,7 +886,7 @@ impl StoreManager {
                 return Err(StoreError::Forbidden);
             }
             *stored = Some(Arc::clone(&store));
-            return Ok(store);
+            return Ok(self.lease(store));
         }
         let created = !path.exists();
         match RedbLibrary::open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
@@ -816,7 +894,7 @@ impl StoreManager {
                 let store = Arc::new(store);
                 process_databases().lock().unwrap().insert(path, Arc::downgrade(&store));
                 *stored = Some(Arc::clone(&store));
-                Ok(store)
+                Ok(self.lease(store))
             }
             Err(error) => {
                 let mut registry = self.registry.lock().unwrap();
@@ -833,6 +911,19 @@ impl StoreManager {
                 Err(error)
             }
         }
+    }
+
+    /// Open authority that was already published. A format marker without its database is corruption, never an
+    /// instruction to manufacture a new empty head and hide a stale v2 log.
+    pub(super) fn existing_library(
+        &self,
+        id: &str,
+        token_hash: [u8; 32],
+    ) -> Result<Arc<dyn LibraryStore>, StoreError> {
+        if !self.path(id).is_file() {
+            return Err(StoreError::Invalid("published v3 database is missing".into()));
+        }
+        self.library(id, token_hash)
     }
 
     pub(super) fn path(&self, id: &str) -> PathBuf {
@@ -1032,7 +1123,7 @@ mod tests {
             assert_eq!(bytes, open * OPEN_DATABASE_BYTES);
             assert!(slots <= 3);
         }
-        assert_eq!(manager.cached(), (3, 3 * OPEN_DATABASE_BYTES, 3));
+        assert_eq!(manager.cached(), (RETAINED_DATABASES, RETAINED_DATABASES * OPEN_DATABASE_BYTES, 2));
     }
 
     #[test]
@@ -1114,6 +1205,19 @@ mod tests {
     }
 
     #[test]
+    fn an_active_burst_recovers_to_two_idle_database_handles() {
+        let dir = temp_dir();
+        let manager = manager(&dir, 16, 128 << 20, 4 << 20);
+        let leases: Vec<_> = (0..16)
+            .map(|id| manager.library(&format!("{id:016x}"), TOKEN).unwrap())
+            .collect();
+        assert_eq!(manager.cached(), (16, 16 * OPEN_DATABASE_BYTES, 16));
+        assert!(matches!(manager.library("ffffffffffffffff", TOKEN), Err(StoreError::Full)));
+        drop(leases);
+        assert_eq!(manager.cached(), (RETAINED_DATABASES, RETAINED_DATABASES * OPEN_DATABASE_BYTES, 2));
+    }
+
+    #[test]
     fn sixty_four_mib_cgroup_keeps_high_cardinality_bounded() {
         let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok();
         if max.as_deref().map(str::trim) != Some("67108864") {
@@ -1125,8 +1229,7 @@ mod tests {
             let store = manager.library(&format!("{id:016x}"), TOKEN).unwrap();
             store.apply(&[Write { key: K1.into(), base: 0, value: "x".repeat(4096) }]).unwrap();
         }
-        assert!(manager.cached().1 <= 16 * OPEN_DATABASE_BYTES);
-        assert!(manager.cached().2 <= 16);
+        assert_eq!(manager.cached(), (RETAINED_DATABASES, RETAINED_DATABASES * OPEN_DATABASE_BYTES, 2));
         let current: u64 =
             std::fs::read_to_string("/sys/fs/cgroup/memory.current").unwrap().trim().parse().unwrap();
         assert!(current < 64 << 20, "cgroup used {current} bytes");
