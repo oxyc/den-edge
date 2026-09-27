@@ -679,10 +679,14 @@ impl Drop for StoreLease {
             let mut removed = false;
             for (id, slot) in candidates {
                 let Ok(mut stored) = slot.store.try_lock() else { continue };
-                let evictable = stored.as_ref().is_some_and(|store| {
-                    Arc::strong_count(store) == 1
-                        || Arc::ptr_eq(store, &self.store) && Arc::strong_count(store) == 2
-                });
+                // Registry + this local candidate must be the only slot owners. A request which cloned the slot
+                // but has not locked `store` yet otherwise resumes through an orphan slot and leaks this open
+                // database's accounting charge until valid requests are falsely refused as full.
+                let evictable = Arc::strong_count(&slot) == 2
+                    && stored.as_ref().is_some_and(|store| {
+                        Arc::strong_count(store) == 1
+                            || Arc::ptr_eq(store, &self.store) && Arc::strong_count(store) == 2
+                    });
                 if evictable {
                     stored.take();
                     registry.slots.remove(&id);
@@ -1350,7 +1354,7 @@ mod tests {
     #[test]
     fn concurrent_hot_reads_and_eviction_never_race_redb_file_close() {
         let dir = temp_dir();
-        let manager = Arc::new(manager(&dir, 16, 128 << 20, 8 << 20));
+        let manager = Arc::new(manager(&dir, 8, 128 << 20, 8 << 20));
         for number in 0..12 {
             let store = manager.library(&format!("{number:016x}"), TOKEN).unwrap();
             store.apply(&[Write { key: K1.into(), base: 0, value: number.to_string() }]).unwrap();
