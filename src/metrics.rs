@@ -19,6 +19,7 @@ pub struct Metrics {
     provider_access: [[AtomicU64; 4]; 4],
     provider_upstream: [[AtomicU64; 4]; 4],
     provider_store: [[AtomicU64; 4]; 4],
+    provider_inventory: [[AtomicU64; 2]; 4],
     tmdb_prepared: [AtomicU64; 4],
     title_metadata: [[AtomicU64; 7]; 3],
     /// Record-log writes applied, and refused as stale — a rising share of conflicts means devices are fighting
@@ -440,6 +441,12 @@ impl Metrics {
         self.provider_store[provider as usize][result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Replace the last bounded background inventory snapshot. This is never called from a request path.
+    pub fn provider_cache_inventory(&self, provider: Provider, bytes: u64, entries: u64) {
+        self.provider_inventory[provider as usize][0].store(bytes, Ordering::Relaxed);
+        self.provider_inventory[provider as usize][1].store(entries, Ordering::Relaxed);
+    }
+
     pub fn tmdb_prepared(&self, result: TmdbPrepared) {
         self.tmdb_prepared[result as usize].fetch_add(1, Ordering::Relaxed);
     }
@@ -641,7 +648,11 @@ impl Metrics {
              # HELP den_edge_provider_upstream_total Actual provider exchanges by bounded outcome.\n\
              # TYPE den_edge_provider_upstream_total counter\n\
              # HELP den_edge_provider_cache_store_total Provider-cache persistence decisions by bounded outcome.\n\
-             # TYPE den_edge_provider_cache_store_total counter\n",
+             # TYPE den_edge_provider_cache_store_total counter\n\
+             # HELP den_edge_provider_cache_bytes Regular-file bytes in the last background inventory.\n\
+             # TYPE den_edge_provider_cache_bytes gauge\n\
+             # HELP den_edge_provider_cache_entries Serveable JSON bodies in the last background inventory.\n\
+             # TYPE den_edge_provider_cache_entries gauge\n",
         );
         for (provider, provider_label) in Provider::LABELS.into_iter().enumerate() {
             for (result, result_label) in CacheAccess::LABELS.into_iter().enumerate() {
@@ -662,6 +673,12 @@ impl Metrics {
                     "den_edge_provider_cache_store_total{{provider=\"{provider_label}\",result=\"{result_label}\"}} {n}\n"
                 ));
             }
+            let bytes = self.provider_inventory[provider][0].load(Ordering::Relaxed);
+            let entries = self.provider_inventory[provider][1].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "den_edge_provider_cache_bytes{{provider=\"{provider_label}\"}} {bytes}\n\
+                 den_edge_provider_cache_entries{{provider=\"{provider_label}\"}} {entries}\n"
+            ));
         }
         out.push_str(
             "# HELP den_edge_tmdb_prepared_total TMDB prepared-response reuse and build outcomes.\n\
@@ -761,6 +778,8 @@ mod tests {
             r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 0"#,
             r#"den_edge_provider_upstream_total{provider="ratings",result="failed"} 0"#,
             r#"den_edge_provider_cache_store_total{provider="warnings",result="expired"} 0"#,
+            r#"den_edge_provider_cache_bytes{provider="skipdb"} 0"#,
+            r#"den_edge_provider_cache_entries{provider="tmdb"} 0"#,
             r#"den_edge_tmdb_prepared_total{result="transient_built"} 0"#,
             r#"den_edge_title_metadata_observation_total{result="busy"} 0"#,
         ] {
@@ -796,6 +815,7 @@ mod tests {
         metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
         metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
         metrics.provider_cache_store(Provider::Warnings, CacheStore::Expired);
+        metrics.provider_cache_inventory(Provider::Skipdb, 8192, 7);
         metrics.tmdb_prepared(TmdbPrepared::FileBuilt);
         metrics.stream_terminated(StreamClass::Media, StreamTermination::Lifetime);
         metrics.compression_busy();
@@ -806,6 +826,8 @@ mod tests {
             r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 1"#,
             r#"den_edge_provider_upstream_total{provider="ratings",result="failed"} 1"#,
             r#"den_edge_provider_cache_store_total{provider="warnings",result="expired"} 1"#,
+            r#"den_edge_provider_cache_bytes{provider="skipdb"} 8192"#,
+            r#"den_edge_provider_cache_entries{provider="skipdb"} 7"#,
             r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#,
             r#"den_edge_stream_terminated_total{class="media",reason="lifetime"} 1"#,
             r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#,
