@@ -542,12 +542,8 @@ impl LibraryStore for RedbLibrary {
         append(&mut chunks, suffix.as_bytes());
         let len = chunks.iter().map(Vec::len).sum();
         let page = ChunkPage { chunks: chunks.into_iter().map(Bytes::from).collect(), len };
-        *prepared = Some(PreparedPage {
-            since,
-            limit,
-            generation: generation.to_owned(),
-            page: page.clone(),
-        });
+        *prepared =
+            Some(PreparedPage { since, limit, generation: generation.to_owned(), page: page.clone() });
         Ok(page)
     }
 
