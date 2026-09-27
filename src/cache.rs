@@ -243,18 +243,15 @@ impl JsonFile {
     }
 
     /// Build the canonical identity response. Callers add cache policy and diagnostics before `revalidate`.
-    pub(crate) fn response(self) -> Response {
+    pub(crate) fn response(self, mmaps: &crate::mmap::Cache) -> Response {
         let modified = self.modified;
-        self.response_at(modified)
+        self.response_at(modified, mmaps)
     }
 
     /// Build this representation with the timestamp of the canonical source it was derived from.
-    pub(crate) fn response_at(self, modified: SystemTime) -> Response {
-        let mut response = crate::handler::raw_json(
-            StatusCode::OK,
-            Body::new(crate::web::FileBody::from_file(self.file, self.len)),
-            false,
-        );
+    pub(crate) fn response_at(self, modified: SystemTime, mmaps: &crate::mmap::Cache) -> Response {
+        let mut response =
+            crate::handler::raw_json(StatusCode::OK, Body::new(mmaps.body(self.file, self.len)), false);
         if let Ok(length) = HeaderValue::from_str(&self.len.to_string()) {
             response.headers_mut().insert(header::CONTENT_LENGTH, length);
         }
@@ -558,7 +555,9 @@ mod tests {
         crate::tmdb::write(&file, &Bytes::from(body.clone())).await;
         let prepared = open_json(&file, body.len()).await.unwrap();
         assert_eq!(tokio::fs::metadata(json_meta_path(&file)).await.unwrap().len(), JSON_META_LEN as u64);
-        let response = prepared.response();
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
+        let mmaps = crate::mmap::Cache::new(std::sync::Arc::clone(&metrics));
+        let response = prepared.response(&mmaps);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], body.len().to_string());
         let etag = response.headers()[header::ETAG].to_str().unwrap().to_owned();
@@ -575,9 +574,15 @@ mod tests {
         let prepared = open_json(&file, body.len()).await.unwrap();
         let mut asked = HeaderMap::new();
         asked.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
-        let response = revalidate(prepared.response(), &asked);
+        let response = revalidate(prepared.response(&mmaps), &asked);
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
+        #[cfg(target_os = "linux")]
+        {
+            let rendered = metrics.render();
+            assert!(rendered.contains("den_edge_mmap_total{outcome=\"built\"} 1\n"));
+            assert!(rendered.contains("den_edge_mmap_total{outcome=\"hit\"} 0\n"));
+        }
     }
 
     #[tokio::test]
@@ -589,7 +594,9 @@ mod tests {
         assert_eq!(old.len(), new.len());
 
         write_json(&file, &old).await;
-        let old_response = open_json(&file, old.len()).await.unwrap().response();
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
+        let mmaps = crate::mmap::Cache::new(metrics);
+        let old_response = open_json(&file, old.len()).await.unwrap().response(&mmaps);
         let old_etag = old_response.headers()[header::ETAG].to_str().unwrap().to_owned();
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
 
@@ -601,7 +608,7 @@ mod tests {
         let prepared = open_json(&file, new.len()).await.unwrap();
         let mut asked = HeaderMap::new();
         asked.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&old_etag).unwrap());
-        let response = revalidate(prepared.response(), &asked);
+        let response = revalidate(prepared.response(&mmaps), &asked);
         assert_eq!(response.status(), StatusCode::OK, "the old sidecar belongs to another inode");
         assert_ne!(response.headers()[header::ETAG], old_etag.as_str());
         assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), new);

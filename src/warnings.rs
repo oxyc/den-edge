@@ -132,7 +132,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
             }
             Kept::Fresh => {
                 state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Fresh);
-                return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+                return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
             }
             Kept::Cold => {}
         }
@@ -162,7 +162,7 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
                     }
                     Kept::Fresh => {
                         state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Fresh);
-                        return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+                        return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
                     }
                     Kept::Cold => {}
                 }
@@ -603,12 +603,13 @@ fn answer(
 }
 
 fn answer_file(
+    state: &AppState,
     body: crate::cache::JsonFile,
     remaining: Duration,
     how: &'static str,
     asked: &HeaderMap,
 ) -> Response {
-    let mut resp = body.response();
+    let mut resp = body.response(&state.mmaps);
     let headers = resp.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&policy(remaining)) {
         headers.insert(header::CACHE_CONTROL, value);

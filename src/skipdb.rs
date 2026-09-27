@@ -98,7 +98,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
         if !absent && age < FRESH {
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Fresh);
-            return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+            return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
             stale = Some(body);
@@ -118,7 +118,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             if let (Some(file), Some(body)) = (&file, stale) {
                 if !gone(file).await {
                     state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
-                    return answer_file(body, STALE_MAX_AGE, "stale", asked);
+                    return answer_file(state, body, STALE_MAX_AGE, "stale", asked);
                 }
             }
             state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
@@ -129,7 +129,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         Err(refused) => match stale {
             Some(body) => {
                 state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
-                answer_file(body, STALE_MAX_AGE, "stale", asked)
+                answer_file(state, body, STALE_MAX_AGE, "stale", asked)
             }
             None => {
                 state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
@@ -364,12 +364,13 @@ fn answer(
 }
 
 fn answer_file(
+    state: &AppState,
     body: crate::cache::JsonFile,
     remaining: Duration,
     how: &'static str,
     asked: &HeaderMap,
 ) -> Response {
-    let mut resp = body.response();
+    let mut resp = body.response(&state.mmaps);
     let headers = resp.headers_mut();
     let max_age = remaining.min(Duration::from_secs(DAY)).as_secs();
     if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
