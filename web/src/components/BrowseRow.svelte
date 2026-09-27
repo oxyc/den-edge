@@ -4,6 +4,7 @@
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import { titleCaption, type Title } from '../lib/library';
+  import { whenIdle } from '../lib/idle';
   import { Pager } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
@@ -20,17 +21,27 @@
   const done = $derived(pager.done);
   const key = (t: Title) => `${t.type}:${t.id}`;
 
+  // The first page loads when the browser is next idle, so a row is usually filled before it is scrolled to, and
+  // at the latest as it nears the screen.
   $effect(() => {
+    let live = true;
+    const first = () => {
+      if (live && pager.page === 0) return pager.more();
+    };
+    whenIdle(first);
     const near = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         near.disconnect();
-        void pager.more();
+        void first();
       },
       { rootMargin: '400px 0px' },
     );
     near.observe(wrapper);
-    return () => near.disconnect();
+    return () => {
+      live = false;
+      near.disconnect();
+    };
   });
 
   // The next page is asked for two row-widths before the end, measured against the row's own scroller: the

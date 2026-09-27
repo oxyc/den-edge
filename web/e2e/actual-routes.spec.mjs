@@ -29,6 +29,23 @@ test('actual-routes regressions', async () => {
       let releaseActor;
       const actorReady = new Promise((r) => (releaseActor = r));
       await routeTmdb(page, async (r) => {
+        // The title's "Starring An Actor" row reads the filmography while the title is open; only the actor's own
+        // page is held back. An actor with other work, as a lead has, so the row is not one that turns out empty.
+        if (r.request().url().includes('/person/7/combined_credits'))
+          return r.fulfill({
+            json: {
+              cast: [
+                {
+                  id: 43,
+                  media_type: 'movie',
+                  title: 'Another Movie',
+                  poster_path: '/poster.jpg',
+                  release_date: '2025-01-01',
+                },
+              ],
+              crew: [],
+            },
+          });
         if (r.request().url().includes('/person/')) {
           await actorReady;
           return r.fulfill({

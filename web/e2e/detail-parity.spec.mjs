@@ -268,7 +268,7 @@ for (const width of [390, 834, 1280])
         'href',
         '/search?type=tv&c=genre-18',
       );
-      await expect(active.getByRole('link', { name: 'Swedish' })).toHaveAttribute(
+      await expect(active.getByRole('link', { name: 'Swedish', exact: true })).toHaveAttribute(
         'href',
         '/search?c=lang-sv',
       );

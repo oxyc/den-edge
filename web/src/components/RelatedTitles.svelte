@@ -35,31 +35,20 @@
     shown: (t: Title) => boolean;
   } = $props();
 
-  let reached = $state(false);
   /** Each shown row with its build: a rebuilt row keeps its id, and must still start its own loader afresh. */
   let rows = $state<{ build: number; row: RowDef }[]>([]);
   /** The title `rows` were built for, and how many builds there have been. Not reactive: the effect only reads them. */
   let rowsFor = '';
   let builds = 0;
 
-  function approach(node: HTMLElement) {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) reached = true;
-      },
-      { rootMargin: '600px' },
-    );
-    observer.observe(node);
-    return { destroy: () => observer.disconnect() };
-  }
-
-  // The rows are built once they are near the screen. For a title's first build, every row it is known to have shows
-  // its heading and `BrowseRow`'s card-sized placeholders at once and loads itself, hiding if it turns out empty;
-  // only the franchise row, which is not known to exist until it is looked up, joins once it has something to show.
+  // The rows are built as soon as the title is, and each loads its first page when the browser is next idle
+  // (`BrowseRow`), so they are usually full before they are scrolled to. For a title's first build, every row it
+  // is known to have shows its heading and card-sized placeholders at once and loads itself, hiding if it turns
+  // out empty; only the franchise row, which is not known to exist until it is looked up, joins once it has
+  // something to show.
   // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
   // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
   $effect(() => {
-    if (!reached) return;
     const options = { key: tmdbKey };
     const self = detail.title;
     const key = titleKey(self);
@@ -108,7 +97,7 @@
   });
 </script>
 
-<div use:approach aria-hidden={!active}>
+<div aria-hidden={!active}>
   {#each rows as { build, row } (`${build}:${row.id}`)}
     <BrowseRow {row} {shown} />
   {/each}

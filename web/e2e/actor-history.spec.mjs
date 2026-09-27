@@ -75,7 +75,11 @@ for (const scenario of [
       // document, and the title is the first history entry, exactly as opening its link would give.
       await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
       await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
-      await page.locator('[data-active="true"] a').filter({ hasText: 'An Actor' }).click();
+      await page
+        .locator('[data-active="true"]')
+        .getByRole('region', { name: 'Cast & Crew' })
+        .getByRole('link', { name: 'An Actor' })
+        .click();
       await expect(page.locator('[data-active="true"] h1')).toHaveText('An Actor');
       await page.waitForSelector('[data-loading-snapshot]', { state: 'detached' });
       // A visible heading does not mean the View Transition has released its frozen rendering.

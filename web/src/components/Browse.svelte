@@ -2,6 +2,7 @@
      own posters once it's near the screen. -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
+  import { whenIdle } from '../lib/idle';
   import type { Title } from '../lib/library';
   import BrowseRow from './BrowseRow.svelte';
 
@@ -41,6 +42,28 @@
     );
     observer.observe(bottom);
     return () => observer.disconnect();
+  });
+
+  // Within three screens of the bottom, rows are added while the browser is idle, a step at a time, so a quick
+  // scroll finds them already filled; the marker above still adds them at once where no idle time comes. Observed
+  // afresh as rows are added, since a marker still in range after a step changes no intersection.
+  $effect(() => {
+    void count;
+    let live = true;
+    const ahead = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting) || count >= rows.length) return;
+        whenIdle(() => {
+          if (live) count += STEP;
+        });
+      },
+      { rootMargin: '300% 0px' },
+    );
+    ahead.observe(bottom);
+    return () => {
+      live = false;
+      ahead.disconnect();
+    };
   });
 </script>
 

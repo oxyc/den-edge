@@ -141,10 +141,20 @@ test('settings re-read with nothing changed leave the page as it is', async ({ b
 
   const cards = page.locator('a[href^="/movie/10"]:not(.billboard *)');
   await expect(cards.first()).toBeVisible();
-  // A card can paint from the atlas row before the TMDB row finishes hydrating all visible cards. Wait for the
-  // last visible card's row lookup too, so a slow runner cannot mistake that late request for settings work.
-  await expect.poll(() => asked.filter((path) => path === '/tmdb/3/discover/movie').length).toBe(1);
-  await expect.poll(() => asked.filter((path) => path === '/tmdb/3/movie/103').length).toBe(2);
+  // Cards paint before their rows finish hydrating, and rows below go on loading while the browser is idle
+  // (`Browse`). Wait until the page has stopped asking, so a late request is not mistaken for settings work.
+  let seen = -1;
+  await expect
+    .poll(
+      async () => {
+        const quiet = asked.length === seen;
+        seen = asked.length;
+        await page.waitForTimeout(500);
+        return quiet;
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(true);
   const shown = await cards.count();
   await cards.evaluateAll((all) => all.forEach((card) => (card.dataset.kept = '')));
   const before = asked.length;

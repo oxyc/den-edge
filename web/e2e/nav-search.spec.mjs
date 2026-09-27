@@ -1034,8 +1034,10 @@ test('a rating floor is picked from the Browse row, and asks TMDB for it', async
     await expect(page).toHaveURL(/\/search\?c=rating-7$/);
     const selected = active(page).getByRole('group', { name: 'Selected' });
     await expect(selected.getByRole('button', { name: 'Remove ★ 7+' })).toBeVisible();
-    await expect.poll(() => asked.at(-1)?.get('vote_average.gte')).toBe('7');
-    expect(asked.at(-1)?.get('vote_count.gte')).toBe('10');
+    // Other rows may still be loading while the browser is idle; the grid's own request carries the floor.
+    const floored = () => asked.find((params) => params.get('vote_average.gte') === '7');
+    await expect.poll(() => floored() !== undefined).toBe(true);
+    expect(floored()?.get('vote_count.gte')).toBe('10');
     // One floor at a time: the others leave the rail until it is removed.
     const ratings = active(page)
       .getByRole('navigation', { name: 'Browse by category' })

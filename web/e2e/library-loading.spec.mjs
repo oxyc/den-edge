@@ -108,7 +108,9 @@ for (const [width, failed] of [
       // thirty-second of a pixel, sub-pixel rounding as the last shelf resolves, and comfortably
       // inside the 0.05 this test already calls settled. A shelf moving under a reader is what this
       // is about, and that is what both assertions now measure.
-      const after = await positions();
+      // Rows the browser adds below while idle (`Browse`) move nothing above them, so only the shelves already
+      // there are compared.
+      const after = (await positions()).slice(0, before.length);
       expect(after.map((row) => row.label)).toEqual(before.map((row) => row.label));
       for (const [at, row] of after.entries()) expect(row.top).toBeCloseTo(before[at].top, 1);
       const shifts = await page.evaluate(() => window.shifts.reduce((a, b) => a + b, 0));
