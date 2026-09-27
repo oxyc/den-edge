@@ -26,7 +26,11 @@ for (const width of [320, 393, 844, 1280])
             title: 'Detail title',
             backdrop_path: '/backdrop.jpg',
             runtime: 145,
-            genres: [{ name: 'Science Fiction' }, { name: 'Adventure' }, { name: 'Drama' }],
+            genres: [
+              { id: 878, name: 'Science Fiction' },
+              { id: 12, name: 'Adventure' },
+              { id: 18, name: 'Drama' },
+            ],
             overview: 'A substantial movie overview that fills the allotted space. '.repeat(20),
           },
         });
@@ -68,6 +72,7 @@ for (const width of [320, 393, 844, 1280])
       expect(await geometry()).toEqual(before);
       releaseMetadata();
       await expect(page.locator('.overview').first()).toContainText('substantial movie overview');
+      await expect(page.locator('.facts').first()).toHaveText('2026 · Science Fiction · Adventure');
       expect(await geometry()).toEqual(before);
       releaseImages();
       await expect(hero.locator('img.backdrop.lit')).toHaveCount(1);

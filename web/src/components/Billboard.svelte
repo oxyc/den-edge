@@ -14,6 +14,7 @@
   import DetailIcon from './DetailIcon.svelte';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
+  import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
     cropStyle,
@@ -604,13 +605,6 @@
     void player.play().catch(() => {});
   }
 
-  const facts = (title: Title) => {
-    const found = known.get(keyOf(title));
-    return [title.year ? String(title.year) : undefined, ...(found?.genres ?? []).slice(0, 2)]
-      .filter(Boolean)
-      .join(' · ');
-  };
-
   /** The dots in view: a window that slides with the current slide, its edges shrunk where the set carries on. */
   const window9 = $derived.by(() => {
     const count = shown.length;
@@ -705,7 +699,7 @@
             {#if reason}
               <p class="reason">{reason}</p>
             {/if}
-            <p class="facts">{facts(title)}</p>
+            <p class="facts">{billboardFacts(title, found)}</p>
             <p class="overview">{found?.overview ?? ''}</p>
             <div class="actions">
               {#if onplay}
