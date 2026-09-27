@@ -439,6 +439,69 @@ fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
     BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }
 
+#[cfg(test)]
+static VARIANT_WATCHES: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, tokio::sync::oneshot::Sender<()>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn watch_variant_owner(source: &Path) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).insert(source.to_owned(), tx);
+    rx
+}
+
+#[cfg(test)]
+fn note_variant_owner(source: &Path) {
+    if let Some(tx) = crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).remove(source) {
+        let _ = tx.send(());
+    }
+}
+
+fn response_sidecar(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_os_string();
+    name.push(".response");
+    PathBuf::from(name)
+}
+
+async fn remove_variant(file: &Path) {
+    let _ = tokio::fs::remove_file(file).await;
+    let _ = tokio::fs::remove_file(response_sidecar(file)).await;
+}
+
+fn variants_dir(source: &Path) -> PathBuf {
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let stem = source.file_stem().unwrap_or_default();
+    parent.join(".tmdb-prepared").join(stem)
+}
+
+/// Keep at most the current source generation's prepared representations. Builds are globally serialized, so no
+/// newer variant publisher can race this pass; a concurrent canonical replacement can at worst leave the just-built
+/// digest orphaned until the next successful build, never make it answer for the replacement.
+async fn retire_obsolete_variants(source: &Path, keep_digest: &[u8; 16]) {
+    let keep = crate::hex(keep_digest);
+    let Ok(mut entries) = tokio::fs::read_dir(variants_dir(source)).await else { return };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(record) = name.strip_suffix(".tmdb.json") else {
+            continue;
+        };
+        let mut parts = record.split('.');
+        let (Some(question), Some(digest), Some(fresh), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let hex = |value: &str| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let known_fresh =
+            fresh == LIST_TTL.as_secs().to_string() || fresh == DETAILS_TTL.as_secs().to_string();
+        if hex(question) && hex(digest) && known_fresh && digest != keep {
+            remove_variant(&entry.path()).await;
+        }
+    }
+}
+
 impl Detail {
     fn of(path: &str, query: Option<&str>, dir: Option<&Path>) -> Option<Detail> {
         let dir = dir?;
@@ -517,7 +580,11 @@ impl Detail {
         let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
         let question = cache_key(&self.path, self.query(&appends).as_deref());
         let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
-        source.with_extension(format!("{suffix}.{}.{}.tmdb.json", crate::hex(source_digest), fresh.as_secs()))
+        variants_dir(source).join(format!(
+            "{suffix}.{}.{}.tmdb.json",
+            crate::hex(source_digest),
+            fresh.as_secs()
+        ))
     }
 
     /// Only representations used by a checked-in client become durable. An arbitrary public subset is still
@@ -557,9 +624,10 @@ impl Detail {
             }
         }
 
-        // The task, rather than this requester, owns admission through parse and publication. Cancelling the HTTP
-        // request cannot drop the permit while spawn_blocking still holds a multi-megabyte serde tree, nor can it
-        // strand a half-published generation.
+        // Waiters remain ordinary request futures: cancellation drops their open source FD and queue position.
+        // Only the strict permit holder becomes a detached owner, so abandoned requests cannot accumulate queued
+        // tasks while a multi-megabyte parse is in progress.
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
         let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
         let question = cache_key(&self.path, self.query(&appends).as_deref());
         let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
@@ -573,10 +641,12 @@ impl Detail {
             source.modified(),
         );
         let task = tokio::spawn(async move {
-            let _permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+            let _permit = permit;
+            #[cfg(test)]
+            note_variant_owner(&source_path);
             if durable {
                 for fresh in [LIST_TTL, DETAILS_TTL] {
-                    let variant = source_path.with_extension(format!(
+                    let variant = variants_dir(&source_path).join(format!(
                         "{suffix}.{}.{}.tmdb.json",
                         crate::hex(&source_digest),
                         fresh.as_secs()
@@ -599,7 +669,7 @@ impl Detail {
             if !durable {
                 return Some((Some(narrowed), fresh, None));
             }
-            let variant = source_path.with_extension(format!(
+            let variant = variants_dir(&source_path).join(format!(
                 "{suffix}.{}.{}.tmdb.json",
                 crate::hex(&source_digest),
                 fresh.as_secs()
@@ -617,10 +687,10 @@ impl Detail {
                 .await
                 .is_some_and(|current| current.digest() == source_digest);
             if !still_current {
-                let _ = tokio::fs::remove_file(&variant).await;
-                let _ = tokio::fs::remove_file(format!("{}.response", variant.display())).await;
+                remove_variant(&variant).await;
                 return Some((Some(narrowed), fresh, None));
             }
+            retire_obsolete_variants(&source_path, &source_digest).await;
             Some((Some(narrowed), fresh, Some(variant)))
         });
         let (narrowed, fresh, variant) = task.await.ok()??;
@@ -767,8 +837,8 @@ async fn ask_kept(
             keep(file, &body, etag.as_deref()).await;
             Ok((body, "miss"))
         }
-        Ok(Revalidated::Unchanged(generation)) => {
-            let generation = generation.renew(file, SystemTime::now()).await;
+        Ok(Revalidated::Unchanged(confirmed)) => {
+            let generation = renew_generation(confirmed, file).await;
             let Some(body) = generation.bytes().await else {
                 return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
             };
@@ -868,8 +938,8 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                             let fresh = fresh_for_answer(&path, query.as_deref(), &new);
                             answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
-                        Ok(Revalidated::Unchanged(generation)) => {
-                            let generation = generation.renew(file, SystemTime::now()).await;
+                        Ok(Revalidated::Unchanged(confirmed)) => {
+                            let generation = renew_generation(confirmed, file).await;
                             let Some(body) = generation.bytes().await else {
                                 return *refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable");
                             };
@@ -1196,10 +1266,10 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             }
             serde_json::from_slice(&body).ok()
         }
-        Ok(Revalidated::Unchanged(generation)) => {
+        Ok(Revalidated::Unchanged(confirmed)) => {
             let generation = match &file {
-                Some(file) => generation.renew(file, SystemTime::now()).await,
-                None => generation,
+                Some(file) => renew_generation(confirmed, file).await,
+                None => confirmed.generation,
             };
             generation.bytes().await.and_then(|body| serde_json::from_slice(&body).ok())
         }
@@ -1231,13 +1301,30 @@ enum Fetched {
 enum Revalidated {
     Answer(Bytes, Option<String>),
     /// The exact open body generation whose bound upstream tag TMDB confirmed.
-    Unchanged(crate::cache::JsonFile),
+    Unchanged(Box<Confirmed>),
+}
+
+struct Confirmed {
+    generation: crate::cache::JsonFile,
+    etag: BoundEtag,
 }
 
 const ETAG_MAGIC: &[u8; 8] = b"DENTAG2\0";
 const MAX_ETAG_BYTES: usize = 1024;
 
-async fn bound_etag(file: &Path, digest: &[u8; 16]) -> Option<String> {
+struct BoundEtag {
+    value: String,
+    file: tokio::fs::File,
+}
+
+impl BoundEtag {
+    async fn renew(self, modified: SystemTime) {
+        let file = self.file.into_std().await;
+        let _ = tokio::task::spawn_blocking(move || file.set_modified(modified)).await;
+    }
+}
+
+async fn bound_etag(file: &Path, digest: &[u8; 16]) -> Option<BoundEtag> {
     let opened = tokio::fs::File::open(file.with_extension("etag")).await.ok()?;
     let len = usize::try_from(opened.metadata().await.ok()?.len()).ok()?;
     if !(24..=24 + MAX_ETAG_BYTES).contains(&len) {
@@ -1250,7 +1337,15 @@ async fn bound_etag(file: &Path, digest: &[u8; 16]) -> Option<String> {
     if &bytes[..8] != ETAG_MAGIC || &bytes[8..24] != digest {
         return None;
     }
-    String::from_utf8(bytes[24..].to_vec()).ok().filter(|tag| !tag.is_empty())
+    let value = String::from_utf8(bytes[24..].to_vec()).ok().filter(|tag| !tag.is_empty())?;
+    Some(BoundEtag { value, file: opened })
+}
+
+async fn renew_generation(confirmed: Box<Confirmed>, file: &Path) -> crate::cache::JsonFile {
+    let Confirmed { generation, etag } = *confirmed;
+    let modified = SystemTime::now();
+    let (generation, ()) = tokio::join!(generation.renew(file, modified), etag.renew(modified));
+    generation
 }
 
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
@@ -1287,9 +1382,12 @@ async fn revalidate(
         });
     };
     let etag = bound_etag(file, &generation.digest()).await;
-    match send(state, path, query, key, rid, etag.as_deref()).await? {
+    match send(state, path, query, key, rid, etag.as_ref().map(|etag| etag.value.as_str())).await? {
         Fetched::Answer(body, etag) => Ok(Revalidated::Answer(body, etag)),
-        Fetched::Unchanged => Ok(Revalidated::Unchanged(generation)),
+        Fetched::Unchanged => Ok(Revalidated::Unchanged(Box::new(Confirmed {
+            generation,
+            etag: etag.expect("TMDB cannot answer 304 without the bound ETag we sent"),
+        }))),
     }
 }
 
@@ -1477,17 +1575,33 @@ async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) {
     }
 }
 
-#[cfg(test)]
-async fn renew(file: &Path) {
-    if let Some(generation) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
-        let _ = generation.renew(file, SystemTime::now()).await;
-    }
-}
-
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path) {
     sweep_older_than(dir, RETENTION).await;
+    sweep_prepared(dir, RETENTION).await;
+}
+
+async fn sweep_prepared(dir: &Path, max_age: Duration) {
+    let root = dir.join(".tmdb-prepared");
+    let Ok(mut sources) = tokio::fs::read_dir(&root).await else { return };
+    while let Ok(Some(source)) = sources.next_entry().await {
+        let Ok(mut entries) = tokio::fs::read_dir(source.path()).await else { continue };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let expired = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age > max_age);
+            if expired {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+        let _ = tokio::fs::remove_dir(source.path()).await;
+    }
+    let _ = tokio::fs::remove_dir(root).await;
 }
 
 /// The same sweep for another cache with its own ceiling (`warnings.rs`).
@@ -1541,8 +1655,8 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
                 keep(&asking.file, &body, etag.as_deref()).await;
                 crate::title_metadata::observe_tmdb(&state, path, &body);
             }
-            Ok(Revalidated::Unchanged(generation)) => {
-                let generation = generation.renew(&asking.file, SystemTime::now()).await;
+            Ok(Revalidated::Unchanged(confirmed)) => {
+                let generation = renew_generation(confirmed, &asking.file).await;
                 if let Some(body) = generation.bytes().await {
                     crate::title_metadata::observe_tmdb(&state, path, &body);
                 }
@@ -1989,12 +2103,18 @@ mod tests {
         let tag = file.with_extension("etag");
         keep(&file, &Bytes::from_static(b"{\"page\":1}"), Some("W/\"abc\"")).await;
         let digest = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await.unwrap().digest();
-        assert_eq!(bound_etag(&file, &digest).await.as_deref(), Some("W/\"abc\""));
+        assert_eq!(bound_etag(&file, &digest).await.map(|etag| etag.value).as_deref(), Some("W/\"abc\""));
 
         aged(&file, LIST_TTL + Duration::from_secs(60));
-        renew(&file).await;
+        aged(&tag, LIST_TTL + Duration::from_secs(60));
+        let generation = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await.unwrap();
+        let etag = bound_etag(&file, &digest).await.unwrap();
+        let _ = renew_generation(Box::new(Confirmed { generation, etag }), &file).await;
         assert!(read(&file).await.unwrap().1 < Duration::from_secs(5), "a 304 counts as fetched now");
-        assert_eq!(bound_etag(&file, &digest).await.as_deref(), Some("W/\"abc\""));
+        let tag_age =
+            SystemTime::now().duration_since(std::fs::metadata(&tag).unwrap().modified().unwrap()).unwrap();
+        assert!(tag_age < Duration::from_secs(5), "the exact digest-bound ETag was not renewed");
+        assert_eq!(bound_etag(&file, &digest).await.map(|etag| etag.value).as_deref(), Some("W/\"abc\""));
 
         keep(&file, &Bytes::from_static(b"{\"page\":2}"), None).await;
         assert!(!tag.exists(), "an answer kept without a tag drops the old one");
@@ -2268,6 +2388,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_detail_replacements_keep_only_one_bounded_generation() {
+        let dir = temp_dir();
+        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
+        let source_path = detail.whole().1;
+        let mut expected_len = 0;
+
+        for generation in 0..24 {
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "id": 550,
+                    "title": format!("generation-{generation}"),
+                    "credits": {"cast": [{"id": generation, "name": "actor"}]},
+                    "external_ids": {},
+                    "recommendations": {},
+                    "release_dates": {},
+                    "videos": {},
+                    "watch/providers": {}
+                }))
+                .unwrap(),
+            );
+            assert!(crate::cache::write_json(&source_path, &body).await);
+            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
+            expected_len = prepared.bytes().await.unwrap().len() as u64;
+
+            let derived: Vec<_> = std::fs::read_dir(variants_dir(&source_path))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
+                .collect();
+            assert_eq!(derived.len(), 1, "generation {generation} left obsolete prepared bodies");
+            assert_eq!(derived[0].metadata().unwrap().len(), expected_len);
+        }
+
+        let derived_bytes: u64 = std::fs::read_dir(variants_dir(&source_path))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum();
+        assert_eq!(derived_bytes, expected_len + 64, "one body and its fixed metadata sidecar are the bound");
+
+        sweep_prepared(&dir, Duration::ZERO).await;
+        assert!(
+            !variants_dir(&source_path).exists(),
+            "retention cleanup left the per-source directory behind"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelling_a_variant_request_does_not_release_its_build_owner() {
         let dir = temp_dir();
         let detail =
@@ -2290,15 +2460,13 @@ mod tests {
         let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
 
         let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
+        let owner_started = watch_variant_owner(&source_path);
         let build = tokio::spawn(async move { detail.prepared_variant(&source_path, source).await });
         drop(held);
-        for _ in 0..200 {
-            if detail_builds().available_permits() == 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(detail_builds().available_permits(), 0, "the owner task never took its build permit");
+        tokio::time::timeout(Duration::from_secs(2), owner_started)
+            .await
+            .expect("the owner task never took its build permit")
+            .expect("the owner task dropped its start signal");
         build.abort();
         for _ in 0..200 {
             if variant.exists() {
@@ -2312,6 +2480,45 @@ mod tests {
                 .await
                 .expect("the build owner retained its permit forever")
                 .unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn cancelled_variant_waiters_never_become_detached_builds() {
+        let dir = temp_dir();
+        let detail =
+            Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
+        let source_path = detail.whole().1;
+        let body = Bytes::from_static(
+            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        assert!(crate::cache::write_json(&source_path, &body).await);
+        let digest = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap().digest();
+        let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
+        let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
+
+        let mut waiters = Vec::new();
+        for _ in 0..64 {
+            let detail = Arc::clone(&detail);
+            let path = source_path.clone();
+            let source = crate::cache::open_json(&path, MAX_ANSWER_BYTES).await.unwrap();
+            waiters.push(tokio::spawn(async move { detail.prepared_variant(&path, source).await }));
+        }
+        tokio::task::yield_now().await;
+        for waiter in &waiters {
+            waiter.abort();
+        }
+        for waiter in waiters {
+            let _ = waiter.await;
+        }
+        drop(held);
+
+        let permit =
+            tokio::time::timeout(Duration::from_secs(2), Arc::clone(detail_builds()).acquire_owned())
+                .await
+                .expect("cancelled waiters left detached owners queued")
+                .unwrap();
+        assert!(!variant.exists(), "a cancelled waiter published after its request ended");
         drop(permit);
     }
 
@@ -2335,8 +2542,10 @@ mod tests {
             let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
             assert!(detail.prepared_variant(&source_path, source).await.is_some());
         }
-        let derived = std::fs::read_dir(&dir)
-            .unwrap()
+        let derived = std::fs::read_dir(variants_dir(&source_path))
+            .ok()
+            .into_iter()
+            .flatten()
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
             .count();
