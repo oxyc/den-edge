@@ -21,7 +21,10 @@ use std::sync::{OnceLock, Weak};
 
 const FORMAT_VERSION: u64 = 3;
 pub(super) const DATABASE_CACHE_BYTES: usize = 64 * 1024;
-pub(crate) const OPEN_DATABASE_BYTES: usize = 112 * 1024;
+const DATABASE_HANDLE_BYTES: usize = 112 * 1024;
+const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
+/// Redb's measured handle/cache/mapping residency plus one worst-case exact prepared identity page.
+pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_PAGE_BYTES;
 const RETAINED_DATABASES: usize = 2;
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("keys-v3");
 /// The exact v2-compatible memory charge of each live row. Keeping this beside the key index lets a write enforce
@@ -90,9 +93,17 @@ pub(super) struct RangePage {
     pub more: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct ChunkPage {
     pub chunks: Vec<Bytes>,
     pub len: usize,
+}
+
+struct PreparedPage {
+    since: u64,
+    limit: usize,
+    generation: String,
+    page: ChunkPage,
 }
 
 pub(super) trait LibraryStore: Send + Sync {
@@ -225,6 +236,7 @@ struct RedbLibrary {
     path: PathBuf,
     token_hash: [u8; 32],
     member_hash: Mutex<Option<[u8; 32]>>,
+    prepared: Mutex<Option<PreparedPage>>,
 }
 
 /// redb intentionally permits one open handle per file. Tests model a restart by constructing a second AppState
@@ -302,6 +314,7 @@ impl RedbLibrary {
             path: path.to_owned(),
             token_hash,
             member_hash: Mutex::new(member_hash),
+            prepared: Mutex::new(None),
         })
     }
 
@@ -326,6 +339,9 @@ impl LibraryStore for RedbLibrary {
         {
             return Err(StoreError::Invalid("invalid or duplicate v3 write".into()));
         }
+        // Keep prepared-page publication ordered with commits. Without this per-library lock, a read begun before
+        // the commit could publish its stale page after the writer invalidated the old cache entry.
+        let mut prepared = self.prepared.lock().unwrap();
         let transaction = self.database.begin_write().map_err(StoreError::redb)?;
         let mut head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
@@ -410,6 +426,7 @@ impl LibraryStore for RedbLibrary {
             metadata.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
         }
         transaction.commit().map_err(StoreError::redb)?;
+        *prepared = None;
         Ok(BatchResult {
             head,
             applied: accepted.into_iter().map(|(write, _, seq, _, _)| (write.key.clone(), seq)).collect(),
@@ -480,6 +497,13 @@ impl LibraryStore for RedbLibrary {
             }
         }
 
+        let limit = limit.min(MAX_LIMIT);
+        let mut prepared = self.prepared.lock().unwrap();
+        if let Some(cached) = prepared.as_ref() {
+            if cached.since == since && cached.limit == limit && cached.generation == generation {
+                return Ok(cached.page.clone());
+            }
+        }
         let transaction = self.database.begin_read().map_err(StoreError::redb)?;
         let head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
@@ -496,7 +520,7 @@ impl LibraryStore for RedbLibrary {
         let mut entries = 0usize;
         let mut page_bytes = 128usize;
         let mut more = false;
-        while entries < limit.min(MAX_LIMIT) {
+        while entries < limit {
             let Some(item) = rows.next() else { break };
             let (_, fragment) = item.map_err(StoreError::redb)?;
             let cost = fragment.value().len() + usize::from(entries != 0);
@@ -517,7 +541,14 @@ impl LibraryStore for RedbLibrary {
         let suffix = format!(r#"],"head":{head},"more":{more},"generation":"{generation}"}}"#);
         append(&mut chunks, suffix.as_bytes());
         let len = chunks.iter().map(Vec::len).sum();
-        Ok(ChunkPage { chunks: chunks.into_iter().map(Bytes::from).collect(), len })
+        let page = ChunkPage { chunks: chunks.into_iter().map(Bytes::from).collect(), len };
+        *prepared = Some(PreparedPage {
+            since,
+            limit,
+            generation: generation.to_owned(),
+            page: page.clone(),
+        });
+        Ok(page)
     }
 
     #[cfg(test)]
@@ -580,11 +611,8 @@ impl Drop for StoreLease {
     fn drop(&mut self) {
         let mut registry = self.registry.lock().unwrap();
         while registry.bytes > RETAINED_DATABASES * OPEN_DATABASE_BYTES {
-            let mut candidates: Vec<_> = registry
-                .slots
-                .iter()
-                .map(|(id, slot)| (id.clone(), Arc::clone(slot)))
-                .collect();
+            let mut candidates: Vec<_> =
+                registry.slots.iter().map(|(id, slot)| (id.clone(), Arc::clone(slot))).collect();
             candidates.sort_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed));
             let mut removed = false;
             for (id, slot) in candidates {
@@ -1193,6 +1221,26 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_identity_page_is_shared_until_its_library_commits() {
+        let dir = temp_dir();
+        let manager = manager(&dir, 1, 32 << 20, 8 << 20);
+        let store = manager.library("1111111111111111", TOKEN).unwrap();
+        store.apply(&[Write { key: K1.into(), base: 0, value: "old".into() }]).unwrap();
+        let first = store.range_chunks(0, 500, "generation").unwrap();
+        let hit = store.range_chunks(0, 500, "generation").unwrap();
+        assert_eq!(first.len, hit.len);
+        assert_eq!(first.chunks[0].as_ptr(), hit.chunks[0].as_ptr(), "the immutable bytes are shared");
+
+        store.apply(&[Write { key: K1.into(), base: 1, value: "new".into() }]).unwrap();
+        let after = store.range_chunks(0, 500, "generation").unwrap();
+        assert_ne!(first.chunks[0].as_ptr(), after.chunks[0].as_ptr());
+        let joined: Vec<u8> = after.chunks.into_iter().flatten().collect();
+        let decoded: serde_json::Value = serde_json::from_slice(&joined).unwrap();
+        assert_eq!(decoded["head"], 2);
+        assert_eq!(decoded["entries"][0]["v"], "new");
+    }
+
+    #[test]
     fn active_leases_cannot_be_evicted_or_exceed_the_reservation() {
         let dir = temp_dir();
         let manager = manager(&dir, 2, 32 << 20, 4 << 20);
@@ -1208,9 +1256,8 @@ mod tests {
     fn an_active_burst_recovers_to_two_idle_database_handles() {
         let dir = temp_dir();
         let manager = manager(&dir, 16, 128 << 20, 4 << 20);
-        let leases: Vec<_> = (0..16)
-            .map(|id| manager.library(&format!("{id:016x}"), TOKEN).unwrap())
-            .collect();
+        let leases: Vec<_> =
+            (0..16).map(|id| manager.library(&format!("{id:016x}"), TOKEN).unwrap()).collect();
         assert_eq!(manager.cached(), (16, 16 * OPEN_DATABASE_BYTES, 16));
         assert!(matches!(manager.library("ffffffffffffffff", TOKEN), Err(StoreError::Full)));
         drop(leases);

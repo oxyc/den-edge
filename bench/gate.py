@@ -11,6 +11,8 @@ EVENT_KEYS = ("oom", "oom_kill", "oom_group_kill")
 PROBE_KEYS = (
     "rss_bytes",
     "cgroup_current_bytes",
+    "cgroup_anon_bytes",
+    "cgroup_file_bytes",
     "cgroup_events_available",
     "cgroup_events_oom",
     "cgroup_events_oom_kill",
@@ -46,7 +48,7 @@ def read_probe(path):
         raise GateFailure(f"in-container memory.max is not 64 MiB: {values['memory_max_bytes']}")
     if values["memory_swap_max_bytes"] != 0:
         raise GateFailure(f"in-container memory.swap.max is not zero: {values['memory_swap_max_bytes']}")
-    for key in ("rss_bytes", "cgroup_current_bytes", "cgroup_peak_bytes", "fd_count"):
+    for key in ("rss_bytes", "cgroup_current_bytes", "cgroup_anon_bytes", "cgroup_peak_bytes", "fd_count"):
         if values[key] <= 0:
             raise GateFailure(f"probe did not produce a plausible {key}: {values[key]}")
     if values["cgroup_peak_bytes"] < values["cgroup_current_bytes"]:
@@ -103,7 +105,11 @@ def validate_result(row, allowed, required, tmdb_hit=False, allowed_refusals=Non
 def recovery_failures(before, after, rss_slack, cgroup_slack, fd_slack, upstream_slack):
     checks = (
         ("rss_bytes", rss_slack),
-        ("cgroup_current_bytes", cgroup_slack),
+        # memory.current includes clean filesystem cache. A cold walk across durable libraries is expected to
+        # populate that reclaimable cache; treating it as an application leak makes recovery depend on unrelated
+        # host pressure. RSS plus cgroup anonymous memory identify retained application ownership, while every
+        # sample still enforces memory.max/no-swap and the OOM counters.
+        ("cgroup_anon_bytes", cgroup_slack),
         ("fd_count", fd_slack),
         ("upstream_established", upstream_slack),
     )
@@ -204,7 +210,17 @@ def report_case(args):
         cgroup_events_oom_delta=deltas["oom"],
         cgroup_events_oom_kill_delta=deltas["oom_kill"],
         cgroup_events_oom_group_kill_delta=deltas["oom_group_kill"],
-        recovery={key: recovered[key] for key in ("rss_bytes", "cgroup_current_bytes", "fd_count", "upstream_established")},
+        recovery={
+            key: recovered[key]
+            for key in (
+                "rss_bytes",
+                "cgroup_current_bytes",
+                "cgroup_anon_bytes",
+                "cgroup_file_bytes",
+                "fd_count",
+                "upstream_established",
+            )
+        },
         memory_limit_bytes=67108864,
         heap_allocations=None,
         heap_allocations_note="production binary exposes no allocator counter; RSS and cgroup memory are measured",

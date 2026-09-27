@@ -37,6 +37,21 @@ fn events() -> io::Result<std::collections::HashMap<String, u64>> {
     Ok(values)
 }
 
+fn memory_stat() -> io::Result<std::collections::HashMap<String, u64>> {
+    let path = "/sys/fs/cgroup/memory.stat";
+    let mut values = std::collections::HashMap::new();
+    for line in fs::read_to_string(path)?.lines() {
+        let (key, value) = line.split_once(' ').ok_or_else(|| invalid(path))?;
+        values.insert(key.to_owned(), value.parse().map_err(|_| invalid(path))?);
+    }
+    for key in ["anon", "file"] {
+        if !values.contains_key(key) {
+            return Err(invalid(path));
+        }
+    }
+    Ok(values)
+}
+
 fn cpu_ticks() -> io::Result<u64> {
     let path = "/proc/1/stat";
     let stat = fs::read_to_string(path)?;
@@ -71,9 +86,12 @@ fn main() -> io::Result<()> {
     let current = number("/sys/fs/cgroup/memory.current")?;
     let peak = number("/sys/fs/cgroup/memory.peak")?;
     let events = events()?;
+    let memory = memory_stat()?;
     println!("cgroup_events_available=1");
     println!("rss_bytes={}", status("VmRSS:")? * 1024);
     println!("cgroup_current_bytes={current}");
+    println!("cgroup_anon_bytes={}", memory["anon"]);
+    println!("cgroup_file_bytes={}", memory["file"]);
     println!("memory_max_bytes={}", number("/sys/fs/cgroup/memory.max")?);
     println!("memory_swap_max_bytes={}", number("/sys/fs/cgroup/memory.swap.max")?);
     println!("cgroup_peak_bytes={peak}");

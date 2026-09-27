@@ -31,9 +31,16 @@ response ownership, temporary migration memory, and copy-on-write slack. Existin
 hard: 8 MiB per library, 16 MiB aggregate library cache, 32 KiB value, 50,000 live rows, 512 KiB page, and the 64 MiB
 container target. Reservations precede allocation and roll back on cancellation.
 
-V3 admits at most 16 simultaneously leased databases (charged at 112 KiB apiece) and trims back to the two most
-recent idle handles as soon as request leases end. Active libraries are never evicted. This preserves independent
-writers during a burst while preventing a high-cardinality cold walk from retaining mappings and file descriptors.
+V3 admits at most 16 simultaneously leased databases. Each is charged 688 KiB: 112 KiB for the measured handle,
+cache, and mapping residency, plus 576 KiB for one worst-case prepared identity page including allocation slack. It
+trims back to the two most recent idle handles as soon as request leases end. Active libraries are never evicted.
+This preserves independent writers during a burst while preventing a high-cardinality cold walk from retaining
+mappings and file descriptors.
+
+The Linux gate reports cgroup anonymous and filesystem-cache bytes separately. Recovery requires RSS, anonymous
+memory, descriptors, and sockets to return within their bounds. Clean file pages may remain in the cgroup after a
+cold durable scan because the kernel owns and reclaims them under pressure; they remain visible in every report,
+and `memory.max`, zero swap, peak usage, plus `memory.events` still fail the run on real pressure or OOM.
 
 A changes read holds one consistent snapshot while selecting sequences greater than `since`, bounded by row count
 and the existing page-byte rule. It captures head and generation with that selection. Where the backend permits,
@@ -44,6 +51,11 @@ Identity output is an envelope, comma-separated canonical fragments, and suffix,
 than 64 KiB directly from one redb read transaction. There is no whole-page assembly and no frame per row. The
 response holds a 512 KiB aggregate-budget permit until its last frame or cancellation. Gzip keeps the existing
 separately bounded whole-page compression path and holds the same response permit.
+
+An open library retains at most one exact identity representation keyed by `since`, effective `limit`, and
+generation. Concurrent hits clone immutable `Bytes` references rather than the body. A writer holds that library's
+prepared-page lock across its transaction and invalidation, so a pre-commit read cannot publish stale bytes after a
+commit. This is per-library only; it creates no cross-library writer or cache lock.
 
 ## Format selection and compatibility
 

@@ -582,10 +582,7 @@ async fn v3_store(
             if let Some(old) = loaded.take() {
                 state.libraries.reserve(id, slot, old.bytes, 0, state.library_limits)?.commit();
             }
-            return Arc::clone(&state.library_v3)
-                .existing_library(id, token_hash)
-                .map(Some)
-                .map_err(v3_io);
+            return Arc::clone(&state.library_v3).existing_library(id, token_hash).map(Some).map_err(v3_io);
         }
         AUTHORITY_V2 => {}
         _ => unreachable!("authority returns only known states"),
@@ -623,10 +620,7 @@ async fn v3_store(
     }
     state.libraries.reserve(id, slot, old_bytes, 0, state.library_limits)?.commit();
     publish_v3(state, slot, id).await?;
-    Arc::clone(&state.library_v3)
-        .existing_library(id, token_hash)
-        .map(Some)
-        .map_err(v3_io)
+    Arc::clone(&state.library_v3).existing_library(id, token_hash).map(Some).map_err(v3_io)
 }
 
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
