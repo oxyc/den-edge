@@ -41,6 +41,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
+#[cfg(test)]
+mod v3_model;
+
 const NS: &str = "lib";
 const EXT: &str = "log";
 /// A deleted library's marker: its id is retired.
