@@ -20,6 +20,7 @@
 //! viewer.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::metrics::{CacheAccess, CacheStore, Provider, ProviderUpstream};
 use crate::tmdb::Failed;
 use crate::warnings::valid_imdb;
 use crate::AppState;
@@ -92,9 +93,11 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         let age = body.age();
         let absent = body.matches(ABSENT);
         if absent && age < ABSENT_TTL {
+            state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Negative);
             return crate::warnings::absent();
         }
         if !absent && age < FRESH {
+            state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Fresh);
             return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
@@ -103,8 +106,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     }
     match lookup(state, &asked_for, &ip, rid).await {
         Ok(Some(body)) => {
-            if let Some(file) = keep() {
-                crate::cache::write_json(file, &body).await;
+            state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
+            let target = keep();
+            store(state, target.map(|file| file.as_path()), &body).await;
+            if let Some(file) = target {
                 let _ = tokio::fs::remove_file(file.with_extension("empty")).await;
             }
             answer(body, FRESH, "miss", SystemTime::now(), asked)
@@ -112,20 +117,43 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         Ok(None) => {
             if let (Some(file), Some(body)) = (&file, stale) {
                 if !gone(file).await {
+                    state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
                     return answer_file(body, STALE_MAX_AGE, "stale", asked);
                 }
             }
-            if let Some(file) = keep() {
-                crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
-            }
+            state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
+            store(state, keep().map(|file| file.as_path()), &Bytes::from_static(ABSENT)).await;
             crate::warnings::absent()
         }
         // SkipDB down, slow or refusing: the segments kept are still the best answer there is.
         Err(refused) => match stale {
-            Some(body) => answer_file(body, STALE_MAX_AGE, "stale", asked),
-            None => *refused,
+            Some(body) => {
+                state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Stale);
+                answer_file(body, STALE_MAX_AGE, "stale", asked)
+            }
+            None => {
+                state.metrics.provider_cache_access(Provider::Skipdb, CacheAccess::Cold);
+                *refused
+            }
         },
     }
+}
+
+async fn store(state: &AppState, file: Option<&std::path::Path>, body: &Bytes) {
+    let result = match file {
+        Some(file) => {
+            let attempt = state.metrics.provider_store_started(Provider::Skipdb);
+            let result = if crate::cache::write_json(file, body).await {
+                CacheStore::Stored
+            } else {
+                CacheStore::Failed
+            };
+            attempt.finished(result);
+            return;
+        }
+        None => CacheStore::Skipped,
+    };
+    state.metrics.provider_cache_store(Provider::Skipdb, result);
 }
 
 /// Whether today allows one more answer kept under a new name (`NEW_PER_DAY`), counting it if so.
@@ -250,16 +278,31 @@ async fn lookup(state: &AppState, ask: &Ask, ip: &str, rid: &str) -> Result<Opti
         .header("x-request-id", rid)
         .body(Full::new(Bytes::new()));
     let Ok(out) = out else { return Err(refused(StatusCode::BAD_REQUEST, "bad_request")) };
+    let attempt = state.metrics.provider_upstream_started(Provider::Skipdb);
     let (status, headers, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "skipdb").await {
             Ok(answer) => answer,
-            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable")),
-            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "skipdb_timeout")),
+            Err(Failed::Unreachable) => {
+                attempt.finished(ProviderUpstream::Failed);
+                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_unreachable"));
+            }
+            Err(Failed::Timeout) => {
+                attempt.finished(ProviderUpstream::Failed);
+                return Err(refused(StatusCode::GATEWAY_TIMEOUT, "skipdb_timeout"));
+            }
             Err(Failed::TooLarge | Failed::Unreadable) => {
-                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"))
+                attempt.finished(ProviderUpstream::Failed);
+                return Err(refused(StatusCode::BAD_GATEWAY, "skipdb_answer_unreadable"));
             }
         };
-    said(status, &headers, &bytes)
+    let answer = said(status, &headers, &bytes);
+    let outcome = match &answer {
+        Ok(Some(_)) => ProviderUpstream::Updated,
+        Ok(None) => ProviderUpstream::Negative,
+        Err(_) => ProviderUpstream::Failed,
+    };
+    attempt.finished(outcome);
+    answer
 }
 
 /// What SkipDB's answer says: `Some` body to keep, `None` where it names no segment at all, or the refusal to give.
@@ -340,8 +383,8 @@ fn answer_file(
 pub async fn sweep_forever(state: Arc<AppState>) {
     let Some(dir) = state.skipdb_cache_dir.clone() else { return };
     loop {
+        crate::tmdb::sweep_provider_cache(&dir, RETENTION, &state.metrics, Provider::Skipdb).await;
         tokio::time::sleep(Duration::from_secs(DAY)).await;
-        crate::tmdb::sweep_older_than(&dir, RETENTION).await;
     }
 }
 
@@ -461,6 +504,16 @@ mod tests {
         assert_eq!(get().await.status(), StatusCode::NOT_FOUND);
         assert_eq!(std::fs::read(&file).unwrap(), ABSENT);
         assert_eq!(*crate::lock(&asked), 4);
+        let metrics = h.state.metrics.render();
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="skipdb",result="cold"} 2"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_access_total{provider="skipdb",result="stale"} 2"#)
+        );
+        assert!(
+            metrics.contains(r#"den_edge_provider_cache_store_total{provider="skipdb",result="stored"} 2"#)
+        );
     }
 
     /// Every runtime, season and episode is a question of its own and a file kept for 90 days, so made-up ones

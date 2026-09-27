@@ -532,19 +532,32 @@ async fn query(state: &AppState, req: Request) -> Response {
     }
     let store = match store(state).await {
         Ok(store) => store,
-        Err(Unstored::Unavailable) => return json_reply(StatusCode::OK, &json!({ "entries": [] })),
+        Err(Unstored::Unavailable) => {
+            state.metrics.title_query(crate::metrics::TitleQuery::Unavailable);
+            return json_reply(StatusCode::OK, &json!({ "entries": [] }));
+        }
         Err(Unstored::Full | Unstored::Failed) => {
+            state.metrics.title_query(crate::metrics::TitleQuery::Failed);
             return json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"));
         }
     };
     let now = state.now();
     match tokio::task::spawn_blocking(move || store.query_batch(body.titles, now)).await {
-        Ok(Ok(entries)) => json_reply(StatusCode::OK, &json!({ "entries": entries })),
+        Ok(Ok(entries)) => {
+            state.metrics.title_query(if entries.is_empty() {
+                crate::metrics::TitleQuery::Empty
+            } else {
+                crate::metrics::TitleQuery::Nonempty
+            });
+            json_reply(StatusCode::OK, &json!({ "entries": entries }))
+        }
         Ok(Err(store_error)) => {
+            state.metrics.title_query(crate::metrics::TitleQuery::Failed);
             eprintln!("title metadata query: {store_error:?}");
             json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"))
         }
         Err(task_error) => {
+            state.metrics.title_query(crate::metrics::TitleQuery::Failed);
             eprintln!("title metadata query task: {task_error}");
             json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"))
         }
@@ -571,12 +584,20 @@ async fn publish(state: &AppState, req: Request) -> Response {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_metadata"));
     }
     match merge(state, body.entries).await {
-        Ok(()) => json_reply(StatusCode::NO_CONTENT, &Value::Null),
+        Ok(()) => {
+            state.metrics.title_publish(crate::metrics::TitlePublish::Stored);
+            json_reply(StatusCode::NO_CONTENT, &Value::Null)
+        }
         Err(Unstored::Unavailable) => {
+            state.metrics.title_publish(crate::metrics::TitlePublish::Unavailable);
             json_reply(StatusCode::SERVICE_UNAVAILABLE, &error("metadata_store_unavailable"))
         }
-        Err(Unstored::Full) => json_reply(StatusCode::INSUFFICIENT_STORAGE, &error("storage_full")),
+        Err(Unstored::Full) => {
+            state.metrics.title_publish(crate::metrics::TitlePublish::Full);
+            json_reply(StatusCode::INSUFFICIENT_STORAGE, &error("storage_full"))
+        }
         Err(Unstored::Failed) => {
+            state.metrics.title_publish(crate::metrics::TitlePublish::Failed);
             json_reply(StatusCode::INTERNAL_SERVER_ERROR, &error("metadata_store_failed"))
         }
     }
@@ -647,29 +668,44 @@ fn record(
     read: impl FnOnce(&[u8]) -> Vec<Observation> + Send + 'static,
 ) -> bool {
     if state.title_metadata_cache_dir.is_none() {
+        state.metrics.title_observation(crate::metrics::TitleObservation::NoStore);
         return false;
     }
-    let Some(charge) = observation_charge(body.len()) else { return false };
-    let Ok(permit) = Arc::clone(&state.title_metadata_observation_budget).try_acquire_many_owned(charge)
-    else {
+    let Some(charge) = observation_charge(body.len()) else {
+        state.metrics.title_observation(crate::metrics::TitleObservation::TooLarge);
         return false;
     };
+    let Ok(permit) = Arc::clone(&state.title_metadata_observation_budget).try_acquire_many_owned(charge)
+    else {
+        state.metrics.byte_refused(crate::metrics::BytePool::TitleObservation);
+        state.metrics.title_observation(crate::metrics::TitleObservation::Busy);
+        return false;
+    };
+    let accounting =
+        state.metrics.byte_admitted(crate::metrics::BytePool::TitleObservation, permit.num_permits(), false);
+    state.metrics.title_observation(crate::metrics::TitleObservation::Accepted);
     let (state, body) = (Arc::clone(state), body.clone());
     tokio::spawn(async move {
         let _permit = permit;
+        let _accounting = accounting;
         // A 4 MiB JSON parse is blocking CPU work. Keep it off Tokio's network workers as well as byte-bounded.
         let entries = match tokio::task::spawn_blocking(move || read(&body)).await {
             Ok(entries) => entries,
             Err(error) => {
+                state.metrics.title_observation(crate::metrics::TitleObservation::Failed);
                 eprintln!("title metadata observation task: {error}");
                 return;
             }
         };
         if entries.is_empty() {
+            state.metrics.title_observation(crate::metrics::TitleObservation::Empty);
             return;
         }
         if let Err(e) = merge(&state, entries).await {
+            state.metrics.title_observation(crate::metrics::TitleObservation::Failed);
             eprintln!("title metadata: an observation was not kept ({e:?})");
+        } else {
+            state.metrics.title_observation(crate::metrics::TitleObservation::Stored);
         }
     });
     true
@@ -1114,13 +1150,23 @@ mod tests {
         assert!(!record(&h.state, &Bytes::from_static(b"{}"), |_| Vec::new()));
         release_tx.send(()).unwrap();
 
-        for _ in 0..100 {
-            if h.state.title_metadata_observation_budget.available_permits() == OBSERVATION_BUDGET_BYTES {
-                return;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while h.state.title_metadata_observation_budget.available_permits() != OBSERVATION_BUDGET_BYTES {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-        panic!("the completed observation did not release its byte budget");
+        })
+        .await
+        .expect("the completed observation did not release its byte budget");
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(r#"den_edge_byte_admission_used_bytes{pool="title_observation"} 0"#));
+        assert!(metrics
+            .contains(r#"den_edge_byte_admission_high_water_bytes{pool="title_observation"} 16777216"#));
+        assert!(metrics.contains(r#"den_edge_byte_admission_refused_total{pool="title_observation"} 1"#));
+        assert!(
+            metrics.contains(r#"den_edge_title_metadata_observation_admission_total{result="accepted"} 1"#)
+        );
+        assert!(metrics.contains(r#"den_edge_title_metadata_observation_admission_total{result="busy"} 1"#));
+        assert!(metrics.contains(r#"den_edge_title_metadata_observation_completion_total{result="empty"} 1"#));
     }
 
     #[test]

@@ -924,8 +924,16 @@ async fn relay_with(
     // live session whose signed playlist we never retained well enough to end.
     let mut session_charge = if public_session {
         match Arc::clone(&state.relay_collect_budget).try_acquire_many_owned(PUBLIC_SESSION_CHARGE_BYTES) {
-            Ok(charge) => Some(charge),
+            Ok(permit) => Some(CollectedCharge {
+                _accounting: vec![state.metrics.byte_admitted(
+                    crate::metrics::BytePool::RelayCollect,
+                    permit.num_permits(),
+                    false,
+                )],
+                permit,
+            }),
             Err(_) => {
+                state.metrics.byte_refused(crate::metrics::BytePool::RelayCollect);
                 guest_refused("relay_busy");
                 return crate::handler::retry_after(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -984,6 +992,10 @@ async fn relay_with(
     let (parts, body) = answer.into_parts();
     // An answer that says it is too large is refused whole, before any of it is passed on.
     if http_body::Body::size_hint(&body).lower() > MAX_ANSWER_BYTES as u64 {
+        state.metrics.stream_terminated(
+            crate::metrics::StreamClass::Addon,
+            crate::metrics::StreamTermination::RouteLimit,
+        );
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     }
     // Only an answer something here reads or rewrites is collected whole. Every other one — most of them — is passed
@@ -993,7 +1005,7 @@ async fn relay_with(
     if !collect {
         return answer_response(
             &parts,
-            passed_body(body, deadline, ANSWER_IDLE, slot),
+            passed_body(body, deadline, ANSWER_IDLE, slot, Arc::clone(&state.metrics)),
             public_session || playground || speed,
             member_only || grant.is_some(),
             None,
@@ -1006,18 +1018,19 @@ async fn relay_with(
     } else {
         (Some(&state.relay_collect_budget), 1, MAX_ANSWER_BYTES)
     };
-    let (mut bytes, collected_charge) = match collect_by(body, deadline, budget, multiplier, limit).await {
-        Ok(collected) => collected,
-        Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
-            eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
-            return crate::handler::retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &error(code),
-                COLLECT_BUSY_RETRY_MS,
-            );
-        }
-        Err((status, code)) => return json(status, code),
-    };
+    let (mut bytes, collected_charge) =
+        match collect_by(body, deadline, budget, multiplier, limit, Some(&state.metrics)).await {
+            Ok(collected) => collected,
+            Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
+                eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error(code),
+                    COLLECT_BUSY_RETRY_MS,
+                );
+            }
+            Err((status, code)) => return json(status, code),
+        };
     let charge = if public_session { session_charge.take() } else { collected_charge };
     if let Some(g) = &grant {
         // Whatever the addon says about the host's install goes back as the guest's own `~<gid>`.
@@ -1152,7 +1165,8 @@ async fn collect_by<B>(
     budget: Option<&Arc<tokio::sync::Semaphore>>,
     per_byte: usize,
     limit: usize,
-) -> Result<(Bytes, Option<tokio::sync::OwnedSemaphorePermit>), (StatusCode, &'static str)>
+    metrics: Option<&Arc<crate::metrics::Metrics>>,
+) -> Result<(Bytes, Option<CollectedCharge>), (StatusCode, &'static str)>
 where
     B: http_body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -1162,9 +1176,15 @@ where
         let mut body = std::pin::pin!(body);
         let declared = body.size_hint().exact().and_then(|n| usize::try_from(n).ok());
         if declared.is_some_and(|n| n > limit) {
+            if let Some(metrics) = metrics {
+                metrics.stream_terminated(
+                    crate::metrics::StreamClass::Addon,
+                    crate::metrics::StreamTermination::RouteLimit,
+                );
+            }
             return Err(unreadable());
         }
-        let mut charge: Option<tokio::sync::OwnedSemaphorePermit> = None;
+        let mut charge: Option<CollectedCharge> = None;
         let mut charged = 0;
         // Charge a declared answer before allocating it. An answer without an exact length reserves its full route
         // limit: incremental reservations let several chunked answers each occupy part of the budget and leave none
@@ -1174,11 +1194,24 @@ where
             let Some(delta) = (len - charged).checked_mul(per_byte) else { return false };
             let taken =
                 u32::try_from(delta).ok().and_then(|n| Arc::clone(budget).try_acquire_many_owned(n).ok());
-            let Some(taken) = taken else { return false };
+            let Some(taken) = taken else {
+                if let Some(metrics) = metrics {
+                    metrics.byte_refused(crate::metrics::BytePool::RelayCollect);
+                }
+                return false;
+            };
+            let accounting = metrics
+                .map(|metrics| metrics.byte_admitted(crate::metrics::BytePool::RelayCollect, delta, false));
             charged = len;
             match &mut charge {
-                Some(charge) => charge.merge(taken),
-                None => charge = Some(taken),
+                Some(charge) => {
+                    charge.permit.merge(taken);
+                    charge._accounting.extend(accounting);
+                }
+                None => {
+                    charge =
+                        Some(CollectedCharge { permit: taken, _accounting: accounting.into_iter().collect() })
+                }
             }
             true
         };
@@ -1190,6 +1223,12 @@ where
             let Ok(data) = frame.map_err(|_| unreadable())?.into_data() else { continue };
             let Some(next) = whole.len().checked_add(data.len()) else { return Err(unreadable()) };
             if next > limit {
+                if let Some(metrics) = metrics {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::RouteLimit,
+                    );
+                }
                 return Err(unreadable());
             }
             if !charge_to(next) {
@@ -1207,7 +1246,25 @@ where
 
 struct ChargedBytes {
     bytes: Bytes,
-    _charge: tokio::sync::OwnedSemaphorePermit,
+    _charge: CollectedCharge,
+}
+
+struct CollectedCharge {
+    permit: tokio::sync::OwnedSemaphorePermit,
+    _accounting: Vec<crate::metrics::ByteAdmission>,
+}
+
+impl std::fmt::Debug for CollectedCharge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CollectedCharge").field("permits", &self.permit.num_permits()).finish()
+    }
+}
+
+#[cfg(test)]
+impl CollectedCharge {
+    fn untracked(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { permit, _accounting: Vec::new() }
+    }
 }
 
 impl AsRef<[u8]> for ChargedBytes {
@@ -1218,7 +1275,7 @@ impl AsRef<[u8]> for ChargedBytes {
 
 /// Keep the accounting permit inside the `Bytes` owner itself. The charge therefore follows every clone/slice into
 /// Hyper's write buffers and cannot be released by a timer while the allocation is still resident.
-fn collected_body(bytes: Bytes, charge: Option<tokio::sync::OwnedSemaphorePermit>) -> Body {
+fn collected_body(bytes: Bytes, charge: Option<CollectedCharge>) -> Body {
     match charge {
         Some(charge) => Body::from(Bytes::from_owner(ChargedBytes { bytes, _charge: charge })),
         None => Body::from(bytes),
@@ -1240,6 +1297,7 @@ fn passed_body<B>(
     deadline: tokio::time::Instant,
     idle: Duration,
     slot: tokio::sync::OwnedSemaphorePermit,
+    metrics: Arc<crate::metrics::Metrics>,
 ) -> Body
 where
     B: http_body::Body<Data = Bytes> + Unpin + Send + 'static,
@@ -1250,29 +1308,51 @@ where
     let failed = Arc::clone(&terminal);
     tokio::spawn(async move {
         let _slot = slot;
+        let _stream = metrics.stream_started(crate::metrics::StreamClass::Addon);
         let mut sent = 0usize;
         loop {
             // Reserve downstream room before reading upstream. Thus a stopped browser leaves at most the one frame
             // already queued, rather than that frame plus another one waiting to be sent.
-            let send = tokio::select! {
+            let ready = tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
                     let why = "past the deadline";
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::Lifetime,
+                    );
                     eprintln!("relay: answer cut off after {sent} bytes: {why}");
                     *crate::lock(&failed) = Some(why);
                     break;
                 }
                 permit = send.reserve() => match permit {
                     Ok(permit) => permit,
-                    Err(_) => break,
+                    Err(_) => {
+                        metrics.stream_terminated(
+                            crate::metrics::StreamClass::Addon,
+                            crate::metrics::StreamTermination::ReceiverClosed,
+                        );
+                        break;
+                    }
                 },
             };
             let next = tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
                     let why = "past the deadline";
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::Lifetime,
+                    );
                     eprintln!("relay: answer cut off after {sent} bytes: {why}");
                     *crate::lock(&failed) = Some(why);
+                    break;
+                }
+                _ = send.closed() => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::ReceiverClosed,
+                    );
                     break;
                 }
                 next = tokio::time::timeout(idle, body.frame()) => next,
@@ -1280,12 +1360,20 @@ where
             let frame = match next {
                 Err(_) => {
                     let why = "the addon went silent";
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::SourceIdle,
+                    );
                     eprintln!("relay: answer cut off after {sent} bytes: {why}");
                     *crate::lock(&failed) = Some(why);
                     break;
                 }
                 Ok(Some(Ok(frame))) => frame,
                 Ok(Some(Err(e))) => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::UpstreamError,
+                    );
                     eprintln!("relay: answer cut off after {sent} bytes: {}", axum::Error::new(e));
                     *crate::lock(&failed) = Some("the addon answer failed");
                     break;
@@ -1294,12 +1382,18 @@ where
             };
             sent = sent.saturating_add(frame.data_ref().map_or(0, Bytes::len));
             if sent > MAX_ANSWER_BYTES {
+                metrics.stream_terminated(
+                    crate::metrics::StreamClass::Addon,
+                    crate::metrics::StreamTermination::RouteLimit,
+                );
                 let why = "larger than MAX_ANSWER_BYTES";
                 eprintln!("relay: answer cut off after {sent} bytes: {why}");
                 *crate::lock(&failed) = Some(why);
                 break;
             }
-            send.send(frame);
+            ready.send(
+                frame.map_data(|bytes| metrics.stream_bytes(crate::metrics::StreamClass::Addon, bytes)),
+            );
         }
     });
     Body::new(Passed { frames, terminal })
@@ -1728,8 +1822,10 @@ where
     let (send, frames) = tokio::sync::mpsc::channel(1);
     let terminal = Arc::new(Mutex::new(None));
     let failed = Arc::clone(&terminal);
+    let metrics = Arc::clone(&state.metrics);
     tokio::spawn(async move {
         let _admission = permits;
+        let _stream = metrics.stream_started(crate::metrics::StreamClass::Media);
         let deadline = tokio::time::Instant::now() + MEDIA_LIFETIME;
         loop {
             // Reserve the sole downstream frame before reading another upstream frame. A non-reading client can
@@ -1737,13 +1833,27 @@ where
             let ready = tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::Lifetime,
+                    );
                     *crate::lock(&failed) = Some("the media lifetime ended");
                     break;
                 }
                 permit = tokio::time::timeout(MEDIA_IDLE, send.reserve()) => match permit {
                     Ok(Ok(permit)) => permit,
-                    Ok(Err(_)) => break,
+                    Ok(Err(_)) => {
+                        metrics.stream_terminated(
+                            crate::metrics::StreamClass::Media,
+                            crate::metrics::StreamTermination::ReceiverClosed,
+                        );
+                        break;
+                    }
                     Err(_) => {
+                        metrics.stream_terminated(
+                            crate::metrics::StreamClass::Media,
+                            crate::metrics::StreamTermination::ReceiverIdle,
+                        );
                         *crate::lock(&failed) = Some("the media receiver went silent");
                         break;
                     }
@@ -1752,26 +1862,46 @@ where
             let next = tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::Lifetime,
+                    );
                     *crate::lock(&failed) = Some("the media lifetime ended");
                     break;
                 }
-                _ = send.closed() => break,
+                _ = send.closed() => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::ReceiverClosed,
+                    );
+                    break;
+                }
                 next = tokio::time::timeout(MEDIA_IDLE, body.frame()) => next,
             };
             let frame = match next {
                 Err(_) => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::SourceIdle,
+                    );
                     *crate::lock(&failed) = Some("the media source went silent");
                     break;
                 }
                 Ok(Some(Ok(frame))) => frame,
                 Ok(Some(Err(error))) => {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Media,
+                        crate::metrics::StreamTermination::UpstreamError,
+                    );
                     eprintln!("relay media: {}", axum::Error::new(error));
                     *crate::lock(&failed) = Some("the media source failed");
                     break;
                 }
                 Ok(None) => break,
             };
-            ready.send(frame);
+            ready.send(
+                frame.map_data(|bytes| metrics.stream_bytes(crate::metrics::StreamClass::Media, bytes)),
+            );
         }
     });
     Body::new(MediaPassed { passed: Passed { frames, terminal }, state, slot })
@@ -3085,7 +3215,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
         let given_up = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            super::collect_by(answer.into_body(), deadline, None, 1, super::MAX_ANSWER_BYTES),
+            super::collect_by(answer.into_body(), deadline, None, 1, super::MAX_ANSWER_BYTES, None),
         )
         .await
         .expect("still waiting on the body");
@@ -3145,6 +3275,10 @@ mod tests {
         let got = axum::body::to_bytes(answer.into_body(), usize::MAX).await.unwrap();
         assert!(got == body, "{} bytes of {}", got.len(), body.len());
         assert_eq!(slots_back(&h.state.relay_slots).await, super::MAX_IN_FLIGHT, "its slot came back");
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(r#"den_edge_stream_active{class="addon"} 0"#), "{metrics}");
+        assert!(metrics.contains(r#"den_edge_stream_retained_bytes{class="addon"} 0"#), "{metrics}");
+        assert!(!metrics.contains(r#"den_edge_stream_retained_high_water_bytes{class="addon"} 0"#));
     }
 
     /// Past `MAX_ANSWER_BYTES`: an answer that says so is a 502 before anything is passed on, and one that does not
@@ -3165,6 +3299,11 @@ mod tests {
         let cut = axum::body::to_bytes(answer.into_body(), usize::MAX).await;
         assert!(cut.is_err(), "the body ends in an error rather than whole");
         assert_eq!(slots_back(&h.state.relay_slots).await, super::MAX_IN_FLIGHT);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_stream_terminated_total{class="addon",reason="route_limit"} 1"#));
     }
 
     /// An answer passed on that goes silent part-way is ended at the idle deadline, and gives its slot back.
@@ -3180,7 +3319,13 @@ mod tests {
         let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
         let far = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         let idle = std::time::Duration::from_millis(200);
-        let passed = super::passed_body(answer.into_body(), far, idle, slot);
+        let passed = super::passed_body(
+            answer.into_body(),
+            far,
+            idle,
+            slot,
+            std::sync::Arc::new(crate::metrics::Metrics::default()),
+        );
         let ended =
             tokio::time::timeout(std::time::Duration::from_secs(3), axum::body::to_bytes(passed, usize::MAX))
                 .await
@@ -3201,8 +3346,13 @@ mod tests {
         let slots = Arc::new(tokio::sync::Semaphore::new(1));
         let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
-        let unread =
-            super::passed_body(answer.into_body(), deadline, std::time::Duration::from_secs(60), slot);
+        let unread = super::passed_body(
+            answer.into_body(),
+            deadline,
+            std::time::Duration::from_secs(60),
+            slot,
+            std::sync::Arc::new(crate::metrics::Metrics::default()),
+        );
         assert_eq!(slots.available_permits(), 0);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert_eq!(slots.available_permits(), 1, "given back without a read");
@@ -3210,6 +3360,41 @@ mod tests {
             axum::body::to_bytes(unread, usize::MAX).await.is_err(),
             "the queued frame is followed by the deadline error"
         );
+    }
+
+    /// Once the browser has taken one frame, dropping it wakes a pump that is blocked on a silent upstream.
+    #[tokio::test]
+    async fn a_closed_passed_answer_promptly_releases_its_slot() {
+        use http_body_util::BodyExt;
+
+        let h = chunked_addon(CHUNKED_JSON, vec![b' '; 64 * 1024], true).await;
+        let target = &h.state.relays[0].1;
+        let ask = axum::http::Request::get(format!("{target}/x"))
+            .body(http_body_util::Full::new(axum::body::Bytes::new()))
+            .unwrap();
+        let answer = super::client().request(ask).await.unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
+        let mut passed = super::passed_body(
+            answer.into_body(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            slot,
+            Arc::clone(&metrics),
+        );
+        assert!(passed.frame().await.unwrap().unwrap().is_data());
+        drop(passed);
+        tokio::time::timeout(std::time::Duration::from_millis(500), slots.acquire())
+            .await
+            .expect("the relay slot remained held after its receiver closed")
+            .unwrap()
+            .forget();
+        let rendered = metrics.render();
+        assert!(rendered
+            .contains(r#"den_edge_stream_terminated_total{class="addon",reason="receiver_closed"} 1"#));
+        assert!(rendered.contains(r#"den_edge_stream_active{class="addon"} 0"#));
+        assert!(rendered.contains(r#"den_edge_stream_retained_bytes{class="addon"} 0"#));
     }
 
     /// An answer with no declared length reserves its full route limit before it is read, so concurrent chunked
@@ -3227,17 +3412,39 @@ mod tests {
         let budget = Arc::new(tokio::sync::Semaphore::new(3 * 1024 * 1024));
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         let limit = 2 * 1024 * 1024;
-        let once =
-            super::collect_by(ask(()).await.unwrap().into_body(), deadline, Some(&budget), 1, limit).await;
+        let once = super::collect_by(
+            ask(()).await.unwrap().into_body(),
+            deadline,
+            Some(&budget),
+            1,
+            limit,
+            Some(&h.state.metrics),
+        )
+        .await;
         let (bytes, charge) = once.unwrap();
         assert_eq!(bytes.len(), 2 * 1024 * 1024);
         assert_eq!(budget.available_permits(), 1024 * 1024, "held with the answer");
-        let twice =
-            super::collect_by(ask(()).await.unwrap().into_body(), deadline, Some(&budget), 1, limit).await;
+        let twice = super::collect_by(
+            ask(()).await.unwrap().into_body(),
+            deadline,
+            Some(&budget),
+            1,
+            limit,
+            Some(&h.state.metrics),
+        )
+        .await;
         assert_eq!(twice.unwrap_err(), (StatusCode::SERVICE_UNAVAILABLE, "relay_busy"));
         assert_eq!(budget.available_permits(), 1024 * 1024, "the refused one's part came back");
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(r#"den_edge_byte_admission_used_bytes{pool="relay_collect"} 2097152"#));
+        assert!(metrics.contains(r#"den_edge_byte_admission_refused_total{pool="relay_collect"} 1"#));
         drop(charge);
         assert_eq!(budget.available_permits(), 3 * 1024 * 1024);
+        assert!(h
+            .state
+            .metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="relay_collect"} 0"#));
     }
 
     /// A collected answer's charge follows its bytes: a deadline cannot make still-resident memory disappear from
@@ -3246,7 +3453,10 @@ mod tests {
     async fn an_unread_collected_answer_stays_charged_until_its_bytes_are_dropped() {
         let budget = Arc::new(tokio::sync::Semaphore::new(1024));
         let charge = Arc::clone(&budget).try_acquire_many_owned(1024).unwrap();
-        let unread = super::collected_body(axum::body::Bytes::from_static(b"{}"), Some(charge));
+        let unread = super::collected_body(
+            axum::body::Bytes::from_static(b"{}"),
+            Some(super::CollectedCharge::untracked(charge)),
+        );
         assert_eq!(budget.available_permits(), 0, "held while the answer may still be sent");
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert_eq!(budget.available_permits(), 0, "time alone cannot uncharge resident bytes");
@@ -3255,7 +3465,10 @@ mod tests {
 
         // Sent, it comes back as soon as Hyper is done with the owned bytes.
         let charge = Arc::clone(&budget).try_acquire_many_owned(1024).unwrap();
-        let read = super::collected_body(axum::body::Bytes::from_static(b"{}"), Some(charge));
+        let read = super::collected_body(
+            axum::body::Bytes::from_static(b"{}"),
+            Some(super::CollectedCharge::untracked(charge)),
+        );
         assert_eq!(axum::body::to_bytes(read, usize::MAX).await.unwrap(), "{}");
         assert_eq!(slots_back(&budget).await, 1024);
     }
@@ -3296,6 +3509,8 @@ mod tests {
             got += body.frame().await.unwrap().unwrap().into_data().unwrap().len();
         }
         assert_eq!(*crate::lock(&h.state.media_spent), (1, 1500));
+        let metrics = h.state.metrics.render();
+        assert!(!metrics.contains(r#"den_edge_stream_retained_high_water_bytes{class="media"} 0"#));
     }
 
     /// The guest cap bounds viewers at once, so a slot is held for as long as a guest's trailer is still streaming,
@@ -3343,12 +3558,12 @@ mod tests {
             .contains("den_edge_media_admission_refused_total{reason=\"total\"} 1\n"));
         drop(first);
         assert_eq!(slots_back(&h.state.media_slots).await, 1);
-        assert!(h.state.metrics.render().contains("den_edge_media_admission_active{audience=\"guest\"} 0\n"));
-        assert!(h
-            .state
-            .metrics
-            .render()
-            .contains("den_edge_media_admission_high_water{audience=\"guest\"} 1\n"));
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains("den_edge_media_admission_active{audience=\"guest\"} 0\n"));
+        assert!(metrics.contains("den_edge_media_admission_high_water{audience=\"guest\"} 1\n"));
+        assert!(metrics.contains(r#"den_edge_stream_active{class="media"} 0"#));
+        assert!(metrics.contains(r#"den_edge_stream_high_water{class="media"} 1"#));
+        assert!(metrics.contains(r#"den_edge_stream_retained_bytes{class="media"} 0"#));
 
         let admitted = h.send("GET", SEGMENT, None, &[("x-forwarded-for", "203.0.113.2")]).await;
         assert_eq!(admitted.status(), StatusCode::OK);
