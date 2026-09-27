@@ -108,7 +108,8 @@
   {/if}
 </div>
 {#if d.genres.length}<p class="genres">
-    {#each d.genres as genre, i (genre.id)}{#if i}<span aria-hidden="true"> · </span>{/if}<a
+    {#each d.genres as genre, i (genre.id)}{#if i}<span class="separator" aria-hidden="true">·</span
+        >{/if}<a
         class="filter-link"
         href={searchHref('', {
           type: d.title.type === 'tv' ? 'tv' : 'movie',
@@ -196,6 +197,10 @@
   .genres {
     color: var(--muted);
     margin: 12px 0 0;
+  }
+
+  .genres .separator {
+    margin-inline: 0.35em;
   }
 
   .providers {
