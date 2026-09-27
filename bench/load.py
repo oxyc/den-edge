@@ -125,11 +125,23 @@ def main():
     parser.add_argument("--slow-read-ms", type=float, default=25)
     parser.add_argument("--cancel-delay-ms", type=float, default=5)
     parser.add_argument("--rotate-ip", action="store_true", help="model independent callers behind the trusted test proxy")
+    parser.add_argument(
+        "--rotate-ip-pool",
+        type=int,
+        default=4096,
+        help="bounded caller pool; must fit den-edge's fixed throttle registry",
+    )
+    parser.add_argument("--rotate-ip-offset", type=int, default=0, help="first synthetic caller in the benchmark range")
     parser.add_argument("--label", help="stable component name for mixed-soak gate contracts")
     parser.add_argument("--expect-200-bytes", type=int)
     parser.add_argument("--min-200-bytes", type=int)
     parser.add_argument("--expect-304-bytes", type=int, default=0)
     args = parser.parse_args()
+    synthetic_ips = 254 * 250
+    if not 1 <= args.rotate_ip_pool <= synthetic_ips:
+        parser.error(f"--rotate-ip-pool must be between 1 and {synthetic_ips}")
+    if not 0 <= args.rotate_ip_offset <= synthetic_ips - args.rotate_ip_pool:
+        parser.error("--rotate-ip-offset plus --rotate-ip-pool exceeds the benchmark address range")
 
     parsed = urllib.parse.urlsplit(args.url)
     base_path = parsed.path + (("?" + parsed.query) if parsed.query else "")
@@ -160,7 +172,8 @@ def main():
             try:
                 request_headers = list(headers)
                 if args.rotate_ip:
-                    request_headers.append(("x-forwarded-for", f"198.18.{(sequence // 250) % 254}.{sequence % 250 + 1}"))
+                    caller = args.rotate_ip_offset + (sequence - 1) % args.rotate_ip_pool
+                    request_headers.append(("x-forwarded-for", f"198.18.{caller // 250}.{caller % 250 + 1}"))
                 if args.mode == "normal":
                     if connection is None:
                         connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
