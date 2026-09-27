@@ -63,6 +63,11 @@ for number in range(2, 162):
 # without warming any of the 160 cold libraries.
 library_log("0000000000000162", 8, 4096)
 
+# Four independent v2 authorities are migrated and durably rewritten throughout the mixed soak.
+for writer in range(4):
+    library_id = f"{0x300 + writer:016x}"
+    library_log(library_id, 1, 16)
+
 
 def tmdb_key(path, query=""):
     pairs = [(name, value) for name, value in urllib.parse.parse_qsl(query) if name not in ("api_key", "session_id")]

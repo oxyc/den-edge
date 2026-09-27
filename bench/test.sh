@@ -11,7 +11,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 bash -n "$ROOT/bench/run.sh"
-python3 -m py_compile "$ROOT/bench/fixtures.py" "$ROOT/bench/gate.py" "$ROOT/bench/load.py" \
+python3 -m py_compile "$ROOT/bench/fixtures.py" "$ROOT/bench/gate.py" "$ROOT/bench/library_write.py" "$ROOT/bench/load.py" \
   "$ROOT/bench/network_gateway.py" "$ROOT/bench/summarize_mix.py"
 python3 "$ROOT/bench/fixtures.py" "$TMP/fixtures"
 test "$(wc -c < "$TMP/fixtures/web/static-1m.bin" | tr -d ' ')" = 1048576
