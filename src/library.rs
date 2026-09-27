@@ -1634,9 +1634,9 @@ mod tests {
         assert!(!ask("gzip;q=0").await.headers().contains_key("content-encoding"));
         let metrics = h.state.metrics.render();
         assert!(metrics.contains(r#"den_edge_compression_active 0"#), "{metrics}");
-        assert!(metrics.contains(
-            r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#
-        ));
+        assert!(
+            metrics.contains(r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#)
+        );
         assert!(metrics.contains(r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="busy"} 1"#));
         assert!(!metrics.contains(r#"den_edge_compression_input_bytes_total{kind="library_gzip"} 0"#));
         assert!(!metrics.contains(r#"den_edge_compression_output_bytes_total{kind="library_gzip"} 0"#));
