@@ -1,4 +1,4 @@
-<!-- The rows under a title's cast: its franchise, More like this, and what its director, creator, writer and leads
+<!-- The rows under a title's cast: its franchise, You might also like, and what its director, creator, writer and leads
      have done. A row appears once it has something to show, and goes on loading as it is scrolled to its end
      (`BrowseRow`). -->
 <script lang="ts">
@@ -79,9 +79,14 @@
     const defined = [
       ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
       // Films and series together; curated primary members have their own row and atlas excludes them here.
-      // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
-      // the broader plot-neighbour and TMDB sources. With the endpoint's default, it silently switched after 20.
-      moreLikeThisRow(detail, atlas, { ...options, mixed: true, similarLimit: 200 }),
+      // Ask for atlas's whole affinity row: the loader pages this answer into screenfuls before it falls through
+      // to the broader plot-neighbour and TMDB sources. Older Atlas versions fall back to More Like This.
+      moreLikeThisRow(detail, atlas, {
+        ...options,
+        mixed: true,
+        similarLimit: 200,
+        affinity: true,
+      }),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
     ];

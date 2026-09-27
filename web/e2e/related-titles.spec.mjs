@@ -9,9 +9,15 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   let releaseAtlas;
   const atlasGate = new Promise((r) => (releaseAtlas = r));
   // atlas answers only when the test says so, and has nothing for this title: the row goes on as TMDB's.
-  await page.route('**/atlas-late/index/similar/movie/1.json', async (r) => {
+  await page.route('**/atlas-late/index/suggest.json', async (r) => {
     await atlasGate;
-    await r.fulfill({ json: { ids: [] } });
+    await r.fulfill({
+      json: {
+        perSeed: [{ seed: { type: 'movie', id: 1 }, ids: [], mixed: [] }],
+        pooled: [],
+        pooledMixed: [],
+      },
+    });
   });
   // The title's own first page of recommendations is all TMDB has.
   await routeTmdb(page, (r) => r.fulfill({ json: { page: 2, results: [], total_pages: 1 } }));
@@ -19,7 +25,7 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
 
   // The rows load as they near the screen, so go to them first.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
-  const row = page.getByRole('region', { name: 'More like this' });
+  const row = page.getByRole('region', { name: 'You might also like' });
   await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
   // At the foot of the page, where rows that vanish for a moment would pull the viewer up by their height.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));

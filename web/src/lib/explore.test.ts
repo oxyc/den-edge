@@ -787,7 +787,7 @@ describe('Explore feeds', () => {
     }
   });
 
-  it('is the title page’s "More like this" for a "Like", as deep as atlas keeps, narrowed beside it', async () => {
+  it('uses the literal Similar row for a "Like", as deep as atlas keeps, narrowed beside it', async () => {
     const realFetch = globalThis.fetch;
     const asked: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -802,7 +802,7 @@ describe('Explore feeds', () => {
       });
       expect(row.id).toBe('facets-genre-80+like-movie-949+rating-7-movie');
       await row.load(1);
-      // atlas's filter first; with no such route, the title page's own "More like this".
+      // atlas's filter first; with no such route, the related-row loader in literal Similar mode.
       expect(asked[0]).toBe('/atlas/index/filter/movie/titles.json?sel=genre:80,like:949,rating:7');
       expect(asked[1]).toBe('/atlas/index/similar/movie/949.json?limit=200');
       // atlas has nothing for it: TMDB's recommendations, from their first page.

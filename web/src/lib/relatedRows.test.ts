@@ -42,6 +42,76 @@ const ids = (row: { load: (page: number) => Promise<Title[]> }, pages: number) =
   })();
 
 describe('moreLikeThisRow', () => {
+  it('uses Atlas structural affinity for You might also like, with the single-seed POST contract', async () => {
+    const asked: { path: string; init?: RequestInit }[] = [];
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      const path = new URL(input, 'https://den.test').pathname;
+      asked.push({ path, init });
+      if (path === '/atlas/index/suggest.json') {
+        return new Response(
+          JSON.stringify({
+            perSeed: [
+              {
+                seed: { type: 'movie', id: 550 },
+                ids: [11],
+                mixed: [
+                  { type: 'series', id: 1396 },
+                  { type: 'movie', id: 11 },
+                ],
+              },
+            ],
+          }),
+        );
+      }
+      if (path === '/3/tv/1396')
+        return new Response(JSON.stringify({ id: 1396, name: 'Breaking Bad' }));
+      if (path === '/3/movie/11') return new Response(JSON.stringify({ id: 11, title: 'T11' }));
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const row = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      key: 'k',
+      fetchImpl,
+      mixed: true,
+      similarLimit: 200,
+      affinity: true,
+    });
+
+    expect(row.title).toBe('You might also like');
+    expect((await row.load(1)).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:1396', 'movie:11']);
+    const request = asked.find((entry) => entry.path === '/atlas/index/suggest.json');
+    expect(request?.init?.method).toBe('POST');
+    expect(request?.init?.headers).toEqual({ 'content-type': 'application/json' });
+    expect(JSON.parse(request?.init?.body as string)).toEqual({
+      seeds: [{ type: 'movie', id: 550 }],
+      limit: 200,
+    });
+    expect(asked.some((entry) => entry.path.includes('/index/similar/'))).toBe(false);
+  });
+
+  it('falls back to Similar when Atlas predates the affinity endpoint', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        '/atlas/index/similar/movie/550.json?limit=200': { mixed: [{ type: 'movie', id: 11 }] },
+        ...Object.fromEntries([11].map(movie)),
+      },
+      asked,
+    );
+    const row = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      key: 'k',
+      fetchImpl,
+      mixed: true,
+      similarLimit: 200,
+      affinity: true,
+    });
+
+    expect((await row.load(1)).map((t) => t.id)).toEqual([11]);
+    expect(asked.slice(0, 2)).toEqual([
+      '/atlas/index/suggest.json',
+      '/atlas/index/similar/movie/550.json?limit=200',
+    ]);
+  });
+
   it('leads with atlas, best match first, then its wider neighbours, and only then pads with TMDB', async () => {
     const asked: string[] = [];
     const fetchImpl = answering(
