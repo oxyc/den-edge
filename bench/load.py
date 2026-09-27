@@ -20,13 +20,16 @@ def percentile(values, p):
     return values[min(len(values) - 1, math.ceil(len(values) * p) - 1)]
 
 
-def raw_request(parsed, path, headers, mode, slow_read_ms):
+def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
     sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=5)
     request = [f"GET {path} HTTP/1.1", f"Host: {parsed.netloc}", "Connection: close"]
     request.extend(f"{key}: {value}" for key, value in headers)
     sock.sendall(("\r\n".join(request) + "\r\n\r\n").encode())
     if mode == "cancel":
         sock.close()
+        # Keep the churn on the server, not the load generator's ephemeral-port
+        # table. Even 5 ms per worker is far above plausible browser cancellation.
+        time.sleep(cancel_delay_ms / 1000)
         return 0, 0
     body = bytearray()
     while True:
@@ -51,7 +54,9 @@ def main():
     parser.add_argument("--paths-file")
     parser.add_argument("--mode", choices=("normal", "cancel", "slow-reader"), default="normal")
     parser.add_argument("--slow-read-ms", type=float, default=25)
+    parser.add_argument("--cancel-delay-ms", type=float, default=5)
     parser.add_argument("--rotate-ip", action="store_true", help="model independent callers behind the trusted test proxy")
+    parser.add_argument("--label", help="stable component name for mixed-soak gate contracts")
     args = parser.parse_args()
 
     parsed = urllib.parse.urlsplit(args.url)
@@ -65,7 +70,9 @@ def main():
     tmdb_outcomes = collections.Counter()
     payload_bytes = 0
     errors = 0
+    error_outcomes = collections.Counter()
     sequence = 0
+    fatal = []
 
     def worker():
         nonlocal payload_bytes, errors, sequence
@@ -90,7 +97,9 @@ def main():
                     status, size = response.status, len(body)
                     tmdb_outcome = response.getheader("x-den-tmdb")
                 else:
-                    status, size = raw_request(parsed, path, request_headers, args.mode, args.slow_read_ms)
+                    status, size = raw_request(
+                        parsed, path, request_headers, args.mode, args.slow_read_ms, args.cancel_delay_ms
+                    )
                     tmdb_outcome = None
                 elapsed = time.perf_counter() - started
                 with lock:
@@ -99,10 +108,15 @@ def main():
                         tmdb_outcomes[tmdb_outcome] += 1
                     payload_bytes += size
                     latencies.append(elapsed)
-            except (OSError, http.client.HTTPException):
+            except (OSError, http.client.HTTPException) as error:
                 connection = None
                 with lock:
                     errors += 1
+                    error_outcomes[f"{type(error).__name__}:{getattr(error, 'errno', None)}"] += 1
+            except Exception as error:
+                with lock:
+                    fatal.append(repr(error))
+                return
 
     began = time.monotonic()
     threads = [threading.Thread(target=worker) for _ in range(args.concurrency)]
@@ -110,6 +124,8 @@ def main():
         thread.start()
     for thread in threads:
         thread.join()
+    if fatal:
+        raise RuntimeError(f"load worker failed unexpectedly: {fatal[0]}")
     elapsed = time.monotonic() - began
     completed = len(latencies)
     result = {
@@ -124,8 +140,10 @@ def main():
         "statuses": dict(sorted(statuses.items())),
         "tmdb_outcomes": dict(sorted(tmdb_outcomes.items())),
         "errors": errors,
+        "error_outcomes": dict(sorted(error_outcomes.items())),
         "mode": args.mode,
         "concurrency": args.concurrency,
+        "label": args.label,
     }
     histogram = collections.Counter(min(60_000, int(value * 1000)) for value in latencies)
     result["_latency_histogram_ms"] = dict(sorted(histogram.items()))

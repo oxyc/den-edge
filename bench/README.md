@@ -17,11 +17,15 @@ defaults with `DURATION=30 SOAK_DURATION=300 CONCURRENCY=32 PORT=18081`.
 `CONTAINER_ENGINE=podman` selects Podman explicitly. Exit 77 means the required
 container engine was unavailable, so a misleading host-only run was not made.
 
-Every row includes completed requests, status/refusal counts, body payload
+This is a closure gate, not a reporting-only benchmark. Any unexplained client
+error, unexpected status, cgroup OOM/kill increment, failed post-case health
+check, or failed cancellation/slow-reader resource recovery exits nonzero.
+Every passing row carries `"gate":"passed"` and includes completed requests, status/refusal counts, body payload
 bytes, requests/s, GiB/s, p50/p95/p99 latency, process CPU in cores, sampled
 RSS, sampled cgroup current, the kernel cgroup peak and OOM events, open file
 descriptors, all established TCP sockets, and established port-9090 upstream
 sockets. The cgroup peak and event counters are cumulative for the container;
+the report also records per-case OOM/kill deltas and requires each delta to be zero.
 the sampled RSS/current/FD/socket peaks are local to each named case. The tiny
 `/probe` observer runs only for a sample and is not resident in the server.
 On Docker Desktop the Linux VM owns the cgroup; the in-container counters are
@@ -34,7 +38,7 @@ no allocator instrumentation, and rebuilding it with a profiling allocator
 would change the footprint being measured. RSS and cgroup current/peak are the
 allocation-pressure acceptance measurements. Seeded TMDB rows additionally
 report `external_call_count: 0` only when every response carried
-`x-den-tmdb: hit`; otherwise the count is null instead of being guessed.
+`x-den-tmdb: hit`; a missing hit now fails the seeded-provider case.
 
 The cases cover:
 
@@ -53,9 +57,22 @@ The fixture generation writes valid store paths/logs directly so the cold run
 is not capped by the public five-new-libraries-per-minute policy. Throughput
 cases model many independent callers by rotating `X-Forwarded-For` through the
 dedicated, trusted benchmark bridge. The slow-reader overload intentionally
-uses one identity: its repeatable 503/429 counts verify admission/refusal
-behavior instead of bypassing it. Status counts must therefore be inspected;
-a high request rate made of refusals is not reported as successful throughput.
+uses one identity. It and the two media components competing for the shared
+budget in the mixed soak are the only cases allowed stable overload statuses:
+HTTP 429 (`too_many_sources`) and 503 (`relay_busy`/`server_busy`). They must
+still serve at least one HTTP 200. Control/cache/library/relay components in
+that same mixed saturation case remain strictly 200-only.
+Cancellation cases require the driver's explicit status 0; every other case
+requires only its documented 200 or 304. Refusals cannot pass as throughput.
+
+After every case `/health` must recover. Cancellation, slow-reader saturation,
+and the mixed soak additionally wait up to `RECOVERY_TIMEOUT` (15 seconds by
+default) for RSS and cgroup current to return within 8 MiB of baseline, file
+descriptors within two, and established port-9090 sockets exactly to baseline.
+The tolerances accommodate allocator/page-cache noise while still detecting
+leaked bodies, permits, descriptors, and upstream streams. OOM enforcement
+requires cgroup v2 `memory.events`; the run fails clearly rather than silently
+pretending zero events on an unsupported engine.
 
 TMDB's origin is currently a hardcoded public HTTPS URL. The harness records an
 explicit skipped `tmdb-stale-revalidation` row rather than contacting it with a
@@ -85,7 +102,7 @@ comma-separated replacement list.
 
 ## Lightweight validation
 
-`bench/test.sh` checks shell/Python syntax, fixture sizes, the load-result
-contract, the deterministic upstream, and the process probe without requiring
-a container engine. It is suitable for CI; the full soak remains an explicit
-capacity job.
+`bench/test.sh` checks shell/Python syntax, fixture sizes, the load-result and
+gate contracts (including expected rejection), the deterministic upstream, and
+the process probe without requiring a container engine. It is suitable for CI;
+the full enforced soak remains an explicit capacity job.

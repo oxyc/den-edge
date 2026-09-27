@@ -31,6 +31,20 @@ fn event(name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn events_available() -> bool {
+    fs::read_to_string("/sys/fs/cgroup/memory.events")
+        .ok()
+        .map(|body| {
+            ["oom", "oom_kill"].iter().all(|wanted| {
+                body.lines().any(|line| {
+                    line.split_once(' ')
+                        .is_some_and(|(key, value)| key == *wanted && value.parse::<u64>().is_ok())
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn cpu_ticks() -> u64 {
     let Ok(stat) = fs::read_to_string("/proc/1/stat") else { return 0 };
     // comm is parenthesized and may contain spaces. Fields after it begin with field 3.
@@ -68,6 +82,10 @@ fn main() {
     let fds = fs::read_dir("/proc/1/fd").map(|entries| entries.count()).unwrap_or(0);
     let current = number("/sys/fs/cgroup/memory.current");
     let peak = number("/sys/fs/cgroup/memory.peak");
+    println!(
+        "cgroup_events_available={}",
+        u8::from(events_available())
+    );
     println!("rss_bytes={}", status("VmRSS:") * 1024);
     println!("cgroup_current_bytes={current}");
     println!("cgroup_peak_bytes={peak}");
