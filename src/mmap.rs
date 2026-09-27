@@ -26,7 +26,7 @@ pub(crate) struct Cache {
 struct Inner {
     metrics: Arc<crate::metrics::Metrics>,
     #[cfg(target_os = "linux")]
-    entries: tokio::sync::Mutex<Entries>,
+    entries: std::sync::Mutex<Entries>,
     #[cfg(target_os = "linux")]
     bytes: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
@@ -48,7 +48,7 @@ impl Cache {
             inner: Arc::new(Inner {
                 metrics,
                 #[cfg(target_os = "linux")]
-                entries: tokio::sync::Mutex::new(Entries::default()),
+                entries: std::sync::Mutex::new(Entries::default()),
                 #[cfg(target_os = "linux")]
                 bytes: Arc::new(tokio::sync::Semaphore::new(BUDGET_BYTES)),
                 #[cfg(target_os = "linux")]
@@ -170,6 +170,8 @@ mod linux {
         len: u64,
         modified_seconds: i64,
         modified_nanos: i64,
+        changed_seconds: i64,
+        changed_nanos: i64,
     }
 
     impl Key {
@@ -180,6 +182,8 @@ mod linux {
                 len: metadata.len(),
                 modified_seconds: metadata.mtime(),
                 modified_nanos: metadata.mtime_nsec(),
+                changed_seconds: metadata.ctime(),
+                changed_nanos: metadata.ctime_nsec(),
             }
         }
     }
@@ -255,16 +259,20 @@ mod linux {
             file: tokio::fs::File,
             len: u64,
         ) -> Result<MappedBody, tokio::fs::File> {
-            let mut file = file.into_std().await;
-            let initial = match file.metadata() {
+            // Tokio performs metadata on its blocking pool. Even an otherwise hot local filesystem can block while
+            // resolving an uncached inode, so do not put that syscall on a runtime worker before the copy below.
+            let initial = match file.metadata().await {
                 Ok(metadata) if metadata.is_file() && metadata.len() == len => Key::of(&metadata),
                 _ => {
                     self.inner.metrics.mmap_fault(2);
-                    return Err(tokio::fs::File::from_std(file));
+                    return Err(file);
                 }
             };
+            let mut file = file.into_std().await;
             {
-                let mut entries = self.inner.entries.lock().await;
+                // This section is tiny and never awaits. A synchronous mutex avoids putting every hot file hit
+                // through Tokio's waiter queue, which otherwise creates avoidable tail-latency convoys.
+                let mut entries = crate::lock(&self.inner.entries);
                 entries.clock = entries.clock.wrapping_add(1);
                 let clock = entries.clock;
                 if let Some((mapping, touched)) = entries.values.get_mut(&initial) {
@@ -353,6 +361,10 @@ mod linux {
                         Fault::Read => 1,
                         Fault::Generation => 2,
                     });
+                    // `try_clone` duplicates the descriptor but shares its open-file-description offset on Unix.
+                    // The failed builder may therefore have advanced `file` to EOF before detecting a generation
+                    // change or `make_read_only` failure. Rewind so the ordinary body remains an exact fallback.
+                    let _ = file.seek(std::io::SeekFrom::Start(0));
                     return Err(tokio::fs::File::from_std(file));
                 }
             };
@@ -364,7 +376,7 @@ mod linux {
                 _bytes: bytes_permit,
                 _count: count_permit,
             });
-            let mut entries = self.inner.entries.lock().await;
+            let mut entries = crate::lock(&self.inner.entries);
             entries.clock = entries.clock.wrapping_add(1);
             let clock = entries.clock;
             let mapping = if let Some((existing, touched)) = entries.values.get_mut(&initial) {
@@ -494,6 +506,34 @@ mod tests {
         }
         assert_eq!(old_bytes.len(), len);
         assert!(old_bytes.iter().all(|byte| *byte == 3));
+    }
+
+    #[tokio::test]
+    async fn generation_change_rewinds_the_ordinary_fallback() {
+        use std::sync::atomic::Ordering;
+
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let cache = Cache::new(Arc::clone(&metrics));
+        let gate = Arc::new(TestBuildGate::default());
+        *crate::lock(&cache.inner.build_gate) = Some(Arc::clone(&gate));
+        let len = MIN_BYTES as usize;
+        let (path, file) = fixture(4, len);
+        let body = cache.body(file, len as u64);
+        let task = tokio::spawn(async move { body.collect().await });
+        while !gate.started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        // Deliberately violate the immutable-file contract while the build is paused. Generation validation must
+        // reject the snapshot, and the shared descriptor offset must be rewound before ordinary file streaming.
+        // Leave the coarsest practical timestamp tick between fixture creation and mutation: some test filesystems
+        // do not expose nanosecond ctime changes even though production ext4 does.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(path, vec![5; len]).unwrap();
+        gate.release.store(true, Ordering::Release);
+        let bytes = task.await.unwrap().unwrap().to_bytes();
+        assert_eq!(bytes.len(), len);
+        assert!(bytes.iter().all(|byte| *byte == 5));
+        assert!(metrics.render().contains("den_edge_mmap_faults_total{reason=\"generation\"} 1\n"));
     }
 
     #[tokio::test]

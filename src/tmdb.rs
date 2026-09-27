@@ -1118,7 +1118,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                         modified,
                         asked,
                         &state.mmaps,
-                    )
+                    );
                 }
                 // A list or a search moves, but the one kept is a better page than a wait on TMDB: served at
                 // once, and asked again behind it. A title's details are never here inside the six months.
