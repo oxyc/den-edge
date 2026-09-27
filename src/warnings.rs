@@ -17,6 +17,7 @@
 //! spent.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::metrics::{CacheAccess, CacheStore, Provider, ProviderUpstream};
 use crate::tmdb::Failed;
 use crate::AppState;
 use axum::body::{Body, Bytes};
@@ -125,28 +126,44 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
     if let Some(body) = kept {
         let age = body.age();
         match verdict(body.matches(ABSENT), age) {
-            Kept::Absent => return absent(),
-            Kept::Fresh => return answer_file(body, FRESH.saturating_sub(age), "hit", asked),
+            Kept::Absent => {
+                state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Negative);
+                return absent();
+            }
+            Kept::Fresh => {
+                state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Fresh);
+                return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+            }
             Kept::Cold => {}
         }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked; anyone else is told
     // there is nothing.
     let Some(key) = spendable(state, member.as_deref(), own, state.warnings_key.as_ref()).await else {
+        state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Cold);
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
     let mut asking = match &file {
         Some(file) => {
             let asking = match crate::tmdb::one_asking(file, &key.whose()).await {
                 Ok(asking) => asking,
-                Err(refusal) => return *refusal,
+                Err(refusal) => {
+                    state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Cold);
+                    return *refusal;
+                }
             };
             // A question for this title that got here first has kept its answer by now.
             if let Some(body) = crate::cache::open_json(file, MAX_CACHE_BYTES).await {
                 let age = body.age();
                 match verdict(body.matches(ABSENT), age) {
-                    Kept::Absent => return absent(),
-                    Kept::Fresh => return answer_file(body, FRESH.saturating_sub(age), "hit", asked),
+                    Kept::Absent => {
+                        state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Negative);
+                        return absent();
+                    }
+                    Kept::Fresh => {
+                        state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Fresh);
+                        return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+                    }
                     Kept::Cold => {}
                 }
             }
@@ -154,11 +171,15 @@ pub async fn handle(state: &AppState, req: Request, rid: &str) -> Response {
         }
         None => None,
     };
+    state.metrics.provider_cache_access(Provider::Warnings, CacheAccess::Cold);
     match lookup(state, &imdb, &key, rid).await {
-        Ok(Some((fresh, true))) => keep(file.as_deref(), fresh, "miss", asked).await,
+        Ok(Some((fresh, true))) => keep_counted(state, file.as_deref(), fresh, "miss", asked).await,
         // Named without the topic table: shown now, and asked for again rather than kept for 30 days without it.
-        Ok(Some((fresh, false))) => answer(fresh, UNKEPT_MAX_AGE, "miss", SystemTime::now(), asked),
-        Ok(None) => forget(file.as_deref()).await,
+        Ok(Some((fresh, false))) => {
+            state.metrics.provider_cache_store(Provider::Warnings, CacheStore::Skipped);
+            answer(fresh, UNKEPT_MAX_AGE, "miss", SystemTime::now(), asked)
+        }
+        Ok(None) => forget(state, file.as_deref()).await,
         Err(refused) => match &mut asking {
             Some(asking) => *asking.failed(refused).await,
             None => *refused,
@@ -303,7 +324,14 @@ async fn topics(state: &AppState, key: &Key, rid: &str) -> Result<Value, Box<Res
     // title asking, which is named by its votes' own names (`normalize`) and not kept either (`lookup`).
     if named(&table) {
         if let Some(file) = &file {
-            crate::tmdb::write(file, &Bytes::from(table.to_string())).await;
+            let result = if crate::tmdb::write(file, &Bytes::from(table.to_string())).await {
+                CacheStore::Stored
+            } else {
+                CacheStore::Failed
+            };
+            state.metrics.provider_cache_store(Provider::Warnings, result);
+        } else {
+            state.metrics.provider_cache_store(Provider::Warnings, CacheStore::Skipped);
         }
     }
     Ok(table)
@@ -432,9 +460,16 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
     let (status, headers, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "warnings").await {
             Ok(answer) => answer,
-            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "warnings_unreachable")),
-            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "warnings_timeout")),
+            Err(Failed::Unreachable) => {
+                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                return Err(refused(StatusCode::BAD_GATEWAY, "warnings_unreachable"));
+            }
+            Err(Failed::Timeout) => {
+                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                return Err(refused(StatusCode::GATEWAY_TIMEOUT, "warnings_timeout"));
+            }
             Err(Failed::TooLarge | Failed::Unreadable) => {
+                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
             }
         };
@@ -447,20 +482,34 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
         rest(state, now + DAY.as_millis() as u64, "its month is nearly spent");
     }
     match status {
-        s if s.is_success() => serde_json::from_slice(&bytes)
-            .map_err(|_| refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable")),
-        StatusCode::NOT_FOUND => Ok(Value::Null),
+        s if s.is_success() => match serde_json::from_slice(&bytes) {
+            Ok(value) => {
+                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Updated);
+                Ok(value)
+            }
+            Err(_) => {
+                state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+                Err(refused(StatusCode::BAD_GATEWAY, "warnings_answer_unreadable"))
+            }
+        },
+        StatusCode::NOT_FOUND => {
+            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Negative);
+            Ok(Value::Null)
+        }
         // Their body never travels: it may name the key.
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if !key.household => {
+            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
             Err(refused(StatusCode::UNAUTHORIZED, "key_refused"))
         }
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
             eprintln!(
                 "warnings: doesthedogdie refused the household key ({status}) — check DOESTHEDOGDIE_KEY"
             );
             Err(refused(StatusCode::BAD_GATEWAY, "warnings_refused"))
         }
         StatusCode::TOO_MANY_REQUESTS => {
+            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
             if key.household {
                 rest(state, now + wait_ms, "it is rate-limited");
             }
@@ -470,7 +519,10 @@ async fn ask(state: &AppState, path: &str, key: &Key, rid: &str) -> Result<Value
                 wait_ms,
             )))
         }
-        _ => Err(refused(StatusCode::BAD_GATEWAY, "warnings_refused")),
+        _ => {
+            state.metrics.provider_upstream(Provider::Warnings, ProviderUpstream::Failed);
+            Err(refused(StatusCode::BAD_GATEWAY, "warnings_refused"))
+        }
     }
 }
 
@@ -483,6 +535,7 @@ fn rest(state: &AppState, until: u64, why: &str) {
     *rest_until = (*rest_until).max(until);
 }
 
+#[cfg(test)]
 async fn keep(file: Option<&Path>, body: Bytes, how: &'static str, asked: &HeaderMap) -> Response {
     let kept = body.len() <= MAX_CACHE_BYTES;
     if let Some(file) = file.filter(|_| kept) {
@@ -491,10 +544,33 @@ async fn keep(file: Option<&Path>, body: Bytes, how: &'static str, asked: &Heade
     answer(body, if kept { FRESH } else { UNKEPT_MAX_AGE }, how, SystemTime::now(), asked)
 }
 
-async fn forget(file: Option<&Path>) -> Response {
-    if let Some(file) = file {
-        crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
+async fn keep_counted(
+    state: &AppState,
+    file: Option<&Path>,
+    body: Bytes,
+    how: &'static str,
+    asked: &HeaderMap,
+) -> Response {
+    let kept = body.len() <= MAX_CACHE_BYTES;
+    if kept {
+        cache_store(state, file, &body).await;
+    } else {
+        state.metrics.provider_cache_store(Provider::Warnings, CacheStore::Skipped);
     }
+    answer(body, if kept { FRESH } else { UNKEPT_MAX_AGE }, how, SystemTime::now(), asked)
+}
+
+async fn cache_store(state: &AppState, file: Option<&Path>, body: &Bytes) {
+    let result = match file {
+        Some(file) if crate::cache::write_json(file, body).await => CacheStore::Stored,
+        Some(_) => CacheStore::Failed,
+        None => CacheStore::Skipped,
+    };
+    state.metrics.provider_cache_store(Provider::Warnings, result);
+}
+
+async fn forget(state: &AppState, file: Option<&Path>) -> Response {
+    cache_store(state, file, &Bytes::from_static(ABSENT)).await;
     absent()
 }
 
@@ -546,7 +622,7 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     let Some(dir) = state.warnings_cache_dir.clone() else { return };
     loop {
         tokio::time::sleep(DAY).await;
-        crate::tmdb::sweep_older_than(&dir, FRESH).await;
+        crate::tmdb::sweep_older_than(&dir, FRESH, &state.metrics, Provider::Warnings).await;
     }
 }
 
@@ -704,6 +780,17 @@ mod tests {
         let resp =
             h.send("GET", "/warnings/imdb/tt0050798", None, &[("x-den-library-member", "0123:forged")]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a claim to membership is checked, not believed");
+
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="warnings",result="cold"} 2"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="warnings",result="fresh"} 3"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="warnings",result="negative"} 2"#
+        ));
     }
 
     /// Anyone could send any string as a key, and every question on one spent the same minute's allowance the

@@ -15,6 +15,9 @@
 //! that, and the attribution the app already shows is what licenses the rest.
 
 use crate::handler::{error, raw_json, retry_after};
+use crate::metrics::{
+    ByteAdmission, BytePool, CacheAccess, CacheStore, Provider, ProviderUpstream, TmdbPrepared,
+};
 use crate::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -464,7 +467,12 @@ fn derived_response_budget() -> &'static Arc<tokio::sync::Semaphore> {
 
 struct ChargedDerived {
     body: Bytes,
-    _charge: tokio::sync::OwnedSemaphorePermit,
+    _charge: DerivedCharge,
+}
+
+struct DerivedCharge {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _admission: Option<ByteAdmission>,
 }
 
 impl AsRef<[u8]> for ChargedDerived {
@@ -475,11 +483,27 @@ impl AsRef<[u8]> for ChargedDerived {
 
 /// Attach the memory charge to the allocation itself. Hyper may clone or slice `Bytes` after the response future
 /// is gone; `from_owner` keeps the permit until the final view of those bytes is dropped.
-async fn derived_response_charge() -> Option<tokio::sync::OwnedSemaphorePermit> {
-    Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_CHARGE).await.ok()
+async fn derived_response_charge(metrics: Option<&Arc<crate::metrics::Metrics>>) -> Option<DerivedCharge> {
+    let budget = Arc::clone(derived_response_budget());
+    let (permit, waited) = match Arc::clone(&budget).try_acquire_many_owned(DERIVED_RESPONSE_CHARGE) {
+        Ok(permit) => (permit, false),
+        Err(_) => match budget.acquire_many_owned(DERIVED_RESPONSE_CHARGE).await {
+            Ok(permit) => (permit, true),
+            Err(_) => {
+                if let Some(metrics) = metrics {
+                    metrics.byte_refused(BytePool::TmdbDerived);
+                }
+                return None;
+            }
+        },
+    };
+    let admission = metrics.map(|metrics| {
+        metrics.byte_admitted(BytePool::TmdbDerived, DERIVED_RESPONSE_CHARGE as usize, waited)
+    });
+    Some(DerivedCharge { _permit: permit, _admission: admission })
 }
 
-fn charged_derived(body: Bytes, charge: tokio::sync::OwnedSemaphorePermit) -> Bytes {
+fn charged_derived(body: Bytes, charge: DerivedCharge) -> Bytes {
     Bytes::from_owner(ChargedDerived { body, _charge: charge })
 }
 
@@ -651,18 +675,21 @@ impl Detail {
             if let Some(file) =
                 crate::cache::open_json(&self.variant(source, source_digest, fresh), MAX_ANSWER_BYTES).await
             {
+                // One fixed counter distinguishes the cheap repeat path from a rebuild without exposing a title.
+                // This method has no state, so the caller records the hit after receiving the file.
                 return Some((Prepared::File(file), fresh));
             }
         }
         None
     }
 
+    #[cfg(test)]
     async fn prepared_variant(
         &self,
         source_path: &Path,
         source: crate::cache::JsonFile,
     ) -> Option<(Prepared, Duration)> {
-        self.prepared_variant_with(source_path, source, self.durable_variant()).await
+        self.prepared_variant_with(source_path, source, self.durable_variant(), None).await
     }
 
     async fn prepared_variant_with(
@@ -670,10 +697,14 @@ impl Detail {
         source_path: &Path,
         source: crate::cache::JsonFile,
         durable: bool,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Option<(Prepared, Duration)> {
         let source_digest = source.digest();
         if durable {
             if let Some(found) = self.existing_variant(source_path, &source_digest).await {
+                if let Some(metrics) = &metrics {
+                    metrics.tmdb_prepared(TmdbPrepared::FileHit);
+                }
                 return Some(found);
             }
         }
@@ -684,7 +715,7 @@ impl Detail {
         // Reserve the worst-case response before allocating or taking the one build permit. Waiting slow clients
         // therefore cannot leave completed, uncharged bodies queued behind the budget, and a budget wait never
         // prevents an exact file-only inspection from using the builder.
-        let charge = derived_response_charge().await?;
+        let charge = derived_response_charge(metrics.as_ref()).await?;
         let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
         let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
         let question = cache_key(&self.path, self.query(&appends).as_deref());
@@ -710,6 +741,9 @@ impl Detail {
                         fresh.as_secs()
                     ));
                     if let Some(prepared) = crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
+                        if let Some(metrics) = &metrics {
+                            metrics.tmdb_prepared(TmdbPrepared::FileHit);
+                        }
                         return Some((Prepared::File(prepared), fresh));
                     }
                 }
@@ -725,6 +759,9 @@ impl Detail {
                 tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
             };
             if !durable {
+                if let Some(metrics) = &metrics {
+                    metrics.tmdb_prepared(TmdbPrepared::TransientBuilt);
+                }
                 return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             let variant = variants_dir(&source_path).join(format!(
@@ -736,9 +773,15 @@ impl Detail {
             // replacement safe even across the final check; the post-check removes the now-orphaned generation.
             let current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await?;
             if current.digest() != source_digest {
+                if let Some(metrics) = &metrics {
+                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
+                }
                 return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             if !crate::cache::write_json_at(&variant, &narrowed, Some(modified)).await {
+                if let Some(metrics) = &metrics {
+                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
+                }
                 return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             let still_current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES)
@@ -746,12 +789,25 @@ impl Detail {
                 .is_some_and(|current| current.digest() == source_digest);
             if !still_current {
                 remove_variant(&variant).await;
+                if let Some(metrics) = &metrics {
+                    metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
+                }
                 return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             retire_obsolete_variants(&source_path, &source_digest).await;
             let prepared = match crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
-                Some(prepared) => Prepared::File(prepared),
-                None => Prepared::Bytes(charged_derived(narrowed, charge)),
+                Some(prepared) => {
+                    if let Some(metrics) = &metrics {
+                        metrics.tmdb_prepared(TmdbPrepared::FileBuilt);
+                    }
+                    Prepared::File(prepared)
+                }
+                None => {
+                    if let Some(metrics) = &metrics {
+                        metrics.tmdb_prepared(TmdbPrepared::PublishFailed);
+                    }
+                    Prepared::Bytes(charged_derived(narrowed, charge))
+                }
             };
             Some((prepared, fresh))
         });
@@ -765,9 +821,10 @@ impl Detail {
         &self,
         source_path: &Path,
         source: crate::cache::JsonFile,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Option<(Prepared, Duration)> {
         if self.durable_variant() {
-            return self.prepared_variant_with(source_path, source, true).await;
+            return self.prepared_variant_with(source_path, source, true, metrics).await;
         }
         let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
         let (path, exact) = (self.path.clone(), self.exact.clone());
@@ -802,10 +859,12 @@ impl Detail {
     /// or taking the build permit, so completed bodies cannot pile up unaccounted while the response budget waits.
     async fn prepared_narrowed(
         &self,
+        state: &AppState,
         body: Bytes,
-        charge: tokio::sync::OwnedSemaphorePermit,
+        charge: DerivedCharge,
     ) -> Option<Prepared> {
         let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let metrics = Arc::clone(&state.metrics);
         let (all, asked) = (self.all, self.asked.clone());
         let task = tokio::spawn(async move {
             let _permit = permit;
@@ -817,6 +876,7 @@ impl Detail {
                 let kept = body.clone();
                 tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
             };
+            metrics.tmdb_prepared(TmdbPrepared::TransientBuilt);
             Some(Prepared::Bytes(charged_derived(narrowed, charge)))
         });
         task.await.ok()?
@@ -824,7 +884,16 @@ impl Detail {
 
     /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
     /// freshness. Each is judged by its own age and what it says — an airing series stays fresh for hours.
+    #[cfg(test)]
     async fn kept(&self) -> Kept {
+        self.kept_with_metrics(None).await
+    }
+
+    async fn kept_counted(&self, state: &AppState) -> Kept {
+        self.kept_with_metrics(Some(Arc::clone(&state.metrics))).await
+    }
+
+    async fn kept_with_metrics(&self, metrics: Option<Arc<crate::metrics::Metrics>>) -> Kept {
         let mut stale = Kept::Nothing;
         for (file, exact) in self.candidates() {
             let Some(source) = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await else { continue };
@@ -836,10 +905,17 @@ impl Detail {
                 continue;
             }
             let (prepared, fresh) = if exact {
-                let Some(found) = self.prepared_exact(&file, source).await else { continue };
+                let Some(found) = self.prepared_exact(&file, source, metrics.clone()).await else {
+                    continue;
+                };
                 found
             } else {
-                let Some(found) = self.prepared_variant(&file, source).await else { continue };
+                let Some(found) = self
+                    .prepared_variant_with(&file, source, self.durable_variant(), metrics.clone())
+                    .await
+                else {
+                    continue;
+                };
                 found
             };
             if age < fresh {
@@ -958,7 +1034,7 @@ async fn ask_kept(
     };
     match fetched {
         Ok(Revalidated::Answer(body, etag)) => {
-            keep(file, &body, etag.as_deref()).await;
+            keep_counted(state, file, &body, etag.as_deref()).await;
             Ok((body, "miss"))
         }
         Ok(Revalidated::Unchanged(confirmed)) => {
@@ -970,7 +1046,7 @@ async fn ask_kept(
         }
         Err(response) => {
             if response.status() == StatusCode::NOT_FOUND {
-                keep(file, &Bytes::from_static(ABSENT), None).await;
+                keep_counted(state, file, &Bytes::from_static(ABSENT), None).await;
             }
             Err(response)
         }
@@ -1030,8 +1106,12 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             // RETENTION allows. It is also ahead of the per-IP bucket, so that is the unthrottled drain again.
             // Falling through to the cold path gets the bucket, the fetch, and a rewritten sentinel.
             match verdict(prepared.matches(ABSENT), age, fresh) {
-                Cached::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+                Cached::Absent => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+                    return *refused(StatusCode::NOT_FOUND, "not_found");
+                }
                 Cached::Fresh => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
                     return answer_prepared(
                         Prepared::File(prepared),
                         &fresh_policy(fresh, fresh.saturating_sub(age)),
@@ -1045,6 +1125,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 Cached::Refresh if fresh != DETAILS_TTL && age < RETENTION => {
                     let asking = Refresh { cached, path, query, key: key.to_owned(), file: file.clone() };
                     refresh_behind(state, asking);
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Stale);
                     return answer_prepared(
                         Prepared::File(prepared),
                         "public, max-age=60",
@@ -1054,9 +1135,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     );
                 }
                 Cached::Refresh => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
                     return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
                         Ok(Revalidated::Answer(new, etag)) => {
-                            keep(file, &new, etag.as_deref()).await;
+                            keep_counted(state, file, &new, etag.as_deref()).await;
                             crate::title_metadata::observe_tmdb(state, &path, &new);
                             // The series may have ended since it was last asked for, which gives it its months back.
                             let fresh = fresh_for_answer(&path, query.as_deref(), &new);
@@ -1078,6 +1160,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             }
         }
     }
+    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
     let ip = crate::handler::client_ip(state, &req);
     if let Some(refusal) = over_allowance(state, &ip, asked).await {
         return refusal;
@@ -1085,7 +1168,9 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     match fetch(state, &path, query.as_deref(), key, rid).await {
         Ok((body, etag)) => {
             if let Some(file) = &file {
-                keep(file, &body, etag.as_deref()).await;
+                keep_counted(state, file, &body, etag.as_deref()).await;
+            } else {
+                state.metrics.provider_cache_store(Provider::Tmdb, CacheStore::Skipped);
             }
             crate::title_metadata::observe_tmdb(state, &path, &body);
             let fresh = fresh_for_answer(&path, query.as_deref(), &body);
@@ -1094,7 +1179,9 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         Err(response) => {
             if response.status() == StatusCode::NOT_FOUND {
                 if let Some(file) = &file {
-                    keep(file, &Bytes::from_static(ABSENT), None).await;
+                    keep_counted(state, file, &Bytes::from_static(ABSENT), None).await;
+                } else {
+                    state.metrics.provider_cache_store(Provider::Tmdb, CacheStore::Skipped);
                 }
             }
             *response
@@ -1127,8 +1214,9 @@ async fn detail_answer(
     key: &str,
     rid: &str,
 ) -> Response {
-    let mut asking = match detail.kept().await {
+    let mut asking = match detail.kept_counted(state).await {
         Kept::Hit(body, fresh, age, modified) => {
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
             return answer_prepared(
                 body,
                 &fresh_policy(fresh, fresh.saturating_sub(age)),
@@ -1137,7 +1225,10 @@ async fn detail_answer(
                 asked,
             )
         }
-        Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+        Kept::Absent => {
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+            return *refused(StatusCode::NOT_FOUND, "not_found");
+        }
         Kept::Stale(body, modified, fresh) if fresh != DETAILS_TTL => {
             let (query, file) = if detail.oversize().await { detail.exact() } else { detail.whole() };
             let cached = cache_key(&detail.path, query.as_deref());
@@ -1145,6 +1236,7 @@ async fn detail_answer(
                 state,
                 Refresh { cached, path: detail.path.clone(), query, key: key.to_owned(), file },
             );
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Stale);
             return answer_prepared(body, "public, max-age=60", "stale", modified, asked);
         }
         // A settled record past its six months is asked again now, as it always was, without the allowance.
@@ -1155,11 +1247,15 @@ async fn detail_answer(
             }
             let asking = match one_asking(&detail.whole().1, "tmdb").await {
                 Ok(asking) => asking,
-                Err(refusal) => return *refusal,
+                Err(refusal) => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
+                    return *refusal;
+                }
             };
             // A question about this title that got here first has kept its answer by now.
-            match detail.kept().await {
+            match detail.kept_counted(state).await {
                 Kept::Hit(body, fresh, age, modified) => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
                     return answer_prepared(
                         body,
                         &fresh_policy(fresh, fresh.saturating_sub(age)),
@@ -1168,21 +1264,25 @@ async fn detail_answer(
                         asked,
                     )
                 }
-                Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
+                Kept::Absent => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+                    return *refused(StatusCode::NOT_FOUND, "not_found");
+                }
                 Kept::Stale(..) | Kept::Nothing => Some(asking),
             }
         }
     };
+    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
     // Reserve the eventual response before the upstream may allocate it. Without this ordering, many cold asks
     // could each finish with a 4 MiB body and then retain it while waiting behind slow derived responses.
-    let Some(charge) = derived_response_charge().await else {
+    let Some(charge) = derived_response_charge(Some(&state.metrics)).await else {
         return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
     };
     match detail.ask(state, key, rid).await {
         Ok((whole, how, fresh)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            let Some(body) = detail.prepared_narrowed(whole, charge).await else {
+            let Some(body) = detail.prepared_narrowed(state, whole, charge).await else {
                 return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
             };
             answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
@@ -1325,8 +1425,14 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // cold one fetched whole, so the page this preview was built for opens on a hit.
     if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
         let stale = match detail.kept_bytes().await {
-            KeptBytes::Hit(body) => return serde_json::from_slice(&body).ok(),
-            KeptBytes::Absent => return None,
+            KeptBytes::Hit(body) => {
+                state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
+                return serde_json::from_slice(&body).ok();
+            }
+            KeptBytes::Absent => {
+                state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+                return None;
+            }
             KeptBytes::Stale(body) => Some(body),
             KeptBytes::Nothing => None,
         };
@@ -1338,8 +1444,14 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 Err(_) => break 'asked None,
             };
             match detail.kept_bytes().await {
-                KeptBytes::Hit(body) => Some(body),
-                KeptBytes::Absent => return None,
+                KeptBytes::Hit(body) => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
+                    return serde_json::from_slice(&body).ok();
+                }
+                KeptBytes::Absent => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+                    return None;
+                }
                 KeptBytes::Stale(..) | KeptBytes::Nothing => {
                     if preview_allowed(state).is_none() {
                         break 'asked None;
@@ -1358,6 +1470,12 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 }
             }
         };
+        let access = if asked.is_some() { CacheAccess::Cold } else if stale.is_some() {
+            CacheAccess::Stale
+        } else {
+            CacheAccess::Cold
+        };
+        state.metrics.provider_cache_access(Provider::Tmdb, access);
         let body = asked.or(stale)?;
         return serde_json::from_slice(&body).ok();
     }
@@ -1368,9 +1486,11 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
             // A remembered 404 answers as "no such thing" without spending anything.
             if body == ABSENT {
                 if age < ABSENT_TTL {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
                     return None;
                 }
             } else if age < fresh_for_answer(path, query, &body) {
+                state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
                 return serde_json::from_slice(&body).ok();
             } else {
                 stale = Some(body);
@@ -1385,6 +1505,10 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // and unthrottled, and that budget is shared with the /tmdb proxy the app browses through. Draining it
     // took out browsing, not just link previews.
     if preview_allowed(state).is_none() {
+        state.metrics.provider_cache_access(
+            Provider::Tmdb,
+            if stale.is_some() { CacheAccess::Stale } else { CacheAccess::Cold },
+        );
         return stale.and_then(|body| serde_json::from_slice(&body).ok());
     }
     let fetched = match (&file, &stale) {
@@ -1394,8 +1518,11 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     match fetched {
         Ok(Revalidated::Answer(body, etag)) => {
             if let Some(file) = &file {
-                keep(file, &body, etag.as_deref()).await;
+                keep_counted(state, file, &body, etag.as_deref()).await;
+            } else {
+                state.metrics.provider_cache_store(Provider::Tmdb, CacheStore::Skipped);
             }
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
             serde_json::from_slice(&body).ok()
         }
         Ok(Revalidated::Unchanged(confirmed)) => {
@@ -1403,15 +1530,23 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 Some(file) => renew_generation(confirmed, file).await,
                 None => confirmed.generation,
             };
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
             generation.bytes().await.and_then(|body| serde_json::from_slice(&body).ok())
         }
         Err(answer) => {
             if answer.status() == StatusCode::NOT_FOUND {
                 if let Some(file) = &file {
-                    keep(file, &Bytes::from_static(ABSENT), None).await;
+                    keep_counted(state, file, &Bytes::from_static(ABSENT), None).await;
+                } else {
+                    state.metrics.provider_cache_store(Provider::Tmdb, CacheStore::Skipped);
                 }
+                state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
                 return None;
             }
+            state.metrics.provider_cache_access(
+                Provider::Tmdb,
+                if stale.is_some() { CacheAccess::Stale } else { CacheAccess::Cold },
+            );
             stale.and_then(|body| serde_json::from_slice(&body).ok())
         }
     }
@@ -1561,19 +1696,41 @@ async fn send(
     };
     let (status, headers, bytes) = match exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "tmdb").await {
         Ok(answer) => answer,
-        Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable")),
-        Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout")),
-        Err(Failed::TooLarge) => return Err(refused(StatusCode::BAD_GATEWAY, TOO_LARGE)),
-        Err(Failed::Unreadable) => return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable")),
+        Err(Failed::Unreachable) => {
+            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_unreachable"));
+        }
+        Err(Failed::Timeout) => {
+            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            return Err(refused(StatusCode::GATEWAY_TIMEOUT, "tmdb_timeout"));
+        }
+        Err(Failed::TooLarge) => {
+            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            return Err(refused(StatusCode::BAD_GATEWAY, TOO_LARGE));
+        }
+        Err(Failed::Unreadable) => {
+            state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Failed);
+            return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
+        }
     };
     if status == StatusCode::NOT_MODIFIED && etag.is_some() {
         refund(state);
+        state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::NotModified);
         return Ok(Fetched::Unchanged);
     }
     let tag = headers.get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
     if !status.is_success() {
+        state.metrics.provider_upstream(
+            Provider::Tmdb,
+            if status == StatusCode::NOT_FOUND {
+                ProviderUpstream::Negative
+            } else {
+                ProviderUpstream::Failed
+            },
+        );
         return Err(refusal(state, status, &headers));
     }
+    state.metrics.provider_upstream(Provider::Tmdb, ProviderUpstream::Updated);
     Ok(Fetched::Answer(bytes, tag))
 }
 
@@ -1692,11 +1849,11 @@ pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
 /// An answer kept with the ETag TMDB gave it, beside it as `<name>.etag`, or with none — so a revalidation never
 /// names the tag of a body that is no longer there, which TMDB would answer 304 for. The old tag goes first: a
 /// reader in between asks without one rather than with the wrong one.
-async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) {
+async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) -> bool {
     let tag = file.with_extension("etag");
     let _ = tokio::fs::remove_file(&tag).await;
     if !crate::cache::write_json(file, body).await {
-        return;
+        return false;
     }
     if let Some(etag) = etag.filter(|etag| !etag.is_empty() && etag.len() <= MAX_ETAG_BYTES) {
         let mut record = Vec::with_capacity(24 + etag.len());
@@ -1705,16 +1862,25 @@ async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) {
         record.extend_from_slice(etag.as_bytes());
         write(&tag, &Bytes::from(record)).await;
     }
+    true
+}
+
+async fn keep_counted(state: &AppState, file: &Path, body: &Bytes, etag: Option<&str>) {
+    let stored = keep(file, body, etag).await;
+    state.metrics.provider_cache_store(
+        Provider::Tmdb,
+        if stored { CacheStore::Stored } else { CacheStore::Failed },
+    );
 }
 
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
-pub async fn sweep(dir: &Path) {
-    sweep_older_than(dir, RETENTION).await;
-    sweep_prepared(dir, RETENTION).await;
+pub async fn sweep(dir: &Path, metrics: &crate::metrics::Metrics) {
+    sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await;
+    sweep_prepared(dir, RETENTION, metrics).await;
 }
 
-async fn sweep_prepared(dir: &Path, max_age: Duration) {
+async fn sweep_prepared(dir: &Path, max_age: Duration, metrics: &crate::metrics::Metrics) {
     let root = dir.join(".tmdb-prepared");
     let Ok(mut sources) = tokio::fs::read_dir(&root).await else { return };
     while let Ok(Some(source)) = sources.next_entry().await {
@@ -1728,7 +1894,12 @@ async fn sweep_prepared(dir: &Path, max_age: Duration) {
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                 .is_some_and(|age| age > max_age);
             if expired {
-                let _ = tokio::fs::remove_file(entry.path()).await;
+                let path = entry.path();
+                if tokio::fs::remove_file(&path).await.is_ok()
+                    && path.extension().is_some_and(|extension| extension == "json")
+                {
+                    metrics.provider_cache_store(Provider::Tmdb, CacheStore::Expired);
+                }
             }
         }
         let _ = tokio::fs::remove_dir(source.path()).await;
@@ -1737,7 +1908,12 @@ async fn sweep_prepared(dir: &Path, max_age: Duration) {
 }
 
 /// The same sweep for another cache with its own ceiling (`warnings.rs`).
-pub(crate) async fn sweep_older_than(dir: &Path, max_age: Duration) {
+pub(crate) async fn sweep_older_than(
+    dir: &Path,
+    max_age: Duration,
+    metrics: &crate::metrics::Metrics,
+    provider: Provider,
+) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let expired = entry
@@ -1748,7 +1924,12 @@ pub(crate) async fn sweep_older_than(dir: &Path, max_age: Duration) {
             .and_then(|t| SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age > max_age);
         if expired {
-            let _ = tokio::fs::remove_file(entry.path()).await;
+            let path = entry.path();
+            if tokio::fs::remove_file(&path).await.is_ok()
+                && path.extension().is_some_and(|extension| extension == "json")
+            {
+                metrics.provider_cache_store(provider, CacheStore::Expired);
+            }
         }
     }
 }
@@ -1757,7 +1938,7 @@ pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     let Some(dir) = state.tmdb_cache_dir.clone() else { return };
     loop {
         tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
-        sweep(&dir).await;
+        sweep(&dir, &state.metrics).await;
     }
 }
 
@@ -1784,7 +1965,7 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
         let (path, query, key) = (&asking.path, asking.query.as_deref(), &asking.key);
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
             Ok(Revalidated::Answer(body, etag)) => {
-                keep(&asking.file, &body, etag.as_deref()).await;
+                keep_counted(&state, &asking.file, &body, etag.as_deref()).await;
                 crate::title_metadata::observe_tmdb(&state, path, &body);
             }
             Ok(Revalidated::Unchanged(confirmed)) => {
@@ -2472,6 +2653,16 @@ mod tests {
             .await;
         assert_eq!(repeated.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(crate::lock(&asked).len(), 1, "a prepared representation never asks TMDB");
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="transient_built"} 1"#));
+        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_built"} 1"#));
+        assert!(metrics.contains(r#"den_edge_tmdb_prepared_total{result="file_hit"} 1"#));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="tmdb",result="cold"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 2"#
+        ));
 
         let replacement = Bytes::from_static(
             br#"{"id":550,"title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
@@ -2480,6 +2671,20 @@ mod tests {
         let changed = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
         assert_ne!(changed.headers()[header::ETAG], etag.as_str());
         assert_eq!(body_json(changed).await["credits"]["from"], "new");
+    }
+
+    #[tokio::test]
+    async fn derived_byte_metrics_follow_the_response_owner() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let charge = derived_response_charge(Some(&metrics)).await.unwrap();
+        let body = charged_derived(Bytes::from_static(b"{}"), charge);
+        assert!(metrics.render().contains(
+            r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 4194304"#
+        ));
+        drop(body);
+        assert!(metrics
+            .render()
+            .contains(r#"den_edge_byte_admission_used_bytes{pool="tmdb_derived"} 0"#));
     }
 
     #[tokio::test]
@@ -2736,11 +2941,15 @@ mod tests {
             .sum();
         assert_eq!(derived_bytes, expected_len + 64, "one body and its fixed metadata sidecar are the bound");
 
-        sweep_prepared(&dir, Duration::ZERO).await;
+        let metrics = crate::metrics::Metrics::default();
+        sweep_prepared(&dir, Duration::ZERO, &metrics).await;
         assert!(
             !variants_dir(&source_path).exists(),
             "retention cleanup left the per-source directory behind"
         );
+        assert!(metrics
+            .render()
+            .contains(r#"den_edge_provider_cache_store_total{provider="tmdb",result="expired"} 1"#));
     }
 
     #[tokio::test]

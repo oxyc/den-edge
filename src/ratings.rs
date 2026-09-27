@@ -15,6 +15,7 @@
 //! already kept, and nobody is shown nothing because a refresh failed.
 
 use crate::handler::{client_ip, error, raw_json, retry_after};
+use crate::metrics::{CacheAccess, CacheStore, Provider, ProviderUpstream};
 use crate::tmdb::Failed;
 use crate::warnings::{callers_key, spendable, valid_imdb, Key};
 use crate::AppState;
@@ -89,9 +90,11 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         let age = body.age();
         let absent = body.matches(ABSENT);
         if absent && age < ABSENT_TTL {
+            state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Negative);
             return crate::warnings::absent();
         }
         if !absent && age < FRESH {
+            state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Fresh);
             return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
@@ -101,26 +104,33 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             {
                 refresh_behind(state, imdb, key, file);
             }
+            state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Stale);
             return answer_file(body, STALE_MAX_AGE, "stale", asked);
         }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked.
     let Some(key) = spendable(state, member.as_deref(), own, state.ratings_key.as_ref()).await else {
+        state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Cold);
         return json(StatusCode::NOT_FOUND, "not_cached");
     };
     let mut asking = match &file {
         Some(file) => {
             let asking = match crate::tmdb::one_asking(file, &key.whose()).await {
                 Ok(asking) => asking,
-                Err(refusal) => return *refusal,
+                Err(refusal) => {
+                    state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Cold);
+                    return *refusal;
+                }
             };
             // A question for this title that got here first has kept its answer by now.
             if let Some(body) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
                 let age = body.age();
                 if body.matches(ABSENT) && age < ABSENT_TTL {
+                    state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Negative);
                     return crate::warnings::absent();
                 }
                 if !body.matches(ABSENT) && age < FRESH {
+                    state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Fresh);
                     return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
                 }
             }
@@ -128,17 +138,14 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
         None => None,
     };
+    state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Cold);
     match lookup(state, &imdb, &key, rid).await {
         Ok(Some(body)) => {
-            if let Some(file) = &file {
-                crate::cache::write_json(file, &body).await;
-            }
+            store(state, file.as_deref(), &body).await;
             answer(body, FRESH, "miss", SystemTime::now(), asked)
         }
         Ok(None) => {
-            if let Some(file) = &file {
-                crate::cache::write_json(file, &Bytes::from_static(ABSENT)).await;
-            }
+            store(state, file.as_deref(), &Bytes::from_static(ABSENT)).await;
             crate::warnings::absent()
         }
         Err(refused) => match &mut asking {
@@ -161,9 +168,18 @@ fn refresh_behind(state: &Arc<AppState>, imdb: String, key: Key, file: PathBuf) 
         // a bad answer rather than news: written over them, it hid a title's ratings for a week. What is kept stays,
         // as it does when OMDb is refused, rested or unreachable, and the next stale read asks again.
         if let Ok(Some(body)) = lookup(&state, &imdb, &key, "refresh").await {
-            crate::cache::write_json(&file, &body).await;
+            store(&state, Some(&file), &body).await;
         }
     });
+}
+
+async fn store(state: &AppState, file: Option<&std::path::Path>, body: &Bytes) {
+    let result = match file {
+        Some(file) if crate::cache::write_json(file, body).await => CacheStore::Stored,
+        Some(_) => CacheStore::Failed,
+        None => CacheStore::Skipped,
+    };
+    state.metrics.provider_cache_store(Provider::Ratings, result);
 }
 
 /// One title's ratings as they are kept: `Some` body, or `None` when OMDb has no title with this IMDb id. Every
@@ -197,9 +213,16 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
     let (status, _, bytes) =
         match crate::tmdb::exchange(client, out, MAX_ANSWER_BYTES, TIMEOUT, "ratings").await {
             Ok(answer) => answer,
-            Err(Failed::Unreachable) => return Err(refused(StatusCode::BAD_GATEWAY, "ratings_unreachable")),
-            Err(Failed::Timeout) => return Err(refused(StatusCode::GATEWAY_TIMEOUT, "ratings_timeout")),
+            Err(Failed::Unreachable) => {
+                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+                return Err(refused(StatusCode::BAD_GATEWAY, "ratings_unreachable"));
+            }
+            Err(Failed::Timeout) => {
+                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
+                return Err(refused(StatusCode::GATEWAY_TIMEOUT, "ratings_timeout"));
+            }
             Err(Failed::TooLarge | Failed::Unreadable) => {
+                state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
                 return Err(refused(StatusCode::BAD_GATEWAY, "ratings_answer_unreadable"))
             }
         };
@@ -208,11 +231,14 @@ async fn lookup(state: &AppState, imdb: &str, key: &Key, rid: &str) -> Result<Op
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let why = body.get("Error").and_then(Value::as_str).unwrap_or("");
     if status.is_success() && body.get("Response").and_then(Value::as_str) == Some("True") {
+        state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Updated);
         return Ok(Some(Bytes::from(kept(&body).to_string())));
     }
     if status.is_success() && (why.contains("not found") || why.contains("Incorrect IMDb ID")) {
+        state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Negative);
         return Ok(None);
     }
+    state.metrics.provider_upstream(Provider::Ratings, ProviderUpstream::Failed);
     if why.contains("limit") {
         if key.household {
             rest(state);
@@ -319,7 +345,7 @@ pub async fn sweep_forever(state: Arc<AppState>) {
     let Some(dir) = state.ratings_cache_dir.clone() else { return };
     loop {
         tokio::time::sleep(Duration::from_millis(DAY_MS)).await;
-        crate::tmdb::sweep_older_than(&dir, RETENTION).await;
+        crate::tmdb::sweep_older_than(&dir, RETENTION, &state.metrics, Provider::Ratings).await;
     }
 }
 
@@ -419,6 +445,20 @@ mod tests {
 
         assert_eq!(h.send("GET", "/ratings/check", None, &[]).await.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(h.send("GET", "/ratings/imdb/nm1", None, &[]).await.status(), StatusCode::NOT_FOUND);
+
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="ratings",result="cold"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="ratings",result="fresh"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="ratings",result="stale"} 2"#
+        ));
+        assert!(metrics.contains(
+            r#"den_edge_provider_cache_access_total{provider="ratings",result="negative"} 1"#
+        ));
     }
 
     type Omdb = Arc<dyn Fn() -> Result<Option<Bytes>, Box<Response>> + Send + Sync>;
