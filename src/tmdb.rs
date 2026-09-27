@@ -439,6 +439,39 @@ fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
     BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }
 
+/// A derived response which cannot be streamed from a prepared file is charged as the largest body it could own,
+/// not merely its current length: `serde_json` may retain spare `Vec` capacity which `Bytes` keeps alive. Four such
+/// responses may wait on slow clients at once. Together with the single builder's source and output buffers this
+/// keeps this path below 24 MiB even when every body is at the provider's 4 MiB ceiling.
+const DERIVED_RESPONSE_BUDGET_BYTES: usize = 4 * MAX_ANSWER_BYTES;
+const DERIVED_RESPONSE_CHARGE: u32 = MAX_ANSWER_BYTES as u32;
+
+fn derived_response_budget() -> &'static Arc<tokio::sync::Semaphore> {
+    static BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(DERIVED_RESPONSE_BUDGET_BYTES)))
+}
+
+struct ChargedDerived {
+    body: Bytes,
+    _charge: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for ChargedDerived {
+    fn as_ref(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+/// Attach the memory charge to the allocation itself. Hyper may clone or slice `Bytes` after the response future
+/// is gone; `from_owner` keeps the permit until the final view of those bytes is dropped.
+async fn derived_response_charge() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_CHARGE).await.ok()
+}
+
+fn charged_derived(body: Bytes, charge: tokio::sync::OwnedSemaphorePermit) -> Bytes {
+    Bytes::from_owner(ChargedDerived { body, _charge: charge })
+}
+
 #[cfg(test)]
 static VARIANT_WATCHES: OnceLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, tokio::sync::oneshot::Sender<()>>>,
@@ -590,10 +623,11 @@ impl Detail {
     /// Only representations used by a checked-in client become durable. An arbitrary public subset is still
     /// answered, but reparsed on its next ask rather than multiplying files beside every canonical title.
     fn durable_variant(&self) -> bool {
-        self.kept.iter().any(|appends| {
-            let known: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
-            self.asked.len() == known.len() && self.asked.iter().all(|a| known.contains(a.as_str()))
-        })
+        self.rest.is_empty()
+            && self.kept.iter().any(|appends| {
+                let known: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
+                self.asked.len() == known.len() && self.asked.iter().all(|a| known.contains(a.as_str()))
+            })
     }
 
     async fn existing_variant(
@@ -636,6 +670,10 @@ impl Detail {
         // Waiters remain ordinary request futures: cancellation drops their open source FD and queue position.
         // Only the strict permit holder becomes a detached owner, so abandoned requests cannot accumulate queued
         // tasks while a multi-megabyte parse is in progress.
+        // Reserve the worst-case response before allocating or taking the one build permit. Waiting slow clients
+        // therefore cannot leave completed, uncharged bodies queued behind the budget, and a budget wait never
+        // prevents an exact file-only inspection from using the builder.
+        let charge = derived_response_charge().await?;
         let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
         let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
         let question = cache_key(&self.path, self.query(&appends).as_deref());
@@ -660,8 +698,8 @@ impl Detail {
                         crate::hex(&source_digest),
                         fresh.as_secs()
                     ));
-                    if crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await.is_some() {
-                        return Some((None, fresh, Some(variant)));
+                    if let Some(prepared) = crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
+                        return Some((Prepared::File(prepared), fresh));
                     }
                 }
             }
@@ -676,7 +714,7 @@ impl Detail {
                 tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
             };
             if !durable {
-                return Some((Some(narrowed), fresh, None));
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             let variant = variants_dir(&source_path).join(format!(
                 "{suffix}.{}.{}.tmdb.json",
@@ -687,30 +725,26 @@ impl Detail {
             // replacement safe even across the final check; the post-check removes the now-orphaned generation.
             let current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await?;
             if current.digest() != source_digest {
-                return Some((Some(narrowed), fresh, None));
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             if !crate::cache::write_json_at(&variant, &narrowed, Some(modified)).await {
-                return Some((Some(narrowed), fresh, None));
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             let still_current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES)
                 .await
                 .is_some_and(|current| current.digest() == source_digest);
             if !still_current {
                 remove_variant(&variant).await;
-                return Some((Some(narrowed), fresh, None));
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
             }
             retire_obsolete_variants(&source_path, &source_digest).await;
-            Some((Some(narrowed), fresh, Some(variant)))
+            let prepared = match crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
+                Some(prepared) => Prepared::File(prepared),
+                None => Prepared::Bytes(charged_derived(narrowed, charge)),
+            };
+            Some((prepared, fresh))
         });
-        let (narrowed, fresh, variant) = task.await.ok()??;
-        let prepared = match variant {
-            Some(path) => crate::cache::open_json(&path, MAX_ANSWER_BYTES)
-                .await
-                .map(Prepared::File)
-                .or_else(|| narrowed.map(Prepared::Bytes))?,
-            None => Prepared::Bytes(narrowed?),
-        };
-        Some((prepared, fresh))
+        task.await.ok()?
     }
 
     /// Inspect an exact cache generation under the same single-owner bound as a derived representation, then stream
@@ -721,8 +755,7 @@ impl Detail {
         source_path: &Path,
         source: crate::cache::JsonFile,
     ) -> Option<(Prepared, Duration)> {
-        let canonical = source_path == self.whole().1;
-        if self.durable_variant() || canonical {
+        if self.durable_variant() {
             return self.prepared_variant_with(source_path, source, true).await;
         }
         let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
@@ -751,6 +784,31 @@ impl Detail {
         }
         let (all, asked, kept) = (self.all, self.asked.clone(), body.clone());
         tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
+    }
+
+    /// Build an in-memory derived response under both bounds: only one parse at a time, and a fixed charge which
+    /// follows the returned bytes through the response's lifetime. The caller reserves the charge before fetching
+    /// or taking the build permit, so completed bodies cannot pile up unaccounted while the response budget waits.
+    async fn prepared_narrowed(
+        &self,
+        body: Bytes,
+        charge: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<Prepared> {
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let (all, asked) = (self.all, self.asked.clone());
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let narrowed = if all.iter().all(|append| asked.contains(*append)) {
+                body
+            } else if body.len() < NARROW_INLINE_BYTES {
+                narrowed(all, &asked, body)
+            } else {
+                let kept = body.clone();
+                tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
+            };
+            Some(Prepared::Bytes(charged_derived(narrowed, charge)))
+        });
+        task.await.ok()?
     }
 
     /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
@@ -1080,11 +1138,19 @@ async fn detail_answer(
             }
         }
     };
+    // Reserve the eventual response before the upstream may allocate it. Without this ordering, many cold asks
+    // could each finish with a 4 MiB body and then retain it while waiting behind slow derived responses.
+    let Some(charge) = derived_response_charge().await else {
+        return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+    };
     match detail.ask(state, key, rid).await {
         Ok((whole, how, fresh)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            answer(detail.narrowed(whole).await, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
+            let Some(body) = detail.prepared_narrowed(whole, charge).await else {
+                return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+            };
+            answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
         Err(response) => match &mut asking {
             Some(asking) => *asking.failed(response).await,
@@ -2443,7 +2509,116 @@ mod tests {
             Kept::Hit(Prepared::File(_), fresh, _, _) => assert_eq!(fresh, LIST_TTL),
             _ => panic!("the exact canonical shape was not prepared as a streamed file"),
         }
-        assert!(canonical.variant(&canonical_file, &canonical_digest, LIST_TTL).exists());
+        assert!(
+            !canonical.variant(&canonical_file, &canonical_digest, LIST_TTL).exists(),
+            "the canonical file itself is the prepared representation"
+        );
+    }
+
+    async fn assert_slow_derived_responses_are_bounded(detail: Arc<Detail>, source_path: PathBuf) {
+        let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
+        assert_eq!(capacity, 4, "keep this test's expected response ceiling explicit");
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..crate::handler::BULK_REQUESTS {
+            let detail = Arc::clone(&detail);
+            let source_path = source_path.clone();
+            requests.spawn(async move {
+                let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+                detail.prepared_variant(&source_path, source).await.unwrap()
+            });
+        }
+
+        let mut held = Vec::new();
+        for _ in 0..capacity {
+            let (prepared, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+                .await
+                .expect("a derived response never acquired its bounded charge")
+                .expect("a derived response task vanished")
+                .unwrap();
+            assert!(matches!(prepared, Prepared::Bytes(_)));
+            held.push(answer_prepared(
+                prepared,
+                "public, max-age=60",
+                "hit",
+                SystemTime::now(),
+                &HeaderMap::new(),
+            ));
+        }
+        assert_eq!(derived_response_budget().available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), requests.join_next()).await.is_err(),
+            "a fifth slow response retained an uncharged derived body"
+        );
+
+        // The charge follows the response body: releasing one unread response lets exactly one waiting builder
+        // finish. The remaining waiters are request-owned and cancellation removes them from the build queue.
+        drop(held.pop());
+        let (next, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+            .await
+            .expect("dropping a response did not release its charge")
+            .expect("the next derived response task vanished")
+            .unwrap();
+        assert!(matches!(next, Prepared::Bytes(_)));
+        drop(next);
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
+        drop(held);
+
+        // An owner detached between taking the build permit and observing cancellation may finish once the held
+        // responses leave. Reacquiring the whole budget proves it did not leak either its task or its charge.
+        let all = tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_BUDGET_BYTES as u32),
+        )
+        .await
+        .expect("cancelled derived responses retained their memory charge")
+        .unwrap();
+        drop(all);
+    }
+
+    #[tokio::test]
+    async fn forty_eight_slow_arbitrary_and_failed_publication_responses_stay_bounded() {
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "id": 550,
+                "title": "large",
+                "credits": {"cast": (0..7000).map(|id| serde_json::json!({
+                    "id": id,
+                    "name": format!("actor-{id}"),
+                    "character": "x".repeat(260)
+                })).collect::<Vec<_>>()},
+                "external_ids": {},
+                "recommendations": {},
+                "release_dates": {},
+                "videos": {},
+                "watch/providers": {}
+            }))
+            .unwrap(),
+        );
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
+
+        // An unknown subset is intentionally not durable, but its slow response still owns a large allocation.
+        let arbitrary_dir = temp_dir();
+        let arbitrary = Arc::new(
+            Detail::of("/3/movie/550", Some("append_to_response=credits,videos"), Some(&arbitrary_dir))
+                .unwrap(),
+        );
+        assert!(!arbitrary.durable_variant());
+        let arbitrary_source = arbitrary.whole().1;
+        crate::cache::write_json(&arbitrary_source, &body).await;
+        assert_slow_derived_responses_are_bounded(arbitrary, arbitrary_source).await;
+
+        // A normal durable shape must take the same bounded fallback when its prepared directory cannot be made.
+        let failed_dir = temp_dir();
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        std::fs::write(failed_dir.join(".tmdb-prepared"), b"not a directory").unwrap();
+        let failed = Arc::new(
+            Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&failed_dir)).unwrap(),
+        );
+        assert!(failed.durable_variant());
+        let failed_source = failed.whole().1;
+        crate::cache::write_json(&failed_source, &body).await;
+        assert_slow_derived_responses_are_bounded(failed, failed_source).await;
     }
 
     #[tokio::test]
@@ -2646,6 +2821,29 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
             .count();
         assert_eq!(derived, 0, "public subset churn amplified the durable cache");
+    }
+
+    #[tokio::test]
+    async fn checked_in_appends_with_arbitrary_rest_do_not_create_derived_files() {
+        let dir = temp_dir();
+        let body = Bytes::from_static(
+            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        for n in 0..32 {
+            let query = format!("append_to_response=credits&language=x-private-{n}");
+            let detail = Detail::of("/3/movie/550", Some(&query), Some(&dir)).unwrap();
+            assert!(!detail.durable_variant(), "an arbitrary complete query was called a checked-in shape");
+            let source_path = detail.whole().1;
+            crate::cache::write_json(&source_path, &body).await;
+            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
+            assert!(matches!(prepared, Prepared::Bytes(_)));
+            drop(prepared);
+        }
+        assert!(
+            !dir.join(".tmdb-prepared").exists(),
+            "arbitrary rest parameters amplified the durable cache"
+        );
     }
 
     #[tokio::test]
