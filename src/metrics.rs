@@ -253,10 +253,28 @@ impl TmdbPrepared {
 }
 
 #[derive(Clone, Copy)]
-pub enum TitleMetadataMetric {
-    Query = 0,
-    Publish = 1,
-    Observation = 2,
+pub enum TitleQuery {
+    Nonempty = 0,
+    Empty = 1,
+    Unavailable = 2,
+    Failed = 3,
+}
+
+pub enum TitlePublish {
+    Stored = 0,
+    Unavailable = 1,
+    Full = 2,
+    Failed = 3,
+}
+
+pub enum TitleObservation {
+    Accepted = 0,
+    NoStore = 1,
+    TooLarge = 2,
+    Busy = 3,
+    Empty = 4,
+    Stored = 5,
+    Failed = 6,
 }
 
 const TITLE_METADATA_LABELS: [&[&str]; 3] = [
@@ -406,6 +424,10 @@ impl Metrics {
         lock(&self.compression).jobs[2] += 1;
     }
 
+    pub fn compression_failed(&self) {
+        lock(&self.compression).jobs[1] += 1;
+    }
+
     pub fn provider_cache_access(&self, provider: Provider, result: CacheAccess) {
         self.provider_access[provider as usize][result as usize].fetch_add(1, Ordering::Relaxed);
     }
@@ -422,9 +444,16 @@ impl Metrics {
         self.tmdb_prepared[result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn title_metadata(&self, metric: TitleMetadataMetric, result: usize) {
-        debug_assert!(result < TITLE_METADATA_LABELS[metric as usize].len());
-        self.title_metadata[metric as usize][result].fetch_add(1, Ordering::Relaxed);
+    pub fn title_query(&self, result: TitleQuery) {
+        self.title_metadata[0][result as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn title_publish(&self, result: TitlePublish) {
+        self.title_metadata[1][result as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn title_observation(&self, result: TitleObservation) {
+        self.title_metadata[2][result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_library_writes(&self, applied: usize, conflicts: usize) {

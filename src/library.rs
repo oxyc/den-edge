@@ -701,9 +701,12 @@ async fn changes(
     let mut body = changes_body(&entries, head, more, state.store.generation());
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
+            let job = state.metrics.compression_started();
             let compressed = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                let input = body.len();
                 let compressed = gzip_bytes(&body);
+                job.finished(input, compressed.as_ref().map(Vec::len));
                 (body, compressed)
             })
             .await;
@@ -715,8 +718,13 @@ async fn changes(
                     return resp;
                 }
                 Ok((identity, None)) => body = identity,
-                Err(error) => return internal("library compression", io::Error::other(error)),
+                Err(error) => {
+                    state.metrics.compression_failed();
+                    return internal("library compression", io::Error::other(error));
+                }
             }
+        } else {
+            state.metrics.compression_busy();
         }
     }
     raw_json(StatusCode::OK, Body::from(body), true)
@@ -1624,6 +1632,14 @@ mod tests {
         drop(held);
 
         assert!(!ask("gzip;q=0").await.headers().contains_key("content-encoding"));
+        let metrics = h.state.metrics.render();
+        assert!(metrics.contains(r#"den_edge_compression_active 0"#), "{metrics}");
+        assert!(metrics.contains(
+            r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="success"} 1"#
+        ));
+        assert!(metrics.contains(r#"den_edge_compression_jobs_total{kind="library_gzip",outcome="busy"} 1"#));
+        assert!(!metrics.contains(r#"den_edge_compression_input_bytes_total{kind="library_gzip"} 0"#));
+        assert!(!metrics.contains(r#"den_edge_compression_output_bytes_total{kind="library_gzip"} 0"#));
     }
 
     #[tokio::test]
