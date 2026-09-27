@@ -232,7 +232,11 @@ impl StorageBackend for QuotaBackend {
 }
 
 struct RedbLibrary {
-    database: Database,
+    // Explicitly dropped while holding `database_lifecycle`. Rust normally drops fields after `Drop::drop`
+    // returns, which leaves a small window where the weak process registry says no owner remains but redb still
+    // holds the file lock. A cold/high-cardinality workload can otherwise reopen in that window and spuriously
+    // return an internal error.
+    database: Option<Database>,
     path: PathBuf,
     token_hash: [u8; 32],
     member_hash: Mutex<Option<[u8; 32]>>,
@@ -241,6 +245,8 @@ struct RedbLibrary {
 
 impl Drop for RedbLibrary {
     fn drop(&mut self) {
+        let _lifecycle = database_lifecycle().lock().unwrap();
+        drop(self.database.take());
         let mut databases = process_databases().lock().unwrap();
         if databases.get(&self.path).is_some_and(|database| database.strong_count() == 0) {
             databases.remove(&self.path);
@@ -254,6 +260,47 @@ impl Drop for RedbLibrary {
 fn process_databases() -> &'static Mutex<HashMap<PathBuf, Weak<RedbLibrary>>> {
     static DATABASES: OnceLock<Mutex<HashMap<PathBuf, Weak<RedbLibrary>>>> = OnceLock::new();
     DATABASES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Serializes the gap between a redb handle's last strong reference and release of its operating-system file
+/// lock. A weak entry with no strong owners means its destructor is waiting for this lock; openers yield instead
+/// of racing that destructor.
+fn database_lifecycle() -> &'static Mutex<()> {
+    static LIFECYCLE: OnceLock<Mutex<()>> = OnceLock::new();
+    LIFECYCLE.get_or_init(|| Mutex::new(()))
+}
+
+fn shared_or_open(
+    path: &Path,
+    quota: Arc<DiskQuota>,
+    file_cap: u64,
+    token_hash: [u8; 32],
+    initial_member_hash: Option<[u8; 32]>,
+) -> Result<Arc<RedbLibrary>, StoreError> {
+    loop {
+        let lifecycle = database_lifecycle().lock().unwrap();
+        let mut databases = process_databases().lock().unwrap();
+        if let Some(weak) = databases.get(path) {
+            if let Some(store) = weak.upgrade() {
+                return if store.accepts(&token_hash) { Ok(store) } else { Err(StoreError::Forbidden) };
+            }
+            // The last Arc reached zero and its destructor is waiting for `lifecycle`. Do not attempt to take
+            // redb's file lock until that destructor has run and removed the weak entry.
+            drop(databases);
+            drop(lifecycle);
+            std::thread::yield_now();
+            continue;
+        }
+        let store = Arc::new(RedbLibrary::open(
+            path,
+            quota,
+            file_cap,
+            token_hash,
+            initial_member_hash,
+        )?);
+        databases.insert(path.to_owned(), Arc::downgrade(&store));
+        return Ok(store);
+    }
 }
 
 impl RedbLibrary {
@@ -318,7 +365,7 @@ impl RedbLibrary {
             transaction.commit().map_err(StoreError::redb)?;
         }
         Ok(Self {
-            database,
+            database: Some(database),
             path: path.to_owned(),
             token_hash,
             member_hash: Mutex::new(member_hash),
@@ -332,6 +379,10 @@ impl RedbLibrary {
 
     fn accepts(&self, token_hash: &[u8; 32]) -> bool {
         constant_time_eq(&self.token_hash, token_hash)
+    }
+
+    fn database(&self) -> &Database {
+        self.database.as_ref().expect("a live library owns its database")
     }
 }
 
@@ -350,7 +401,7 @@ impl LibraryStore for RedbLibrary {
         // Keep prepared-page publication ordered with commits. Without this per-library lock, a read begun before
         // the commit could publish its stale page after the writer invalidated the old cache entry.
         let mut prepared = self.prepared.lock().unwrap();
-        let transaction = self.database.begin_write().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
         let mut head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -444,7 +495,7 @@ impl LibraryStore for RedbLibrary {
 
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError> {
-        let transaction = self.database.begin_read().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
         let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
         let Some(sequence_number) = keys.get(key).map_err(StoreError::redb)?.map(|value| value.value())
         else {
@@ -459,7 +510,7 @@ impl LibraryStore for RedbLibrary {
     }
 
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
-        let transaction = self.database.begin_read().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
         let head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -519,7 +570,7 @@ impl LibraryStore for RedbLibrary {
                 return Ok(cached.page.clone());
             }
         }
-        let transaction = self.database.begin_read().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
         let head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -569,7 +620,7 @@ impl LibraryStore for RedbLibrary {
 
     #[cfg(test)]
     fn live_bytes(&self) -> Result<usize, StoreError> {
-        let transaction = self.database.begin_read().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
         let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
         let bytes = metadata
             .get("live-bytes")
@@ -591,7 +642,7 @@ impl LibraryStore for RedbLibrary {
                 Err(StoreError::Invalid("member_already_registered".into()))
             };
         }
-        let transaction = self.database.begin_write().map_err(StoreError::redb)?;
+        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
         transaction
             .open_table(META_BYTES)
             .map_err(StoreError::redb)?
@@ -771,7 +822,7 @@ impl StoreManager {
                 library.token_hash,
                 library.member_hash,
             )?;
-            let transaction = store.database.begin_write().map_err(StoreError::redb)?;
+            let transaction = store.database().begin_write().map_err(StoreError::redb)?;
             {
                 let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
                 let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
@@ -832,39 +883,57 @@ impl StoreManager {
         if !path.exists() {
             return Ok(None);
         }
-        let shared = process_databases().lock().unwrap().get(&path).and_then(Weak::upgrade);
-        if let Some(store) = shared {
-            let credentials = store.credentials();
-            let _ = self.library(id, credentials.0)?;
-            return Ok(Some(credentials));
-        }
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).map_err(StoreError::io)?;
-        let backend = QuotaBackend {
-            inner: FileBackend::new(file).map_err(StoreError::redb)?,
-            quota: Arc::clone(&self.quota),
-            file_cap: self.file_cap,
+        let (token, member) = loop {
+            let lifecycle = database_lifecycle().lock().unwrap();
+            let databases = process_databases().lock().unwrap();
+            if let Some(weak) = databases.get(&path) {
+                if let Some(store) = weak.upgrade() {
+                    let credentials = store.credentials();
+                    drop(databases);
+                    drop(lifecycle);
+                    let _ = self.library(id, credentials.0)?;
+                    return Ok(Some(credentials));
+                }
+                drop(databases);
+                drop(lifecycle);
+                std::thread::yield_now();
+                continue;
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(StoreError::io)?;
+            let backend = QuotaBackend {
+                inner: FileBackend::new(file).map_err(StoreError::redb)?,
+                quota: Arc::clone(&self.quota),
+                file_cap: self.file_cap,
+            };
+            let mut builder = Database::builder();
+            builder.set_cache_size(DATABASE_CACHE_BYTES);
+            let database = builder.create_with_backend(backend).map_err(StoreError::redb)?;
+            let transaction = database.begin_read().map_err(StoreError::redb)?;
+            let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+            let token: [u8; 32] = metadata
+                .get("token")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 token is missing".into()))?
+                .value()
+                .try_into()
+                .map_err(|_| StoreError::Invalid("v3 token has the wrong size".into()))?;
+            let member = metadata
+                .get("member")
+                .map_err(StoreError::redb)?
+                .map(|value| value.value().try_into())
+                .transpose()
+                .map_err(|_| StoreError::Invalid("v3 member proof has the wrong size".into()))?;
+            drop(metadata);
+            drop(transaction);
+            drop(database);
+            drop(databases);
+            drop(lifecycle);
+            break (token, member);
         };
-        let mut builder = Database::builder();
-        builder.set_cache_size(DATABASE_CACHE_BYTES);
-        let database = builder.create_with_backend(backend).map_err(StoreError::redb)?;
-        let transaction = database.begin_read().map_err(StoreError::redb)?;
-        let metadata = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
-        let token: [u8; 32] = metadata
-            .get("token")
-            .map_err(StoreError::redb)?
-            .ok_or_else(|| StoreError::Invalid("v3 token is missing".into()))?
-            .value()
-            .try_into()
-            .map_err(|_| StoreError::Invalid("v3 token has the wrong size".into()))?;
-        let member = metadata
-            .get("member")
-            .map_err(StoreError::redb)?
-            .map(|value| value.value().try_into())
-            .transpose()
-            .map_err(|_| StoreError::Invalid("v3 member proof has the wrong size".into()))?;
-        drop(metadata);
-        drop(transaction);
-        drop(database);
         let store = self.library(id, token)?;
         debug_assert_eq!(store.credentials(), (token, member));
         Ok(Some((token, member)))
@@ -921,21 +990,9 @@ impl StoreManager {
             }
             return Err(error);
         }
-        if let Some(store) = process_databases().lock().unwrap().get(&path).and_then(Weak::upgrade) {
-            if !store.accepts(&token_hash) {
-                let mut registry = self.registry.lock().unwrap();
-                registry.bytes -= OPEN_DATABASE_BYTES;
-                registry.slots.remove(id);
-                return Err(StoreError::Forbidden);
-            }
-            *stored = Some(Arc::clone(&store));
-            return Ok(self.lease(store));
-        }
         let created = !path.exists();
-        match RedbLibrary::open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
+        match shared_or_open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
             Ok(store) => {
-                let store = Arc::new(store);
-                process_databases().lock().unwrap().insert(path, Arc::downgrade(&store));
                 *stored = Some(Arc::clone(&store));
                 Ok(self.lease(store))
             }
@@ -1076,7 +1133,7 @@ mod tests {
         let store = RedbLibrary::open(&path, Arc::clone(&quota), 8 << 20, TOKEN, None).unwrap();
         store.apply(&[Write { key: K1.into(), base: 0, value: "old".into() }]).unwrap();
         {
-            let transaction = store.database.begin_write().unwrap();
+            let transaction = store.database().begin_write().unwrap();
             transaction.open_table(META_U64).unwrap().insert("head", 2).unwrap();
             transaction.abort().unwrap();
         }
@@ -1108,7 +1165,7 @@ mod tests {
             let used = std::fs::metadata(&path).unwrap().len();
             let quota = Arc::new(DiskQuota(crate::store::Quota::standalone_with_used(32 << 20, used)));
             let store = RedbLibrary::open(&path, quota, 8 << 20, TOKEN, None).unwrap();
-            let transaction = store.database.begin_write().unwrap();
+            let transaction = store.database().begin_write().unwrap();
             transaction.open_table(META_U64).unwrap().insert("head", 2).unwrap();
             std::process::abort();
         }
@@ -1288,6 +1345,36 @@ mod tests {
         }
         drop(manager);
         assert!(!process_databases().lock().unwrap().keys().any(|path| path.starts_with(&dir)));
+    }
+
+    #[test]
+    fn concurrent_hot_reads_and_eviction_never_race_redb_file_close() {
+        let dir = temp_dir();
+        let manager = Arc::new(manager(&dir, 16, 128 << 20, 8 << 20));
+        for number in 0..12 {
+            let store = manager.library(&format!("{number:016x}"), TOKEN).unwrap();
+            store.apply(&[Write { key: K1.into(), base: 0, value: number.to_string() }]).unwrap();
+        }
+        let start = Arc::new(std::sync::Barrier::new(9));
+        let mut threads = Vec::new();
+        for worker in 0..8 {
+            let manager = Arc::clone(&manager);
+            let start = Arc::clone(&start);
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                for iteration in 0..100 {
+                    let number = if worker < 2 { 0 } else { (worker + iteration) % 12 };
+                    let store = manager.library(&format!("{number:016x}"), TOKEN).unwrap();
+                    let page = store.range_chunks(0, 500, "generation").unwrap();
+                    assert_ne!(page.len, 0);
+                }
+            }));
+        }
+        start.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(manager.cached().0 <= RETAINED_DATABASES);
     }
 
     #[test]
