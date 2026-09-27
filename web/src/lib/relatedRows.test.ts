@@ -4,6 +4,7 @@ import type { RowDef } from './catalog';
 import {
   collectionRow,
   firstScreen,
+  franchiseRow,
   languageRow,
   moreLikeThisRow,
   personRow,
@@ -348,6 +349,78 @@ describe('collectionRow', () => {
     expect((await row.load(1)).map((t) => t.id)).toEqual([1, 2]);
     expect(await row.load(2)).toEqual([]);
     expect(row.title).toBe('The Saga');
+  });
+});
+
+describe('franchiseRow', () => {
+  it('prefers atlas’s mixed seed-era-first row over a TMDB movie collection', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        '/atlas/index/franchise/movie/550.json': {
+          franchise: { id: 'fight', name: 'Fight franchise' },
+          members: [
+            { type: 'movie', id: 550, title: 'Fight Club' },
+            { type: 'series', id: 7, title: 'Fight Club: The Series' },
+            { type: 'movie', id: 8, title: 'Fight Again' },
+          ],
+          total: 3,
+        },
+      },
+      asked,
+    );
+    const row = await franchiseRow({ id: 5, name: 'TMDB collection' }, self, '/atlas', {
+      key: 'k',
+      fetchImpl,
+    });
+
+    expect(row?.id).toBe('franchise-fight');
+    expect(row?.title).toBe('Fight franchise');
+    expect((await row!.load(1)).map((title) => `${title.type}:${title.id}`)).toEqual([
+      'movie:550',
+      'tv:7',
+      'movie:8',
+    ]);
+    expect((await firstScreen(row!, (title) => title.id !== 550))?.load).toBeDefined();
+    expect(asked).toEqual(['/atlas/index/franchise/movie/550.json']);
+  });
+
+  it('uses TMDB only when atlas has no curated primary', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        '/atlas/index/franchise/movie/550.json': { franchise: null, members: [] },
+        '/3/collection/5': { parts: [{ id: 2, title: 'Two', release_date: '2004-01-01' }] },
+      },
+      asked,
+    );
+    const row = await franchiseRow({ id: 5, name: 'TMDB collection' }, self, '/atlas', {
+      key: 'k',
+      fetchImpl,
+    });
+
+    expect(row?.id).toBe('collection-5');
+    expect((await row!.load(1)).map((title) => title.id)).toEqual([2]);
+    expect(asked).toEqual(['/atlas/index/franchise/movie/550.json', '/3/collection/5']);
+  });
+
+  it('does not replace an authoritative empty atlas franchise with TMDB', async () => {
+    const asked: string[] = [];
+    const row = await franchiseRow({ id: 5, name: 'TMDB collection' }, self, '/atlas', {
+      key: 'k',
+      fetchImpl: answering(
+        {
+          '/atlas/index/franchise/movie/550.json': {
+            franchise: { id: 'fight', name: 'Fight franchise' },
+            members: [{ type: 'movie', id: 550, title: 'Fight Club' }],
+          },
+        },
+        asked,
+      ),
+    });
+
+    expect(await firstScreen(row!, () => true)).toBeNull();
+    expect(asked).toEqual(['/atlas/index/franchise/movie/550.json']);
   });
 });
 

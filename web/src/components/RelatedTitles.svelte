@@ -7,8 +7,8 @@
   import type { IconicStudio } from '../lib/iconicStudios';
   import { titleKey, type Title } from '../lib/library';
   import {
-    collectionRow,
     firstScreen,
+    franchiseRow,
     languageRow,
     moreLikeThisRow,
     personRow,
@@ -72,20 +72,24 @@
       rows = [];
       rowsFor = key;
     }
+    let live = true;
+    const franchise = franchiseRow(detail.collection, self, atlas, options).then((row) =>
+      row ? firstScreen(row, shown) : null,
+    );
     const defined = [
-      ...(detail.collection ? [collectionRow(detail.collection, self, options)] : []),
       ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
-      // Films and series together: a series' closest titles include the films that share its world, and back.
+      // Films and series together; curated primary members have their own row and atlas excludes them here.
       moreLikeThisRow(detail, atlas, { ...options, mixed: true }),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
     ];
-    let live = true;
-    void Promise.all(defined.map((row) => firstScreen(row, shown))).then((found) => {
-      if (!live) return;
-      const build = ++builds;
-      rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
-    });
+    void Promise.all([franchise, ...defined.map((row) => firstScreen(row, shown))]).then(
+      (found) => {
+        if (!live) return;
+        const build = ++builds;
+        rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
+      },
+    );
     return () => {
       live = false;
     };
