@@ -211,6 +211,9 @@ pub struct AppState {
     /// Distinct `ipv4Hint` addresses each member rate-limit bucket (an IPv6 /64) had a media listener opened for,
     /// and when (`relay::MEMBER_HINTS`). A guest's are counted with its grant's sources instead.
     pub member_hints: Mutex<HashMap<String, Vec<(std::net::IpAddr, u64)>>>,
+    /// Public Reel activation hints, separately and globally bounded because unlike remux member hints these
+    /// may be created by unauthenticated IPv6 /64s holding signed media capabilities.
+    pub reel_hints: Mutex<HashMap<String, Vec<(std::net::IpAddr, u64)>>>,
     /// Shared with den-remux (env `REMUX_EDGE_SECRET` here, `EDGE_SECRET` there): what lets den-edge name a grant
     /// as a session's owner and end its sessions. Unset, a guest is offered no remux at all — without it remux
     /// would count the guest's sessions as the host's.
@@ -291,6 +294,7 @@ impl AppState {
             media_leases: Mutex::new(HashMap::new()),
             grants: grants::Grants::default(),
             member_hints: Mutex::new(HashMap::new()),
+            reel_hints: Mutex::new(HashMap::new()),
             remux_edge_secret: None,
             oauth: None,
         }

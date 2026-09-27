@@ -268,7 +268,7 @@ impl Metrics {
              # TYPE den_edge_public_media_hinted_total counter\n",
         );
         let hinted = lock(&self.public_media_hinted);
-        for who in ["member", "guest"] {
+        for who in ["member", "guest", "reel"] {
             let n = hinted.get(who).copied().unwrap_or(0);
             out.push_str(&format!("den_edge_public_media_hinted_total{{who=\"{who}\"}} {n}\n"));
         }
@@ -287,7 +287,7 @@ impl Metrics {
              # TYPE den_edge_public_media_hint_wanted_total counter\n",
         );
         let wanted = lock(&self.public_media_hint_wanted);
-        for who in ["member", "guest"] {
+        for who in ["member", "guest", "reel"] {
             let n = wanted.get(who).copied().unwrap_or(0);
             out.push_str(&format!("den_edge_public_media_hint_wanted_total{{who=\"{who}\"}} {n}\n"));
         }

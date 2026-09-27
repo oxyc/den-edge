@@ -14,6 +14,9 @@ pub(crate) const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Guesses per client address per minute: a pairing's nameplate is only four characters.
 pub(crate) const CLAIMS_PER_WINDOW: u32 = 20;
 const CLAIM_WINDOW_MS: u64 = 60 * 1000;
+/// All live rate-limit identities together. Public callers can present many legitimate source addresses; sweeping
+/// expired entries is not a hard bound while those windows overlap, so new identities fail closed at this ceiling.
+const MAX_THROTTLE_BUCKETS: usize = 8 * 1024;
 
 pub struct Throttle {
     count: u32,
@@ -27,15 +30,25 @@ pub struct Throttles {
     /// The size past which the next count sweeps out the expired entries: twice what the last sweep left. Swept at
     /// every count once past a fixed 1024, a map holding that many live budgets was scanned whole on every request.
     sweep_above: usize,
+    /// A full table is attacker-reachable. Do not turn each refused novel address into an O(table) expiry scan.
+    capacity_sweep_after: u64,
 }
 
 impl Throttles {
-    fn entry(&mut self, bucket: &str, now: u64) -> &mut Throttle {
-        if self.map.len() > self.sweep_above.max(1024) {
+    fn entry(&mut self, bucket: &str, now: u64) -> Option<&mut Throttle> {
+        let new = !self.map.contains_key(bucket);
+        let at_capacity = new && self.map.len() >= MAX_THROTTLE_BUCKETS;
+        if self.map.len() > self.sweep_above.max(1024) || (at_capacity && now >= self.capacity_sweep_after) {
             self.map.retain(|_, t| t.until > now);
             self.sweep_above = self.map.len() * 2;
+            if at_capacity {
+                self.capacity_sweep_after = now.saturating_add(1_000);
+            }
         }
-        self.map.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 })
+        if new && self.map.len() >= MAX_THROTTLE_BUCKETS {
+            return None;
+        }
+        Some(self.map.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 }))
     }
 }
 
@@ -93,7 +106,7 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option
 pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
-    let t = claims.entry(bucket, now);
+    let Some(t) = claims.entry(bucket, now) else { return Some(CLAIM_WINDOW_MS) };
     if t.until <= now {
         t.count = 0;
     }
@@ -118,7 +131,7 @@ pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -
 pub(crate) fn throttled_per_minute_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
-    let t = claims.entry(bucket, now);
+    let Some(t) = claims.entry(bucket, now) else { return Some(CLAIM_WINDOW_MS) };
     if t.until <= now {
         t.count = 0;
         t.until = now + CLAIM_WINDOW_MS;
@@ -173,6 +186,22 @@ mod tests {
         assert_eq!(crate::lock(&h.state.claims).map.len(), 2051, "not swept yet");
         super::throttled_at(&h.state, "b:last", 1);
         assert_eq!(crate::lock(&h.state.claims).map.len(), 552, "the 1500 expired ones gone at the next");
+    }
+
+    #[test]
+    fn simultaneous_live_budget_identities_are_hard_bounded() {
+        let h = Harness::new();
+        for i in 0..super::MAX_THROTTLE_BUCKETS {
+            assert!(super::throttled_per_minute(&h.state, &format!("public:{i}"), 2).is_none());
+        }
+        assert_eq!(crate::lock(&h.state.claims).map.len(), super::MAX_THROTTLE_BUCKETS);
+        assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_some());
+        assert_eq!(crate::lock(&h.state.claims).map.len(), super::MAX_THROTTLE_BUCKETS);
+        // Existing callers are not displaced merely because the global identity table is full.
+        assert!(super::throttled_per_minute(&h.state, "public:0", 2).is_none());
+        h.advance(super::CLAIM_WINDOW_MS);
+        assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_none());
+        assert_eq!(crate::lock(&h.state.claims).map.len(), 1);
     }
 
     #[tokio::test]

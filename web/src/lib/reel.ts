@@ -11,6 +11,7 @@
 // where the page is not served by den-edge does it fall back to reel's own addresses.
 
 import type { MediaType } from './library';
+import { ipv4Hint } from './ipv4';
 import { relayFetch } from './relayFetch';
 import type { Entry, Routes } from './routes';
 
@@ -443,6 +444,98 @@ export interface Sources {
   expires?: number;
 }
 
+// One cold IPv6 activation may include the 1.5-second IPv4 lookup, edge's bounded two-second validation, and a
+// ten-second listener lease while the host starts/proves Caddy. Keep one shared deadline across both activation asks
+// and the lookup; on expiry, preserve the already-present relay rather than delaying playback without bound.
+const DIRECT_ACTIVATION_MS = 15_000;
+
+/** A signed carried source on this origin, as the edge activation endpoint accepts it. */
+function carriedPath(url: string): string | null {
+  if (!url.startsWith('/') || url.startsWith('//')) return null;
+  try {
+    const parsed = new URL(url, 'https://relative.invalid');
+    if (parsed.origin !== 'https://relative.invalid') return null;
+    const match = parsed.pathname.match(/^\/(reel)(?:\/[^/]+)?\/m\/s\/([A-Za-z0-9_-]{40,2048})$/);
+    return match && /^s=[0-9a-fA-F]{24}$/.test(parsed.search.slice(1))
+      ? `/${match[1]}/m/s/${match[2]}${parsed.search}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lease Reel's DNS-only direct origin for this browser. The signed media path is the authority;
+ * failure returns null so the already-built same-origin relay list remains untouched.
+ */
+async function activateDirect(
+  media: string,
+  mount: string,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal | undefined,
+  lookup: () => Promise<string | undefined>,
+): Promise<string | null> {
+  const deadline = AbortSignal.timeout(DIRECT_ACTIVATION_MS);
+  const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const ask = async (ipv4Hint?: string): Promise<Response> => {
+    return fetchImpl(`${mount}/activate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ media, ...(ipv4Hint ? { ipv4Hint } : {}) }),
+      signal: bounded,
+    });
+  };
+  try {
+    let response = await ask();
+    if (response.status === 428) {
+      const refusal = await response.json().catch(() => null);
+      if (refusal?.error !== 'ipv4_hint_wanted') return null;
+      const stopped = new Promise<undefined>((resolve) => {
+        if (bounded.aborted) resolve(undefined);
+        else bounded.addEventListener('abort', () => resolve(undefined), { once: true });
+      });
+      const hint = await Promise.race([lookup(), stopped]);
+      if (!hint) return null;
+      response = await ask(hint);
+    }
+    if (!response.ok) return null;
+    const answer = await response.json();
+    if (typeof answer?.publicBase !== 'string' || typeof answer?.media !== 'string') return null;
+    const base = new URL(answer.publicBase);
+    if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash)
+      return null;
+    const expected = new URL(media, base).href;
+    return answer.media === expected ? base.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Direct first, then the byte-identical bounded relay fallback; native/external URLs stay unchanged. */
+async function directSources(
+  sources: Source[],
+  mount: string,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal | undefined,
+  lookup: () => Promise<string | undefined>,
+): Promise<Source[]> {
+  // A page already speaking to Reel directly (LAN/tailnet) should keep doing so. Activation is an
+  // edge-owned control route and exists only beside the same-origin `/reel` relay mount.
+  const edgeMount = mount.match(/^\/[^/]+/)?.[0];
+  if (!edgeMount) return sources;
+  const first = sources.map((source) => carriedPath(source.url)).find((path) => path !== null);
+  if (!first) return sources;
+  const direct = await activateDirect(first, edgeMount, fetchImpl, signal, lookup);
+  if (!direct) return sources;
+  const result: Source[] = [];
+  for (const source of sources) {
+    const path = carriedPath(source.url);
+    if (path) result.push({ ...source, url: new URL(path, direct).href });
+    result.push(source);
+  }
+  return result;
+}
+
 /**
  * Ask reel what to play, and by asking, have it made ready.
  *
@@ -461,6 +554,7 @@ export async function fetchSources(
     playable,
     fetchImpl = relayFetch,
     signal,
+    lookupIpv4 = () => ipv4Hint(),
   }: {
     surface: Surface;
     player: Player;
@@ -477,6 +571,8 @@ export async function fetchSources(
     playable?: unknown;
     fetchImpl?: typeof fetch;
     signal?: AbortSignal;
+    /** The browser's public IPv4 lookup, injected by tests and called only after edge asks for it. */
+    lookupIpv4?: () => Promise<string | undefined>;
   },
 ): Promise<Sources | null> {
   try {
@@ -522,7 +618,8 @@ export async function fetchSources(
       });
     }
     if (!list.length) return null;
-    return { sources: list, crop: crop(body.crop), expires: body.expires };
+    const activated = await directSources(list, mount, fetchImpl, signal, lookupIpv4);
+    return { sources: activated, crop: crop(body.crop), expires: body.expires };
   } catch {
     return null;
   }
