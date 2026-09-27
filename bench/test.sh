@@ -11,7 +11,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 bash -n "$ROOT/bench/run.sh"
-python3 -m py_compile "$ROOT/bench/fixtures.py" "$ROOT/bench/gate.py" "$ROOT/bench/load.py" \
+python3 -m py_compile "$ROOT/bench/fixtures.py" "$ROOT/bench/gate.py" "$ROOT/bench/library_write.py" "$ROOT/bench/load.py" \
   "$ROOT/bench/network_gateway.py" "$ROOT/bench/summarize_mix.py"
 python3 "$ROOT/bench/fixtures.py" "$TMP/fixtures"
 test "$(wc -c < "$TMP/fixtures/web/static-1m.bin" | tr -d ' ')" = 1048576
@@ -63,6 +63,7 @@ else:
 
 probe = {
     "rss_bytes": 10, "cgroup_current_bytes": 20, "cgroup_events_available": 1,
+    "cgroup_anon_bytes": 10, "cgroup_file_bytes": 5,
     "cgroup_peak_bytes": 30,
     "cgroup_events_oom": 4, "cgroup_events_oom_kill": 2,
     "cgroup_events_oom_group_kill": 1, "fd_count": 5,
@@ -76,6 +77,9 @@ gate.validate_result(
 )
 assert gate.event_deltas(probe, dict(probe)) == {"oom": 0, "oom_kill": 0, "oom_group_kill": 0}
 assert gate.recovery_failures(probe, dict(probe), 0, 0, 0, 0) == []
+file_cached = {**probe, "cgroup_current_bytes": 120, "cgroup_file_bytes": 105}
+assert gate.recovery_failures(probe, file_cached, 0, 0, 0, 0) == []
+assert gate.recovery_failures(probe, {**probe, "cgroup_anon_bytes": 11}, 0, 0, 0, 0)
 gate.assert_initial({**probe, "cgroup_events_oom": 0, "cgroup_events_oom_kill": 0,
                      "cgroup_events_oom_group_kill": 0})
 for operation in (
@@ -112,7 +116,7 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError("completed cancellation work unexpectedly passed")
     zero_path = pathlib.Path(directory) / "zero.probe"
     zero_path.write_text("\n".join(f"{key}={value}" for key, value in {
-        **probe, "rss_bytes": 0, "cgroup_current_bytes": 0,
+        **probe, "rss_bytes": 0, "cgroup_current_bytes": 0, "cgroup_anon_bytes": 0,
         "cgroup_peak_bytes": 0, "fd_count": 0,
         "cgroup_events_oom": 0, "cgroup_events_oom_kill": 0,
         "cgroup_events_oom_group_kill": 0,

@@ -298,6 +298,8 @@ mix tmdb-list --url "$BASE/tmdb/3/trending/all/week" --duration "$SOAK_DURATION"
 mix tmdb-detail --url "$BASE/tmdb/3/movie/550?append_to_response=credits" --duration "$SOAK_DURATION" --concurrency 2 --expect-200-bytes "$TMDB_NARROW_SIZE"
 mix relay-fast --url "$BASE/fixture/fast?bytes=262144" --duration "$SOAK_DURATION" --concurrency 4 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 262144
 mix library --url "$BASE/lib/0000000000000001/changes?since=0&limit=500" --duration "$SOAK_DURATION" --concurrency 2 --header 'x-den-library-token: bench-token' --expect-200-bytes "$LIBRARY_SIZE"
+python3 "$ROOT/bench/library_write.py" --url "$BASE" --duration "$SOAK_DURATION" --concurrency 4 >>"$RUN_DIR/mixed.parts" &
+mix_pids="$mix_pids $!"; CHILD_PIDS="$CHILD_PIDS $!"
 mix media --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" --duration "$SOAK_DURATION" --concurrency 4 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 2097152
 mix cancellation --url "$BASE/fixture/slow?cancel=1&bytes=8388608&delay_ms=5" --duration "$SOAK_DURATION" --concurrency 8 --mode cancel --header "$COMMON_HEADER" --rotate-ip
 mix media-slow-reader --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" --duration "$SOAK_DURATION" --concurrency 12 --mode slow-reader --slow-read-ms 20 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 2097152

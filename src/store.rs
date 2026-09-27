@@ -20,12 +20,59 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct Store {
     dir: PathBuf,
-    /// Bytes on disk across every namespace.
-    used: AtomicU64,
-    /// Bytes on disk in the inbox, which is also in `used`.
-    inbox_used: AtomicU64,
-    cap: u64,
+    quota: Quota,
     generation: String,
+}
+
+/// Cloneable access to the store's one disk budget. Storage engines which write through their own synchronous
+/// backend (library-v3/redb) must reserve here too; a private quota would make `STORE_CAP_BYTES` dishonest.
+#[derive(Clone, Debug)]
+pub(crate) struct Quota {
+    used: std::sync::Arc<AtomicU64>,
+    inbox_used: std::sync::Arc<AtomicU64>,
+    cap: u64,
+}
+
+impl Quota {
+    #[cfg(test)]
+    pub(crate) fn standalone(cap: u64) -> Self {
+        Self { used: Default::default(), inbox_used: Default::default(), cap }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn standalone_with_used(cap: u64, used: u64) -> Self {
+        Self { used: std::sync::Arc::new(AtomicU64::new(used)), inbox_used: Default::default(), cap }
+    }
+
+    pub(crate) fn resize(&self, ns: &str, old: u64, new: u64) -> io::Result<()> {
+        if new > old {
+            self.reserve(ns, new - old)
+        } else {
+            self.release(ns, old - new);
+            Ok(())
+        }
+    }
+
+    fn reserve(&self, ns: &str, bytes: u64) -> io::Result<()> {
+        let full = || io::Error::new(io::ErrorKind::StorageFull, "den-edge's storage cap is reached");
+        if ns == "inbox" && !take(&self.inbox_used, bytes, self.cap / INBOX_SHARE) {
+            return Err(full());
+        }
+        if !take(&self.used, bytes, self.cap) {
+            if ns == "inbox" {
+                give_back(&self.inbox_used, bytes);
+            }
+            return Err(full());
+        }
+        Ok(())
+    }
+
+    fn release(&self, ns: &str, bytes: u64) {
+        give_back(&self.used, bytes);
+        if ns == "inbox" {
+            give_back(&self.inbox_used, bytes);
+        }
+    }
 }
 
 /// The inbox holds at most this part of the cap: a quarter.
@@ -81,9 +128,11 @@ impl Store {
         let generation = load_generation(dir)?;
         Ok(Store {
             dir: dir.to_owned(),
-            used: AtomicU64::new(used),
-            inbox_used: AtomicU64::new(inbox_used),
-            cap,
+            quota: Quota {
+                used: std::sync::Arc::new(AtomicU64::new(used)),
+                inbox_used: std::sync::Arc::new(AtomicU64::new(inbox_used)),
+                cap,
+            },
             generation,
         })
     }
@@ -96,25 +145,21 @@ impl Store {
     /// cap, or the inbox past its share. Taken in one step, not checked and counted later: writers in different
     /// namespaces hold different locks, and two that each saw room for one would both have written.
     fn reserve(&self, ns: &str, bytes: u64) -> io::Result<()> {
-        let full = || io::Error::new(io::ErrorKind::StorageFull, "den-edge's storage cap is reached");
-        if ns == "inbox" && !take(&self.inbox_used, bytes, self.cap / INBOX_SHARE) {
-            return Err(full());
-        }
-        if !take(&self.used, bytes, self.cap) {
-            if ns == "inbox" {
-                give_back(&self.inbox_used, bytes);
-            }
-            return Err(full());
-        }
-        Ok(())
+        self.quota.reserve(ns, bytes)
     }
 
     /// Gives back `bytes` of `ns`: a file shrank or went, or a write that reserved them failed.
     fn release(&self, ns: &str, bytes: u64) {
-        give_back(&self.used, bytes);
-        if ns == "inbox" {
-            give_back(&self.inbox_used, bytes);
-        }
+        self.quota.release(ns, bytes);
+    }
+
+    pub(crate) fn quota(&self) -> Quota {
+        self.quota.clone()
+    }
+
+    pub(crate) fn namespace_dir(&self, ns: &str) -> PathBuf {
+        debug_assert!(NAMESPACES.contains(&ns));
+        self.dir.join(ns)
     }
 
     fn path(&self, ns: &str, key: &str, ext: &str) -> PathBuf {

@@ -1,11 +1,14 @@
 # den-edge
 
 Den's sync relay, on the homelab. It relays pairings between an Apple TV and another device, carries a paired
-device's sealed messages to the TV, keeps the library's record log and the TV's encrypted backup, and holds the
-plugin list and settings older links shared. It also serves the Den web app.
+device's sealed messages to the TV, keeps the library's current encrypted state and the TV's encrypted backup, and
+holds the plugin list and settings older links shared. It also serves the Den web app.
 
-It never interprets what it stores: the log, the backup and the inbox are ciphertext sealed on the devices, and
-the rest is small JSON it validates and bounds.
+It never interprets what it stores: library rows, the backup and the inbox are ciphertext sealed on the devices,
+and the rest is small JSON it validates and bounds.
+
+See [Architecture](ARCHITECTURE.md) for the current request and storage flows and
+[Performance](PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
 
 ## Routes
 
@@ -25,7 +28,7 @@ the rest is small JSON it validates and bounds.
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied. An unknown or expired queue is `{messages: []}` like an empty one: a queue exists only while messages wait, so there is no way to tell a dead key from a quiet one |
 | `POST /inbox/drain` `{keys}` | several queues at once, one per linked device: `{queues: [[…], …]}` in the order of `keys`, each emptied. 1–16 distinct keys, each its own credential as in the header; one malformed key is a `400` and empties nothing. Both drains share one budget of 240 queues per address per minute (`429` with `Retry-After` past it) |
 | `DELETE /sync/{id}` | erases a backup an older link or the retired settings backup left |
-| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
+| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the transactional library: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
 | `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
 | `POST`/`GET /lib/{id}/grants`, `PUT`/`DELETE /lib/{id}/grants/{gid}` | a library owner's guest grants (oxyc/den#100): invite a named guest (`{name, addons, installs, codeExpiresAt?, accessDays? or accessUntil?, devices?}` → `{gid, code, grant}`, the code shown once), list, edit or extend, revoke. Authenticated by `x-den-library-member: <id>:<proof>` for the library in the path; at most 10 live grants per library (`409 too_many_grants`). `installs` is one bare base64url config segment per addon, never a URL |
 | `POST /grant/redeem` `{code, secretHash}` | a guest redeems an invite: `{gid, name, addons, expiresAt}`. One `404 invalid_code` for every reason a code fails (a store that fails is a `5xx`, `507` when full, as for every write); idempotent for the same `secretHash`; the access clock starts at the first redeem; throttled per address |
@@ -54,10 +57,11 @@ named by the key's SHA-256 so no key is a file name. Writes go to a temporary fi
 renamed into place, and every read-modify-write — an inbox append, a drain, a versioned write — happens under
 one lock. So two messages arriving together are both kept, which Workers KV couldn't promise.
 
-A library is one append-only log under `lib/`: its token's hash, then a line per write, synced before the
-answer goes out, replayed into memory on first use and rewritten without superseded lines once they
-outnumber the live ones. `/lib` requests carry `x-den-library-token`; the first write sets it. Values are
-ciphertext the clients seal and merge.
+A library is one independently writable transactional database under `lib/`. Its current key/sequence indexes,
+canonical encrypted row fragments, credentials, and head commit atomically; replacing watched/progress state removes
+the superseded row in the same transaction, so startup needs no replay and normal operation needs no compaction.
+Old append logs migrate lazily on the first request with a crash-safe format marker. `/lib` requests carry
+`x-den-library-token`; the first write sets it. Values remain ciphertext only the clients can open and merge.
 
 Guest grants live under `grants/` (mode 0700): one file per grant and an index, holding only SHA-256 hashes of the
 invite code and each device's secret, plus the escrow — the host's config segment per shared addon, which is a
@@ -75,7 +79,7 @@ ends its connections; an hourly sweep ends idle ones (30 days) and those whose m
 
 `DATA_DIR/generation` is a random id minted the first time the store opens. Every `/lib` answer carries it.
 Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
-the change, reads the log from the start and writes back what the snapshot lacks (den-spec library-v2 §2).
+the change, reads changes from sequence zero and writes back what the snapshot lacks (den-spec library-v2 §2).
 
 A queue is kept for a week after its last message. Expired queues are reclaimed at startup and hourly,
 including abandoned links, and their bytes are returned to the shared storage quota. Everything else is kept until it is replaced. Pairing
@@ -86,8 +90,9 @@ can reach den-edge can't fill the host's disk. The inbox, where anyone may start
 of it, so a filled inbox leaves the rest for libraries, grants and connections. An address may start 5 libraries a
 minute (`429` with `Retry-After` past that). A library holds at most 50,000 rows and an 8 MiB memory charge
 (`413 library_full`). The charge includes twice the key/value byte lengths plus row/map overhead. The
-combined library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
-their durable logs. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
+combined legacy-library cache is capped at 16 MiB and 128 libraries; older copies leave memory and reload from
+their durable logs. V3 admits 16 concurrently leased per-library databases and retains only two idle handles;
+ordinary startup opens none. Log replay is streamed and uses the same per-library limit. Oversized legacy logs are
 preserved on disk and refused, rather than loaded into the 64 MiB container; their owner can still delete
 them. Changes pages are bounded by bytes as well as the requested row count, so follow `more` until done.
 

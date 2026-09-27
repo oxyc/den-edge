@@ -29,7 +29,7 @@ try:
     by_label = {part.get("label"): part for part in parts}
     expected_labels = {
         "health", "static", "ratings", "tmdb-list", "tmdb-detail", "relay-fast",
-        "library", "media", "cancellation", "media-slow-reader",
+        "library", "library-writes", "media", "cancellation", "media-slow-reader",
     }
     if set(by_label) != expected_labels or len(parts) != len(expected_labels):
         raise gate.GateFailure(

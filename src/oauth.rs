@@ -2654,7 +2654,7 @@ mod tests {
             h.dir.join(ns).join(format!("{}.{ext}", crate::hex(&Sha256::digest(key.as_bytes()))))
         };
         for (proof, record) in [
-            (("x-den-library-member", claim.as_str()), hashed("lib", LIB, "log")),
+            (("x-den-library-member", claim.as_str()), hashed("lib", LIB, "redb")),
             (("x-den-grant", proof.as_str()), hashed("grants", &format!("g:{gid}"), "json")),
         ] {
             let tokens = connect(&h, &[proof]).await;
@@ -2666,6 +2666,7 @@ mod tests {
             ];
             // The record is there but reading it fails: a directory stands in its place.
             h.state.libraries.clear().await;
+            h.state.library_v3.clear();
             let aside = record.with_extension("aside");
             std::fs::rename(&record, &aside).unwrap();
             std::fs::create_dir(&record).unwrap();
