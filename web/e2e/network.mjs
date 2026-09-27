@@ -39,6 +39,11 @@ export async function guardNetwork(page) {
     const kept = /^\/(?:ratings|warnings)\/imdb\//.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && kept)
       return route.fulfill({ status: 404, json: { error: 'not_cached' } });
+    // A title's You might also like asks for atlas's paged cards first. Unless a spec mocks them, the fixture's atlas
+    // predates that route, and the row goes on from the POST it mocks (`relatedRows.ts`).
+    const cards = /\/index\/suggest\/(?:movie|series)\/\d+\.json$/.test(url.pathname);
+    if (url.origin === 'http://127.0.0.1:5198' && cards)
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);

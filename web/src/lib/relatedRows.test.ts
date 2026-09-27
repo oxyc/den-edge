@@ -106,10 +106,50 @@ describe('moreLikeThisRow', () => {
     });
 
     expect((await row.load(1)).map((t) => t.id)).toEqual([11]);
-    expect(asked.slice(0, 2)).toEqual([
+    expect(asked.slice(0, 3)).toEqual([
+      '/atlas/index/suggest/movie/550.json?skip=0&limit=20',
       '/atlas/index/suggest.json',
       '/atlas/index/similar/movie/550.json?limit=200',
     ]);
+  });
+
+  it('draws the affinity row from atlas’s paged cards, asking TMDB only for a card with no poster', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        '/atlas/index/suggest/movie/550.json?skip=0&limit=20': {
+          mixed: [
+            { type: 'series', id: 1396 },
+            { type: 'movie', id: 11 },
+          ],
+          titles: [
+            { type: 'series', id: 1396, title: 'Breaking Bad', posterPath: '/bb.jpg', year: 2008 },
+            { type: 'movie', id: 11, title: 'T11', posterPath: null },
+          ],
+          total: 2,
+        },
+        '/atlas/index/suggest/movie/550.json?skip=2&limit=20': { mixed: [], titles: [], total: 2 },
+        '/3/movie/11': { id: 11, title: 'T11', poster_path: '/11.jpg' },
+      },
+      asked,
+    );
+    const row = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      key: 'k',
+      fetchImpl,
+      mixed: true,
+      similarLimit: 200,
+      affinity: true,
+    });
+
+    const first = await row.load(1);
+    expect(first.map((t) => `${t.type}:${t.id}`)).toEqual(['tv:1396', 'movie:11']);
+    expect(first[0]?.title).toBe('Breaking Bad');
+    expect(asked.filter((path) => path.startsWith('/3/'))).toEqual(['/3/movie/11']);
+    expect(asked).not.toContain('/atlas/index/suggest.json');
+    // The row's end moves on to the wider neighbours, as any atlas source does.
+    await row.load(2);
+    expect(asked).toContain('/atlas/index/suggest/movie/550.json?skip=2&limit=20');
+    expect(asked).toContain('/atlas/index/neighbours/movie/550.json?k=50');
   });
 
   it('leads with atlas, best match first, then its wider neighbours, and only then pads with TMDB', async () => {

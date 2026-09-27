@@ -10,6 +10,7 @@ import type { MediaType, Title } from './library';
 import { likeId, personHref, searchHref } from './route';
 import { fetchTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
+import { withSharedTitleMetadata } from './titleMetadata';
 
 /** Titles a page adds: a screenful and a bit, the size TMDB's own pages come in. */
 const CHUNK = 20;
@@ -64,10 +65,13 @@ export function moreLikeThisRow(
 
   const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
   const suggestPath = '/index/suggest.json';
+  const cardsPath = `/index/suggest/${kind}/${self.id}.json`;
   const neighboursPath = `/index/neighbours/${kind}/${self.id}.json?k=${NEIGHBOURS}`;
 
   /** `unknown` is atlas not yet asked; whether it has anything for this title decides which way the row goes. */
-  type Source = 'unknown' | 'similar' | 'neighbours' | 'recommended' | 'done';
+  type Source = 'unknown' | 'cards' | 'similar' | 'neighbours' | 'recommended' | 'done';
+  /** How far into the paged affinity row (`cardsPath`) the row has read. */
+  let cardsSkip = 0;
   let source: Source = atlas === null ? 'recommended' : 'unknown';
   /** The TMDB page the detail already carried (page 1) is served first, then page 2 on. */
   let recommendedPage = 1;
@@ -126,6 +130,43 @@ export function moreLikeThisRow(
     }
   }
 
+  /**
+   * The next page of atlas's mixed affinity row as cards, drawn. A title atlas has a card for needs no request of its
+   * own; the posters cards lack come from den-edge's shared metadata in one request; only what neither can draw is
+   * asked of TMDB, one title at a time. `null` when this atlas has no such route (the POST's ids are read instead),
+   * `undefined` once the row has nothing left.
+   */
+  async function drawCards(): Promise<Title[] | null | undefined> {
+    let body: { mixed?: unknown; titles?: unknown };
+    try {
+      const res = await fetchImpl(`${atlas}${cardsPath}?skip=${cardsSkip}&limit=${CHUNK}`);
+      if (!res.ok) return cardsSkip === 0 ? null : undefined;
+      body = (await res.json()) as typeof body;
+    } catch {
+      return cardsSkip === 0 ? null : undefined;
+    }
+    // An answer without the mixed row is not this route's: on the first page that is an atlas without it.
+    const refs = refsFrom(body, true);
+    if (refs === null) return cardsSkip === 0 ? null : undefined;
+    if (refs.length === 0) return undefined;
+    cardsSkip += refs.length;
+    const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
+    const cards = new Map(titlesOf(body).map((t) => [keyOf(t), t]));
+    const shared = await withSharedTitleMetadata(
+      wanted.flatMap((ref) => cards.get(keyOf(ref)) ?? []),
+      fetchImpl,
+    );
+    const drawn = new Map(shared.map((t) => [keyOf(t), t]));
+    const titles = await Promise.all(
+      wanted.map((ref) => {
+        const card = drawn.get(keyOf(ref));
+        if (card?.posterPath) return card;
+        return fetchTitle(ref, key, fetchImpl).then((full) => full ?? card ?? null);
+      }),
+    );
+    return titles.filter((t): t is Title => t !== null);
+  }
+
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
   async function drawQueued(path: string): Promise<Title[] | undefined> {
     queue ??= await idsFrom(path);
@@ -138,6 +179,21 @@ export function moreLikeThisRow(
   }
 
   async function step(): Promise<Title[]> {
+    if (source === 'unknown' && affinity && mixed) {
+      const found = await drawCards();
+      if (found !== null) {
+        if (found) {
+          source = 'cards';
+          return found;
+        }
+        source = 'neighbours'; // atlas's affinity row for this title is empty
+      }
+    }
+    if (source === 'cards') {
+      const found = await drawCards();
+      if (found) return found;
+      source = 'neighbours';
+    }
     if (source === 'unknown') {
       queue = affinity
         ? ((await suggested()) ?? (await idsFrom(similarPath)))
