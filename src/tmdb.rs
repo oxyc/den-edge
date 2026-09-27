@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 pub type TmdbClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -411,12 +412,138 @@ fn narrowed(all: &[&str], asked: &BTreeSet<String>, body: Bytes) -> Bytes {
 /// What the cache holds for a detail question.
 enum Kept {
     /// Fresh, with how long it is fresh for, its age and when it was kept.
-    Hit(Bytes, Duration, Duration, SystemTime),
+    Hit(Prepared, Duration, Duration, SystemTime),
     /// A remembered 404, still believed.
     Absent,
     /// Past its freshness but inside the six months, with when it was kept and how long it was fresh for.
-    Stale(Bytes, SystemTime, Duration),
+    Stale(Prepared, SystemTime, Duration),
     Nothing,
+}
+
+/// What the cache holds when an internal caller will parse the answer itself. Link previews do not benefit from a
+/// prepared HTTP representation: entering the globally bounded representation builder here could make an otherwise
+/// hot preview miss its deadline behind unrelated response work, only to parse the prepared bytes immediately.
+enum KeptBytes {
+    Hit(Bytes),
+    Absent,
+    Stale(Bytes),
+    Nothing,
+}
+
+enum Prepared {
+    Bytes(Bytes),
+    File(crate::cache::JsonFile),
+}
+
+impl Prepared {
+    #[cfg(test)]
+    async fn bytes(self) -> Option<Bytes> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::File(file) => file.bytes().await,
+        }
+    }
+}
+
+fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
+    static BUILDS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    BUILDS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+}
+
+/// A derived response which cannot be streamed from a prepared file is charged as the largest body it could own,
+/// not merely its current length: `serde_json` may retain spare `Vec` capacity which `Bytes` keeps alive. Four such
+/// responses may wait on slow clients at once. Together with the single builder's source and output buffers this
+/// keeps this path below 24 MiB even when every body is at the provider's 4 MiB ceiling.
+const DERIVED_RESPONSE_BUDGET_BYTES: usize = 4 * MAX_ANSWER_BYTES;
+const DERIVED_RESPONSE_CHARGE: u32 = MAX_ANSWER_BYTES as u32;
+
+fn derived_response_budget() -> &'static Arc<tokio::sync::Semaphore> {
+    static BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(DERIVED_RESPONSE_BUDGET_BYTES)))
+}
+
+struct ChargedDerived {
+    body: Bytes,
+    _charge: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for ChargedDerived {
+    fn as_ref(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+/// Attach the memory charge to the allocation itself. Hyper may clone or slice `Bytes` after the response future
+/// is gone; `from_owner` keeps the permit until the final view of those bytes is dropped.
+async fn derived_response_charge() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_CHARGE).await.ok()
+}
+
+fn charged_derived(body: Bytes, charge: tokio::sync::OwnedSemaphorePermit) -> Bytes {
+    Bytes::from_owner(ChargedDerived { body, _charge: charge })
+}
+
+#[cfg(test)]
+static VARIANT_WATCHES: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, tokio::sync::oneshot::Sender<()>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn watch_variant_owner(source: &Path) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).insert(source.to_owned(), tx);
+    rx
+}
+
+#[cfg(test)]
+fn note_variant_owner(source: &Path) {
+    if let Some(tx) = crate::lock(VARIANT_WATCHES.get_or_init(Default::default)).remove(source) {
+        let _ = tx.send(());
+    }
+}
+
+fn response_sidecar(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_os_string();
+    name.push(".response");
+    PathBuf::from(name)
+}
+
+async fn remove_variant(file: &Path) {
+    let _ = tokio::fs::remove_file(file).await;
+    let _ = tokio::fs::remove_file(response_sidecar(file)).await;
+}
+
+fn variants_dir(source: &Path) -> PathBuf {
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let stem = source.file_stem().unwrap_or_default();
+    parent.join(".tmdb-prepared").join(stem)
+}
+
+/// Keep at most the current source generation's prepared representations. Builds are globally serialized, so no
+/// newer variant publisher can race this pass; a concurrent canonical replacement can at worst leave the just-built
+/// digest orphaned until the next successful build, never make it answer for the replacement.
+async fn retire_obsolete_variants(source: &Path, keep_digest: &[u8; 16]) {
+    let keep = crate::hex(keep_digest);
+    let Ok(mut entries) = tokio::fs::read_dir(variants_dir(source)).await else { return };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(record) = name.strip_suffix(".tmdb.json") else {
+            continue;
+        };
+        let mut parts = record.split('.');
+        let (Some(question), Some(digest), Some(fresh), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let hex = |value: &str| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let known_fresh =
+            fresh == LIST_TTL.as_secs().to_string() || fresh == DETAILS_TTL.as_secs().to_string();
+        if hex(question) && hex(digest) && known_fresh && digest != keep {
+            remove_variant(&entry.path()).await;
+        }
+    }
 }
 
 impl Detail {
@@ -493,6 +620,166 @@ impl Detail {
         files
     }
 
+    fn variant(&self, source: &Path, source_digest: &[u8; 16], fresh: Duration) -> PathBuf {
+        let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
+        let question = cache_key(&self.path, self.query(&appends).as_deref());
+        let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
+        variants_dir(source).join(format!(
+            "{suffix}.{}.{}.tmdb.json",
+            crate::hex(source_digest),
+            fresh.as_secs()
+        ))
+    }
+
+    /// Only representations used by a checked-in client become durable. An arbitrary public subset is still
+    /// answered, but reparsed on its next ask rather than multiplying files beside every canonical title.
+    fn durable_variant(&self) -> bool {
+        self.rest.is_empty()
+            && self.kept.iter().any(|appends| {
+                let known: BTreeSet<&str> = appends.split(',').filter(|a| !a.is_empty()).collect();
+                self.asked.len() == known.len() && self.asked.iter().all(|a| known.contains(a.as_str()))
+            })
+    }
+
+    async fn existing_variant(
+        &self,
+        source: &Path,
+        source_digest: &[u8; 16],
+    ) -> Option<(Prepared, Duration)> {
+        // Prefer the conservative short freshness if a cache from an interrupted/older build somehow contains both.
+        for fresh in [LIST_TTL, DETAILS_TTL] {
+            if let Some(file) =
+                crate::cache::open_json(&self.variant(source, source_digest, fresh), MAX_ANSWER_BYTES).await
+            {
+                return Some((Prepared::File(file), fresh));
+            }
+        }
+        None
+    }
+
+    async fn prepared_variant(
+        &self,
+        source_path: &Path,
+        source: crate::cache::JsonFile,
+    ) -> Option<(Prepared, Duration)> {
+        self.prepared_variant_with(source_path, source, self.durable_variant()).await
+    }
+
+    async fn prepared_variant_with(
+        &self,
+        source_path: &Path,
+        source: crate::cache::JsonFile,
+        durable: bool,
+    ) -> Option<(Prepared, Duration)> {
+        let source_digest = source.digest();
+        if durable {
+            if let Some(found) = self.existing_variant(source_path, &source_digest).await {
+                return Some(found);
+            }
+        }
+
+        // Waiters remain ordinary request futures: cancellation drops their open source FD and queue position.
+        // Only the strict permit holder becomes a detached owner, so abandoned requests cannot accumulate queued
+        // tasks while a multi-megabyte parse is in progress.
+        // Reserve the worst-case response before allocating or taking the one build permit. Waiting slow clients
+        // therefore cannot leave completed, uncharged bodies queued behind the budget, and a budget wait never
+        // prevents an exact file-only inspection from using the builder.
+        let charge = derived_response_charge().await?;
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let appends = self.asked.iter().map(String::as_str).collect::<Vec<_>>().join(",");
+        let question = cache_key(&self.path, self.query(&appends).as_deref());
+        let suffix = crate::hex(&Sha256::digest(question.as_bytes())[..16]);
+        let (all, asked, path, exact, source_path, durable, modified) = (
+            self.all,
+            self.asked.clone(),
+            self.path.clone(),
+            self.exact.clone(),
+            source_path.to_owned(),
+            durable,
+            source.modified(),
+        );
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            #[cfg(test)]
+            note_variant_owner(&source_path);
+            if durable {
+                for fresh in [LIST_TTL, DETAILS_TTL] {
+                    let variant = variants_dir(&source_path).join(format!(
+                        "{suffix}.{}.{}.tmdb.json",
+                        crate::hex(&source_digest),
+                        fresh.as_secs()
+                    ));
+                    if let Some(prepared) = crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
+                        return Some((Prepared::File(prepared), fresh));
+                    }
+                }
+            }
+            let body = source.bytes().await?;
+            let fresh = fresh_for_answer(&path, exact.as_deref(), &body).min(RETENTION);
+            let narrowed = if all.iter().all(|append| asked.contains(*append)) {
+                body
+            } else if body.len() < NARROW_INLINE_BYTES {
+                narrowed(all, &asked, body)
+            } else {
+                let kept = body.clone();
+                tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
+            };
+            if !durable {
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
+            }
+            let variant = variants_dir(&source_path).join(format!(
+                "{suffix}.{}.{}.tmdb.json",
+                crate::hex(&source_digest),
+                fresh.as_secs()
+            ));
+            // Publication is useful only while this digest remains canonical. The digest-qualified pathname makes a
+            // replacement safe even across the final check; the post-check removes the now-orphaned generation.
+            let current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await?;
+            if current.digest() != source_digest {
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
+            }
+            if !crate::cache::write_json_at(&variant, &narrowed, Some(modified)).await {
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
+            }
+            let still_current = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES)
+                .await
+                .is_some_and(|current| current.digest() == source_digest);
+            if !still_current {
+                remove_variant(&variant).await;
+                return Some((Prepared::Bytes(charged_derived(narrowed, charge)), fresh));
+            }
+            retire_obsolete_variants(&source_path, &source_digest).await;
+            let prepared = match crate::cache::open_json(&variant, MAX_ANSWER_BYTES).await {
+                Some(prepared) => Prepared::File(prepared),
+                None => Prepared::Bytes(charged_derived(narrowed, charge)),
+            };
+            Some((prepared, fresh))
+        });
+        task.await.ok()?
+    }
+
+    /// Inspect an exact cache generation under the same single-owner bound as a derived representation, then stream
+    /// its still-open inode. Known client shapes take the durable variant path so legacy exact entries are migrated
+    /// lazily; arbitrary exact questions keep no second file and retain no body-sized response buffer.
+    async fn prepared_exact(
+        &self,
+        source_path: &Path,
+        source: crate::cache::JsonFile,
+    ) -> Option<(Prepared, Duration)> {
+        if self.durable_variant() {
+            return self.prepared_variant_with(source_path, source, true).await;
+        }
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let (path, exact) = (self.path.clone(), self.exact.clone());
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let (source, body) = source.with_bytes().await?;
+            let fresh = fresh_for_answer(&path, exact.as_deref(), &body).min(RETENTION);
+            Some((Prepared::File(source), fresh))
+        });
+        task.await.ok()?
+    }
+
     /// An answer holding more than was asked, cut to what was: a record for a library's poster should not carry a
     /// series' every guest actor. What it keeps is TMDB's own, so the narrower question gets the answer it would have.
     ///
@@ -510,24 +797,80 @@ impl Detail {
         tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
     }
 
+    /// Build an in-memory derived response under both bounds: only one parse at a time, and a fixed charge which
+    /// follows the returned bytes through the response's lifetime. The caller reserves the charge before fetching
+    /// or taking the build permit, so completed bodies cannot pile up unaccounted while the response budget waits.
+    async fn prepared_narrowed(
+        &self,
+        body: Bytes,
+        charge: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<Prepared> {
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let (all, asked) = (self.all, self.asked.clone());
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let narrowed = if all.iter().all(|append| asked.contains(*append)) {
+                body
+            } else if body.len() < NARROW_INLINE_BYTES {
+                narrowed(all, &asked, body)
+            } else {
+                let kept = body.clone();
+                tokio::task::spawn_blocking(move || narrowed(all, &asked, body)).await.unwrap_or(kept)
+            };
+            Some(Prepared::Bytes(charged_derived(narrowed, charge)))
+        });
+        task.await.ok()?
+    }
+
     /// The freshest kept answer to this question, from any entry that holds it; else the first one past its
     /// freshness. Each is judged by its own age and what it says — an airing series stays fresh for hours.
     async fn kept(&self) -> Kept {
         let mut stale = Kept::Nothing;
         for (file, exact) in self.candidates() {
-            let Some((body, age, modified)) = read(&file).await else { continue };
-            if body == ABSENT {
+            let Some(source) = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await else { continue };
+            let (age, modified) = (source.age(), source.modified());
+            if source.matches(ABSENT) {
                 if age < ABSENT_TTL {
                     return Kept::Absent;
                 }
                 continue;
             }
-            let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
+            let (prepared, fresh) = if exact {
+                let Some(found) = self.prepared_exact(&file, source).await else { continue };
+                found
+            } else {
+                let Some(found) = self.prepared_variant(&file, source).await else { continue };
+                found
+            };
             if age < fresh {
-                return Kept::Hit(if exact { body } else { self.narrowed(body).await }, fresh, age, modified);
+                return Kept::Hit(prepared, fresh, age, modified);
             }
             if matches!(stale, Kept::Nothing) && age < RETENTION {
-                stale = Kept::Stale(if exact { body } else { self.narrowed(body).await }, modified, fresh);
+                stale = Kept::Stale(prepared, modified, fresh);
+            }
+        }
+        stale
+    }
+
+    /// The same lookup semantics as `kept`, without publication or the prepared-response queue. This is reserved for
+    /// internal consumers which need a JSON value rather than an HTTP body.
+    async fn kept_bytes(&self) -> KeptBytes {
+        let mut stale = KeptBytes::Nothing;
+        for (file, exact) in self.candidates() {
+            let Some((body, age, _)) = read_answer(&file).await else { continue };
+            if body == ABSENT {
+                if age < ABSENT_TTL {
+                    return KeptBytes::Absent;
+                }
+                continue;
+            }
+            let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
+            let body = if exact { body } else { self.narrowed(body).await };
+            if age < fresh {
+                return KeptBytes::Hit(body);
+            }
+            if matches!(stale, KeptBytes::Nothing) && age < RETENTION {
+                stale = KeptBytes::Stale(body);
             }
         }
         stale
@@ -611,16 +954,16 @@ async fn ask_kept(
     let fetched = if tokio::fs::try_exists(file).await.unwrap_or(false) {
         revalidate(state, path, query, key, rid, file).await
     } else {
-        fetch(state, path, query, key, rid).await.map(|(body, etag)| Fetched::Answer(body, etag))
+        fetch(state, path, query, key, rid).await.map(|(body, etag)| Revalidated::Answer(body, etag))
     };
     match fetched {
-        Ok(Fetched::Answer(body, etag)) => {
+        Ok(Revalidated::Answer(body, etag)) => {
             keep(file, &body, etag.as_deref()).await;
             Ok((body, "miss"))
         }
-        Ok(Fetched::Unchanged) => {
-            renew(file).await;
-            let Some((body, _, _)) = read(file).await else {
+        Ok(Revalidated::Unchanged(confirmed)) => {
+            let generation = renew_generation(confirmed, file).await;
+            let Some(body) = generation.bytes().await else {
                 return Err(refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable"));
             };
             Ok((body, "revalidated"))
@@ -672,9 +1015,11 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     // A hit never leaves the box, so it is not counted against anybody's budget: what the limits exist to
     // bound is what this origin asks TMDB, not what it already knows.
     if let Some(file) = &file {
-        if let Some((body, age, modified)) = read(file).await {
-            // What TMDB said narrows what the path alone could say: an airing series is kept for hours, not months.
-            let fresh = fresh_for_answer(&path, query.as_deref(), &body);
+        if let Some(prepared) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
+            let (age, modified) = (prepared.age(), prepared.modified());
+            // Movie and TV records are handled by `Detail`; every remaining exact endpoint's freshness is entirely
+            // path-based, so a hot list/search/subresource hit need not read JSON to rediscover it.
+            let fresh = if carries_moving(query.as_deref()) { LIST_TTL } else { fresh_for(&path) };
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
             //
@@ -684,11 +1029,11 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             // stays old and every later request repeats it, spending a budget unit each time, for as long as
             // RETENTION allows. It is also ahead of the per-IP bucket, so that is the unthrottled drain again.
             // Falling through to the cold path gets the bucket, the fetch, and a rewritten sentinel.
-            match verdict(body == ABSENT, age, fresh) {
+            match verdict(prepared.matches(ABSENT), age, fresh) {
                 Cached::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
                 Cached::Fresh => {
-                    return answer(
-                        body,
+                    return answer_prepared(
+                        Prepared::File(prepared),
                         &fresh_policy(fresh, fresh.saturating_sub(age)),
                         "hit",
                         modified,
@@ -700,19 +1045,28 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 Cached::Refresh if fresh != DETAILS_TTL && age < RETENTION => {
                     let asking = Refresh { cached, path, query, key: key.to_owned(), file: file.clone() };
                     refresh_behind(state, asking);
-                    return answer(body, "public, max-age=60", "stale", modified, asked);
+                    return answer_prepared(
+                        Prepared::File(prepared),
+                        "public, max-age=60",
+                        "stale",
+                        modified,
+                        asked,
+                    );
                 }
                 Cached::Refresh => {
                     return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
-                        Ok(Fetched::Answer(new, etag)) => {
+                        Ok(Revalidated::Answer(new, etag)) => {
                             keep(file, &new, etag.as_deref()).await;
                             crate::title_metadata::observe_tmdb(state, &path, &new);
                             // The series may have ended since it was last asked for, which gives it its months back.
                             let fresh = fresh_for_answer(&path, query.as_deref(), &new);
                             answer(new, &fresh_policy(fresh, fresh), "miss", SystemTime::now(), asked)
                         }
-                        Ok(Fetched::Unchanged) => {
-                            renew(file).await;
+                        Ok(Revalidated::Unchanged(confirmed)) => {
+                            let generation = renew_generation(confirmed, file).await;
+                            let Some(body) = generation.bytes().await else {
+                                return *refused(StatusCode::BAD_GATEWAY, "tmdb_answer_unreadable");
+                            };
                             crate::title_metadata::observe_tmdb(state, &path, &body);
                             answer(body, &fresh_policy(fresh, fresh), "revalidated", SystemTime::now(), asked)
                         }
@@ -775,7 +1129,13 @@ async fn detail_answer(
 ) -> Response {
     let mut asking = match detail.kept().await {
         Kept::Hit(body, fresh, age, modified) => {
-            return answer(body, &fresh_policy(fresh, fresh.saturating_sub(age)), "hit", modified, asked)
+            return answer_prepared(
+                body,
+                &fresh_policy(fresh, fresh.saturating_sub(age)),
+                "hit",
+                modified,
+                asked,
+            )
         }
         Kept::Absent => return *refused(StatusCode::NOT_FOUND, "not_found"),
         Kept::Stale(body, modified, fresh) if fresh != DETAILS_TTL => {
@@ -785,7 +1145,7 @@ async fn detail_answer(
                 state,
                 Refresh { cached, path: detail.path.clone(), query, key: key.to_owned(), file },
             );
-            return answer(body, "public, max-age=60", "stale", modified, asked);
+            return answer_prepared(body, "public, max-age=60", "stale", modified, asked);
         }
         // A settled record past its six months is asked again now, as it always was, without the allowance.
         Kept::Stale(..) => None,
@@ -800,7 +1160,7 @@ async fn detail_answer(
             // A question about this title that got here first has kept its answer by now.
             match detail.kept().await {
                 Kept::Hit(body, fresh, age, modified) => {
-                    return answer(
+                    return answer_prepared(
                         body,
                         &fresh_policy(fresh, fresh.saturating_sub(age)),
                         "hit",
@@ -813,11 +1173,19 @@ async fn detail_answer(
             }
         }
     };
+    // Reserve the eventual response before the upstream may allocate it. Without this ordering, many cold asks
+    // could each finish with a 4 MiB body and then retain it while waiting behind slow derived responses.
+    let Some(charge) = derived_response_charge().await else {
+        return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+    };
     match detail.ask(state, key, rid).await {
         Ok((whole, how, fresh)) => {
             // A 304 counts too: TMDB confirmed what is kept, and the observation's age starts over with it.
             crate::title_metadata::observe_tmdb(state, &detail.path, &whole);
-            answer(detail.narrowed(whole).await, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
+            let Some(body) = detail.prepared_narrowed(whole, charge).await else {
+                return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
+            };
+            answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
         }
         Err(response) => match &mut asking {
             Some(asking) => *asking.failed(response).await,
@@ -956,11 +1324,11 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     // A title's record is the same question the app asks next (`Detail`): answered from what the app keeps, and a
     // cold one fetched whole, so the page this preview was built for opens on a hit.
     if let Some(detail) = Detail::of(path, query, state.tmdb_cache_dir.as_deref()) {
-        let stale = match detail.kept().await {
-            Kept::Hit(body, ..) => return serde_json::from_slice(&body).ok(),
-            Kept::Absent => return None,
-            Kept::Stale(body, ..) => Some(body),
-            Kept::Nothing => None,
+        let stale = match detail.kept_bytes().await {
+            KeptBytes::Hit(body) => return serde_json::from_slice(&body).ok(),
+            KeptBytes::Absent => return None,
+            KeptBytes::Stale(body) => Some(body),
+            KeptBytes::Nothing => None,
         };
         // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
         let asked = 'asked: {
@@ -969,10 +1337,10 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
                 Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => return None,
                 Err(_) => break 'asked None,
             };
-            match detail.kept().await {
-                Kept::Hit(body, ..) => Some(body),
-                Kept::Absent => return None,
-                Kept::Stale(..) | Kept::Nothing => {
+            match detail.kept_bytes().await {
+                KeptBytes::Hit(body) => Some(body),
+                KeptBytes::Absent => return None,
+                KeptBytes::Stale(..) | KeptBytes::Nothing => {
                     if preview_allowed(state).is_none() {
                         break 'asked None;
                     }
@@ -996,7 +1364,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     let file = state.tmdb_cache_dir.as_ref().map(|dir| cache_path(dir, &cache_key(path, query)));
     let mut stale = None;
     if let Some(file) = &file {
-        if let Some((body, age, _)) = read(file).await {
+        if let Some((body, age, _)) = read_answer(file).await {
             // A remembered 404 answers as "no such thing" without spending anything.
             if body == ABSENT {
                 if age < ABSENT_TTL {
@@ -1021,20 +1389,21 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
     }
     let fetched = match (&file, &stale) {
         (Some(file), Some(_)) => revalidate(state, path, query, key, "meta", file).await,
-        _ => fetch(state, path, query, key, "meta").await.map(|(body, etag)| Fetched::Answer(body, etag)),
+        _ => fetch(state, path, query, key, "meta").await.map(|(body, etag)| Revalidated::Answer(body, etag)),
     };
     match fetched {
-        Ok(Fetched::Answer(body, etag)) => {
+        Ok(Revalidated::Answer(body, etag)) => {
             if let Some(file) = &file {
                 keep(file, &body, etag.as_deref()).await;
             }
             serde_json::from_slice(&body).ok()
         }
-        Ok(Fetched::Unchanged) => {
-            if let Some(file) = &file {
-                renew(file).await;
-            }
-            stale.and_then(|body| serde_json::from_slice(&body).ok())
+        Ok(Revalidated::Unchanged(confirmed)) => {
+            let generation = match &file {
+                Some(file) => renew_generation(confirmed, file).await,
+                None => confirmed.generation,
+            };
+            generation.bytes().await.and_then(|body| serde_json::from_slice(&body).ok())
         }
         Err(answer) => {
             if answer.status() == StatusCode::NOT_FOUND {
@@ -1059,6 +1428,56 @@ enum Fetched {
     Answer(Bytes, Option<String>),
     /// A 304: the kept answer is still TMDB's.
     Unchanged,
+}
+
+enum Revalidated {
+    Answer(Bytes, Option<String>),
+    /// The exact open body generation whose bound upstream tag TMDB confirmed.
+    Unchanged(Box<Confirmed>),
+}
+
+struct Confirmed {
+    generation: crate::cache::JsonFile,
+    etag: BoundEtag,
+}
+
+const ETAG_MAGIC: &[u8; 8] = b"DENTAG2\0";
+const MAX_ETAG_BYTES: usize = 1024;
+
+struct BoundEtag {
+    value: String,
+    file: tokio::fs::File,
+}
+
+impl BoundEtag {
+    async fn renew(self, modified: SystemTime) {
+        let file = self.file.into_std().await;
+        let _ = tokio::task::spawn_blocking(move || file.set_modified(modified)).await;
+    }
+}
+
+async fn bound_etag(file: &Path, digest: &[u8; 16]) -> Option<BoundEtag> {
+    let opened = tokio::fs::File::open(file.with_extension("etag")).await.ok()?;
+    let len = usize::try_from(opened.metadata().await.ok()?.len()).ok()?;
+    if !(24..=24 + MAX_ETAG_BYTES).contains(&len) {
+        return None;
+    }
+    let mut bytes = vec![0; len];
+    let mut opened = opened;
+    use tokio::io::AsyncReadExt as _;
+    opened.read_exact(&mut bytes).await.ok()?;
+    if &bytes[..8] != ETAG_MAGIC || &bytes[8..24] != digest {
+        return None;
+    }
+    let value = String::from_utf8(bytes[24..].to_vec()).ok().filter(|tag| !tag.is_empty())?;
+    Some(BoundEtag { value, file: opened })
+}
+
+async fn renew_generation(confirmed: Box<Confirmed>, file: &Path) -> crate::cache::JsonFile {
+    let Confirmed { generation, etag } = *confirmed;
+    let modified = SystemTime::now();
+    let (generation, ()) = tokio::join!(generation.renew(file, modified), etag.renew(modified));
+    generation
 }
 
 /// Ask TMDB. The error case is already a response, so a caller holding a kept copy can discard it and serve
@@ -1087,9 +1506,21 @@ async fn revalidate(
     key: &str,
     rid: &str,
     file: &Path,
-) -> Result<Fetched, Box<Response>> {
-    let etag = tokio::fs::read_to_string(file.with_extension("etag")).await.ok();
-    send(state, path, query, key, rid, etag.as_deref().filter(|t| !t.is_empty())).await
+) -> Result<Revalidated, Box<Response>> {
+    let Some(generation) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await else {
+        return send(state, path, query, key, rid, None).await.map(|fetched| match fetched {
+            Fetched::Answer(body, etag) => Revalidated::Answer(body, etag),
+            Fetched::Unchanged => unreachable!("no validator was sent"),
+        });
+    };
+    let etag = bound_etag(file, &generation.digest()).await;
+    match send(state, path, query, key, rid, etag.as_ref().map(|etag| etag.value.as_str())).await? {
+        Fetched::Answer(body, etag) => Ok(Revalidated::Answer(body, etag)),
+        Fetched::Unchanged => Ok(Revalidated::Unchanged(Box::new(Confirmed {
+            generation,
+            etag: etag.expect("TMDB cannot answer 304 without the bound ETag we sent"),
+        }))),
+    }
 }
 
 async fn send(
@@ -1224,6 +1655,12 @@ pub(crate) async fn read(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
     Some((Bytes::from(bytes), age, modified))
 }
 
+async fn read_answer(file: &Path) -> Option<(Bytes, Duration, SystemTime)> {
+    let opened = crate::cache::open_json(file, MAX_ANSWER_BYTES).await?;
+    let (age, modified) = (opened.age(), opened.modified());
+    Some((opened.bytes().await?, age, modified))
+}
+
 /// Written beside and renamed over, so a reader never sees half an answer. Ordinary caches may ignore a
 /// failure; endpoints that promise persistence can surface it.
 ///
@@ -1258,19 +1695,15 @@ pub(crate) async fn write(file: &Path, body: &Bytes) -> bool {
 async fn keep(file: &Path, body: &Bytes, etag: Option<&str>) {
     let tag = file.with_extension("etag");
     let _ = tokio::fs::remove_file(&tag).await;
-    write(file, body).await;
-    if let Some(etag) = etag {
-        let _ = tokio::fs::write(&tag, etag).await;
+    if !crate::cache::write_json(file, body).await {
+        return;
     }
-}
-
-/// TMDB said the kept answer is still its own, so it counts as fetched now, tag and all: freshness and TMDB's six
-/// months start over from this confirmation, as they would from a download of the same bytes.
-async fn renew(file: &Path) {
-    for path in [file.to_path_buf(), file.with_extension("etag")] {
-        if let Ok(f) = tokio::fs::File::options().write(true).open(&path).await {
-            let _ = f.into_std().await.set_modified(SystemTime::now());
-        }
+    if let Some(etag) = etag.filter(|etag| !etag.is_empty() && etag.len() <= MAX_ETAG_BYTES) {
+        let mut record = Vec::with_capacity(24 + etag.len());
+        record.extend_from_slice(ETAG_MAGIC);
+        record.extend_from_slice(&Sha256::digest(body)[..16]);
+        record.extend_from_slice(etag.as_bytes());
+        write(&tag, &Bytes::from(record)).await;
     }
 }
 
@@ -1278,6 +1711,29 @@ async fn renew(file: &Path) {
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path) {
     sweep_older_than(dir, RETENTION).await;
+    sweep_prepared(dir, RETENTION).await;
+}
+
+async fn sweep_prepared(dir: &Path, max_age: Duration) {
+    let root = dir.join(".tmdb-prepared");
+    let Ok(mut sources) = tokio::fs::read_dir(&root).await else { return };
+    while let Ok(Some(source)) = sources.next_entry().await {
+        let Ok(mut entries) = tokio::fs::read_dir(source.path()).await else { continue };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let expired = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age > max_age);
+            if expired {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+        let _ = tokio::fs::remove_dir(source.path()).await;
+    }
+    let _ = tokio::fs::remove_dir(root).await;
 }
 
 /// The same sweep for another cache with its own ceiling (`warnings.rs`).
@@ -1327,13 +1783,13 @@ fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
         // Refused, over budget or unreachable: what is kept stays, and the next stale read asks again.
         let (path, query, key) = (&asking.path, asking.query.as_deref(), &asking.key);
         match revalidate(&state, path, query, key, "refresh", &asking.file).await {
-            Ok(Fetched::Answer(body, etag)) => {
+            Ok(Revalidated::Answer(body, etag)) => {
                 keep(&asking.file, &body, etag.as_deref()).await;
                 crate::title_metadata::observe_tmdb(&state, path, &body);
             }
-            Ok(Fetched::Unchanged) => {
-                renew(&asking.file).await;
-                if let Some((body, _, _)) = read(&asking.file).await {
+            Ok(Revalidated::Unchanged(confirmed)) => {
+                let generation = renew_generation(confirmed, &asking.file).await;
+                if let Some(body) = generation.bytes().await {
                     crate::title_metadata::observe_tmdb(&state, path, &body);
                 }
             }
@@ -1381,6 +1837,26 @@ fn answer(body: Bytes, policy: &str, how: &'static str, modified: SystemTime, as
     }
     headers.insert("x-den-tmdb", HeaderValue::from_static(how));
     crate::cache::validated(resp, &body, Some(modified), asked)
+}
+
+fn answer_prepared(
+    body: Prepared,
+    policy: &str,
+    how: &'static str,
+    modified: SystemTime,
+    asked: &HeaderMap,
+) -> Response {
+    match body {
+        Prepared::Bytes(body) => answer(body, policy, how, modified, asked),
+        Prepared::File(body) => {
+            let mut response = body.response_at(modified);
+            if let Ok(value) = HeaderValue::from_str(policy) {
+                response.headers_mut().insert(header::CACHE_CONTROL, value);
+            }
+            response.headers_mut().insert("x-den-tmdb", HeaderValue::from_static(how));
+            crate::cache::revalidate(response, asked)
+        }
+    }
 }
 
 fn json(status: StatusCode, code: &str) -> Response {
@@ -1749,23 +2225,28 @@ mod tests {
         assert!(!file.with_extension("tmp").exists(), "the temporary file was left behind");
     }
 
-    /// A kept answer's ETag travels with it and leaves with it. An answer kept without one, or a 404 kept in its
-    /// place, must never be revalidated with the tag of what was there before: TMDB would answer 304 for a body
+    /// A kept answer's ETag is bound to its digest and leaves with it. An answer kept without one, or a 404 kept in
+    /// its place, must never be revalidated with the tag of what was there before: TMDB would answer 304 for a body
     /// that is not the one on disk.
     #[tokio::test]
-    async fn an_answer_is_kept_with_its_etag_and_a_304_renews_both() {
+    async fn an_answer_is_kept_with_a_bound_etag_and_a_304_renews_its_body() {
         let dir = temp_dir();
         let file = cache_path(&dir, &cache_key("/3/trending/all/week", None));
         let tag = file.with_extension("etag");
         keep(&file, &Bytes::from_static(b"{\"page\":1}"), Some("W/\"abc\"")).await;
-        assert_eq!(std::fs::read_to_string(&tag).unwrap(), "W/\"abc\"");
+        let digest = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await.unwrap().digest();
+        assert_eq!(bound_etag(&file, &digest).await.map(|etag| etag.value).as_deref(), Some("W/\"abc\""));
 
         aged(&file, LIST_TTL + Duration::from_secs(60));
         aged(&tag, LIST_TTL + Duration::from_secs(60));
-        renew(&file).await;
+        let generation = crate::cache::open_json(&file, MAX_ANSWER_BYTES).await.unwrap();
+        let etag = bound_etag(&file, &digest).await.unwrap();
+        let _ = renew_generation(Box::new(Confirmed { generation, etag }), &file).await;
         assert!(read(&file).await.unwrap().1 < Duration::from_secs(5), "a 304 counts as fetched now");
-        let tag_age = SystemTime::now().duration_since(std::fs::metadata(&tag).unwrap().modified().unwrap());
-        assert!(tag_age.unwrap_or_default() < Duration::from_secs(5), "and so does its tag");
+        let tag_age =
+            SystemTime::now().duration_since(std::fs::metadata(&tag).unwrap().modified().unwrap()).unwrap();
+        assert!(tag_age < Duration::from_secs(5), "the exact digest-bound ETag was not renewed");
+        assert_eq!(bound_etag(&file, &digest).await.map(|etag| etag.value).as_deref(), Some("W/\"abc\""));
 
         keep(&file, &Bytes::from_static(b"{\"page\":2}"), None).await;
         assert!(!tag.exists(), "an answer kept without a tag drops the old one");
@@ -1965,6 +2446,543 @@ mod tests {
         let tv_page = "/tmdb/3/tv/1399?append_to_response=aggregate_credits,recommendations,videos,external_ids,content_ratings,watch/providers";
         assert_eq!(detail(&h, tv_page).await.0, "hit");
         assert_eq!(crate::lock(&asked).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_narrow_detail_is_prepared_once_and_bound_to_the_whole_generation() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "prepared-detail");
+        let asked = tmdb_answering("prepared-detail", "Ended");
+        assert_eq!(detail(&h, "/tmdb/3/movie/550?append_to_response=credits").await.0, "miss");
+
+        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&cache)).unwrap();
+        let source = detail.whole().1;
+        let source_digest = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap().digest();
+        let variant = detail.variant(&source, &source_digest, DETAILS_TTL);
+        assert!(!variant.exists(), "the miss response is already resident and needs no second write");
+
+        let first = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
+        assert_eq!(first.headers()["x-den-tmdb"], "hit");
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert!(variant.exists());
+        assert_eq!(body_json(first).await["credits"]["from"], "credits");
+
+        let repeated = h
+            .send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[("if-none-match", &etag)])
+            .await;
+        assert_eq!(repeated.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(crate::lock(&asked).len(), 1, "a prepared representation never asks TMDB");
+
+        let replacement = Bytes::from_static(
+            br#"{"id":550,"title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        keep(&source, &replacement, None).await;
+        let changed = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
+        assert_ne!(changed.headers()[header::ETAG], etag.as_str());
+        assert_eq!(body_json(changed).await["credits"]["from"], "new");
+    }
+
+    #[tokio::test]
+    async fn slow_exact_hits_keep_open_files_not_body_sized_buffers() {
+        let dir = temp_dir();
+        let detail =
+            Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
+        let exact = detail.exact().1;
+        let cast: Vec<_> = (0..7000)
+            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
+            .collect();
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({"id":550,"title":"legacy","credits":{"cast":cast}}))
+                .unwrap(),
+        );
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
+        crate::cache::write_json(&exact, &body).await;
+        let digest = crate::cache::open_json(&exact, MAX_ANSWER_BYTES).await.unwrap().digest();
+        let variant = detail.variant(&exact, &digest, DETAILS_TTL);
+
+        // Model the 48 slow bulk responses the server admits at once. Each result remains alive and unread: a
+        // Bytes-backed response would retain more than 96 MiB here; prepared hits retain only open descriptors.
+        let mut requests = Vec::new();
+        for _ in 0..crate::handler::BULK_REQUESTS {
+            let detail = Arc::clone(&detail);
+            requests.push(tokio::spawn(async move { detail.kept().await }));
+        }
+        let mut held = Vec::new();
+        for request in requests {
+            match request.await.unwrap() {
+                Kept::Hit(prepared @ Prepared::File(_), fresh, _, _) => {
+                    assert_eq!(fresh, DETAILS_TTL);
+                    held.push(prepared);
+                }
+                _ => panic!("an exact hit retained an allocated body instead of an open prepared file"),
+            }
+        }
+        assert_eq!(held.len(), crate::handler::BULK_REQUESTS);
+        assert!(variant.exists(), "the legacy exact shape was not migrated lazily");
+        let bodies = std::fs::read_dir(variants_dir(&exact))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
+            .count();
+        assert_eq!(bodies, 1, "concurrent owners published duplicate prepared generations");
+
+        // The internal canonical TV shape contains both credit forms and is intentionally not one of KEPT_TV's
+        // external client shapes. It is nevertheless a fixed shape and must not fall back to retained Bytes when a
+        // caller asks that exact question.
+        let canonical_query = format!("append_to_response={}", TV_APPENDS.join(","));
+        let canonical = Detail::of("/3/tv/1399", Some(&canonical_query), Some(&dir)).unwrap();
+        assert!(!canonical.durable_variant());
+        assert_eq!(canonical.exact().1, canonical.whole().1);
+        let canonical_file = canonical.whole().1;
+        let canonical_body = Bytes::from_static(
+            br#"{"id":1399,"status":"Ended","aggregate_credits":{},"content_ratings":{},"credits":{},"external_ids":{},"recommendations":{},"videos":{},"watch/providers":{}}"#,
+        );
+        crate::cache::write_json(&canonical_file, &canonical_body).await;
+        let canonical_digest =
+            crate::cache::open_json(&canonical_file, MAX_ANSWER_BYTES).await.unwrap().digest();
+        match canonical.kept().await {
+            Kept::Hit(Prepared::File(_), fresh, _, _) => assert_eq!(fresh, LIST_TTL),
+            _ => panic!("the exact canonical shape was not prepared as a streamed file"),
+        }
+        assert!(
+            !canonical.variant(&canonical_file, &canonical_digest, LIST_TTL).exists(),
+            "the canonical file itself is the prepared representation"
+        );
+    }
+
+    async fn assert_slow_derived_responses_are_bounded(detail: Arc<Detail>, source_path: PathBuf) {
+        let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
+        assert_eq!(capacity, 4, "keep this test's expected response ceiling explicit");
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..crate::handler::BULK_REQUESTS {
+            let detail = Arc::clone(&detail);
+            let source_path = source_path.clone();
+            requests.spawn(async move {
+                let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+                detail.prepared_variant(&source_path, source).await.unwrap()
+            });
+        }
+
+        let mut held = Vec::new();
+        for _ in 0..capacity {
+            let (prepared, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+                .await
+                .expect("a derived response never acquired its bounded charge")
+                .expect("a derived response task vanished")
+                .unwrap();
+            assert!(matches!(prepared, Prepared::Bytes(_)));
+            held.push(answer_prepared(
+                prepared,
+                "public, max-age=60",
+                "hit",
+                SystemTime::now(),
+                &HeaderMap::new(),
+            ));
+        }
+        assert_eq!(derived_response_budget().available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), requests.join_next()).await.is_err(),
+            "a fifth slow response retained an uncharged derived body"
+        );
+
+        // The charge follows the response body: releasing one unread response lets exactly one waiting builder
+        // finish. The remaining waiters are request-owned and cancellation removes them from the build queue.
+        drop(held.pop());
+        let (next, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
+            .await
+            .expect("dropping a response did not release its charge")
+            .expect("the next derived response task vanished")
+            .unwrap();
+        assert!(matches!(next, Prepared::Bytes(_)));
+        drop(next);
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
+        drop(held);
+
+        // An owner detached between taking the build permit and observing cancellation may finish once the held
+        // responses leave. Reacquiring the whole budget proves it did not leak either its task or its charge.
+        let all = tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(derived_response_budget()).acquire_many_owned(DERIVED_RESPONSE_BUDGET_BYTES as u32),
+        )
+        .await
+        .expect("cancelled derived responses retained their memory charge")
+        .unwrap();
+        drop(all);
+    }
+
+    #[tokio::test]
+    async fn forty_eight_slow_arbitrary_and_failed_publication_responses_stay_bounded() {
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "id": 550,
+                "title": "large",
+                "credits": {"cast": (0..7000).map(|id| serde_json::json!({
+                    "id": id,
+                    "name": format!("actor-{id}"),
+                    "character": "x".repeat(260)
+                })).collect::<Vec<_>>()},
+                "external_ids": {},
+                "recommendations": {},
+                "release_dates": {},
+                "videos": {},
+                "watch/providers": {}
+            }))
+            .unwrap(),
+        );
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
+
+        // An unknown subset is intentionally not durable, but its slow response still owns a large allocation.
+        let arbitrary_dir = temp_dir();
+        let arbitrary = Arc::new(
+            Detail::of("/3/movie/550", Some("append_to_response=credits,videos"), Some(&arbitrary_dir))
+                .unwrap(),
+        );
+        assert!(!arbitrary.durable_variant());
+        let arbitrary_source = arbitrary.whole().1;
+        crate::cache::write_json(&arbitrary_source, &body).await;
+        assert_slow_derived_responses_are_bounded(arbitrary, arbitrary_source).await;
+
+        // A normal durable shape must take the same bounded fallback when its prepared directory cannot be made.
+        let failed_dir = temp_dir();
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        std::fs::write(failed_dir.join(".tmdb-prepared"), b"not a directory").unwrap();
+        let failed = Arc::new(
+            Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&failed_dir)).unwrap(),
+        );
+        assert!(failed.durable_variant());
+        let failed_source = failed.whole().1;
+        crate::cache::write_json(&failed_source, &body).await;
+        assert_slow_derived_responses_are_bounded(failed, failed_source).await;
+    }
+
+    #[tokio::test]
+    async fn a_late_old_generation_build_cannot_publish_for_a_new_source() {
+        let dir = temp_dir();
+        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
+        let source_path = detail.whole().1;
+        let old = Bytes::from_static(
+            br#"{"id":550,"title":"old","credits":{"from":"old"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        keep(&source_path, &old, None).await;
+        let old_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+        let old_digest = old_source.digest();
+        let old_variant = detail.variant(&source_path, &old_digest, DETAILS_TTL);
+
+        let new = Bytes::from_static(
+            br#"{"id":550,"title":"new","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        keep(&source_path, &new, None).await;
+        let new_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+        let new_digest = new_source.digest();
+        let new_variant = detail.variant(&source_path, &new_digest, DETAILS_TTL);
+        assert_ne!(old_variant, new_variant);
+
+        let (old_answer, _) = detail.prepared_variant(&source_path, old_source).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&old_answer.bytes().await.unwrap()).unwrap()["title"],
+            "old"
+        );
+        assert!(!old_variant.exists(), "a displaced generation was published late");
+
+        let (new_answer, _) = detail.prepared_variant(&source_path, new_source).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&new_answer.bytes().await.unwrap()).unwrap()["title"],
+            "new"
+        );
+        assert!(new_variant.exists());
+    }
+
+    #[tokio::test]
+    async fn prepared_detail_replacements_keep_only_one_bounded_generation() {
+        let dir = temp_dir();
+        let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
+        let source_path = detail.whole().1;
+        let mut expected_len = 0;
+
+        for generation in 0..24 {
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "id": 550,
+                    "title": format!("generation-{generation}"),
+                    "credits": {"cast": [{"id": generation, "name": "actor"}]},
+                    "external_ids": {},
+                    "recommendations": {},
+                    "release_dates": {},
+                    "videos": {},
+                    "watch/providers": {}
+                }))
+                .unwrap(),
+            );
+            assert!(crate::cache::write_json(&source_path, &body).await);
+            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
+            expected_len = prepared.bytes().await.unwrap().len() as u64;
+
+            let derived: Vec<_> = std::fs::read_dir(variants_dir(&source_path))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
+                .collect();
+            assert_eq!(derived.len(), 1, "generation {generation} left obsolete prepared bodies");
+            assert_eq!(derived[0].metadata().unwrap().len(), expected_len);
+        }
+
+        let derived_bytes: u64 = std::fs::read_dir(variants_dir(&source_path))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum();
+        assert_eq!(derived_bytes, expected_len + 64, "one body and its fixed metadata sidecar are the bound");
+
+        sweep_prepared(&dir, Duration::ZERO).await;
+        assert!(
+            !variants_dir(&source_path).exists(),
+            "retention cleanup left the per-source directory behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_variant_request_does_not_release_its_build_owner() {
+        let dir = temp_dir();
+        let detail =
+            Detail::of("/3/tv/1399", Some("append_to_response=credits,external_ids"), Some(&dir)).unwrap();
+        let source_path = detail.whole().1;
+        let cast: Vec<_> = (0..9000)
+            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
+            .collect();
+        let mut record = serde_json::json!({"id":1399,"status":"Ended","credits":{"cast":cast}});
+        for append in TV_APPENDS {
+            if append != "credits" {
+                record[append] = serde_json::json!({"results":[]});
+            }
+        }
+        let body = Bytes::from(serde_json::to_vec(&record).unwrap());
+        assert!(body.len() < MAX_ANSWER_BYTES);
+        crate::cache::write_json(&source_path, &body).await;
+        let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+        let digest = source.digest();
+        let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
+
+        let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
+        let owner_started = watch_variant_owner(&source_path);
+        let build = tokio::spawn(async move { detail.prepared_variant(&source_path, source).await });
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), owner_started)
+            .await
+            .expect("the owner task never took its build permit")
+            .expect("the owner task dropped its start signal");
+        build.abort();
+        for _ in 0..200 {
+            if variant.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(variant.exists(), "the requester owned and cancelled parse/publication");
+        let permit =
+            tokio::time::timeout(Duration::from_secs(2), Arc::clone(detail_builds()).acquire_owned())
+                .await
+                .expect("the build owner retained its permit forever")
+                .unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn cancelled_variant_waiters_never_become_detached_builds() {
+        let dir = temp_dir();
+        let detail =
+            Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
+        let source_path = detail.whole().1;
+        let body = Bytes::from_static(
+            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        assert!(crate::cache::write_json(&source_path, &body).await);
+        let digest = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap().digest();
+        let variant = detail.variant(&source_path, &digest, DETAILS_TTL);
+        let held = Arc::clone(detail_builds()).acquire_owned().await.unwrap();
+
+        let mut waiters = Vec::new();
+        for _ in 0..64 {
+            let detail = Arc::clone(&detail);
+            let path = source_path.clone();
+            let source = crate::cache::open_json(&path, MAX_ANSWER_BYTES).await.unwrap();
+            waiters.push(tokio::spawn(async move { detail.prepared_variant(&path, source).await }));
+        }
+        tokio::task::yield_now().await;
+        for waiter in &waiters {
+            waiter.abort();
+        }
+        for waiter in waiters {
+            let _ = waiter.await;
+        }
+        drop(held);
+
+        let permit =
+            tokio::time::timeout(Duration::from_secs(2), Arc::clone(detail_builds()).acquire_owned())
+                .await
+                .expect("cancelled waiters left detached owners queued")
+                .unwrap();
+        assert!(!variant.exists(), "a cancelled waiter published after its request ended");
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn arbitrary_append_subset_churn_does_not_create_derived_files() {
+        let dir = temp_dir();
+        let whole = Detail::of("/3/movie/550", None, Some(&dir)).unwrap();
+        let source_path = whole.whole().1;
+        let body = Bytes::from_static(
+            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        crate::cache::write_json(&source_path, &body).await;
+        for query in [
+            "append_to_response=credits,videos",
+            "append_to_response=external_ids,videos",
+            "append_to_response=credits,external_ids,videos",
+            "append_to_response=recommendations,release_dates",
+        ] {
+            let detail = Detail::of("/3/movie/550", Some(query), Some(&dir)).unwrap();
+            assert!(!detail.durable_variant(), "the test accidentally named a checked-in client shape");
+            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+            assert!(detail.prepared_variant(&source_path, source).await.is_some());
+        }
+        let derived = std::fs::read_dir(variants_dir(&source_path))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmdb.json"))
+            .count();
+        assert_eq!(derived, 0, "public subset churn amplified the durable cache");
+    }
+
+    #[tokio::test]
+    async fn checked_in_appends_with_arbitrary_rest_do_not_create_derived_files() {
+        let dir = temp_dir();
+        let body = Bytes::from_static(
+            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        for n in 0..32 {
+            let query = format!("append_to_response=credits&language=x-private-{n}");
+            let detail = Detail::of("/3/movie/550", Some(&query), Some(&dir)).unwrap();
+            assert!(!detail.durable_variant(), "an arbitrary complete query was called a checked-in shape");
+            let source_path = detail.whole().1;
+            crate::cache::write_json(&source_path, &body).await;
+            let source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
+            let (prepared, _) = detail.prepared_variant(&source_path, source).await.unwrap();
+            assert!(matches!(prepared, Prepared::Bytes(_)));
+            drop(prepared);
+        }
+        assert!(
+            !dir.join(".tmdb-prepared").exists(),
+            "arbitrary rest parameters amplified the durable cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_304_renews_and_returns_only_the_generation_whose_tag_was_sent() {
+        let cache = temp_dir();
+        let file = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
+        let old = Bytes::from_static(
+            br#"{"id":550,"title":"old","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+        );
+        keep(&file, &old, Some("W/\"old\"")).await;
+        aged(&file, DETAILS_TTL + Duration::from_secs(60));
+
+        let replacement = file.with_extension("replacement");
+        let current = file.clone();
+        crate::lock(&UPSTREAMS).push((
+            "304-generation-race".to_owned(),
+            Arc::new(move |_: &str| {
+                std::fs::write(
+                    &replacement,
+                    br#"{"id":550,"title":"new","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+                )
+                .unwrap();
+                std::fs::rename(&replacement, &current).unwrap();
+                Ok(Fetched::Unchanged)
+            }) as Upstream,
+        ));
+        let kept_in = cache.clone();
+        let h = Harness::in_dir_with(temp_dir(), move |state| {
+            state.tmdb_key = Some("304-generation-race".into());
+            state.tmdb_cache_dir = Some(kept_in);
+        });
+
+        let response = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
+        assert_eq!(response.headers()["x-den-tmdb"], "revalidated");
+        assert_eq!(body_json(response).await["title"], "old", "304 returned bytes from another generation");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&file).unwrap()).unwrap()["title"],
+            "new"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_tmdb_hit_streams_and_validates_from_fixed_metadata() {
+        let cache = temp_dir();
+        let h = lending_as(&cache, "exact-stream");
+        let file = cache_path(&cache, &cache_key("/3/trending/all/week", None));
+        let body = Bytes::from(vec![b'x'; 2 * NARROW_INLINE_BYTES + 17]);
+        keep(&file, &body, None).await;
+
+        let first = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.headers()["x-den-tmdb"], "hit");
+        assert_eq!(first.headers()[header::CONTENT_LENGTH], body.len().to_string());
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(first.into_body().collect().await.unwrap().to_bytes(), body);
+
+        let repeated = h.send("HEAD", "/tmdb/3/trending/all/week", None, &[("if-none-match", &etag)]).await;
+        assert_eq!(repeated.status(), StatusCode::NOT_MODIFIED);
+        assert!(repeated.into_body().collect().await.unwrap().to_bytes().is_empty());
+    }
+
+    /// Manual release-mode probe for the expensive real-world shape this cache is meant to remove. Ignored in CI:
+    /// run with `cargo test --release tmdb_detail_variant_benchmark -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn tmdb_detail_variant_benchmark() {
+        let dir = temp_dir();
+        let detail =
+            Detail::of("/3/tv/1399", Some("append_to_response=credits,external_ids"), Some(&dir)).unwrap();
+        let source = detail.whole().1;
+        let cast: Vec<_> = (0..6000)
+            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(240)}))
+            .collect();
+        let mut record = serde_json::json!({"id":1399,"status":"Ended","credits":{"cast":cast}});
+        for append in TV_APPENDS {
+            if append != "credits" {
+                record[append] = serde_json::json!({"results":[]});
+            }
+        }
+        let body = Bytes::from(serde_json::to_vec(&record).unwrap());
+        assert!(body.len() > 1024 * 1024 && body.len() < MAX_ANSWER_BYTES, "{} bytes", body.len());
+        crate::cache::write_json(&source, &body).await;
+
+        let old_started = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(detail.narrowed(body.clone()).await);
+        }
+        let old = old_started.elapsed() / 10;
+
+        let first_started = std::time::Instant::now();
+        let canonical = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap();
+        std::hint::black_box(detail.prepared_variant(&source, canonical).await.unwrap());
+        let first = first_started.elapsed();
+
+        let repeat_started = std::time::Instant::now();
+        for _ in 0..1000 {
+            let canonical = crate::cache::open_json(&source, MAX_ANSWER_BYTES).await.unwrap();
+            std::hint::black_box(detail.prepared_variant(&source, canonical).await.unwrap());
+        }
+        let repeat = repeat_started.elapsed() / 1000;
+        eprintln!(
+            "{} bytes: prior reparse {old:?}; first prepared {first:?}; repeat metadata hit {repeat:?}",
+            body.len()
+        );
     }
 
     /// The cache on the box is not started over: an answer kept under the question a client asked before the whole
