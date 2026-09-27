@@ -823,12 +823,15 @@ async fn changes(
         .expect("the library response budget is never closed");
     if !gzip {
         let generation = state.store.generation().to_owned();
-        let page =
+        let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
+            page
+        } else {
             match tokio::task::spawn_blocking(move || store.range_chunks(since, limit, &generation)).await {
                 Ok(Ok(page)) => page,
                 Ok(Err(reason)) => return internal("library read", v3_io(reason)),
                 Err(reason) => return internal("library read task", io::Error::other(reason)),
-            };
+            }
+        };
         let length = page.len;
         let body = Body::new(ChunkBody::new(page));
         let mut response =

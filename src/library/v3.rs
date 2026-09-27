@@ -115,6 +115,7 @@ pub(super) trait LibraryStore: Send + Sync {
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError>;
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage>;
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError>;
     #[cfg(test)]
     fn disk_bytes(&self) -> Result<u64, StoreError>;
@@ -482,6 +483,13 @@ impl LibraryStore for RedbLibrary {
         Ok(RangePage { entries, head, more })
     }
 
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
+        let prepared = self.prepared.try_lock().ok()?;
+        let cached = prepared.as_ref()?;
+        (cached.since == since && cached.limit == limit.min(MAX_LIMIT) && cached.generation == generation)
+            .then(|| cached.page.clone())
+    }
+
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
         const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -644,6 +652,10 @@ impl LibraryStore for StoreLease {
 
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
         self.store.range(since, limit)
+    }
+
+    fn cached_range_chunks(&self, since: u64, limit: usize, generation: &str) -> Option<ChunkPage> {
+        self.store.cached_range_chunks(since, limit, generation)
     }
 
     fn range_chunks(&self, since: u64, limit: usize, generation: &str) -> Result<ChunkPage, StoreError> {
@@ -1223,7 +1235,7 @@ mod tests {
         let store = manager.library("1111111111111111", TOKEN).unwrap();
         store.apply(&[Write { key: K1.into(), base: 0, value: "old".into() }]).unwrap();
         let first = store.range_chunks(0, 500, "generation").unwrap();
-        let hit = store.range_chunks(0, 500, "generation").unwrap();
+        let hit = store.cached_range_chunks(0, 500, "generation").unwrap();
         assert_eq!(first.len, hit.len);
         assert_eq!(first.chunks[0].as_ptr(), hit.chunks[0].as_ptr(), "the immutable bytes are shared");
 
