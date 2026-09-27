@@ -183,6 +183,8 @@ impl CompressionJob {
             }
             None => compression.jobs[1] += 1,
         }
+        // `self` drops below and returns the active gauge through the same mutex.
+        drop(compression);
     }
 }
 
