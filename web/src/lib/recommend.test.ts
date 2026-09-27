@@ -31,7 +31,12 @@ describe('recommendBody', () => {
       named: new Map([
         [
           'movie:603',
-          film(603, { genreIds: [28, 878], countries: ['US'], releaseDate: '1999-03-31' }),
+          film(603, {
+            year: 1999,
+            genreIds: [28, 878],
+            countries: ['US'],
+            releaseDate: '1999-03-31',
+          }),
         ],
       ]),
       owned: new Set(['tv:1438', 'movie:603', 'nonsense']),
@@ -59,7 +64,13 @@ describe('recommendBody', () => {
     expect(body.library[1]).toMatchObject({
       type: 'movie',
       id: 603,
-      hint: { genreIds: [28, 878], countries: ['US'], releaseDate: '1999-03-31' },
+      hint: {
+        title: 'T603',
+        year: 1999,
+        genreIds: [28, 878],
+        countries: ['US'],
+        releaseDate: '1999-03-31',
+      },
     });
     expect(body.owned).toEqual([
       { type: 'series', id: 1438 },

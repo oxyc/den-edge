@@ -81,6 +81,10 @@ function hintOf(title: Title) {
       ? title.rating
       : undefined;
   return {
+    // For a library title outside Atlas's corpus, these let /recommend build a transient semantic vector instead
+    // of losing all plot-taste evidence. They are public TMDB identity, never persisted by Atlas.
+    title: title.title,
+    year: title.year,
     releaseDate: title.releaseDate,
     genreIds: title.genreIds,
     originalLanguage: title.originalLanguage,
