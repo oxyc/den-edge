@@ -85,6 +85,19 @@ export function titleFacts(d: TitleDetail, now = new Date()): string[] {
   ].filter(Boolean);
 }
 
+/** The compact line under a billboard title: its year and at most two named genres. */
+export function billboardFacts(
+  title: Pick<Title, 'year'>,
+  detail?: Pick<TitleDetail, 'genres'>,
+): string {
+  return [
+    title.year ? String(title.year) : undefined,
+    ...(detail?.genres ?? []).slice(0, 2).map((genre) => genre.name),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 export function productionFacts(d: TitleDetail): string {
   const money = (n: number) =>
     '$' + new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);

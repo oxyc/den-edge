@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { groupFilmography, parseDetail, parseFilmography, parseSeason } from './detail';
 import {
   airDate,
+  billboardFacts,
   calendarDate,
   cleanedOverview,
   episodeProgress,
@@ -41,6 +42,19 @@ const row = (reset: number) =>
   ({ deleted: { value: false }, episodesReset: [reset, 0, 'test'] }) as TitleRow;
 
 describe('detail presentation', () => {
+  it('renders billboard genre facets by name rather than as objects', () => {
+    expect(
+      billboardFacts(
+        { year: 2026 },
+        {
+          genres: [
+            { id: 18, name: 'Drama' },
+            { id: 9648, name: 'Mystery' },
+          ],
+        },
+      ),
+    ).toBe('2026 · Drama · Mystery');
+  });
   it('treats air dates as local calendar days, validates dates, and does not call today unaired', () => {
     expect(calendarDate('2026-02-31')).toBeUndefined();
     expect(calendarDate('not-a-date')).toBeUndefined();
