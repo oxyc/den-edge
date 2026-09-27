@@ -14,6 +14,8 @@ const MEDIA = 'https://media.test';
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 const hls = new URL('./media/hls/', import.meta.url);
+const TEST_CAST_DISCOVERY_MS = 500;
+const TEST_CAST_PLAY_MS = 1_000;
 
 /**
  * The cast page, as far as the player can tell: `none` sees no receiver, `receiver` sees one but cannot play what is
@@ -90,7 +92,9 @@ async function open(mode, { releases = [] } = {}) {
   await page.route(`${CAST}/**`, (r) =>
     r.fulfill({ contentType: 'text/html', body: castPage(mode) }),
   );
-  await page.goto(`${ORIGIN}/test/player.html`);
+  await page.goto(
+    `${ORIGIN}/test/player.html?castDiscoveryMs=${TEST_CAST_DISCOVERY_MS}&castPlayMs=${TEST_CAST_PLAY_MS}`,
+  );
   return { browser, page, asked };
 }
 

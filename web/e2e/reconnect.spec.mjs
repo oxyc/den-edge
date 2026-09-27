@@ -4,7 +4,8 @@
 // rest, not fetched again from its first byte.
 //
 // den-remux is a real HTTP server here, on its own origin as a direct route is, so the breaks are real ones: a socket
-// destroyed mid-body, and every segment request refused for half a minute.
+// destroyed mid-body, and every segment request refused until the test observes the exhausted buffer and restores
+// the line. The ten-minute production cutoff is covered with fake time in resumingLoader's unit tests.
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -13,7 +14,6 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 const ORIGIN = 'http://127.0.0.1:5198';
 const SID = 'AbCdEfGhIjKlMnOpQrStUv';
 const hls = new URL('./media/hls/', import.meta.url);
-const OUTAGE_MS = 30_000;
 
 const cors = {
   'access-control-allow-origin': '*',
@@ -133,16 +133,14 @@ async function open(plan) {
 const video = (page) => page.locator('.player video');
 const at = (page) => video(page).evaluate((v) => v.currentTime);
 
-test('a connection gone for half a minute is waited out, and playback carries on where it was', async () => {
-  test.setTimeout(120_000);
-  // Everything from seg4 on fails for OUTAGE_MS from the first time it is asked for: the player has eight seconds
-  // of picture, and then nothing arrives until the line comes back.
-  let downUntil;
+test('a connection is waited out, and playback carries on where it was', async () => {
+  // Everything from seg4 on fails until the test restores the line: the player has eight seconds of picture, and
+  // then nothing arrives. Recovery is released by the observation below, not by a wall-clock timeout.
+  let down = true;
   const { page, heard, close } = await open(({ file }) => {
     const n = Number(/^seg(\d+)\.m4s$/.exec(file)?.[1] ?? -1);
     if (n < 4) return 'serve';
-    downUntil ??= Date.now() + OUTAGE_MS;
-    return Date.now() < downUntil ? 'drop' : 'serve';
+    return down ? 'drop' : 'serve';
   });
   try {
     await expect.poll(() => at(page), { timeout: 30_000 }).toBeGreaterThan(1);
@@ -152,14 +150,16 @@ test('a connection gone for half a minute is waited out, and playback carries on
     await expect(reconnecting).toBeVisible({ timeout: 20_000 });
     const held = await at(page);
     expect(held).toBeGreaterThan(6);
-    expect(Date.now()).toBeLessThan(downUntil);
-    // Still waiting well into the outage: no error, and the same picture held.
-    await page.waitForTimeout(10_000);
     await expect(reconnecting).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
+    expect(
+      heard.media.filter((m) => m.file === 'seg4.m4s').length,
+      'the same segment was retried while the line was down',
+    ).toBeGreaterThan(1);
     // The line comes back: playback goes on past where it stopped, in the same element, on the same session.
+    down = false;
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
     await expect.poll(() => at(page), { timeout: 45_000 }).toBeGreaterThan(held + 3);
-    expect(Date.now()).toBeGreaterThanOrEqual(downUntil);
     await expect(reconnecting).toHaveCount(0);
     await expect(page.locator('.player video[data-before="outage"]')).toHaveCount(1);
     expect(heard.sessions, 'no new session was asked for').toHaveLength(1);
@@ -208,13 +208,16 @@ test('a session that did not survive the drop is resumed with one tap at the sam
   const { page, heard, close } = await open(({ file }) => {
     const n = Number(/^seg(\d+)\.m4s$/.exec(file)?.[1] ?? -1);
     if (heard.sessions.length > 1 || n < 4) return 'serve';
-    if (!gone) {
-      gone = true;
-      setTimeout(() => (gone = 'expired'), 12_000);
-    }
-    return gone === 'expired' ? 'gone' : 'drop';
+    return gone ? 'gone' : 'drop';
   });
   try {
+    await expect.poll(() => at(page), { timeout: 30_000 }).toBeGreaterThan(6);
+    expect(
+      heard.media.filter((m) => m.file === 'seg4.m4s').length,
+      'the session stayed in its retry loop before den-remux ended it',
+    ).toBeGreaterThan(1);
+    gone = true;
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
     const resume = page.getByRole('button', { name: /^Resume from 0:0\d$/ });
     await expect(resume).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('The connection was gone too long')).toBeVisible();

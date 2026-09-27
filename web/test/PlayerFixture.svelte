@@ -7,7 +7,10 @@
   import { tabName } from '../src/lib/tabName.svelte';
 
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
-  const remux = new URLSearchParams(location.search).get('remux') ?? 'http://127.0.0.1:5198/direct';
+  const query = new URLSearchParams(location.search);
+  const remux = query.get('remux') ?? 'http://127.0.0.1:5198/direct';
+  const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
+  const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   let open = $state(true);
   // As App does: the name a page offers, else the address's.
   $effect(() => {
@@ -23,6 +26,8 @@
     {remux}
     subtitles={[]}
     resume={{ fraction: 0 }}
+    {castDiscoveryMs}
+    {castPlayMs}
     onprogress={() => undefined}
     onclose={() => (open = false)}
   />
