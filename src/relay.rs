@@ -24,12 +24,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub type RelayClient = Client<HttpConnector, Full<Bytes>>;
 
 pub fn client() -> RelayClient {
+    // Bound both the userspace and kernel queues. The one-frame media pump applies backpressure to Hyper, but an
+    // autotuned upstream SO_RCVBUF can still retain megabytes per slow downstream reader inside the cgroup.
+    // 128 KiB leaves enough window for a LAN origin without allowing sixteen media sockets to consume the 64 MiB
+    // container. Requests are tiny, so their send queue can be smaller.
+    let mut connector = HttpConnector::new();
+    connector.set_recv_buffer_size(Some(128 * 1024));
+    connector.set_send_buffer_size(Some(32 * 1024));
     // Hyper otherwise lets each HTTP/1 connection's adaptive read buffer grow to roughly 400 KiB. Relays move
     // bodies under backpressure, so 64 KiB keeps sixteen media plus sixteen JSON connections inexpensive without
     // making socket reads tiny; the protocol minimum is 8 KiB.
     let mut builder = Client::builder(TokioExecutor::new());
     builder.http1_max_buf_size(64 * 1024);
-    builder.build_http()
+    builder.build(connector)
 }
 
 /// Past scout's scrape timeout on a slow indexer (8 s), with its answer still to come.

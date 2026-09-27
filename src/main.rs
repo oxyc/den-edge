@@ -683,6 +683,14 @@ async fn serve_until(
             },
             () = &mut shutdown => break,
         };
+        // Hyper can finish a response into an autotuned kernel send queue before a slow client has read it. The
+        // body then releases its media permit while megabytes remain charged to the cgroup, so application-level
+        // stream limits alone are not a memory bound. Keep every accepted connection's queues small and refuse a
+        // connection if the platform cannot honor the ceiling.
+        if let Err(e) = bound_connection_buffers(&stream) {
+            eprintln!("refusing {peer}: cannot bound TCP buffers: {e}");
+            continue;
+        }
         let service = hyper_util::service::TowerToHyperService::new(
             app.clone().layer(axum::Extension(axum::extract::ConnectInfo(peer))),
         );
@@ -702,6 +710,29 @@ async fn serve_until(
             limits.grace
         )),
     }
+}
+
+// Linux reports twice the requested SO_SNDBUF/SO_RCVBUF because it includes kernel bookkeeping. These effective
+// ceilings therefore bound 256 admitted connections to at most 32 MiB of downstream response queues plus 16 MiB
+// of request queues; media's upstream queues are bounded separately in `relay::client`.
+const CONNECTION_SEND_BUFFER: usize = 64 * 1024;
+const CONNECTION_RECV_BUFFER: usize = 32 * 1024;
+const SOCKET_BUFFER_ACCOUNTING_FACTOR: usize = 2;
+
+fn bound_connection_buffers(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
+    let socket = socket2::SockRef::from(stream);
+    socket.set_send_buffer_size(CONNECTION_SEND_BUFFER)?;
+    socket.set_recv_buffer_size(CONNECTION_RECV_BUFFER)?;
+    let send = socket.send_buffer_size()?;
+    let recv = socket.recv_buffer_size()?;
+    if send > CONNECTION_SEND_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
+        || recv > CONNECTION_RECV_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
+    {
+        return Err(std::io::Error::other(format!(
+            "effective buffers exceed ceilings (send={send}, recv={recv})"
+        )));
+    }
+    Ok(())
 }
 
 struct ConnectionAdmission {
@@ -768,6 +799,24 @@ async fn wait_for(registered: std::io::Result<tokio::signal::unix::Signal>, name
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn accepted_connection_kernel_buffers_are_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(tokio::net::TcpStream::connect(addr));
+        let (server, _) = listener.accept().await.unwrap();
+        client.await.unwrap().unwrap();
+
+        bound_connection_buffers(&server).unwrap();
+        let socket = socket2::SockRef::from(&server);
+        assert!(
+            socket.send_buffer_size().unwrap() <= CONNECTION_SEND_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
+        );
+        assert!(
+            socket.recv_buffer_size().unwrap() <= CONNECTION_RECV_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
+        );
+    }
 
     /// A client that sends half a request head must not hold shutdown open past the grace.
     #[tokio::test]

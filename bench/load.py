@@ -128,8 +128,8 @@ def main():
     parser.add_argument(
         "--rotate-ip-pool",
         type=int,
-        default=4096,
-        help="bounded caller pool; must fit den-edge's fixed throttle registry",
+        default=512,
+        help="bounded caller pool; route-specific overrides must leave headroom in den-edge's fixed throttle registry",
     )
     parser.add_argument("--rotate-ip-offset", type=int, default=0, help="first synthetic caller in the benchmark range")
     parser.add_argument("--label", help="stable component name for mixed-soak gate contracts")

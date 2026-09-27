@@ -239,9 +239,10 @@ normal() {
 normal control-json /health "$CONCURRENCY" '' '' 200 --expect-200-bytes "$CONTROL_SIZE"
 normal static-200 /static-1m.bin "$CONCURRENCY" '' '' 200 --expect-200-bytes "$STATIC_SIZE"
 normal static-304 /static-1m.bin "$CONCURRENCY" "If-None-Match: $STATIC_ETAG" '' 304 --expect-304-bytes 0
-normal canonical-cache-200 /ratings/imdb/tt0137523 8 '' rotate 200 --expect-200-bytes "$RATINGS_SIZE"
+normal canonical-cache-200 /ratings/imdb/tt0137523 8 '' rotate 200 \
+  --rotate-ip-pool 5000 --expect-200-bytes "$RATINGS_SIZE"
 normal canonical-cache-304 /ratings/imdb/tt0137523 "$CONCURRENCY" "If-None-Match: $CACHE_ETAG" rotate 304 \
-  --rotate-ip-offset 4096 --expect-304-bytes 0
+  --rotate-ip-pool 5000 --expect-304-bytes 0
 normal relay-fast '/fixture/fast?bytes=262144' "$CONCURRENCY" "$COMMON_HEADER" rotate 200 --expect-200-bytes 262144
 normal relay-slow-upstream '/fixture/slow?bytes=262144&chunk=16384&delay_ms=5' "$CONCURRENCY" "$COMMON_HEADER" rotate 200 --expect-200-bytes 262144
 normal library-exact-hot '/lib/0000000000000001/changes?since=0&limit=500' 8 'x-den-library-token: bench-token' '' 200 --expect-200-bytes "$LIBRARY_SIZE"
