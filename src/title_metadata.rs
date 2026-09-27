@@ -1150,15 +1150,13 @@ mod tests {
         assert!(!record(&h.state, &Bytes::from_static(b"{}"), |_| Vec::new()));
         release_tx.send(()).unwrap();
 
-        let mut released = false;
-        for _ in 0..100 {
-            if h.state.title_metadata_observation_budget.available_permits() == OBSERVATION_BUDGET_BYTES {
-                released = true;
-                break;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while h.state.title_metadata_observation_budget.available_permits() != OBSERVATION_BUDGET_BYTES {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-        assert!(released, "the completed observation did not release its byte budget");
+        })
+        .await
+        .expect("the completed observation did not release its byte budget");
         let metrics = h.state.metrics.render();
         assert!(metrics.contains(r#"den_edge_byte_admission_used_bytes{pool="title_observation"} 0"#));
         assert!(metrics
