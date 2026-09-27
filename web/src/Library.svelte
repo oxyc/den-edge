@@ -848,6 +848,14 @@
    * towards the library's taste and away from anything it already holds.
    */
   let featured = $state<RecommendedTitle[]>([]);
+  let heroReady = $state(false);
+  const heroKey = $derived(
+    featured[0] ? `${facet ?? 'all'}:${featured[0].type}:${featured[0].id}` : '',
+  );
+  $effect(() => {
+    void heroKey;
+    heroReady = false;
+  });
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
@@ -862,9 +870,9 @@
       if (saved?.length && !featured.length) featured = saved;
     });
   });
-  // The screens Home doesn't draw load once its shelves are up, not while Home still needs the network.
+  // Common next screens load only after both the shelves and the hero have won their critical resources.
   $effect(() => {
-    if (shelvesReady) preloadScreens();
+    if (shelvesReady && heroReady) preloadScreens();
   });
   $effect(() => {
     // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be
@@ -1159,6 +1167,7 @@
       {tmdbKey}
       {reel}
       {routes}
+      onready={() => (heroReady = true)}
       onplay={playHere && ((title) => playHere(title))}
     />
   {/if}

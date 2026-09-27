@@ -13,6 +13,7 @@
     onend,
     onlike,
     onopen,
+    onpersonvisible,
   }: {
     hits: Hit[];
     onend?: () => void;
@@ -20,6 +21,8 @@
     onlike?: (title: Title) => void;
     /** A typed result was opened, so its query is worth keeping in this browser's recent searches. */
     onopen?: () => void;
+    /** A person card is close enough to need metadata that was not part of the result. */
+    onpersonvisible?: (id: number) => void;
   } = $props();
   let end = $state<HTMLElement>();
 
@@ -62,6 +65,7 @@
         profilePath={hit.person.profilePath}
         knownFor={hit.person.knownFor}
         {onopen}
+        onvisible={onpersonvisible}
       />
     {/if}
   {/each}

@@ -54,6 +54,19 @@ prefix. Migration is per library, so v2 and v3 libraries can coexist during roll
 clients that observed a later head to read from sequence zero and reconcile. Library retirement removes the selected
 authority and its marker under the same per-library coordination.
 
+## Browser delivery
+
+HTML, the service worker, and other mutable entry files revalidate; hashed JS, CSS, images, and WASM are immutable
+and served from prebuilt Brotli or gzip representations when accepted. CSS is one small cacheable transfer. Route
+JavaScript remains split: Detail and Search may preload in an idle slice on a fast connection only after the Home
+hero has decoded; other screens load on navigation or pointer intent. HLS remains demand-only.
+
+The billboard gives its current still priority. Adjacent stills and metadata wait for that image and an idle slice;
+ambient video resolution waits for the still, and the following trailer warms only after the current trailer is
+playing. Browse mounts two rows at a time near the viewport. Posters load lazily, and person photo metadata is
+requested only as its card approaches the viewport. The router retains at most two inactive detail/person/service
+pages while preserving reusable top-level browsing surfaces.
+
 ## Operational invariants
 
 - Stored library values, inbox messages, and backups remain device-sealed ciphertext.

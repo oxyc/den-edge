@@ -38,6 +38,12 @@
   } = $props();
   let frame: HTMLDivElement;
   let video = $state<HTMLVideoElement>();
+  const artwork = $derived(backdrop ?? poster ?? '');
+  let canResolveTrailer = $state(false);
+  $effect(() => {
+    void artwork;
+    canResolveTrailer = !artwork;
+  });
   let candidates = $state<TrailerCandidate[]>([]);
   let candidate = $state(0);
   const url = $derived(candidates[candidate]?.play ?? null);
@@ -176,6 +182,11 @@
    * no such number — a 400ms one ate the tap that brings up the controls.
    */
   let pressed = false;
+  function press() {
+    pressed = true;
+    // Explicit intent need not wait for artwork; it is stronger than speculative sequencing.
+    canResolveTrailer = true;
+  }
 
   /** WebKit's handle on a master's separate audio rendition. Absent in every other browser. */
   type Renditions = { length: number; [at: number]: { enabled: boolean } };
@@ -310,7 +321,16 @@
     candidates = [];
     candidate = 0;
     playing = ended = failed = false;
-    if (!autoplay || !active || reduced || saving || (!ids.tmdb && !ids.imdb) || !base) return;
+    if (
+      !canResolveTrailer ||
+      !autoplay ||
+      !active ||
+      reduced ||
+      saving ||
+      (!ids.tmdb && !ids.imdb) ||
+      !base
+    )
+      return;
     const controller = new AbortController();
     // Resolve only. YouTube's adaptive stream carries sound and plays in every browser now — its
     // master directly where HLS is native, reel's proxy of it everywhere else — so a download and
@@ -568,7 +588,14 @@
 
 <div class="media" bind:this={frame} data-detail-media>
   {#if backdrop || poster}
-    <img class="backdrop" class:portrait={!backdrop} src={backdrop ?? poster} alt="" />
+    <img
+      class="backdrop"
+      class:portrait={!backdrop}
+      src={backdrop ?? poster}
+      alt=""
+      onload={() => (canResolveTrailer = true)}
+      onerror={() => (canResolveTrailer = true)}
+    />
   {/if}
   <!-- Always mounted: a late URL or first frame cannot insert space into the detail layout.
 
@@ -587,7 +614,7 @@
     playsinline
     preload={allowed ? 'auto' : 'metadata'}
     controls={mobile && touched && !!source && !failed}
-    onpointerdown={() => (pressed = true)}
+    onpointerdown={press}
     onclick={tap}
     aria-label="Trailer"
     aria-hidden={!mobile}
@@ -615,7 +642,7 @@
   {#if !mobile && !!source && !failed && !ended}
     <button
       class="control expand glass"
-      onpointerdown={() => (pressed = true)}
+      onpointerdown={press}
       onclick={expand}
       aria-label="Play trailer full screen with sound"
     >
@@ -623,7 +650,7 @@
     </button>
     <button
       class="control sound glass"
-      onpointerdown={() => (pressed = true)}
+      onpointerdown={press}
       onclick={toggleSound}
       aria-label={sound ? 'Mute trailer' : 'Play trailer with sound'}
     >

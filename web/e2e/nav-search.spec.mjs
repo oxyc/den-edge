@@ -861,6 +861,12 @@ for (const titles of [true, false])
       await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movies')}`);
       // Drama: the fixture's TMDB films are all dramas, so TMDB's shelf has them too.
       const drama = active(page).getByRole('region', { name: 'Drama', exact: true });
+      // Browse deliberately mounts two rows at a time. Walk its bottom marker until the requested genre exists;
+      // a test for a later row must not require every catalogue row in the initial DOM.
+      await expect(async () => {
+        await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+        await expect(drama).toHaveCount(1);
+      }).toPass({ timeout: 5000 });
       // Once atlas is found the row is rebuilt under its own id, so the region drawn first can leave the page
       // mid-scroll; the locator finds the new one on the next try.
       await expect(() => drama.scrollIntoViewIfNeeded({ timeout: 1000 })).toPass();

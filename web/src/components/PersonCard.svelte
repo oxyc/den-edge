@@ -10,6 +10,7 @@
     profilePath,
     knownFor = [],
     onopen,
+    onvisible,
   }: {
     id: number;
     name: string;
@@ -19,10 +20,31 @@
     knownFor?: string[];
     /** Called when this person's link is followed. */
     onopen?: () => void;
+    /** Called once shortly before the card reaches the viewport. */
+    onvisible?: (id: number) => void;
   } = $props();
+  let card = $state<HTMLAnchorElement>();
+
+  $effect(() => {
+    const element = card;
+    const reveal = onvisible;
+    if (!element || !reveal) return;
+    let sent = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (sent || !entries.some((entry) => entry.isIntersecting)) return;
+        sent = true;
+        reveal(id);
+        observer.disconnect();
+      },
+      { rootMargin: '400px 0px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
 </script>
 
-<a class="person" href={personHref(id)} onclick={onopen}>
+<a class="person" href={personHref(id)} onclick={onopen} bind:this={card}>
   <span class="portrait">
     {#if profilePath}
       <img

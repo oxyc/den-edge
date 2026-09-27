@@ -32,6 +32,7 @@
     active = true,
     tmdbKey,
     onplay,
+    onready,
     reel,
     routes,
   }: {
@@ -41,6 +42,8 @@
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
     onplay?: (title: Title) => void;
+    /** The current still is decoded and visible, so the rest of Home may begin speculative work. */
+    onready?: () => void;
     /** Where this page asks den-reel (`/reel/<config>`); without it a slide keeps its still picture. */
     reel?: string | null;
     /** The routes table, for the address the trailer's video is loaded from. */
@@ -74,13 +77,8 @@
    */
   const SLIDE_HEIGHT = 720;
 
-  /**
-   * How long the current slide keeps the line to itself before the next one is looked up.
-   *
-   * Long enough that the trailer on screen has claimed its own first bytes, short enough that the
-   * lookup finishes inside the fifteen seconds a slide stands for.
-   */
-  const WARM_MS = 3_000;
+  /** The longest the next trailer's idle warm may wait once the current trailer is actually playing. */
+  const WARM_IDLE_TIMEOUT_MS = 3_000;
 
   const shown = $derived(titles.slice(0, SLIDES));
   let index = $state(0);
@@ -93,6 +91,16 @@
   const keyOf = (title: Title) => `${title.type}:${title.id}`;
   const backdropURL = (path: string) => `https://image.tmdb.org/t/p/w1280${path}`;
   const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /** Run non-critical work in an idle slice, with a bounded fallback for browsers without the API. */
+  function whenIdle(run: () => void, timeout = 2500): () => void {
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(run, { timeout });
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(run, Math.min(timeout, 1000));
+    return () => clearTimeout(id);
+  }
 
   // Details arrive per slide and are kept, so coming back to one shows it at once.
   let known = $state(new Map<string, TitleDetail>());
@@ -117,10 +125,9 @@
 
   const detail = $derived(current ? known.get(keyOf(current)) : undefined);
 
-  // Two either way rather than one: a slide whose details haven't arrived has no picture to show, so the reach
-  // of this is how often the billboard goes dark for a moment when someone swipes briskly.
+  // The current slide is the only detail request on the page's critical path.
   $effect(() => {
-    for (const step of [0, 1, -1, 2, -2]) void learn(shown[index + step]);
+    void learn(current);
   });
 
   // --- The picture ---
@@ -137,23 +144,17 @@
 
   /** The picture this slide should be showing; anything that finishes loading after this changed is stale. */
   let wanted = '';
+  /** The slide whose still has decoded. Neighbour work and ambient media wait for this. */
+  let readyKey = $state('');
 
   $effect(() => {
     const path = current?.backdropPath ?? detail?.backdropPath;
     const url = path ? backdropURL(path) : '';
-    // Warm the neighbours, so paging usually finds the picture already decoded and swaps without a gap.
-    for (const step of [1, -1]) {
-      const near = shown[index + step];
-      const path = near && (near.backdropPath ?? known.get(keyOf(near))?.backdropPath);
-      if (path) {
-        const image = new Image();
-        image.fetchPriority = 'low';
-        image.src = backdropURL(path);
-      }
-    }
+    const titleKey = current ? keyOf(current) : '';
     untrack(() => {
       if (lit >= 0 && layers[lit]?.url === url) return;
       wanted = url;
+      readyKey = '';
       // Nothing is lit while the right picture is on its way. Keeping the last one up would show one title's
       // artwork behind another title's name — which is the same picture appearing twice, once against the
       // wrong words. The scrim carries the words for the moment it takes.
@@ -167,8 +168,28 @@
         const next = layers[0]?.url === url ? 0 : 1;
         layers[next] = { id: next, url };
         lit = next;
+        readyKey = titleKey;
+        onready?.();
       };
       image.src = url;
+    });
+  });
+
+  // Once the visible still has won the network and decoded, prepare only the adjacent slides in an idle slice.
+  // Intent still wins immediately: changing `index` makes that slide current and the effect above loads it high.
+  $effect(() => {
+    const here = current;
+    if (!here || readyKey !== keyOf(here)) return;
+    return whenIdle(() => {
+      for (const step of [1, -1]) {
+        const near = shown[index + step];
+        void learn(near);
+        const path = near && (near.backdropPath ?? known.get(keyOf(near))?.backdropPath);
+        if (!path) continue;
+        const image = new Image();
+        image.fetchPriority = 'low';
+        image.src = backdropURL(path);
+      }
     });
   });
 
@@ -266,7 +287,17 @@
     const table = routes;
     // No imdb id required any more: reel is asked by the tmdb id every title carries, and told the imdb
     // one only when this slide's details have arrived carrying it.
-    if (!active || !title || !base || !onScreen || still() || saving() || ambientFailed) return;
+    if (
+      !active ||
+      !title ||
+      readyKey !== keyOf(title) ||
+      !base ||
+      !onScreen ||
+      still() ||
+      saving() ||
+      ambientFailed
+    )
+      return;
     // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
     if (untrack(() => ambient)) return;
     let live = true;
@@ -356,9 +387,9 @@
     const next = shown[index + 1];
     const base = reel;
     const table = routes;
-    if (!active || !next || !base || !onScreen || still() || saving()) return;
+    if (!active || !playing || !next || !base || !onScreen || still() || saving()) return;
     let live = true;
-    const timer = setTimeout(() => {
+    const cancel = whenIdle(() => {
       if (!live) return;
       const ids = { tmdb: next.id, imdb: known.get(keyOf(next))?.imdbId };
       void trailerCandidates(base, next.type, ids, table ?? {}, {
@@ -376,10 +407,10 @@
           player: PLAYS_HLS ? 'native' : 'hls.js',
         });
       });
-    }, WARM_MS);
+    }, WARM_IDLE_TIMEOUT_MS);
     return () => {
       live = false;
-      clearTimeout(timer);
+      cancel();
     };
   });
 

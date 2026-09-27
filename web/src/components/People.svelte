@@ -160,19 +160,16 @@
   // Each person's photo, from TMDB as a person's page and search draw them.
   const sources = $derived(searchSources(tmdbKey, undefined, atlas));
   let photos = $state<Record<number, string | null>>({});
-  $effect(() => {
-    const from = sources;
-    for (const id of [...people, ...byName].map((p) => p.tmdbId)) {
-      if (id === undefined || untrack(() => id in photos)) continue;
-      photos[id] = null;
-      from
-        .person(id)
-        .then((found) => {
-          if (found?.profilePath) photos[id] = found.profilePath;
-        })
-        .catch((error: unknown) => console.warn('people: no photo for', id, error));
-    }
-  });
+  function loadPhoto(id: number) {
+    if (id in photos) return;
+    photos[id] = null;
+    sources
+      .person(id)
+      .then((found) => {
+        if (found?.profilePath) photos[id] = found.profilePath;
+      })
+      .catch((error: unknown) => console.warn('people: no photo for', id, error));
+  }
   /** People as cards: each once, and only those with a TMDB id, their page's address. */
   const cards = (list: { tmdbId?: number; name: string; knownFor?: { title: string }[] }[]) => {
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local to one derivation; nothing renders from it.
@@ -500,7 +497,7 @@
           <FacetSuggestions chips={suggested} {query} onpick={pickFound} />
           {#if matches.length}
             <section aria-label="People by that name">
-              <SearchResults hits={matches} />
+              <SearchResults hits={matches} onpersonvisible={loadPhoto} />
             </section>
           {:else if finding}
             <Loading label="Searching" />
@@ -508,7 +505,7 @@
             <p class="note" role="status">No one by that name.</p>
           {/if}
         {:else if hits.length}
-          <SearchResults {hits} onend={() => void more()} />
+          <SearchResults {hits} onend={() => void more()} onpersonvisible={loadPhoto} />
         {:else if failed}
           <p class="note" role="status">Couldn’t load people right now. Try again in a moment.</p>
         {:else if done}
