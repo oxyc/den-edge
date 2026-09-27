@@ -79,7 +79,9 @@
     const defined = [
       ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
       // Films and series together; curated primary members have their own row and atlas excludes them here.
-      moreLikeThisRow(detail, atlas, { ...options, mixed: true }),
+      // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
+      // the broader plot-neighbour and TMDB sources. With the endpoint's default, it silently switched after 20.
+      moreLikeThisRow(detail, atlas, { ...options, mixed: true, similarLimit: 200 }),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
     ];

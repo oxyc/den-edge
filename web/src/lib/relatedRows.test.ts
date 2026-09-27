@@ -107,6 +107,46 @@ describe('moreLikeThisRow', () => {
     expect(plain.aside?.href).toBe('/search?c=like-movie-550');
   });
 
+  it('pages every id in atlas’s served row before consulting a fallback source', async () => {
+    const asked: string[] = [];
+    const served = Array.from({ length: 45 }, (_, i) => ({
+      type: i % 2 === 0 ? ('movie' as const) : ('series' as const),
+      id: 100 + i,
+    }));
+    const cards = Object.fromEntries(
+      served.map((ref) =>
+        ref.type === 'movie'
+          ? movie(ref.id)
+          : [`/3/tv/${ref.id}`, { id: ref.id, name: `S${ref.id}` }],
+      ),
+    );
+    const fetchImpl = answering(
+      {
+        '/atlas/index/similar/movie/550.json?limit=200': {
+          mixed: served,
+          mixedTotal: served.length,
+        },
+        '/atlas/index/neighbours/movie/550.json?k=50': { ids: [900] },
+        ...cards,
+        ...Object.fromEntries([900].map(movie)),
+      },
+      asked,
+    );
+    const row = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      key: 'k',
+      fetchImpl,
+      mixed: true,
+      similarLimit: 200,
+    });
+
+    const rendered = (await ids(row, 3)).flat();
+    expect(rendered).toEqual(served.map((ref) => ref.id));
+    expect(asked).not.toContain('/atlas/index/neighbours/movie/550.json?k=50');
+
+    // Only after the endpoint's complete 45-title fixture has been rendered may the wider fallback begin.
+    expect((await row.load(4)).map((title) => title.id)).toEqual([900]);
+  });
+
   it('is more than the one page of recommendations it used to be', async () => {
     const fetchImpl = answering({
       '/3/movie/550/recommendations?page=2': results([21, 22]),
