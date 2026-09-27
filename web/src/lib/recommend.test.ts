@@ -31,7 +31,12 @@ describe('recommendBody', () => {
       named: new Map([
         [
           'movie:603',
-          film(603, { year: 1999, genreIds: [28, 878], countries: ['US'], releaseDate: '1999-03-31' }),
+          film(603, {
+            year: 1999,
+            genreIds: [28, 878],
+            countries: ['US'],
+            releaseDate: '1999-03-31',
+          }),
         ],
       ]),
       owned: new Set(['tv:1438', 'movie:603', 'nonsense']),
