@@ -1,11 +1,14 @@
 # den-edge
 
 Den's sync relay, on the homelab. It relays pairings between an Apple TV and another device, carries a paired
-device's sealed messages to the TV, keeps the library's record log and the TV's encrypted backup, and holds the
-plugin list and settings older links shared. It also serves the Den web app.
+device's sealed messages to the TV, keeps the library's current encrypted state and the TV's encrypted backup, and
+holds the plugin list and settings older links shared. It also serves the Den web app.
 
-It never interprets what it stores: the log, the backup and the inbox are ciphertext sealed on the devices, and
-the rest is small JSON it validates and bounds.
+It never interprets what it stores: library rows, the backup and the inbox are ciphertext sealed on the devices,
+and the rest is small JSON it validates and bounds.
+
+See [Architecture](docs/ARCHITECTURE.md) for the current request and storage flows and
+[Performance](docs/PERFORMANCE.md) for delivery paths, resource bounds, and measured results.
 
 ## Routes
 
@@ -25,7 +28,7 @@ the rest is small JSON it validates and bounds.
 | `GET /inbox/drain` | the TV takes the queue: `{messages}`, and it is emptied. An unknown or expired queue is `{messages: []}` like an empty one: a queue exists only while messages wait, so there is no way to tell a dead key from a quiet one |
 | `POST /inbox/drain` `{keys}` | several queues at once, one per linked device: `{queues: [[…], …]}` in the order of `keys`, each emptied. 1–16 distinct keys, each its own credential as in the header; one malformed key is a `400` and empties nothing. Both drains share one budget of 240 queues per address per minute (`429` with `Retry-After` past it) |
 | `DELETE /sync/{id}` | erases a backup an older link or the retired settings backup left |
-| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the library record log: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
+| `POST /lib/{id}/batch` `{writes: [{k, base, v}]}` | the transactional library: each write lands if `base` is the record's current sequence, else comes back as a conflict with the current row — `{head, applied, conflicts}` |
 | `GET /lib/{id}/changes?since=&limit=` | the records written after `since`, in sequence order: `{entries, head, more}` |
 | `POST`/`GET /lib/{id}/grants`, `PUT`/`DELETE /lib/{id}/grants/{gid}` | a library owner's guest grants (oxyc/den#100): invite a named guest (`{name, addons, installs, codeExpiresAt?, accessDays? or accessUntil?, devices?}` → `{gid, code, grant}`, the code shown once), list, edit or extend, revoke. Authenticated by `x-den-library-member: <id>:<proof>` for the library in the path; at most 10 live grants per library (`409 too_many_grants`). `installs` is one bare base64url config segment per addon, never a URL |
 | `POST /grant/redeem` `{code, secretHash}` | a guest redeems an invite: `{gid, name, addons, expiresAt}`. One `404 invalid_code` for every reason a code fails (a store that fails is a `5xx`, `507` when full, as for every write); idempotent for the same `secretHash`; the access clock starts at the first redeem; throttled per address |
@@ -76,7 +79,7 @@ ends its connections; an hourly sweep ends idle ones (30 days) and those whose m
 
 `DATA_DIR/generation` is a random id minted the first time the store opens. Every `/lib` answer carries it.
 Leave it out of backups: a restored store then gets a new one, and a device that read past the snapshot sees
-the change, reads the log from the start and writes back what the snapshot lacks (den-spec library-v2 §2).
+the change, reads changes from sequence zero and writes back what the snapshot lacks (den-spec library-v2 §2).
 
 A queue is kept for a week after its last message. Expired queues are reclaimed at startup and hourly,
 including abandoned links, and their bytes are returned to the shared storage quota. Everything else is kept until it is replaced. Pairing
