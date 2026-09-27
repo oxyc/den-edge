@@ -12,11 +12,14 @@
     hits,
     onend,
     onlike,
+    onopen,
   }: {
     hits: Hit[];
     onend?: () => void;
     /** Given, each poster offers "More like <title>", which calls it instead of opening the title. */
     onlike?: (title: Title) => void;
+    /** A typed result was opened, so its query is worth keeping in this browser's recent searches. */
+    onopen?: () => void;
   } = $props();
   let end = $state<HTMLElement>();
 
@@ -45,6 +48,7 @@
         title={hit.title}
         caption={hit.title.year ? String(hit.title.year) : undefined}
         href={titleHref(hit.title)}
+        {onopen}
         action={onlike && {
           label: `More like ${hit.title.title}`,
           icon: '≈',
@@ -57,6 +61,7 @@
         name={hit.person.name}
         profilePath={hit.person.profilePath}
         knownFor={hit.person.knownFor}
+        {onopen}
       />
     {/if}
   {/each}

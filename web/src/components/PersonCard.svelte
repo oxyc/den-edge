@@ -9,6 +9,7 @@
     role,
     profilePath,
     knownFor = [],
+    onopen,
   }: {
     id: number;
     name: string;
@@ -16,10 +17,12 @@
     profilePath?: string;
     /** Titles they are known for, named under their name. */
     knownFor?: string[];
+    /** Called when this person's link is followed. */
+    onopen?: () => void;
   } = $props();
 </script>
 
-<a class="person" href={personHref(id)}>
+<a class="person" href={personHref(id)} onclick={onopen}>
   <span class="portrait">
     {#if profilePath}
       <img
