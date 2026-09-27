@@ -115,10 +115,17 @@ async fn serve_file(
     face: crate::handler::Face,
 ) -> (&'static str, Response) {
     let Some(dir) = state.web_dir.as_deref() else { return ("404", not_found()) };
-    let kept: Vec<String>;
+    let mut kept: Vec<String>;
     let media: &[String] = match face {
         crate::handler::Face::Web => {
             kept = public_media(&state.media_origins);
+            // The DNS-only direct-media origin is configured separately from ROUTES on purpose: Reel metadata and
+            // fallback stay on the public edge while only signed bulk bytes use this origin. It is already validated
+            // as one bare HTTPS origin at startup; without it in both CSP directives activation succeeds but every
+            // native MP4/HLS request is browser-blocked and silently falls back through the edge relay.
+            if let Some(origin) = state.public_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
+                kept.push(origin.clone());
+            }
             &kept
         }
         _ => &state.media_origins,
@@ -930,6 +937,24 @@ mod tests {
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");
         assert_eq!(h.send("GET", "/assets/missing.js", None, &[]).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_public_shell_allows_the_separately_configured_direct_media_origin() {
+        let mut h = with_app();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        // Deployment shape: Reel in ROUTES is a same-origin relay without an advertised HTTPS media origin;
+        // PUBLIC_MEDIA_BASE separately names the DNS-only Caddy listener.
+        state.media_origins.clear();
+        state.public_media_base = Some("https://media.example".into());
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+
+        let response = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        for directive in ["media-src", "connect-src"] {
+            let values = policy.split(directive).nth(1).unwrap().split(';').next().unwrap();
+            assert!(values.contains("https://media.example"), "{directive} omitted direct media: {policy}");
+        }
     }
 
     #[tokio::test]

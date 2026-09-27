@@ -391,6 +391,12 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if crate::oauth::is_path(&path) {
         return crate::oauth::handle(state, req, rid).await;
     }
+    // Edge owns activation rather than forwarding it to Reel. A valid, short-lived signed `/m/s`
+    // capability is checked by Reel over the LAN before the root-owned helper leases this exact
+    // visitor address. Metadata and the fallback relay remain on this origin.
+    if path == crate::relay::REEL_ACTIVATE {
+        return crate::relay::activate_reel(state, req, rid).await;
+    }
     if let Some(target) = crate::relay::target(&state.relays, &path_and_query) {
         return crate::relay::relay(state, req, target, rid, face).await;
     }
@@ -593,6 +599,7 @@ fn reel_route(rest: &str) -> &'static str {
         let mut beyond = tail.split('/');
         let (next, then) = (beyond.next().unwrap_or(""), beyond.next().unwrap_or(""));
         match segment {
+            "activate" if tail.is_empty() => return "/reel/activate",
             "m" if next == "n" => return "/reel/m/n",
             "m" if next == "s" && then == "seg" => return "/reel/m/s/seg",
             "m" if next == "s" => return "/reel/m/s",
@@ -679,7 +686,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
-        "/grant/redeem" => Some(POST),
+        "/grant/redeem" | "/reel/activate" => Some(POST),
         "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" => Some(GET_PUT),

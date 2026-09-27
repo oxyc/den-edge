@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   forgetWarmedTrailers,
   cropStyle,
@@ -237,6 +237,122 @@ describe('fetchSources', () => {
       { kind: 'hls', url: '/reel/m/n/blob2', audio: true, height: null },
     ],
   };
+
+  it('puts the signed direct origin first and retains the same-origin relay fallback', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    const requests: Array<{ url: string; body?: unknown }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (url.includes('/sources/')) {
+        return new Response(
+          JSON.stringify({
+            sources: [
+              { kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true },
+              { kind: 'mp4', url: 'https://rr3---sn-x.googlevideo.com/file', audio: false },
+              { kind: 'mp4', url: `//evil.example/reel/m/s/${blob}?s=${tag}`, audio: false },
+            ],
+          }),
+        );
+      }
+      const media = `/reel/m/s/${blob}?s=${tag}`;
+      return new Response(
+        JSON.stringify({
+          publicBase: 'https://media.example',
+          media: `https://media.example${media}`,
+        }),
+      );
+    };
+    const got = await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'native',
+      fetchImpl,
+    });
+    expect(requests).toEqual([
+      { url: expect.stringContaining('/reel/cfg/sources/') },
+      { url: '/reel/activate', body: { media: `/reel/m/s/${blob}?s=${tag}` } },
+    ]);
+    expect(got?.sources.map((source) => source.url)).toEqual([
+      `https://media.example/reel/m/s/${blob}?s=${tag}`,
+      `/reel/cfg/m/s/${blob}?s=${tag}`,
+      'https://rr3---sn-x.googlevideo.com/file',
+    ]);
+  });
+
+  it('accepts a slow valid cold activation within the shared lifecycle deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const blob = 'A'.repeat(40);
+      const tag = 'b'.repeat(24);
+      const fetchImpl: typeof fetch = async (input) => {
+        if (String(input).includes('/sources/')) {
+          return new Response(
+            JSON.stringify({
+              sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true }],
+            }),
+          );
+        }
+        return new Promise((resolve) => {
+          setTimeout(
+            () =>
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    publicBase: 'https://media.example',
+                    media: `https://media.example/reel/m/s/${blob}?s=${tag}`,
+                  }),
+                ),
+              ),
+            3_000,
+          );
+        });
+      };
+      const pending = fetchSources(SOURCES, { surface: 'audible', player: 'native', fetchImpl });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect((await pending)?.sources.map((source) => source.url)).toEqual([
+        `https://media.example/reel/m/s/${blob}?s=${tag}`,
+        `/reel/cfg/m/s/${blob}?s=${tag}`,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('looks up IPv4 only when edge requests it, and falls back unchanged on refusal', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    const bodies: unknown[] = [];
+    let activation = 0;
+    let lookups = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).includes('/sources/')) {
+        return new Response(
+          JSON.stringify({
+            sources: [{ kind: 'hls', url: `../m/s/${blob}?s=${tag}`, audio: true }],
+          }),
+        );
+      }
+      activation += 1;
+      bodies.push(JSON.parse(String(init?.body)));
+      return activation === 1
+        ? new Response(JSON.stringify({ error: 'ipv4_hint_wanted' }), { status: 428 })
+        : new Response(JSON.stringify({ error: 'public_listener_unavailable' }), { status: 503 });
+    };
+    const got = await fetchSources(SOURCES, {
+      surface: 'audible',
+      player: 'hls.js',
+      fetchImpl,
+      lookupIpv4: async () => {
+        lookups += 1;
+        return '8.8.8.8';
+      },
+    });
+    const media = `/reel/m/s/${blob}?s=${tag}`;
+    expect(lookups).toBe(1);
+    expect(bodies).toEqual([{ media }, { media, ipv4Hint: '8.8.8.8' }]);
+    expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
+  });
 
   it('names the surface and the player, and keeps reel’s order', async () => {
     const got = await fetchSources(SOURCES, {
