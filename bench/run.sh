@@ -101,7 +101,11 @@ if ! GATEWAY=$("$ENGINE" network inspect "$NETWORK" | python3 "$ROOT/bench/netwo
   exit 1
 fi
 VOLUME_RELABEL=""
-if [ "$(basename "$ENGINE")" = podman ]; then VOLUME_RELABEL=",Z"; fi
+if [ "$(basename "$ENGINE")" = podman ] \
+  && [ -r /sys/fs/selinux/enforce ] \
+  && [ "$(cat /sys/fs/selinux/enforce)" = 1 ]; then
+  VOLUME_RELABEL=",Z"
+fi
 "$ENGINE" run -d --name "$UPSTREAM" --network "$NETWORK" --network-alias upstream \
   -p "127.0.0.1:$UPSTREAM_PORT:9090" "$UPSTREAM_IMAGE" >/dev/null
 "$ENGINE" run -d --name "$EDGE" --network "$NETWORK" \
