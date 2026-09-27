@@ -126,7 +126,6 @@
 <svelte:head>
   {#if links.current}
     <link rel="preconnect" href="https://api.themoviedb.org" crossorigin="anonymous" />
-    <link rel="preconnect" href="https://image.tmdb.org" />
   {/if}
 </svelte:head>
 
