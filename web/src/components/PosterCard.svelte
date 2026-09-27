@@ -5,6 +5,7 @@
      faded, as on the TV. -->
 <script lang="ts">
   import { availability } from '../lib/availability.svelte';
+  import { warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
 
@@ -47,6 +48,20 @@
   const faded = $derived(availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   $effect(() => availability.want(title));
+
+  // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
+  // answer already under way. Delayed, and dropped on `pointercancel` — what a touch that turns into a scroll
+  // fires — so a swipe across a row fetches nothing.
+  let warming: ReturnType<typeof setTimeout> | undefined;
+  function intend(event: PointerEvent, ms: number) {
+    if (!href || (event.type === 'pointerenter' && event.pointerType !== 'mouse')) return;
+    clearTimeout(warming);
+    warming = setTimeout(() => warmDetail(title), ms);
+  }
+  function drop(event: PointerEvent) {
+    if (event.type === 'pointerleave' && event.pointerType !== 'mouse') return;
+    clearTimeout(warming);
+  }
 </script>
 
 {#snippet body()}
@@ -82,7 +97,16 @@
 
 {#snippet card()}
   {#if href}
-    <a class="card pick" class:faded {href} onclick={onopen}>{@render body()}</a>
+    <a
+      class="card pick"
+      class:faded
+      {href}
+      onclick={onopen}
+      onpointerenter={(event) => intend(event, 100)}
+      onpointerdown={(event) => intend(event, 60)}
+      onpointerleave={drop}
+      onpointercancel={drop}>{@render body()}</a
+    >
   {:else}
     <figure class="card" class:faded>{@render body()}</figure>
   {/if}
