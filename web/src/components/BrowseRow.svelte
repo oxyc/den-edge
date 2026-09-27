@@ -3,7 +3,7 @@
      empty hides itself. -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
-  import type { Title } from '../lib/library';
+  import { titleCaption, type Title } from '../lib/library';
   import { Pager } from '../lib/pager.svelte';
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
@@ -46,7 +46,7 @@
     {#each visible as title (key(title))}
       <PosterCard
         {title}
-        caption={row.caption?.(title) ?? (title.year ? String(title.year) : undefined)}
+        caption={titleCaption(title, row.caption?.(title))}
         href={titleHref(title)}
       />
     {:else}

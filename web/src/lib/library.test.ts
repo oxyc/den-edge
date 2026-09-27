@@ -1,6 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { RESUME_FLOOR, WATCHED } from './actions';
-import { applyLog, continueWatching, emptyLibrary, watchlist, type Library } from './library';
+import {
+  applyLog,
+  continueWatching,
+  emptyLibrary,
+  titleCaption,
+  watchlist,
+  type Library,
+} from './library';
+
+describe('poster captions', () => {
+  const title = { type: 'movie' as const, id: 1, title: 'One', year: 2020 };
+
+  it('labels a likely Atlas match beside its year or a row-specific caption', () => {
+    expect(titleCaption(title)).toBe('2020');
+    expect(titleCaption({ ...title, likely: true })).toBe('2020 · Likely match');
+    expect(titleCaption({ ...title, likely: true }, 'Netflix')).toBe('Netflix · Likely match');
+  });
+});
 
 function record(
   type: 'movie' | 'tv',
