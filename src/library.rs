@@ -197,12 +197,28 @@ impl Libraries {
             .filter(|(_, slot)| {
                 Arc::strong_count(slot) == 1
                     && (now.saturating_sub(slot.last_used.load(Ordering::Relaxed)) >= IDLE_MS
-                        || slot.library.try_lock().is_ok_and(|library| library.is_none()))
+                        || slot.authority.load(Ordering::Acquire) != AUTHORITY_V3
+                            && slot.library.try_lock().is_ok_and(|library| library.is_none()))
             })
             .map(|(id, _)| id.clone())
             .collect();
         for removable_id in removable {
             let stale = registry.slots.remove(&removable_id).expect("the removable slot is registered");
+            let mut library = stale.library.try_lock().expect("an inactive slot is unlocked");
+            if let Some(library) = library.take() {
+                registry.bytes = registry.bytes.saturating_sub(library.bytes);
+                registry.loaded -= 1;
+            }
+        }
+        while !registry.slots.contains_key(id) && registry.slots.len() >= MAX_CACHED_LIBRARIES {
+            let candidate = registry
+                .slots
+                .iter()
+                .filter(|(_, slot)| Arc::strong_count(slot) == 1)
+                .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
+                .map(|(id, _)| id.clone());
+            let Some(candidate) = candidate else { break };
+            let stale = registry.slots.remove(&candidate).expect("the inactive slot is registered");
             let mut library = stale.library.try_lock().expect("an inactive slot is unlocked");
             if let Some(library) = library.take() {
                 registry.bytes = registry.bytes.saturating_sub(library.bytes);
@@ -1557,8 +1573,12 @@ mod tests {
         assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "old" }])).await.0, StatusCode::OK);
         h.state.store.replace_file(super::NS, LIB, super::MOVED, b"").await.unwrap();
         h.state.store.sync_dir(super::NS).await.unwrap();
-        assert_eq!(changes(&h, TOKEN, "").await.0, StatusCode::GONE);
-        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "new" }])).await.0, StatusCode::GONE);
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(changes(&restarted, TOKEN, "").await.0, StatusCode::GONE);
+        assert_eq!(
+            batch(&restarted, TOKEN, json!([{ "k": K1, "base": 1, "v": "new" }])).await.0,
+            StatusCode::GONE
+        );
     }
 
     async fn start(h: &Harness, id: &str, token: &str, member: Option<&str>) -> StatusCode {
@@ -1647,6 +1667,30 @@ mod tests {
         h.send("POST", &format!("/lib/{other}/batch"), Some(body), &[("x-den-library-token", "other")]).await;
         assert_eq!(h.state.libraries.cached_len().await, 0, "v3 retains no replayed row map");
         assert_eq!(changes(&h, TOKEN, "").await.1["entries"][0]["v"], "kept");
+    }
+
+    #[tokio::test]
+    async fn an_active_v3_slot_keeps_its_cached_authority_without_a_legacy_row_map() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "kept" }])).await;
+        let first = h.state.libraries.slot(LIB, h.state.now());
+        assert_eq!(first.authority.load(super::Ordering::Acquire), super::AUTHORITY_V3);
+        drop(first);
+        let second = h.state.libraries.slot(LIB, h.state.now());
+        drop(second);
+        let third = h.state.libraries.slot(LIB, h.state.now());
+        assert_eq!(third.authority.load(super::Ordering::Acquire), super::AUTHORITY_V3);
+        assert_eq!(h.state.libraries.cached_len().await, 0, "v3 retains no replayed rows");
+    }
+
+    #[tokio::test]
+    async fn v3_authority_slots_have_a_hard_cardinality_bound() {
+        let h = Harness::new();
+        for number in 0..(super::MAX_CACHED_LIBRARIES * 2) {
+            let slot = h.state.libraries.slot(&format!("{number:016x}"), number as u64);
+            slot.authority.store(super::AUTHORITY_V3, super::Ordering::Release);
+        }
+        assert_eq!(h.state.libraries.registry.lock().unwrap().slots.len(), super::MAX_CACHED_LIBRARIES);
     }
 
     /// A crash mid-append leaves the last line cut short. It is dropped, and the next write is not fused
