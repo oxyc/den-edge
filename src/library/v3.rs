@@ -233,11 +233,19 @@ impl StorageBackend for QuotaBackend {
 
 struct RedbLibrary {
     database: Database,
-    #[cfg(test)]
     path: PathBuf,
     token_hash: [u8; 32],
     member_hash: Mutex<Option<[u8; 32]>>,
     prepared: Mutex<Option<PreparedPage>>,
+}
+
+impl Drop for RedbLibrary {
+    fn drop(&mut self) {
+        let mut databases = process_databases().lock().unwrap();
+        if databases.get(&self.path).is_some_and(|database| database.strong_count() == 0) {
+            databases.remove(&self.path);
+        }
+    }
 }
 
 /// redb intentionally permits one open handle per file. Tests model a restart by constructing a second AppState
@@ -311,7 +319,6 @@ impl RedbLibrary {
         }
         Ok(Self {
             database,
-            #[cfg(test)]
             path: path.to_owned(),
             token_hash,
             member_hash: Mutex::new(member_hash),
@@ -1270,6 +1277,17 @@ mod tests {
         assert!(matches!(manager.library("ffffffffffffffff", TOKEN), Err(StoreError::Full)));
         drop(leases);
         assert_eq!(manager.cached(), (RETAINED_DATABASES, RETAINED_DATABASES * OPEN_DATABASE_BYTES, 2));
+    }
+
+    #[test]
+    fn closed_libraries_leave_no_dead_process_registry_keys() {
+        let dir = temp_dir();
+        let manager = manager(&dir, 4, 32 << 20, 4 << 20);
+        for id in 0..8 {
+            drop(manager.library(&format!("{id:016x}"), TOKEN).unwrap());
+        }
+        drop(manager);
+        assert!(!process_databases().lock().unwrap().keys().any(|path| path.starts_with(&dir)));
     }
 
     #[test]
