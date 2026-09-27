@@ -2,6 +2,7 @@
 // it a page at a time as the viewer scrolls: the more they slide, the more appears. None of them is a fixed slice.
 
 import { tmdbPages, type RowDef } from './catalog';
+import { titlesOf } from './atlasRows';
 import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
 import { filterTitles } from './filterRoutes';
 import type { IconicStudio } from './iconicStudios';
@@ -250,6 +251,47 @@ export function collectionRow(
     filter: (t) => keyOf(t) !== keyOf(self),
     load: async (page) => (page === 1 ? await fetchCollection(collection.id, key, fetchImpl) : []),
   };
+}
+
+/**
+ * The title's curated primary franchise from atlas, with TMDB's movie collection only when atlas has none.
+ * Atlas already orders the mixed film/TV members for this seed: its era first, release order within each era.
+ * A primary with no other drawable member is still authoritative and deliberately does not fall through to a
+ * different, narrower TMDB grouping.
+ */
+export async function franchiseRow(
+  collection: { id: number; name: string } | undefined,
+  self: Title,
+  atlas: string | null,
+  options: RelatedOptions,
+): Promise<RowDef | null> {
+  if (atlas) {
+    const kind = self.type === 'tv' ? 'series' : 'movie';
+    try {
+      const res = await (options.fetchImpl ?? tmdbFetch)(
+        `${atlas}/index/franchise/${kind}/${self.id}.json`,
+      );
+      if (res.ok) {
+        const body = (await res.json()) as Record<string, unknown>;
+        const franchise =
+          body.franchise && typeof body.franchise === 'object'
+            ? (body.franchise as Record<string, unknown>)
+            : null;
+        if (franchise && typeof franchise.id === 'string' && typeof franchise.name === 'string') {
+          const members = titlesOf({ titles: body.members });
+          return {
+            id: `franchise-${franchise.id}`,
+            title: franchise.name,
+            filter: (title) => keyOf(title) !== keyOf(self),
+            load: async (page) => (page === 1 ? members : []),
+          };
+        }
+      }
+    } catch {
+      // An older/unreachable atlas has no curated answer; preserve the existing TMDB collection fallback.
+    }
+  }
+  return collection ? collectionRow(collection, self, options) : null;
 }
 
 type Department = 'Directing' | 'Writing' | 'Acting';
