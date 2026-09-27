@@ -56,8 +56,9 @@ authority and its marker under the same per-library coordination.
 
 ## Browser delivery
 
-HTML, the service worker, and other mutable entry files revalidate; hashed JS, CSS, images, and WASM are immutable
-and served from prebuilt Brotli or gzip representations when accepted. CSS is one small cacheable transfer. Route
+HTML, the service worker, and other mutable entry files revalidate; service-worker registration also bypasses HTTP
+caches during update checks. Hashed JS, CSS, images, and WASM are immutable and served from prebuilt Brotli or gzip
+representations when accepted. CSS is one small cacheable transfer. Route
 JavaScript remains split: Detail and Search may preload in an idle slice on a fast connection only after the Home
 hero has decoded; other screens load on navigation or pointer intent. HLS remains demand-only.
 

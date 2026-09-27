@@ -51,6 +51,8 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
     if (event.data === 'den:reload') reloadOnce();
   });
   navigator.serviceWorker
-    .register('/sw.js')
+    // The worker chooses every app-shell response. Never let a browser or intermediary freshness lifetime
+    // suppress its update check; the origin and Cloudflare rule also mark this exact mutable file no-cache.
+    .register('/sw.js', { updateViaCache: 'none' })
     .catch((error: unknown) => console.warn('den: the app shell is not kept offline', error));
 }
