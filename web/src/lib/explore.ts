@@ -1179,8 +1179,8 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
  * in full, whatever the mix. Where atlas has no such route, or leaves a picked kind out, the feed goes on as it did
  * before it, from the page it had reached:
  *
- * A "Like" is the title page's "More like this" (`moreLikeThisRow`) as a whole feed: atlas's closest titles, then its
- * plot neighbours, then TMDB's recommendations for as many pages as TMDB has.
+ * A "Like" uses `moreLikeThisRow` in its literal Similar mode as a whole feed: atlas's closest titles, then its plot
+ * neighbours, then TMDB's recommendations for as many pages as TMDB has. The title page uses affinity mode instead.
  *
  * All (`allFeed`) asks atlas's filter for both types at once, and otherwise shows each type's own feed, interleaved.
  */

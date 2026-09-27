@@ -108,7 +108,7 @@ async function setup(page) {
         },
       });
     if (id) {
-      // One of "More like this"'s titles answers late, which holds the row back.
+      // One of "You might also like"'s titles answers late, which holds the row back.
       if (id === SLOW) await gates.slow.promise;
       return r.fulfill({ json: { ...film(id), credits: { cast: [] } } });
     }
@@ -159,7 +159,7 @@ test('late answers leave a title opened from Search where the viewer scrolled it
   gates.sources.release();
   await page.waitForTimeout(300);
   landed.trailer = (await at()).y;
-  // The last "More like this" title.
+  // The last "You might also like" title.
   gates.slow.release();
   await page.waitForTimeout(300);
   landed.title = (await at()).y;

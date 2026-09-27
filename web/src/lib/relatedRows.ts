@@ -1,5 +1,5 @@
-// The rows under a title (More like this, the franchise, More from / Starring), each a `RowDef` so `BrowseRow` loads
-// it a page at a time as the viewer scrolls: the more they slide, the more appears. None of them is a fixed slice.
+// The rows under a title (You might also like, the franchise, More from / Starring), each a `RowDef` so `BrowseRow`
+// loads it a page at a time as the viewer scrolls: the more they slide, the more appears. None is a fixed slice.
 
 import { tmdbPages, type RowDef } from './catalog';
 import { titlesOf } from './atlasRows';
@@ -34,13 +34,15 @@ export interface RelatedOptions {
    * page's row, and Search's "Like" under All.
    */
   mixed?: boolean;
+  /** Use Atlas's structural-affinity You Might Also Like order, with Similar as an old-Atlas fallback. */
+  affinity?: boolean;
 }
 
 /**
- * "More like this", without an end short of what is known. atlas leads, because its index judges better than TMDB's
- * co-viewing: its closest titles first (premise neighbours, gated by animation, genre and plot agreement), then its
- * wider plot neighbours. Only when atlas has nothing more does TMDB pad the end of the row with its recommendations,
- * page after page. The two are never interleaved, and a title is offered once, whichever source names it first.
+ * A related-title row without an end short of what is known. Atlas leads with either More Like This, or — when
+ * `affinity` is set — its distinct structural-affinity You Might Also Like order. An Atlas predating that endpoint
+ * falls back to More Like This. Wider plot neighbours follow, then TMDB pads the end with its recommendations page
+ * after page. The sources are never interleaved, and a title is offered once, whichever source names it first.
  *
  * With no atlas (`atlas` null), or one with no answer for this title (unreachable, its index queries off, no
  * neighbours), the row is TMDB's recommendations alone, as it always was.
@@ -53,7 +55,7 @@ export interface RelatedOptions {
 export function moreLikeThisRow(
   detail: Pick<TitleDetail, 'title'> & { more?: Title[] },
   atlas: string | null,
-  { key, fetchImpl = tmdbFetch, similarLimit, mixed = false }: RelatedOptions,
+  { key, fetchImpl = tmdbFetch, similarLimit, mixed = false, affinity = false }: RelatedOptions,
 ): RowDef {
   const self = detail.title;
   const kind = self.type === 'tv' ? 'series' : 'movie';
@@ -61,6 +63,7 @@ export function moreLikeThisRow(
   const recommendations = tmdbPages(key, fetchImpl);
 
   const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
+  const suggestPath = '/index/suggest.json';
   const neighboursPath = `/index/neighbours/${kind}/${self.id}.json?k=${NEIGHBOURS}`;
 
   /** `unknown` is atlas not yet asked; whether it has anything for this title decides which way the row goes. */
@@ -74,24 +77,52 @@ export function moreLikeThisRow(
    * The titles an atlas list names: its `ids`, of the seed's type, or — for a mixed row, where the answer has one —
    * its `mixed` list, each with its own type.
    */
+  function refsFrom(body: { ids?: unknown; mixed?: unknown }, requireMixed = false): Ref[] | null {
+    if (mixed && Array.isArray(body.mixed)) {
+      return (body.mixed as Record<string, unknown>[]).flatMap((t): Ref[] => {
+        const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
+        return type && Number.isInteger(t.id) ? [{ type, id: t.id as number }] : [];
+      });
+    }
+    if (mixed && requireMixed) return null;
+    if (!Array.isArray(body.ids)) return null;
+    return body.ids
+      .filter((id): id is number => Number.isInteger(id))
+      .map((id) => ({ type: self.type, id }));
+  }
+
   async function idsFrom(path: string): Promise<Ref[]> {
     try {
       const res = await fetchImpl(`${atlas}${path}`);
       if (!res.ok) return [];
       const body = (await res.json()) as { ids?: unknown; mixed?: unknown };
-      if (mixed && Array.isArray(body.mixed))
-        return (body.mixed as Record<string, unknown>[]).flatMap((t): Ref[] => {
-          const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
-          return type && Number.isInteger(t.id) ? [{ type, id: t.id as number }] : [];
-        });
-      const ids = body.ids;
-      return Array.isArray(ids)
-        ? ids
-            .filter((id): id is number => Number.isInteger(id))
-            .map((id) => ({ type: self.type, id }))
-        : [];
+      return refsFrom(body) ?? [];
     } catch {
       return [];
+    }
+  }
+
+  /** The one requested seed's row, or null when this Atlas does not implement the affinity contract. */
+  async function suggested(): Promise<Ref[] | null> {
+    try {
+      const res = await fetchImpl(`${atlas}${suggestPath}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          seeds: [{ type: kind, id: self.id }],
+          ...(similarLimit ? { limit: similarLimit } : {}),
+        }),
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { perSeed?: unknown };
+      if (!Array.isArray(body.perSeed)) return null;
+      const row = (body.perSeed as Record<string, unknown>[]).find((candidate) => {
+        const seed = candidate.seed as Record<string, unknown> | undefined;
+        return seed?.type === kind && seed.id === self.id;
+      });
+      return row ? refsFrom(row, true) : null;
+    } catch {
+      return null;
     }
   }
 
@@ -108,7 +139,9 @@ export function moreLikeThisRow(
 
   async function step(): Promise<Title[]> {
     if (source === 'unknown') {
-      queue = await idsFrom(similarPath);
+      queue = affinity
+        ? ((await suggested()) ?? (await idsFrom(similarPath)))
+        : await idsFrom(similarPath);
       source = queue.length > 0 ? 'similar' : 'recommended';
       if (source === 'recommended') queue = undefined; // atlas has nothing for this title: TMDB alone
     }
@@ -146,7 +179,7 @@ export function moreLikeThisRow(
 
   return {
     id: 'more-like-this',
-    title: 'More like this',
+    title: affinity ? 'You might also like' : 'More like this',
     // The same titles as a whole page to browse and narrow: Search with this title as its "Like", under All, where
     // they are films and series together.
     aside: { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },

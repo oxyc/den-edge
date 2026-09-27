@@ -629,7 +629,7 @@
     });
   }
   /**
-   * What a title's OWN rows hide — "More like this", its collection, its cast's other work.
+   * What a title's OWN rows hide — "You might also like", its collection, its cast's other work.
    *
    * The discovery rules do not apply here. A year floor and Hide Watched shape what to show you NEXT; on a
    * title's page you are asking what RESEMBLES this, so an old film or one you have already seen is a
