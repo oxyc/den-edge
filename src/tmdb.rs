@@ -436,6 +436,7 @@ enum Prepared {
 }
 
 impl Prepared {
+    #[cfg(test)]
     async fn bytes(self) -> Option<Bytes> {
         match self {
             Self::Bytes(bytes) => Some(bytes),
