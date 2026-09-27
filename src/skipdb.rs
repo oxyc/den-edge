@@ -374,8 +374,8 @@ fn answer_file(
 pub async fn sweep_forever(state: Arc<AppState>) {
     let Some(dir) = state.skipdb_cache_dir.clone() else { return };
     loop {
+        crate::tmdb::sweep_provider_cache(&dir, RETENTION, &state.metrics, Provider::Skipdb).await;
         tokio::time::sleep(Duration::from_secs(DAY)).await;
-        crate::tmdb::sweep_older_than(&dir, RETENTION, &state.metrics, Provider::Skipdb).await;
     }
 }
 

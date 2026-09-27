@@ -621,8 +621,8 @@ fn policy(remaining: Duration) -> String {
 pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     let Some(dir) = state.warnings_cache_dir.clone() else { return };
     loop {
+        crate::tmdb::sweep_provider_cache(&dir, FRESH, &state.metrics, Provider::Warnings).await;
         tokio::time::sleep(DAY).await;
-        crate::tmdb::sweep_older_than(&dir, FRESH, &state.metrics, Provider::Warnings).await;
     }
 }
 

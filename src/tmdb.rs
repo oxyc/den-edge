@@ -1876,35 +1876,118 @@ async fn keep_counted(state: &AppState, file: &Path, body: &Bytes, etag: Option<
 /// Drop what is past TMDB's six-month ceiling. Runs on a timer rather than on a request: a sweep is a
 /// directory scan, and no one waiting for a page should pay for it.
 pub async fn sweep(dir: &Path, metrics: &crate::metrics::Metrics) {
-    sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await;
-    sweep_prepared(dir, RETENTION, metrics).await;
+    let Some(mut inventory) = sweep_older_than(dir, RETENTION, metrics, Provider::Tmdb).await else {
+        return;
+    };
+    let Some(prepared) = sweep_prepared(dir, RETENTION, metrics).await else { return };
+    inventory.add(prepared);
+    metrics.provider_cache_inventory(Provider::Tmdb, inventory.bytes, inventory.entries);
 }
 
-async fn sweep_prepared(dir: &Path, max_age: Duration, metrics: &crate::metrics::Metrics) {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CacheInventory {
+    bytes: u64,
+    entries: u64,
+}
+
+impl CacheInventory {
+    fn add(&mut self, other: CacheInventory) {
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.entries = self.entries.saturating_add(other.entries);
+    }
+
+    fn record(&mut self, path: &Path, len: u64, provider: Provider) {
+        self.bytes = self.bytes.saturating_add(len);
+        let excluded = match provider {
+            Provider::Warnings => path.file_name().is_some_and(|name| name == "topics.json"),
+            _ => false,
+        };
+        let serveable = path.extension().is_some_and(|extension| extension == "json") && !excluded;
+        self.entries = self.entries.saturating_add(u64::from(serveable));
+    }
+}
+
+async fn sweep_prepared(
+    dir: &Path,
+    max_age: Duration,
+    metrics: &crate::metrics::Metrics,
+) -> Option<CacheInventory> {
     let root = dir.join(".tmdb-prepared");
-    let Ok(mut sources) = tokio::fs::read_dir(&root).await else { return };
-    while let Ok(Some(source)) = sources.next_entry().await {
-        let Ok(mut entries) = tokio::fs::read_dir(source.path()).await else { continue };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let expired = entry
-                .metadata()
-                .await
+    let mut inventory = CacheInventory::default();
+    let mut sources = match tokio::fs::read_dir(&root).await {
+        Ok(sources) => sources,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(inventory),
+        Err(_) => return None,
+    };
+    loop {
+        let source = match sources.next_entry().await {
+            Ok(Some(source)) => source,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let kind = match source.file_type().await {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        if kind.is_file() {
+            let metadata = match source.metadata().await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            inventory.record(&source.path(), metadata.len(), Provider::Tmdb);
+            continue;
+        }
+        if !kind.is_dir() {
+            continue;
+        }
+        let mut entries = match tokio::fs::read_dir(source.path()).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => return None,
+            };
+            let kind = match entry.file_type().await {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            if !kind.is_file() {
+                continue;
+            }
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            let expired = metadata
+                .modified()
                 .ok()
-                .and_then(|metadata| metadata.modified().ok())
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                 .is_some_and(|age| age > max_age);
             if expired {
                 let path = entry.path();
-                if tokio::fs::remove_file(&path).await.is_ok()
-                    && path.extension().is_some_and(|extension| extension == "json")
-                {
-                    metrics.provider_cache_store(Provider::Tmdb, CacheStore::Expired);
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) if path.extension().is_some_and(|extension| extension == "json") => {
+                        metrics.provider_cache_store(Provider::Tmdb, CacheStore::Expired);
+                    }
+                    Ok(()) => {}
+                    Err(_) => inventory.record(&path, metadata.len(), Provider::Tmdb),
                 }
+            } else {
+                inventory.record(&entry.path(), metadata.len(), Provider::Tmdb);
             }
         }
         let _ = tokio::fs::remove_dir(source.path()).await;
     }
     let _ = tokio::fs::remove_dir(root).await;
+    Some(inventory)
 }
 
 /// The same sweep for another cache with its own ceiling (`warnings.rs`).
@@ -1913,32 +1996,69 @@ pub(crate) async fn sweep_older_than(
     max_age: Duration,
     metrics: &crate::metrics::Metrics,
     provider: Provider,
-) {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let expired = entry
-            .metadata()
-            .await
+) -> Option<CacheInventory> {
+    let mut inventory = CacheInventory::default();
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(inventory),
+        Err(_) => return None,
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let kind = match entry.file_type().await {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata().await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let expired = metadata
+            .modified()
             .ok()
-            .and_then(|m| m.modified().ok())
             .and_then(|t| SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age > max_age);
         if expired {
             let path = entry.path();
-            if tokio::fs::remove_file(&path).await.is_ok()
-                && path.extension().is_some_and(|extension| extension == "json")
-            {
-                metrics.provider_cache_store(provider, CacheStore::Expired);
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) if path.extension().is_some_and(|extension| extension == "json") => {
+                    metrics.provider_cache_store(provider, CacheStore::Expired);
+                }
+                Ok(()) => {}
+                Err(_) => inventory.record(&path, metadata.len(), provider),
             }
+        } else {
+            inventory.record(&entry.path(), metadata.len(), provider);
         }
+    }
+    Some(inventory)
+}
+
+pub(crate) async fn sweep_provider_cache(
+    dir: &Path,
+    max_age: Duration,
+    metrics: &crate::metrics::Metrics,
+    provider: Provider,
+) {
+    if let Some(inventory) = sweep_older_than(dir, max_age, metrics, provider).await {
+        metrics.provider_cache_inventory(provider, inventory.bytes, inventory.entries);
     }
 }
 
 pub async fn sweep_forever(state: std::sync::Arc<AppState>) {
     let Some(dir) = state.tmdb_cache_dir.clone() else { return };
     loop {
-        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
         sweep(&dir, &state.metrics).await;
+        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
     }
 }
 
@@ -2942,7 +3062,7 @@ mod tests {
         assert_eq!(derived_bytes, expected_len + 64, "one body and its fixed metadata sidecar are the bound");
 
         let metrics = crate::metrics::Metrics::default();
-        sweep_prepared(&dir, Duration::ZERO, &metrics).await;
+        let _ = sweep_prepared(&dir, Duration::ZERO, &metrics).await;
         assert!(
             !variants_dir(&source_path).exists(),
             "retention cleanup left the per-source directory behind"
@@ -2950,6 +3070,49 @@ mod tests {
         assert!(metrics
             .render()
             .contains(r#"den_edge_provider_cache_store_total{provider="tmdb",result="expired"} 1"#));
+    }
+
+    #[tokio::test]
+    async fn provider_inventory_counts_only_regular_serveable_bodies_without_following_links() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("canonical.json"), b"body").unwrap();
+        std::fs::write(dir.join("canonical.response"), b"meta").unwrap();
+        std::fs::write(dir.join("canonical.etag"), b"tag").unwrap();
+        std::fs::write(dir.join("write.tmp"), b"temporary").unwrap();
+        std::fs::write(dir.join("title.oversize"), b"x").unwrap();
+
+        let prepared = dir.join(".tmdb-prepared");
+        let source = prepared.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("variant.tmdb.json"), b"variant").unwrap();
+        std::fs::write(source.join("variant.tmdb.json.response"), b"sidecar").unwrap();
+        std::fs::write(prepared.join("orphan.response"), b"orphan").unwrap();
+
+        let outside = temp_dir();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside.json"), b"not counted").unwrap();
+        std::os::unix::fs::symlink(outside.join("outside.json"), dir.join("linked.json")).unwrap();
+        std::os::unix::fs::symlink(&outside, prepared.join("linked-source")).unwrap();
+
+        let metrics = crate::metrics::Metrics::default();
+        sweep(&dir, &metrics).await;
+        let rendered = metrics.render();
+        let expected_bytes = 4 + 4 + 3 + 9 + 1 + 7 + 7 + 6;
+        assert!(rendered.contains(&format!(
+            r#"den_edge_provider_cache_bytes{{provider="tmdb"}} {expected_bytes}"#
+        )));
+        assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="tmdb"} 2"#));
+
+        let warnings = temp_dir();
+        std::fs::create_dir_all(&warnings).unwrap();
+        std::fs::write(warnings.join("tt1.json"), b"warnings").unwrap();
+        std::fs::write(warnings.join("topics.json"), b"topics").unwrap();
+        std::fs::write(warnings.join("tt1.response"), b"metadata").unwrap();
+        sweep_provider_cache(&warnings, RETENTION, &metrics, Provider::Warnings).await;
+        let rendered = metrics.render();
+        assert!(rendered.contains(r#"den_edge_provider_cache_bytes{provider="warnings"} 22"#));
+        assert!(rendered.contains(r#"den_edge_provider_cache_entries{provider="warnings"} 1"#));
     }
 
     #[tokio::test]
