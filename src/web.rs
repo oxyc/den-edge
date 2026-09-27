@@ -135,7 +135,8 @@ async fn serve_file(
     let immutable = path.starts_with("/assets/");
     if immutable {
         if let Some(resp) =
-            prepared(&state.web_files, &asked, media, state.cast_origin.as_deref(), headers).await
+            prepared(&state.web_files, &state.mmaps, &asked, media, state.cast_origin.as_deref(), headers)
+                .await
         {
             return ("asset", resp);
         }
@@ -186,6 +187,7 @@ async fn serve_file(
 /// performs no filesystem I/O; a 200 opens exactly the bytes it streams and never holds the whole body in memory.
 async fn prepared(
     files: &Files,
+    mmaps: &crate::mmap::Cache,
     file: &Path,
     media: &[String],
     cast_origin: Option<&str>,
@@ -228,10 +230,14 @@ async fn prepared(
         return Some(response);
     }
     files.count_prepared_open();
-    let body = tokio::fs::File::open(selected)
-        .await
-        .ok()
-        .map(|file| Body::new(FileBody::new((file, representation.len, representation.modified))))?;
+    let opened = open(&selected).await?;
+    // A deploy normally replaces the whole web tree, but a hand-written atomic replacement can race this startup
+    // index. Never bind the old validator to a newly opened generation; fall through to the ordinary path, which
+    // derives metadata from this handle. The mmap cache itself additionally keys the opened inode generation.
+    if opened.1 != representation.len || opened.2 != representation.modified {
+        return None;
+    }
+    let body = Body::new(mmaps.body(opened.0, representation.len));
     *response.body_mut() = body;
     Some(response)
 }

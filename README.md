@@ -91,6 +91,13 @@ their durable logs. Log replay is streamed and uses the same per-library limit. 
 preserved on disk and refused, rather than loaded into the 64 MiB container; their owner can still delete
 them. Changes pages are bounded by bytes as well as the requested row count, so follow `more` until done.
 
+On Linux, repeatedly served exact files from 64–512 KiB may be copied off the async workers into read-only
+anonymous mappings. This avoids per-hit read/copy work without exposing a file-backed mapping to `SIGBUS` if an
+inode is truncated. Live mappings share hard limits of 8 MiB and 32 files; active responses retain their mapping,
+and budget pressure falls back to ordinary 64 KiB file streaming. Atomic replacements are separate inode
+generations. `/metrics` reports fixed mmap outcomes, faults, resident/cached counts and bytes, and the resident
+high-water mark.
+
 The addon relay forwards only `Content-Type`, `Content-Encoding`, `Cache-Control`, `ETag`, `Last-Modified`, `Vary`,
 `Server-Timing`, and `X-Den-Degraded` from upstream responses, and only `Content-Type`, `If-None-Match`,
 `If-Modified-Since`, and `Accept-Encoding` from the browser, so an addon's `304` and its gzip reach it. Cookies, redirect locations, and upstream CORS permissions stay

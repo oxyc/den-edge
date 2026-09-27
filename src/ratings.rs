@@ -95,7 +95,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
         if !absent && age < FRESH {
             state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Fresh);
-            return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+            return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
         }
         if !absent && age < RETENTION {
             // Served as it is, now. A caller who may ask starts the refresh; the next one sees its answer.
@@ -105,7 +105,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 refresh_behind(state, imdb, key, file);
             }
             state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Stale);
-            return answer_file(body, STALE_MAX_AGE, "stale", asked);
+            return answer_file(state, body, STALE_MAX_AGE, "stale", asked);
         }
     }
     // Nothing kept that may be served. Only a caller who may spend a question gets one asked.
@@ -131,7 +131,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                 }
                 if !body.matches(ABSENT) && age < FRESH {
                     state.metrics.provider_cache_access(Provider::Ratings, CacheAccess::Fresh);
-                    return answer_file(body, FRESH.saturating_sub(age), "hit", asked);
+                    return answer_file(state, body, FRESH.saturating_sub(age), "hit", asked);
                 }
             }
             Some(asking)
@@ -334,12 +334,13 @@ fn answer(
 /// A cache hit already carries its body length, digest and modification time. Revalidation therefore touches only
 /// the fixed-size response sidecar, while a 200 streams the open file rather than materialising another `Bytes`.
 fn answer_file(
+    state: &AppState,
     body: crate::cache::JsonFile,
     remaining: Duration,
     how: &'static str,
     asked: &HeaderMap,
 ) -> Response {
-    let mut resp = body.response();
+    let mut resp = body.response(&state.mmaps);
     let headers = resp.headers_mut();
     let max_age = remaining.min(Duration::from_millis(DAY_MS)).as_secs();
     if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {

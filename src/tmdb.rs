@@ -1117,7 +1117,8 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                         "hit",
                         modified,
                         asked,
-                    );
+                        &state.mmaps,
+                    )
                 }
                 // A list or a search moves, but the one kept is a better page than a wait on TMDB: served at
                 // once, and asked again behind it. A title's details are never here inside the six months.
@@ -1131,6 +1132,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                         "stale",
                         modified,
                         asked,
+                        &state.mmaps,
                     );
                 }
                 Cached::Refresh => {
@@ -1222,6 +1224,7 @@ async fn detail_answer(
                 "hit",
                 modified,
                 asked,
+                &state.mmaps,
             );
         }
         Kept::Absent => {
@@ -1236,7 +1239,7 @@ async fn detail_answer(
                 Refresh { cached, path: detail.path.clone(), query, key: key.to_owned(), file },
             );
             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Stale);
-            return answer_prepared(body, "public, max-age=60", "stale", modified, asked);
+            return answer_prepared(body, "public, max-age=60", "stale", modified, asked, &state.mmaps);
         }
         // A settled record past its six months is asked again now, as it always was, without the allowance.
         Kept::Stale(..) => None,
@@ -1261,6 +1264,7 @@ async fn detail_answer(
                         "hit",
                         modified,
                         asked,
+                        &state.mmaps,
                     );
                 }
                 Kept::Absent => {
@@ -1284,7 +1288,7 @@ async fn detail_answer(
             let Some(body) = detail.prepared_narrowed(state, whole, charge).await else {
                 return *refused(StatusCode::SERVICE_UNAVAILABLE, "tmdb_busy");
             };
-            answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked)
+            answer_prepared(body, &fresh_policy(fresh, fresh), how, SystemTime::now(), asked, &state.mmaps)
         }
         Err(response) => match &mut asking {
             Some(asking) => *asking.failed(response).await,
@@ -2264,11 +2268,12 @@ fn answer_prepared(
     how: &'static str,
     modified: SystemTime,
     asked: &HeaderMap,
+    mmaps: &crate::mmap::Cache,
 ) -> Response {
     match body {
         Prepared::Bytes(body) => answer(body, policy, how, modified, asked),
         Prepared::File(body) => {
-            let mut response = body.response_at(modified);
+            let mut response = body.response_at(modified, mmaps);
             if let Ok(value) = HeaderValue::from_str(policy) {
                 response.headers_mut().insert(header::CACHE_CONTROL, value);
             }
@@ -3035,6 +3040,7 @@ mod tests {
         }
 
         let mut held = Vec::new();
+        let mmaps = crate::mmap::Cache::new(Arc::new(crate::metrics::Metrics::default()));
         for _ in 0..capacity {
             let (prepared, _) = tokio::time::timeout(Duration::from_secs(5), requests.join_next())
                 .await
@@ -3048,6 +3054,7 @@ mod tests {
                 "hit",
                 SystemTime::now(),
                 &HeaderMap::new(),
+                &mmaps,
             ));
         }
         assert_eq!(derived_response_budget().available_permits(), 0);

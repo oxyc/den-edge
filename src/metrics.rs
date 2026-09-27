@@ -39,7 +39,22 @@ pub struct Metrics {
     public_media_hint_rejected: Mutex<BTreeMap<&'static str, u64>>,
     /// Session starts from an IPv6 visitor sent back for an `ipv4Hint` (`ipv4_hint_wanted`), by who asked.
     public_media_hint_wanted: Mutex<BTreeMap<&'static str, u64>>,
+    mmap: Mutex<MmapMetrics>,
 }
+
+#[derive(Default)]
+struct MmapMetrics {
+    outcomes: [u64; 6],
+    faults: [u64; 3],
+    resident_count: usize,
+    resident_bytes: usize,
+    resident_high_water_bytes: usize,
+    cached_count: usize,
+    cached_bytes: usize,
+}
+
+pub(crate) const MMAP_OUTCOMES: [&str; 6] = ["hit", "built", "ineligible", "budget", "fault", "evicted"];
+pub(crate) const MMAP_FAULTS: [&str; 3] = ["map", "read", "generation"];
 
 #[derive(Default)]
 struct RequestAdmission {
@@ -363,6 +378,39 @@ pub const GUEST_PLAY_REFUSALS: [&str; 7] = [
 pub const HINT_REJECTIONS: [&str; 3] = ["malformed", "not_global", "limit"];
 
 impl Metrics {
+    pub(crate) fn mmap_outcome(&self, outcome: usize) {
+        lock(&self.mmap).outcomes[outcome] += 1;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mmap_fault(&self, fault: usize) {
+        let mut metrics = lock(&self.mmap);
+        metrics.outcomes[4] += 1;
+        metrics.faults[fault] += 1;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mmap_resident_add(&self, bytes: usize) {
+        let mut metrics = lock(&self.mmap);
+        metrics.resident_count += 1;
+        metrics.resident_bytes += bytes;
+        metrics.resident_high_water_bytes = metrics.resident_high_water_bytes.max(metrics.resident_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mmap_resident_remove(&self, bytes: usize) {
+        let mut metrics = lock(&self.mmap);
+        metrics.resident_count = metrics.resident_count.saturating_sub(1);
+        metrics.resident_bytes = metrics.resident_bytes.saturating_sub(bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mmap_cached(&self, count: usize, bytes: usize) {
+        let mut metrics = lock(&self.mmap);
+        metrics.cached_count = count;
+        metrics.cached_bytes = bytes;
+    }
+
     pub fn record(&self, route: &'static str, status: u16) {
         *lock(&self.requests).entry((route, status)).or_default() += 1;
     }
@@ -841,6 +889,47 @@ impl Metrics {
             let n = wanted.get(who).copied().unwrap_or(0);
             out.push_str(&format!("den_edge_public_media_hint_wanted_total{{who=\"{who}\"}} {n}\n"));
         }
+        drop(wanted);
+        let mmap = lock(&self.mmap);
+        out.push_str(
+            "# HELP den_edge_mmap_total Exact-file mmap decisions by fixed outcome.\n\
+             # TYPE den_edge_mmap_total counter\n",
+        );
+        for (index, outcome) in MMAP_OUTCOMES.into_iter().enumerate() {
+            out.push_str(&format!("den_edge_mmap_total{{outcome=\"{outcome}\"}} {}\n", mmap.outcomes[index]));
+        }
+        out.push_str(
+            "# HELP den_edge_mmap_faults_total Mapping build failures by fixed cause.\n\
+             # TYPE den_edge_mmap_faults_total counter\n",
+        );
+        for (index, reason) in MMAP_FAULTS.into_iter().enumerate() {
+            out.push_str(&format!(
+                "den_edge_mmap_faults_total{{reason=\"{reason}\"}} {}\n",
+                mmap.faults[index]
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP den_edge_mmap_resident_bytes Bytes charged to live mappings, cached or response-owned.\n\
+             # TYPE den_edge_mmap_resident_bytes gauge\n\
+             den_edge_mmap_resident_bytes {}\n\
+             # HELP den_edge_mmap_resident_count Live mappings, cached or response-owned.\n\
+             # TYPE den_edge_mmap_resident_count gauge\n\
+             den_edge_mmap_resident_count {}\n\
+             # HELP den_edge_mmap_resident_high_water_bytes Highest live mapped bytes.\n\
+             # TYPE den_edge_mmap_resident_high_water_bytes gauge\n\
+             den_edge_mmap_resident_high_water_bytes {}\n\
+             # HELP den_edge_mmap_cached_bytes Bytes retained by the reusable mapping cache.\n\
+             # TYPE den_edge_mmap_cached_bytes gauge\n\
+             den_edge_mmap_cached_bytes {}\n\
+             # HELP den_edge_mmap_cached_count Mappings retained by the reusable mapping cache.\n\
+             # TYPE den_edge_mmap_cached_count gauge\n\
+             den_edge_mmap_cached_count {}\n",
+            mmap.resident_bytes,
+            mmap.resident_count,
+            mmap.resident_high_water_bytes,
+            mmap.cached_bytes,
+            mmap.cached_count,
+        ));
         out
     }
 }

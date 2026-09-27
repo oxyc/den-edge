@@ -13,6 +13,7 @@ mod library;
 mod link;
 mod meta;
 mod metrics;
+mod mmap;
 mod oauth;
 mod pair;
 mod ratings;
@@ -54,6 +55,8 @@ pub struct AppState {
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
     pub gen_nameplate: Box<dyn Fn() -> String + Send + Sync>,
     pub metrics: Arc<metrics::Metrics>,
+    /// Reusable exact-file mappings. The cache and every response owner share one count/byte budget.
+    pub(crate) mmaps: mmap::Cache,
     /// Requests whose handlers or response bodies are live. The permit follows the response body, so a slow
     /// receiver remains admitted until it finishes or disconnects rather than becoming unaccounted work.
     pub request_slots: Arc<tokio::sync::Semaphore>,
@@ -225,6 +228,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(store: store::Store, metrics_token: Option<String>, log_requests: bool) -> Self {
+        let metrics = Arc::new(metrics::Metrics::default());
         AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
@@ -235,7 +239,8 @@ impl AppState {
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_nameplate: Box::new(pair::gen_nameplate),
-            metrics: Arc::new(metrics::Metrics::default()),
+            metrics: Arc::clone(&metrics),
+            mmaps: mmap::Cache::new(metrics),
             request_slots: Arc::new(tokio::sync::Semaphore::new(handler::REQUESTS)),
             bulk_request_slots: Arc::new(tokio::sync::Semaphore::new(handler::BULK_REQUESTS)),
             metrics_token,
