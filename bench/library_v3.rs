@@ -184,7 +184,9 @@ impl Store for CowStore {
         let mut count = 0;
         let mut bytes = 0;
         let mut checksum = 0;
-        for (_, (_, location)) in state.sequence.range((std::ops::Bound::Excluded(since), std::ops::Bound::Unbounded)) {
+        for (_, (_, location)) in
+            state.sequence.range((std::ops::Bound::Excluded(since), std::ops::Bound::Unbounded))
+        {
             let mut fragment = vec![0; location.len as usize];
             data.seek(SeekFrom::Start(location.offset))?;
             data.read_exact(&mut fragment)?;
@@ -234,12 +236,7 @@ impl Store for CowStore {
     }
 }
 
-fn write_index(
-    dir: &Path,
-    generation: u64,
-    head: u64,
-    sequence: &CowSequence,
-) -> io::Result<()> {
+fn write_index(dir: &Path, generation: u64, head: u64, sequence: &CowSequence) -> io::Result<()> {
     let final_path = dir.join(format!("index.{generation}"));
     let temp = dir.join(format!("index.{generation}.next"));
     let mut file = OpenOptions::new().create(true).truncate(true).write(true).open(&temp)?;
@@ -491,7 +488,8 @@ fn crash_checks(backend: &'static str, root: &Path) -> Result<(), AnyError> {
         let (head, count, _, checksum) = reopened.range(0, 500)?;
         let expected = if point == "after-publish" { 2 } else { 1 };
         assert_eq!((head, count), (expected, 1), "{backend} {point}");
-        let expected_fragment = fragment(expected, "0000000000000000", if expected == 2 { b'b' } else { b'a' });
+        let expected_fragment =
+            fragment(expected, "0000000000000000", if expected == 2 { b'b' } else { b'a' });
         assert_eq!(checksum, checksum_bytes(0, &expected_fragment), "{backend} {point} payload");
         emit(serde_json::json!({"backend":backend,"case":"crash-reopen","point":point,"head":head,
             "payload_checksum":checksum,"passed":true}));
@@ -530,7 +528,8 @@ fn open_store(backend: &str, path: &Path) -> Result<Arc<dyn Store>, AnyError> {
 
 fn rss_bytes() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kb: u64 = text.lines().find(|line| line.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    let kb: u64 =
+        text.lines().find(|line| line.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb * 1024)
 }
 
@@ -555,7 +554,9 @@ fn main() -> Result<(), AnyError> {
         "rows":ROWS,"value_bytes":VALUE_BYTES,"rss_bytes":rss_bytes(),"cgroup_bytes":cgroup_bytes(),
         "memory_max":cgroup_value("memory.max"),"swap_max":cgroup_value("memory.swap.max")}));
     let selected = std::env::var("LIBRARY_V3_BACKEND").ok();
-    for backend in ["redb", "cow"].into_iter().filter(|backend| selected.as_deref().is_none_or(|only| only == *backend)) {
+    for backend in
+        ["redb", "cow"].into_iter().filter(|backend| selected.as_deref().is_none_or(|only| only == *backend))
+    {
         benchmark_backend(backend, &root)?;
         for concurrency in [1, 4, 8] {
             timed_writes(backend, &root, concurrency, 40)?;

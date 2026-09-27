@@ -1,9 +1,12 @@
 //! Feature-gated library-v3 storage. Nothing in the HTTP path selects this module yet.
 
-use super::{constant_time_eq, row_fragment, valid_hex_id, MAX_LIMIT, MAX_ROWS, MAX_VALUE, MAX_WRITES, PAGE_BYTES};
+use super::{
+    constant_time_eq, row_fragment, valid_hex_id, MAX_LIMIT, MAX_ROWS, MAX_VALUE, MAX_WRITES, PAGE_BYTES,
+};
 use redb::backends::FileBackend;
 use redb::{
-    BackendError, Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend, TableDefinition,
+    BackendError, Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend,
+    TableDefinition,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -173,7 +176,11 @@ impl StorageBackend for QuotaBackend {
         self.inner.close()
     }
 
-    fn try_lock_range(&self, start: std::ops::Bound<u64>, end: std::ops::Bound<u64>) -> Result<bool, BackendError> {
+    fn try_lock_range(
+        &self,
+        start: std::ops::Bound<u64>,
+        end: std::ops::Bound<u64>,
+    ) -> Result<bool, BackendError> {
         self.inner.try_lock_range(start, end)
     }
 
@@ -197,7 +204,11 @@ impl StorageBackend for QuotaBackend {
         self.inner.lock_shared_range(start, end)
     }
 
-    fn unlock_range(&self, start: std::ops::Bound<u64>, end: std::ops::Bound<u64>) -> Result<(), BackendError> {
+    fn unlock_range(
+        &self,
+        start: std::ops::Bound<u64>,
+        end: std::ops::Bound<u64>,
+    ) -> Result<(), BackendError> {
         self.inner.unlock_range(start, end)
     }
 
@@ -232,11 +243,8 @@ impl RedbLibrary {
             .truncate(false)
             .open(path)
             .map_err(StoreError::io)?;
-        let backend = QuotaBackend {
-            inner: FileBackend::new(file).map_err(StoreError::redb)?,
-            quota,
-            file_cap,
-        };
+        let backend =
+            QuotaBackend { inner: FileBackend::new(file).map_err(StoreError::redb)?, quota, file_cap };
         let mut builder = Database::builder();
         builder.set_cache_size(DATABASE_CACHE_BYTES);
         let database = builder.create_with_backend(backend).map_err(StoreError::redb)?;
@@ -307,7 +315,9 @@ impl LibraryStore for RedbLibrary {
         let mut unique = HashSet::with_capacity(writes.len());
         if writes.len() > MAX_WRITES
             || writes.iter().any(|write| {
-                write.value.len() > MAX_VALUE || !valid_hex_id(&write.key) || !unique.insert(write.key.as_str())
+                write.value.len() > MAX_VALUE
+                    || !valid_hex_id(&write.key)
+                    || !unique.insert(write.key.as_str())
             })
         {
             return Err(StoreError::Invalid("invalid or duplicate v3 write".into()));
@@ -339,7 +349,8 @@ impl LibraryStore for RedbLibrary {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
             let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
             for write in writes {
-                let current_sequence = keys.get(write.key.as_str()).map_err(StoreError::redb)?.map(|v| v.value());
+                let current_sequence =
+                    keys.get(write.key.as_str()).map_err(StoreError::redb)?.map(|v| v.value());
                 if current_sequence.unwrap_or(0) != write.base {
                     let current = current_sequence
                         .map(|current| {
@@ -384,7 +395,8 @@ impl LibraryStore for RedbLibrary {
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError> {
         let transaction = self.database.begin_read().map_err(StoreError::redb)?;
         let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
-        let Some(sequence_number) = keys.get(key).map_err(StoreError::redb)?.map(|value| value.value()) else {
+        let Some(sequence_number) = keys.get(key).map_err(StoreError::redb)?.map(|value| value.value())
+        else {
             return Ok(None);
         };
         let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
@@ -567,11 +579,7 @@ impl StoreManager {
     #[cfg(test)]
     fn cached(&self) -> (usize, usize, usize) {
         let registry = self.registry.lock().unwrap();
-        let open = registry
-            .slots
-            .values()
-            .filter(|slot| slot.store.lock().unwrap().is_some())
-            .count();
+        let open = registry.slots.values().filter(|slot| slot.store.lock().unwrap().is_some()).count();
         (open, registry.bytes, registry.slots.len())
     }
 }
@@ -605,11 +613,12 @@ mod tests {
         );
         let conflict = store.apply(&[Write { key: K1.into(), base: 0, value: "lost".into() }]).unwrap();
         assert_eq!(value(conflict.conflicts[0].current.as_ref().unwrap())["v"], "one");
-        store.apply(&[
-            Write { key: K1.into(), base: 1, value: "two".into() },
-            Write { key: K2.into(), base: 0, value: "three".into() },
-        ])
-        .unwrap();
+        store
+            .apply(&[
+                Write { key: K1.into(), base: 1, value: "two".into() },
+                Write { key: K2.into(), base: 0, value: "three".into() },
+            ])
+            .unwrap();
         assert_eq!(store.range(0, 500).unwrap().entries.len(), 2);
         drop(store);
         drop(first);
@@ -751,14 +760,12 @@ mod tests {
         }
         assert!(manager.cached().1 <= 16 * OPEN_DATABASE_BYTES);
         assert!(manager.cached().2 <= 16);
-        let current: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let current: u64 =
+            std::fs::read_to_string("/sys/fs/cgroup/memory.current").unwrap().trim().parse().unwrap();
         assert!(current < 64 << 20, "cgroup used {current} bytes");
         let events = std::fs::read_to_string("/sys/fs/cgroup/memory.events").unwrap();
-        let peak: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory.peak").unwrap().trim().parse().unwrap();
+        let peak: u64 =
+            std::fs::read_to_string("/sys/fs/cgroup/memory.peak").unwrap().trim().parse().unwrap();
         assert!(peak < 64 << 20, "cgroup peaked at {peak} bytes");
         assert!(events.lines().all(|line| !line.starts_with("max ") || line == "max 0"));
         assert!(events.lines().all(|line| !line.starts_with("oom ") || line == "oom 0"));

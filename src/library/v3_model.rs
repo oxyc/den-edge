@@ -117,10 +117,11 @@ impl FragmentAuthority {
         for write in writes {
             let current = self.current(&write.key);
             if current.as_ref().map_or(0, |row| row.sequence) != write.base {
-                conflicts.push(current.map_or(
-                    ConflictRow { key: write.key.clone(), sequence: 0, value: None },
-                    |row| ConflictRow { key: row.key, sequence: row.sequence, value: Some(row.value) },
-                ));
+                conflicts.push(
+                    current.map_or(ConflictRow { key: write.key.clone(), sequence: 0, value: None }, |row| {
+                        ConflictRow { key: row.key, sequence: row.sequence, value: Some(row.value) }
+                    }),
+                );
                 continue;
             }
             next.head += 1;
@@ -156,22 +157,13 @@ fn decode(fragment: &[u8]) -> CurrentRow {
     CurrentRow { key: row.k, sequence: row.seq, value: row.v }
 }
 
-fn page_from_rows(
-    rows: impl IntoIterator<Item = CurrentRow>,
-    head: u64,
-    since: u64,
-    limit: usize,
-) -> Page {
+fn page_from_rows(rows: impl IntoIterator<Item = CurrentRow>, head: u64, since: u64, limit: usize) -> Page {
     let fragments: Vec<_> = rows
         .into_iter()
         .filter(|row| row.sequence > since)
         .map(|row| (row.sequence, row_fragment(row.sequence, &row.key, &row.value)))
         .collect();
-    page_from_fragments(
-        fragments.iter().map(|(sequence, fragment)| (sequence, fragment)),
-        head,
-        limit,
-    )
+    page_from_fragments(fragments.iter().map(|(sequence, fragment)| (sequence, fragment)), head, limit)
 }
 
 fn page_from_fragments<'a>(
@@ -221,8 +213,7 @@ fn generated_histories_match_v2_for_cas_conflicts_replacements_and_pages() {
                     continue;
                 }
                 let key = format!("{key_number:016x}");
-                let current =
-                    v2.live().values().find(|row| row.key == key).map_or(0, |row| row.sequence);
+                let current = v2.live().values().find(|row| row.key == key).map_or(0, |row| row.sequence);
                 let base = if random(&mut random_state).is_multiple_of(5) {
                     current.saturating_sub(1)
                 } else {
@@ -260,9 +251,8 @@ fn fragment_authority_removes_the_superseded_sequence() {
     model.apply(&[Write { key: "aaaaaaaaaaaaaaaa".into(), base: 0, value: "first".into() }]);
     model.apply(&[Write { key: "aaaaaaaaaaaaaaaa".into(), base: 1, value: "second".into() }]);
     assert!(!model.sequence.contains_key(&1));
-    assert_eq!(model.page(0, 500).entries, vec![CurrentRow {
-        key: "aaaaaaaaaaaaaaaa".into(),
-        sequence: 2,
-        value: "second".into(),
-    }]);
+    assert_eq!(
+        model.page(0, 500).entries,
+        vec![CurrentRow { key: "aaaaaaaaaaaaaaaa".into(), sequence: 2, value: "second".into() }]
+    );
 }

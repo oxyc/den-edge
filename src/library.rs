@@ -41,11 +41,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-#[cfg(test)]
-mod v3_model;
 #[cfg(feature = "library-v3")]
 #[allow(dead_code)] // Storage activation and migration deliberately follow in later #140 slices.
 mod v3;
+#[cfg(test)]
+mod v3_model;
 
 const NS: &str = "lib";
 const EXT: &str = "log";
