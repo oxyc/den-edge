@@ -1,5 +1,5 @@
 <!-- The rows under a title's cast: its franchise, You might also like, and what its director, creator, writer and leads
-     have done. A row appears once it has something to show, and goes on loading as it is scrolled to its end
+     have done. A row shows its heading as soon as it is known, and goes on loading as it is scrolled to its end
      (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
@@ -53,30 +53,28 @@
     return { destroy: () => observer.disconnect() };
   }
 
-  // Each row is read once the rows are near the screen, and shown if it has anything. A row remembers what it has
-  // loaded, so a new title, or an atlas that answers late, builds them afresh. The rows already shown stay until
-  // the rebuilt ones are ready: emptying them first would shorten the page under someone scrolled down it, and the
-  // browser would pull them up by the rows' height. A replaced row holds its height with `BrowseRow`'s card-sized
-  // placeholders until its first page shows. Only a different title clears them at once.
+  // The rows are built once they are near the screen. For a title's first build, every row it is known to have shows
+  // its heading and `BrowseRow`'s card-sized placeholders at once and loads itself, hiding if it turns out empty;
+  // only the franchise row, which is not known to exist until it is looked up, joins once it has something to show.
+  // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
+  // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
   $effect(() => {
     if (!reached) return;
     const options = { key: tmdbKey };
     const self = detail.title;
     const key = titleKey(self);
+    const rebuild = key === rowsFor;
+    rowsFor = key;
     const originalLanguage = detail.title.originalLanguage;
     const regionalLanguage =
       originalLanguage && originalLanguage !== 'en'
         ? detail.languages.find((language) => language.id === originalLanguage)
         : undefined;
-    if (key !== rowsFor) {
-      rows = [];
-      rowsFor = key;
-    }
     let live = true;
     const franchise = franchiseRow(detail.collection, self, atlas, options).then((row) =>
       row ? firstScreen(row, shown) : null,
     );
-    const defined = [
+    const defined: RowDef[] = [
       ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
       // Films and series together; curated primary members have their own row and atlas excludes them here.
       // Ask for atlas's whole affinity row: the loader pages this answer into screenfuls before it falls through
@@ -90,13 +88,20 @@
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
     ];
-    void Promise.all([franchise, ...defined.map((row) => firstScreen(row, shown))]).then(
-      (found) => {
-        if (!live) return;
-        const build = ++builds;
-        rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
-      },
-    );
+    const build = ++builds;
+    if (rebuild) {
+      void Promise.all([franchise, ...defined.map((row) => firstScreen(row, shown))]).then(
+        (found) => {
+          if (!live) return;
+          rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
+        },
+      );
+    } else {
+      rows = defined.map((row) => ({ build, row }));
+      void franchise.then((row) => {
+        if (live && row) rows = [{ build, row }, ...rows];
+      });
+    }
     return () => {
       live = false;
     };

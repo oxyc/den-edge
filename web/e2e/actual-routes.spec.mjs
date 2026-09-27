@@ -105,7 +105,10 @@ test('actual-routes regressions', async () => {
         'detail snapshot must paint exactly like the live detail, including its backdrop',
       );
       await page.evaluate(() => document.querySelector('[data-visual-check]').remove());
-      const actor = page.locator('[data-active="true"] a').filter({ hasText: 'An Actor' });
+      const actor = page
+        .locator('[data-active="true"]')
+        .getByRole('region', { name: 'Cast & Crew' })
+        .getByRole('link', { name: 'An Actor' });
       await actor.scrollIntoViewIfNeeded();
       await page.waitForTimeout(300);
       const before = await page.evaluate(() => scrollY);

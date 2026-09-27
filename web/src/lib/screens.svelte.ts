@@ -53,7 +53,7 @@ export function permitsScreenPreload(connection?: NetworkHint): boolean {
   return !['slow-2g', '2g', '3g'].includes(connection?.effectiveType ?? '');
 }
 
-/** The two common next screens, fetched once while a fast connection is idle after the hero has painted. */
+/** Every screen a paired page can open, fetched once while a fast connection is idle after the hero has painted. */
 export function preloadScreens(): void {
   if (preloading) return;
   const connection = (navigator as Navigator & { connection?: NetworkHint }).connection;
@@ -65,7 +65,17 @@ export function preloadScreens(): void {
       window.addEventListener('online', load, { once: true });
       return;
     }
-    for (const screen of [DetailScreen, SearchScreen]) void screen.load();
+    // Detail and Search first: the likeliest next tap. The rest follow so a first person, service or player tap
+    // does not wait on its chunk.
+    for (const screen of [
+      DetailScreen,
+      SearchScreen,
+      PersonScreen,
+      ServiceScreen,
+      PlayerScreen,
+      SettingsScreen,
+    ])
+      void screen.load();
   };
   if (typeof requestIdleCallback === 'function') requestIdleCallback(load, { timeout: 2500 });
   else setTimeout(load, 1000);

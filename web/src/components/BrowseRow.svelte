@@ -29,15 +29,23 @@
       },
       { rootMargin: '400px 0px' },
     );
-    const tail = new IntersectionObserver((entries) => {
-      if (pager.page > 0 && entries.some((e) => e.isIntersecting)) void pager.more();
-    });
     near.observe(wrapper);
+    return () => near.disconnect();
+  });
+
+  // The next page is asked for two row-widths before the end, measured against the row's own scroller: the
+  // viewport's margin never reaches cards clipped by a horizontal track. Observed afresh as titles land, since an
+  // end still in range after a page changes no intersection and would never ask for the one after.
+  $effect(() => {
+    void pager.titles.length;
+    const tail = new IntersectionObserver(
+      (entries) => {
+        if (pager.page > 0 && entries.some((e) => e.isIntersecting)) void pager.more();
+      },
+      { root: end.parentElement, rootMargin: '0px 200%' },
+    );
     tail.observe(end);
-    return () => {
-      near.disconnect();
-      tail.disconnect();
-    };
+    return () => tail.disconnect();
   });
 </script>
 

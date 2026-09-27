@@ -37,7 +37,9 @@
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) reached();
       },
-      { rootMargin: '800px 0px' },
+      // Three screens ahead. At 800px (one phone screen) the next page was only asked for once the grid's end was
+      // nearly in view, so a fast scroll reached it before its posters did.
+      { rootMargin: '300% 0px' },
     );
     observer.observe(marker);
     return () => observer.disconnect();
