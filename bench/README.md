@@ -11,15 +11,18 @@ bench/run.sh
 ```
 
 Docker or Podman must be running. The harness builds scratch images, verifies
-that the engine applied exactly 64 MiB (including page cache), and writes one
+from inside the measured cgroup that `memory.max` is exactly 64 MiB and
+`memory.swap.max` is zero, and writes one
 JSON object per case to `bench/results/<UTC timestamp>.jsonl`. Override the
 defaults with `DURATION=30 SOAK_DURATION=300 CONCURRENCY=32 PORT=18081`.
 `CONTAINER_ENGINE=podman` selects Podman explicitly. Exit 77 means the required
 container engine was unavailable, so a misleading host-only run was not made.
 
 This is a closure gate, not a reporting-only benchmark. Any unexplained client
-error, unexpected status, cgroup OOM/kill increment, failed post-case health
-check, or failed cancellation/slow-reader resource recovery exits nonzero.
+error, unexpected status or refusal code, body-size/`Content-Length` mismatch,
+cgroup OOM/kill increment, failed post-case health check, or failed post-case
+resource recovery exits nonzero. Cancellation must also produce server-side
+evidence that upstream work was accepted, aborted, and returned to baseline.
 Every passing row carries `"gate":"passed"` and includes completed requests, status/refusal counts, body payload
 bytes, requests/s, GiB/s, p50/p95/p99 latency, process CPU in cores, sampled
 RSS, sampled cgroup current, the kernel cgroup peak and OOM events, open file
@@ -54,20 +57,26 @@ The cases cover:
 - all of those classes competing in one mixed 64 MiB soak.
 
 The fixture generation writes valid store paths/logs directly so the cold run
-is not capped by the public five-new-libraries-per-minute policy. Throughput
+is not capped by the public five-new-libraries-per-minute policy. The image
+does not serve those host bind-mounted files directly: its PID 1 staging helper
+copies them into initially empty runtime mounts before starting `den-edge`.
+Those writes and the destination file pages therefore belong to the same
+64 MiB cgroup being measured, and the baseline is captured only after staging
+and warmup. Throughput
 cases model many independent callers by rotating `X-Forwarded-For` through the
 dedicated, trusted benchmark bridge. The slow-reader overload intentionally
 uses one identity. It and the two media components competing for the shared
 budget in the mixed soak are the only cases allowed stable overload statuses:
-HTTP 429 (`too_many_sources`) and 503 (`relay_busy`/`server_busy`). They must
+HTTP 429 (`too_many_sources`) and 503 (`media_busy`/`relay_busy`/`server_busy`). They must
 still serve at least one HTTP 200. Control/cache/library/relay components in
 that same mixed saturation case remain strictly 200-only.
 Cancellation cases require the driver's explicit status 0; every other case
 requires only its documented 200 or 304. Refusals cannot pass as throughput.
 
-After every case `/health` must recover. Cancellation, slow-reader saturation,
-and the mixed soak additionally wait up to `RECOVERY_TIMEOUT` (15 seconds by
-default) for RSS and cgroup current to return within 8 MiB of baseline, file
+After every case `/health` and resources must recover, both relative to the
+case boundary and the post-staging run baseline. The harness waits up to
+`RECOVERY_TIMEOUT` (15 seconds by default) for RSS and cgroup current to return
+within 8 MiB of baseline, file
 descriptors within two, and established port-9090 sockets exactly to baseline.
 The tolerances accommodate allocator/page-cache noise while still detecting
 leaked bodies, permits, descriptors, and upstream streams. OOM enforcement

@@ -20,6 +20,14 @@ def percentile(values, p):
     return values[min(len(values) - 1, math.ceil(len(values) * p) - 1)]
 
 
+def refusal_code(payload):
+    try:
+        value = json.loads(payload)
+        return value.get("error") if isinstance(value, dict) and isinstance(value.get("error"), str) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
 def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
     sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=5)
     request = [f"GET {path} HTTP/1.1", f"Host: {parsed.netloc}", "Connection: close"]
@@ -30,7 +38,7 @@ def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
         # Keep the churn on the server, not the load generator's ephemeral-port
         # table. Even 5 ms per worker is far above plausible browser cancellation.
         time.sleep(cancel_delay_ms / 1000)
-        return 0, 0
+        return 0, 0, None
     body = bytearray()
     while True:
         block = sock.recv(65536)
@@ -39,9 +47,18 @@ def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
         body.extend(block)
         time.sleep(slow_read_ms / 1000)
     sock.close()
-    head, _, payload = body.partition(b"\r\n\r\n")
+    head, _, payload = bytes(body).partition(b"\r\n\r\n")
     status = int(head.split(None, 2)[1]) if head else 0
-    return status, len(payload)
+    fields = {}
+    for line in head.split(b"\r\n")[1:]:
+        if b":" in line:
+            name, value = line.split(b":", 1)
+            fields[name.strip().lower()] = value.strip()
+    if status not in (0, 204, 304) and b"content-length" in fields:
+        declared = int(fields[b"content-length"])
+        if len(payload) != declared:
+            raise OSError(f"truncated response: declared={declared} received={len(payload)}")
+    return status, len(payload), refusal_code(payload) if status >= 400 else None
 
 
 def main():
@@ -57,6 +74,9 @@ def main():
     parser.add_argument("--cancel-delay-ms", type=float, default=5)
     parser.add_argument("--rotate-ip", action="store_true", help="model independent callers behind the trusted test proxy")
     parser.add_argument("--label", help="stable component name for mixed-soak gate contracts")
+    parser.add_argument("--expect-200-bytes", type=int)
+    parser.add_argument("--min-200-bytes", type=int)
+    parser.add_argument("--expect-304-bytes", type=int, default=0)
     args = parser.parse_args()
 
     parsed = urllib.parse.urlsplit(args.url)
@@ -71,6 +91,7 @@ def main():
     payload_bytes = 0
     errors = 0
     error_outcomes = collections.Counter()
+    refusal_codes = collections.Counter()
     sequence = 0
     fatal = []
 
@@ -95,15 +116,24 @@ def main():
                     response = connection.getresponse()
                     body = response.read()
                     status, size = response.status, len(body)
+                    code = refusal_code(body) if status >= 400 else None
                     tmdb_outcome = response.getheader("x-den-tmdb")
                 else:
-                    status, size = raw_request(
+                    status, size, code = raw_request(
                         parsed, path, request_headers, args.mode, args.slow_read_ms, args.cancel_delay_ms
                     )
                     tmdb_outcome = None
+                if status == 200 and args.expect_200_bytes is not None and size != args.expect_200_bytes:
+                    raise OSError(f"wrong 200 body size: expected={args.expect_200_bytes} received={size}")
+                if status == 200 and args.min_200_bytes is not None and size < args.min_200_bytes:
+                    raise OSError(f"short 200 body: minimum={args.min_200_bytes} received={size}")
+                if status == 304 and size != args.expect_304_bytes:
+                    raise OSError(f"wrong 304 body size: expected={args.expect_304_bytes} received={size}")
                 elapsed = time.perf_counter() - started
                 with lock:
                     statuses[status] += 1
+                    if status >= 400:
+                        refusal_codes[f"{status}:{code or 'missing'}"] += 1
                     if tmdb_outcome:
                         tmdb_outcomes[tmdb_outcome] += 1
                     payload_bytes += size
@@ -112,7 +142,8 @@ def main():
                 connection = None
                 with lock:
                     errors += 1
-                    error_outcomes[f"{type(error).__name__}:{getattr(error, 'errno', None)}"] += 1
+                    detail = str(error) or str(getattr(error, "errno", None))
+                    error_outcomes[f"{type(error).__name__}:{detail}"] += 1
             except Exception as error:
                 with lock:
                     fatal.append(repr(error))
@@ -141,6 +172,7 @@ def main():
         "tmdb_outcomes": dict(sorted(tmdb_outcomes.items())),
         "errors": errors,
         "error_outcomes": dict(sorted(error_outcomes.items())),
+        "refusal_codes": dict(sorted(refusal_codes.items())),
         "mode": args.mode,
         "concurrency": args.concurrency,
         "label": args.label,

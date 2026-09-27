@@ -18,6 +18,8 @@ PROBE_KEYS = (
     "fd_count",
     "upstream_established",
     "cpu_ticks",
+    "memory_max_bytes",
+    "memory_swap_max_bytes",
 )
 
 
@@ -39,6 +41,10 @@ def read_probe(path):
         raise GateFailure(f"{path}: incomplete probe; missing {', '.join(missing)}")
     if values["cgroup_events_available"] != 1:
         raise GateFailure("cgroup v2 memory.events is unavailable; OOM enforcement cannot be proven")
+    if values["memory_max_bytes"] != 64 * 1024 * 1024:
+        raise GateFailure(f"in-container memory.max is not 64 MiB: {values['memory_max_bytes']}")
+    if values["memory_swap_max_bytes"] != 0:
+        raise GateFailure(f"in-container memory.swap.max is not zero: {values['memory_swap_max_bytes']}")
     return values
 
 
@@ -56,7 +62,13 @@ def event_deltas(before, after):
     return deltas
 
 
-def validate_result(row, allowed, required, tmdb_hit=False):
+def assert_initial(probe):
+    changed = {event: probe[f"cgroup_events_{event}"] for event in EVENT_KEYS if probe[f"cgroup_events_{event}"]}
+    if changed:
+        raise GateFailure(f"setup incurred cgroup OOM events: {changed}")
+
+
+def validate_result(row, allowed, required, tmdb_hit=False, allowed_refusals=None):
     if row.get("errors") != 0:
         raise GateFailure(f"unexplained client failures: errors={row.get('errors')!r}")
     requests = row.get("requests", 0)
@@ -73,6 +85,13 @@ def validate_result(row, allowed, required, tmdb_hit=False):
         raise GateFailure(f"required statuses were not observed: {missing}")
     if tmdb_hit and row.get("tmdb_outcomes", {}).get("hit", 0) != requests:
         raise GateFailure("TMDB disk-hit case did not report x-den-tmdb: hit for every response")
+    refusals = {key: int(count) for key, count in row.get("refusal_codes", {}).items()}
+    refusal_requests = sum(count for status, count in statuses.items() if status >= 400)
+    if sum(refusals.values()) != refusal_requests:
+        raise GateFailure("every refusal must carry a parsed, asserted error code")
+    unexpected_refusals = sorted(set(refusals) - (allowed_refusals or set()))
+    if unexpected_refusals:
+        raise GateFailure(f"unexpected refusal codes {unexpected_refusals}")
 
 
 def recovery_failures(before, after, rss_slack, cgroup_slack, fd_slack, upstream_slack):
@@ -91,6 +110,7 @@ def recovery_failures(before, after, rss_slack, cgroup_slack, fd_slack, upstream
 
 def assert_recovered(args):
     before, after = read_probe(args.before), read_probe(args.after)
+    event_deltas(before, after)
     failures = recovery_failures(
         before, after, args.rss_slack, args.cgroup_slack, args.fd_slack, args.upstream_slack
     )
@@ -115,6 +135,22 @@ def sample_peaks(path):
     return peaks
 
 
+def assert_cancellation(before_path, after_path):
+    before = json.loads(pathlib.Path(before_path).read_text())
+    after = json.loads(pathlib.Path(after_path).read_text())
+    required = ("cancel_accepted", "cancel_active", "cancel_completed", "cancel_aborted")
+    if any(key not in before or key not in after for key in required):
+        raise GateFailure("upstream cancellation-specific counters are missing")
+    if before["cancel_active"] != 0:
+        raise GateFailure(f"cancellation baseline already had active upstream work: {before}")
+    if after["cancel_accepted"] <= before["cancel_accepted"]:
+        raise GateFailure("cancellation load opened no upstream work")
+    if after["cancel_aborted"] <= before["cancel_aborted"]:
+        raise GateFailure("cancellation load did not propagate an upstream abort")
+    if after["cancel_active"] != 0:
+        raise GateFailure(f"upstream active work did not recover: before={before} after={after}")
+
+
 def report_case(args):
     before, after = read_probe(args.before), read_probe(args.after)
     recovered = read_probe(args.recovered)
@@ -124,13 +160,16 @@ def report_case(args):
     allowed = {int(value) for value in args.allowed.split(",")}
     required = {int(value) for value in args.required.split(",") if value}
     row = json.loads(pathlib.Path(args.result).read_text())
-    validate_result(row, allowed, required, args.tmdb_hit)
+    allowed_refusals = {value for value in args.allowed_refusals.split(",") if value}
+    validate_result(row, allowed, required, args.tmdb_hit, allowed_refusals)
     if args.assert_recovery:
         failures = recovery_failures(
             before, recovered, args.rss_slack, args.cgroup_slack, args.fd_slack, args.upstream_slack
         )
         if failures:
             raise GateFailure("resources did not recover: " + "; ".join(failures))
+    if args.assert_cancellation:
+        assert_cancellation(args.upstream_before, args.upstream_after)
     peaks = sample_peaks(args.samples)
     elapsed = float(row["elapsed_s"])
     row.update(
@@ -189,9 +228,18 @@ def main():
     case.add_argument("--required", default="")
     case.add_argument("--assert-recovery", action="store_true")
     case.add_argument("--tmdb-hit", action="store_true")
+    case.add_argument("--allowed-refusals", default="")
+    case.add_argument("--assert-cancellation", action="store_true")
+    case.add_argument("--upstream-before")
+    case.add_argument("--upstream-after")
+    initial = commands.add_parser("initial")
+    initial.add_argument("--probe", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "recovered":
+        if args.command == "initial":
+            probe = read_probe(args.probe)
+            assert_initial(probe)
+        elif args.command == "recovered":
             assert_recovered(args)
         else:
             report_case(args)

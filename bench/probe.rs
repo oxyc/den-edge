@@ -35,7 +35,7 @@ fn events_available() -> bool {
     fs::read_to_string("/sys/fs/cgroup/memory.events")
         .ok()
         .map(|body| {
-            ["oom", "oom_kill"].iter().all(|wanted| {
+            ["oom", "oom_kill", "oom_group_kill"].iter().all(|wanted| {
                 body.lines().any(|line| {
                     line.split_once(' ')
                         .is_some_and(|(key, value)| key == *wanted && value.parse::<u64>().is_ok())
@@ -43,6 +43,10 @@ fn events_available() -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn limit(path: &str) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 fn cpu_ticks() -> u64 {
@@ -82,12 +86,11 @@ fn main() {
     let fds = fs::read_dir("/proc/1/fd").map(|entries| entries.count()).unwrap_or(0);
     let current = number("/sys/fs/cgroup/memory.current");
     let peak = number("/sys/fs/cgroup/memory.peak");
-    println!(
-        "cgroup_events_available={}",
-        u8::from(events_available())
-    );
+    println!("cgroup_events_available={}", u8::from(events_available()));
     println!("rss_bytes={}", status("VmRSS:") * 1024);
     println!("cgroup_current_bytes={current}");
+    println!("memory_max_bytes={}", limit("/sys/fs/cgroup/memory.max").unwrap_or(0));
+    println!("memory_swap_max_bytes={}", limit("/sys/fs/cgroup/memory.swap.max").unwrap_or(u64::MAX));
     println!("cgroup_peak_bytes={peak}");
     println!("cgroup_events_low={}", event("low"));
     println!("cgroup_events_high={}", event("high"));

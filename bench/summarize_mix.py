@@ -7,7 +7,7 @@ import sys
 
 import gate
 
-parts_path, samples_path, before_path, after_path, recovered_path = sys.argv[1:]
+parts_path, samples_path, before_path, after_path, recovered_path, upstream_before, upstream_after = sys.argv[1:]
 parts = [json.loads(line) for line in pathlib.Path(parts_path).read_text().splitlines() if line]
 
 
@@ -42,7 +42,14 @@ try:
             # Slow readers deliberately saturate the shared media budget, so
             # both media clients can see stable admission-control outcomes.
             # Control, cache, library and relay components may not.
-            gate.validate_result(part, {200, 429, 503}, {200})
+            gate.validate_result(
+                part,
+                {200, 429, 503},
+                {200},
+                allowed_refusals={
+                    "429:too_many_sources", "503:media_busy", "503:relay_busy", "503:server_busy"
+                },
+            )
         else:
             gate.validate_result(part, {200}, {200}, label.startswith("tmdb-"))
     before, after, recovered = (
@@ -52,6 +59,7 @@ try:
     failures = gate.recovery_failures(before, recovered, 8 * 1024 * 1024, 8 * 1024 * 1024, 2, 0)
     if failures:
         raise gate.GateFailure("resources did not recover: " + "; ".join(failures))
+    gate.assert_cancellation(upstream_before, upstream_after)
     peaks = gate.sample_peaks(samples_path)
 except (gate.GateFailure, OSError, ValueError, json.JSONDecodeError) as error:
     print(f"GATE FAILURE: {error}", file=sys.stderr)
