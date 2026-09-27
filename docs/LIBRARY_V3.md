@@ -1,7 +1,7 @@
 # Library v3 storage and wire invariants
 
-Status: implemented in the HTTP path with lazy v2 migration. Promotion still requires CI and the issue #140 Linux
-64 MiB mixed-workload gate; this status does not claim deployment.
+Status: implemented in the HTTP path with lazy v2 migration. The issue #140 Linux 64 MiB mixed-workload gate passed;
+this status does not claim deployment.
 
 ## Authority and transaction
 
@@ -83,12 +83,20 @@ Before step 6, v2 alone is authoritative and any v3 file is ignored. After step 
 at any boundary therefore selects a complete old or complete new store, never two heads. Cleanup, retirement,
 generation reset, backup, and restore must use the selected format and tolerate every prefix of these steps.
 
-## Implemented and remaining promotion work
+## Promotion evidence
 
 Implemented: executable equivalence model, per-library redb selection, shared hard disk quota, exact live-row charge,
 lease-bound open admission and idle-handle recovery, lazy v2 migration, mixed-format selection, retirement,
 membership credentials, bounded identity frames, response-lifetime admission, transaction abort tests, and
 migration-prefix recovery tests.
 
-Remaining before merge/deployment: full CI, target-amd64 HTTP/durable-write comparison, the 64 MiB migration/write/
-slow-reader/cancellation soak, and a documented canary/rollback decision in issue #140.
+The final target-amd64 gate ran in a container with `memory.max=64 MiB` and swap disabled. Its 60-second mixed phase
+completed 257,734 requests with zero unexpected statuses or client errors, including 17,501 durable replacement
+writes and 6,695 concurrent library reads. Cgroup memory peaked at 53,682,176 bytes, process RSS peaked at
+13,733,888 bytes, no `memory.events` pressure/OOM counter moved, and descriptors recovered to 13. The preceding
+named cases migrated 160 cold libraries at 531 requests/second and served the prepared 488 KiB identity page at
+1,970 requests/second in the ten-second sample; repeated three-second samples reached 3,347 requests/second.
+
+Unit/model/fault tests, clippy, web tests, browser sync policy, and the production image builds are CI gates. The
+issue and PR record the canary/rollback decision; promotion remains an operator decision and is not performed by
+this implementation.

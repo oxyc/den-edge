@@ -291,13 +291,7 @@ fn shared_or_open(
             std::thread::yield_now();
             continue;
         }
-        let store = Arc::new(RedbLibrary::open(
-            path,
-            quota,
-            file_cap,
-            token_hash,
-            initial_member_hash,
-        )?);
+        let store = Arc::new(RedbLibrary::open(path, quota, file_cap, token_hash, initial_member_hash)?);
         databases.insert(path.to_owned(), Arc::downgrade(&store));
         return Ok(store);
     }
@@ -903,11 +897,8 @@ impl StoreManager {
                 std::thread::yield_now();
                 continue;
             }
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(StoreError::io)?;
+            let file =
+                std::fs::OpenOptions::new().read(true).write(true).open(&path).map_err(StoreError::io)?;
             let backend = QuotaBackend {
                 inner: FileBackend::new(file).map_err(StoreError::redb)?,
                 quota: Arc::clone(&self.quota),
