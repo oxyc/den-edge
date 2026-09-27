@@ -16,7 +16,9 @@ if (
 export default defineConfig({
   testDir: './e2e',
   timeout: 120_000,
-  workers: 1,
+  // Files are isolated by Playwright contexts and do not share mutable server state.
+  // Keep local runs deterministic while allowing CI to execute independent files in parallel.
+  workers: process.env.CI ? 2 : 1,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',

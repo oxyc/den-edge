@@ -141,6 +141,9 @@ test('settings re-read with nothing changed leave the page as it is', async ({ b
 
   const cards = page.locator('a[href^="/movie/10"]:not(.billboard *)');
   await expect(cards.first()).toBeVisible();
+  // A card can paint from the atlas row before the first TMDB row enters the viewport. Wait for that
+  // initial row request so a slow runner cannot mistake it for work caused by the settings re-read.
+  await expect.poll(() => asked.filter((path) => path === '/tmdb/3/discover/movie').length).toBe(1);
   const shown = await cards.count();
   await cards.evaluateAll((all) => all.forEach((card) => (card.dataset.kept = '')));
   const before = asked.length;
