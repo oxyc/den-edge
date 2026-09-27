@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Component } from 'svelte';
-import { lazy } from './screens.svelte';
+import { lazy, permitsScreenPreload } from './screens.svelte';
 
 const Screen = (() => undefined) as unknown as Component;
 
@@ -27,5 +27,19 @@ describe('lazy', () => {
     await Promise.all([screen.load(), screen.load()]);
     await screen.load();
     expect(attempts).toBe(1);
+  });
+});
+
+describe('screen preloading', () => {
+  it('leaves metered and constrained connections to intent-driven loading', () => {
+    expect(permitsScreenPreload({ saveData: true, effectiveType: '4g' })).toBe(false);
+    expect(permitsScreenPreload({ effectiveType: 'slow-2g' })).toBe(false);
+    expect(permitsScreenPreload({ effectiveType: '2g' })).toBe(false);
+    expect(permitsScreenPreload({ effectiveType: '3g' })).toBe(false);
+  });
+
+  it('permits idle loading on fast and unclassified connections', () => {
+    expect(permitsScreenPreload({ effectiveType: '4g' })).toBe(true);
+    expect(permitsScreenPreload()).toBe(true);
   });
 });

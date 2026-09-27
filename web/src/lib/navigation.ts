@@ -14,7 +14,7 @@ export const routeKey = (route: Route): string =>
  * a whole live page plus its frozen copy for swipes (`pageSnapshot.ts`), so a long session of Home → title → Home →
  * title kept every one of them until it reloaded.
  */
-export const KEPT_DETAILS = 4;
+export const KEPT_DETAILS = 2;
 
 const isDetail = (route: Route) =>
   route.page === 'title' || route.page === 'person' || route.page === 'service';

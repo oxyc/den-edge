@@ -131,14 +131,14 @@ describe('kept pages', () => {
     entries.set(17, { pageKey: 'settings' });
     nav.prune(nearest(entries, 17));
     expect([...nav.pages.keys()].sort()).toEqual(
-      ['library', 'settings', 'visit-5', 'visit-6', 'visit-7', 'visit-8'].sort(),
+      ['library', 'settings', 'visit-7', 'visit-8'].sort(),
     );
     // Settings, left, is kept too: a pairing it is hosting goes on while another page is open.
     nav.visit('/', 'library');
     entries.set(18, { pageKey: 'library' });
     nav.prune(nearest(entries, 18));
     expect(nav.pages.has('settings')).toBe(true);
-    expect(KEPT_DETAILS).toBe(4);
+    expect(KEPT_DETAILS).toBe(2);
   });
 
   it('keeps the entries either side of the current one first', () => {

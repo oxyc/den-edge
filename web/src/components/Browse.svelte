@@ -19,7 +19,9 @@
     build?: number;
   } = $props();
 
-  const STEP = 6;
+  // Two rows establish the page. More arrive close to the viewport instead of mounting a whole catalogue
+  // while the billboard is still competing for the main thread and network.
+  const STEP = 2;
   let count = $state(STEP);
   let bottom: HTMLElement;
 
@@ -35,7 +37,7 @@
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) count += STEP;
       },
-      { rootMargin: '800px 0px' },
+      { rootMargin: '300px 0px' },
     );
     observer.observe(bottom);
     return () => observer.disconnect();

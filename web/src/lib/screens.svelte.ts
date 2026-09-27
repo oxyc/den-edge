@@ -45,9 +45,19 @@ export const LinkScreen = lazy(() => import('../LinkTV.svelte'));
 
 let preloading = false;
 
-/** Every screen a paired page can open, fetched once while the browser is idle after Home has painted. */
+type NetworkHint = { saveData?: boolean; effectiveType?: string };
+
+/** Slow or metered links get chunks from intent only; speculative work must not compete with the page. */
+export function permitsScreenPreload(connection?: NetworkHint): boolean {
+  if (connection?.saveData) return false;
+  return !['slow-2g', '2g', '3g'].includes(connection?.effectiveType ?? '');
+}
+
+/** The two common next screens, fetched once while a fast connection is idle after the hero has painted. */
 export function preloadScreens(): void {
   if (preloading) return;
+  const connection = (navigator as Navigator & { connection?: NetworkHint }).connection;
+  if (!permitsScreenPreload(connection)) return;
   preloading = true;
   const load = () => {
     // Offline the chunks are out of reach; they are fetched when the browser is back rather than never.
@@ -55,16 +65,8 @@ export function preloadScreens(): void {
       window.addEventListener('online', load, { once: true });
       return;
     }
-    for (const screen of [
-      DetailScreen,
-      PersonScreen,
-      SearchScreen,
-      PlayerScreen,
-      ServiceScreen,
-      SettingsScreen,
-    ])
-      void screen.load();
+    for (const screen of [DetailScreen, SearchScreen]) void screen.load();
   };
-  if (typeof requestIdleCallback === 'function') requestIdleCallback(load, { timeout: 4000 });
-  else setTimeout(load, 1500);
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(load, { timeout: 2500 });
+  else setTimeout(load, 1000);
 }

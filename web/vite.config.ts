@@ -52,6 +52,8 @@ export default defineConfig({
       '/remux': { target: remux, changeOrigin: true },
     },
   },
-  build: { target: 'es2022' },
+  // One small stylesheet avoids a chain of tiny route CSS requests on constrained mobile links. Route JS
+  // remains split and on-demand; only the CSS shares the first cacheable transfer.
+  build: { target: 'es2022', cssCodeSplit: false },
   test: { include: ['src/**/*.test.ts'], setupFiles: ['test/setup-sync.ts'] },
 });
