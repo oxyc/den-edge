@@ -38,6 +38,10 @@ NETWORK="$RUN_ID-net"
 EDGE_IMAGE="den-edge-bench:$RUN_ID"
 UPSTREAM_IMAGE="den-edge-upstream:$RUN_ID"
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/den-edge-bench.XXXXXX")
+# Podman resolves bind sources through this parent as the container's unprivileged
+# uid. `mktemp -d` creates it as 0700, so otherwise correctly world-accessible
+# fixture/runtime children are still unreachable on a rootful Podman host.
+chmod 755 "$RUN_DIR"
 RESULTS=${RESULTS:-$ROOT/bench/results}
 mkdir -p "$RESULTS"
 REPORT_NAME="$(date -u +%Y%m%dT%H%M%SZ)-$$.jsonl"
