@@ -59,6 +59,9 @@ for number in range(2, 162):
     library_log(library_id, 8, 4096)
     cold_paths.append(f"/lib/{library_id}/changes?since=0&limit=500")
 (root / "library-cold.paths").write_text("\n".join(cold_paths) + "\n")
+# Same shape, outside the measured rotation: its response size can be learned
+# without warming any of the 160 cold libraries.
+library_log("0000000000000162", 8, 4096)
 
 
 def tmdb_key(path, query=""):
@@ -99,6 +102,8 @@ for number in range(1000, 1064):
     tmdb_file(path, "", {"id": number, "cast": [{"id": i, "name": "actor"} for i in range(100)]})
     mixed_tmdb_paths.append(f"/tmdb{path}")
 (root / "tmdb-mixed.paths").write_text("\n".join(mixed_tmdb_paths) + "\n")
+# Calibration key with the same four-digit/body shape, excluded from rotation.
+tmdb_file("/3/movie/1064/credits", "", {"id": 1064, "cast": [{"id": i, "name": "actor"} for i in range(100)]})
 
 # The scratch image runs as the same unprivileged uid as production.
 for path in (root, web, root / "data", ratings, libraries, tmdb):

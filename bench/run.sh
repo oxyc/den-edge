@@ -40,7 +40,12 @@ UPSTREAM_IMAGE="den-edge-upstream:$RUN_ID"
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/den-edge-bench.XXXXXX")
 RESULTS=${RESULTS:-$ROOT/bench/results}
 mkdir -p "$RESULTS"
-REPORT="$RESULTS/$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+REPORT_NAME="$(date -u +%Y%m%dT%H%M%SZ)-$$.jsonl"
+REPORT_FINAL="$RESULTS/$REPORT_NAME"
+# Hidden until every case and the terminal record pass. Failed partial rows
+# move with the other artifacts instead of resembling a complete report.
+REPORT="$RESULTS/.$REPORT_NAME.partial"
+REPORT_PUBLISHED=0
 
 TC_APPLIED=0
 CHILD_PIDS=""
@@ -62,6 +67,11 @@ cleanup() {
   "$ENGINE" rm -f "$EDGE" "$UPSTREAM" >/dev/null 2>&1 || true
   "$ENGINE" network rm "$NETWORK" >/dev/null 2>&1 || true
   "$ENGINE" image rm -f "$EDGE_IMAGE" "$UPSTREAM_IMAGE" >/dev/null 2>&1 || true
+  if [ "$exit_code" -ne 0 ] && [ -f "$REPORT" ] && [ -d "$RUN_DIR" ]; then
+    mv "$REPORT" "$RUN_DIR/report.partial.jsonl" || true
+  elif [ "$REPORT_PUBLISHED" != 1 ]; then
+    rm -f "$REPORT"
+  fi
   if [ "$exit_code" -ne 0 ] && [ -d "$RUN_DIR" ]; then
     failed="$RESULTS/failed-$(basename "$RUN_DIR")"
     if mv "$RUN_DIR" "$failed"; then
@@ -124,6 +134,8 @@ STATIC_SIZE=$(wc -c <"$FIXTURES/web/static-1m.bin" | tr -d ' ')
 RATINGS_SIZE=$(wc -c <"$FIXTURES/data/ratings/tt0137523.json" | tr -d ' ')
 CONTROL_SIZE=$(curl -fsS "$BASE/health" | wc -c | tr -d ' ')
 LIBRARY_SIZE=$(curl -fsS -H 'x-den-library-token: bench-token' "$BASE/lib/0000000000000001/changes?since=0&limit=500" | wc -c | tr -d ' ')
+COLD_LIBRARY_SIZE=$(curl -fsS -H 'x-den-library-token: bench-token' "$BASE/lib/0000000000000162/changes?since=0&limit=500" | wc -c | tr -d ' ')
+TMDB_MIXED_SIZE=$(curl -fsS "$BASE/tmdb/3/movie/1064/credits" | wc -c | tr -d ' ')
 probe >"$RUN_BASELINE"
 python3 "$ROOT/bench/gate.py" initial --probe "$RUN_BASELINE"
 
@@ -192,7 +204,7 @@ run_case() {
   fi
   case "$name" in
     relay-slow-downstream-slow-reader-overload)
-      gate_args="$gate_args --allowed-refusals 429:too_many_sources,503:media_busy,503:relay_busy,503:server_busy"
+      gate_args="$gate_args --allowed-refusals 503:media_busy,503:server_busy"
       ;;
   esac
   # gate_args is restricted to fixed harness flags, not user input.
@@ -225,7 +237,7 @@ normal relay-fast '/fixture/fast?bytes=262144' "$CONCURRENCY" "$COMMON_HEADER" r
 normal relay-slow-upstream '/fixture/slow?bytes=262144&chunk=16384&delay_ms=5' "$CONCURRENCY" "$COMMON_HEADER" rotate 200 --expect-200-bytes 262144
 normal library-exact-hot '/lib/0000000000000001/changes?since=0&limit=500' 8 'x-den-library-token: bench-token' '' 200 --expect-200-bytes "$LIBRARY_SIZE"
 run_case library-cold-unique 200 200 --url "$BASE/" --paths-file "$FIXTURES/library-cold.paths" \
-  --duration 60 --requests 160 --concurrency 2 --header 'x-den-library-token: bench-token' --min-200-bytes 100
+  --duration 60 --requests 160 --concurrency 2 --header 'x-den-library-token: bench-token' --expect-200-bytes "$COLD_LIBRARY_SIZE"
 normal media-pass-through '/reel/progressive/bench.mp4?bytes=2097152' 8 "$COMMON_HEADER" rotate 200 --expect-200-bytes 2097152
 
 # TMDB is the dominant cached provider. These are all guaranteed disk hits and
@@ -247,15 +259,15 @@ TMDB_NARROW_SIZE=$(curl -fsS "$BASE/tmdb/3/movie/550?append_to_response=credits"
 normal tmdb-detail-narrow-repeat '/tmdb/3/movie/550?append_to_response=credits' 8 '' '' 200 --expect-200-bytes "$TMDB_NARROW_SIZE"
 normal tmdb-concurrent-same-key '/tmdb/3/trending/all/week' 32 '' '' 200 --expect-200-bytes "$TMDB_LIST_SIZE"
 run_case tmdb-concurrent-mixed-key 200 200 --url "$BASE/" --paths-file "$FIXTURES/tmdb-mixed.paths" \
-  --duration "$DURATION" --concurrency 32 --min-200-bytes 100
+  --duration 60 --requests 640 --concurrency 32 --expect-200-bytes "$TMDB_MIXED_SIZE"
 # The application currently hardcodes TMDB's public TLS origin. A deterministic
 # stale/revalidation workload cannot count calls without a provider secret or
 # an injectable origin, so record the acceptance-gate gap rather than faking it.
 echo '{"case":"tmdb-stale-revalidation","skipped":"TMDB origin is not injectable; deterministic external-call counting requires the next TMDB slice"}' | tee -a "$REPORT"
-run_case cancellation 0 0 --url "$BASE/fixture/slow?bytes=1048576&chunk=16384&delay_ms=5" \
+run_case cancellation 0 0 --url "$BASE/fixture/slow?cancel=1&bytes=8388608&chunk=16384&delay_ms=5" \
   --duration "$DURATION" --concurrency 32 --mode cancel --header "$COMMON_HEADER"
-run_case relay-slow-downstream-slow-reader-overload 200,429,503 200 --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" \
-  --duration "$DURATION" --concurrency 32 --mode slow-reader --slow-read-ms 20 --header "$COMMON_HEADER" --expect-200-bytes 2097152
+run_case relay-slow-downstream-slow-reader-overload 200,503 200 --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" \
+  --duration "$DURATION" --concurrency 32 --mode slow-reader --slow-read-ms 20 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 2097152
 
 # A compact mixed soak: independent clients keep control, disk, cache, relay, library,
 # media, cancellations and slow readers live together under the same 64 MiB ceiling.
@@ -277,8 +289,8 @@ mix tmdb-detail --url "$BASE/tmdb/3/movie/550?append_to_response=credits" --dura
 mix relay-fast --url "$BASE/fixture/fast?bytes=262144" --duration "$SOAK_DURATION" --concurrency 4 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 262144
 mix library --url "$BASE/lib/0000000000000001/changes?since=0&limit=500" --duration "$SOAK_DURATION" --concurrency 2 --header 'x-den-library-token: bench-token' --expect-200-bytes "$LIBRARY_SIZE"
 mix media --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" --duration "$SOAK_DURATION" --concurrency 4 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 2097152
-mix cancellation --url "$BASE/fixture/slow?bytes=1048576&delay_ms=5" --duration "$SOAK_DURATION" --concurrency 8 --mode cancel --header "$COMMON_HEADER" --rotate-ip
-mix media-slow-reader --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" --duration "$SOAK_DURATION" --concurrency 12 --mode slow-reader --slow-read-ms 20 --header "$COMMON_HEADER" --expect-200-bytes 2097152
+mix cancellation --url "$BASE/fixture/slow?cancel=1&bytes=8388608&delay_ms=5" --duration "$SOAK_DURATION" --concurrency 8 --mode cancel --header "$COMMON_HEADER" --rotate-ip
+mix media-slow-reader --url "$BASE/reel/progressive/bench.mp4?bytes=2097152" --duration "$SOAK_DURATION" --concurrency 12 --mode slow-reader --slow-read-ms 20 --header "$COMMON_HEADER" --rotate-ip --expect-200-bytes 2097152
 sample="$RUN_DIR/mixed.samples"
 : >"$sample"; cat "$mix_before" >>"$sample"; printf '%s\n' --- >>"$sample"
 for pid in $mix_pids; do
@@ -320,4 +332,7 @@ else
   TC_APPLIED=0
 fi
 
-echo "report=$REPORT"
+printf '{"run":"%s","gate":"passed","complete":true}\n' "$RUN_ID" >>"$REPORT"
+mv "$REPORT" "$REPORT_FINAL"
+REPORT_PUBLISHED=1
+echo "report=$REPORT_FINAL"

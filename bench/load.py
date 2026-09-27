@@ -28,16 +28,68 @@ def refusal_code(payload):
         return None
 
 
+def decode_chunked(payload):
+    decoded = bytearray()
+    rest = payload
+    while True:
+        line, separator, rest = rest.partition(b"\r\n")
+        if not separator:
+            raise OSError("truncated chunk header")
+        try:
+            size = int(line.split(b";", 1)[0], 16)
+        except ValueError as error:
+            raise OSError("invalid chunk header") from error
+        if size == 0:
+            # A zero chunk is followed by trailers (possibly none) and the
+            # final CRLF. Reject extra bytes: Connection: close makes them an
+            # ambiguous second response, not payload for this one.
+            if rest == b"\r\n":
+                return bytes(decoded)
+            if rest.endswith(b"\r\n\r\n"):
+                trailers = rest[:-4].split(b"\r\n")
+                if trailers and all(line and b":" in line for line in trailers):
+                    return bytes(decoded)
+            raise OSError("truncated or malformed chunk trailer")
+        if len(rest) < size + 2 or rest[size : size + 2] != b"\r\n":
+            raise OSError(f"truncated chunk: declared={size} available={len(rest)}")
+        decoded.extend(rest[:size])
+        rest = rest[size + 2 :]
+
+
+def framed_payload(status, fields, payload):
+    length = fields.get(b"content-length")
+    transfer = fields.get(b"transfer-encoding")
+    if length is not None and transfer is not None:
+        raise OSError("ambiguous response framing")
+    if transfer is not None:
+        if transfer.lower() != b"chunked":
+            raise OSError(f"unsupported transfer-encoding: {transfer!r}")
+        return decode_chunked(payload)
+    if length is not None:
+        try:
+            declared = int(length)
+        except ValueError as error:
+            raise OSError("invalid Content-Length") from error
+        if len(payload) != declared:
+            raise OSError(f"truncated response: declared={declared} received={len(payload)}")
+        return payload
+    if status == 200:
+        raise OSError("unframed 200 response")
+    return payload
+
+
 def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
     sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=5)
     request = [f"GET {path} HTTP/1.1", f"Host: {parsed.netloc}", "Connection: close"]
     request.extend(f"{key}: {value}" for key, value in headers)
     sock.sendall(("\r\n".join(request) + "\r\n\r\n").encode())
     if mode == "cancel":
-        sock.close()
-        # Keep the churn on the server, not the load generator's ephemeral-port
-        # table. Even 5 ms per worker is far above plausible browser cancellation.
+        # Give the server a small, explicit window to accept and dispatch the
+        # request, then disappear long before the slow 8 MiB answer can
+        # complete. Without this, saturation can cancel every connection in
+        # the accept queue and prove nothing about upstream cancellation.
         time.sleep(cancel_delay_ms / 1000)
+        sock.close()
         return 0, 0, None
     body = bytearray()
     while True:
@@ -53,11 +105,11 @@ def raw_request(parsed, path, headers, mode, slow_read_ms, cancel_delay_ms):
     for line in head.split(b"\r\n")[1:]:
         if b":" in line:
             name, value = line.split(b":", 1)
-            fields[name.strip().lower()] = value.strip()
-    if status not in (0, 204, 304) and b"content-length" in fields:
-        declared = int(fields[b"content-length"])
-        if len(payload) != declared:
-            raise OSError(f"truncated response: declared={declared} received={len(payload)}")
+            name = name.strip().lower()
+            if name in fields:
+                raise OSError(f"duplicate response header: {name!r}")
+            fields[name] = value.strip()
+    payload = framed_payload(status, fields, payload)
     return status, len(payload), refusal_code(payload) if status >= 400 else None
 
 
@@ -116,6 +168,21 @@ def main():
                     response = connection.getresponse()
                     body = response.read()
                     status, size = response.status, len(body)
+                    framing = {}
+                    content_length = response.getheader("content-length")
+                    transfer_encoding = response.getheader("transfer-encoding")
+                    if content_length is not None and transfer_encoding is not None:
+                        raise OSError("ambiguous response framing")
+                    if content_length is not None:
+                        framing[b"content-length"] = content_length.encode()
+                    if transfer_encoding is not None:
+                        # http.client has already decoded a chunked body, so
+                        # its successful read is the terminator proof. Keep a
+                        # sentinel length for the shared framing assertion.
+                        if transfer_encoding.lower() != "chunked":
+                            raise OSError("unsupported transfer-encoding")
+                        framing[b"content-length"] = str(size).encode()
+                    framed_payload(status, framing, body)
                     code = refusal_code(body) if status >= 400 else None
                     tmdb_outcome = response.getheader("x-den-tmdb")
                 else:
@@ -150,14 +217,32 @@ def main():
                 return
 
     began = time.monotonic()
-    threads = [threading.Thread(target=worker) for _ in range(args.concurrency)]
+    threads = [
+        threading.Thread(target=worker, daemon=args.requests is not None)
+        for _ in range(args.concurrency)
+    ]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
+    if args.requests is None:
+        for thread in threads:
+            thread.join()
+    else:
+        # The claim deadline is `duration`; one already-claimed HTTP exchange
+        # gets its configured ten-second socket timeout to unwind. Daemon
+        # workers make this a real process deadline rather than an unbounded
+        # join if a client/library regression wedges despite that timeout.
+        watchdog = deadline + 11
+        for thread in threads:
+            thread.join(max(0, watchdog - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            raise RuntimeError("request-count workload exceeded its hard watchdog")
     if fatal:
         raise RuntimeError(f"load worker failed unexpectedly: {fatal[0]}")
     elapsed = time.monotonic() - began
+    if args.requests is not None and sequence != args.requests:
+        raise RuntimeError(
+            f"request-count workload missed its hard deadline: claimed={sequence} required={args.requests}"
+        )
     completed = len(latencies)
     result = {
         "elapsed_s": round(elapsed, 3),

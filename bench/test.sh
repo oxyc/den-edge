@@ -53,9 +53,17 @@ import network_gateway
 
 assert network_gateway.gateway([{"IPAM": {"Config": [{"Gateway": "172.20.0.1"}]}}]) == "172.20.0.1"
 assert network_gateway.gateway([{"subnets": [{"gateway": "10.89.0.1"}]}]) == "10.89.0.1"
+assert load.decode_chunked(b"3\r\nabc\r\n0\r\n\r\n") == b"abc"
+try:
+    load.decode_chunked(b"3\r\nabc\r\n0\r\n")
+except OSError:
+    pass
+else:
+    raise AssertionError("truncated chunk terminator unexpectedly passed")
 
 probe = {
     "rss_bytes": 10, "cgroup_current_bytes": 20, "cgroup_events_available": 1,
+    "cgroup_peak_bytes": 30,
     "cgroup_events_oom": 4, "cgroup_events_oom_kill": 2,
     "cgroup_events_oom_group_kill": 1, "fd_count": 5,
     "upstream_established": 0, "cpu_ticks": 100,
@@ -95,6 +103,26 @@ with tempfile.TemporaryDirectory() as directory:
     before_path.write_text(json.dumps(before))
     after_path.write_text(json.dumps(after))
     gate.assert_cancellation(before_path, after_path)
+    after_path.write_text(json.dumps({**after, "cancel_completed": 3}))
+    try:
+        gate.assert_cancellation(before_path, after_path)
+    except gate.GateFailure:
+        pass
+    else:
+        raise AssertionError("completed cancellation work unexpectedly passed")
+    zero_path = pathlib.Path(directory) / "zero.probe"
+    zero_path.write_text("\n".join(f"{key}={value}" for key, value in {
+        **probe, "rss_bytes": 0, "cgroup_current_bytes": 0,
+        "cgroup_peak_bytes": 0, "fd_count": 0,
+        "cgroup_events_oom": 0, "cgroup_events_oom_kill": 0,
+        "cgroup_events_oom_group_kill": 0,
+    }.items()))
+    try:
+        gate.read_probe(zero_path)
+    except gate.GateFailure:
+        pass
+    else:
+        raise AssertionError("zero-valued probe unexpectedly passed")
 
 # A slow-reader response that closes before its declared body length must be a
 # client failure, never a successful 200 included in throughput.
@@ -118,12 +146,38 @@ except OSError as error:
 else:
     raise AssertionError("truncated Content-Length unexpectedly passed")
 thread.join()
+
+# EOF framing cannot prove completeness. A nonempty 200 without Content-Length
+# or a complete chunked terminator must fail closed too.
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+port = listener.getsockname()[1]
+def unframed():
+    connection, _ = listener.accept()
+    connection.recv(4096)
+    connection.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\npartial")
+    connection.close()
+    listener.close()
+thread = threading.Thread(target=unframed)
+thread.start()
+try:
+    load.raw_request(type("URL", (), {"hostname": "127.0.0.1", "port": port, "netloc": f"127.0.0.1:{port}"})(),
+                     "/", [], "slow-reader", 0, 0)
+except OSError as error:
+    assert "unframed" in str(error), error
+else:
+    raise AssertionError("unframed partial response unexpectedly passed")
+thread.join()
 PY
 
+# A request-count workload has a deadline, but may never quietly turn its
+# requested coverage into a smaller successful sample.
+if python3 "$ROOT/bench/load.py" --url 'http://127.0.0.1:19090/fast?bytes=1024' \
+  --duration 0 --requests 10 --concurrency 1 --expect-200-bytes 1024 >/dev/null 2>&1; then
+  echo "request-count deadline unexpectedly passed" >&2
+  exit 1
+fi
+
 rustc --edition=2021 "$ROOT/bench/probe.rs" -o "$TMP/probe"
-"$TMP/probe" >"$TMP/probe.out"
-grep -q '^cpu_ticks=' "$TMP/probe.out"
-grep -q '^cgroup_events_available=' "$TMP/probe.out"
-grep -q '^memory_max_bytes=' "$TMP/probe.out"
-grep -q '^memory_swap_max_bytes=' "$TMP/probe.out"
 echo "bench harness self-test passed"

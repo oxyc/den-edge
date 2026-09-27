@@ -13,7 +13,9 @@ bench/run.sh
 Docker or Podman must be running. The harness builds scratch images, verifies
 from inside the measured cgroup that `memory.max` is exactly 64 MiB and
 `memory.swap.max` is zero, and writes one
-JSON object per case to `bench/results/<UTC timestamp>.jsonl`. Override the
+JSON object per case to `bench/results/<UTC timestamp>-<pid>.jsonl`. The report
+is published atomically only after a terminal `{"gate":"passed","complete":true}`
+record; a failed run keeps its partial rows with the failure artifacts. Override the
 defaults with `DURATION=30 SOAK_DURATION=300 CONCURRENCY=32 PORT=18081`.
 `CONTAINER_ENGINE=podman` selects Podman explicitly. Exit 77 means the required
 container engine was unavailable, so a misleading host-only run was not made.
@@ -53,7 +55,7 @@ The cases cover:
 - a 2 MiB Reel-shaped media pass-through;
 - isolated TMDB list/search 200+304 hits, whole-detail hits, first and repeated
   large-detail narrowing, and concurrent same-key/mixed-key hits;
-- clients that cancel immediately and clients that deliberately read slowly;
+- clients that cancel after a fixed 5 ms dispatch window and clients that deliberately read slowly;
 - all of those classes competing in one mixed 64 MiB soak.
 
 The fixture generation writes valid store paths/logs directly so the cold run
@@ -62,12 +64,15 @@ does not serve those host bind-mounted files directly: its PID 1 staging helper
 copies them into initially empty runtime mounts before starting `den-edge`.
 Those writes and the destination file pages therefore belong to the same
 64 MiB cgroup being measured, and the baseline is captured only after staging
-and warmup. Throughput
-cases model many independent callers by rotating `X-Forwarded-For` through the
-dedicated, trusted benchmark bridge. The slow-reader overload intentionally
-uses one identity. It and the two media components competing for the shared
+and warmup. Request-count cases must complete their exact rotation before the
+claim deadline and are terminated by a bounded socket-timeout watchdog if work
+wedges. Throughput cases model many independent callers by rotating
+`X-Forwarded-For` through the
+dedicated, trusted benchmark bridge. The slow-reader overload also rotates
+identities so it isolates shared concurrency admission rather than the separate
+per-address rate throttle. It and the two media components competing for the shared
 budget in the mixed soak are the only cases allowed stable overload statuses:
-HTTP 429 (`too_many_sources`) and 503 (`media_busy`/`relay_busy`/`server_busy`). They must
+HTTP 503 (`media_busy`/`server_busy`). They must
 still serve at least one HTTP 200. Control/cache/library/relay components in
 that same mixed saturation case remain strictly 200-only.
 Cancellation cases require the driver's explicit status 0; every other case

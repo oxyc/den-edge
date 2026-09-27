@@ -66,7 +66,7 @@ fn handle(mut stream: TcpStream) {
     }
     let bytes = query_u64(target, "bytes", 262_144).min(8 * 1024 * 1024) as usize;
     let slow = target.split('?').next().is_some_and(|path| path.contains("/slow"));
-    let cancellation = slow && bytes == 1024 * 1024;
+    let cancellation = slow && query_u64(target, "cancel", 0) == 1;
     ACCEPTED.fetch_add(1, Ordering::SeqCst);
     ACTIVE.fetch_add(1, Ordering::SeqCst);
     if cancellation {

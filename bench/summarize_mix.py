@@ -44,11 +44,9 @@ try:
             # Control, cache, library and relay components may not.
             gate.validate_result(
                 part,
-                {200, 429, 503},
+                {200, 503},
                 {200},
-                allowed_refusals={
-                    "429:too_many_sources", "503:media_busy", "503:relay_busy", "503:server_busy"
-                },
+                allowed_refusals={"503:media_busy", "503:server_busy"},
             )
         else:
             gate.validate_result(part, {200}, {200}, label.startswith("tmdb-"))

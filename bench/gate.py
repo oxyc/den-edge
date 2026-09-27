@@ -18,6 +18,7 @@ PROBE_KEYS = (
     "fd_count",
     "upstream_established",
     "cpu_ticks",
+    "cgroup_peak_bytes",
     "memory_max_bytes",
     "memory_swap_max_bytes",
 )
@@ -45,6 +46,11 @@ def read_probe(path):
         raise GateFailure(f"in-container memory.max is not 64 MiB: {values['memory_max_bytes']}")
     if values["memory_swap_max_bytes"] != 0:
         raise GateFailure(f"in-container memory.swap.max is not zero: {values['memory_swap_max_bytes']}")
+    for key in ("rss_bytes", "cgroup_current_bytes", "cgroup_peak_bytes", "fd_count"):
+        if values[key] <= 0:
+            raise GateFailure(f"probe did not produce a plausible {key}: {values[key]}")
+    if values["cgroup_peak_bytes"] < values["cgroup_current_bytes"]:
+        raise GateFailure("cgroup memory.peak is below memory.current")
     return values
 
 
@@ -141,14 +147,20 @@ def assert_cancellation(before_path, after_path):
     required = ("cancel_accepted", "cancel_active", "cancel_completed", "cancel_aborted")
     if any(key not in before or key not in after for key in required):
         raise GateFailure("upstream cancellation-specific counters are missing")
-    if before["cancel_active"] != 0:
-        raise GateFailure(f"cancellation baseline already had active upstream work: {before}")
-    if after["cancel_accepted"] <= before["cancel_accepted"]:
+    if before["cancel_active"] != 0 or after["cancel_active"] != 0:
+        raise GateFailure(f"cancellation work did not begin and end at zero: before={before} after={after}")
+    accepted = after["cancel_accepted"] - before["cancel_accepted"]
+    completed = after["cancel_completed"] - before["cancel_completed"]
+    aborted = after["cancel_aborted"] - before["cancel_aborted"]
+    if min(accepted, completed, aborted) < 0:
+        raise GateFailure(f"cancellation counters went backwards: before={before} after={after}")
+    if accepted == 0:
         raise GateFailure("cancellation load opened no upstream work")
-    if after["cancel_aborted"] <= before["cancel_aborted"]:
-        raise GateFailure("cancellation load did not propagate an upstream abort")
-    if after["cancel_active"] != 0:
-        raise GateFailure(f"upstream active work did not recover: before={before} after={after}")
+    if completed != 0 or aborted != accepted:
+        raise GateFailure(
+            f"cancellation was not propagated for every accepted request: "
+            f"accepted={accepted} aborted={aborted} completed={completed}"
+        )
 
 
 def report_case(args):
