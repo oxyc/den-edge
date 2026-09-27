@@ -7,6 +7,11 @@ plugin list and settings older links shared. It also serves the Den web app.
 It never interprets what it stores: the log, the backup and the inbox are ciphertext sealed on the devices, and
 the rest is small JSON it validates and bounds.
 
+For the data flow, delivery modes, memory/concurrency model, and storage boundaries,
+see [ARCHITECTURE.md](ARCHITECTURE.md). Measured endpoint and 64 MiB soak results,
+including the guarded mmap and library-v3 experiments, live in
+[PERFORMANCE.md](PERFORMANCE.md).
+
 ## Routes
 
 | Route | What it does |
