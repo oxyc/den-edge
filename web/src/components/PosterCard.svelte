@@ -14,6 +14,7 @@
     progress,
     href,
     action,
+    onopen,
   }: {
     title: Title;
     caption?: string;
@@ -25,6 +26,8 @@
      * "More like this". Shown under the pointer and on focus; always, but quiet, where there is no pointer to hover.
      */
     action?: { label: string; icon: string; onclick: () => void };
+    /** Called when this card's link is followed. */
+    onopen?: () => void;
   } = $props();
   // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
   // title TMDB's own path is missing here, so a row is not half placeholder.
@@ -79,7 +82,7 @@
 
 {#snippet card()}
   {#if href}
-    <a class="card pick" class:faded {href}>{@render body()}</a>
+    <a class="card pick" class:faded {href} onclick={onopen}>{@render body()}</a>
   {:else}
     <figure class="card" class:faded>{@render body()}</figure>
   {/if}

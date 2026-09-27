@@ -46,6 +46,7 @@
   import { FACET, likeId, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
   import { searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
+  import { rememberSearch } from '../lib/recentSearches';
 
   let {
     query,
@@ -596,7 +597,9 @@
         {#if hits === null}
           <Loading label="Searching" />
         {:else if typedHits.length}
-          <div class:stale={pending}><SearchResults hits={typedHits} {onlike} /></div>
+          <div class:stale={pending}>
+            <SearchResults hits={typedHits} {onlike} onopen={() => rememberSearch(query)} />
+          </div>
         {:else if !pending}
           <p class="note" role="status">
             {failed ? 'Couldn’t search right now. Try again in a moment.' : 'No matches.'}

@@ -107,6 +107,64 @@ async function openSearch(page, width) {
   await expect(input(page)).toBeFocused();
 }
 
+for (const width of [390, 1280])
+  test(`recent title searches stay in this browser and can be reused or cleared at ${width}px`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    });
+    try {
+      const page = await browser.newPage({
+        viewport: { width, height: 800 },
+        hasTouch: width < 760,
+      });
+      await setup(page);
+      await page.addInitScript(() =>
+        localStorage.setItem('den.recentSearches', JSON.stringify(['Arrival', 'Studio Ghibli'])),
+      );
+      await page.goto(FIXTURE);
+      // Do not wait for Router's route prop: an immediate choice must work as soon as focus draws the popup.
+      if (width < 760)
+        await page
+          .getByRole('button', { name: 'Search', exact: true })
+          .click({ noWaitAfter: true });
+      else await input(page).click({ noWaitAfter: true });
+      const recent = page.locator('.recent');
+      // Choose as soon as the popup is actionable; `route.page` may still describe Home at this point.
+      await recent.getByRole('button', { name: 'Studio Ghibli', exact: true }).click();
+      await expect(page).toHaveURL(/q=Studio%20Ghibli/);
+      await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+
+      await input(page).fill('Neon');
+      await expect(page).toHaveURL(/q=Neon/);
+      await active(page).getByRole('link', { name: 'Film 100 2026' }).click();
+      await expect(active(page).locator('h1')).toHaveText('Film 100');
+      await page.goBack();
+      await expect(page).toHaveURL(/\/search\?q=Neon/);
+      await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+      await expect(input(page)).toHaveValue('Neon');
+      await input(page).fill('');
+      await expect(input(page)).toHaveValue('');
+      await expect(recent).toBeVisible();
+      await expect(recent.locator('.recent-query').first()).toHaveText('Neon');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await page.keyboard.press('ArrowDown');
+      await expect(recent.getByRole('button', { name: 'Neon', exact: true })).toBeFocused();
+      await page.keyboard.press('ArrowDown');
+      await expect(
+        recent.getByRole('button', { name: 'Studio Ghibli', exact: true }),
+      ).toBeFocused();
+      await page.keyboard.press('ArrowUp');
+      await expect(recent.getByRole('button', { name: 'Neon', exact: true })).toBeFocused();
+      await recent.getByRole('button', { name: 'Remove Arrival from recent searches' }).click();
+      await expect(recent.getByRole('button', { name: 'Arrival', exact: true })).toHaveCount(0);
+      await recent.getByRole('button', { name: 'Clear', exact: true }).click();
+      await expect(recent).toHaveCount(0);
+      expect(await page.evaluate(() => localStorage.getItem('den.recentSearches'))).toBeNull();
+    } finally {
+      await browser.close();
+    }
+  });
+
 for (const width of [320, 390, 1280])
   test(`navbar search preserves Home and result history at ${width}px`, async () => {
     const browser = await chromium.launch({

@@ -6,6 +6,14 @@
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
   import { exploreFromPeople } from '../lib/people';
   import { parseRoute, peopleHref, searchHref, type Explore, type Route } from '../lib/route';
+  import {
+    clearRecentSearches,
+    forgetSearch,
+    isRecentSearchStorageEvent,
+    readRecentSearches,
+    RECENT_SEARCHES_CHANGED,
+    rememberSearch,
+  } from '../lib/recentSearches';
   let { route, query = '' }: { route: Route; query?: string } = $props();
   /**
    * On People the field finds people and facets there: what is typed stays in People's address (`q=`) instead of
@@ -46,6 +54,9 @@
   let expanded = $state(false);
   let input = $state<HTMLInputElement>();
   let toggle = $state<HTMLButtonElement>();
+  let recent = $state<string[]>([]);
+  let searchFocused = $state(false);
+  const showRecent = $derived(!onPeople && !text.trim() && recent.length > 0 && searchFocused);
   // By page, not by route: each letter typed on People is a new route there, and must not fold a phone's field away.
   const page = $derived(route.page);
   $effect(() => {
@@ -58,20 +69,35 @@
    * already somewhere on the page, which is how Back from a title arrives: it keeps its place.
    */
   onMount(() => {
-    if (!matchMedia('(pointer: fine)').matches) return;
+    recent = readRecentSearches();
+    const recentChanged = (event: Event) => {
+      recent = (event as CustomEvent<string[]>).detail;
+    };
+    const storageChanged = (event: StorageEvent) => {
+      if (isRecentSearchStorageEvent(event)) recent = readRecentSearches();
+    };
+    window.addEventListener(RECENT_SEARCHES_CHANGED, recentChanged);
+    window.addEventListener('storage', storageChanged);
     const focusIfIdle = () => {
       if (route.page !== 'search') return;
       const active = document.activeElement;
       if (active && active !== document.body) return;
       input?.focus({ preventScroll: true });
     };
-    // After the route has opened the field, where it is drawn only on /search.
-    void tick().then(focusIfIdle);
     const shown = () => {
       if (document.visibilityState === 'visible') focusIfIdle();
     };
-    document.addEventListener('visibilitychange', shown);
-    return () => document.removeEventListener('visibilitychange', shown);
+    const fine = matchMedia('(pointer: fine)').matches;
+    if (fine) {
+      // After the route has opened the field, where it is drawn only on /search.
+      void tick().then(focusIfIdle);
+      document.addEventListener('visibilitychange', shown);
+    }
+    return () => {
+      if (fine) document.removeEventListener('visibilitychange', shown);
+      window.removeEventListener(RECENT_SEARCHES_CHANGED, recentChanged);
+      window.removeEventListener('storage', storageChanged);
+    };
   });
   function openSearch() {
     // Focus during the tap itself so iPhone browsers open the keyboard.
@@ -114,6 +140,7 @@
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
+    if (text.trim().length >= 2) recent = rememberSearch(text);
     if (route.page === 'search') commit();
     else if (route.page === 'people') {
       // Enter searches titles, as it does everywhere else, taking the type and title facets along.
@@ -123,6 +150,44 @@
     } else navigate(searchHref(text, explore()));
     input?.blur();
   }
+  function useRecent(value: string) {
+    recent = rememberSearch(value);
+    text = value;
+    clearTimeout(pending);
+    pending = undefined;
+    // Focus opens Search before Router's `route` prop necessarily catches up. Read the address it already changed
+    // instead, so an immediate tap on a recent item cannot be reset to the empty Search route.
+    const here = parseRoute(location.pathname + location.search);
+    const context: Explore = here.page === 'search' ? { type: here.type, chips: here.chips } : {};
+    navigate(searchHref(value, context), true);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    input?.focus({ preventScroll: true });
+  }
+  function removeRecent(value: string) {
+    recent = forgetSearch(value);
+    input?.focus({ preventScroll: true });
+  }
+  function clearRecent() {
+    recent = clearRecentSearches();
+    input?.focus({ preventScroll: true });
+  }
+  function moveRecent(event: KeyboardEvent, index: number) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      escaped();
+      return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    const choices = [
+      ...document.querySelectorAll<HTMLButtonElement>('#recent-searches .recent-query'),
+    ];
+    if (event.key === 'ArrowUp' && index === 0) input?.focus({ preventScroll: true });
+    else
+      choices[
+        Math.max(0, Math.min(choices.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))
+      ]?.focus();
+  }
   /**
    * ArrowDown from the field: into what it found — the first of the Browse row, or the first result. What is typed
    * reaches the address first, so what is found is for all of it.
@@ -130,6 +195,11 @@
   async function intoResults() {
     if (pending) commit(false);
     await tick();
+    const recentQuery = document.querySelector<HTMLElement>('#nav-search .recent-query');
+    if (recentQuery && recentQuery.getClientRects().length) {
+      recentQuery.focus({ preventScroll: false });
+      return;
+    }
     const page = '[data-route-page][data-active="true"]';
     document
       .querySelector<HTMLElement>(`${page} .browse button, ${page} .grid a`)
@@ -186,7 +256,17 @@
     <!-- Navigation and search belong to anyone reading the page, paired or not. Hiding them behind a library
        left a guest on Home with no way to reach Movies, Series or Settings — which is also where pairing is —
        and no way to search, though den-edge lends a keyless browser the key that search needs. -->
-    <form class="search" role="search" id="nav-search" onsubmit={submitted}>
+    <form
+      class="search"
+      role="search"
+      id="nav-search"
+      onsubmit={submitted}
+      onfocusin={() => (searchFocused = true)}
+      onfocusout={(event) => {
+        const next = event.relatedTarget;
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) searchFocused = false;
+      }}
+    >
       <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
         ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></svg
       >
@@ -206,6 +286,7 @@
             ? 'Titles, people, moods…'
             : 'Search titles, people, moods, languages…'}
         autocomplete="off"
+        aria-controls={showRecent ? 'recent-searches' : undefined}
         enterkeyhint="search"
         onfocus={() => {
           if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
@@ -225,6 +306,36 @@
         }}
       />
       <button class="cancel" type="button" onclick={closeSearch}>Cancel</button>
+      {#if showRecent}
+        <span class="recent-status" role="status"
+          >Recent searches available. Press Down Arrow to review.</span
+        >
+        <div id="recent-searches" class="recent" role="group" aria-label="Recent searches">
+          <div class="recent-heading">
+            <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
+          </div>
+          <ul>
+            {#each recent as value, index (value.toLocaleLowerCase())}
+              <li>
+                <button
+                  class="recent-query"
+                  type="button"
+                  onclick={() => useRecent(value)}
+                  onkeydown={(event) => moveRecent(event, index)}
+                  ><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
+                    ><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8" /></svg
+                  ><span>{value}</span></button
+                ><button
+                  class="recent-remove"
+                  type="button"
+                  aria-label={`Remove ${value} from recent searches`}
+                  onclick={() => removeRecent(value)}>×</button
+                >
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
     </form>
     <nav aria-label="Main navigation">
       {#each tabs as tab (tab.page)}
@@ -322,6 +433,7 @@
   }
 
   .search {
+    position: relative;
     display: flex;
     align-items: center;
 
@@ -387,6 +499,109 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .recent {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    left: 0;
+    min-width: min(360px, calc(100vw - 2 * var(--gutter)));
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--card);
+    box-shadow: 0 16px 40px rgb(0 0 0 / 0.35);
+  }
+
+  .recent-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .recent-heading,
+  .recent li {
+    display: flex;
+    align-items: center;
+  }
+
+  .recent-heading {
+    justify-content: space-between;
+    padding: 4px 8px 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .recent ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .recent li {
+    border-radius: 8px;
+  }
+
+  .recent li:hover,
+  .recent li:focus-within {
+    background: rgb(255 255 255 / 0.07);
+  }
+
+  .recent button {
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .recent-heading button {
+    padding: 3px 5px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .recent-query {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 1;
+    min-width: 0;
+    min-height: 38px;
+    padding: 0 8px;
+    text-align: left;
+  }
+
+  .recent-query svg {
+    flex-shrink: 0;
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.7;
+  }
+
+  .recent-query span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-remove {
+    flex-shrink: 0;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    color: var(--muted) !important;
+    font-size: 20px !important;
+  }
+
+  .recent button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   nav {
@@ -539,6 +754,13 @@
       max-width: none;
       padding: 0;
       background: none;
+    }
+
+    .recent {
+      top: calc(100% + 12px);
+      right: 0;
+      left: 0;
+      min-width: 0;
     }
 
     .searching .search:focus-within {
