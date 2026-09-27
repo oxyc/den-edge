@@ -90,12 +90,12 @@ lease-bound open admission and idle-handle recovery, lazy v2 migration, mixed-fo
 membership credentials, bounded identity frames, response-lifetime admission, transaction abort tests, and
 migration-prefix recovery tests.
 
-The final target-amd64 gate ran in a container with `memory.max=64 MiB` and swap disabled. Its 60-second mixed phase
-completed 257,734 requests with zero unexpected statuses or client errors, including 17,501 durable replacement
-writes and 6,695 concurrent library reads. Cgroup memory peaked at 53,682,176 bytes, process RSS peaked at
-13,733,888 bytes, no `memory.events` pressure/OOM counter moved, and descriptors recovered to 13. The preceding
-named cases migrated 160 cold libraries at 531 requests/second and served the prepared 488 KiB identity page at
-1,970 requests/second in the ten-second sample; repeated three-second samples reached 3,347 requests/second.
+The final combined target-amd64 gate ran in a container with `memory.max=64 MiB` and swap disabled. Its 60-second
+mixed phase completed 236,495 requests with zero unexpected statuses or client errors, including 14,955 durable
+replacement writes and 5,878 concurrent library reads. Cgroup memory peaked at 52,416,512 bytes, process RSS peaked
+at 12,378,112 bytes, no `memory.events` pressure/OOM counter moved, and descriptors recovered to 13. The preceding
+named cases migrated 160 cold libraries at 540 requests/second and served the prepared 488 KiB identity page at
+2,541 requests/second in the ten-second sample; the three-second smoke sample reached 3,254 requests/second.
 
 Unit/model/fault tests, clippy, web tests, browser sync policy, and the production image builds are CI gates. The
 issue and PR record the canary/rollback decision; promotion remains an operator decision and is not performed by

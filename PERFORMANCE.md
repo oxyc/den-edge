@@ -35,12 +35,12 @@ normal, error, cancellation, and eviction path.
 All numbers below are target-amd64 measurements, not capacity promises. Payload, concurrency, TLS/proxy placement,
 storage, and client behavior change production throughput.
 
-The library-v3 60-second mixed gate ran with `memory.max=64 MiB` and no swap. It completed 257,734 requests with no
-unexpected status, client error, OOM, or memory pressure event. That included 17,501 durable replacement writes and
-6,695 concurrent library reads. Cgroup memory peaked at 53,682,176 bytes, process RSS at 13,733,888 bytes, and file
-descriptors recovered to 13. A separate cold case migrated 160 libraries at 531 requests/second. A hot prepared
-488 KiB identity page sustained 1,970 requests/second for ten seconds; three-second samples reached 3,347
-requests/second.
+The final combined library-v3 and mmap 60-second mixed gate ran with `memory.max=64 MiB` and no swap. It completed
+236,495 requests with no unexpected status, client error, OOM, or memory pressure event. That included 14,955
+durable replacement writes and 5,878 concurrent library reads. Cgroup memory peaked at 52,416,512 bytes, process RSS
+at 12,378,112 bytes, and file descriptors recovered to 13. A separate cold case migrated 160 libraries at 540
+requests/second. A hot prepared 488 KiB identity page sustained 2,541 requests/second for ten seconds; a three-second
+smoke sample reached 3,254 requests/second.
 
 For hot exact files, the mmap implementation measured 1,418 to 4,300 requests/second (+203%), CPU time per GiB
 from 6.99 to 1.259 seconds (-82%), and p99 from 13.94 to 10.63 ms in its matched benchmark. A five-minute 64 MiB
