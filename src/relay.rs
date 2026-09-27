@@ -992,6 +992,10 @@ async fn relay_with(
     let (parts, body) = answer.into_parts();
     // An answer that says it is too large is refused whole, before any of it is passed on.
     if http_body::Body::size_hint(&body).lower() > MAX_ANSWER_BYTES as u64 {
+        state.metrics.stream_terminated(
+            crate::metrics::StreamClass::Addon,
+            crate::metrics::StreamTermination::RouteLimit,
+        );
         return json(StatusCode::BAD_GATEWAY, "addon_answer_unreadable");
     }
     // Only an answer something here reads or rewrites is collected whole. Every other one — most of them — is passed
@@ -1172,6 +1176,12 @@ where
         let mut body = std::pin::pin!(body);
         let declared = body.size_hint().exact().and_then(|n| usize::try_from(n).ok());
         if declared.is_some_and(|n| n > limit) {
+            if let Some(metrics) = metrics {
+                metrics.stream_terminated(
+                    crate::metrics::StreamClass::Addon,
+                    crate::metrics::StreamTermination::RouteLimit,
+                );
+            }
             return Err(unreadable());
         }
         let mut charge: Option<CollectedCharge> = None;
@@ -1216,6 +1226,12 @@ where
             let Ok(data) = frame.map_err(|_| unreadable())?.into_data() else { continue };
             let Some(next) = whole.len().checked_add(data.len()) else { return Err(unreadable()) };
             if next > limit {
+                if let Some(metrics) = metrics {
+                    metrics.stream_terminated(
+                        crate::metrics::StreamClass::Addon,
+                        crate::metrics::StreamTermination::RouteLimit,
+                    );
+                }
                 return Err(unreadable());
             }
             if !charge_to(next) {
