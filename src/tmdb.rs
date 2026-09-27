@@ -617,8 +617,17 @@ impl Detail {
         source_path: &Path,
         source: crate::cache::JsonFile,
     ) -> Option<(Prepared, Duration)> {
+        self.prepared_variant_with(source_path, source, self.durable_variant()).await
+    }
+
+    async fn prepared_variant_with(
+        &self,
+        source_path: &Path,
+        source: crate::cache::JsonFile,
+        durable: bool,
+    ) -> Option<(Prepared, Duration)> {
         let source_digest = source.digest();
-        if self.durable_variant() {
+        if durable {
             if let Some(found) = self.existing_variant(source_path, &source_digest).await {
                 return Some(found);
             }
@@ -637,7 +646,7 @@ impl Detail {
             self.path.clone(),
             self.exact.clone(),
             source_path.to_owned(),
-            self.durable_variant(),
+            durable,
             source.modified(),
         );
         let task = tokio::spawn(async move {
@@ -704,6 +713,29 @@ impl Detail {
         Some((prepared, fresh))
     }
 
+    /// Inspect an exact cache generation under the same single-owner bound as a derived representation, then stream
+    /// its still-open inode. Known client shapes take the durable variant path so legacy exact entries are migrated
+    /// lazily; arbitrary exact questions keep no second file and retain no body-sized response buffer.
+    async fn prepared_exact(
+        &self,
+        source_path: &Path,
+        source: crate::cache::JsonFile,
+    ) -> Option<(Prepared, Duration)> {
+        let canonical = source_path == self.whole().1;
+        if self.durable_variant() || canonical {
+            return self.prepared_variant_with(source_path, source, true).await;
+        }
+        let permit = Arc::clone(detail_builds()).acquire_owned().await.ok()?;
+        let (path, exact) = (self.path.clone(), self.exact.clone());
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let (source, body) = source.with_bytes().await?;
+            let fresh = fresh_for_answer(&path, exact.as_deref(), &body).min(RETENTION);
+            Some((Prepared::File(source), fresh))
+        });
+        task.await.ok()?
+    }
+
     /// An answer holding more than was asked, cut to what was: a record for a library's poster should not carry a
     /// series' every guest actor. What it keeps is TMDB's own, so the narrower question gets the answer it would have.
     ///
@@ -735,9 +767,8 @@ impl Detail {
                 continue;
             }
             let (prepared, fresh) = if exact {
-                let Some(body) = source.bytes().await else { continue };
-                let fresh = fresh_for_answer(&self.path, self.exact.as_deref(), &body);
-                (Prepared::Bytes(body), fresh)
+                let Some(found) = self.prepared_exact(&file, source).await else { continue };
+                found
             } else {
                 let Some(found) = self.prepared_variant(&file, source).await else { continue };
                 found
@@ -2348,6 +2379,71 @@ mod tests {
         let changed = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
         assert_ne!(changed.headers()[header::ETAG], etag.as_str());
         assert_eq!(body_json(changed).await["credits"]["from"], "new");
+    }
+
+    #[tokio::test]
+    async fn slow_exact_hits_keep_open_files_not_body_sized_buffers() {
+        let dir = temp_dir();
+        let detail =
+            Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
+        let exact = detail.exact().1;
+        let cast: Vec<_> = (0..7000)
+            .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
+            .collect();
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({"id":550,"title":"legacy","credits":{"cast":cast}}))
+                .unwrap(),
+        );
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
+        crate::cache::write_json(&exact, &body).await;
+        let digest = crate::cache::open_json(&exact, MAX_ANSWER_BYTES).await.unwrap().digest();
+        let variant = detail.variant(&exact, &digest, DETAILS_TTL);
+
+        // Model the 48 slow bulk responses the server admits at once. Each result remains alive and unread: a
+        // Bytes-backed response would retain more than 96 MiB here; prepared hits retain only open descriptors.
+        let mut requests = Vec::new();
+        for _ in 0..crate::handler::BULK_REQUESTS {
+            let detail = Arc::clone(&detail);
+            requests.push(tokio::spawn(async move { detail.kept().await }));
+        }
+        let mut held = Vec::new();
+        for request in requests {
+            match request.await.unwrap() {
+                Kept::Hit(prepared @ Prepared::File(_), fresh, _, _) => {
+                    assert_eq!(fresh, DETAILS_TTL);
+                    held.push(prepared);
+                }
+                _ => panic!("an exact hit retained an allocated body instead of an open prepared file"),
+            }
+        }
+        assert_eq!(held.len(), crate::handler::BULK_REQUESTS);
+        assert!(variant.exists(), "the legacy exact shape was not migrated lazily");
+        let bodies = std::fs::read_dir(variants_dir(&exact))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmdb.json"))
+            .count();
+        assert_eq!(bodies, 1, "concurrent owners published duplicate prepared generations");
+
+        // The internal canonical TV shape contains both credit forms and is intentionally not one of KEPT_TV's
+        // external client shapes. It is nevertheless a fixed shape and must not fall back to retained Bytes when a
+        // caller asks that exact question.
+        let canonical_query = format!("append_to_response={}", TV_APPENDS.join(","));
+        let canonical = Detail::of("/3/tv/1399", Some(&canonical_query), Some(&dir)).unwrap();
+        assert!(!canonical.durable_variant());
+        assert_eq!(canonical.exact().1, canonical.whole().1);
+        let canonical_file = canonical.whole().1;
+        let canonical_body = Bytes::from_static(
+            br#"{"id":1399,"status":"Ended","aggregate_credits":{},"content_ratings":{},"credits":{},"external_ids":{},"recommendations":{},"videos":{},"watch/providers":{}}"#,
+        );
+        crate::cache::write_json(&canonical_file, &canonical_body).await;
+        let canonical_digest =
+            crate::cache::open_json(&canonical_file, MAX_ANSWER_BYTES).await.unwrap().digest();
+        match canonical.kept().await {
+            Kept::Hit(Prepared::File(_), fresh, _, _) => assert_eq!(fresh, LIST_TTL),
+            _ => panic!("the exact canonical shape was not prepared as a streamed file"),
+        }
+        assert!(canonical.variant(&canonical_file, &canonical_digest, LIST_TTL).exists());
     }
 
     #[tokio::test]

@@ -189,11 +189,29 @@ impl JsonFile {
         self.modified
     }
 
-    pub(crate) async fn bytes(mut self) -> Option<Bytes> {
+    async fn read_exact_bytes(&mut self) -> Option<Bytes> {
         let capacity = usize::try_from(self.len).ok()?;
-        let mut bytes = Vec::with_capacity(capacity);
-        self.file.read_to_end(&mut bytes).await.ok()?;
+        let mut bytes = vec![0; capacity];
+        // Trust the opened generation's measured length, not a later EOF. Internal publishers replace files by
+        // rename, but a maintenance tool or damaged volume can still grow this inode in place after `open_json`.
+        // Read exactly the bound and then re-check this open inode, never following an extension into memory.
+        self.file.read_exact(&mut bytes).await.ok()?;
+        if self.file.metadata().await.ok()?.len() != self.len {
+            return None;
+        }
         Some(Bytes::from(bytes))
+    }
+
+    pub(crate) async fn bytes(mut self) -> Option<Bytes> {
+        self.read_exact_bytes().await
+    }
+
+    /// Inspect this exact generation without turning its eventual response into a body-sized allocation. The bytes
+    /// are dropped by the build owner; the rewound, still-open inode is what the caller streams afterwards.
+    pub(crate) async fn with_bytes(mut self) -> Option<(Self, Bytes)> {
+        let bytes = self.read_exact_bytes().await?;
+        self.file.rewind().await.ok()?;
+        Some((self, bytes))
     }
 
     /// Advance this exact open generation, never whatever inode may now occupy `path`. The pathname check only
@@ -595,5 +613,21 @@ mod tests {
         let file = dir.join("ratings.json");
         crate::tmdb::write(&file, &Bytes::from_static(b"12345")).await;
         assert!(open_json(&file, 4).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_open_cache_generation_refuses_in_place_growth_past_its_bound() {
+        use std::io::Write as _;
+
+        let dir = crate::handler::tests::temp_dir();
+        let file = dir.join("ratings.json");
+        write_json(&file, &Bytes::from_static(b"1234")).await;
+        let opened = open_json(&file, 4).await.unwrap();
+
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writer.write_all(b"5678").unwrap();
+        writer.sync_all().unwrap();
+
+        assert!(opened.bytes().await.is_none(), "the read followed a grown inode past its opened length");
     }
 }
