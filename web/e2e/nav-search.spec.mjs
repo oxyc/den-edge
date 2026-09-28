@@ -155,6 +155,14 @@ for (const width of [390, 1280])
       ).toBeFocused();
       await page.keyboard.press('ArrowUp');
       await expect(recent.getByRole('button', { name: 'Neon', exact: true })).toBeFocused();
+      // Esc closes the list and stays on Search; the list is back the next time the field is focused.
+      await page.keyboard.press('Escape');
+      await expect(recent).toHaveCount(0);
+      await expect(page).toHaveURL(/\/search/);
+      await expect(input(page)).toBeFocused();
+      await input(page).evaluate((field) => field.blur());
+      await input(page).focus();
+      await expect(recent).toBeVisible();
       await recent.getByRole('button', { name: 'Remove Arrival from recent searches' }).click();
       await expect(recent.getByRole('button', { name: 'Arrival', exact: true })).toHaveCount(0);
       await recent.getByRole('button', { name: 'Clear', exact: true }).click();

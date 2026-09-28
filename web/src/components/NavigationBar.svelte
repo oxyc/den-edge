@@ -49,7 +49,11 @@
   let toggle = $state<HTMLButtonElement>();
   let recent = $state<string[]>([]);
   let searchFocused = $state(false);
-  const showRecent = $derived(!onPeople && !text.trim() && recent.length > 0 && searchFocused);
+  /** Escape closed the recent searches; they come back the next time the field is focused. */
+  let recentDismissed = $state(false);
+  const showRecent = $derived(
+    !onPeople && !text.trim() && recent.length > 0 && searchFocused && !recentDismissed,
+  );
   // By page, not by route: each letter typed on People is a new route there, and must not fold a phone's field away.
   const page = $derived(route.page);
   $effect(() => {
@@ -187,8 +191,16 @@
       .querySelector<HTMLElement>(`${page} .browse button, ${page} .grid a`)
       ?.focus({ preventScroll: false });
   }
-  /** Esc empties a typed query first, back to Explore, and leaves search only from there. */
+  /**
+   * Esc closes the recent searches first, as it closes any list opened over the page; then empties a typed query,
+   * back to Explore; and leaves search only from there.
+   */
   function escaped() {
+    if (showRecent) {
+      recentDismissed = true;
+      input?.focus({ preventScroll: true });
+      return;
+    }
     if (!text.trim() || (route.page !== 'search' && !onPeople)) {
       closeSearch();
       return;
@@ -246,7 +258,10 @@
       onfocusin={() => (searchFocused = true)}
       onfocusout={(event) => {
         const next = event.relatedTarget;
-        if (!(next instanceof Node) || !event.currentTarget.contains(next)) searchFocused = false;
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+          searchFocused = false;
+          recentDismissed = false;
+        }
       }}
     >
       <svg class="search-glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
