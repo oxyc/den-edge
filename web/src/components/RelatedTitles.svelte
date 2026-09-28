@@ -63,9 +63,10 @@
         ? detail.languages.find((language) => language.id === originalLanguage)
         : undefined;
     let live = true;
-    const franchise = franchiseRow(detail.collection, self, atlas, options).then((row) =>
-      row ? firstScreen(row, shown) : null,
-    );
+    // Known to exist once atlas (or TMDB's collection) names its members, so it joins then with placeholders
+    // rather than after every member's poster is drawn — for a franchise atlas sends no posters for, that
+    // is one TMDB request per member.
+    const franchise = franchiseRow(detail.collection, self, atlas, options);
     const versions = versionsRow(self, atlas, franchise, options).then((row) =>
       row ? firstScreen(row, shown) : null,
     );

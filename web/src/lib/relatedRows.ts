@@ -382,8 +382,8 @@ export function collectionRow(
  * Atlas already orders the mixed film/TV members for this seed: its era first, release order within each era.
  * Its cards carry no posters, so the members are drawn (`drawRefs`) in that order; a card left without one would be
  * hidden as blank, and the whole row with it.
- * A primary with no other drawable member is still authoritative and deliberately does not fall through to a
- * different, narrower TMDB grouping.
+ * A primary with no other member is still authoritative: there is no row, and it deliberately does not fall
+ * through to a different, narrower TMDB grouping.
  */
 export async function franchiseRow(
   collection: { id: number; name: string } | undefined,
@@ -407,6 +407,7 @@ export async function franchiseRow(
           const refs = cards
             .filter((card) => keyOf(card) !== keyOf(self))
             .map(({ type, id }) => ({ type, id }));
+          if (refs.length === 0) return null;
           let members: Promise<Title[]> | undefined;
           return {
             id: `franchise-${franchise.id}`,
