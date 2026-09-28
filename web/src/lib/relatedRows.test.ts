@@ -1031,18 +1031,17 @@ describe('themeRows', () => {
 });
 
 describe('authorRow', () => {
-  it("asks for the author's adaptations and offers none the rows above have shown", async () => {
-    const seen = new Set(['movie:438631']);
+  it("asks for every other adaptation of the author's work, and needs only one", async () => {
     const row = authorRow(
       { ...NO_FACTS, authors: [{ id: 'Q7934', name: 'Frank Herbert', titles: 5 }] },
       self,
       '/atlas',
-      seen,
       answering({
         '/atlas/index/filter/all/titles.json?sel=author:Q7934': {
           order: 'votes',
           titles: [
             { type: 'movie', id: 438631, title: 'Dune' },
+            { type: 'movie', id: 550, title: 'Fight Club' },
             { type: 'movie', id: 841, title: 'Dune' },
           ],
         },
@@ -1050,15 +1049,13 @@ describe('authorRow', () => {
     );
     expect(row?.title).toBe('More adapted from Frank Herbert');
     const loaded = await row!.load(1);
-    expect(loaded.filter((title) => row!.filter?.(title)).map((title) => title.id)).toEqual([841]);
-    expect(
-      authorRow(
-        { ...NO_FACTS, authors: [{ id: 'Q1', name: 'Once', titles: 2 }] },
-        self,
-        '/atlas',
-        seen,
-      ),
-    ).toBeNull();
+    expect(loaded.filter((title) => row!.filter?.(title)).map((title) => title.id)).toEqual([
+      438631, 841,
+    ]);
+    const twice = { ...NO_FACTS, authors: [{ id: 'Q1', name: 'Twice', titles: 2 }] };
+    expect(authorRow(twice, self, '/atlas')?.id).toBe('author-Q1');
+    const once = { ...NO_FACTS, authors: [{ id: 'Q2', name: 'Once', titles: 1 }] };
+    expect(authorRow(once, self, '/atlas')).toBeNull();
   });
 });
 

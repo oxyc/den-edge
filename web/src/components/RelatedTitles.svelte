@@ -137,15 +137,7 @@
     const versions = versionsRow(self, atlas, franchise, options).then((row) =>
       row ? firstScreen(noted(row), shown) : null,
     );
-    // The rest of the author's adaptations: asked once the franchise and other versions have read theirs (the versions
-    // row reads the franchise's), so it offers none of them, and it joins under them only with something left. It
-    // skips what was on the page then, a copy: its own titles join `onPage` as they load, before its filter reads them.
-    const author = atlas
-      ? versions.then(() => {
-          const row = authorRow(known, self, atlas, new Set(onPage));
-          return row ? firstScreen(noted(withPosters(row, options)), shown) : null;
-        })
-      : Promise.resolve(null);
+    const author = atlas ? authorRow(known, self, atlas) : null;
     // Closest first: what is like this title, then the people who made it, then the same of its strongest mood, its
     // studio, network and country or language, which say less about this title in particular, and last the looser
     // suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
@@ -168,6 +160,9 @@
       // the broader plot-neighbour and TMDB sources.
       { ...similar, load: (page: number) => similar.load(page).finally(similarIn) },
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
+      // Every adaptation of the same author's work, the franchise's and other versions' included: the whole list is
+      // what someone asking "what else came from their books" wants.
+      ...(author ? [withPosters(author, options)] : []),
       ...(mood ? [withPosters(mood, options)] : []),
       ...(atlas
         ? [
@@ -181,7 +176,7 @@
     // atlas's structural-affinity order alone: the wider sources are More like this's. It is asked once More like
     // this has its first page, and skips every title the rows above have shown (`onPage`) — so like the franchise
     // it joins only with something to show, and last, where arriving late grows the page below the viewer rather
-    // than moving it. A row above that loads later (other versions, the author's) drops its titles from it then.
+    // than moving it. A row above that loads later (other versions) drops its titles from it then.
     const affinity = atlas
       ? similarLoaded.then(() => {
           const row = moreLikeThisRow(detail, atlas, {
@@ -200,7 +195,6 @@
       void Promise.all([
         franchise,
         versions,
-        author,
         ...defined.map((row) => firstScreen(row, shown)),
         affinity,
       ]).then((found) => {
@@ -217,22 +211,13 @@
       rows = defined.map((row) => ({ build, row }));
       void franchise.then(async (row) => {
         if (live && row) rows = [{ build, row }, ...rows];
-        // Other versions sit straight under the franchise, which they are never part of, and the author's other
-        // adaptations under those.
-        const after = (above: RowDef | null) =>
-          above
-            ? rows.findIndex((entry) => entry.build === build && entry.row.id === above.id) + 1
-            : 0;
+        // Other versions sit straight under the franchise, which they are never part of.
         const other = await versions;
-        if (!live) return;
-        if (other) {
-          const at = after(row);
-          rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
-        }
-        const adapted = await author;
-        if (!live || !adapted) return;
-        const at = after(other ?? row);
-        rows = [...rows.slice(0, at), { build, row: adapted }, ...rows.slice(at)];
+        if (!live || !other) return;
+        const at = row
+          ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
+          : 0;
+        rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
       });
       void affinity.then((row) => {
         if (live && row) rows = [...rows, { build, row }];

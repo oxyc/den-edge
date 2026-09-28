@@ -615,23 +615,22 @@ function themeRow(
 }
 
 /**
- * "More adapted from Frank Herbert": the titles adapted from the same author's work, from atlas's facts. Mostly the
- * franchise and other versions of this story, which have their rows above, so it offers none of `seen` and is asked
- * once those have loaded; it joins only with something left (`firstScreen`). No link: Search has no author chip.
+ * "More adapted from Frank Herbert": every other title adapted from the same author's work, from atlas's facts,
+ * including what the franchise and other-versions rows also show — the whole list is what the row is for. Any author
+ * with another adaptation has one. No link: Search has no author chip.
  */
 export function authorRow(
   facts: TitleFacts,
   self: Title,
   atlas: string,
-  seen: Set<string>,
   fetchImpl?: typeof fetch,
 ): RowDef | null {
-  const author = facts.authors.find((value) => value.titles >= 3);
+  const author = facts.authors.find((value) => value.titles >= 2);
   if (!author) return null;
   return {
     id: `author-${author.id}`,
     title: `More adapted from ${author.name}`,
-    filter: (title) => keyOf(title) !== keyOf(self) && !seen.has(keyOf(title)),
+    filter: (title) => keyOf(title) !== keyOf(self),
     load: filterTitles(atlas, 'all', [{ kind: 'author', id: author.id }], { fetchImpl }),
   };
 }
