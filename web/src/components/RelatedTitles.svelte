@@ -8,6 +8,7 @@
   import type { IconicStudio } from '../lib/iconicStudios';
   import { titleKey, type Title } from '../lib/library';
   import {
+    authorRow,
     countryRow,
     firstScreen,
     franchiseRow,
@@ -19,6 +20,7 @@
     personRows,
     producerRows,
     studioRow,
+    themeRows,
     versionsRow,
     withPosters,
   } from '../lib/relatedRows';
@@ -89,19 +91,18 @@
     const countryId =
       regionalLanguage &&
       homeCountry(regionalLanguage.id, [...known.countries, ...detail.countries.map((c) => c.id)]);
+    const regionalCountry = countryId
+      ? (detail.countries.find((c) => c.id === countryId)?.name ??
+        regions.of(countryId) ??
+        countryId)
+      : undefined;
     const regional =
       !atlas || !regionalLanguage
         ? null
-        : countryId
+        : countryId && regionalCountry
           ? withPosters(
               countryRow(
-                {
-                  id: countryId,
-                  name:
-                    detail.countries.find((c) => c.id === countryId)?.name ??
-                    regions.of(countryId) ??
-                    countryId,
-                },
+                { id: countryId, name: regionalCountry },
                 regionalLanguage.id,
                 self,
                 atlas,
@@ -130,6 +131,15 @@
     const versions = versionsRow(self, atlas, franchise, options).then((row) =>
       row ? firstScreen(noted(row), shown) : null,
     );
+    // The rest of the author's adaptations: asked once the franchise and other versions have read theirs (the versions
+    // row reads the franchise's), so it offers none of them, and it joins under them only with something left. It
+    // skips what was on the page then, a copy: its own titles join `onPage` as they load, before its filter reads them.
+    const author = atlas
+      ? versions.then(() => {
+          const row = authorRow(known, self, atlas, new Set(onPage));
+          return row ? firstScreen(noted(withPosters(row, options)), shown) : null;
+        })
+      : Promise.resolve(null);
     // Closest first: what is like this title, then the people who made it, then the same of its strongest mood, its
     // studio, network and country or language, which say less about this title in particular, and last the looser
     // suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
@@ -155,6 +165,7 @@
       ...(mood ? [withPosters(mood, options)] : []),
       ...(atlas
         ? [
+            ...themeRows(known, self, atlas, regionalCountry),
             ...credited.map((studio) => studioRow(studio, self, atlas)),
             ...producerRows(known, credited, self, atlas),
           ].map((row) => withPosters(row, options))
@@ -185,6 +196,7 @@
       void Promise.all([
         franchise,
         versions,
+        author,
         ...defined.map((row) => firstScreen(row, shown)),
         affinity,
       ]).then((found) => {
@@ -201,13 +213,22 @@
       rows = defined.map((row) => ({ build, row }));
       void franchise.then(async (row) => {
         if (live && row) rows = [{ build, row }, ...rows];
-        // Other versions sit straight under the franchise, which they are never part of.
+        // Other versions sit straight under the franchise, which they are never part of, and the author's other
+        // adaptations under those.
+        const after = (above: RowDef | null) =>
+          above
+            ? rows.findIndex((entry) => entry.build === build && entry.row.id === above.id) + 1
+            : 0;
         const other = await versions;
-        if (!live || !other) return;
-        const at = row
-          ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
-          : 0;
-        rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
+        if (!live) return;
+        if (other) {
+          const at = after(row);
+          rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
+        }
+        const adapted = await author;
+        if (!live || !adapted) return;
+        const at = after(other ?? row);
+        rows = [...rows.slice(0, at), { build, row: adapted }, ...rows.slice(at)];
       });
       void affinity.then((row) => {
         if (live && row) rows = [...rows, { build, row }];

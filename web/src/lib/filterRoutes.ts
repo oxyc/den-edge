@@ -65,6 +65,7 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   network: { mode: 'and', id: 'qid' },
   subject: { mode: 'and', id: 'qid' },
   place: { mode: 'and', id: 'qid' },
+  author: { mode: 'and', id: 'qid' },
   format: { mode: 'and', id: 'qid' },
   character: { mode: 'and', id: 'character' },
   like: { mode: 'single', id: 'like' },

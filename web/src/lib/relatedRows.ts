@@ -566,6 +566,76 @@ function producerRow(
   };
 }
 
+/** A subject or place's row is worth it between these many titles: fewer is a row of a few, more says nothing (New York City). */
+const THEME_TITLES = { min: 8, max: 300 };
+
+/**
+ * "More about drug trafficking" and "Set in Baltimore", from atlas's facts: the first subject and the first place the
+ * right size to say something (`THEME_TITLES`), films and series together. A place that is the title's own country
+ * (`countryName`) is left to the country row.
+ */
+export function themeRows(
+  facts: TitleFacts,
+  self: Title,
+  atlas: string,
+  countryName?: string,
+  fetchImpl?: typeof fetch,
+): RowDef[] {
+  const fits = (value: Browsable) =>
+    value.titles >= THEME_TITLES.min && value.titles <= THEME_TITLES.max;
+  const rows: RowDef[] = [];
+  const subject = facts.subjects.find(fits);
+  if (subject) rows.push(themeRow('subject', subject, 'More about ', self, atlas, fetchImpl));
+  const country = countryName && folded(countryName);
+  const place = facts.places.find((value) => fits(value) && folded(value.name) !== country);
+  if (place) rows.push(themeRow('place', place, 'Set in ', self, atlas, fetchImpl));
+  return rows;
+}
+
+function themeRow(
+  kind: 'subject' | 'place',
+  value: Browsable,
+  before: string,
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef {
+  return {
+    id: `${kind}-${value.id}`,
+    title: `${before}${value.name}`,
+    headingLink: {
+      before,
+      label: value.name,
+      after: '',
+      href: searchHref('', { chips: [`${kind}-${value.id}`] }),
+    },
+    filter: (title) => keyOf(title) !== keyOf(self),
+    load: filterTitles(atlas, 'all', [{ kind, id: value.id }], { fetchImpl }),
+  };
+}
+
+/**
+ * "More adapted from Frank Herbert": the titles adapted from the same author's work, from atlas's facts. Mostly the
+ * franchise and other versions of this story, which have their rows above, so it offers none of `seen` and is asked
+ * once those have loaded; it joins only with something left (`firstScreen`). No link: Search has no author chip.
+ */
+export function authorRow(
+  facts: TitleFacts,
+  self: Title,
+  atlas: string,
+  seen: Set<string>,
+  fetchImpl?: typeof fetch,
+): RowDef | null {
+  const author = facts.authors.find((value) => value.titles >= 3);
+  if (!author) return null;
+  return {
+    id: `author-${author.id}`,
+    title: `More adapted from ${author.name}`,
+    filter: (title) => keyOf(title) !== keyOf(self) && !seen.has(keyOf(title)),
+    load: filterTitles(atlas, 'all', [{ kind: 'author', id: author.id }], { fetchImpl }),
+  };
+}
+
 /** How a mood reads in "More … like this"; a mood not named here is its own label, lowercased. */
 const MOOD_WORDS: Record<string, string> = {
   'Dark & Gritty': 'dark and gritty',
