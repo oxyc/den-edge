@@ -509,10 +509,13 @@ fn detail_builds() -> &'static Arc<tokio::sync::Semaphore> {
 }
 
 /// A derived response which cannot be streamed from a prepared file is charged as the largest body it could own,
-/// not merely its current length: `serde_json` may retain spare `Vec` capacity which `Bytes` keeps alive. Four such
-/// responses may wait on slow clients at once. Together with the single builder's source and output buffers this
-/// keeps this path below 24 MiB even when every body is at the provider's 4 MiB ceiling.
-const DERIVED_RESPONSE_BUDGET_BYTES: usize = 4 * MAX_ANSWER_BYTES;
+/// not merely its current length: `serde_json` may retain spare `Vec` capacity which `Bytes` keeps alive. A cold
+/// question reserves its charge before asking TMDB, so this is also how many cold questions are asked at once. It
+/// was four: fifteen cold search results then went to TMDB in four waves, 11 of 15 waiting on this pool (measured on
+/// the box: its high water at the whole 16 MiB), 1.7 s a poster where TMDB answers one in 150-450 ms. Thirty-two
+/// covers a screen of results in one wave; with the single builder's buffers this path stays below 136 MiB even
+/// when every body is at the provider's 4 MiB ceiling, inside the container's 256 MiB.
+const DERIVED_RESPONSE_BUDGET_BYTES: usize = 32 * MAX_ANSWER_BYTES;
 const DERIVED_RESPONSE_CHARGE: u32 = MAX_ANSWER_BYTES as u32;
 
 fn derived_response_budget() -> &'static Arc<tokio::sync::Semaphore> {
@@ -3143,7 +3146,8 @@ mod tests {
 
     async fn assert_slow_derived_responses_are_bounded(detail: Arc<Detail>, source_path: PathBuf) {
         let capacity = DERIVED_RESPONSE_BUDGET_BYTES / MAX_ANSWER_BYTES;
-        assert_eq!(capacity, 4, "keep this test's expected response ceiling explicit");
+        assert_eq!(capacity, 32, "keep this test's expected response ceiling explicit");
+        assert!(crate::handler::BULK_REQUESTS > capacity, "more requests than the ceiling, so one must wait");
         let mut requests = tokio::task::JoinSet::new();
         for _ in 0..crate::handler::BULK_REQUESTS {
             let detail = Arc::clone(&detail);
@@ -3175,7 +3179,7 @@ mod tests {
         assert_eq!(derived_response_budget().available_permits(), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(100), requests.join_next()).await.is_err(),
-            "a fifth slow response retained an uncharged derived body"
+            "a slow response past the ceiling retained an uncharged derived body"
         );
 
         // The charge follows the response body: releasing one unread response lets exactly one waiting builder
