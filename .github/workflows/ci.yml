@@ -67,26 +67,30 @@ jobs:
       - run: npm run build:cast
 
   # The image is what ships, and it builds differently from `cargo build` (musl, scratch). Caught on the PR
-  # rather than at tag time, for amd64 — the only arch the box runs.
+  # rather than at tag time, for amd64 — the only arch the box runs. The two images build side by side; each
+  # keeps the cache scope docker-publish.yml uses for it, so a release still starts from the PR's layers.
   build-pr:
     needs: test
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: den-edge
+            file: Dockerfile
+            scope: ""
+          - image: den-cast
+            file: Dockerfile.cast
+            scope: ",scope=cast"
+    name: build-pr (${{ matrix.image }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          file: ${{ matrix.file }}
           push: false
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: Dockerfile.cast
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha,scope=cast
-          cache-to: type=gha,mode=max,scope=cast
+          cache-from: type=gha${{ matrix.scope }}
+          cache-to: type=gha,mode=max${{ matrix.scope }}
