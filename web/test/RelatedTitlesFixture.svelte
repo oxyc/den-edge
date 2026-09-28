@@ -9,7 +9,10 @@
     id: index + 100,
     title: `Similar film ${index + 1}`,
     year: 2000 + index,
+    posterPath: `/similar${index + 1}.jpg`,
   }));
+  // A title page hides a card with no poster as blank (`isHidden`), and a row with only such cards with it.
+  const shown = (title: Title) => Boolean(title.posterPath || title.posterUrl);
   const detail = {
     title: { type: 'movie', id: 1, title: 'The Seed' },
     more,
@@ -28,7 +31,7 @@
 
 <main>
   <div class="above"></div>
-  <RelatedTitles {detail} tmdbKey="" {atlas} active={true} shown={() => true} />
+  <RelatedTitles {detail} tmdbKey="" {atlas} active={true} {shown} />
 </main>
 
 <style>

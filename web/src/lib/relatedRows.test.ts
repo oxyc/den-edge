@@ -511,9 +511,9 @@ describe('franchiseRow', () => {
         '/atlas/index/franchise/movie/550.json': {
           franchise: { id: 'fight', name: 'Fight franchise' },
           members: [
-            { type: 'movie', id: 550, title: 'Fight Club' },
-            { type: 'series', id: 7, title: 'Fight Club: The Series' },
-            { type: 'movie', id: 8, title: 'Fight Again' },
+            { type: 'movie', id: 550, title: 'Fight Club', posterPath: '/f.jpg' },
+            { type: 'series', id: 7, title: 'Fight Club: The Series', posterPath: '/s.jpg' },
+            { type: 'movie', id: 8, title: 'Fight Again', posterPath: '/a.jpg' },
           ],
           total: 3,
         },
@@ -528,12 +528,53 @@ describe('franchiseRow', () => {
     expect(row?.id).toBe('franchise-fight');
     expect(row?.title).toBe('Fight franchise');
     expect((await row!.load(1)).map((title) => `${title.type}:${title.id}`)).toEqual([
-      'movie:550',
       'tv:7',
       'movie:8',
     ]);
     expect((await firstScreen(row!, (title) => title.id !== 550))?.load).toBeDefined();
-    expect(asked).toEqual(['/atlas/index/franchise/movie/550.json']);
+    // Cards with posters are drawn as they are: nothing else is asked.
+    expect(asked.filter((path) => path !== '/metadata/title/query')).toEqual([
+      '/atlas/index/franchise/movie/550.json',
+    ]);
+  });
+
+  it('draws poster-less members, in atlas’s era order, so the row is not hidden as blank', async () => {
+    const asked: string[] = [];
+    const table = answering(
+      {
+        '/atlas/index/franchise/movie/557.json': {
+          franchise: { id: 'Q2307877', name: 'Spider-Man in film' },
+          // Seed era first, then the other eras; neither id nor year order.
+          members: [
+            { type: 'movie', id: 557, title: 'Spider-Man', year: 2002, posterPath: null },
+            { type: 'movie', id: 558, title: 'Spider-Man 2', year: 2004, posterPath: null },
+            { type: 'movie', id: 225914, title: 'Spider-Man', year: 1977, posterPath: null },
+            { type: 'movie', id: 1930, title: 'The Amazing', year: 2012, posterPath: null },
+          ],
+        },
+        '/metadata/title/query': {
+          entries: [558, 225914].map((id) => ({
+            source: 'tmdb',
+            type: 'movie',
+            id,
+            fields: { posterPath: { observedAt: Date.now(), value: `/p${id}.jpg` } },
+          })),
+        },
+        '/3/movie/1930': { id: 1930, title: 'The Amazing', poster_path: '/p1930.jpg' },
+      },
+      asked,
+    );
+    const seed: Title = { type: 'movie', id: 557, title: 'Spider-Man' };
+    const row = await franchiseRow(undefined, seed, '/atlas', { key: 'k', fetchImpl: table });
+    const withPoster = (t: Title) => Boolean(t.posterPath);
+
+    const shown = await firstScreen(row!, withPoster);
+    expect(shown).not.toBeNull();
+    const titles = await shown!.load(1);
+    expect(titles.map((t) => t.id)).toEqual([558, 225914, 1930]);
+    expect(titles.every(withPoster)).toBe(true);
+    // Only the member den-edge has no poster for is asked of TMDB.
+    expect(asked.filter((path) => path.startsWith('/3/'))).toEqual(['/3/movie/1930']);
   });
 
   it('uses TMDB only when atlas has no curated primary', async () => {

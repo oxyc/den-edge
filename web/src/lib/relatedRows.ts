@@ -357,6 +357,8 @@ export function collectionRow(
 /**
  * The title's curated primary franchise from atlas, with TMDB's movie collection only when atlas has none.
  * Atlas already orders the mixed film/TV members for this seed: its era first, release order within each era.
+ * Its cards carry no posters, so the members are drawn (`drawRefs`) in that order; a card left without one would be
+ * hidden as blank, and the whole row with it.
  * A primary with no other drawable member is still authoritative and deliberately does not fall through to a
  * different, narrower TMDB grouping.
  */
@@ -368,10 +370,9 @@ export async function franchiseRow(
 ): Promise<RowDef | null> {
   if (atlas) {
     const kind = self.type === 'tv' ? 'series' : 'movie';
+    const fetchImpl = options.fetchImpl ?? tmdbFetch;
     try {
-      const res = await (options.fetchImpl ?? tmdbFetch)(
-        `${atlas}/index/franchise/${kind}/${self.id}.json`,
-      );
+      const res = await fetchImpl(`${atlas}/index/franchise/${kind}/${self.id}.json`);
       if (res.ok) {
         const body = (await res.json()) as Record<string, unknown>;
         const franchise =
@@ -379,12 +380,17 @@ export async function franchiseRow(
             ? (body.franchise as Record<string, unknown>)
             : null;
         if (franchise && typeof franchise.id === 'string' && typeof franchise.name === 'string') {
-          const members = titlesOf({ titles: body.members });
+          const cards = titlesOf({ titles: body.members });
+          const refs = cards
+            .filter((card) => keyOf(card) !== keyOf(self))
+            .map(({ type, id }) => ({ type, id }));
+          let members: Promise<Title[]> | undefined;
           return {
             id: `franchise-${franchise.id}`,
             title: franchise.name,
             filter: (title) => keyOf(title) !== keyOf(self),
-            load: async (page) => (page === 1 ? members : []),
+            load: async (page) =>
+              page === 1 ? await (members ??= drawRefs(refs, cards, options.key, fetchImpl)) : [],
           };
         }
       }
