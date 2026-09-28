@@ -12,6 +12,7 @@ type Listener = (event: FakeEvent) => void;
 interface FakeEvent {
   request: { url: string; method: string; mode: string };
   resultingClientId?: string;
+  clientId?: string;
   respondWith(answer: Promise<Response>): void;
   waitUntil(work: Promise<unknown>): void;
 }
@@ -40,8 +41,11 @@ function worker(shell?: string) {
     delete: async (name: string) => stores.delete(name),
   };
   const fetched: string[] = [];
+  const messages: unknown[] = [];
   const fetchImpl = async (request: { url: string }) => {
     fetched.push(key(request));
+    // A file of a release den-edge no longer serves.
+    if (key(request).startsWith('/assets/gone')) return new Response('', { status: 404 });
     const response = new Response(`network ${key(request)}`, { headers: { etag: '"r2"' } });
     Object.defineProperty(response, 'type', { value: 'basic' });
     return response;
@@ -57,7 +61,11 @@ function worker(shell?: string) {
     location: { origin: ORIGIN },
     addEventListener: (type: string, listener: Listener) => listeners.set(type, listener),
     skipWaiting: () => undefined,
-    clients: { claim: async () => undefined, get: async () => undefined },
+    clients: {
+      claim: async () => undefined,
+      get: async (id?: string) =>
+        id ? { postMessage: (message: unknown) => void messages.push(message) } : undefined,
+    },
   };
   const appPage = new Function('self', 'caches', 'fetch', 'Request', `${SOURCE}\nreturn appPage;`)(
     self,
@@ -80,7 +88,25 @@ function worker(shell?: string) {
     await Promise.all(behind);
     return body;
   }
-  return { appPage, navigate, fetched, kept: () => [...store('den-page-v1').keys()] };
+  /** The answer the worker gives the page's request for one of the build's files. */
+  async function asset(path: string) {
+    let answer: Promise<Response> | undefined;
+    listeners.get('fetch')!({
+      request: { url: new URL(path, ORIGIN).href, method: 'GET', mode: 'cors' },
+      clientId: 'page',
+      respondWith: (response) => (answer = response),
+      waitUntil: () => undefined,
+    });
+    return (await answer)?.status;
+  }
+  return {
+    appPage,
+    navigate,
+    asset,
+    fetched,
+    messages,
+    kept: () => [...store('den-page-v1').keys()],
+  };
 }
 
 describe('the service worker', () => {
@@ -171,5 +197,16 @@ describe('the service worker', () => {
     const warm = worker('kept shell');
     expect(await warm.navigate('/movie/550')).toBe('kept shell');
     expect(warm.fetched).toEqual(['/']);
+  });
+
+  it('drops a kept shell whose release is gone and reloads the page onto the current one', async () => {
+    const { asset, kept, messages } = worker('kept shell');
+    expect(await asset('/assets/Detail-abc.js')).toBe(200);
+    expect(kept()).toEqual(['/']);
+    expect(messages).toEqual([]);
+
+    expect(await asset('/assets/gone-Detail-old.js')).toBe(404);
+    expect(kept()).toEqual([]);
+    expect(messages).toEqual(['den:reload']);
   });
 });

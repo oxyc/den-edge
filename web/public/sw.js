@@ -4,7 +4,7 @@
 //
 // The kept page is shown and checked behind it, so a release shows on the visit after it lands. Files are kept per
 // release, the last two of them, because a kept page asks for its own release's files after den-edge has replaced
-// them; one it never fetched makes the app reload onto the current release (main.ts). A check that meets Cloudflare
+// them; one it never fetched drops the kept page and reloads onto the current release (`file`, main.ts). A check that meets Cloudflare
 // Access's login instead of the page drops the kept page and reloads, so an expired session still reaches the login.
 //
 // The kept page answers every navigation to one of the app's own pages (`src/lib/route.ts`), not only `/`: den-edge
@@ -35,7 +35,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (request.mode === 'navigate' && appPage(url.pathname)) event.respondWith(page(event));
-  else if (url.pathname.startsWith('/assets/')) event.respondWith(file(request));
+  else if (url.pathname.startsWith('/assets/')) event.respondWith(file(event));
 });
 
 async function page(event) {
@@ -67,7 +67,8 @@ async function page(event) {
   return kept ?? fetch(event.request);
 }
 
-async function file(request) {
+async function file(event) {
+  const { request } = event;
   const kept = await caches.match(request);
   if (kept) return kept;
   const response = await fetch(request);
@@ -75,6 +76,13 @@ async function file(request) {
     const page = await (await caches.open(PAGE)).match('/');
     const cache = await caches.open(FILES + (page?.headers.get('etag') ?? 'unreleased'));
     await cache.put(request, response.clone());
+  } else if (response.status === 404) {
+    // A file of a release den-edge no longer serves, and not kept here: the page asking is that release's, shown
+    // from the kept shell a visit behind. On 2026-09-28 two releases half an hour apart left such a page with its
+    // navigation drawn and no rows or screens, and reloading onto the same kept shell kept it there. Without the
+    // shell the reload goes to the network and gets the current release.
+    await (await caches.open(PAGE)).delete('/');
+    (await self.clients.get(event.clientId))?.postMessage('den:reload');
   }
   return response;
 }
