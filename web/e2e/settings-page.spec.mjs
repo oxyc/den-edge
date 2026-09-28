@@ -151,7 +151,9 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(mac.getByRole('button', { name: 'Forget Mac' })).toBeVisible();
       // A regular expression, so it's matched with its case: the device's own row reads "This browser · seen".
       await expect(listed.filter({ hasText: /Browser · seen/ })).toContainText('Mac');
-      await expect(listed.filter({ hasText: 'This browser' })).toHaveCount(1);
+      // The page lists itself a second after Settings opens, so this waits for that row; a plain string would also
+      // match the TV's "linked to this browser" (string matching ignores case), and passed or failed on the timing.
+      await expect(listed.filter({ hasText: /This browser · seen/ })).toHaveCount(1);
 
       // The long lists, open for the screenshot: content warnings in their ten groups, and the languages.
       await page.getByRole('button', { name: /Content warnings All/ }).click();
