@@ -123,8 +123,16 @@ fn artwork(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// The backdrop a title's page opens on, at the size `Detail.svelte` asks for it: the page's largest paint, which
+/// the browser can start fetching from here instead of after the app has loaded and asked TMDB for the title.
+fn hero(value: &serde_json::Value) -> Option<String> {
+    let path = value.get("backdrop_path").and_then(|v| v.as_str())?;
+    Some(format!("https://image.tmdb.org/t/p/w1280{path}"))
+}
+
 /// The head block for this page, or `None` to leave the fallback alone.
 async fn block(state: &Arc<AppState>, path: &str, query: Option<&str>, origin: &str) -> Option<String> {
+    let mut preload = None;
     let (name, description, image, kind) = match page(path, query)? {
         Page::Title { kind, id } => {
             let asked = if kind == "video.movie" { format!("/3/movie/{id}") } else { format!("/3/tv/{id}") };
@@ -142,6 +150,7 @@ async fn block(state: &Arc<AppState>, path: &str, query: Option<&str>, origin: &
                 .unwrap_or("");
             let year = released.get(..4).filter(|y| y.chars().all(|c| c.is_ascii_digit()));
             let overview = details.get("overview").and_then(|v| v.as_str()).unwrap_or("");
+            preload = hero(&details);
             (
                 match year {
                     Some(year) => format!("{name} ({year})"),
@@ -188,8 +197,16 @@ async fn block(state: &Arc<AppState>, path: &str, query: Option<&str>, origin: &
     let image = image.unwrap_or_else(|| format!("{origin}/og.png"));
     let url = format!("{origin}{path}");
     let (name, described, image, url) = (escaped(&name), escaped(&described), escaped(&image), escaped(&url));
+    let preload = preload
+        .map(|hero| {
+            format!(
+                "<link rel=\"preload\" as=\"image\" href=\"{}\" fetchpriority=\"high\" />",
+                escaped(&hero)
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
-        "<title>{name} · Den</title>\
+        "{preload}<title>{name} · Den</title>\
          <meta name=\"description\" content=\"{described}\" />\
          <meta property=\"og:type\" content=\"{kind}\" />\
          <meta property=\"og:site_name\" content=\"Den\" />\
@@ -286,6 +303,15 @@ mod tests {
         let poster = serde_json::json!({ "poster_path": "/p.jpg" });
         assert_eq!(artwork(&poster).unwrap(), "https://image.tmdb.org/t/p/w780/p.jpg");
         assert!(artwork(&serde_json::json!({})).is_none());
+    }
+
+    /// Only the backdrop is preloaded: a title without one opens on no large image, so the poster a card falls
+    /// back to would be fetched for nothing.
+    #[test]
+    fn a_title_preloads_its_backdrop_and_nothing_else() {
+        let both = serde_json::json!({ "backdrop_path": "/b.jpg", "poster_path": "/p.jpg" });
+        assert_eq!(hero(&both).unwrap(), "https://image.tmdb.org/t/p/w1280/b.jpg");
+        assert!(hero(&serde_json::json!({ "poster_path": "/p.jpg" })).is_none());
     }
 
     #[tokio::test]
