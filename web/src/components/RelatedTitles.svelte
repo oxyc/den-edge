@@ -25,6 +25,7 @@
     withPosters,
   } from '../lib/relatedRows';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
+  import { SvelteSet } from 'svelte/reactivity';
 
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
   import BrowseRow from './BrowseRow.svelte';
@@ -114,11 +115,16 @@
     // Every title the rows above have shown, so You might also like, the last row, offers none of them again.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read by loaders only, never rendered.
     const onPage = new Set<string>([titleKey(self)]);
+    // The same, as it grows: a row above that loads after You might also like drops its titles from that row then.
+    const above = new SvelteSet<string>();
     const noted = (row: RowDef): RowDef => ({
       ...row,
       load: async (page) => {
         const titles = await row.load(page);
-        for (const title of titles) onPage.add(titleKey(title));
+        for (const title of titles) {
+          onPage.add(titleKey(title));
+          above.add(titleKey(title));
+        }
         return titles;
       },
     });
@@ -175,21 +181,19 @@
     // atlas's structural-affinity order alone: the wider sources are More like this's. It is asked once More like
     // this has its first page, and skips every title the rows above have shown (`onPage`) — so like the franchise
     // it joins only with something to show, and last, where arriving late grows the page below the viewer rather
-    // than moving it.
+    // than moving it. A row above that loads later (other versions, the author's) drops its titles from it then.
     const affinity = atlas
-      ? similarLoaded.then(() =>
-          firstScreen(
-            moreLikeThisRow(detail, atlas, {
-              ...options,
-              mixed: true,
-              similarLimit: 200,
-              affinity: true,
-              fallback: false,
-              seen: onPage,
-            }),
-            shown,
-          ),
-        )
+      ? similarLoaded.then(() => {
+          const row = moreLikeThisRow(detail, atlas, {
+            ...options,
+            mixed: true,
+            similarLimit: 200,
+            affinity: true,
+            fallback: false,
+            seen: onPage,
+          });
+          return firstScreen({ ...row, filter: (title) => !above.has(titleKey(title)) }, shown);
+        })
       : Promise.resolve(null);
     const build = ++builds;
     if (rebuild) {
