@@ -1,5 +1,5 @@
 <script lang="ts">
-  import icon from '../assets/den-mark.png';
+  import icon from '../assets/den-mark.svg';
   import DetailIcon from './DetailIcon.svelte';
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
