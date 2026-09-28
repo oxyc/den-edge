@@ -1,4 +1,4 @@
-import { test, expect, chromium } from '@playwright/test';
+import { test, expect, chromium, webkit } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
 const film = (id, title = `Film ${id}`) => ({
@@ -164,6 +164,31 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+// iOS Safari doesn't focus a tapped button: the field's blur has no related target, and the list must still be
+// there when the tap's click lands.
+test('a recent search is reused and removed by touch on an iPhone', async () => {
+  const browser = await webkit.launch();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 800 },
+      hasTouch: true,
+    });
+    await setup(page);
+    await page.addInitScript(() =>
+      localStorage.setItem('den.recentSearches', JSON.stringify(['Arrival', 'Studio Ghibli'])),
+    );
+    await page.goto(FIXTURE);
+    await page.getByRole('button', { name: 'Search', exact: true }).tap();
+    const recent = page.locator('.recent');
+    await recent.getByRole('button', { name: 'Remove Arrival from recent searches' }).tap();
+    await expect(recent.getByRole('button', { name: 'Arrival', exact: true })).toHaveCount(0);
+    await recent.getByRole('button', { name: 'Studio Ghibli', exact: true }).tap();
+    await expect(page).toHaveURL(/q=Studio%20Ghibli/);
+  } finally {
+    await browser.close();
+  }
+});
 
 for (const width of [320, 390, 1280])
   test(`navbar search preserves Home and result history at ${width}px`, async () => {

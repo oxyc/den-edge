@@ -316,7 +316,17 @@
         <span class="recent-status" role="status"
           >Recent searches available. Press Down Arrow to review.</span
         >
-        <div id="recent-searches" class="recent" role="group" aria-label="Recent searches">
+        <!-- Pressing in the list keeps the field focused. iOS Safari doesn't focus a tapped button, so the field's
+             blur had nowhere to go, the bar took search as left, and the list was gone before the tap's click.
+             The handler only holds focus; the list's buttons are what is interactive. -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          id="recent-searches"
+          class="recent"
+          role="group"
+          aria-label="Recent searches"
+          onmousedown={(event) => event.preventDefault()}
+        >
           <div class="recent-heading">
             <span>Recent searches</span><button type="button" onclick={clearRecent}>Clear</button>
           </div>
