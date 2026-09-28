@@ -110,17 +110,30 @@
             )
           : withPosters(languageRow(regionalLanguage, self, atlas), options);
     let live = true;
+    // Every title the rows above have shown, so You might also like, the last row, offers none of them again.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read by loaders only, never rendered.
+    const onPage = new Set<string>([titleKey(self)]);
+    const noted = (row: RowDef): RowDef => ({
+      ...row,
+      load: async (page) => {
+        const titles = await row.load(page);
+        for (const title of titles) onPage.add(titleKey(title));
+        return titles;
+      },
+    });
     // Known to exist once atlas (or TMDB's collection) names its members, so it joins then with placeholders
     // rather than after every member's poster is drawn — for a franchise atlas sends no posters for, that
     // is one TMDB request per member.
-    const franchise = franchiseRow(detail.collection, self, atlas, options);
-    const versions = versionsRow(self, atlas, franchise, options).then((row) =>
-      row ? firstScreen(row, shown) : null,
+    const franchise = franchiseRow(detail.collection, self, atlas, options).then(
+      (row) => row && noted(row),
     );
-    // Closest first: what is like this title and the same of its strongest mood, then the people who made it, then
-    // its studio, network and country or language, which say less about this title in particular, and last the
-    // looser suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
-    // The two suggestion rows share what they have offered, so a title appears in only one of them.
+    const versions = versionsRow(self, atlas, franchise, options).then((row) =>
+      row ? firstScreen(noted(row), shown) : null,
+    );
+    // Closest first: what is like this title, then the people who made it, then the same of its strongest mood, its
+    // studio, network and country or language, which say less about this title in particular, and last the looser
+    // suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
+    // More like this and the mood row share what they have offered, so a title appears in only one of them.
     const suggested = new Set<string>();
     const similar = moreLikeThisRow(detail, atlas, {
       ...options,
@@ -137,9 +150,9 @@
       // Films and series together; curated primary members have their own row and atlas excludes them here.
       // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
       // the broader plot-neighbour and TMDB sources.
-      { ...similar, load: (page) => similar.load(page).finally(similarIn) },
-      ...(mood ? [withPosters(mood, options)] : []),
+      { ...similar, load: (page: number) => similar.load(page).finally(similarIn) },
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
+      ...(mood ? [withPosters(mood, options)] : []),
       ...(atlas
         ? [
             ...credited.map((studio) => studioRow(studio, self, atlas)),
@@ -147,11 +160,11 @@
           ].map((row) => withPosters(row, options))
         : []),
       ...(regional ? [regional] : []),
-    ];
+    ].map(noted);
     // atlas's structural-affinity order alone: the wider sources are More like this's. It is asked once More like
-    // this has its first page, so the closer row keeps the titles both would name, and atlas often has none left —
-    // so like the franchise it joins only with something to show, and last, where arriving late grows the page
-    // below the viewer rather than moving it.
+    // this has its first page, and skips every title the rows above have shown (`onPage`) — so like the franchise
+    // it joins only with something to show, and last, where arriving late grows the page below the viewer rather
+    // than moving it.
     const affinity = atlas
       ? similarLoaded.then(() =>
           firstScreen(
@@ -161,7 +174,7 @@
               similarLimit: 200,
               affinity: true,
               fallback: false,
-              seen: suggested,
+              seen: onPage,
             }),
             shown,
           ),
