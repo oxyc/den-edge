@@ -4,10 +4,11 @@
 import { tmdbPages, type RowDef } from './catalog';
 import { titlesOf } from './atlasRows';
 import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail } from './detail';
-import { filterTitles } from './filterRoutes';
+import { filterTitles, likeValue } from './filterRoutes';
 import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
 import { likeId, personHref, searchHref } from './route';
+import type { Browsable, TitleFacts } from './titleFacts';
 import { fetchTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 import { withSharedTitleMetadata } from './titleMetadata';
@@ -318,6 +319,27 @@ export async function firstScreen(
   return null;
 }
 
+/**
+ * `row` with a poster for every card: atlas's filter sends none, den-edge's shared metadata has only the titles it has
+ * already seen, and a title page hides a card without one — which left "More from Telecinco Cinema" 2 of its 33. What
+ * neither has is asked of TMDB, one title at a time, as the franchise row does (`drawRefs`).
+ */
+export function withPosters(row: RowDef, { key, fetchImpl = tmdbFetch }: RelatedOptions): RowDef {
+  return {
+    ...row,
+    load: async (page) =>
+      Promise.all(
+        (await row.load(page)).map((title) =>
+          title.posterPath || title.posterUrl
+            ? title
+            : fetchTitle(title, key, fetchImpl).then((full) =>
+                full ? { ...title, ...full } : title,
+              ),
+        ),
+      ),
+  };
+}
+
 /** Every indexed title from one curated studio, films and series together, except the title already open. */
 export function studioRow(
   studio: IconicStudio,
@@ -360,6 +382,242 @@ export function languageRow(
     // stricter meaning this row promises.
     filter: (title) => keyOf(title) !== keyOf(self) && title.originalLanguage === language.id,
     load: filterTitles(atlas, self.type, [{ kind: 'language', id: language.id }], { fetchImpl }),
+  };
+}
+
+/** Where each language is at home: the countries a title in it is "from" when it lists them. */
+const HOMES: Record<string, string[]> = {
+  es: [
+    'ES',
+    'MX',
+    'AR',
+    'CO',
+    'CL',
+    'PE',
+    'VE',
+    'UY',
+    'CU',
+    'BO',
+    'EC',
+    'PY',
+    'DO',
+    'GT',
+    'CR',
+    'PR',
+  ],
+  ca: ['ES'],
+  eu: ['ES'],
+  gl: ['ES'],
+  pt: ['BR', 'PT'],
+  fr: ['FR', 'BE', 'CA', 'CH', 'LU', 'SN', 'MA', 'DZ', 'TN'],
+  de: ['DE', 'AT', 'CH'],
+  it: ['IT', 'CH'],
+  nl: ['NL', 'BE'],
+  sv: ['SE', 'FI'],
+  da: ['DK'],
+  no: ['NO'],
+  nb: ['NO'],
+  nn: ['NO'],
+  fi: ['FI'],
+  is: ['IS'],
+  et: ['EE'],
+  lv: ['LV'],
+  lt: ['LT'],
+  pl: ['PL'],
+  cs: ['CZ'],
+  sk: ['SK'],
+  sl: ['SI'],
+  hu: ['HU'],
+  ro: ['RO', 'MD'],
+  bg: ['BG'],
+  hr: ['HR', 'BA'],
+  sr: ['RS', 'BA'],
+  bs: ['BA'],
+  mk: ['MK'],
+  sq: ['AL', 'XK'],
+  el: ['GR', 'CY'],
+  tr: ['TR'],
+  ru: ['RU'],
+  uk: ['UA'],
+  be: ['BY'],
+  ka: ['GE'],
+  hy: ['AM'],
+  he: ['IL'],
+  ar: ['EG', 'LB', 'SA', 'AE', 'MA', 'TN', 'DZ', 'SY', 'JO', 'IQ', 'PS', 'QA', 'KW'],
+  fa: ['IR'],
+  ur: ['PK'],
+  hi: ['IN'],
+  bn: ['IN', 'BD'],
+  ta: ['IN', 'LK'],
+  te: ['IN'],
+  ml: ['IN'],
+  kn: ['IN'],
+  mr: ['IN'],
+  pa: ['IN', 'PK'],
+  ja: ['JP'],
+  ko: ['KR'],
+  zh: ['CN', 'TW', 'HK', 'SG'],
+  cn: ['CN', 'HK'],
+  th: ['TH'],
+  vi: ['VN'],
+  id: ['ID'],
+  ms: ['MY'],
+  tl: ['PH'],
+};
+
+/**
+ * The country a title is "from" for its row: the first of `countries` where `language` is at home — Swedish is
+ * Sweden, not the German co-producer Wikidata names first for The Bridge. Undefined where none is (a Spanish-language
+ * US film, a language not listed here): the language row says it better.
+ */
+export const homeCountry = (language: string, countries: string[]): string | undefined =>
+  countries.find((country) => HOMES[language]?.includes(country));
+
+/** Countries named with "the" in English: "More from the Netherlands". */
+const WITH_THE = new Set(['NL', 'PH', 'AE', 'DO']);
+
+/**
+ * More titles made in a title's country and language, films and series together: "More from Spain". Atlas's country
+ * is any production country, so it is paired with the language, and a card must be in that original language — a
+ * Hollywood film shot in Spain lists Spain too. A country says more than its language does (Spanish is Spain,
+ * Mexico, Argentina…), so where a title has one this row takes the language row's place.
+ */
+export function countryRow(
+  country: { id: string; name: string },
+  language: string,
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef {
+  const name = WITH_THE.has(country.id) ? `the ${country.name}` : country.name;
+  return {
+    id: `country-${country.id}`,
+    title: `More from ${name}`,
+    headingLink: {
+      before: 'More from ',
+      label: name,
+      after: '',
+      href: searchHref('', { chips: [`country-${country.id}`, `lang-${language}`] }),
+    },
+    filter: (title) => keyOf(title) !== keyOf(self) && title.originalLanguage === language,
+    load: filterTitles(
+      atlas,
+      'all',
+      [
+        { kind: 'country', id: country.id },
+        { kind: 'language', id: language },
+      ],
+      { fetchImpl },
+    ),
+  };
+}
+
+/** A studio or network's row is worth it between these many titles: fewer is no row, more says nothing (Warner Bros.). */
+const PRODUCER_TITLES = { min: 10, max: 300 };
+
+const folded = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/**
+ * "More from Showtime": the network a series aired on, then the company that made a title, one row each at most, from
+ * atlas's facts. Only the right size to say something (`PRODUCER_TITLES`), and none a curated studio row already shows.
+ */
+export function producerRows(
+  facts: TitleFacts,
+  studios: IconicStudio[],
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef[] {
+  const taken = new Set(studios.flatMap((studio) => [studio.id, folded(studio.name)]));
+  const fits = (value: Browsable) =>
+    value.titles >= PRODUCER_TITLES.min &&
+    value.titles <= PRODUCER_TITLES.max &&
+    !taken.has(value.id) &&
+    !taken.has(folded(value.name));
+  const rows: RowDef[] = [];
+  const network = facts.networks.find(fits);
+  if (network) {
+    rows.push(producerRow('network', network, self, atlas, fetchImpl));
+    taken.add(network.id).add(folded(network.name));
+  }
+  const company = facts.companies.filter(fits).sort((a, b) => b.titles - a.titles)[0];
+  if (company) rows.push(producerRow('company', company, self, atlas, fetchImpl));
+  return rows;
+}
+
+function producerRow(
+  kind: 'network' | 'company',
+  value: Browsable,
+  self: Title,
+  atlas: string,
+  fetchImpl?: typeof fetch,
+): RowDef {
+  return {
+    id: `${kind}-${value.id}`,
+    title: `More from ${value.name}`,
+    headingLink: {
+      before: 'More from ',
+      label: value.name,
+      after: '',
+      href: searchHref('', { chips: [`${kind}-${value.id}`] }),
+    },
+    filter: (title) => keyOf(title) !== keyOf(self),
+    load: filterTitles(atlas, 'all', [{ kind, id: value.id }], { fetchImpl }),
+  };
+}
+
+/** How a mood reads in "More … like this"; a mood not named here is its own label, lowercased. */
+const MOOD_WORDS: Record<string, string> = {
+  'Dark & Gritty': 'dark and gritty',
+  'Tense/Edge-of-seat': 'tense',
+  'Quirky/Offbeat': 'quirky',
+  'Visually-stunning': 'visually stunning',
+  Tearjerker: 'heartbreaking',
+  'Comfort-watch': 'comforting',
+};
+/** Moods that say how a title is watched or ends, not how it feels: no row reads well for them. */
+const NOT_A_FEELING = new Set(['Bingeable', 'Twist-ending']);
+
+/**
+ * "More tense like this": the titles closest to this one that share its strongest mood, in atlas's likeness order,
+ * films and series together. A narrower More like this, so it shares that row's `seen` and waits for its first page
+ * (`after`): a title shows in one of them only, and the closer row keeps it.
+ */
+export function moodRow(
+  moods: string[],
+  self: Title,
+  atlas: string,
+  { seen, after, fetchImpl }: { seen: Set<string>; after: Promise<void>; fetchImpl?: typeof fetch },
+): RowDef | null {
+  const mood = moods.find((label) => !NOT_A_FEELING.has(label));
+  if (!mood) return null;
+  const word = MOOD_WORDS[mood] ?? mood.toLowerCase().replace(/[-/]/g, ' ');
+  const load = filterTitles(
+    atlas,
+    'all',
+    [
+      { kind: 'like', id: likeValue(self, 'all') },
+      { kind: 'mood', id: mood },
+    ],
+    { fetchImpl },
+  );
+  let read = 0;
+  return {
+    id: `mood-like-${mood}`,
+    // No link: Search takes a "Like" or a mood, never both, so no page there shows these titles.
+    title: `More ${word} like this`,
+    filter: (title) => keyOf(title) !== keyOf(self),
+    load: async () => {
+      await after;
+      // A page all shown above reads on: an empty page would end the row.
+      for (;;) {
+        const titles = await load(++read);
+        if (titles.length === 0) return [];
+        const fresh = titles.filter((t) => !seen.has(keyOf(t)));
+        for (const t of fresh) seen.add(keyOf(t));
+        if (fresh.length > 0) return fresh;
+      }
+    },
   };
 }
 

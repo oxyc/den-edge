@@ -1,28 +1,38 @@
-<!-- The rows under a title's cast: its franchise, other versions of its story, More like this, what its director,
-     creator, writer and leads have done, its studio and its language, and You might also like. A row shows its
-     heading as soon as it is known, and goes on loading as it is scrolled to its end (`BrowseRow`). -->
+<!-- The rows under a title's cast: its franchise, other versions of its story, More like this and its strongest
+     mood, what its director, creator, writer and leads have done, its studio and network, its country or language,
+     and You might also like. A row shows its heading as soon as it is known, and goes on loading as it is scrolled
+     to its end (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { titleKey, type Title } from '../lib/library';
   import {
+    countryRow,
     firstScreen,
     franchiseRow,
+    homeCountry,
     languageRow,
+    moodRow,
     moreLikeThisRow,
     personRow,
     personRows,
+    producerRows,
     studioRow,
     versionsRow,
+    withPosters,
   } from '../lib/relatedRows';
+  import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
+
+  const regions = new Intl.DisplayNames(['en'], { type: 'region' });
   import BrowseRow from './BrowseRow.svelte';
 
   let {
     detail,
     tmdbKey,
     atlas = null,
-    studios = [],
+    studios,
+    facts,
     active,
     shown,
   }: {
@@ -30,8 +40,13 @@
     tmdbKey: string;
     /** Where this page reaches atlas, for the titles its index finds closest; null where it can't. */
     atlas?: string | null;
-    /** Curated studios credited on this title; ordinary production companies never get a row. */
-    studios?: IconicStudio[];
+    /**
+     * Curated studios credited on this title, each with its own row, and atlas's facts about it — its moods, networks
+     * and companies (`fetchTitleFacts`). Either is undefined while it is asked for, and the rows wait for both: a row
+     * they name would otherwise join mid-page.
+     */
+    studios: IconicStudio[] | undefined;
+    facts: TitleFacts | undefined;
     active: boolean;
     shown: (t: Title) => boolean;
   } = $props();
@@ -52,6 +67,12 @@
   // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
   // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
   $effect(() => {
+    // Held for atlas's studios and facts, which name the studio, mood and network rows: a title's rows are built
+    // once, all together.
+    const [curated, asked] = [studios, facts];
+    if (atlas && (!curated || !asked)) return;
+    const known = asked ?? NO_FACTS;
+    const credited = curated ?? [];
     const options = { key: tmdbKey };
     const self = detail.title;
     const key = titleKey(self);
@@ -62,6 +83,32 @@
       originalLanguage && originalLanguage !== 'en'
         ? detail.languages.find((language) => language.id === originalLanguage)
         : undefined;
+    // "More from Spain" rather than "More in Spanish", which is Spain, Mexico and Argentina together: the first of its
+    // countries where its language is at home (`homeCountry`), atlas's (Wikidata's countries of origin) before TMDB's,
+    // which names Pan's Labyrinth Mexican. Where none is, its language's row.
+    const countryId =
+      regionalLanguage &&
+      homeCountry(regionalLanguage.id, [...known.countries, ...detail.countries.map((c) => c.id)]);
+    const regional =
+      !atlas || !regionalLanguage
+        ? null
+        : countryId
+          ? withPosters(
+              countryRow(
+                {
+                  id: countryId,
+                  name:
+                    detail.countries.find((c) => c.id === countryId)?.name ??
+                    regions.of(countryId) ??
+                    countryId,
+                },
+                regionalLanguage.id,
+                self,
+                atlas,
+              ),
+              options,
+            )
+          : withPosters(languageRow(regionalLanguage, self, atlas), options);
     let live = true;
     // Known to exist once atlas (or TMDB's collection) names its members, so it joins then with placeholders
     // rather than after every member's poster is drawn — for a franchise atlas sends no posters for, that
@@ -70,8 +117,9 @@
     const versions = versionsRow(self, atlas, franchise, options).then((row) =>
       row ? firstScreen(row, shown) : null,
     );
-    // Closest first: what is like this title, then the people who made it, then the studio and the language, which
-    // say less about this title in particular, and last the looser suggestions.
+    // Closest first: what is like this title and the same of its strongest mood, then the people who made it, then
+    // its studio, network and country or language, which say less about this title in particular, and last the
+    // looser suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
     // The two suggestion rows share what they have offered, so a title appears in only one of them.
     const suggested = new Set<string>();
     const similar = moreLikeThisRow(detail, atlas, {
@@ -82,14 +130,23 @@
     });
     let similarIn = () => {};
     const similarLoaded = new Promise<void>((resolve) => (similarIn = resolve));
+    const mood = atlas
+      ? moodRow(known.moods, self, atlas, { seen: suggested, after: similarLoaded })
+      : null;
     const defined: RowDef[] = [
       // Films and series together; curated primary members have their own row and atlas excludes them here.
       // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
       // the broader plot-neighbour and TMDB sources.
       { ...similar, load: (page) => similar.load(page).finally(similarIn) },
+      ...(mood ? [withPosters(mood, options)] : []),
       ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
-      ...(atlas ? studios.map((studio) => studioRow(studio, self, atlas)) : []),
-      ...(atlas && regionalLanguage ? [languageRow(regionalLanguage, self, atlas)] : []),
+      ...(atlas
+        ? [
+            ...credited.map((studio) => studioRow(studio, self, atlas)),
+            ...producerRows(known, credited, self, atlas),
+          ].map((row) => withPosters(row, options))
+        : []),
+      ...(regional ? [regional] : []),
     ];
     // atlas's structural-affinity order alone: the wider sources are More like this's. It is asked once More like
     // this has its first page, so the closer row keeps the titles both would name, and atlas often has none left —

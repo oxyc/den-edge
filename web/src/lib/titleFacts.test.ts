@@ -9,6 +9,8 @@ const facts = parseTitleFacts({
     { id: 'Q5', name: '  ' },
   ],
   subjects: [{ id: 'Q362', name: 'World War II', titles: 577 }],
+  labels: { moods: ['Dark & Gritty', 7, ' ', 'Tense/Edge-of-seat'] },
+  countries: ['ES', 'spain', 3],
 });
 
 describe('parseTitleFacts', () => {
@@ -17,6 +19,8 @@ describe('parseTitleFacts', () => {
     expect(facts.companies).toEqual([{ id: 'Q16248298', name: 'A24', titles: 40 }]);
     expect(facts.subjects[0]?.name).toBe('World War II');
     expect(facts.places).toEqual([]);
+    expect(facts.moods).toEqual(['Dark & Gritty', 'Tense/Edge-of-seat']);
+    expect(facts.countries).toEqual(['ES']);
     expect(parseTitleFacts(null)).toEqual(NO_FACTS);
   });
 });

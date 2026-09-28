@@ -186,8 +186,10 @@
   let sourcesPanel = $state<TitleSources>();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
-  let iconicStudios = $state<IconicStudio[]>([]);
-  let titleFacts = $state<TitleFacts>(NO_FACTS);
+  /** The curated studios credited on this title; undefined while they are asked for. */
+  let iconicStudios = $state<IconicStudio[] | undefined>();
+  /** atlas's facts about this title; undefined while they are asked for. */
+  let titleFacts = $state<TitleFacts | undefined>();
   /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
@@ -241,7 +243,7 @@
 
   $effect(() => {
     const [base, type, id] = [atlas, ref.type, ref.id];
-    iconicStudios = [];
+    iconicStudios = base ? undefined : [];
     if (!active || !base) return;
     const controller = new AbortController();
     void fetchIconicStudios(base, { type, id }, controller.signal).then((loaded) => {
@@ -252,7 +254,7 @@
 
   $effect(() => {
     const [base, type, id] = [atlas, ref.type, ref.id];
-    titleFacts = NO_FACTS;
+    titleFacts = base ? undefined : NO_FACTS;
     if (!active || !base) return;
     const controller = new AbortController();
     void fetchTitleFacts(base, { type, id }, controller.signal).then((loaded) => {
@@ -626,7 +628,15 @@
       <span use:castEnd class="cast-end" aria-hidden="true"></span>
     </PosterRow>
   {/if}
-  <RelatedTitles detail={d} {tmdbKey} {atlas} studios={iconicStudios} {active} {shown} />
+  <RelatedTitles
+    detail={d}
+    {tmdbKey}
+    {atlas}
+    studios={iconicStudios}
+    facts={titleFacts}
+    {active}
+    {shown}
+  />
 {/if}
 
 <style>

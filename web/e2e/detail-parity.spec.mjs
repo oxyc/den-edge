@@ -100,6 +100,22 @@ async function setup(
   await page.route('**/metadata/title/query', (r) => r.fulfill({ json: { entries: [] } }));
   await page.route('**/atlas/index/filter/all/titles.json?*', (r) => {
     const url = new URL(r.request().url());
+    if (url.searchParams.get('sel') === 'country:SE,language:sv')
+      return r.fulfill({
+        json: {
+          order: 'votes',
+          titles: [
+            {
+              type: 'series',
+              id: 10,
+              title: 'Another Swedish Series',
+              year: 2022,
+              posterPath: '/swedish.jpg',
+              originalLanguage: 'sv',
+            },
+          ],
+        },
+      });
     if (url.searchParams.get('sel') !== 'studio:Q174811') return r.fallback();
     return r.fulfill({
       json: {
@@ -270,10 +286,9 @@ for (const width of [390, 834, 1280])
         'href',
         '/search?c=lang-sv',
       );
-      await expect(active.getByRole('link', { name: 'Sweden' })).toHaveAttribute(
-        'href',
-        '/search?c=country-SE',
-      );
+      await expect(
+        active.getByRole('link', { name: 'Sweden', exact: true }).first(),
+      ).toHaveAttribute('href', '/search?c=country-SE');
       await expect(
         active.getByRole('link', { name: 'Studio Ghibli', exact: true }).first(),
       ).toHaveAttribute('href', '/search?c=studio-Q174811');
@@ -324,12 +339,14 @@ for (const width of [390, 834, 1280])
         'href',
         '/movie/129-spirited-away',
       );
-      const languageRow = active.getByRole('region', { name: 'More in Swedish' });
+      // A Swedish title from Sweden gets its country's row, which says more than its language's would.
+      await expect(active.getByRole('region', { name: 'More in Swedish' })).toHaveCount(0);
+      const countryRow = active.getByRole('region', { name: 'More from Sweden' });
       await expect(
-        languageRow.getByRole('heading').getByRole('link', { name: 'in Swedish' }),
-      ).toHaveAttribute('href', '/search?type=tv&c=lang-sv');
+        countryRow.getByRole('heading').getByRole('link', { name: 'Sweden' }),
+      ).toHaveAttribute('href', '/search?c=country-SE,lang-sv');
       await expect(
-        languageRow.getByRole('link', { name: /^Another Swedish Series/ }),
+        countryRow.getByRole('link', { name: /^Another Swedish Series/ }),
       ).toHaveAttribute('href', '/tv/10-another-swedish-series');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,

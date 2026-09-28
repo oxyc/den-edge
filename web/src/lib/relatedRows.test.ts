@@ -3,15 +3,21 @@ import type { Title } from './library';
 import type { RowDef } from './catalog';
 import {
   collectionRow,
+  countryRow,
   firstScreen,
   franchiseRow,
+  homeCountry,
   languageRow,
+  moodRow,
   moreLikeThisRow,
   personRow,
   personRows,
+  producerRows,
   studioRow,
   versionsRow,
+  withPosters,
 } from './relatedRows';
+import { NO_FACTS } from './titleFacts';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
 const named = (id: number): Title => ({ type: 'movie', id, title: `T${id}` });
@@ -850,6 +856,195 @@ describe('studioRow', () => {
       '/metadata/title/query',
       '/atlas/index/filter/all/titles.json?sel=studio:Q174811&skip=24',
     ]);
+  });
+});
+
+describe('withPosters', () => {
+  it('asks TMDB only for the cards that came without a poster', async () => {
+    const asked: string[] = [];
+    const row = withPosters(
+      {
+        id: 'r',
+        title: 'R',
+        load: async () => [
+          { type: 'movie', id: 1, title: 'Has one', posterPath: '/one.jpg' },
+          { type: 'movie', id: 2, title: 'Needs one' },
+          { type: 'movie', id: 3, title: 'TMDB has none either' },
+        ],
+      },
+      {
+        key: '',
+        fetchImpl: answering(
+          { '/3/movie/2': { id: 2, title: 'Needs one', poster_path: '/two.jpg' } },
+          asked,
+        ),
+      },
+    );
+    expect((await row.load(1)).map((title) => title.posterPath)).toEqual([
+      '/one.jpg',
+      '/two.jpg',
+      undefined,
+    ]);
+    expect(asked).toEqual(['/3/movie/2', '/3/movie/3']);
+  });
+});
+
+describe('homeCountry', () => {
+  it('picks the first country where the language is at home, and none where it is not', () => {
+    // The Bridge: Wikidata names the German co-producer first.
+    expect(homeCountry('sv', ['DE', 'DK', 'SE'])).toBe('SE');
+    // Pan's Labyrinth: atlas's Spain before TMDB's Mexico.
+    expect(homeCountry('es', ['ES', 'MX'])).toBe('ES');
+    expect(homeCountry('es', ['US'])).toBeUndefined();
+    expect(homeCountry('xx', ['FR'])).toBeUndefined();
+  });
+});
+
+describe('countryRow', () => {
+  it('asks for the country in its language, films and series together, and keeps only that original language', async () => {
+    const asked: string[] = [];
+    const spain = {
+      type: 'movie',
+      id: 1417,
+      title: "Pan's Labyrinth",
+      originalLanguage: 'es',
+    } as const;
+    const row = countryRow(
+      { id: 'ES', name: 'Spain' },
+      'es',
+      spain,
+      '/atlas',
+      answering(
+        {
+          '/atlas/index/filter/all/titles.json?sel=country:ES,language:es': {
+            order: 'votes',
+            titles: [
+              { type: 'series', id: 71446, title: 'Money Heist', originalLanguage: 'es' },
+              { type: 'movie', id: 121856, title: "Assassin's Creed", originalLanguage: 'en' },
+            ],
+          },
+        },
+        asked,
+      ),
+    );
+
+    expect(row.title).toBe('More from Spain');
+    expect(row.headingLink?.href).toBe('/search?c=country-ES,lang-es');
+    const loaded = await row.load(1);
+    expect(loaded.filter((title) => row.filter?.(title)).map((title) => title.title)).toEqual([
+      'Money Heist',
+    ]);
+    expect(row.filter?.(spain)).toBe(false);
+    expect(countryRow({ id: 'NL', name: 'Netherlands' }, 'nl', spain, '/atlas').title).toBe(
+      'More from the Netherlands',
+    );
+  });
+});
+
+describe('producerRows', () => {
+  const series: Title = { type: 'tv', id: 1405, title: 'Dexter' };
+  const value = (id: string, name: string, titles: number) => ({ id, name, titles });
+
+  it('gives the network, then the largest company, each only at a size that says something', () => {
+    const rows = producerRows(
+      {
+        ...NO_FACTS,
+        networks: [value('Q1', 'Tiny', 3), value('Q23589', 'Showtime', 59)],
+        companies: [
+          value('Q2', 'Warner Bros.', 2400),
+          value('Q3', 'Small Films', 12),
+          value('Q4', 'Bigger Films', 80),
+        ],
+      },
+      [],
+      series,
+      '/atlas',
+    );
+    expect(rows.map((row) => [row.id, row.title, row.headingLink?.href])).toEqual([
+      ['network-Q23589', 'More from Showtime', '/search?c=network-Q23589'],
+      ['company-Q4', 'More from Bigger Films', '/search?c=company-Q4'],
+    ]);
+  });
+
+  it('leaves out what a curated studio row or the network already shows', () => {
+    const rows = producerRows(
+      {
+        ...NO_FACTS,
+        networks: [value('Q23633', 'HBO', 155)],
+        companies: [value('Q23633', 'HBO', 73), value('Q9', 'Showtime', 20)],
+      },
+      [{ id: 'Q23633', name: 'HBO' }],
+      series,
+      '/atlas',
+    );
+    expect(rows.map((row) => row.id)).toEqual(['company-Q9']);
+    expect(
+      producerRows(
+        { ...NO_FACTS, networks: [value('Q23589', 'Showtime', 59)] },
+        [],
+        series,
+        '/atlas',
+      ).length,
+    ).toBe(1);
+    expect(
+      producerRows(
+        {
+          ...NO_FACTS,
+          networks: [value('Q23589', 'Showtime', 59)],
+          companies: [value('Q7503313', 'Showtime', 10)],
+        },
+        [],
+        series,
+        '/atlas',
+      ).map((row) => row.id),
+    ).toEqual(['network-Q23589']);
+  });
+});
+
+describe('moodRow', () => {
+  const wire: Title = { type: 'tv', id: 1438, title: 'The Wire' };
+
+  it('names the strongest feeling, waits for More like this, and never repeats what it showed', async () => {
+    const asked: string[] = [];
+    let release = () => {};
+    const after = new Promise<void>((resolve) => (release = resolve));
+    const seen = new Set(['tv:125949']);
+    const row = moodRow(['Bingeable', 'Dark & Gritty'], wire, '/atlas', {
+      seen,
+      after,
+      fetchImpl: answering(
+        {
+          '/atlas/index/filter/all/titles.json?sel=like:series-1438,mood:Dark%20%26%20Gritty': {
+            order: 'like:series-1438',
+            titles: [{ type: 'series', id: 125949, title: 'We Own This City' }],
+          },
+          '/atlas/index/filter/all/titles.json?sel=like:series-1438,mood:Dark%20%26%20Gritty&skip=24':
+            {
+              order: 'like:series-1438',
+              titles: [{ type: 'series', id: 14531, title: 'The Corner' }],
+            },
+        },
+        asked,
+      ),
+    });
+
+    expect(row?.title).toBe('More dark and gritty like this');
+    const loading = row!.load(1);
+    await Promise.resolve();
+    expect(asked).toEqual([]);
+    release();
+    // Its first page was all shown above, so the row reads on rather than ending.
+    expect((await loading).map((title) => title.title)).toEqual(['The Corner']);
+    expect(seen.has('tv:14531')).toBe(true);
+  });
+
+  it('is no row for a title whose moods say only how it is watched', () => {
+    const none = { seen: new Set<string>(), after: Promise.resolve() };
+    expect(moodRow(['Bingeable', 'Twist-ending'], wire, '/atlas', none)).toBeNull();
+    expect(moodRow([], wire, '/atlas', none)).toBeNull();
+    expect(moodRow(['Tense/Edge-of-seat'], wire, '/atlas', none)?.title).toBe(
+      'More tense like this',
+    );
   });
 });
 

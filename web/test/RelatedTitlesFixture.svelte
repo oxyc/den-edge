@@ -2,6 +2,7 @@
   import RelatedTitles from '../src/components/RelatedTitles.svelte';
   import type { TitleDetail } from '../src/lib/detail';
   import type { Title } from '../src/lib/library';
+  import { NO_FACTS } from '../src/lib/titleFacts';
   import '../src/app.css';
 
   const more: Title[] = Array.from({ length: 20 }, (_, index) => ({
@@ -31,7 +32,7 @@
 
 <main>
   <div class="above"></div>
-  <RelatedTitles {detail} tmdbKey="" {atlas} active={true} {shown} />
+  <RelatedTitles {detail} tmdbKey="" {atlas} studios={[]} facts={NO_FACTS} active={true} {shown} />
 </main>
 
 <style>

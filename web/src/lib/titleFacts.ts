@@ -1,5 +1,6 @@
 // What atlas can browse a title by beyond its people (`/index/title`): its production companies, networks,
-// subjects, places and source authors, each with the id Search selects it by and how many titles carry it.
+// subjects, places and source authors, each with the id Search selects it by and how many titles carry it; and its
+// moods, as atlas's labels name them.
 
 import type { MediaType } from './library';
 import { relayFetch } from './relayFetch';
@@ -17,6 +18,10 @@ export interface TitleFacts {
   subjects: Browsable[];
   places: Browsable[];
   authors: Browsable[];
+  /** atlas's mood labels (`Dark & Gritty`), as its filter takes them. */
+  moods: string[];
+  /** Its countries of origin, as ISO codes (`ES`). */
+  countries: string[];
 }
 
 export const NO_FACTS: TitleFacts = {
@@ -25,6 +30,8 @@ export const NO_FACTS: TitleFacts = {
   subjects: [],
   places: [],
   authors: [],
+  moods: [],
+  countries: [],
 };
 
 function browsable(list: unknown): Browsable[] {
@@ -39,12 +46,19 @@ function browsable(list: unknown): Browsable[] {
 
 export function parseTitleFacts(body: unknown): TitleFacts {
   const at = (body ?? {}) as Record<string, unknown>;
+  const moods = ((at.labels ?? {}) as Record<string, unknown>).moods;
   return {
     companies: browsable(at.companies),
     networks: browsable(at.networks),
     subjects: browsable(at.subjects),
     places: browsable(at.places),
     authors: browsable(at.authors),
+    moods: Array.isArray(moods)
+      ? moods.filter((mood): mood is string => typeof mood === 'string' && mood.trim() !== '')
+      : [],
+    countries: Array.isArray(at.countries)
+      ? at.countries.filter((id): id is string => typeof id === 'string' && /^[A-Z]{2}$/.test(id))
+      : [],
   };
 }
 
