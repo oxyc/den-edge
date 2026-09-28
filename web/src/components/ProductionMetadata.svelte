@@ -2,14 +2,18 @@
   import type { TitleDetail } from '../lib/detail';
   import type { IconicStudio } from '../lib/iconicStudios';
   import { searchHref } from '../lib/route';
+  import { chipFor, NO_FACTS, type TitleFacts } from '../lib/titleFacts';
 
   let {
     detail: d,
     studios = [],
+    facts = NO_FACTS,
     class: className = '',
   }: {
     detail: TitleDetail;
     studios?: IconicStudio[];
+    /** Atlas's companies and networks for the title, which link TMDB's names where they match. */
+    facts?: TitleFacts;
     class?: string;
   } = $props();
 
@@ -44,7 +48,10 @@
             ...item,
             href: searchHref('', { chips: [`studio-${item.id}`] }),
           }))
-        : d.studios.slice(0, 2).map((name) => ({ id: name, name })),
+        : d.studios.slice(0, 2).map((name) => {
+            const chip = chipFor(name, facts);
+            return { id: name, name, href: chip && searchHref('', { chips: [chip] }) };
+          }),
     ].filter((group) => group.length),
   );
   const hasFacts = $derived(

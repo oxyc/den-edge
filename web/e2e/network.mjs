@@ -41,7 +41,8 @@ export async function guardNetwork(page) {
       return route.fulfill({ status: 404, json: { error: 'not_cached' } });
     // A title's You might also like asks for atlas's paged cards first. Unless a spec mocks them, the fixture's atlas
     // predates that route, and the row goes on from the POST it mocks (`relatedRows.ts`).
-    const cards = /\/index\/suggest\/(?:movie|series)\/\d+\.json$/.test(url.pathname);
+    // So does its page's /index/title, for the companies and networks it links: the page then shows them as text.
+    const cards = /\/index\/(?:suggest|title)\/(?:movie|series)\/\d+\.json$/.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);

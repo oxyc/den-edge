@@ -37,6 +37,7 @@
   import { nameTab } from '../lib/tabName.svelte';
   import { titleHref } from '../lib/route';
   import { fetchIconicStudios, type IconicStudio } from '../lib/iconicStudios';
+  import { fetchTitleFacts, NO_FACTS, type TitleFacts } from '../lib/titleFacts';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -186,6 +187,7 @@
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
   let iconicStudios = $state<IconicStudio[]>([]);
+  let titleFacts = $state<TitleFacts>(NO_FACTS);
   /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
@@ -244,6 +246,17 @@
     const controller = new AbortController();
     void fetchIconicStudios(base, { type, id }, controller.signal).then((loaded) => {
       if (!controller.signal.aborted) iconicStudios = loaded;
+    });
+    return () => controller.abort();
+  });
+
+  $effect(() => {
+    const [base, type, id] = [atlas, ref.type, ref.id];
+    titleFacts = NO_FACTS;
+    if (!active || !base) return;
+    const controller = new AbortController();
+    void fetchTitleFacts(base, { type, id }, controller.signal).then((loaded) => {
+      if (!controller.signal.aborted) titleFacts = loaded;
     });
     return () => controller.abort();
   });
@@ -412,7 +425,7 @@
           />
           {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
           <div class="desktop-overview">
-            <ProductionMetadata detail={d} studios={iconicStudios} />
+            <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
           </div>
           {#if d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
               {ratings?.awards ? ratings.awards : ''}
@@ -472,7 +485,7 @@
   {/if}
   <div class="mobile-overview">
     {#if d.overview}<p class="overview">{d.overview}</p>{/if}
-    <ProductionMetadata detail={d} studios={iconicStudios} />
+    <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
     {#if d.imdbId}<p class="awards" title={ratings?.awards}>
         {ratings?.awards ?? ''}
       </p>{/if}
