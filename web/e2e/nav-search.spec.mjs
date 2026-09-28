@@ -1137,7 +1137,7 @@ test('a language, country or decade picked offers no other of its kind until it 
   }
 });
 
-test('a title’s "You might also like" row links to Search with its "Like"', async () => {
+test('a title’s "More like this" row links to Search with its "Like"', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -1147,6 +1147,18 @@ test('a title’s "You might also like" row links to Search with its "Like"', as
       reducedMotion: 'reduce',
     });
     await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/atlas/index/similar/**', (r) =>
+      r.fulfill({
+        json: {
+          ids: [300, 301],
+          mixed: [
+            { type: 'movie', id: 300 },
+            { type: 'movie', id: 301 },
+          ],
+        },
+      }),
+    );
+    // You might also like names the same two, which More like this has already shown.
     await page.route('**/atlas/index/suggest.json', (r) =>
       r.fulfill({
         json: {
@@ -1172,8 +1184,13 @@ test('a title’s "You might also like" row links to Search with its "Like"', as
       }),
     );
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
-    const row = active(page).getByRole('region', { name: 'You might also like' });
+    const row = active(page).getByRole('region', { name: 'More like this' });
     await expect(row.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
+    await expect(
+      active(page).getByRole('region', { name: 'You might also like' }).getByRole('link', {
+        name: 'Film 300 2026',
+      }),
+    ).toHaveCount(0);
     await row.getByRole('link', { name: 'Explore similar ›' }).click();
     await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
     await expect(

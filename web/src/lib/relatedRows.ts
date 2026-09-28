@@ -64,6 +64,16 @@ export interface RelatedOptions {
   mixed?: boolean;
   /** Use Atlas's structural-affinity You Might Also Like order, with Similar as an old-Atlas fallback. */
   affinity?: boolean;
+  /**
+   * Go on to atlas's wider neighbours and TMDB's recommendations once the row's own atlas answer runs out (the
+   * default). Off, the row is that answer alone, and empty where atlas has none.
+   */
+  fallback?: boolean;
+  /**
+   * The titles already offered, shared between rows on one page so a title appears once: in whichever row offered it
+   * first. A row adds what it offers.
+   */
+  seen?: Set<string>;
 }
 
 /**
@@ -83,11 +93,19 @@ export interface RelatedOptions {
 export function moreLikeThisRow(
   detail: Pick<TitleDetail, 'title'> & { more?: Title[] },
   atlas: string | null,
-  { key, fetchImpl = tmdbFetch, similarLimit, mixed = false, affinity = false }: RelatedOptions,
+  {
+    key,
+    fetchImpl = tmdbFetch,
+    similarLimit,
+    mixed = false,
+    affinity = false,
+    fallback = true,
+    seen = new Set(),
+  }: RelatedOptions,
 ): RowDef {
   const self = detail.title;
   const kind = self.type === 'tv' ? 'series' : 'movie';
-  const seen = new Set<string>([keyOf(self)]);
+  seen.add(keyOf(self));
   const recommendations = tmdbPages(key, fetchImpl);
 
   const similarPath = `/index/similar/${kind}/${self.id}.json${similarLimit ? `?limit=${similarLimit}` : ''}`;
@@ -190,6 +208,9 @@ export function moreLikeThisRow(
     return drawn.filter((t): t is Title => t !== null);
   }
 
+  /** Where the row goes once atlas's own answer for it has run out: the wider sources, or nowhere. */
+  const after: Source = fallback ? 'neighbours' : 'done';
+
   async function step(): Promise<Title[]> {
     if (source === 'unknown' && affinity && mixed) {
       const found = await drawCards();
@@ -198,25 +219,25 @@ export function moreLikeThisRow(
           source = 'cards';
           return found;
         }
-        source = 'neighbours'; // atlas's affinity row for this title is empty
+        source = after; // atlas's affinity row for this title is empty
       }
     }
     if (source === 'cards') {
       const found = await drawCards();
       if (found) return found;
-      source = 'neighbours';
+      source = after;
     }
     if (source === 'unknown') {
       queue = affinity
-        ? ((await suggested()) ?? (await idsFrom(similarPath)))
+        ? ((await suggested()) ?? (fallback ? await idsFrom(similarPath) : []))
         : await idsFrom(similarPath);
-      source = queue.length > 0 ? 'similar' : 'recommended';
-      if (source === 'recommended') queue = undefined; // atlas has nothing for this title: TMDB alone
+      source = queue.length > 0 ? 'similar' : fallback ? 'recommended' : 'done';
+      if (source !== 'similar') queue = undefined; // atlas has nothing for this title: TMDB alone
     }
     if (source === 'similar') {
       const found = await drawQueued(similarPath);
       if (found) return found;
-      source = 'neighbours';
+      source = after;
       queue = undefined;
     }
     if (source === 'neighbours') {
@@ -246,11 +267,13 @@ export function moreLikeThisRow(
   }
 
   return {
-    id: 'more-like-this',
+    id: affinity ? 'you-might-also-like' : 'more-like-this',
     title: affinity ? 'You might also like' : 'More like this',
     // The same titles as a whole page to browse and narrow: Search with this title as its "Like", under All, where
-    // they are films and series together.
-    aside: { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },
+    // they are films and series together. Said once, on More like this, whose titles that page shows.
+    ...(affinity
+      ? {}
+      : { aside: { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) } }),
     load: async () => {
       while (source !== 'done') {
         const fresh = (await step()).filter((t) => {

@@ -85,9 +85,7 @@ async function setup(
       },
     }),
   );
-  await page.route('**/atlas/index/similar/*/*.json', (r) =>
-    r.fulfill({ json: { ids: [], mixed: [] } }),
-  );
+  await page.route('**/atlas/index/similar/**', (r) => r.fulfill({ json: { ids: [], mixed: [] } }));
   await page.route('**/atlas/index/suggest.json', (r) => {
     const { seeds } = r.request().postDataJSON();
     return r.fulfill({
@@ -260,7 +258,7 @@ for (const width of [390, 834, 1280])
         'href',
         '/search?c=decade-2020',
       );
-      await expect(active.getByRole('link', { name: 'Series' })).toHaveAttribute(
+      await expect(active.getByRole('link', { name: 'Series', exact: true })).toHaveAttribute(
         'href',
         '/search?type=tv',
       );
@@ -366,7 +364,7 @@ test('season requests cannot overwrite a newer selection and retained detail and
     await expect(active().getByText('Season 2 premiere', { exact: true })).toBeVisible();
     expect(requests.filter((p) => p.endsWith('/season/2'))).toHaveLength(1);
     await expect(
-      active().getByRole('heading', { name: 'You might also like', exact: true }).getByRole('link'),
+      active().getByRole('heading', { name: 'More like this', exact: true }).getByRole('link'),
     ).toHaveCount(0);
     const personHeading = active().getByRole('link', {
       name: 'A Person',

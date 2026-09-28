@@ -16,6 +16,11 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   let releaseAtlas;
   const atlasGate = new Promise((r) => (releaseAtlas = r));
   // atlas answers only when the test says so, and has nothing for this title: the row goes on as TMDB's.
+  await page.route('**/atlas-late/index/similar/movie/1.json*', async (r) => {
+    await atlasGate;
+    await r.fulfill({ json: { ids: [], mixed: [] } });
+  });
+  await page.route('**/atlas-late/index/franchise/**', (r) => r.fulfill({ json: {} }));
   await page.route('**/atlas-late/index/suggest.json', async (r) => {
     await atlasGate;
     await r.fulfill({
@@ -32,7 +37,7 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
 
   // The rows load as they near the screen, so go to them first.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
-  const row = page.getByRole('region', { name: 'You might also like' });
+  const row = page.getByRole('region', { name: 'More like this' });
   await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
   // At the foot of the page, where rows that vanish for a moment would pull the viewer up by their height.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
@@ -52,12 +57,15 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   await page.close();
 });
 
-test('other versions sit between the franchise and You might also like, never repeating the franchise', async ({
+test('other versions sit between the franchise and More like this, never repeating the franchise', async ({
   browser,
 }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
   await routePosters(page);
+  await page.route('**/atlas-v/index/similar/**', (r) =>
+    r.fulfill({ json: { ids: [], mixed: [] } }),
+  );
   await page.route('**/atlas-v/index/suggest.json', (r) =>
     r.fulfill({ json: { perSeed: [{ seed: { type: 'movie', id: 1 }, ids: [], mixed: [] }] } }),
   );
@@ -114,7 +122,7 @@ test('other versions sit between the franchise and You might also like, never re
 
   const franchise = page.getByRole('region', { name: 'The Seed Saga' });
   const versions = page.getByRole('region', { name: 'Other versions' });
-  const similar = page.getByRole('region', { name: 'You might also like' });
+  const similar = page.getByRole('region', { name: 'More like this' });
   // Poster-less atlas cards are drawn and shown, in atlas's order rather than by year.
   const reborn = franchise.getByRole('link', { name: /^The Seed Reborn / });
   const returns = franchise.getByRole('link', { name: /^The Seed Returns / });

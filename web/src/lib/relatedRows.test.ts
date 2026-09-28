@@ -114,6 +114,41 @@ describe('moreLikeThisRow', () => {
     ]);
   });
 
+  it('offers a title once across rows that share what they have offered', async () => {
+    const fetchImpl = answering({
+      '/atlas/index/similar/movie/550.json?limit=200': {
+        mixed: [
+          { type: 'movie', id: 11 },
+          { type: 'movie', id: 12 },
+        ],
+      },
+      '/atlas/index/suggest/movie/550.json?skip=0&limit=20': {
+        mixed: [
+          { type: 'movie', id: 12 },
+          { type: 'movie', id: 13 },
+        ],
+        titles: [12, 13].map((id) => ({
+          type: 'movie',
+          id,
+          title: `T${id}`,
+          posterPath: '/p.jpg',
+        })),
+      },
+      ...Object.fromEntries([11, 12].map(movie)),
+    });
+    const seen = new Set<string>();
+    const options = { key: 'k', fetchImpl, mixed: true, similarLimit: 200, seen };
+    const similar = moreLikeThisRow({ title: self, more: [] }, '/atlas', options);
+    const suggested = moreLikeThisRow({ title: self, more: [] }, '/atlas', {
+      ...options,
+      affinity: true,
+    });
+
+    expect(similar.id).not.toBe(suggested.id);
+    expect((await similar.load(1)).map((t) => t.id)).toEqual([11, 12]);
+    expect((await suggested.load(1)).map((t) => t.id)).toEqual([13]);
+  });
+
   it('draws the affinity row from atlas’s paged cards, asking TMDB only for a card with no poster', async () => {
     const asked: string[] = [];
     const fetchImpl = answering(
