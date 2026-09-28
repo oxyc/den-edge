@@ -4,8 +4,14 @@
   import { flushSync, onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { navigate, navigateBack, navigateOut } from '../lib/navigation';
-  import { exploreFromPeople } from '../lib/people';
-  import { parseRoute, peopleHref, searchHref, type Explore, type Route } from '../lib/route';
+  import {
+    exploreFromPeople,
+    parseRoute,
+    peopleHref,
+    searchHref,
+    type Explore,
+    type Route,
+  } from '../lib/route';
   import {
     clearRecentSearches,
     forgetSearch,

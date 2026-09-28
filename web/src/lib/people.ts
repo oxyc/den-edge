@@ -202,14 +202,7 @@ export function peopleFromExplore({ type, chips = [] }: Explore): PeopleView {
   return { ...(type ? { type } : {}), ...(kept.length ? { chips: kept } : {}) };
 }
 
-/**
- * What People's tab link to Explore carries: the type and the title facets, which are Explore's own ids. The person
- * traits, the order and the typed text are People's alone.
- */
-export const exploreFromPeople = ({ type, chips = [] }: PeopleView): Explore => ({
-  ...(type ? { type } : {}),
-  ...(chips.length ? { chips: [...chips] } : {}),
-});
+export { exploreFromPeople } from './route';
 
 /**
  * What the bar's search field offers on People, as Explore's Browse row does: the person traits the text names (a

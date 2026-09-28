@@ -10,7 +10,7 @@ import { guestGrants } from './grants.svelte';
 import type { LibraryLog } from './log';
 import { readPlugins } from './prefs';
 import { ADDRESSES, ahead, healed, readPrivateAddresses } from './privateAddresses';
-import { localNetworkRefused } from './remux';
+import { localNetworkRefused } from './remuxRoute';
 import type { Routes } from './routes';
 import type { Addon } from './scout';
 import { ensureSyncPolicy } from './syncLoader';

@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { discoverServices } from './discoverServices';
 import { findAddon, findAtlas, findReel } from './scout';
-import { findRemux } from './remux';
+import { findRemux } from './remuxRoute';
 
 vi.mock('./scout', () => ({
   findAddon: vi.fn(),
@@ -10,7 +10,7 @@ vi.mock('./scout', () => ({
   SCOUT: { name: 'scout' },
   REEL: { name: 'reel' },
 }));
-vi.mock('./remux', () => ({ findRemux: vi.fn() }));
+vi.mock('./remuxRoute', () => ({ findRemux: vi.fn() }));
 
 beforeEach(() => {
   vi.mocked(findAddon).mockImplementation(async (_installed, _routes, kind) => ({

@@ -42,6 +42,10 @@ export const PlayerScreen = lazy(() => import('../components/Player.svelte'));
 export const ServiceScreen = lazy(() => import('../components/ServicePage.svelte'));
 export const SettingsScreen = lazy(() => import('../Settings.svelte'));
 export const LinkScreen = lazy(() => import('../LinkTV.svelte'));
+export const WatchlistScreen = lazy(() => import('../components/WatchlistPage.svelte'));
+/** Asked only by a page that carries their question: an invite link, or an assistant's request to connect. */
+export const InviteDialogScreen = lazy(() => import('../components/InviteDialog.svelte'));
+export const ConnectDialogScreen = lazy(() => import('../components/ConnectDialog.svelte'));
 
 let preloading = false;
 
@@ -74,6 +78,7 @@ export function preloadScreens(): void {
       ServiceScreen,
       PlayerScreen,
       SettingsScreen,
+      WatchlistScreen,
     ])
       void screen.load();
   };

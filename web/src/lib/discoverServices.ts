@@ -1,5 +1,5 @@
 import { findAddon, findAtlas, findReel, SCOUT, type Addon } from './scout';
-import { findRemux } from './remux';
+import { findRemux } from './remuxRoute';
 import type { Routes } from './routes';
 
 /** Publish independent services as they answer. A playback route can be unreachable while the

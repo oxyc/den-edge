@@ -48,6 +48,16 @@ export interface PeopleView {
   order?: string;
 }
 
+/**
+ * What People's tab link to Explore carries: the type and the title facets, which are Explore's own ids. The person
+ * traits, the order and the typed text are People's alone. Here rather than in `people.ts` because the bar uses it,
+ * and `people.ts` brings Explore's whole chip model with it.
+ */
+export const exploreFromPeople = ({ type, chips = [] }: PeopleView): Explore => ({
+  ...(type ? { type } : {}),
+  ...(chips.length ? { chips: [...chips] } : {}),
+});
+
 /** atlas's `people.json` orders; the first, prominence, is the default and stays out of an address. */
 export const PEOPLE_ORDERS = ['prominence', 'credits', 'name', 'born_asc', 'born_desc'] as const;
 const namedOrder = (order: string) =>

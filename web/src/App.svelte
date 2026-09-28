@@ -1,22 +1,33 @@
 <script lang="ts">
-  import ConnectDialog from './components/ConnectDialog.svelte';
-  import InviteDialog from './components/InviteDialog.svelte';
   import NavigationBar from './components/NavigationBar.svelte';
   import RoutedLibrary from './RoutedLibrary.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
+  import { guestGrants } from './lib/grants.svelte';
+  import { consentRequestId } from './lib/oauth';
   import { sendToTV } from './lib/inbox';
   import { links } from './lib/links.svelte';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
   import { parseRoute, type Explore, type PeopleView } from './lib/route';
-  import { LinkScreen } from './lib/screens.svelte';
+  import { ConnectDialogScreen, InviteDialogScreen, LinkScreen } from './lib/screens.svelte';
   import { preloadSyncPolicy } from './lib/syncLoader';
   import { onTmdbThrottle } from './lib/tmdbCache';
 
   let tmdbLimited = $state(false);
+  // The invite and consent dialogs load only for a page that asks one of their questions: an invite link, or an
+  // assistant's request to connect. Latched, since the invite dialog clears the code as it shows it.
+  let invited = $state(false);
+  $effect(() => {
+    if (guestGrants.invite) invited = true;
+  });
+  const consenting = consentRequestId(location.href) !== null;
+  $effect(() => {
+    if (invited) void InviteDialogScreen.load();
+  });
+  if (consenting) void ConnectDialogScreen.load();
   const identityClock = browserClock();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight work must not retrigger the effect that starts it.
   const sendingIdentity = new Set<string>();
@@ -131,8 +142,8 @@
 
 <!-- On People the bar's field finds people and facets there, with its own text in People's address. -->
 <NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />
-<InviteDialog />
-<ConnectDialog />
+{#if invited && InviteDialogScreen.current}<InviteDialogScreen.current />{/if}
+{#if consenting && ConnectDialogScreen.current}<ConnectDialogScreen.current />{/if}
 
 <main>
   {#if tmdbLimited}

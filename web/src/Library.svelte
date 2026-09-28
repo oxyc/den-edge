@@ -6,7 +6,6 @@
   import Browse from './components/Browse.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import PosterRow from './components/PosterRow.svelte';
-  import WatchlistPage from './components/WatchlistPage.svelte';
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
     DetailScreen,
@@ -16,6 +15,7 @@
     preloadScreens,
     SearchScreen,
     ServiceScreen,
+    WatchlistScreen,
   } from './lib/screens.svelte';
   import {
     addToWatchlist,
@@ -196,6 +196,7 @@
     else if (route.page === 'search') void SearchScreen.load();
     else if (route.page === 'people') void PeopleScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
+    else if (route.page === 'watchlist') void WatchlistScreen.load();
   });
   $effect(() => {
     if (playing) void PlayerScreen.load();
@@ -1141,8 +1142,10 @@
     </p>
   {:else if !shelvesReady}
     <div data-route-loading><Loading label="Loading your watchlist" page /></div>
+  {:else if !WatchlistScreen.current}
+    <ScreenLoading screen={WatchlistScreen} />
   {:else}
-    <WatchlistPage
+    <WatchlistScreen.current
       resume={continueWatching(library)}
       saved={watchlist(library)}
       {history}
