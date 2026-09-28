@@ -593,7 +593,7 @@ export function themeRows(
 }
 
 function themeRow(
-  kind: 'subject' | 'place',
+  kind: 'subject' | 'place' | 'author',
   value: Browsable,
   before: string,
   self: Title,
@@ -617,7 +617,7 @@ function themeRow(
 /**
  * "More adapted from Frank Herbert": every other title adapted from the same author's work, from atlas's facts,
  * including what the franchise and other-versions rows also show — the whole list is what the row is for. Any author
- * with another adaptation has one. No link: Search has no author chip.
+ * with another adaptation has one. The name opens Search on that author.
  */
 export function authorRow(
   facts: TitleFacts,
@@ -626,13 +626,7 @@ export function authorRow(
   fetchImpl?: typeof fetch,
 ): RowDef | null {
   const author = facts.authors.find((value) => value.titles >= 2);
-  if (!author) return null;
-  return {
-    id: `author-${author.id}`,
-    title: `More adapted from ${author.name}`,
-    filter: (title) => keyOf(title) !== keyOf(self),
-    load: filterTitles(atlas, 'all', [{ kind: 'author', id: author.id }], { fetchImpl }),
-  };
+  return author ? themeRow('author', author, 'More adapted from ', self, atlas, fetchImpl) : null;
 }
 
 /** How a mood reads in "More … like this"; a mood not named here is its own label, lowercased. */

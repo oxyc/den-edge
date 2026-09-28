@@ -1048,6 +1048,8 @@ describe('authorRow', () => {
       }),
     );
     expect(row?.title).toBe('More adapted from Frank Herbert');
+    expect(row?.headingLink).toMatchObject({ label: 'Frank Herbert' });
+    expect(row?.headingLink?.href).toContain('author-Q7934');
     const loaded = await row!.load(1);
     expect(loaded.filter((title) => row!.filter?.(title)).map((title) => title.id)).toEqual([
       438631, 841,

@@ -74,6 +74,7 @@ export type ChipGroup =
   | 'place'
   | 'format'
   | 'source'
+  | 'author'
   | 'technique'
   | 'audience'
   | 'critique'
@@ -117,6 +118,7 @@ export const KIND: Record<ChipGroup, string> = {
   place: 'place',
   format: 'format',
   source: 'based on',
+  author: 'author',
   technique: 'technique',
   audience: 'audience',
   critique: 'critique',
@@ -1412,6 +1414,7 @@ const FILTER_GROUPS: [FilterOnlyKind, ChipGroup][] = [
   ['place', 'place'],
   ['format', 'format'],
   ['source', 'source'],
+  ['author', 'author'],
   ['technique', 'technique'],
   ['audience', 'audience'],
   ['critique', 'critique'],

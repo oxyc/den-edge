@@ -258,6 +258,7 @@ export const SECTIONS: [ChipGroup, string][] = [
   ['place', 'Place'],
   ['format', 'Format'],
   ['source', 'Based on'],
+  ['author', 'Adapted from'],
   ['technique', 'Made with'],
   ['audience', 'Audience'],
   ['critique', 'Critiques'],

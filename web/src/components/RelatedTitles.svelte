@@ -138,7 +138,8 @@
       row ? firstScreen(noted(row), shown) : null,
     );
     const author = atlas ? authorRow(known, self, atlas) : null;
-    // Closest first: what is like this title, then the people who made it, then the same of its strongest mood, its
+    // Closest first: what is like this title, then what else came from its source author's books, the people who
+    // made it, then the same of its strongest mood, its
     // studio, network and country or language, which say less about this title in particular, and last the looser
     // suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
     // More like this and the mood row share what they have offered, so a title appears in only one of them.
@@ -159,10 +160,10 @@
       // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
       // the broader plot-neighbour and TMDB sources.
       { ...similar, load: (page: number) => similar.load(page).finally(similarIn) },
-      ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       // Every adaptation of the same author's work, the franchise's and other versions' included: the whole list is
       // what someone asking "what else came from their books" wants.
       ...(author ? [withPosters(author, options)] : []),
+      ...personRows(detail).map((r) => personRow(r.person, r.department, self, options, r.before)),
       ...(mood ? [withPosters(mood, options)] : []),
       ...(atlas
         ? [

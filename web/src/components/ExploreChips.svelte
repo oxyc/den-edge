@@ -31,6 +31,7 @@
     ['place', 'Places'],
     ['format', 'Formats'],
     ['source', 'Based on'],
+    ['author', 'Adapted from'],
     ['technique', 'Made with'],
     ['audience', 'Audience'],
     ['critique', 'Critiques'],

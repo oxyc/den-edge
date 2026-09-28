@@ -52,6 +52,7 @@ export const FILTER_ONLY = [
   'place',
   'format',
   'source',
+  'author',
   'technique',
   'audience',
   'critique',
