@@ -25,7 +25,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,12 @@ pub type TmdbClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<B
 /// TLS handshake apiece before TMDB is asked anything. Over HTTP/2 the burst shares one connection. The same
 /// client asks OMDb (`ratings.rs`), doesthedogdie (`warnings.rs`) and SkipDB (`skipdb.rs`); none of them sets
 /// a header HTTP/2 forbids, and a server that offers only HTTP/1.1 is still asked over it.
+///
+/// The connection is kept open while idle. Measured from the box on 2026-09-28: a new one costs 0.3–0.45 s
+/// before TMDB is asked anything (a 140 ms round trip, then TLS; 1.4 s once with DNS), and a lookup on a warm one
+/// takes 0.15–0.25 s. The pool used to drop it after 90 idle seconds, so the first search after a pause paid the
+/// setup on every title (a lone lookup after two idle minutes took 1.04 s). HTTP/2 PINGs keep it open; one the
+/// server closes anyway (GOAWAY) is replaced on the next question.
 pub fn client() -> TmdbClient {
     // rustls needs a crypto provider chosen before any config is built. `ring` is the light one, and the only
     // one compiled in; installing it twice is not an error worth stopping for.
@@ -52,9 +58,14 @@ pub fn client() -> TmdbClient {
         .enable_http1()
         .enable_http2()
         .build();
-    // An idle connection is kept a while so the next page's questions skip the handshake; a server that closes
-    // it first says so (GOAWAY), and the next question opens another.
-    Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(90)).build(https)
+    Client::builder(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .pool_timer(TokioTimer::new())
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .http2_keep_alive_while_idle(true)
+        .pool_idle_timeout(Duration::from_secs(3600))
+        .build(https)
 }
 
 /// Why an upstream exchange gave no answer to read.
