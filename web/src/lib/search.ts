@@ -62,11 +62,19 @@ export interface SearchSources {
   semantic(query: string): Promise<Ref[]>;
   facets(query: string): Promise<FacetAnswer>;
   similar(ref: Ref): Promise<Ref[]>;
+  /** The posters, ratings and votes den-edge already holds for these titles, in one request (`titleMetadata`). */
+  shared(titles: Title[]): Promise<Title[]>;
   title(ref: Ref): Promise<Title | null>;
 }
 
 /** The TV's hydration caps: 16 title-index hits, 12 for the semantic and similar tails, 50 for the facet lane. */
 const TITLE_LIMIT = 16;
+/**
+ * Titles shown before their pictures were looked for. A card without a poster is normally blank and hidden
+ * (`isHidden`); one of these is waiting for its poster, and shows its name meanwhile.
+ */
+const awaiting = new WeakSet<Title>();
+export const awaitingPicture = (title: Title): boolean => awaiting.has(title);
 const TAIL_LIMIT = 12;
 const FACET_LIMIT = 50;
 
@@ -216,11 +224,21 @@ async function facetLane(answer: FacetAnswer, sources: SearchSources): Promise<H
   return dedupe((await person) ?? matches);
 }
 
-/** Titles atlas found, those it has no poster for named from TMDB, so a card isn't drawn blank. */
-async function drawable(titles: Title[], sources: SearchSources): Promise<Hit[]> {
+/**
+ * Titles atlas found, pictured: first from what den-edge already holds, in one request, then from TMDB for those
+ * still without a poster. TMDB was asked for every one of them, one request each, on every settled prefix: a word
+ * typed cost a hundred of them, and cold ones queued behind each other for seconds.
+ */
+async function drawable(
+  titles: Title[],
+  sources: SearchSources,
+  signal?: AbortSignal,
+): Promise<Hit[]> {
+  const shared = await sources.shared(titles).catch(() => titles);
+  // A query typed past already has its successor asking: its pictures would only queue in front of it.
   const named = await Promise.all(
-    titles.map((title, at) =>
-      title.posterPath || at >= TITLE_LIMIT
+    shared.map((title, at) =>
+      title.posterPath || at >= TITLE_LIMIT || signal?.aborted
         ? title
         : sources
             .title(title)
@@ -232,10 +250,14 @@ async function drawable(titles: Title[], sources: SearchSources): Promise<Hit[]>
 }
 
 /** People atlas named, with the photo TMDB has of each; one TMDB can't draw keeps atlas's name. */
-async function faces(people: Person[], sources: SearchSources): Promise<Hit[]> {
+async function faces(
+  people: Person[],
+  sources: SearchSources,
+  signal?: AbortSignal,
+): Promise<Hit[]> {
   const drawn = await Promise.all(
     people.map((person) =>
-      person.profilePath
+      person.profilePath || signal?.aborted
         ? person
         : sources
             .person(person.id)
@@ -252,9 +274,13 @@ async function faces(people: Person[], sources: SearchSources): Promise<Hit[]> {
  * but the rest only by TMDB's original title ("Pernille" is "Pørni" there), and only the people its titles credit:
  * when it names nothing, TMDB's search is asked whether the query is a title or a person by name, and one it finds
  * leads. An atlas without `/index/query` leaves search to the lanes it replaced (`lanesStream`). Rejects only when
- * nothing answered.
+ * nothing answered. `signal` says the query has been typed past: nothing more is asked of TMDB for it.
  */
-export async function* searchStream(query: string, sources: SearchSources): AsyncGenerator<Hit[]> {
+export async function* searchStream(
+  query: string,
+  sources: SearchSources,
+  signal?: AbortSignal,
+): AsyncGenerator<Hit[]> {
   const { text } = normalizeQuery(query);
   if (text.length < 2) return;
   const found = await sources.query(text).catch(() => null);
@@ -262,11 +288,23 @@ export async function* searchStream(query: string, sources: SearchSources): Asyn
     yield* lanesStream(query, sources);
     return;
   }
-  const [people, titles] = await Promise.all([
-    faces(found.people, sources),
-    drawable(found.titles, sources),
-  ]);
-  const answer = dedupe([...people, ...titles]);
+  const drawn = Promise.all([
+    faces(found.people, sources, signal),
+    drawable(found.titles, sources, signal),
+  ]).then(([people, titles]) => dedupe([...people, ...titles]));
+  if (found.titles.some((title) => !title.posterPath)) {
+    // Named at once, pictured as the posters arrive: a card without one shows its title meanwhile. Copies, so a
+    // title the pictures still leave without one is not taken for a waiting one later.
+    yield dedupe([
+      ...found.people.map((person): Hit => ({ kind: 'person', person })),
+      ...found.titles.map((title) => {
+        const waiting = { ...title };
+        awaiting.add(waiting);
+        return titleHit(waiting);
+      }),
+    ]);
+  }
+  const answer = await drawn;
   yield answer;
   if (found.named) return;
   const byName = await sources

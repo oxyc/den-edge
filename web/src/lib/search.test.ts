@@ -48,6 +48,7 @@ function sources(overrides: Partial<SearchSources> = {}): SearchSources {
     semantic: async () => [],
     facets: async () => ({ facet: null, titles: [] }),
     similar: async () => [],
+    shared: async (titles) => titles,
     title: async (ref) => catalog[`${ref.type}-${ref.id}`] ?? null,
     ...overrides,
   };
@@ -117,6 +118,73 @@ describe('searchStream over atlas’s /index/query', () => {
     });
     expect(await final('the matrix', s)).toEqual(['movie-603', 'movie-157336']);
     expect(named).toEqual(['movie-157336']);
+  });
+
+  it('asks TMDB only for what den-edge’s shared metadata could not picture', async () => {
+    const named: string[] = [];
+    const s = sources({
+      query: async () => ({
+        people: [],
+        titles: [matrix, movie(157336, 'Interstellar')],
+        named: true,
+      }),
+      shared: async (titles) =>
+        titles.map((title) => (title.id === 603 ? { ...title, posterPath: '/m.jpg' } : title)),
+      title: async (ref) => {
+        named.push(`${ref.type}-${ref.id}`);
+        return { ...catalog[`${ref.type}-${ref.id}`]!, posterPath: '/i.jpg' };
+      },
+    });
+    expect(await final('the matrix', s)).toEqual(['movie-603', 'movie-157336']);
+    expect(named).toEqual(['movie-157336']);
+  });
+
+  it('shows atlas’s titles at once, then pictured', async () => {
+    const s = sources({
+      query: async () => ({ people: [], titles: [matrix], named: true }),
+      title: async () => ({ ...matrix, posterPath: '/m.jpg' }),
+    });
+    const batches: Hit[][] = [];
+    for await (const batch of searchStream('the matrix', s)) batches.push(batch);
+    const posters = batches.map((batch) =>
+      batch[0]?.kind === 'title' ? batch[0].title.posterPath : 'person',
+    );
+    expect(posters).toEqual([undefined, '/m.jpg']);
+  });
+
+  it('asks TMDB nothing for a query already typed past', async () => {
+    const named: string[] = [];
+    const typedPast = new AbortController();
+    const s = sources({
+      // The next letter arrives while atlas answers.
+      query: async () => {
+        typedPast.abort();
+        return { people: [{ id: 287, name: 'Brad Pitt' }], titles: [matrix], named: true };
+      },
+      person: async (id) => {
+        named.push(`person-${id}`);
+        return null;
+      },
+      title: async (ref) => {
+        named.push(`${ref.type}-${ref.id}`);
+        return null;
+      },
+    });
+    for await (const batch of searchStream('the matrix', s, typedPast.signal)) void batch;
+    expect(named).toEqual([]);
+  });
+
+  it('draws the grid once when atlas already has every poster', async () => {
+    const s = sources({
+      query: async () => ({
+        people: [],
+        titles: [{ ...matrix, posterPath: '/m.jpg' }],
+        named: true,
+      }),
+    });
+    const batches: Hit[][] = [];
+    for await (const batch of searchStream('the matrix', s)) batches.push(batch);
+    expect(batches).toHaveLength(1);
   });
 
   it('leads with the people atlas names, their photos from TMDB, and never asks TMDB’s search', async () => {

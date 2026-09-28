@@ -85,6 +85,7 @@
         canNavigate: () => inScope() && position > 0 && !!destination(-1),
         navigate: () => {
           swiping = true;
+          writeAddress();
           history.back();
         },
         preview: () => previewDestination(-1, 1),
@@ -93,6 +94,7 @@
         canNavigate: () => inScope() && !!destination(1),
         navigate: () => {
           swiping = true;
+          writeAddress();
           history.forward();
         },
         preview: () => previewDestination(1, -1),
@@ -100,6 +102,26 @@
     });
     onchange(current.route);
     const address = () => location.pathname + location.search;
+    /**
+     * An address the route has already moved to but the entry does not say yet: a query typed a letter at a time.
+     * The route is the one truth every page reads, and it moves with each letter; the entry follows once typing
+     * pauses (`ADDRESS_WAIT_MS`), because Safari refuses a page more than 100 history writes in ten seconds. It is
+     * written before any other navigation leaves this entry, and when the page is left, so a new entry, Back or a
+     * reload always starts from what was typed. A traversal drops it: the entry it was for is no longer current.
+     */
+    let unwritten: { path: string; timer: ReturnType<typeof setTimeout> } | undefined;
+    const ADDRESS_WAIT_MS = 300;
+    const writeAddress = () => {
+      if (!unwritten) return;
+      clearTimeout(unwritten.timer);
+      const { path } = unwritten;
+      unwritten = undefined;
+      if (address() !== path) history.replaceState(history.state, '', path);
+    };
+    const dropAddress = () => {
+      clearTimeout(unwritten?.timer);
+      unwritten = undefined;
+    };
     async function follow(path: string, push: boolean, replace = false) {
       if (push && appPath(path, location.href) === null) return;
       const key = routeKey(parseRoute(path));
@@ -107,13 +129,16 @@
       // navigated to, and giving it a history entry would bury the page they came from under the spelling
       // of what they typed. The entry is rewritten in place and the page keeps its scroll and its state.
       if (replace) {
-        if (address() !== path) history.replaceState(history.state, '', path);
-        // Only the address and the route it names. The page itself is the one already on screen, so its
-        // scroll, its snapshot and its place in the ledger are left exactly as they are.
+        clearTimeout(unwritten?.timer);
+        unwritten = { path, timer: setTimeout(writeAddress, ADDRESS_WAIT_MS) };
+        // Only the route and, once typing pauses, the address. The page itself is the one already on screen, so
+        // its scroll, its snapshot and its place in the ledger are left exactly as they are.
         current.route = parseRoute(path);
         onchange(current.route);
         return;
       }
+      if (push) writeAddress();
+      else dropAddress();
       const previousPosition = position;
       if (!push) {
         const state = history.state?.denNavigation;
@@ -229,11 +254,13 @@
       void transition.finished.catch(() => {});
     }
     const backRequested = () => {
+      writeAddress();
       if (inScope() && position > 0) history.back();
       else void follow('/', true);
     };
     // Back to the entry before this page's run of entries, in one traversal.
     const outRequested = () => {
+      writeAddress();
       const here = entries.get(position)?.routeKey;
       let first = position;
       while (first > 0 && entries.get(first - 1)?.routeKey === here) first--;
@@ -272,7 +299,10 @@
     document.addEventListener('den:back', backRequested);
     document.addEventListener('den:back-out', outRequested);
     window.addEventListener('popstate', traversed);
+    window.addEventListener('pagehide', writeAddress);
     return () => {
+      writeAddress();
+      window.removeEventListener('pagehide', writeAddress);
       transition?.skipTransition();
       delete document.documentElement.dataset.denNavigation;
       delete document.documentElement.dataset.denOpeningDetail;

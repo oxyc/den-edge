@@ -26,31 +26,18 @@
    * opening Search, and Enter still searches titles.
    */
   const onPeople = $derived(route.page === 'people');
-  // What the field shows. The address owns the query, so this follows it whenever it changes from somewhere
-  // else — Back, a shared link, leaving search — and leads it only while someone is typing.
+  // What the field shows. The route owns the query, and every letter typed reaches it at once (`commit`), so the
+  // results follow each letter; this follows the route whenever it changes from somewhere else — Back, a shared
+  // link, leaving search. Only the browser's address trails a letter behind, until typing pauses (`Router`).
   let text = $state(untrack(() => query));
   /** A phone's bar: the placeholder says less, to fit. */
   const narrow = new MediaQuery('width <= 759px');
-  /**
-   * The letters typed but not yet in the address. Typing belongs to the field; the address — and with it every
-   * page that reads the query — follows once typing pauses, or at once on Enter, blur, clearing or Esc.
-   * Rewriting it on every letter cost a history write (Safari throttles those) and a pass through the router
-   * and every page per keystroke.
-   */
-  let pending: ReturnType<typeof setTimeout> | undefined;
-  const SETTLE_MS = 180;
-  $effect(() => () => clearTimeout(pending));
   $effect(() => {
     if (query === untrack(() => text)) return;
-    // The address moved on its own — Back, a link, a chip — so a letter still waiting to reach it is stale.
-    clearTimeout(pending);
-    pending = undefined;
     text = query;
   });
   /** `top` returns to the top of the results; a blur must not, or a tap landing on a card loses it. */
   function commit(top = true) {
-    clearTimeout(pending);
-    pending = undefined;
     if (route.page === 'search') navigate(searchHref(text, explore()), true);
     else if (route.page === 'people') navigate(peopleHref({ ...route, query: text }), true);
     else return;
@@ -139,10 +126,7 @@
       navigate(searchHref(text));
       return;
     }
-    clearTimeout(pending);
-    // An emptied field is a decision, not a letter: back to Explore without waiting.
-    if (!text) commit();
-    else pending = setTimeout(() => commit(), SETTLE_MS);
+    commit();
   }
   function submitted(event: SubmitEvent) {
     event.preventDefault();
@@ -150,8 +134,6 @@
     if (route.page === 'search') commit();
     else if (route.page === 'people') {
       // Enter searches titles, as it does everywhere else, taking the type and title facets along.
-      clearTimeout(pending);
-      pending = undefined;
       navigate(searchHref(text, exploreFromPeople(route)));
     } else navigate(searchHref(text, explore()));
     input?.blur();
@@ -159,8 +141,6 @@
   function useRecent(value: string) {
     recent = rememberSearch(value);
     text = value;
-    clearTimeout(pending);
-    pending = undefined;
     // Focus opens Search before Router's `route` prop necessarily catches up. Read the address it already changed
     // instead, so an immediate tap on a recent item cannot be reset to the empty Search route.
     const here = parseRoute(location.pathname + location.search);
@@ -194,12 +174,8 @@
         Math.max(0, Math.min(choices.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))
       ]?.focus();
   }
-  /**
-   * ArrowDown from the field: into what it found — the first of the Browse row, or the first result. What is typed
-   * reaches the address first, so what is found is for all of it.
-   */
+  /** ArrowDown from the field: into what it found — the first of the Browse row, or the first result. */
   async function intoResults() {
-    if (pending) commit(false);
     await tick();
     const recentQuery = document.querySelector<HTMLElement>('#nav-search .recent-query');
     if (recentQuery && recentQuery.getClientRects().length) {
@@ -298,9 +274,6 @@
           if (route.page !== 'search' && !onPeople) navigate(searchHref(text));
         }}
         oninput={searchChanged}
-        onblur={() => {
-          if (pending) commit(false);
-        }}
         onkeydown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault();

@@ -1,9 +1,10 @@
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
-// Typing in the search field is the input's own business: the address, the query every page reads and the
-// results grid follow once typing pauses, not once per letter. Rewriting the address per keystroke (Safari
-// throttles `replaceState`) and tearing the grid down for a spinner per keystroke made typing lag.
+// Typing in the search field moves the query every page reads at each letter, so the results follow it, but the
+// browser's address only once typing pauses: rewriting it per keystroke hits Safari's `replaceState` throttle.
+// And the results grid stays up while the next answer loads: tearing it down for a spinner per keystroke made
+// typing lag.
 
 const film = (id) => ({
   id,

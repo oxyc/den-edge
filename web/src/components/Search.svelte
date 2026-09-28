@@ -45,7 +45,7 @@
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
   import { FACET, likeId, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
-  import { searchStream, type Hit } from '../lib/search';
+  import { awaitingPicture, searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
   import { rememberSearch } from '../lib/recentSearches';
 
@@ -148,7 +148,9 @@
     ),
   );
   const known = $derived.by(() => {
-    const all = [...listed, ...Object.values(named)];
+    // A pick's own name first: atlas's counts can list the same person with no label for them, which names them by
+    // their bare id, and those arrive the moment the pick is made.
+    const all = [...Object.values(named), ...listed];
     if (like) all.push(likeChip(like, likeNames[like]));
     for (const id of selection) {
       const pending = !all.some((chip) => chip.id === id) && pendingChip(id);
@@ -248,15 +250,22 @@
     // The last results stay while the next load: tearing the grid down for a spinner on every letter is what
     // made typing feel slow. The spinner is only for a search with nothing on screen yet.
     pending = true;
+    // At once, on every letter: a wait here only added its own 300 ms to every search. The one before this letter's
+    // is told it has been typed past, so it asks TMDB nothing more.
+    const typedPast = new AbortController();
     const timer = setTimeout(async () => {
       let answered = false;
       try {
-        for await (const batch of searchStream(text, available)) {
+        for await (const batch of searchStream(text, available, typedPast.signal)) {
           if (!current) return;
           answered = true;
           hits = batch.filter(
             (hit) =>
-              hit.kind === 'person' || !isHidden(hit.title, rules, { ignoringYearFloor: true }),
+              hit.kind === 'person' ||
+              !isHidden(hit.title, rules, {
+                ignoringYearFloor: true,
+                requirePoster: !awaitingPicture(hit.title),
+              }),
           );
           pending = false;
         }
@@ -269,9 +278,10 @@
       } finally {
         if (current) pending = false;
       }
-    }, 300);
+    });
     return () => {
       current = false;
+      typedPast.abort();
       clearTimeout(timer);
     };
   });
@@ -357,8 +367,8 @@
     go({ type: explore.type, chips: [] }, typing ? query : '');
   }
   /**
-   * atlas's counts beside the selection (`filterRoutes.ts`): one request per selection, a moment after it settles,
-   * the last one dropped when the next begins. They judge what would show nothing only beside the selection they were
+   * atlas's counts beside the selection (`filterRoutes.ts`): one request per selection, asked at once, the last one
+   * dropped when the next begins. They judge what would show nothing only beside the selection they were
    * counted for; the options they list, and the pills' names, stay from the last answer until the next.
    *
    * Under All, where atlas has no `all` route, each type the grid shows is counted beside the selection as that type
@@ -399,7 +409,7 @@
       if (signal.aborted) return;
       filterAnswer = next;
       if (next) filtered = true;
-    }, 150);
+    });
     return () => {
       clearTimeout(timer);
       ask.abort();
@@ -420,9 +430,9 @@
 
   /**
    * People and characters the typed text names, from atlas's filter, beside the selection: a person by name as a
-   * maker ("director/writer") or else as cast ("actor"), a character from three letters. Asked a moment after
-   * typing settles; none where atlas has no such route. Under All, where atlas has no `all` route, each type's
-   * answers together.
+   * maker ("director/writer") or else as cast ("actor"), a character from three letters. Asked on every letter, the
+   * last ask dropped when the next begins; none where atlas has no such route. Under All, where atlas has no `all`
+   * route, each type's answers together.
    */
   let found = $state<Chip[]>([]);
   $effect(() => {
@@ -484,7 +494,7 @@
           group: 'character',
         })),
       ].filter((chip) => FACET.test(chip.id));
-    }, 250);
+    });
     return () => {
       clearTimeout(timer);
       ask.abort();

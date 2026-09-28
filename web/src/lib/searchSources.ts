@@ -3,6 +3,7 @@
 
 import type { MediaType, Title } from './library';
 import type { FacetAnswer, Hit, Person, Ref, SearchSources } from './search';
+import { withSharedTitleMetadata } from './titleMetadata';
 import { fetchTitle, toTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 
@@ -210,6 +211,8 @@ export function searchSources(
         .filter((id): id is number => typeof id === 'number')
         .map((id) => ({ type: ref.type, id }));
     },
+
+    shared: (titles) => withSharedTitleMetadata(titles),
 
     // One detail fetch per title per visit: popular titles recur across queries. A title TMDB couldn't name is asked
     // again next time: `fetchTitle` says null for a failed request as much as for a missing title, and one that

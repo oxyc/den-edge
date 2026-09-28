@@ -193,7 +193,7 @@
   const hits = $derived(cards(people));
 
   /**
-   * atlas's counts beside the selection, a moment after it settles: the traits' (who would be left) and the titles'
+   * atlas's counts beside the selection, asked at once, the last ask dropped when the next begins: the traits' (who would be left) and the titles'
    * (which title facets have titles). They judge what would leave nothing only beside the selection they were
    * counted for; the options they list stay from the last answer until the next.
    */
@@ -215,7 +215,7 @@
         fetchFilterCounts(here, t, items, { signal }),
       ]);
       if (!signal.aborted) counts = { key, people: byTrait, titles: byTitle };
-    }, 150);
+    });
     return () => {
       clearTimeout(timer);
       ask.abort();
@@ -345,7 +345,8 @@
   }
 
   /**
-   * What the typed text finds, beside the selection, a moment after typing settles: nationalities and occupations by
+   * What the typed text finds, beside the selection, asked on every letter, the last ask dropped when the next
+   * begins: nationalities and occupations by
    * name, past the rail's strongest few, and the people credited there by that name. Under All, where atlas may have
    * no `all` route for names, each type's answers together.
    */
@@ -389,7 +390,7 @@
       );
       byName = people;
       finding = false;
-    }, 250);
+    });
     return () => {
       clearTimeout(timer);
       ask.abort();
