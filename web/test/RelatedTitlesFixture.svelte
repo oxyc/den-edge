@@ -20,8 +20,9 @@
     cast: [],
   } as unknown as TitleDetail;
 
-  let atlas = $state<string | null>(null);
-  // The page learns where atlas is after the rows have shown, as a title page does when its answer is late.
+  // Known from the start with `?atlas=`, as on a title page opened with atlas already found; otherwise the page learns
+  // where atlas is after the rows have shown, as a title page does when its answer is late.
+  let atlas = $state<string | null>(new URLSearchParams(location.search).get('atlas'));
   (window as unknown as { setAtlas: (url: string) => void }).setAtlas = (url) => (atlas = url);
 </script>
 

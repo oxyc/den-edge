@@ -21,6 +21,33 @@ const keyOf = (t: { type: string; id: number }) => `${t.type}:${t.id}`;
 
 type Ref = { type: MediaType; id: number };
 
+/**
+ * `refs` drawn, in their order, from the cards atlas sent with them. A title atlas has a card for needs no request of
+ * its own; the posters cards lack come from den-edge's shared metadata in one request; only what neither can draw is
+ * asked of TMDB, one title at a time.
+ */
+async function drawRefs(
+  refs: Ref[],
+  cards: Title[],
+  key: string,
+  fetchImpl: typeof fetch,
+): Promise<Title[]> {
+  const byKey = new Map(cards.map((t) => [keyOf(t), t]));
+  const shared = await withSharedTitleMetadata(
+    refs.flatMap((ref) => byKey.get(keyOf(ref)) ?? []),
+    fetchImpl,
+  );
+  const drawn = new Map(shared.map((t) => [keyOf(t), t]));
+  const titles = await Promise.all(
+    refs.map((ref) => {
+      const card = drawn.get(keyOf(ref));
+      if (card?.posterPath) return card;
+      return fetchTitle(ref, key, fetchImpl).then((full) => full ?? card ?? null);
+    }),
+  );
+  return titles.filter((t): t is Title => t !== null);
+}
+
 export interface RelatedOptions {
   /** TMDB's key, or the empty string where den-edge lends its own (`/tmdb`). */
   key: string;
@@ -131,10 +158,8 @@ export function moreLikeThisRow(
   }
 
   /**
-   * The next page of atlas's mixed affinity row as cards, drawn. A title atlas has a card for needs no request of its
-   * own; the posters cards lack come from den-edge's shared metadata in one request; only what neither can draw is
-   * asked of TMDB, one title at a time. `null` when this atlas has no such route (the POST's ids are read instead),
-   * `undefined` once the row has nothing left.
+   * The next page of atlas's mixed affinity row as cards, drawn (`drawRefs`). `null` when this atlas has no such
+   * route (the POST's ids are read instead), `undefined` once the row has nothing left.
    */
   async function drawCards(): Promise<Title[] | null | undefined> {
     let body: { mixed?: unknown; titles?: unknown };
@@ -151,20 +176,7 @@ export function moreLikeThisRow(
     if (refs.length === 0) return undefined;
     cardsSkip += refs.length;
     const wanted = refs.filter((ref) => !seen.has(keyOf(ref)));
-    const cards = new Map(titlesOf(body).map((t) => [keyOf(t), t]));
-    const shared = await withSharedTitleMetadata(
-      wanted.flatMap((ref) => cards.get(keyOf(ref)) ?? []),
-      fetchImpl,
-    );
-    const drawn = new Map(shared.map((t) => [keyOf(t), t]));
-    const titles = await Promise.all(
-      wanted.map((ref) => {
-        const card = drawn.get(keyOf(ref));
-        if (card?.posterPath) return card;
-        return fetchTitle(ref, key, fetchImpl).then((full) => full ?? card ?? null);
-      }),
-    );
-    return titles.filter((t): t is Title => t !== null);
+    return drawRefs(wanted, titlesOf(body), key, fetchImpl);
   }
 
   /** The next chunk of a queued atlas source, drawn; `undefined` once it has none left to give. */
@@ -381,6 +393,55 @@ export async function franchiseRow(
     }
   }
   return collection ? collectionRow(collection, self, options) : null;
+}
+
+/**
+ * The other versions of the title's story from atlas (`/index/versions`): remakes, and other adaptations of the same
+ * book or play, films and series together, in atlas's order (release, then popularity). Atlas leaves out the title's
+ * own curated franchise; whatever the franchise row shows is left out here too, since that row can be TMDB's
+ * collection instead. One page: atlas answers with every version at once. Null when there are none, or when the
+ * atlas predates the route, so the page never shows the row empty.
+ */
+export async function versionsRow(
+  self: Title,
+  atlas: string | null,
+  franchise: Promise<RowDef | null>,
+  { key, fetchImpl = tmdbFetch }: RelatedOptions,
+): Promise<RowDef | null> {
+  if (!atlas) return null;
+  const kind = self.type === 'tv' ? 'series' : 'movie';
+  let listed: unknown;
+  try {
+    const res = await fetchImpl(`${atlas}/index/versions/${kind}/${self.id}.json`);
+    if (!res.ok) return null;
+    listed = ((await res.json()) as Record<string, unknown> | null)?.versions;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(listed)) return null;
+  const remakes = new Set<string>();
+  const refs = (listed as Record<string, unknown>[]).flatMap((t): Ref[] => {
+    const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
+    if (!type || !Number.isInteger(t.id)) return [];
+    const ref: Ref = { type, id: t.id as number };
+    if (t.kind === 'remake') remakes.add(keyOf(ref));
+    return [ref];
+  });
+  const elsewhere = new Set<string>(
+    (await franchise.then((row) => row?.load(1)).catch(() => undefined))?.map(keyOf),
+  );
+  elsewhere.add(keyOf(self));
+  const wanted = refs.filter((ref) => !elsewhere.has(keyOf(ref)));
+  if (wanted.length === 0) return null;
+  const titles = await drawRefs(wanted, titlesOf({ titles: listed }), key, fetchImpl);
+  if (titles.length === 0) return null;
+  return {
+    id: 'other-versions',
+    title: 'Other versions',
+    caption: (t) =>
+      remakes.has(keyOf(t)) ? [t.year, 'Remake'].filter(Boolean).join(' · ') : undefined,
+    load: async (page) => (page === 1 ? titles : []),
+  };
 }
 
 type Department = 'Directing' | 'Writing' | 'Acting';
