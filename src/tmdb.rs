@@ -2366,6 +2366,10 @@ fn refused(status: StatusCode, code: &str) -> Box<Response> {
 mod tests {
     use super::*;
 
+    /// The one builder and the response pool are process-wide, so tests that hold them take turns: filling the pool
+    /// (32 slow responses through the one builder) kept it from a test waiting 2 s for it, when both ran at once.
+    static SHARED_BUILDER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A missing title was never remembered, so asking for one cost a budget unit EVERY time.
     ///
     /// `fetch` spends before it asks and a 404 returns Err, so nothing reached the cache. `/movie/999999999`
@@ -3210,6 +3214,7 @@ mod tests {
 
     #[tokio::test]
     async fn forty_eight_slow_arbitrary_and_failed_publication_responses_stay_bounded() {
+        let _turn = SHARED_BUILDER.lock().await;
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "id": 550,
@@ -3422,6 +3427,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_variant_request_does_not_release_its_build_owner() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail =
             Detail::of("/3/tv/1399", Some("append_to_response=credits,external_ids"), Some(&dir)).unwrap();
@@ -3468,6 +3474,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_variant_waiters_never_become_detached_builds() {
+        let _turn = SHARED_BUILDER.lock().await;
         let dir = temp_dir();
         let detail =
             Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
