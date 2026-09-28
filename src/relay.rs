@@ -1138,6 +1138,9 @@ fn answer_response(
         header::RETRY_AFTER,
         header::HeaderName::from_static("server-timing"),
         header::HeaderName::from_static("x-den-degraded"),
+        // What the answer is built from, so the deploy that changes it can purge Cloudflare's copy by name
+        // (atlas's `atlas`). Cloudflare strips it before a browser sees the answer.
+        header::HeaderName::from_static("cache-tag"),
     ] {
         if let Some(value) = parts.headers.get(&name) {
             resp.headers_mut().insert(name, value.clone());
@@ -3676,6 +3679,7 @@ mod tests {
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60"),
             );
+            resp.headers_mut().insert("cache-tag", HeaderValue::from_static("atlas"));
             resp
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -3713,6 +3717,8 @@ mod tests {
             "anyone may ask on the LAN"
         );
         let atlas = h.send("GET", "/atlas/recommend", None, &[("host", "d.oxy.fi")]).await;
+        // Its tag too, which is what purges Cloudflare's copy when atlas or its dataset changes.
+        assert_eq!(atlas.headers()["cache-tag"], "atlas");
         assert_eq!(policy(atlas), "public, max-age=300, stale-while-revalidate=60", "atlas answers everyone");
 
         assert_eq!(super::private(&"no-store".parse().unwrap()), "no-store");
