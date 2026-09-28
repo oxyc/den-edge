@@ -11,6 +11,7 @@ export default defineConfig(
     'src/vendor/**',
     'dist/**',
     'dist-cast/**',
+    'dist-shell/**',
     'test-results/**',
     'playwright-report/**',
     'coverage/**',

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-cast/
+dist-shell/
 test-results/
 playwright-report/
 coverage/

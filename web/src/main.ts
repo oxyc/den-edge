@@ -24,6 +24,8 @@ if (invited) {
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');
+// The built page arrives with the navigation bar already drawn (`shell.ts`); the app's own replaces it.
+target.replaceChildren();
 mount(App, { target });
 
 /** Reload onto the current release, at most once in a while: a missing file must not become a reload loop. */

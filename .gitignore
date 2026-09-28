@@ -3,6 +3,7 @@
 /web/node_modules
 /web/dist
 /web/dist-cast
+/web/dist-shell
 .env
 *.log
 
