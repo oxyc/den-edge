@@ -1,6 +1,6 @@
-<!-- The rows under a title's cast: its franchise, You might also like, and what its director, creator, writer and leads
-     have done. A row shows its heading as soon as it is known, and goes on loading as it is scrolled to its end
-     (`BrowseRow`). -->
+<!-- The rows under a title's cast: its franchise, other versions of its story, You might also like, and what its
+     director, creator, writer and leads have done. A row shows its heading as soon as it is known, and goes on
+     loading as it is scrolled to its end (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
@@ -14,6 +14,7 @@
     personRow,
     personRows,
     studioRow,
+    versionsRow,
   } from '../lib/relatedRows';
   import BrowseRow from './BrowseRow.svelte';
 
@@ -44,8 +45,8 @@
   // The rows are built as soon as the title is, and each loads its first page when the browser is next idle
   // (`BrowseRow`), so they are usually full before they are scrolled to. For a title's first build, every row it
   // is known to have shows its heading and card-sized placeholders at once and loads itself, hiding if it turns
-  // out empty; only the franchise row, which is not known to exist until it is looked up, joins once it has
-  // something to show.
+  // out empty; only the franchise and other-versions rows, which are not known to exist until they are looked up,
+  // join once they have something to show.
   // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
   // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
   $effect(() => {
@@ -61,6 +62,9 @@
         : undefined;
     let live = true;
     const franchise = franchiseRow(detail.collection, self, atlas, options).then((row) =>
+      row ? firstScreen(row, shown) : null,
+    );
+    const versions = versionsRow(self, atlas, franchise, options).then((row) =>
       row ? firstScreen(row, shown) : null,
     );
     const defined: RowDef[] = [
@@ -79,16 +83,25 @@
     ];
     const build = ++builds;
     if (rebuild) {
-      void Promise.all([franchise, ...defined.map((row) => firstScreen(row, shown))]).then(
-        (found) => {
-          if (!live) return;
-          rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
-        },
-      );
+      void Promise.all([
+        franchise,
+        versions,
+        ...defined.map((row) => firstScreen(row, shown)),
+      ]).then((found) => {
+        if (!live) return;
+        rows = found.filter((row): row is RowDef => row !== null).map((row) => ({ build, row }));
+      });
     } else {
       rows = defined.map((row) => ({ build, row }));
-      void franchise.then((row) => {
+      void franchise.then(async (row) => {
         if (live && row) rows = [{ build, row }, ...rows];
+        // Other versions sit straight under the franchise, which they are never part of.
+        const other = await versions;
+        if (!live || !other) return;
+        const at = row
+          ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
+          : 0;
+        rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
       });
     }
     return () => {

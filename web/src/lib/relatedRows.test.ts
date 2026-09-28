@@ -10,6 +10,7 @@ import {
   personRow,
   personRows,
   studioRow,
+  versionsRow,
 } from './relatedRows';
 
 const self: Title = { type: 'movie', id: 550, title: 'Fight Club' };
@@ -571,6 +572,114 @@ describe('franchiseRow', () => {
 
     expect(await firstScreen(row!, () => true)).toBeNull();
     expect(asked).toEqual(['/atlas/index/franchise/movie/550.json']);
+  });
+});
+
+describe('versionsRow', () => {
+  const versionsPath = '/atlas/index/versions/movie/550.json';
+  const franchiseOf = (titles: Title[]): Promise<RowDef | null> =>
+    Promise.resolve({ id: 'franchise-fight', title: 'Fight', load: async () => titles });
+  const none = Promise.resolve(null);
+  const keys = (titles: Title[]) => titles.map((t) => `${t.type}:${t.id}`);
+
+  it('draws atlas’s versions in the order it serves them, with a quiet caption on remakes', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      {
+        [versionsPath]: {
+          seed: { type: 'movie', id: 550 },
+          versions: [
+            {
+              type: 'movie',
+              id: 30,
+              title: 'Remade',
+              year: 1998,
+              posterPath: '/r.jpg',
+              kind: 'remake',
+            },
+            {
+              type: 'series',
+              id: 9,
+              title: 'The Book Series',
+              year: 1970,
+              posterPath: '/s.jpg',
+              kind: 'source',
+            },
+            { type: 'movie', id: 2, kind: 'source' },
+          ],
+          total: 3,
+        },
+        '/3/movie/2': { id: 2, title: 'T2' },
+      },
+      asked,
+    );
+    const row = await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl });
+
+    expect(row?.title).toBe('Other versions');
+    const titles = await row!.load(1);
+    // Neither by id nor by year: atlas's order, the card-less version drawn from TMDB in its place.
+    expect(keys(titles)).toEqual(['movie:30', 'tv:9', 'movie:2']);
+    expect(titles.map((t) => row!.caption?.(t))).toEqual(['1998 · Remake', undefined, undefined]);
+    expect(await row!.load(2)).toEqual([]);
+    expect(asked).toContain('/3/movie/2');
+    expect(asked).not.toContain('/3/movie/30');
+  });
+
+  it('leaves out every title the franchise row shows, and the title itself', async () => {
+    const fetchImpl = answering({
+      [versionsPath]: {
+        versions: [
+          { type: 'movie', id: 550, title: 'Fight Club', posterPath: '/f.jpg', kind: 'source' },
+          { type: 'movie', id: 8, title: 'Fight Again', posterPath: '/a.jpg', kind: 'source' },
+          { type: 'movie', id: 31, title: 'Other Fight', posterPath: '/o.jpg', kind: 'remake' },
+        ],
+      },
+    });
+    const row = await versionsRow(self, '/atlas', franchiseOf([named(8)]), { key: 'k', fetchImpl });
+
+    expect(keys(await row!.load(1))).toEqual(['movie:31']);
+  });
+
+  it('is no row when the franchise row already shows every version', async () => {
+    const fetchImpl = answering({
+      [versionsPath]: {
+        versions: [
+          { type: 'movie', id: 8, title: 'Fight Again', posterPath: '/a.jpg', kind: 'source' },
+        ],
+      },
+    });
+    expect(
+      await versionsRow(self, '/atlas', franchiseOf([named(8)]), { key: 'k', fetchImpl }),
+    ).toBeNull();
+  });
+
+  it('is no row for a title without versions, and asks nothing more', async () => {
+    const asked: string[] = [];
+    const fetchImpl = answering(
+      { [versionsPath]: { seed: { type: 'movie', id: 550 }, versions: [], total: 0 } },
+      asked,
+    );
+    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl })).toBeNull();
+    expect(asked).toEqual([versionsPath]);
+  });
+
+  it('is no row, and no error, from an atlas that predates the route or answers something else', async () => {
+    const older = answering({});
+    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: older })).toBeNull();
+    const other = answering({ [versionsPath]: { ids: [8] } });
+    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: other })).toBeNull();
+    const down = (async () => {
+      throw new TypeError('offline');
+    }) as unknown as typeof fetch;
+    expect(await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl: down })).toBeNull();
+  });
+
+  it('asks nothing without atlas', async () => {
+    const asked: string[] = [];
+    expect(
+      await versionsRow(self, null, none, { key: 'k', fetchImpl: answering({}, asked) }),
+    ).toBeNull();
+    expect(asked).toEqual([]);
   });
 });
 

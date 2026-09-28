@@ -42,7 +42,11 @@ export async function guardNetwork(page) {
     // A title's You might also like asks for atlas's paged cards first. Unless a spec mocks them, the fixture's atlas
     // predates that route, and the row goes on from the POST it mocks (`relatedRows.ts`).
     // So does its page's /index/title, for the companies and networks it links: the page then shows them as text.
-    const cards = /\/index\/(?:suggest|title)\/(?:movie|series)\/\d+\.json$/.test(url.pathname);
+    // And /index/franchise and /index/versions: the page then shows TMDB's collection, and no other versions.
+    const cards =
+      /\/index\/(?:suggest|title|franchise|versions)\/(?:movie|series)\/\d+\.json$/.test(
+        url.pathname,
+      );
     if (url.origin === 'http://127.0.0.1:5198' && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
