@@ -19,6 +19,22 @@ export function tmdbKeyOf(keys: SettingsRow | undefined): string {
   return readApiKey(keys, 'tmdb') ?? TMDB_PROXY_KEY;
 }
 
+let warmedAt = -Infinity;
+
+/**
+ * Ask den-edge to open its connection to TMDB before a search needs it (`POST /tmdb/warm`). A new connection costs
+ * the box 0.3–0.45 s before TMDB is asked anything, and after a quiet spell den-edge holds none, so the first
+ * search's posters would each pay it. Asked as someone reaches for search; once a minute at most from a page.
+ */
+export function warmTmdb(): void {
+  const now = Date.now();
+  if (now - warmedAt < 60_000) return;
+  warmedAt = now;
+  fetch('/tmdb/warm', { method: 'POST' }).catch((error: unknown) =>
+    console.warn('den: TMDB warm failed', error),
+  );
+}
+
 /** A title's display, and a series' season layout. */
 export interface Details {
   title: Title;

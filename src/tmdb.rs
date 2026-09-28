@@ -43,11 +43,12 @@ pub type TmdbClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<B
 /// client asks OMDb (`ratings.rs`), doesthedogdie (`warnings.rs`) and SkipDB (`skipdb.rs`); none of them sets
 /// a header HTTP/2 forbids, and a server that offers only HTTP/1.1 is still asked over it.
 ///
-/// The connection is kept open while idle. Measured from the box on 2026-09-28: a new one costs 0.3–0.45 s
-/// before TMDB is asked anything (a 140 ms round trip, then TLS; 1.4 s once with DNS), and a lookup on a warm one
-/// takes 0.15–0.25 s. The pool used to drop it after 90 idle seconds, so the first search after a pause paid the
-/// setup on every title (a lone lookup after two idle minutes took 1.04 s). HTTP/2 PINGs keep it open; one the
-/// server closes anyway (GOAWAY) is replaced on the next question.
+/// The connection is kept open for five idle minutes. Measured from the box on 2026-09-28: a new one costs
+/// 0.3–0.45 s before TMDB is asked anything (a 140 ms round trip, then TLS; 1.4 s once with DNS), and a lookup on a
+/// warm one takes 0.15–0.25 s. With 90 idle seconds the first search after a pause paid the setup on every title
+/// (a lone lookup after two idle minutes took 1.04 s). HTTP/2 PINGs keep it open that long; one the server closes
+/// anyway (GOAWAY) is replaced on the next question. Past a longer pause the page opens it again as someone
+/// opens search (`warm`).
 pub fn client() -> TmdbClient {
     // rustls needs a crypto provider chosen before any config is built. `ring` is the light one, and the only
     // one compiled in; installing it twice is not an error worth stopping for.
@@ -64,7 +65,7 @@ pub fn client() -> TmdbClient {
         .http2_keep_alive_interval(Duration::from_secs(30))
         .http2_keep_alive_timeout(Duration::from_secs(10))
         .http2_keep_alive_while_idle(true)
-        .pool_idle_timeout(Duration::from_secs(3600))
+        .pool_idle_timeout(Duration::from_secs(300))
         .build(https)
 }
 
@@ -1136,10 +1137,41 @@ fn upstream(path: &str, query: Option<&str>, key: &str) -> String {
     format!("{HOST}{path}?{query}")
 }
 
+/// When `warm` last reached for TMDB, in seconds since the epoch.
+static WARMED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Open the connection to TMDB before a search needs it: the page asks as someone opens search. It asks for the
+/// API root with no key (TMDB answers a 301), so nothing is spent of the day's budget or the key's; what it leaves
+/// behind is the pooled connection (`client`). Once a minute at most, however many pages ask.
+fn warm(state: &Arc<AppState>) {
+    let Some(client) = state.tmdb_client.clone() else { return };
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    use std::sync::atomic::Ordering::Relaxed;
+    let last = WARMED_AT.load(Relaxed);
+    if now.saturating_sub(last) < 60 || WARMED_AT.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        let Ok(uri) = HOST.parse::<axum::http::Uri>() else { return };
+        let Ok(request) = axum::http::Request::head(uri).body(Full::new(Bytes::new())) else { return };
+        if let Err(error) = client.request(request).await {
+            eprintln!("tmdb: warm failed: {error}");
+        }
+    });
+}
+
 pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     let Some(key) = state.tmdb_key.as_deref() else {
         return json(StatusCode::NOT_FOUND, "tmdb_proxy_off");
     };
+    if req.uri().path() == "/tmdb/warm" {
+        warm(state);
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::empty())
+            .unwrap_or_default();
+    }
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
@@ -2426,6 +2458,19 @@ mod tests {
         // A new UTC day starts the budget over.
         harness.advance(86_400_000);
         assert!(spend(state), "tomorrow asks again");
+    }
+
+    /// Opening search asks den-edge to warm its connection: a POST, answered at once and never cached, since a copy
+    /// Cloudflare kept would stop the next one reaching the box. Nothing else about `/tmdb/` takes a POST.
+    #[tokio::test]
+    async fn a_warm_is_a_post_answered_at_once_and_never_kept() {
+        let h = Harness::in_dir_with(temp_dir(), |state| state.tmdb_key = Some("k".into()));
+        let warmed = h.send("POST", "/tmdb/warm", None, &[]).await;
+        assert_eq!(warmed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(warmed.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(h.send("GET", "/tmdb/warm", None, &[]).await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let posted = h.send("POST", "/tmdb/3/movie/550", None, &[]).await;
+        assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     /// A refused key, a rate limit and an outage were each a bare 502 with nothing in the log; a 429's own wait was

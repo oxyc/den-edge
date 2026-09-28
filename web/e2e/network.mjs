@@ -49,6 +49,9 @@ export async function guardNetwork(page) {
       );
     if (url.origin === 'http://127.0.0.1:5198' && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    // Opening search asks den-edge to open its TMDB connection ahead of the lookups (`warmTmdb`); it answers nothing.
+    if (url.origin === 'http://127.0.0.1:5198' && url.pathname === '/tmdb/warm')
+      return route.fulfill({ status: 204 });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
     if (url.origin === 'http://127.0.0.1:5198' && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);
