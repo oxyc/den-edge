@@ -427,6 +427,13 @@ pub(crate) fn http_date(t: SystemTime) -> String {
     )
 }
 
+/// `t`'s UTC day as `YYYY-MM-DD`, the form TMDB writes a date in, so the two compare as text.
+pub(crate) fn iso_date(t: SystemTime) -> String {
+    let days = (t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs() / 86_400) as i64;
+    let (year, month, day) = civil(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// An IMF-fixdate as seconds since the epoch. The obsolete RFC 850 and asctime forms are not read: a date that
 /// does not parse is a condition not met, and the whole answer is sent, which is always correct.
 fn parse_http_date(s: &str) -> Option<u64> {

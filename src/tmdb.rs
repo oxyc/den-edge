@@ -217,27 +217,82 @@ fn carries_moving(query: Option<&str>) -> bool {
     })
 }
 
-/// Does this body describe a series that can still change?
+/// How long after a film comes out, or an episode airs, TMDB goes on filling its record in: a runtime, the rest of
+/// the cast, an episode's still and overview.
+const SETTLING: Duration = Duration::from_secs(30 * 86_400);
+
+/// Does this body describe something that can still change: a series that is not over, a season still airing, or
+/// a film not yet out or only just out?
+fn unfinished(path: &str, body: &[u8]) -> bool {
+    let since =
+        crate::cache::iso_date(SystemTime::now().checked_sub(SETTLING).unwrap_or(SystemTime::UNIX_EPOCH));
+    unfinished_since(path, body, &since)
+}
+
+/// `unfinished`, with `since` the `YYYY-MM-DD` before which a date is settled.
 ///
-/// The status decides it, not the next episode: a series BETWEEN seasons has `next_episode_to_air: null` and is
-/// not finished, and the day its next season is announced is precisely the day this has to notice. Only "Ended"
-/// and "Canceled" are over; returning, in production and planned are not. A body whose status cannot be read is
-/// treated as unfinished, because an answer we don't recognise is no evidence that a series is done.
+/// A series: the status decides it, not the next episode. A series BETWEEN seasons has `next_episode_to_air: null`
+/// and is not finished, and the day its next season is announced is precisely the day this has to notice. Only
+/// "Ended" and "Canceled" are over; returning, in production and planned are not. A body whose status cannot be
+/// read is treated as unfinished, because an answer we don't recognise is no evidence that a series is done.
+///
+/// A season (`/3/tv/1399/season/2`): kept for six months while it was still airing, its episode list stopped at
+/// the episodes announced when it was first asked, without their titles, stills or overviews. It is unfinished while
+/// any date in it — the season's own and each episode's — is missing or `since` or later, or it has none at all.
+///
+/// A film: unfinished until TMDB says "Released", and for `SETTLING` after its release date. Kept for six months
+/// before it came out, its page went on naming a date that had moved and no runtime.
 ///
 /// Matched on the text rather than parsed: the alternative is parsing a whole answer on every read to learn one
 /// thing about it.
-fn unfinished(path: &str, body: &[u8]) -> bool {
-    if !(path.starts_with("/3/tv/") && is_entity(path)) {
-        return false;
-    }
+fn unfinished_since(path: &str, body: &[u8], since: &str) -> bool {
     let Ok(text) = std::str::from_utf8(body) else {
         return false;
     };
-    let over = text.split_once("\"status\":").is_some_and(|(_, rest)| {
-        let rest = rest.trim_start();
-        rest.starts_with("\"Ended\"") || rest.starts_with("\"Canceled\"")
-    });
-    !over
+    // The value after the first `"key":`, if it is a string.
+    let first = |key: &str| {
+        text.split_once(&format!("\"{key}\":")).and_then(|(_, rest)| {
+            rest.trim_start().strip_prefix('"').and_then(|rest| rest.split_once('"')).map(|(value, _)| value)
+        })
+    };
+    if path.starts_with("/3/tv/") && is_entity(path) {
+        return !matches!(first("status"), Some("Ended" | "Canceled"));
+    }
+    if is_season(path) {
+        let mut dates = text.split("\"air_date\":").skip(1).map(|rest| {
+            rest.trim_start().strip_prefix('"').and_then(|rest| rest.split_once('"')).map(|(date, _)| date)
+        });
+        let mut any = false;
+        return dates.any(|date| {
+            any = true;
+            date.is_none_or(|date| date.is_empty() || date >= since)
+        }) || !any;
+    }
+    if path.starts_with("/3/movie/") && is_entity(path) {
+        // Parsed for its own two fields: an appended list (recommendations, release dates) names dates of its own.
+        #[derive(serde::Deserialize)]
+        struct Film {
+            status: Option<String>,
+            release_date: Option<String>,
+        }
+        let Ok(film) = serde_json::from_str::<Film>(text) else { return true };
+        return film.status.as_deref() != Some("Released")
+            || film.release_date.as_deref().is_none_or(|date| date.is_empty() || date >= since);
+    }
+    false
+}
+
+/// `/3/tv/1399/season/2` — a season's own episode list, and nothing under it.
+fn is_season(path: &str) -> bool {
+    let digits =
+        |part: Option<&str>| part.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let mut parts = path.split('/').skip(1);
+    matches!(parts.next(), Some("3"))
+        && matches!(parts.next(), Some("tv"))
+        && digits(parts.next())
+        && matches!(parts.next(), Some("season"))
+        && digits(parts.next())
+        && parts.next().is_none()
 }
 
 /// `/3/movie/550`, `/3/tv/1399`, `/3/person/287` — a title or a person's own record, and nothing else.
@@ -1090,11 +1145,23 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
     // A hit never leaves the box, so it is not counted against anybody's budget: what the limits exist to
     // bound is what this origin asks TMDB, not what it already knows.
     if let Some(file) = &file {
-        if let Some(prepared) = crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
+        // A season's episode list is read for whether it is still airing (`unfinished`); nothing else here is.
+        let opened = match crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
+            Some(prepared) if is_season(&path) => {
+                prepared.with_bytes().await.map(|(p, body)| (p, Some(body)))
+            }
+            other => other.map(|prepared| (prepared, None)),
+        };
+        if let Some((prepared, body)) = opened {
             let (age, modified) = (prepared.age(), prepared.modified());
-            // Movie and TV records are handled by `Detail`; every remaining exact endpoint's freshness is entirely
-            // path-based, so a hot list/search/subresource hit need not read JSON to rediscover it.
-            let fresh = if carries_moving(query.as_deref()) { LIST_TTL } else { fresh_for(&path) };
+            // Movie and TV records are handled by `Detail`; every remaining exact endpoint's freshness is path-based,
+            // so a hot list/search/subresource hit need not read JSON to rediscover it. A season is the exception.
+            let fresh =
+                if carries_moving(query.as_deref()) || body.is_some_and(|body| unfinished(&path, &body)) {
+                    LIST_TTL
+                } else {
+                    fresh_for(&path)
+                };
             // A remembered 404, answered without spending. Same reasoning as `ask`: this path is per-IP
             // limited so it could not be drained as freely, but it shares the one daily budget.
             //
@@ -2454,10 +2521,51 @@ mod tests {
         assert_eq!(fresh_for_answer("/3/tv/1399", None, between), LIST_TTL);
         assert_eq!(fresh_for_answer("/3/tv/1399", None, ended), DETAILS_TTL);
         assert_eq!(fresh_for_answer("/3/tv/1399", None, cancelled), DETAILS_TTL);
-        // A series' own record and nothing else: a season's episodes are settled once they have aired, and a
-        // film has no status to read.
-        assert_eq!(fresh_for_answer("/3/tv/1399/season/2", None, airing), DETAILS_TTL);
-        assert_eq!(fresh_for_answer("/3/movie/550", None, airing), DETAILS_TTL);
+        // A series' status speaks for its own record only: a season is judged by its dates, a film by its release.
+        let aired: &[u8] = br#"{"air_date":"2011-04-17","episodes":[{"air_date":"2011-04-17"}]}"#;
+        assert_eq!(fresh_for_answer("/3/tv/1399/season/1", None, aired), DETAILS_TTL);
+        let released: &[u8] = br#"{"id":550,"release_date":"1999-10-15","status":"Released"}"#;
+        assert_eq!(fresh_for_answer("/3/movie/550", None, released), DETAILS_TTL);
+    }
+
+    /// A season still airing, and a film not yet out or only just out, are still being filled in: kept for six
+    /// months, a season stopped at the episodes announced when it was first asked, and a film went on naming a
+    /// release date that had moved.
+    #[test]
+    fn a_season_still_airing_and_a_film_not_yet_settled_are_kept_for_hours() {
+        let since = "2026-08-29";
+        let season = |body: &str| unfinished_since("/3/tv/1399/season/3", body.as_bytes(), since);
+        assert!(!season(
+            r#"{"air_date":"2013-03-31","episodes":[{"air_date":"2013-03-31"},{"air_date":"2013-06-02"}]}"#
+        ));
+        assert!(season(
+            r#"{"air_date":"2026-09-01","episodes":[{"air_date":"2026-09-01"},{"air_date":"2026-10-06"}]}"#
+        ));
+        assert!(season(
+            r#"{"air_date":"2026-01-01","episodes":[{"air_date":"2026-01-01"},{"air_date":null}]}"#
+        ));
+        assert!(
+            season(r#"{"air_date":"2026-01-01","episodes":[{"air_date":"2026-09-10"}]}"#),
+            "aired inside the month"
+        );
+        assert!(season(r#"{"air_date":null,"episodes":[]}"#), "announced, nothing scheduled");
+        assert!(season(r#"{"episodes":[]}"#), "no date at all is no evidence it is done");
+
+        let film = |body: &str| unfinished_since("/3/movie/550", body.as_bytes(), since);
+        assert!(!film(r#"{"release_date":"1999-10-15","status":"Released"}"#));
+        assert!(film(r#"{"release_date":"2027-03-05","status":"Post Production"}"#));
+        assert!(film(r#"{"release_date":"2026-09-18","status":"Released"}"#), "out inside the month");
+        assert!(film(r#"{"release_date":"","status":"Planned"}"#));
+        // An appended list names dates of its own, which say nothing about this film.
+        assert!(!film(
+            r#"{"recommendations":{"results":[{"release_date":"2026-09-20"}]},"release_date":"1999-10-15","status":"Released"}"#
+        ));
+
+        // Neither the routes under a season nor a person's record is judged this way.
+        assert!(!unfinished_since("/3/tv/1399/season/3/credits", br#"{"cast":[]}"#, since));
+        assert!(!unfinished_since("/3/person/287", br#"{"birthday":"1963-12-18"}"#, since));
+        assert!(is_season("/3/tv/1399/season/0"));
+        assert!(!is_season("/3/tv/1399/season/3/episode/1"));
     }
 
     /// The same question from a TV and from a browser is one entry, whatever key either of them sent.
@@ -2580,8 +2688,11 @@ mod tests {
     async fn a_kept_answer_carries_its_validators_and_a_title_no_stale_allowance() {
         let cache = temp_dir();
         let h = lending(&cache, None);
-        write(&cache_path(&cache, &cache_key("/3/movie/550", None)), &Bytes::from_static(b"{\"id\":550}"))
-            .await;
+        write(
+            &cache_path(&cache, &cache_key("/3/movie/550", None)),
+            &Bytes::from_static(br#"{"id":550,"status":"Released","release_date":"1999-10-15"}"#),
+        )
+        .await;
         let resp = h.send("GET", "/tmdb/3/movie/550", None, &[]).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let policy = resp.headers()[header::CACHE_CONTROL].to_str().unwrap().to_owned();
@@ -2726,8 +2837,12 @@ mod tests {
         let tmdb: Upstream = Arc::new(move |url: &str| {
             let url = url::Url::parse(url).unwrap();
             let id: u64 = url.path().rsplit('/').next().unwrap().parse().unwrap();
-            let mut body =
-                serde_json::json!({ "id": id, "title": "T", "status": status, "vote_average": 7.5 });
+            // `status` is a series'; a film is one long out, which is what settles it (`unfinished`).
+            let mut body = if url.path().starts_with("/3/movie/") {
+                serde_json::json!({ "id": id, "title": "T", "status": "Released", "release_date": "1999-10-15", "vote_average": 7.5 })
+            } else {
+                serde_json::json!({ "id": id, "title": "T", "status": status, "vote_average": 7.5 })
+            };
             let mut appends = String::new();
             for (name, value) in url.query_pairs().filter(|(name, _)| name != "api_key") {
                 if name == "append_to_response" {
@@ -2938,7 +3053,7 @@ mod tests {
         assert!(metrics.contains(r#"den_edge_provider_cache_access_total{provider="tmdb",result="fresh"} 2"#));
 
         let replacement = Bytes::from_static(
-            br#"{"id":550,"title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"changed","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         keep(&source, &replacement, None).await;
         let changed = h.send("GET", "/tmdb/3/movie/550?append_to_response=credits", None, &[]).await;
@@ -2968,7 +3083,7 @@ mod tests {
             .map(|id| serde_json::json!({"id":id,"name":format!("actor-{id}"),"character":"x".repeat(260)}))
             .collect();
         let body = Bytes::from(
-            serde_json::to_vec(&serde_json::json!({"id":550,"title":"legacy","credits":{"cast":cast}}))
+            serde_json::to_vec(&serde_json::json!({"id":550,"status":"Released","release_date":"1999-10-15","title":"legacy","credits":{"cast":cast}}))
                 .unwrap(),
         );
         assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_ANSWER_BYTES);
@@ -3140,7 +3255,7 @@ mod tests {
         let detail = Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap();
         let source_path = detail.whole().1;
         let old = Bytes::from_static(
-            br#"{"id":550,"title":"old","credits":{"from":"old"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"old","credits":{"from":"old"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         keep(&source_path, &old, None).await;
         let old_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
@@ -3148,7 +3263,7 @@ mod tests {
         let old_variant = detail.variant(&source_path, &old_digest, DETAILS_TTL);
 
         let new = Bytes::from_static(
-            br#"{"id":550,"title":"new","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"new","credits":{"from":"new"},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         keep(&source_path, &new, None).await;
         let new_source = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap();
@@ -3354,7 +3469,7 @@ mod tests {
             Arc::new(Detail::of("/3/movie/550", Some("append_to_response=credits"), Some(&dir)).unwrap());
         let source_path = detail.whole().1;
         let body = Bytes::from_static(
-            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         assert!(crate::cache::write_json(&source_path, &body).await);
         let digest = crate::cache::open_json(&source_path, MAX_ANSWER_BYTES).await.unwrap().digest();
@@ -3392,7 +3507,7 @@ mod tests {
         let whole = Detail::of("/3/movie/550", None, Some(&dir)).unwrap();
         let source_path = whole.whole().1;
         let body = Bytes::from_static(
-            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         crate::cache::write_json(&source_path, &body).await;
         for query in [
@@ -3420,7 +3535,7 @@ mod tests {
     async fn checked_in_appends_with_arbitrary_rest_do_not_create_derived_files() {
         let dir = temp_dir();
         let body = Bytes::from_static(
-            br#"{"id":550,"title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"x","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         for n in 0..32 {
             let query = format!("append_to_response=credits&language=x-private-{n}");
@@ -3444,7 +3559,7 @@ mod tests {
         let cache = temp_dir();
         let file = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
         let old = Bytes::from_static(
-            br#"{"id":550,"title":"old","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+            br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"old","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
         );
         keep(&file, &old, Some("W/\"old\"")).await;
         aged(&file, DETAILS_TTL + Duration::from_secs(60));
@@ -3456,7 +3571,7 @@ mod tests {
             Arc::new(move |_: &str| {
                 std::fs::write(
                     &replacement,
-                    br#"{"id":550,"title":"new","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
+                    br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"new","credits":{},"external_ids":{},"recommendations":{},"release_dates":{},"videos":{},"watch/providers":{}}"#,
                 )
                 .unwrap();
                 std::fs::rename(&replacement, &current).unwrap();
@@ -3553,7 +3668,9 @@ mod tests {
         let asked = tmdb_answering("kept-before", "Ended");
         let kept =
             cache_path(&cache, &cache_key("/3/movie/550", Some(&format!("append_to_response={WEB_MOVIE}"))));
-        let body = serde_json::json!({ "id": 550, "title": "Fight Club", "credits": {}, "videos": {} });
+        let body = serde_json::json!({
+            "id": 550, "title": "Fight Club", "status": "Released", "release_date": "1999-10-15", "credits": {}, "videos": {}
+        });
         write(&kept, &Bytes::from(body.to_string())).await;
         aged(&kept, Duration::from_secs(30 * 86_400));
 
@@ -3567,7 +3684,10 @@ mod tests {
         assert!(max_age <= left && max_age + 5 > left, "what is left of its own six months: {policy}");
         let (how, bare) = detail(&h, "/tmdb/3/movie/550").await;
         assert_eq!(how, "hit");
-        assert_eq!(bare, serde_json::json!({ "id": 550, "title": "Fight Club" }));
+        assert_eq!(
+            bare,
+            serde_json::json!({ "id": 550, "title": "Fight Club", "status": "Released", "release_date": "1999-10-15" })
+        );
         assert!(ask(&h.state, "/3/movie/550", None).await.is_some());
         assert!(crate::lock(&asked).is_empty(), "nothing was asked of TMDB");
     }
@@ -3762,7 +3882,7 @@ mod tests {
         assert!(preview.is_none(), "the page went out with the generic block");
         tokio::time::sleep(Duration::from_millis(900)).await;
         let preview = crate::meta::rewrite(&h.state, shell, "/movie/550", None, &host).await;
-        assert!(preview.expect("kept, so a hit").contains("<title>T · Den</title>"));
+        assert!(preview.expect("kept, so a hit").contains("<title>T (1999) · Den</title>"));
         assert_eq!(crate::lock(&asked).len(), 1, "paid for once");
     }
 
@@ -3981,7 +4101,7 @@ mod tests {
         let whole = Detail::of("/3/movie/550", None, Some(&cache)).unwrap().whole().1;
         keep(
             &whole,
-            &Bytes::from_static(br#"{"id":550,"title":"Fight Club","vote_average":8.4}"#),
+            &Bytes::from_static(br#"{"id":550,"status":"Released","release_date":"1999-10-15","title":"Fight Club","vote_average":8.4}"#),
             Some("W/\"a\""),
         )
         .await;
