@@ -23,6 +23,11 @@ updates:
     groups:
       web:
         update-types: [minor, patch]
+    ignore:
+      # svelte-check's typescript peer range stops at ^6.0.0, so npm ci refuses TypeScript 7. Drop this once
+      # a svelte-check release accepts ^7.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
     labels: [dependencies]
 
   - package-ecosystem: docker
