@@ -13,10 +13,15 @@ export interface Warning {
   votes: number;
 }
 
-/** The warnings to show: confirmed by more yes votes than no, never a spoiler, and among `categories` if any are picked. */
+/**
+ * The warnings to show: confirmed by more yes votes than no, never a spoiler, and among `categories` if any are picked.
+ * Each once: an answer can list a topic more than once, with different votes (The Wire's names "a dog dies" five
+ * times), and the one kept is the one with the most yes votes.
+ */
 export function parseWarnings(body: unknown, categories: string[]): Warning[] {
   const rows = (body as { warnings?: unknown } | null)?.warnings;
   if (!Array.isArray(rows)) return [];
+  const seen = new Set<number>();
   return rows
     .flatMap((r): Warning[] => {
       const id = Number(r?.id),
@@ -35,7 +40,8 @@ export function parseWarnings(body: unknown, categories: string[]): Warning[] {
       const label = r?.name;
       return typeof label === 'string' && label.trim() ? [{ id, label, votes: yes }] : [];
     })
-    .sort((a, b) => b.votes - a.votes);
+    .sort((a, b) => b.votes - a.votes)
+    .filter((warning) => !seen.has(warning.id) && !!seen.add(warning.id));
 }
 
 export async function fetchWarnings(

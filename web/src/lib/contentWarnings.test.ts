@@ -29,6 +29,19 @@ it('shows confirmed non-spoiler warnings, only the picked categories when any ar
   ]);
 });
 
+it('shows a repeated warning once, with its most yes votes', () => {
+  const dog = (yes: number) => ({
+    id: 153,
+    name: 'a dog dies',
+    category: 'Animal Death',
+    yes,
+    no: 1,
+  });
+  expect(parseWarnings({ id: 1, warnings: [dog(33), dog(34), dog(33)] }, [])).toEqual([
+    { id: 153, label: 'a dog dies', votes: 34 },
+  ]);
+});
+
 it('asks den-edge once, by IMDb id, with this page’s key only when it has one', async () => {
   const detail = parseDetail(
     { type: 'movie', id: 1 },
