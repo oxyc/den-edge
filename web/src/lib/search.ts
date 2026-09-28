@@ -224,29 +224,96 @@ async function facetLane(answer: FacetAnswer, sources: SearchSources): Promise<H
   return dedupe((await person) ?? matches);
 }
 
+/** The browser's next paint: pictures landing before it share one repaint, and none waits past it. */
+const nextFrame = () =>
+  new Promise<void>((resolve) =>
+    typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame(() => resolve())
+      : setTimeout(resolve, 0),
+  );
+
 /**
- * Titles atlas found, pictured: first from what den-edge already holds, in one request, then from TMDB for those
- * still without a poster. TMDB was asked for every one of them, one request each, on every settled prefix: a word
- * typed cost a hundred of them, and cold ones queued behind each other for seconds.
+ * atlas's answer as it is pictured: named at once — a card without a poster shows its title meanwhile — then
+ * repainted as each picture lands, first from what den-edge already holds (one request), then from TMDB, one title
+ * at a time, for those still without one. The grid waited for the slowest of those, measured at 1.2 s of 15 cold
+ * lookups while the posters themselves took 0.17 s; now each poster shows as its own lookup answers, those landing
+ * before one paint sharing it (`nextFrame`).
+ *
+ * The last list is the finished one: a title still without a poster is no longer waiting for one. Before it, a
+ * waiting title is a copy marked `awaiting`, so the hide rules show its name rather than dropping it.
  */
-async function drawable(
-  titles: Title[],
+async function* pictured(
+  found: { people: Person[]; titles: Title[] },
   sources: SearchSources,
   signal?: AbortSignal,
-): Promise<Hit[]> {
-  const shared = await sources.shared(titles).catch(() => titles);
-  // A query typed past already has its successor asking: its pictures would only queue in front of it.
-  const named = await Promise.all(
-    shared.map((title, at) =>
-      title.posterPath || at >= TITLE_LIMIT || signal?.aborted
-        ? title
-        : sources
-            .title(title)
-            .then((full) => full ?? title)
-            .catch(() => title),
-    ),
-  );
-  return named.map(titleHit);
+): AsyncGenerator<Hit[]> {
+  const waiting = new Map<number, Title>();
+  found.titles.forEach((title, at) => {
+    if (title.posterPath) return;
+    const copy = { ...title };
+    awaiting.add(copy);
+    waiting.set(at, copy);
+  });
+  const titles = [...found.titles];
+  let people: Hit[] = found.people.map((person) => ({ kind: 'person', person }));
+  const hits = (last: boolean) =>
+    dedupe([
+      ...people,
+      ...titles.map((title, at) =>
+        titleHit(last || title.posterPath ? title : (waiting.get(at) ?? title)),
+      ),
+    ]);
+  if (waiting.size) yield hits(false);
+
+  let changed = false;
+  let done = false;
+  let wake = () => {};
+  const landed = () => {
+    changed = true;
+    wake();
+  };
+  const all = Promise.all([
+    faces(found.people, sources, signal).then((drawn) => {
+      people = drawn;
+      landed();
+    }),
+    (async () => {
+      const shared = await sources.shared(found.titles).catch(() => found.titles);
+      shared.forEach((title, at) => (titles[at] = title));
+      landed();
+      // A query typed past already has its successor asking: its pictures would only queue in front of it.
+      await Promise.all(
+        titles.map((title, at) =>
+          title.posterPath || at >= TITLE_LIMIT || signal?.aborted
+            ? undefined
+            : sources.title(title).then(
+                (full) => {
+                  if (!full) return;
+                  titles[at] = full;
+                  landed();
+                },
+                () => {},
+              ),
+        ),
+      );
+    })(),
+  ]).then(() => {
+    done = true;
+    wake();
+  });
+  while (!done) {
+    await new Promise<void>((resolve) => {
+      wake = resolve;
+      if (changed || done) resolve();
+    });
+    if (done) break;
+    await nextFrame();
+    if (done) break;
+    changed = false;
+    yield hits(false);
+  }
+  await all;
+  yield hits(true);
 }
 
 /** People atlas named, with the photo TMDB has of each; one TMDB can't draw keeps atlas's name. */
@@ -288,24 +355,11 @@ export async function* searchStream(
     yield* lanesStream(query, sources);
     return;
   }
-  const drawn = Promise.all([
-    faces(found.people, sources, signal),
-    drawable(found.titles, sources, signal),
-  ]).then(([people, titles]) => dedupe([...people, ...titles]));
-  if (found.titles.some((title) => !title.posterPath)) {
-    // Named at once, pictured as the posters arrive: a card without one shows its title meanwhile. Copies, so a
-    // title the pictures still leave without one is not taken for a waiting one later.
-    yield dedupe([
-      ...found.people.map((person): Hit => ({ kind: 'person', person })),
-      ...found.titles.map((title) => {
-        const waiting = { ...title };
-        awaiting.add(waiting);
-        return titleHit(waiting);
-      }),
-    ]);
+  let answer: Hit[] = [];
+  for await (const batch of pictured(found, sources, signal)) {
+    answer = batch;
+    yield batch;
   }
-  const answer = await drawn;
-  yield answer;
   if (found.named) return;
   const byName = await sources
     .multi(text)

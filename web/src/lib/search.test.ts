@@ -152,6 +152,34 @@ describe('searchStream over atlas’s /index/query', () => {
     expect(posters).toEqual([undefined, '/m.jpg']);
   });
 
+  it('shows each poster as its own lookup lands, not once the slowest has', async () => {
+    let slow = () => {};
+    const s = sources({
+      query: async () => ({
+        people: [],
+        titles: [matrix, movie(157336, 'Interstellar')],
+        named: true,
+      }),
+      title: (ref) =>
+        ref.id === 603
+          ? Promise.resolve({ ...matrix, posterPath: '/m.jpg' })
+          : new Promise((resolve) => {
+              slow = () => resolve({ ...catalog['movie-157336']!, posterPath: '/i.jpg' });
+            }),
+    });
+    const posters: (string | undefined)[][] = [];
+    for await (const batch of searchStream('the matrix', s)) {
+      posters.push(batch.map((hit) => (hit.kind === 'title' ? hit.title.posterPath : 'person')));
+      // Interstellar's lookup answers only once The Matrix's poster has been shown.
+      if (posters.at(-1)?.[0] === '/m.jpg') slow();
+    }
+    expect(posters).toEqual([
+      [undefined, undefined],
+      ['/m.jpg', undefined],
+      ['/m.jpg', '/i.jpg'],
+    ]);
+  });
+
   it('asks TMDB nothing for a query already typed past', async () => {
     const named: string[] = [];
     const typedPast = new AbortController();
