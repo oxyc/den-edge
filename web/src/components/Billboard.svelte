@@ -671,8 +671,10 @@
 
   <!-- Three ways to notice, because one is not reliable: the observer above settles it, `scroll` catches it
        early where the browser sends those, and `scrollend` fires once when a swipe finally comes to rest. -->
+  <!-- Slides are keyed by position, not by title. The set is replaced once atlas has ranked it, and keyed by title
+       its slides were moved to their new places: Lighthouse counted each move as a layout shift (0.17 on Home). -->
   <div class="rail" bind:this={rail} onscroll={scrolled} onscrollend={scrolled}>
-    {#each shown as title, n (keyOf(title))}
+    {#each shown as title, n (n)}
       {@const found = known.get(keyOf(title))}
       {@const reason = recommendationReason(title.why)}
       <article
@@ -1046,8 +1048,10 @@
     line-clamp: 2;
   }
 
-  /* Three lines: a billboard says what it is, the title's own page says the rest. */
+  /* Three lines: a billboard says what it is, the title's own page says the rest. The three are held before the
+     overview arrives, since the text is bottom-aligned and an overview landing later pushed the title up. */
   .overview {
+    min-block-size: 4.2em;
     display: -webkit-box;
     margin: 0;
     overflow: hidden;

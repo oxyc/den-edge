@@ -10,10 +10,16 @@
   let {
     services,
     heading = 'Services',
+    pending = 0,
     onintent,
   }: {
     services: ResolvedService[];
     heading?: string;
+    /**
+     * How many tiles to hold room for while the services are still being named. The row sits above Home's other rows,
+     * and arriving late it pushed all of them down (a layout shift Lighthouse counted).
+     */
+    pending?: number;
     /** A tile is about to be opened (`ServiceTile`): the page behind it can start loading. */
     onintent?: (service: Service, country: string) => void;
   } = $props();
@@ -26,7 +32,7 @@
   });
 </script>
 
-{#if services.length}
+{#if services.length || pending}
   <section class="row" aria-label={heading}>
     <h2>{heading}</h2>
     <div class="track">
@@ -37,6 +43,11 @@
           showCountry={(countries[service.id] ?? 0) > 1}
           onintent={onintent && (() => onintent(service, pick.country))}
         />
+      {:else}
+        {#each { length: pending }, n (n)}
+          <span class="hold" aria-hidden="true"><span class="plate"></span><span>&nbsp;</span></span
+          >
+        {/each}
       {/each}
     </div>
   </section>
@@ -70,5 +81,20 @@
   .track > :global(*) {
     flex: 0 0 auto;
     scroll-snap-align: start;
+  }
+
+  /* A tile's size before it has a service: its plate, and a line where its name goes (`ServiceTile`). */
+  .hold {
+    display: grid;
+    width: var(--tile-w);
+    gap: 8px;
+    font-size: 14px;
+  }
+
+  .plate {
+    height: var(--tile-w);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: var(--card);
   }
 </style>

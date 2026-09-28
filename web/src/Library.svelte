@@ -806,21 +806,26 @@
   /** Which countries have been asked for; a directory is one request per country per visit, not one per pick. */
   const askedFor: Record<string, true> = {};
   let directories = $state<Record<string, Service[]>>({});
+  /** Countries whose directory is on its way: the Services row holds its room until they answer. */
+  let naming = $state(0);
   $effect(() => {
     if (!tmdbKey) return;
     for (const { country } of servicePicks) {
       if (askedFor[country]) continue;
       askedFor[country] = true;
-      void fetchServices(country, tmdbKey).then(
-        (listed) => {
-          directories = { ...directories, [country]: listed };
-        },
-        () => {
-          // No directory, no tiles — but the country is put back, so the next visit to Home asks again rather
-          // than leaving the row empty for the rest of the session over one failed request.
-          delete askedFor[country];
-        },
-      );
+      naming++;
+      void fetchServices(country, tmdbKey)
+        .then(
+          (listed) => {
+            directories = { ...directories, [country]: listed };
+          },
+          () => {
+            // No directory, no tiles — but the country is put back, so the next visit to Home asks again rather
+            // than leaving the row empty for the rest of the session over one failed request.
+            delete askedFor[country];
+          },
+        )
+        .finally(() => naming--);
     }
   });
   /** The picks their country's directory can account for, named and ordered by it. */
@@ -1201,7 +1206,7 @@
       </PosterRow>
     {/if}
     {#if !facet}
-      <ServicesRow {services} onintent={primeService} />
+      <ServicesRow {services} pending={naming ? servicePicks.length : 0} onintent={primeService} />
     {/if}
     <Browse {rows} shown={browseShown} />
   {/if}
