@@ -701,6 +701,51 @@ describe('versionsRow', () => {
     expect(asked).not.toContain('/3/movie/30');
   });
 
+  it('captions a franchise’s members with its label, in atlas’s order', async () => {
+    const group = { id: 'Q1784319', name: 'Wallander', label: 'Wallander (Sweden)', era: null };
+    const fetchImpl = answering({
+      [versionsPath]: {
+        versions: [
+          {
+            type: 'movie',
+            id: 40,
+            title: 'Mastermind',
+            year: 2005,
+            posterPath: '/m.jpg',
+            kind: 'remake',
+            group,
+          },
+          {
+            type: 'series',
+            id: 41,
+            title: 'Wallander',
+            year: 2007,
+            posterPath: '/w.jpg',
+            kind: 'source',
+            group,
+          },
+          {
+            type: 'series',
+            id: 42,
+            title: 'Young Wallander',
+            year: 2020,
+            posterPath: '/y.jpg',
+            kind: 'source',
+          },
+        ],
+      },
+    });
+    const row = await versionsRow(self, '/atlas', none, { key: 'k', fetchImpl });
+    const titles = await row!.load(1);
+
+    expect(keys(titles)).toEqual(['movie:40', 'tv:41', 'tv:42']);
+    expect(titles.map((t) => row!.caption?.(t))).toEqual([
+      '2005 · Wallander (Sweden)',
+      '2007 · Wallander (Sweden)',
+      undefined,
+    ]);
+  });
+
   it('leaves out every title the franchise row shows, and the title itself', async () => {
     const fetchImpl = answering({
       [versionsPath]: {
