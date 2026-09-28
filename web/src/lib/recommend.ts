@@ -6,6 +6,7 @@
 import type { MediaType, Title } from './library';
 import type { Prefs } from './prefs';
 import { relayFetch } from './relayFetch';
+import { ATLAS } from './scout';
 import { GUEST_PICKS } from './services';
 
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
@@ -234,6 +235,62 @@ export async function recommend(
   } catch {
     return null;
   }
+}
+
+/** The billboard's scope for the page showing `facet` (Home: null), as `GET /recommend/<scope>.json` names it. */
+export const billboardScope = (facet: MediaType | null) =>
+  facet === 'movie' ? 'movies' : facet === 'tv' ? 'series' : 'home';
+
+/** Where everyone's billboard for `scope` is asked on `now`'s UTC day, from atlas at `base`. */
+const everyoneUrl = (base: string, scope: string, now: Date) =>
+  `${base}/recommend/${scope}.json?day=${now.toISOString().slice(0, 10)}`;
+
+async function askEveryone(url: string, fetchImpl: typeof fetch): Promise<Slide[] | null> {
+  try {
+    const res = await fetchImpl(url);
+    if (!res.ok) return null;
+    const answer = (await res.json()) as { slides?: unknown };
+    return Array.isArray(answer.slides) ? slidesOf(answer.slides) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Billboards asked before the app knew it would want them (`startBillboard`), by address, until taken. */
+const started = new Map<string, Promise<Slide[] | null>>();
+
+/**
+ * Ask for this page's billboard for everyone as the app starts (`main.ts`), before it has found atlas or opened the
+ * library: at the address a browser with no library of its own finds atlas at (`findAtlas`'s same-origin `/atlas`).
+ * `recommendForEveryone` takes this answer when it asks the same address; if nothing asks, it was one kept GET.
+ */
+export function startBillboard(
+  path: string,
+  now = new Date(),
+  fetchImpl: typeof fetch = fetch,
+): void {
+  const scope =
+    path === '/' ? 'home' : path === '/movies' ? 'movies' : path === '/series' ? 'series' : null;
+  if (!scope) return;
+  const url = everyoneUrl(ATLAS.path, scope, now);
+  started.set(url, askEveryone(url, fetchImpl));
+}
+
+/**
+ * atlas's billboard for everyone (`GET /recommend/<scope>.json`): no library, so one answer per scope and day, which
+ * Cloudflare and the browser keep. The UTC day is in the address so each day is its own answer. Null where atlas can't
+ * rank (no route, out of reach, a malformed answer).
+ */
+export function recommendForEveryone(
+  base: string,
+  scope: string,
+  now = new Date(),
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Slide[] | null> {
+  const url = everyoneUrl(base, scope, now);
+  const early = started.get(url);
+  started.delete(url);
+  return early ?? askEveryone(url, fetchImpl);
 }
 
 /**

@@ -73,7 +73,14 @@
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
   import { fetchDetails, fetchTitle } from './lib/tmdb';
-  import { nameSlides, recommend, recommendBody, type RecommendedTitle } from './lib/recommend';
+  import {
+    billboardScope,
+    nameSlides,
+    recommend,
+    recommendBody,
+    recommendForEveryone,
+    type RecommendedTitle,
+  } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
   import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './lib/wire';
 
@@ -100,6 +107,8 @@
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
   const LOOKUPS = 6;
+  /** Slides of everyone's billboard named for an empty library: atlas names them by id, each a TMDB lookup. */
+  const EVERYONE_NAMED = 20;
   const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
@@ -921,6 +930,29 @@
     const key = tmdbKey;
     const run = ++billboardRun;
     const kept = keptBillboard(type);
+    // A library with nothing in it has no taste to send: everyone's billboard, one GET that Cloudflare and this
+    // browser keep for the day, asked at once rather than after the TMDB lists.
+    if (!weighted.length && !seeds.owned.size) {
+      void recommendForEveryone(here, billboardScope(type)).then(async (slides) => {
+        if (run !== billboardRun) return;
+        if (!slides) {
+          buildTrending(run);
+          return;
+        }
+        const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+        // The first screenfuls only: each slide atlas names by id alone is one TMDB lookup.
+        const picked = await nameSlides(
+          slides.slice(0, EVERYONE_NAMED),
+          new Map(),
+          lookup,
+          LOOKUPS,
+        );
+        if (run !== billboardRun || !picked.length) return;
+        featured = picked;
+        void log?.keep(kept, picked).catch(warnKeep);
+      });
+      return;
+    }
     if (!table.length) return;
     const row = (id: string) =>
       table

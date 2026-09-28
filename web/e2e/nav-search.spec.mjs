@@ -47,8 +47,8 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
     await catalogueGate;
     return r.fulfill({ json: { metas: [] } });
   });
-  // Once atlas is found it ranks the billboard itself.
-  await page.route('**/atlas/recommend', async (r) => {
+  // Once atlas is found it ranks the billboard itself: for this empty library, everyone's billboard (the GET).
+  await page.route('**/atlas/recommend**', async (r) => {
     await catalogueGate;
     return r.fulfill({ json: { version: 1, slides: [] } });
   });
@@ -1577,11 +1577,11 @@ test('late discovery keeps the already visible billboard and selected slide', as
         attributes: true,
       });
     });
-    const fetching = page.waitForRequest('**/atlas/recommend');
+    const fetching = page.waitForRequest('**/atlas/recommend**');
     releaseAtlas();
     await fetching;
     await expect(hero.locator('.slide').first()).toBeAttached();
-    const response = page.waitForResponse('**/atlas/recommend');
+    const response = page.waitForResponse('**/atlas/recommend**');
     releaseCatalogue();
     await response;
     await page.waitForTimeout(150);

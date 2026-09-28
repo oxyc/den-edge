@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
-import { nameSlides, recommend, recommendationReason, recommendBody } from './recommend';
+import {
+  billboardScope,
+  nameSlides,
+  recommend,
+  recommendationReason,
+  recommendBody,
+  recommendForEveryone,
+  startBillboard,
+} from './recommend';
 import { readPrefs } from './prefs';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
@@ -226,6 +234,48 @@ describe('recommend', () => {
       throw new TypeError('offline');
     }) as unknown as typeof fetch;
     expect(await recommend('/atlas', body, offline)).toBeNull();
+  });
+});
+
+describe('recommendForEveryone', () => {
+  it('asks for the scope’s billboard for the UTC day, a GET, and is nothing where atlas can’t rank', async () => {
+    const asked: { url: string; init?: RequestInit }[] = [];
+    const answering = (status: number, body: unknown) =>
+      (async (url: string, init?: RequestInit) => {
+        asked.push({ url, init });
+        return new Response(JSON.stringify(body), { status });
+      }) as unknown as typeof fetch;
+    const late = new Date('2026-09-28T23:30:00-03:00');
+    const slides = await recommendForEveryone(
+      '/atlas',
+      billboardScope('tv'),
+      late,
+      answering(200, { slides: [{ type: 'series', id: 1438 }], next: 100 }),
+    );
+    expect(slides).toEqual([{ type: 'tv', id: 1438, imdbId: undefined, why: undefined }]);
+    expect(asked[0]!.url).toBe('/atlas/recommend/series.json?day=2026-09-29');
+    expect(asked[0]!.init?.method ?? 'GET').toBe('GET');
+    expect(billboardScope(null)).toBe('home');
+    expect(
+      await recommendForEveryone('/atlas', 'home', late, answering(404, { error: 'not_found' })),
+    ).toBeNull();
+  });
+
+  it('takes the billboard the app started asking for, once, and asks itself for any other', async () => {
+    const asked: string[] = [];
+    const answering = (async (url: string) => {
+      asked.push(url);
+      return new Response(JSON.stringify({ slides: [{ type: 'movie', id: asked.length }] }));
+    }) as unknown as typeof fetch;
+    const now = new Date('2026-09-28T12:00:00Z');
+    startBillboard('/movies', now, answering);
+    startBillboard('/watchlist', now, answering);
+    expect(asked).toEqual(['/atlas/recommend/movies.json?day=2026-09-28']);
+    const early = await recommendForEveryone('/atlas', 'movies', now, answering);
+    expect(early?.[0]?.id).toBe(1);
+    expect(asked).toHaveLength(1);
+    await recommendForEveryone('/atlas', 'movies', now, answering);
+    expect(asked).toHaveLength(2);
   });
 });
 
