@@ -379,7 +379,7 @@ export function collectionRow(
 
 /**
  * The title's curated primary franchise from atlas, with TMDB's movie collection only when atlas has none.
- * Atlas already orders the mixed film/TV members for this seed: its era first, release order within each era.
+ * Atlas already orders the mixed film/TV members for this seed: its era first, newest first within each era.
  * Its cards carry no posters, so the members are drawn (`drawRefs`) in that order; a card left without one would be
  * hidden as blank, and the whole row with it.
  * A primary with no other member is still authoritative: there is no row, and it deliberately does not fall
@@ -427,10 +427,12 @@ export async function franchiseRow(
 
 /**
  * The other versions of the title's story from atlas (`/index/versions`): remakes, and other adaptations of the same
- * book or play, films and series together, in atlas's order (release, then popularity). Atlas leaves out the title's
- * own curated franchise; whatever the franchise row shows is left out here too, since that row can be TMDB's
- * collection instead. One page: atlas answers with every version at once. Null when there are none, or when the
- * atlas predates the route, so the page never shows the row empty.
+ * book, play or character, films and series together, in atlas's order (release, then popularity). A version in a
+ * franchise comes with the rest of that franchise, each card captioned with the franchise's label ("Wallander
+ * (Sweden)"); a remake outside one says "Remake". Atlas leaves out the title's own curated franchise; whatever the
+ * franchise row shows is left out here too, since that row can be TMDB's collection instead. One page: atlas answers
+ * with every version at once. Null when there are none, or when the atlas predates the route, so the page never shows
+ * the row empty.
  */
 export async function versionsRow(
   self: Title,
@@ -449,12 +451,16 @@ export async function versionsRow(
     return null;
   }
   if (!Array.isArray(listed)) return null;
-  const remakes = new Set<string>();
+  /** What each card says beside its year: its franchise's label, else "Remake" for a remake. */
+  const notes = new Map<string, string>();
   const refs = (listed as Record<string, unknown>[]).flatMap((t): Ref[] => {
     const type = t?.type === 'series' ? 'tv' : t?.type === 'movie' ? 'movie' : null;
     if (!type || !Number.isInteger(t.id)) return [];
     const ref: Ref = { type, id: t.id as number };
-    if (t.kind === 'remake') remakes.add(keyOf(ref));
+    const group = t.group as Record<string, unknown> | undefined;
+    const label = typeof group?.label === 'string' ? group.label : undefined;
+    const note = label ?? (t.kind === 'remake' ? 'Remake' : undefined);
+    if (note) notes.set(keyOf(ref), note);
     return [ref];
   });
   const elsewhere = new Set<string>(
@@ -468,8 +474,10 @@ export async function versionsRow(
   return {
     id: 'other-versions',
     title: 'Other versions',
-    caption: (t) =>
-      remakes.has(keyOf(t)) ? [t.year, 'Remake'].filter(Boolean).join(' · ') : undefined,
+    caption: (t) => {
+      const note = notes.get(keyOf(t));
+      return note ? [t.year, note].filter(Boolean).join(' · ') : undefined;
+    },
     load: async (page) => (page === 1 ? titles : []),
   };
 }
