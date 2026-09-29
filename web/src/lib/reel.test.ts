@@ -7,6 +7,7 @@ import {
   progressiveURL,
   isPlaylist,
   nativeHls,
+  resetActivationPause,
   trailerCandidates,
 } from './reel';
 import type { Routes } from './routes';
@@ -48,6 +49,7 @@ const meta = {
 // A press resolves a title's trailer and the page it opens reads that answer back; every test here
 // asks about the same title and means it each time.
 beforeEach(forgetWarmedTrailers);
+beforeEach(resetActivationPause);
 
 // Every base in the app today is relative, so the absolute branch below is a guard rather than a path
 // anyone walks. It is tested because "nothing produces this input" is a property of today's callers,
@@ -278,6 +280,30 @@ describe('fetchSources', () => {
       `/reel/cfg/m/s/${blob}?s=${tag}`,
       'https://rr3---sn-x.googlevideo.com/file',
     ]);
+  });
+
+  it('stops asking for a direct origin once one is refused as down, and plays through the relay', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    let activations = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).includes('/sources/')) {
+        return new Response(
+          JSON.stringify({
+            sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true }],
+          }),
+        );
+      }
+      activations++;
+      return new Response(JSON.stringify({ error: 'public_listener_unavailable' }), {
+        status: 503,
+      });
+    };
+    for (let i = 0; i < 5; i++) {
+      const got = await fetchSources(SOURCES, { surface: 'audible', player: 'native', fetchImpl });
+      expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
+    }
+    expect(activations).toBe(1);
   });
 
   it('accepts a slow valid cold activation within the shared lifecycle deadline', async () => {

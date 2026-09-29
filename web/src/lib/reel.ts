@@ -449,6 +449,28 @@ export interface Sources {
 // and the lookup; on expiry, preserve the already-present relay rather than delaying playback without bound.
 const DIRECT_ACTIVATION_MS = 15_000;
 
+/**
+ * When a refusal says the direct origin is down (503) or this page asks too often (429), the relay carries every
+ * trailer until then. Without it, a page asked once per trailer: with den-edge's public listener down, a phone sent
+ * dozens of refused activations in a minute until den-edge rate-limited it.
+ */
+const ACTIVATION_PAUSE_MS = 5 * 60_000;
+let activationPausedUntil = 0;
+
+function pauseActivation(response: Response, now = Date.now()): void {
+  if (response.status === 503) activationPausedUntil = now + ACTIVATION_PAUSE_MS;
+  else if (response.status === 429) {
+    const seconds = Number(response.headers.get('retry-after'));
+    activationPausedUntil =
+      now + (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000);
+  }
+}
+
+/** For tests: forget a pause. */
+export function resetActivationPause(): void {
+  activationPausedUntil = 0;
+}
+
 /** A signed carried source on this origin, as the edge activation endpoint accepts it. */
 function carriedPath(url: string): string | null {
   if (!url.startsWith('/') || url.startsWith('//')) return null;
@@ -485,6 +507,7 @@ async function activateDirect(
       signal: bounded,
     });
   };
+  if (Date.now() < activationPausedUntil) return null;
   try {
     let response = await ask();
     if (response.status === 428) {
@@ -498,7 +521,10 @@ async function activateDirect(
       if (!hint) return null;
       response = await ask(hint);
     }
-    if (!response.ok) return null;
+    if (!response.ok) {
+      pauseActivation(response);
+      return null;
+    }
     const answer = await response.json();
     if (typeof answer?.publicBase !== 'string' || typeof answer?.media !== 'string') return null;
     const base = new URL(answer.publicBase);
