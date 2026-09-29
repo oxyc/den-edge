@@ -55,6 +55,8 @@ export interface Plan {
 export interface Lookups {
   searchMulti(query: string): Promise<SearchHit[]>;
   searchTv(query: string): Promise<SearchHit[]>;
+  /** Films alone, a page of TMDB's at a time: a one-word title ("Girl") can be far down a popularity order. */
+  searchMovie?(query: string, page: number): Promise<SearchHit[]>;
   show(id: number): Promise<Show | null>;
   episodes(id: number, season: number): Promise<{ number: number; name: string }[] | null>;
 }
@@ -154,6 +156,11 @@ function seasonOf(label: string): number | undefined {
   if (LIMITED.test(label)) return 1;
   const short = /^s(\d+)$/i.exec(label)?.[1];
   if (short !== undefined) return Number(short);
+  // "The Chef Show: Season 2 - Volume 1", "The World's Most Extraordinary Homes: Season 2 Part B": season 2.
+  const split = /^(?:season|series)\s+(\d+)\s*[-–]?\s*(?:part|volume|vol\.)\s+\w+$/i.exec(
+    label,
+  )?.[1];
+  if (split !== undefined) return Number(split);
   const [, number] = SEASON.exec(label) ?? [];
   if (number === undefined) return undefined;
   return /^\d+$/.test(number) ? Number(number) : ROMAN[number.toLowerCase()];
@@ -165,6 +172,17 @@ function seasonOf(label: string): number | undefined {
  */
 export const isPreview = (title: string) =>
   /(?:^|: )[^:]*\btrailer(?::|$)/i.test(title) || /_hook_|_16x9\b/i.test(title);
+
+/**
+ * A line naming two episodes or more, as one line each: Netflix lists a double bill as one viewing ("The Killing:
+ * Season 3: From Up Here / The Road to Hamelin"), and a children's show its short stories together.
+ */
+export function joined(title: string): string[] {
+  if (parseTitle(title).kind !== 'episode') return [title];
+  const at = title.lastIndexOf(': ');
+  const [head, tail] = [title.slice(0, at + 2), title.slice(at + 2)];
+  return tail.includes(' / ') ? tail.split(' / ').map((part) => head + part.trim()) : [title];
+}
 
 /** A Netflix title as show, season and episode name, split at its first season label; otherwise a name. */
 export function parseTitle(title: string): Parsed {
@@ -194,14 +212,46 @@ export function parseTitle(title: string): Parsed {
 
 /** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
 export function normalize(name: string): string {
-  return name
-    .normalize('NFKD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim();
+  return (
+    name
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase()
+      .replace(/&/g, ' and ')
+      // "Un plus une" is TMDB's "Un + une"; "1,000 Times Good Night" a thousand, not "1 000".
+      .replace(/\+/g, ' plus ')
+      .replace(/(\d),(?=\d{3}\b)/g, '$1')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+  );
 }
+
+const NUMBER_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  hundred: '100',
+  thousand: '1000',
+};
+
+/**
+ * A film's name for comparing, a leading article and spelt-out numbers aside: Netflix's "School of Rock",
+ * "1,000 Times Good Night" and "Three Generations" are TMDB's "The School of Rock", "A Thousand Times Good Night"
+ * and "3 Generations".
+ */
+export const filmKey = (name: string) =>
+  normalize(name)
+    .replace(/^(?:the|a|an) /, '')
+    .split(' ')
+    .map((word) => NUMBER_WORDS[word] ?? word)
+    .join(' ');
 
 const PART_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, ...ROMAN };
 
@@ -339,7 +389,7 @@ export async function plan(
       undated++;
       continue;
     }
-    latest.set(title, Math.max(latest.get(title) ?? 0, at));
+    for (const one of joined(title)) latest.set(one, Math.max(latest.get(one) ?? 0, at));
   }
 
   const shows = new Map<
@@ -434,7 +484,11 @@ export async function plan(
       const number = findEpisode(name, lists[at] ?? []);
       if (number !== undefined) return { season: other, episode: number };
     }
-    return full && full !== name ? locate(id, season, full) : undefined;
+    const whole = full && full !== name ? await locate(id, season, full) : undefined;
+    if (whole) return whole;
+    // A label ahead of the name: "Love Is Blind: S10: Ohio: Um, Redo!", "Manhunt: Unabomber: Ted".
+    const after = name.indexOf(': ');
+    return after > 0 ? locate(id, season, name.slice(after + 2)) : undefined;
   };
 
   const total = shows.size + names.length;
@@ -483,6 +537,16 @@ export async function plan(
           found[at] = { season: slot.season, episode: slot.episode };
           claimed.add(`${slot.season}:${slot.episode}`);
         });
+
+    // Netflix calls a first episode "Pilot" where TMDB has its story's name (Travelers, Blindspot, The O.C.). Placed
+    // here rather than found by name, so it never tells two namesakes apart ("WHAT / IF" and "What If...?").
+    for (const [at, line] of lines.entries()) {
+      const season = line.season ?? 1;
+      if (found[at] || normalize(line.episode) !== 'pilot' || claimed.has(`${season}:1`)) continue;
+      if (!(await episodesOf(id, season))?.some((e) => e.number === 1)) continue;
+      found[at] = { season, episode: 1 };
+      claimed.add(`${season}:1`);
+    }
 
     const bySeason = new Map<number | null, number[]>();
     lines.forEach((line, at) => {
@@ -607,12 +671,34 @@ export async function plan(
     string,
     { candidates: SearchHit[]; lines: { title: string; episode: string }[] }
   >();
+  /**
+   * The film a name is: TMDB's first of that name (`filmKey`) that was out by the year it was watched — a film before
+   * a series of the same name, since "Limitless" and "Trust" are both. Where the combined search has none, TMDB's
+   * films alone, three pages deep: the 2018 "Girl" is not among the first twenty things called something with "girl".
+   */
+  const findFilm = async (title: string): Promise<SearchHit | undefined> => {
+    const key = filmKey(title);
+    const watched = new Date(latest.get(title)!).getFullYear();
+    const first = (hits: SearchHit[]) =>
+      hits.find(
+        (h) =>
+          h.type === 'movie' &&
+          (filmKey(h.name) === key || filmKey(h.originalName ?? '') === key) &&
+          (!h.year || h.year <= watched),
+      );
+    const found = first(await lookups.searchMulti(title));
+    if (found || !lookups.searchMovie || !key) return found;
+    for (let page = 1; page <= 3; page++) {
+      const hits = await lookups.searchMovie(title, page);
+      const more = first(hits);
+      if (more || hits.length < 20) return more;
+    }
+    return undefined;
+  };
   const films = pool(names, 12, async (title) => {
     const shared = (firsts.get(title.split(': ')[0]!) ?? 0) > 1;
     if (shared && (await asSeasonless(title))) return tick();
-    // A film before a series of the same name: "Limitless" and "Trust" are both.
-    const hits = named(await lookups.searchMulti(title), title, false);
-    const film = hits.find((h) => h.type === 'movie');
+    const film = await findFilm(title);
     if (film) {
       if (seen(film)) known++;
       else add({ ...markOf(film, title), at: latest.get(title)! });

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { markEpisode } from './actions';
 import {
   dayFirst,
+  filmKey,
   findEpisode,
+  joined,
   normalize,
   parseCsv,
   parseTitle,
@@ -347,6 +349,68 @@ describe('what a real history needed', () => {
       ['2:1', '2:2', '2:3', '3:1', '3:2', '3:3'].sort(),
     );
     expect(unmatched.sort()).toEqual(['Zero: Episode 1', 'Zero: Episode 2', 'Zero: Episode 3']);
+  });
+
+  it('reads a film’s name past a leading article, spelt-out numbers, "+" and a thousands comma', () => {
+    expect(filmKey('School of Rock')).toBe(filmKey('The School of Rock'));
+    expect(filmKey('1,000 Times Good Night')).toBe(filmKey('A Thousand Times Good Night'));
+    expect(filmKey('Three Generations')).toBe(filmKey('3 Generations'));
+    expect(filmKey('Un plus une')).toBe(filmKey('Un + une'));
+  });
+
+  it('splits a line naming two episodes, and reads a season label with a volume or part', () => {
+    expect(joined('The Killing: Season 3: From Up Here / The Road to Hamelin')).toEqual([
+      'The Killing: Season 3: From Up Here',
+      'The Killing: Season 3: The Road to Hamelin',
+    ]);
+    expect(joined('WHAT / IF: Part I: Pilot')).toEqual(['WHAT / IF: Part I: Pilot']);
+    expect(parseTitle('The Chef Show: Season 2 - Volume 1: Tartine')).toMatchObject({
+      season: 2,
+      episode: 'Tartine',
+    });
+  });
+
+  it('takes the film of that name out by the year it was watched, deeper than the first page', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [],
+      searchMulti: async () => [{ type: 'movie', id: 1, name: 'Gone Girl', year: 2014 }],
+      searchMovie: async (_q, page) =>
+        page === 1
+          ? Array.from({ length: 20 }, (_, at) => ({
+              type: 'movie' as const,
+              id: 100 + at,
+              name: at === 0 ? 'Girl' : `Girl ${at}`,
+              year: 2024,
+            }))
+          : [{ type: 'movie', id: 2, name: 'Girl', year: 2018 }],
+      show: async () => null,
+      episodes: async () => null,
+    };
+    const { marks } = await plan([{ title: 'Girl', date: '11/2/20' }], lookups);
+    expect(marks).toEqual([expect.objectContaining({ type: 'movie', id: 2 })]);
+  });
+
+  it('places "Pilot" as the first episode, without it telling two namesakes apart', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [
+        { type: 'tv', id: 1, name: 'What If...?' },
+        { type: 'tv', id: 2, name: 'WHAT / IF' },
+      ],
+      searchMulti: async () => [],
+      show: async () => shape({ 1: 2 }),
+      episodes: async (id) =>
+        id === 2
+          ? [
+              { number: 1, name: 'Pilot' },
+              { number: 2, name: 'Part II' },
+            ]
+          : [
+              { number: 1, name: 'What If… Captain Carter Were the First Avenger?' },
+              { number: 2, name: 'What If… T’Challa Became a Star-Lord?' },
+            ],
+    };
+    const { marks } = await plan([{ title: 'WHAT / IF: Part I: Pilot', date: '9/1/26' }], lookups);
+    expect(marks).toEqual([expect.objectContaining({ id: 2, season: 1, episode: 1 })]);
   });
 
   it('takes a film over a series of the same name', async () => {

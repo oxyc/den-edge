@@ -93,6 +93,11 @@ export function netflixLookups(
     searchMulti: async (query) =>
       hits(await get('/search/multi', { query, include_adult: 'false' })),
     searchTv: async (query) => hits(await get('/search/tv', { query }), 'tv'),
+    searchMovie: async (query, page) =>
+      hits(
+        await get('/search/movie', { query, page: String(page), include_adult: 'false' }),
+        'movie',
+      ),
     show: async (id) => {
       const body = await get(`/tv/${id}`);
       return (body && seriesShape(body)) ?? null;
