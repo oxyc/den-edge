@@ -8,7 +8,7 @@
 
   type State =
     | { step: 'idle' }
-    | { step: 'matching'; done: number; total: number }
+    | { step: 'matching'; done: number; total: number; paused?: boolean }
     | { step: 'preview'; plan: Plan; writes: Writes[] }
     | { step: 'writing'; done: number; total: number }
     | { step: 'done'; written: number }
@@ -55,11 +55,14 @@
         const row = opened.title(ref);
         return !!row && !row.deleted.value && row.status.value === 'watched';
       };
+      const lookups = netflixLookups(tmdbKey, undefined, (ms) => {
+        if (state.step === 'matching') state = { ...state, paused: ms > 0 };
+      });
       const result = await plan(
         viewings,
-        netflixLookups(tmdbKey),
+        lookups,
         (done, total) => {
-          state = { step: 'matching', done, total };
+          if (state.step === 'matching') state = { ...state, done, total };
         },
         seen,
       );
@@ -137,6 +140,9 @@
       <p class="status" role="status">
         Finding your titles{state.total ? ` — ${state.done} of ${state.total}` : '…'}
       </p>
+      {#if state.paused}
+        <p class="foot">Pausing for den-edge’s per-minute limit — carrying on shortly.</p>
+      {/if}
     {:else if state.step === 'preview'}
       {@const all = previewLines(state.plan.marks)}
       {@const chosen = state.writes.filter((w) => !excluded.has(w.key))}
