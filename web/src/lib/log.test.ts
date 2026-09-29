@@ -860,6 +860,9 @@ describe('LibraryLog', () => {
       full = true;
       expect(await log.writeAction(action(10, 'single')), 'refused, not saved').toBeNull();
       expect(await log.writeActions([action(11, 'bulk')])).toBe(false);
+      expect(log.refusal, 'which refusal, for the import to say the library is full').toBe(
+        'library_full',
+      );
       expect(log.pendingActions, 'nothing kept to be refused again').toBe(0);
       expect(log.title({ type: 'movie', id: 10 })).toBeUndefined();
       expect(log.title({ type: 'movie', id: 11 })).toBeUndefined();

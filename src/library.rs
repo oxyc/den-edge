@@ -91,13 +91,18 @@ pub(crate) const COMPRESSION_JOBS: usize = 4;
 /// measure allocator RSS exactly. The disk quota is a separate limit.
 #[derive(Clone, Copy)]
 pub struct Limits {
+    /// What a legacy (v2) log may charge as it is replayed into memory, and what `load` reserves for one.
     pub library_bytes: usize,
     pub cache_bytes: usize,
+    /// The same charge for a v3 library, which lives in its redb file rather than in memory: a bound on what one
+    /// library may hold, well inside the per-library file cap, not a memory reservation. 8 MiB here, as for v2, was
+    /// about 1,800 watched episodes: an episode row and its tracker event charge about 1 KiB and 3.6 KiB.
+    pub stored_bytes: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { library_bytes: 8 * 1024 * 1024, cache_bytes: 16 * 1024 * 1024 }
+        Self { library_bytes: 8 * 1024 * 1024, cache_bytes: 16 * 1024 * 1024, stored_bytes: 32 * 1024 * 1024 }
     }
 }
 
@@ -685,7 +690,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         .into_iter()
         .map(|write| v3::Write { key: write.k, base: write.base, value: write.v })
         .collect();
-    let live_cap = state.library_limits.library_bytes;
+    let live_cap = state.library_limits.stored_bytes;
     let result = match tokio::task::spawn_blocking(move || store.apply_bounded(&writes, live_cap)).await {
         Ok(Ok(result)) => result,
         Ok(Err(v3::StoreError::Full)) => {
@@ -1774,7 +1779,7 @@ mod tests {
 
     fn bounded(h: &Harness, library_bytes: usize, cache_bytes: usize) -> Harness {
         Harness::in_dir_with(h.dir.clone(), |state| {
-            state.library_limits = super::Limits { library_bytes, cache_bytes };
+            state.library_limits = super::Limits { library_bytes, cache_bytes, stored_bytes: library_bytes };
         })
     }
 
@@ -1796,6 +1801,29 @@ mod tests {
         );
         let reopened = bounded(&root, 1900, 3800);
         assert_eq!(changes(&reopened, TOKEN, "").await.1["head"], 4);
+    }
+
+    /// A v3 library lives in its file: what it may hold is `stored_bytes`, not the legacy in-memory `library_bytes`,
+    /// which at 8 MiB was about 1,800 watched episodes.
+    #[tokio::test]
+    async fn a_v3_library_is_bounded_by_stored_bytes_not_the_legacy_memory_charge() {
+        let root = Harness::new();
+        let h = Harness::in_dir_with(root.dir.clone(), |state| {
+            state.library_limits =
+                super::Limits { library_bytes: 1900, cache_bytes: 3800, stored_bytes: 5000 };
+        });
+        let writes = |v: char| {
+            json!([{ "k": K1, "base": 0, "v": v.to_string().repeat(100) },
+                { "k": K2, "base": 0, "v": v.to_string().repeat(100) },
+                { "k": "cccccccccccccccc", "base": 0, "v": v.to_string().repeat(100) }])
+        };
+        // Three rows pass the 1,900-byte legacy charge that refused a third above, and fit in 5,000.
+        assert_eq!(batch(&h, TOKEN, writes('x')).await.0, StatusCode::OK);
+        let more = json!([{ "k": "dddddddddddddddd", "base": 0, "v": "w".repeat(1000) }]);
+        assert_eq!(
+            batch(&h, TOKEN, more).await,
+            (StatusCode::PAYLOAD_TOO_LARGE, json!({"error":"library_full"}))
+        );
     }
 
     #[tokio::test]

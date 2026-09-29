@@ -142,6 +142,8 @@ export class LibraryLog {
   refused = false;
   /** When den-edge last refused (`Date.now()`). */
   private refusedAt = 0;
+  /** den-edge's code for the last write it refused for good (`library_full`), so a caller can say which it was. */
+  refusal: string | null = null;
   /**
    * When den-edge last refused each piece of kept work for good (`failed`), by its key: a full library, a row it will
    * not take. That piece is sent again after `RECHECK_MS`, not on every refresh, where it was refused every 30 seconds
@@ -682,6 +684,7 @@ export class LibraryLog {
     }
     if (refusals !== 'any' && !refusals.includes(code)) return;
     if (outcome) outcome.refused = true;
+    this.refusal = code ?? String(res.status);
     console.warn(`den: den-edge refused a library write (${res.status} ${code ?? ''})`);
   }
 

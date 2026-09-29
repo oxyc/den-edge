@@ -1,11 +1,15 @@
-// A Netflix import's marks as tracker events (`trackerEvents`), the same rows the web's own "Seen" writes, so the
-// Apple TV delivers them to Simkl like any other action.
+// A Netflix import's marks as the library's own rows — a film's title row, an episode's row — and no tracker events.
+// An event is an immutable row carrying two full snapshots, about 3.6 KB of den-edge's per-library budget each against
+// an episode row's 1 KB, and a history of thousands of episodes as events filled a library (`413 library_full`). The
+// journal is for what someone does in Den; an import is not that (docs/tracker-journal.md). Simkl hears of these all
+// the same: the Apple TV's catch-up (`LibraryLog.baselinePushes`) sends every watched episode and film row that no
+// event speaks for, each at its own row's stamp, once it checks Simkl hasn't got it.
 //
-// Each is stamped with the day it was watched rather than now, because a stamp's time is what the TV sends a tracker
-// as the watched date. That also decides every clash by date: a mark older than what the library already says of the
-// title or episode (seen again since, or un-seen since) loses, so it is left out rather than journalled to lose.
-// Compared by time alone: the counter is a mark's place in this file, so the same file imported again would
-// otherwise read as newer and journal every mark twice.
+// Each is stamped with the day it was watched rather than now, because that stamp's time is what the TV sends a
+// tracker as the watched date. It also decides every clash by date: a mark older than what the library already says
+// of the title or episode (seen again since, or un-seen since) loses, so it is left out rather than written to lose.
+// Compared by time alone: the counter is a mark's place in this file, so the same file imported again would otherwise
+// read as newer and write every mark twice.
 
 import {
   blankEpisode,
@@ -17,8 +21,7 @@ import {
 } from './actions';
 import { isAired } from './library';
 import type { Mark, Show } from './netflixImport';
-import { recordTrackerEvent } from './trackerEvents';
-import type { EpisodeRow, Row, SettingsRow, Stamp, TitleRow } from './wire';
+import type { EpisodeRow, Row, Stamp, TitleRow } from './wire';
 
 export interface Rows {
   title(ref: { type: string; id: number }): TitleRow | undefined;
@@ -32,9 +35,10 @@ export interface Rows {
 /** What one film or series of the import writes, under its `type:id`, so the preview can leave it out whole. */
 export interface Writes {
   key: string;
-  /** Tracker events: its films or episodes seen, and a series finished. */
-  events: SettingsRow[];
-  /** Rows written as they are, which no tracker hears of: an old series off Continue Watching. */
+  /**
+   * Its film or episodes seen, a series finished, or an old series off Continue Watching: rows, each merged over what
+   * the library holds as it is written.
+   */
   rows: Row[];
 }
 
@@ -68,21 +72,13 @@ export function importWrites(
 
   return [...byTitle].map(([key, group]) => {
     const ref = { type: group[0]!.type, id: group[0]!.id };
-    const events: SettingsRow[] = [];
     const written: Row[] = [];
-    const journal = (before: Row, after: Row, at: Stamp) => {
-      const event = recordTrackerEvent(before, after, at);
-      if (event) events.push(event);
-    };
 
     if (ref.type === 'movie') {
       const mark = group[0]!;
       const before = rows.title(ref) ?? blankTitle(ref, mark.at);
-      if (before.status.at[0] < mark.at) {
-        const at = stamp(mark.at);
-        journal(before, markWatched(before, at), at);
-      }
-      return { key, events, rows: written };
+      if (before.status.at[0] < mark.at) written.push(markWatched(before, stamp(mark.at)));
+      return { key, rows: written };
     }
 
     const imported = new Set<string>();
@@ -96,21 +92,17 @@ export function importWrites(
       // Netflix, it doesn't count towards the series being finished.
       if (before.progress.at[0] >= mark.at) continue;
       imported.add(`${mark.season}:${mark.episode}`);
-      const at = stamp(mark.at);
-      journal(before, markEpisode(before, true, at), at);
+      written.push(markEpisode(before, true, stamp(mark.at)));
     }
 
     const show = shows[ref.id];
     const title = rows.title(ref) ?? blankTitle(ref, last);
     if (show && finished(show, (s, e) => imported.has(`${s}:${e}`) || seenHere(rows, ref, s, e))) {
-      if (title.status.at[0] < last) {
-        const at = stamp(last);
-        journal(title, markWatched(title, at), at);
-      }
+      if (title.status.at[0] < last) written.push(markWatched(title, stamp(last)));
     } else if (now - last > STALE_MS && title.dismissed.at[0] <= last) {
       written.push(dismissFromContinueWatching(title, stamp(last + 1)));
     }
-    return { key, events, rows: written };
+    return { key, rows: written };
   });
 }
 

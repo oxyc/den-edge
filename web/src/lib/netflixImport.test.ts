@@ -703,11 +703,11 @@ describe('writing the marks', () => {
       true,
       [at, 0, 'tv'],
     );
-  const events = (writes: Writes[]) => writes.flatMap((w) => w.events).map((e) => trackerEvent(e)!);
+  const written = (writes: Writes[]) => writes.flatMap((w) => w.rows);
 
-  it('journals each mark stamped with the day it was watched, which the TV sends Simkl as the date', () => {
+  it('writes each mark as its own row stamped with the day it was watched, which the TV sends Simkl as the date', () => {
     const at = noon(2026, 9, 20);
-    const [episode, film] = events(
+    const rows = written(
       importWrites(
         [
           { ...friends, season: 4, episode: 12, at },
@@ -719,31 +719,35 @@ describe('writing the marks', () => {
         now,
       ),
     );
-    expect(episode!.at).toEqual([at, 0, device]);
-    expect(episode!.after).toMatchObject({
-      kind: 'ep',
-      season: 4,
-      episode: 12,
-      progress: { value: 1 },
-    });
-    expect(film!.after).toMatchObject({
-      kind: 'rec',
-      status: { value: 'watched', at: [at, 1, device] },
-      watchedAt: at,
-    });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        kind: 'ep',
+        season: 4,
+        episode: 12,
+        progress: expect.objectContaining({ value: 1, at: [at, 0, device] }),
+      }),
+      expect.objectContaining({
+        kind: 'rec',
+        status: { value: 'watched', at: [at, 1, device] },
+        watchedAt: at,
+      }),
+    ]);
+    // No tracker events: each is an immutable row about three times an episode row's size, which a long history
+    // filled a library with. The TV's catch-up sends Simkl the rows themselves.
+    expect(rows.some((row) => row.kind === 'set' || trackerEvent(row))).toBe(false);
   });
 
   it('writes nothing for a mark imported before, whatever its place in the file', () => {
     const at = noon(2026, 9, 20);
     const mark = { ...friends, season: 4, episode: 12, at };
-    const imported = events(importWrites([mark], {}, none, device, now))[0]!.after as EpisodeRow;
+    const imported = written(importWrites([mark], {}, none, device, now))[0] as EpisodeRow;
     // The same file again, this mark now second: a higher counter on the same day.
     const rows: Rows = {
       title: () => undefined,
       episode: (_r, _s, e) => (e === 12 ? imported : undefined),
     };
     expect(
-      events(importWrites([{ ...mark, episode: 13 }, mark], {}, rows, device, now)),
+      written(importWrites([{ ...mark, episode: 13 }, mark], {}, rows, device, now)),
     ).toHaveLength(1);
   });
 
@@ -751,12 +755,12 @@ describe('writing the marks', () => {
     const mark = { ...friends, season: 4, episode: 12, at: noon(2026, 9, 20) };
     const holding = (row: EpisodeRow): Rows => ({ title: () => undefined, episode: () => row });
     expect(
-      events(importWrites([mark], {}, holding(ep(12, noon(2026, 9, 25))), device, now)),
+      written(importWrites([mark], {}, holding(ep(12, noon(2026, 9, 25))), device, now)),
     ).toEqual([]);
-    const [newer] = events(
+    const [newer] = written(
       importWrites([mark], {}, holding(ep(12, noon(2025, 1, 1))), device, now),
     );
-    expect(newer!.after).toMatchObject({ progress: { at: [mark.at, 0, device] } });
+    expect(newer).toMatchObject({ progress: { at: [mark.at, 0, device] } });
   });
 
   it('marks a series seen once the import and the library hold every aired episode', () => {
@@ -765,9 +769,9 @@ describe('writing the marks', () => {
       { ...friends, season: 4, episode: 1, at: noon(2026, 9, 10) },
       { ...friends, season: 4, episode: 2, at: noon(2026, 9, 12) },
     ];
-    const series = events(importWrites(marks, { 1668: show }, none, device, now)).at(-1)!;
+    const series = written(importWrites(marks, { 1668: show }, none, device, now)).at(-1)!;
     // Episode 3 hasn't aired, and specials don't count.
-    expect(series.after).toMatchObject({
+    expect(series).toMatchObject({
       kind: 'rec',
       status: { value: 'watched', at: [noon(2026, 9, 12), 2, device] },
     });
@@ -777,7 +781,7 @@ describe('writing the marks', () => {
       episode: (_r, _s, e) => (e === 1 ? ep(1, noon(2020, 1, 1)) : undefined),
     };
     const partly = importWrites([marks[1]!], { 1668: show }, rows, device, now);
-    expect(events(partly).at(-1)!.after).toMatchObject({
+    expect(written(partly).at(-1)).toMatchObject({
       kind: 'rec',
       status: { value: 'watched' },
     });
@@ -792,7 +796,7 @@ describe('writing the marks', () => {
       device,
       now,
     );
-    expect(old[0]!.rows).toEqual([
+    expect(old[0]!.rows.filter((row) => row.kind === 'rec')).toEqual([
       expect.objectContaining({
         kind: 'rec',
         dismissed: { value: true, at: [noon(2025, 1, 5) + 1, 1, device] },
@@ -805,7 +809,6 @@ describe('writing the marks', () => {
       device,
       now,
     );
-    expect(recent[0]!.rows).toEqual([]);
-    expect(events(recent).every((e) => e.after.kind === 'ep')).toBe(true);
+    expect(recent[0]!.rows.every((row) => row.kind === 'ep')).toBe(true);
   });
 });

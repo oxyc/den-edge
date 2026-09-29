@@ -28,7 +28,8 @@ pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_P
 const RETAINED_DATABASES: usize = 2;
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("keys-v3");
 /// The exact v2-compatible memory charge of each live row. Keeping this beside the key index lets a write enforce
-/// the same 8 MiB semantic library bound without parsing canonical JSON or confusing redb's cache with live data.
+/// the library's semantic bound (`Limits::stored_bytes`) without parsing canonical JSON or confusing redb's cache
+/// with live data.
 const CHARGES: TableDefinition<&str, u64> = TableDefinition::new("charges-v3");
 const SEQUENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("sequence-v3");
 const META_U64: TableDefinition<&str, u64> = TableDefinition::new("metadata-u64-v3");

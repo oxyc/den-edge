@@ -1,6 +1,6 @@
 <!-- Settings › Import: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
-     each film and episode at the day it was last watched. Read and matched in this browser; written as the same
-     tracker events the web's own "Seen" writes, so the Apple TV passes them to Simkl in its own time. -->
+     each film and episode at the day it was last watched. Read and matched in this browser; written as the library's
+     own rows (`netflixJournal`), which the Apple TV's catch-up passes to Simkl in its own time, each at its date. -->
 <script lang="ts" module>
   import { SvelteSet } from 'svelte/reactivity';
   import type { Plan } from '../lib/netflixImport';
@@ -36,7 +36,7 @@
   }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
     $props();
 
-  /** Journals are kept in this browser's storage until sent; a batch at a time stays well inside its quota. */
+  /** Rows written a batch at a time, so the count shown moves and a stop says roughly how far it got. */
   const BATCH = 250;
 
   async function read(file: File) {
@@ -81,26 +81,26 @@
   async function write(writes: Writes[]) {
     const opened = log;
     if (!opened) return;
-    const events = writes.flatMap((w) => w.events);
     const rows = writes.flatMap((w) => w.rows);
-    state = { step: 'writing', done: 0, total: events.length };
-    for (let start = 0; start < events.length; start += BATCH) {
-      const batch = events.slice(start, start + BATCH);
-      if (!(await opened.writeActions(batch))) {
+    state = { step: 'writing', done: 0, total: rows.length };
+    for (let start = 0; start < rows.length; start += BATCH) {
+      const batch = rows.slice(start, start + BATCH);
+      opened.refusal = null;
+      if (!(await opened.writeRows(batch))) {
+        const full = opened.refusal === 'library_full';
         state = {
           step: 'failed',
-          message: `Saved ${start} of ${events.length}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
+          message: full
+            ? `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
+            : `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
         };
         changed();
         return;
       }
-      state = { step: 'writing', done: start + batch.length, total: events.length };
+      state = { step: 'writing', done: start + batch.length, total: rows.length };
     }
-    // Off Continue Watching: a plain row, which nothing needs to be told about. Failing it loses no viewing.
-    if (rows.length && !(await opened.writeRows(rows)))
-      console.warn('den: Netflix import could not hide old series from Continue Watching');
     changed();
-    state = { step: 'done', written: events.length };
+    state = { step: 'done', written: rows.length };
   }
 
   const plural = (n: number, one: string, many = `${one}s`) =>
@@ -198,11 +198,16 @@
         <button
           type="button"
           class="primary"
-          disabled={!chosen.some((w) => w.events.length || w.rows.length)}
+          disabled={!chosen.some((w) => w.rows.length)}
           onclick={() => void write(chosen)}
         >
           Mark {plural(
-            chosen.filter((w) => w.events.length).length,
+            chosen.filter((w) =>
+              w.rows.some(
+                (row) =>
+                  row.kind === 'ep' || (row.kind === 'rec' && row.status.value === 'watched'),
+              ),
+            ).length,
             'film or series',
             'films and series',
           )} as seen
