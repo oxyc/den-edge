@@ -101,6 +101,8 @@ pub struct AppState {
     /// Relayed request bodies being received (`relay::MAX_BODY_IN_FLIGHT`). Kept apart from `relay_slots`, so slow
     /// uploads cannot occupy every upstream slot, while their bounded bodies cannot accumulate without a cap.
     pub relay_body_slots: Arc<tokio::sync::Semaphore>,
+    /// atlas `/recommend` bodies being received, which may be larger (`relay::RECOMMEND_BODIES_IN_FLIGHT`).
+    pub recommend_body_slots: Arc<tokio::sync::Semaphore>,
     /// Of those, the ones atlas's tuning playground may hold at once (`relay::PLAYGROUND_IN_FLIGHT`).
     pub playground_slots: Arc<tokio::sync::Semaphore>,
     /// Bytes of relayed answers collected whole that may be held at once (`relay::COLLECT_BUDGET_BYTES`).
@@ -274,6 +276,7 @@ impl AppState {
             relay_client: relay::client(),
             relay_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_IN_FLIGHT)),
             relay_body_slots: Arc::new(tokio::sync::Semaphore::new(relay::MAX_BODY_IN_FLIGHT)),
+            recommend_body_slots: Arc::new(tokio::sync::Semaphore::new(relay::RECOMMEND_BODIES_IN_FLIGHT)),
             relay_collect_budget: Arc::new(tokio::sync::Semaphore::new(relay::COLLECT_BUDGET_BYTES)),
             playground_slots: Arc::new(tokio::sync::Semaphore::new(relay::PLAYGROUND_IN_FLIGHT)),
             routes: Vec::new(),

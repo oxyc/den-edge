@@ -702,6 +702,9 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
 fn body_cap(route: &str) -> usize {
     match route {
         "/lib/:id/batch" => crate::library::BATCH_MAX_BODY_BYTES,
+        // The relay holds each atlas path to its own cap (`relay::is_recommend`); this only refuses what no atlas
+        // path takes.
+        "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
 }

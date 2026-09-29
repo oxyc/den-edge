@@ -87,6 +87,17 @@ pub(crate) const MAX_IN_FLIGHT: usize = 16;
 /// but buffering bodies before admission without another global bound can exceed the container's memory limit.
 /// Twice the upstream cap leaves room for ordinary bodyless requests while every upstream slot is busy.
 pub(crate) const MAX_BODY_IN_FLIGHT: usize = MAX_IN_FLIGHT * 2;
+/// atlas's `/recommend` takes the household's library, owned titles and candidates, up to 5,000, 10,000 and 2,000
+/// of them (den-atlas `recommend.rs` `MAX_LIBRARY`…), which is ~2 MiB with TMDB hints. The 256 KiB every other
+/// relayed body gets refused a library of ~1,300 titles. These bodies get their own cap and their own few slots,
+/// so the larger allowance never multiplies across `MAX_BODY_IN_FLIGHT`.
+pub(crate) const RECOMMEND_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const RECOMMEND_BODIES_IN_FLIGHT: usize = 2;
+
+/// Whether a relayed path is atlas's `/recommend` (an install's config may sit between the prefix and it).
+pub(crate) fn is_recommend(path: &str) -> bool {
+    path.starts_with("/atlas/") && path.trim_end_matches('/').ends_with("/recommend")
+}
 /// Media fetches per address per minute, counted apart from the JSON above.
 ///
 /// One playback is many requests, not one: a video element opens a range, seeks, and opens another. Charging
@@ -810,13 +821,30 @@ async fn relay_with(
             );
         }
     };
-    let body =
-        match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES)).await {
-            Ok(Ok(body)) => body,
-            Ok(Err(_)) => return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
-            Err(_) => return json(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
-        };
+    let recommend = is_recommend(&control);
+    let recommend_slot = if recommend {
+        match Arc::clone(&state.recommend_body_slots).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                guest_refused("relay_busy");
+                return crate::handler::retry_after(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &error("relay_busy"),
+                    SLOT_WAIT.as_millis() as u64,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let limit = if recommend { RECOMMEND_BODY_BYTES } else { MAX_BODY_BYTES };
+    let body = match tokio::time::timeout(TIMEOUT, axum::body::to_bytes(req.into_body(), limit)).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return json(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        Err(_) => return json(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+    };
     drop(body_slot);
+    drop(recommend_slot);
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let slot = match slot {
@@ -3021,6 +3049,25 @@ mod tests {
         {
             assert!(!super::playground(path), "{path}");
         }
+    }
+
+    /// A household of ~1,300 titles sends atlas's `/recommend` ~325 KiB with its TMDB hints, which the 256 KiB every
+    /// other relayed body gets refused with a 413 (seen live after a Netflix import).
+    #[tokio::test]
+    async fn atlas_recommend_takes_a_large_library_and_nothing_else_does() {
+        let addon = public_addon().await;
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/atlas={addon}"));
+        let library = "x".repeat(1024 * 1024);
+        for path in ["/atlas/recommend", "/atlas/nfx-amp/recommend"] {
+            let answer = h.send("POST", path, Some(library.clone()), &[]).await;
+            assert_eq!(answer.status(), StatusCode::OK, "{path}");
+        }
+        let other = h.send("POST", "/atlas/index/similar/movie/1.json", Some(library), &[]).await;
+        assert_eq!(other.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let too_big = "x".repeat(super::RECOMMEND_BODY_BYTES + 1);
+        let refused = h.send("POST", "/atlas/recommend", Some(too_big), &[]).await;
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// Scout's `/configure` mints installs, and an install a stranger makes scrapes indexers from this
