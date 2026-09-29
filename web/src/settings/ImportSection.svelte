@@ -155,6 +155,10 @@
         {#if state.plan.known}
           {plural(state.plan.known, 'line')} of what you’ve already marked seen were skipped.
         {/if}
+        {#if state.plan.covered}
+          {plural(state.plan.covered, 'line')} named an episode of a season the rest of the file already
+          covers in full.
+        {/if}
       </p>
       <details class="foot">
         <summary>Review what was found</summary>

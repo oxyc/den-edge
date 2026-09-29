@@ -36,8 +36,11 @@ export interface Mark {
   at: number;
 }
 
-/** A series' episodes per season and the last one aired (`tmdb.seriesShape`). */
-export type Show = Shape;
+/**
+ * A series' episodes per season and the last one aired (`tmdb.seriesShape`), and each season's own name where TMDB
+ * gives one: Trapped's third is "Entrapped", which is what Netflix calls it.
+ */
+export type Show = Shape & { seasonNames?: Map<number, string> };
 
 export interface Plan {
   marks: Mark[];
@@ -49,6 +52,11 @@ export interface Plan {
   undated: number;
   /** Lines of films and series the library already has as seen, which were not looked into further. */
   known: number;
+  /**
+   * Lines naming a season whose every episode the file's other lines already are: Netflix splits some seasons into
+   * more episodes than TMDB has ("Grey's Anatomy: Season 6: Goodbye"), so the extra line has nothing left to be.
+   */
+  covered: number;
 }
 
 /** The TMDB lookups the matcher needs; each null or [] when TMDB can't answer. */
@@ -347,9 +355,10 @@ export function findEpisode(
     .map((e) => ({ number: e.number, score: likeness(mine.words, e.words) }))
     .sort((a, b) => b.score - a.score);
   const [best, next] = scored;
-  return best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1
-    ? best.number
-    : undefined;
+  if (best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1) return best.number;
+  // A note Netflix adds in brackets: "Wujing (No. 84)" is TMDB's "Wujing".
+  const bare = name.replace(/\s*\([^()]*\)\s*$/, '');
+  return bare !== name && normalize(bare) ? findEpisode(bare, episodes) : undefined;
 }
 
 /**
@@ -435,6 +444,17 @@ export async function plan(
     return showCache.get(id)!;
   };
   /**
+   * The series named `show`, in TMDB's order. Netflix tells namesakes apart by a year in the name ("Tales of the City
+   * (1993)", "Further Tales of the City (2001)"), which TMDB's search finds nothing for: it is searched without the
+   * year, and only a series first aired that year is kept.
+   */
+  const namesakes = async (show: string) => {
+    const dated = /^(.*\S)\s*\((\d{4})\)$/.exec(show);
+    const name = dated?.[1] ?? show;
+    const found = named(await searchTv(name), name, false);
+    return dated ? found.filter((hit) => hit.year === Number(dated[2])) : found;
+  };
+  /**
    * A show's candidates: its namesakes; or, where TMDB names none so, what the search finds under another name (TMDB's
    * alternative titles take "The Defeated" to Shadowplay, "Entrapped" to Trapped) or under a shorter one ("Itxaso and
    * the Sea" is TMDB's "Itxaso"). Only a namesake is taken on trust: any other has to be borne out by its episodes.
@@ -442,9 +462,9 @@ export async function plan(
   const candidatesFor = async (
     show: string,
   ): Promise<{ hit: SearchHit; exact: boolean; first?: boolean }[]> => {
-    const hits = await searchTv(show);
-    const exact = named(hits, show, false);
+    const exact = await namesakes(show);
     if (exact.length) return exact.map((hit) => ({ hit, exact: true }));
+    const hits = await searchTv(show);
     if (hits.length)
       return hits.slice(0, 4).map((hit, at) => ({ hit, exact: false, first: at === 0 }));
     const words = show.split(' ');
@@ -459,6 +479,7 @@ export async function plan(
   const seasonsOf = async (id: number) => [...((await showOf(id))?.counts.keys() ?? [])];
   const layouts: Record<number, Show> = {};
   let known = 0;
+  let covered = 0;
   /** The series' layout, kept for the plan: asked for with its seasons, so it costs no lookup of its own. */
   const keep = async (id: number) => {
     const show = await showOf(id);
@@ -504,6 +525,7 @@ export async function plan(
   const place = async (
     id: number,
     lines: { title: string; season: number | null; episode: string; full?: string }[],
+    netflixName?: string,
   ) => {
     const found = await Promise.all(
       lines.map((line) => locate(id, line.season, line.episode, line.full)),
@@ -538,11 +560,15 @@ export async function plan(
           claimed.add(`${slot.season}:${slot.episode}`);
         });
 
-    // Netflix calls a first episode "Pilot" where TMDB has its story's name (Travelers, Blindspot, The O.C.). Placed
-    // here rather than found by name, so it never tells two namesakes apart ("WHAT / IF" and "What If...?").
+    // Netflix calls a first episode "Pilot", or by the show's own name ("Community: Season 1: Community"), where TMDB
+    // has its story's name (Travelers, Blindspot, The O.C.). Placed here rather than found by name, so it never tells
+    // two namesakes apart ("WHAT / IF" and "What If...?").
+    const pilot = (episode: string) =>
+      normalize(episode) === 'pilot' ||
+      (!!netflixName && normalize(episode) === normalize(netflixName));
     for (const [at, line] of lines.entries()) {
       const season = line.season ?? 1;
-      if (found[at] || normalize(line.episode) !== 'pilot' || claimed.has(`${season}:1`)) continue;
+      if (found[at] || !pilot(line.episode) || claimed.has(`${season}:1`)) continue;
       if (!(await episodesOf(id, season))?.some((e) => e.number === 1)) continue;
       found[at] = { season, episode: 1 };
       claimed.add(`${season}:1`);
@@ -626,7 +652,7 @@ export async function plan(
       const byName = (
         await Promise.all(asked.map((l) => locate(hit.id, l.season, l.episode, l.full)))
       ).filter(Boolean).length;
-      const found = await place(hit.id, asked);
+      const found = await place(hit.id, asked, show);
       const count = found.filter(Boolean).length;
       if (!exact && !first && !(await borneOut(hit.id, asked, found))) continue;
       if (
@@ -641,11 +667,18 @@ export async function plan(
       known += lines.length;
       return tick();
     }
-    lines.forEach(({ title }, at) => {
+    const taken = new Set(best?.found.flatMap((f) => (f ? [`${f.season}:${f.episode}`] : [])));
+    /** As many of this show's other lines are of `season` as TMDB counts episodes in it. */
+    const whole = async (season: number | null) => {
+      const count = best && season !== null ? (await showOf(best.hit.id))?.counts.get(season) : 0;
+      return !!count && [...taken].filter((key) => key.startsWith(`${season}:`)).length >= count;
+    };
+    for (const [at, { title, parsed }] of lines.entries()) {
       const where = best?.found[at];
       if (best && where) add({ ...markOf(best.hit, show), ...where, at: latest.get(title)! });
+      else if (await whole(parsed.season)) covered++;
       else unmatched.push(title);
-    });
+    }
     tick();
   });
 
@@ -702,14 +735,38 @@ export async function plan(
     if (film) {
       if (seen(film)) known++;
       else add({ ...markOf(film, title), at: latest.get(title)! });
-    } else if (shared || !(await asSeasonless(title))) unmatched.push(title);
+    } else if (shared || !((await asSeasonless(title)) || (await asWhole(title))))
+      unmatched.push(title);
     tick();
   });
+  /**
+   * A name with no episode that TMDB has as a series of that name, of three episodes or fewer, out by the year it
+   * was watched: a TV film or two-parter ("Love in Lapland"), marked whole.
+   */
+  async function asWhole(title: string): Promise<boolean> {
+    const watched = new Date(latest.get(title)!).getFullYear();
+    for (const hit of await namesakes(title)) {
+      if (hit.year && hit.year > watched) continue;
+      const seasons = [...((await showOf(hit.id))?.counts ?? [])].filter(([season]) => season > 0);
+      const total = seasons.reduce((sum, [, count]) => sum + count, 0);
+      if (total < 1 || total > 3) continue;
+      if (seen(hit)) known++;
+      else {
+        await keep(hit.id);
+        for (const [season, count] of seasons)
+          for (let episode = 1; episode <= count; episode++)
+            add({ ...markOf(hit, title), season, episode, at: latest.get(title)! });
+      }
+      return true;
+    }
+    return false;
+  }
   await Promise.all([series, films]);
   for (const { hit, show, lines } of seasonless.values()) {
     const found = await place(
       hit.id,
       lines.map((line) => ({ ...line, season: null })),
+      show,
     );
     lines.forEach(({ title }, at) => {
       const where = found[at];
@@ -718,12 +775,17 @@ export async function plan(
     });
   }
   for (const [show, { candidates, lines }] of unnamedShows) {
-    const asked = lines.map((line) => ({ ...line, season: null }));
     let taken = false;
     for (const hit of candidates) {
       await keep(hit.id);
-      const found = await place(hit.id, asked);
-      if (!(await borneOut(hit.id, asked, found))) continue;
+      // A season TMDB gives Netflix's name for the show is the one the lines are of, which bears the series out
+      // on its own: "Entrapped: Episode 3" is Trapped's third season's third episode.
+      const own = [...((await showOf(hit.id))?.seasonNames ?? [])].find(
+        ([season, name]) => season > 0 && normalize(name) === normalize(show),
+      )?.[0];
+      const asked = lines.map((line) => ({ ...line, season: own ?? null }));
+      const found = await place(hit.id, asked, show);
+      if (own === undefined && !(await borneOut(hit.id, asked, found))) continue;
       taken = true;
       if (seen(hit)) known += lines.length;
       else
@@ -745,7 +807,7 @@ export async function plan(
     const parts = title.split(': ');
     for (let i = parts.length - 1; i >= 1; i--) {
       const show = parts.slice(0, i).join(': ');
-      const candidates = named(await searchTv(show), show, false);
+      const candidates = await namesakes(show);
       if (!candidates.length) continue;
       const episode = parts.slice(i).join(': ');
       let chosen = candidates[0]!;
@@ -778,7 +840,7 @@ export async function plan(
     return false;
   }
 
-  return { marks: [...marks.values()], shows: layouts, unmatched, undated, known };
+  return { marks: [...marks.values()], shows: layouts, unmatched, undated, known, covered };
 }
 
 /** A hit as a mark's identity: TMDB's name and year, and what Netflix called it. */

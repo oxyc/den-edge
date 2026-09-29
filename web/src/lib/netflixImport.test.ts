@@ -413,6 +413,94 @@ describe('what a real history needed', () => {
     expect(marks).toEqual([expect.objectContaining({ id: 2, season: 1, episode: 1 })]);
   });
 
+  it('picks the namesake of the year in the name, and a season TMDB gives the show’s name', async () => {
+    const lookups: Lookups = {
+      searchTv: async (query) =>
+        ({
+          'Tales of the City': [
+            { type: 'tv' as const, id: 1, name: 'Tales of the City', year: 2019 },
+            { type: 'tv' as const, id: 2, name: 'Tales of the City', year: 1993 },
+          ],
+          Entrapped: [{ type: 'tv' as const, id: 3, name: 'Trapped', year: 2015 }],
+        })[query] ?? [],
+      searchMulti: async () => [],
+      show: async (id) =>
+        id === 3
+          ? { ...shape({ 1: 10, 2: 10, 3: 8 }), seasonNames: new Map([[3, 'Entrapped']]) }
+          : shape({ 1: 6 }),
+      episodes: async (_id, season) =>
+        Array.from({ length: season === 3 ? 8 : 6 }, (_, at) => ({
+          number: at + 1,
+          name: `Episode ${at + 1}`,
+        })),
+    };
+    const { marks, unmatched } = await plan(
+      [
+        { title: 'Tales of the City (1993): Episode 1', date: '8/23/19' },
+        { title: 'Entrapped: Episode 1', date: '9/28/22' },
+        { title: 'Entrapped: Episode 2', date: '9/29/22' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => `${m.id}:S${m.season}E${m.episode}`).sort()).toEqual(
+      ['2:S1E1', '3:S3E1', '3:S3E2'].sort(),
+    );
+    expect(unmatched).toEqual([]);
+  });
+
+  it('marks a two-part TV film whole, and counts a line of a season already covered', async () => {
+    const lookups: Lookups = {
+      searchTv: async (query) =>
+        query === 'Love in Lapland'
+          ? [{ type: 'tv', id: 1, name: 'Love in Lapland', year: 2017 }]
+          : [{ type: 'tv', id: 2, name: "Grey's Anatomy", year: 2005 }],
+      searchMulti: async () => [],
+      show: async (id) => shape(id === 1 ? { 1: 2 } : { 6: 2 }),
+      episodes: async (id) =>
+        id === 1
+          ? [
+              { number: 1, name: 'Part 1' },
+              { number: 2, name: 'Part 2' },
+            ]
+          : [
+              { number: 1, name: 'Good Mourning' },
+              { number: 2, name: 'Sanctuary' },
+            ],
+    };
+    const { marks, unmatched, covered } = await plan(
+      [
+        { title: 'Love in Lapland', date: '11/13/20' },
+        { title: "Grey's Anatomy: Season 6: Good Mourning", date: '1/1/20' },
+        { title: "Grey's Anatomy: Season 6: Sanctuary", date: '1/2/20' },
+        { title: "Grey's Anatomy: Season 6: Goodbye", date: '1/1/20' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => `${m.id}:S${m.season}E${m.episode}`).sort()).toEqual(
+      ['1:S1E1', '1:S1E2', '2:S6E1', '2:S6E2'].sort(),
+    );
+    expect(unmatched).toEqual([]);
+    expect(covered).toBe(1);
+  });
+
+  it('finds a name past a bracketed note, and an episode named for its show as the first', async () => {
+    expect(findEpisode('Wujing (No. 84)', [{ number: 3, name: 'Wujing' }])).toBe(3);
+    const lookups: Lookups = {
+      searchTv: async () => [{ type: 'tv', id: 1, name: 'Community' }],
+      searchMulti: async () => [],
+      show: async () => shape({ 1: 2 }),
+      episodes: async () => [
+        { number: 1, name: 'Pilot' },
+        { number: 2, name: 'Spanish 101' },
+      ],
+    };
+    const { marks } = await plan(
+      [{ title: 'Community: Season 1: Community', date: '12/10/20' }],
+      lookups,
+    );
+    expect(marks).toEqual([expect.objectContaining({ id: 1, season: 1, episode: 1 })]);
+  });
+
   it('takes a film over a series of the same name', async () => {
     const lookups: Lookups = {
       searchTv: async () => [],

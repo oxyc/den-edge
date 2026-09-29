@@ -100,7 +100,17 @@ export function netflixLookups(
       ),
     show: async (id) => {
       const body = await get(`/tv/${id}`);
-      return (body && seriesShape(body)) ?? null;
+      const shape = body && seriesShape(body);
+      if (!shape) return null;
+      const seasons = Array.isArray(body.seasons) ? (body.seasons as Json[]) : [];
+      const seasonNames = new Map<number, string>(
+        seasons.flatMap((s): [number, string][] =>
+          typeof s.season_number === 'number' && typeof s.name === 'string'
+            ? [[s.season_number, s.name]]
+            : [],
+        ),
+      );
+      return { ...shape, seasonNames };
     },
     episodes: async (id, season) => {
       const body = await get(`/tv/${id}/season/${season}`);
