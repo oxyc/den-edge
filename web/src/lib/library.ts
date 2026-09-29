@@ -4,7 +4,7 @@
 
 import { WATCHED } from './actions';
 import { syncPolicy } from './syncCore';
-import type { Row } from './wire';
+import { wellFormed, type Row } from './wire';
 
 export type MediaType = 'movie' | 'tv';
 /** What Explore browses and atlas's filter answers for: one type, or films and series together. */
@@ -189,7 +189,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
   const flags = new Map(library.flags ?? []);
   const resets = new Map<string, number>();
   for (const row of rows) {
-    if (row.kind === 'set') continue; // settings are read by prefs.ts
+    if (row.kind === 'set' || !wellFormed(row)) continue; // settings are read by prefs.ts
     if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {

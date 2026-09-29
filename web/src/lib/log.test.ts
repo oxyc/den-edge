@@ -1295,6 +1295,12 @@ describe('applyLog', () => {
     const after = applyLog(named, [episode(1, 1, 1, 4000), episode(1, 2, 0.3, 5000), reset]);
     expect(after.marks.map((m) => m.episode)).toEqual([2]);
   });
+
+  it('leaves out an episode row of a film, which den-core refuses, rather than failing the whole library', () => {
+    const film = { ...episode(1, 2, 1, 4000), title: { type: 'movie' as const, id: 550 } };
+    const library = applyLog(backup, [film, episode(1, 2, 0.5, 4000)]);
+    expect(library.marks.map((m) => m.id)).toEqual([95396]);
+  });
 });
 
 describe('tmdb', () => {

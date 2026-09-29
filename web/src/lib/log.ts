@@ -16,6 +16,7 @@ import {
   open,
   rowName,
   seal,
+  wellFormed,
   ZERO_STAMP,
   type EpisodeRow,
   type LibraryKeys,
@@ -185,6 +186,7 @@ export class LibraryLog {
     await ensureSyncPolicy();
     const saved = await log.kept<Snapshot>(SNAPSHOT);
     for (const [name, seq, row] of saved?.entries ?? []) {
+      if (!wellFormed(row)) continue;
       log.acknowledged.set(name, { seq, row });
       log.entries.set(name, { seq, row });
     }
@@ -285,6 +287,7 @@ export class LibraryLog {
       log.generation = saved.generation;
       log.head = saved.head;
       for (const [name, seq, row] of saved.entries) {
+        if (!wellFormed(row)) continue;
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }
@@ -311,6 +314,7 @@ export class LibraryLog {
       log.generation = partial.generation;
       log.head = since = partial.head;
       for (const [name, seq, row] of partial.entries) {
+        if (!wellFormed(row)) continue;
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }

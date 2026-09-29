@@ -189,6 +189,12 @@ export async function seal(
   return { k: hex(mac), v: toBase64url(out) };
 }
 
+/**
+ * Only a series has episodes (library v2 §3). den-core refuses any other episode row, so one held anywhere would
+ * stop every page that asks it about the library; such a row is left out wherever rows are read.
+ */
+export const wellFormed = (row: Row): boolean => row.kind !== 'ep' || row.title?.type === 'tv';
+
 /** Open a stored row; rejects one that was tampered with, sealed under another key, or moved to another `k`. */
 export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row> {
   const bytes = fromBase64url(v);
@@ -202,6 +208,7 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
     throw new Error(`unknown row kind ${String(parsed.kind)}`);
   }
   const row = parsed as Row;
+  if (!wellFormed(row)) throw new Error(`an episode row of a film: ${rowName(row)}`);
   if (hex(await rowMac(keys, rowName(row))) !== k)
     throw new Error('the row names a different record than its key');
   return row;
