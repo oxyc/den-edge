@@ -1,3 +1,4 @@
+import { LIVE_PULL_MS } from './livePosition';
 import { LibraryLog } from './log';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
@@ -11,6 +12,8 @@ export class LibrarySession {
   shapes = $state(new Map<string, Shape>());
   revision = $state(0);
   settingsRevision = $state(0);
+  /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
+  live = false;
   log = $state<LibraryLog | null | undefined>(undefined);
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
@@ -91,13 +94,17 @@ export class LibrarySession {
       await this.refresh();
       if (!disposed && this.log?.moved) onMoved();
     };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 30_000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      await refresh();
+      if (!disposed) timer = setTimeout(() => void tick(), this.live ? LIVE_PULL_MS : 30_000);
+    };
+    void tick();
     window.addEventListener('online', refresh);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       disposed = true;
-      clearInterval(timer);
+      clearTimeout(timer);
       window.removeEventListener('online', refresh);
       document.removeEventListener('visibilitychange', refresh);
     };

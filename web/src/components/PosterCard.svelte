@@ -8,11 +8,13 @@
   import { warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
+  import { libraryStandings } from '../lib/standing.svelte';
 
   let {
     title,
     caption,
     progress,
+    live,
     href,
     action,
     onopen,
@@ -20,6 +22,8 @@
     title: Title;
     caption?: string;
     progress?: number;
+    /** Where it is playing right now on some device, as a clock that ticks (`livePosition`). */
+    live?: string;
     /** Where the card leads. Without one it is not a link: a card that shows a title and opens nothing. */
     href?: string;
     /**
@@ -47,6 +51,8 @@
   const art = $derived(poster && poster !== failed ? poster : undefined);
   const faded = $derived(availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
+  const standing = $derived(libraryStandings.of(title));
+  const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
   $effect(() => availability.want(title));
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
@@ -84,6 +90,28 @@
       <time class="release" datetime={release.date} aria-label={release.accessibilityLabel}
         >{release.text}</time
       >
+    {/if}
+    {#if live}
+      <span class="live" class:raised={progress}>▶ {live}</span>
+    {/if}
+    {#if standing}
+      <span
+        class="standing"
+        class:raised={progress}
+        role="img"
+        aria-label={standingLabel[standing]}
+        title={standingLabel[standing]}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          {#if standing === 'watched'}
+            <path d="M5 12.5l4.5 4.5L19 7.5" />
+          {:else if standing === 'watchlist'}
+            <path class="filled" d="M7 4h10v16l-5-3.5L7 20z" />
+          {:else}
+            <path class="filled" d="M8 5.5v13l10.5-6.5z" />
+          {/if}
+        </svg>
+      </span>
     {/if}
     {#if progress !== undefined && progress > 0}
       <span class="progress" style:--p={progress}></span>
@@ -222,6 +250,53 @@
       var(--fg) calc(var(--p) * 100%),
       rgb(255 255 255 / 0.3) 0
     );
+  }
+
+  /* Above the progress bar where there is one. */
+  .live,
+  .standing {
+    position: absolute;
+    bottom: 8px;
+  }
+
+  .live.raised,
+  .standing.raised {
+    bottom: 18px;
+  }
+
+  .live {
+    left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--on-accent, #fff);
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .standing {
+    right: 8px;
+    display: grid;
+    width: 24px;
+    height: 24px;
+    place-items: center;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.72);
+  }
+
+  .standing svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: var(--fg);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.5;
+  }
+
+  .standing .filled {
+    fill: var(--fg);
   }
 
   .holder {

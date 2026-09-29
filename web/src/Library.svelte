@@ -41,6 +41,7 @@
     emptyLibrary,
     episodeAfter,
     isAired,
+    standings,
     titleKey,
     untitled,
     watchlist,
@@ -49,6 +50,8 @@
     type Title,
   } from './lib/library';
   import { links, type Link } from './lib/links.svelte';
+  import { clock as timecode, livePosition } from './lib/livePosition';
+  import { libraryStandings } from './lib/standing.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
@@ -194,6 +197,36 @@
   const library = $derived(
     applied && { ...withDisplay(applied, session.displays), shapes: session.shapes },
   );
+
+  // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
+  $effect(() => libraryStandings.set(applied ? standings(applied) : new Map()));
+  $effect(() => () => libraryStandings.set(new Map()));
+
+  /**
+   * The clock a Continue Watching card shows while its title plays on some device. It ticks each second only
+   * while something is playing, and meanwhile the library is pulled faster, so a pause stops it soon.
+   */
+  let now = $state(Date.now());
+  const playingAnywhere = $derived(
+    library
+      ? continueWatching(library).some((entry) => livePosition(entry, now) !== undefined)
+      : false,
+  );
+  $effect(() => {
+    session.live = playingAnywhere;
+    if (!playingAnywhere) return;
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  // A fresh position arriving from a pull is live again without waiting for a tick to notice.
+  $effect(() => {
+    void applied;
+    now = Date.now();
+  });
+  const liveClock = (entry: ContinueEntry) => {
+    const at = livePosition(entry, now);
+    return at === undefined ? undefined : timecode(at);
+  };
 
   /** The title whose page is open, if one is. */
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
@@ -1221,6 +1254,7 @@
             title={entry.title}
             caption={caption(entry)}
             progress={entry.fraction}
+            live={liveClock(entry)}
             href={titleHref(entry.title)}
           />
         {/each}

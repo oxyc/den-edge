@@ -84,6 +84,8 @@ interface LibraryRecord {
   status: Status;
   progress: number;
   progressAt: number;
+  /** The resume point in seconds, where the device that wrote it knew it. */
+  seconds?: number;
   addedAt: number;
   deleted: boolean;
 }
@@ -95,6 +97,7 @@ interface Mark {
   episode: number;
   fraction: number;
   updatedAt: number;
+  seconds?: number;
   title: string;
   posterPath?: string;
   voteAverage: number;
@@ -155,6 +158,9 @@ export interface ContinueEntry {
   fraction: number;
   /** The episode to resume or start next, for a series. */
   episode?: { season: number; episode: number };
+  /** Where it was last playing, in seconds, and when that was written (epoch ms): `livePosition`. */
+  seconds?: number;
+  at?: number;
 }
 
 export function emptyLibrary(): Library {
@@ -219,6 +225,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
           ...episode,
           fraction: decided.fraction,
           updatedAt: decided.at,
+          ...(decided.seconds !== undefined ? { seconds: decided.seconds } : {}),
           title: series?.title ?? '',
           posterPath: series?.posterPath,
           voteAverage: series?.voteAverage ?? 0,
@@ -236,6 +243,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
       status: row.status.value,
       progress: row.resume.value,
       progressAt: row.resume.at[0],
+      ...(row.resume.seconds !== undefined ? { seconds: row.resume.seconds } : {}),
       addedAt: row.addedAt,
       deleted: row.deleted.value,
     });
@@ -305,6 +313,26 @@ export function watchlist(library: Library): Title[] {
     .filter((r) => !r.deleted && r.status === 'watchlist' && r.title.title !== '')
     .sort((a, b) => b.addedAt - a.addedAt)
     .map((r) => r.title);
+}
+
+/** What the library says of a title, for the mark in its poster's corner. */
+export type Standing = 'watched' | 'watchlist' | 'inProgress';
+
+/**
+ * Every title the library has a standing for, by `titleKey`: its record's status, and a series with episode
+ * progress as in progress unless the series is watched. The TV's PosterCard marks the same three.
+ */
+export function standings(library: Library): Map<string, Standing> {
+  const out = new Map<string, Standing>();
+  for (const mark of library.marks) out.set(titleKey(mark), 'inProgress');
+  for (const record of library.records) {
+    if (record.deleted || record.status === 'none') continue;
+    const key = titleKey(record.title);
+    // A watchlisted series already being watched reads as in progress.
+    if (record.status === 'watchlist' && out.has(key)) continue;
+    out.set(key, record.status);
+  }
+  return out;
 }
 
 /** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
@@ -415,7 +443,18 @@ export function continueWatching(library: Library): ContinueEntry[] {
     });
     if (answer.action === 'none' || !answer.episode || seen.has(key)) continue;
     seen.add(key);
-    entries.push({ title, fraction: answer.fraction, episode: answer.episode });
+    // The position is the mark's only when the entry resumes the episode that mark is of.
+    const resumes =
+      answer.action === 'resume' &&
+      mark?.seconds !== undefined &&
+      mark.season === answer.episode.season &&
+      mark.episode === answer.episode.episode;
+    entries.push({
+      title,
+      fraction: answer.fraction,
+      episode: answer.episode,
+      ...(resumes ? { seconds: mark.seconds, at: mark.updatedAt } : {}),
+    });
   }
 
   const movies = library.records
@@ -428,7 +467,11 @@ export function continueWatching(library: Library): ContinueEntry[] {
     const key = titleKey(record.title);
     if (dismissedSince(key, record.progressAt) || seen.has(key)) continue;
     seen.add(key);
-    entries.push({ title: record.title, fraction: record.progress });
+    entries.push({
+      title: record.title,
+      fraction: record.progress,
+      ...(record.seconds !== undefined ? { seconds: record.seconds, at: record.progressAt } : {}),
+    });
   }
   return entries;
 }

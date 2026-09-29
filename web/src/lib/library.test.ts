@@ -4,6 +4,7 @@ import {
   applyLog,
   continueWatching,
   emptyLibrary,
+  standings,
   titleCaption,
   watchlist,
   type Library,
@@ -110,6 +111,29 @@ function epRow(season: number, episode: number, value: number, at: number) {
   };
 }
 
+/** A folded library's marks named, as `withDisplay` would: Continue Watching lists no unnamed title. */
+const withTitle = (folded: Library): Library => ({
+  ...folded,
+  marks: folded.marks.map((m) => ({ ...m, title: `tv ${m.id}` })),
+});
+
+describe('what each poster marks', () => {
+  it('seen, on the watchlist, or being watched, by the record and by episode progress', () => {
+    const marked = standings(library);
+    expect(marked.get('movie:10')).toBe('watchlist');
+    expect(marked.get('movie:12')).toBe('inProgress');
+    expect(marked.get('tv:1')).toBe('inProgress');
+    expect(marked.get('tv:5')).toBe('watched');
+    expect(marked.has('movie:13'), 'a deleted record marks nothing').toBe(false);
+    expect(marked.has('movie:99')).toBe(false);
+  });
+
+  it('marks a watchlisted series already being watched as in progress', () => {
+    const both = { ...library, marks: [...library.marks, mark(11, 1, 1, 0.3, 950)] };
+    expect(standings(both).get('tv:11')).toBe('inProgress');
+  });
+});
+
 describe('folding episode rows in', () => {
   /**
    * den-core defines the watched threshold once — `crates/den-sync/src/series.rs:6`, "One definition, so a
@@ -144,6 +168,17 @@ describe('folding episode rows in', () => {
       { season: 1, episode: 2, fraction: 0.4, updatedAt: 1700000000000 },
     ]);
     expect([...(then.flags?.values() ?? [])]).toEqual([]);
+  });
+
+  it("keeps a row's position in seconds, which a playing device's card counts on from", () => {
+    const row = epRow(1, 2, 0.4, 1700000000000);
+    const playing = applyLog(emptyLibrary(), [
+      { ...row, progress: { ...row.progress, seconds: 1390 } },
+    ]);
+    expect(playing.marks).toMatchObject([{ seconds: 1390, updatedAt: 1700000000000 }]);
+    expect(continueWatching(withTitle(playing))).toMatchObject([
+      { episode: { season: 1, episode: 2 }, seconds: 1390, at: 1700000000000 },
+    ]);
   });
 
   it('takes a stamped row, and an un-watch clears what was held', () => {
