@@ -130,14 +130,14 @@ export function parseTitle(title: string): Parsed {
   return { kind: 'name', name: title };
 }
 
-/** A name for comparing: accents, case, quote styles and punctuation left out. */
+/** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
 export function normalize(name: string): string {
   return name
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 
@@ -147,6 +147,7 @@ export function findEpisode(
   episodes: readonly { number: number; name: string }[],
 ): number | undefined {
   const wanted = normalize(name);
+  if (!wanted) return undefined;
   const exact = episodes.find((e) => normalize(e.name) === wanted);
   if (exact) return exact.number;
   const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
@@ -164,10 +165,10 @@ export function findEpisode(
 /** The hit named exactly `query`, or, for a show, TMDB's first. */
 function pick(hits: SearchHit[], query: string, loose: boolean): SearchHit | undefined {
   const wanted = normalize(query);
-  return (
-    hits.find((h) => normalize(h.name) === wanted || normalize(h.originalName ?? '') === wanted) ??
-    (loose ? hits[0] : undefined)
-  );
+  const exact = wanted
+    ? hits.find((h) => normalize(h.name) === wanted || normalize(h.originalName ?? '') === wanted)
+    : undefined;
+  return exact ?? (loose ? hits[0] : undefined);
 }
 
 /** Every Netflix viewing matched to a TMDB film or episode, each marked once at its latest date. */
@@ -176,7 +177,11 @@ export async function plan(
   lookups: Lookups,
   progress?: (done: number, total: number) => void,
 ): Promise<Plan> {
-  const order = dayFirst(viewings.map((v) => v.date));
+  // A file whose every day is 12 or under reads either way; the order that puts no viewing in the future is the one.
+  const inFuture = (dayFirstOrder: boolean) =>
+    viewings.some((v) => (readDate(v.date, dayFirstOrder) ?? 0) > Date.now() + 86_400_000);
+  const guessed = dayFirst(viewings.map((v) => v.date));
+  const order = inFuture(guessed) && !inFuture(!guessed) ? !guessed : guessed;
   let undated = 0;
   // Latest date per Netflix title: a rewatch is one viewing more of the same thing.
   const latest = new Map<string, number>();
@@ -197,7 +202,11 @@ export async function plan(
   for (const title of latest.keys()) {
     const parsed = parseTitle(title);
     if (parsed.kind === 'name') names.push(title);
-    else shows.set(parsed.show, [...(shows.get(parsed.show) ?? []), { title, parsed }]);
+    else {
+      const lines = shows.get(parsed.show) ?? [];
+      lines.push({ title, parsed });
+      shows.set(parsed.show, lines);
+    }
   }
 
   const marks = new Map<string, Mark>();
@@ -214,15 +223,32 @@ export async function plan(
     if (!seasonCache.has(key)) seasonCache.set(key, lookups.episodes(id, season));
     return seasonCache.get(key)!;
   };
-  /** The episode by name: in the season Netflix named first, then in every other one. */
+  // A show Netflix writes without a season label ("Stranger Things: Stranger Things 4: Chapter One: …") is searched
+  // for from each of its episodes, so a search is asked once and shared.
+  const searches = new Map<string, Promise<SearchHit[]>>();
+  const searchTv = (query: string) => {
+    const key = `tv:${query}`;
+    if (!searches.has(key)) searches.set(key, lookups.searchTv(query));
+    return searches.get(key)!;
+  };
+  const seasonsCache = new Map<number, Promise<number[]>>();
+  const seasonsOf = (id: number) => {
+    if (!seasonsCache.has(id)) seasonsCache.set(id, lookups.seasons(id));
+    return seasonsCache.get(id)!;
+  };
+  /**
+   * The episode by name: in the season Netflix named first, then in every other one — those asked for together, on
+   * the first episode that needs them, rather than one season after another.
+   */
   const locate = async (id: number, season: number | null, name: string) => {
     if (season !== null) {
       const number = findEpisode(name, (await episodesOf(id, season)) ?? []);
       if (number !== undefined) return { season, episode: number };
     }
-    for (const other of await lookups.seasons(id)) {
-      if (other === season || other <= 0) continue;
-      const number = findEpisode(name, (await episodesOf(id, other)) ?? []);
+    const others = (await seasonsOf(id)).filter((other) => other !== season && other > 0);
+    const lists = await Promise.all(others.map((other) => episodesOf(id, other)));
+    for (const [at, other] of others.entries()) {
+      const number = findEpisode(name, lists[at] ?? []);
       if (number !== undefined) return { season: other, episode: number };
     }
     return undefined;
@@ -232,31 +258,52 @@ export async function plan(
   let done = 0;
   const tick = () => progress?.(++done, total);
 
-  await pool([...shows], 4, async ([show, lines]) => {
-    const hit = pick(await lookups.searchTv(show), show, true);
-    for (const { title, parsed } of lines) {
-      const found = hit && (await locate(hit.id, parsed.season, parsed.episode));
-      if (hit && found)
-        add({ type: 'tv', id: hit.id, name: hit.name, ...found, at: latest.get(title)! });
-      else unmatched.push(title);
+  const series = pool([...shows], 8, async ([show, lines]) => {
+    const hit = pick(await searchTv(show), show, true);
+    if (hit) {
+      // Every season the history names, asked for at once.
+      const named = new Set(
+        lines.flatMap(({ parsed }) => (parsed.season === null ? [] : [parsed.season])),
+      );
+      await Promise.all([...named].map((season) => episodesOf(hit.id, season)));
     }
+    const found = await Promise.all(
+      lines.map(({ parsed }) => (hit ? locate(hit.id, parsed.season, parsed.episode) : undefined)),
+    );
+    lines.forEach(({ title }, at) => {
+      const where = found[at];
+      if (hit && where)
+        add({ type: 'tv', id: hit.id, name: hit.name, ...where, at: latest.get(title)! });
+      else unmatched.push(title);
+    });
     tick();
   });
 
-  await pool(names, 4, async (title) => {
+  // Films alongside the shows rather than after them; the lookups' own limit keeps the two from swamping den-edge.
+  // A name whose first part several lines share ("Stranger Things: …") is a show's episodes: tried as one before
+  // it is searched for as a film, which would be a lookup per episode for nothing.
+  const firsts = new Map<string, number>();
+  for (const title of names) {
+    const first = title.split(': ')[0]!;
+    if (first !== title) firsts.set(first, (firsts.get(first) ?? 0) + 1);
+  }
+  const films = pool(names, 12, async (title) => {
+    const shared = (firsts.get(title.split(': ')[0]!) ?? 0) > 1;
+    if (shared && (await asSeasonless(title))) return tick();
     const hit = pick(await lookups.searchMulti(title), title, false);
     if (hit?.type === 'movie')
       add({ type: 'movie', id: hit.id, name: hit.name, at: latest.get(title)! });
-    else if (!(await asSeasonless(title))) unmatched.push(title);
+    else if (shared || !(await asSeasonless(title))) unmatched.push(title);
     tick();
   });
+  await Promise.all([series, films]);
 
   /** `Show: Episode` with no season named (a series of one), looked for in every season. */
   async function asSeasonless(title: string): Promise<boolean> {
     const parts = title.split(': ');
     for (let i = parts.length - 1; i >= 1; i--) {
       const show = parts.slice(0, i).join(': ');
-      const hit = pick(await lookups.searchTv(show), show, false);
+      const hit = pick(await searchTv(show), show, false);
       if (!hit) continue;
       const found = await locate(hit.id, null, parts.slice(i).join(': '));
       if (!found) return false;

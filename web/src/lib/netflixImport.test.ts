@@ -3,6 +3,7 @@ import { markEpisode } from './actions';
 import {
   dayFirst,
   findEpisode,
+  normalize,
   parseCsv,
   parseTitle,
   plan,
@@ -87,6 +88,76 @@ describe('reading a title', () => {
     expect(findEpisode('The One with the Embryos', episodes)).toBeUndefined();
   });
 });
+
+describe('matching edge cases', () => {
+  it('keeps letters of every script, so two different non-Latin names never read as equal', () => {
+    expect(normalize('오징어 게임')).not.toBe('');
+    expect(normalize('오징어 게임!')).toBe(normalize('오징어  게임'));
+    expect(normalize('오징어 게임')).not.toBe(normalize('킹덤'));
+    expect(normalize('Amélie')).toBe('amelie');
+    expect(findEpisode('!!!', [{ number: 1, name: '???' }])).toBeUndefined();
+  });
+
+  it('reads a day-first file as day-first when every day is 12 or under, rather than dating it in the future', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [],
+      searchMulti: async (q) => [{ type: 'movie', id: 1, name: q }],
+      seasons: async () => [],
+      episodes: async () => null,
+    };
+    // 10 March 2026, day-first; month-first it would be 3 October 2026 — still to come on 28 September.
+    const { marks } = await withNow(new Date(2026, 8, 28, 9).getTime(), () =>
+      plan([{ title: 'Office Romance', date: '10/03/2026' }], lookups),
+    );
+    expect(marks[0]!.at).toBe(noon(2026, 3, 10));
+  });
+
+  it('finds a show Netflix writes without a season label, searching for it once', async () => {
+    let searches = 0;
+    let filmSearches = 0;
+    const lookups: Lookups = {
+      searchTv: async (q) => {
+        searches++;
+        return q === 'Stranger Things' ? [{ type: 'tv', id: 66732, name: 'Stranger Things' }] : [];
+      },
+      searchMulti: async () => (filmSearches++, []),
+      seasons: async () => [1, 4],
+      episodes: async (_id, season) =>
+        season === 4
+          ? [
+              { number: 1, name: 'Chapter One: The Hellfire Club' },
+              { number: 2, name: 'Chapter Two: Vecna’s Curse' },
+            ]
+          : [],
+    };
+    const { marks, unmatched } = await plan(
+      [
+        {
+          title: 'Stranger Things: Stranger Things 4: Chapter One: The Hellfire Club',
+          date: '9/1/26',
+        },
+        { title: "Stranger Things: Stranger Things 4: Chapter Two: Vecna's Curse", date: '9/2/26' },
+      ],
+      lookups,
+    );
+    expect(unmatched).toEqual([]);
+    expect(marks.map((m) => `S${m.season}E${m.episode}`).sort()).toEqual(['S4E1', 'S4E2']);
+    expect(filmSearches).toBe(0);
+    // "…Chapter One", "…Chapter Two" each once, the shared "Stranger Things: Stranger Things 4" and "Stranger
+    // Things" once between them.
+    expect(searches).toBe(4);
+  });
+});
+
+async function withNow<T>(now: number, run: () => Promise<T>): Promise<T> {
+  const real = Date.now;
+  Date.now = () => now;
+  try {
+    return await run();
+  } finally {
+    Date.now = real;
+  }
+}
 
 describe('matching a history', () => {
   const friends: SearchHit = { type: 'tv', id: 1668, name: 'Friends' };
@@ -177,6 +248,26 @@ describe('writing the marks', () => {
       status: { value: 'watched', at: [at, 1, device] },
       watchedAt: at,
     });
+  });
+
+  it('writes nothing for a mark imported before, whatever its place in the file', () => {
+    const at = noon(2026, 9, 20);
+    const mark = { type: 'tv' as const, id: 1668, name: 'Friends', season: 4, episode: 12, at };
+    const [first] = importJournals(
+      [mark],
+      { title: () => undefined, episode: () => undefined },
+      device,
+    );
+    const imported = trackerEvent(first!)!.after as EpisodeRow;
+    // The same file again, this mark now second: a higher counter on the same day.
+    const other = { ...mark, episode: 13 };
+    expect(
+      importJournals(
+        [other, mark],
+        { title: () => undefined, episode: (_r, _s, e) => (e === 12 ? imported : undefined) },
+        device,
+      ),
+    ).toHaveLength(1);
   });
 
   it('leaves out a mark older than what the library already says, and dates a newer one by Netflix', () => {

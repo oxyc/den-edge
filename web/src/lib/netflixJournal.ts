@@ -4,17 +4,13 @@
 // Each is stamped with the day it was watched rather than now, because a stamp's time is what the TV sends a tracker
 // as the watched date. That also decides every clash by date: a mark older than what the library already says of the
 // title or episode (seen again since, or un-seen since) loses, so it is left out rather than journalled to lose.
+// Compared by time alone: the counter is a mark's place in this file, so the same file imported again would
+// otherwise read as newer and journal every mark twice.
 
 import { blankEpisode, blankTitle, markEpisode, markWatched } from './actions';
 import type { Mark } from './netflixImport';
 import { recordTrackerEvent } from './trackerEvents';
-import {
-  compareStamps,
-  type EpisodeRow,
-  type SettingsRow,
-  type Stamp,
-  type TitleRow,
-} from './wire';
+import { type EpisodeRow, type SettingsRow, type Stamp, type TitleRow } from './wire';
 
 export interface Rows {
   title(ref: { type: string; id: number }): TitleRow | undefined;
@@ -33,7 +29,7 @@ export function importJournals(marks: readonly Mark[], rows: Rows, device: strin
     const ref = { type: mark.type, id: mark.id };
     if (mark.type === 'movie') {
       const before = rows.title(ref) ?? blankTitle(ref, mark.at);
-      if (compareStamps(before.status.at, at) >= 0) return;
+      if (before.status.at[0] >= mark.at) return;
       const event = recordTrackerEvent(before, markWatched(before, at), at);
       if (event) journals.push(event);
       return;
@@ -41,7 +37,7 @@ export function importJournals(marks: readonly Mark[], rows: Rows, device: strin
     const before =
       rows.episode(ref, mark.season!, mark.episode!) ??
       blankEpisode(ref, mark.season!, mark.episode!);
-    if (compareStamps(before.progress.at, at) >= 0) return;
+    if (before.progress.at[0] >= mark.at) return;
     const event = recordTrackerEvent(before, markEpisode(before, true, at), at);
     if (event) journals.push(event);
   });

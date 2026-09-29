@@ -12,14 +12,30 @@ const TRIES = 8;
 
 type Json = Record<string, unknown>;
 
+/** Lookups in flight at once: den-edge runs 32 cold TMDB fetches together, and the page has its own to make. */
+const IN_FLIGHT = 16;
+
 export function netflixLookups(key: string, fetchImpl: typeof fetch = tmdbFetch): Lookups {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  async function limited(url: string): Promise<Response> {
+    if (running >= IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+    running++;
+    try {
+      return await fetchImpl(url);
+    } finally {
+      running--;
+      waiting.shift()?.();
+    }
+  }
+
   async function get(path: string, params: Record<string, string> = {}): Promise<Json | null> {
     const url = new URL(TMDB + path);
     for (const [name, value] of Object.entries({ ...params, api_key: key }))
       url.searchParams.set(name, value);
     for (let attempt = 0; attempt < TRIES; attempt++) {
       try {
-        const res = await fetchImpl(url.toString());
+        const res = await limited(url.toString());
         if (res.ok) return (await res.json()) as Json;
         if (res.status !== 429 && res.status < 500) return null;
         await sleep(res.status === 429 ? retryAfterMs(res, 10_000) : 2_000 * (attempt + 1));

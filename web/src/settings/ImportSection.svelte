@@ -1,15 +1,29 @@
 <!-- Settings › Import: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
      each film and episode at the day it was last watched. Read and matched in this browser; written as the same
      tracker events the web's own "Seen" writes, so the Apple TV passes them to Simkl in its own time. -->
+<script lang="ts" module>
+  import type { Plan } from '../lib/netflixImport';
+  import type { SettingsRow } from '../lib/wire';
+
+  type State =
+    | { step: 'idle' }
+    | { step: 'matching'; done: number; total: number }
+    | { step: 'preview'; plan: Plan; journals: SettingsRow[] }
+    | { step: 'writing'; done: number; total: number }
+    | { step: 'done'; written: number }
+    | { step: 'failed'; message: string };
+  /** Kept with the module, not the section: matching a long history goes on while the viewer is elsewhere. */
+  let state = $state<State>({ step: 'idle' });
+</script>
+
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import type { LibraryLog } from '../lib/log';
-  import { parseCsv, plan, type Plan } from '../lib/netflixImport';
+  import { parseCsv, plan } from '../lib/netflixImport';
   import { importJournals } from '../lib/netflixJournal';
   import { netflixLookups } from '../lib/netflixLookups';
   import { ensureSyncPolicy } from '../lib/syncLoader';
-  import type { SettingsRow } from '../lib/wire';
 
   let {
     log,
@@ -21,15 +35,6 @@
 
   /** Journals are kept in this browser's storage until sent; a batch at a time stays well inside its quota. */
   const BATCH = 250;
-
-  type State =
-    | { step: 'idle' }
-    | { step: 'matching'; done: number; total: number }
-    | { step: 'preview'; plan: Plan; journals: SettingsRow[] }
-    | { step: 'writing'; done: number; total: number }
-    | { step: 'done'; written: number }
-    | { step: 'failed'; message: string };
-  let state = $state<State>({ step: 'idle' });
 
   async function read(file: File) {
     if (!log) return;
