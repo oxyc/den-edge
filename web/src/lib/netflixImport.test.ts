@@ -51,13 +51,13 @@ describe('reading the file', () => {
 
 describe('reading a title', () => {
   it('splits an episode at its season label, colons in the show’s name kept', () => {
-    expect(parseTitle("Friends: Season 4: The One with Rachel's Crush")).toEqual({
+    expect(parseTitle("Friends: Season 4: The One with Rachel's Crush")).toMatchObject({
       kind: 'episode',
       show: 'Friends',
       season: 4,
       episode: "The One with Rachel's Crush",
     });
-    expect(parseTitle('Love Is Blind: UK: Season 3: The Reunion')).toEqual({
+    expect(parseTitle('Love Is Blind: UK: Season 3: The Reunion')).toMatchObject({
       kind: 'episode',
       show: 'Love Is Blind: UK',
       season: 3,
@@ -269,6 +269,84 @@ describe('what a real history needed', () => {
       [noon(2026, 9, 2)]: 2,
       [noon(2026, 9, 3)]: 3,
     });
+  });
+
+  it('marks every episode of a season whatever each is called, when as many were watched as it has', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [{ type: 'tv', id: 7, name: 'Show' }],
+      searchMulti: async () => [],
+      show: async () => shape({ 1: 3, 2: 2 }, { season: 2, episode: 2 }),
+      episodes: async (_id, season) =>
+        season === 2
+          ? [
+              { number: 1, name: 'Uno' },
+              { number: 2, name: 'Dos' },
+            ]
+          : [
+              { number: 1, name: 'Primero' },
+              { number: 2, name: 'Segundo' },
+              { number: 3, name: 'Tercero' },
+            ],
+    };
+    const { marks, unmatched } = await plan(
+      [
+        { title: 'Show: Season 2: Two', date: '9/2/26' },
+        { title: 'Show: Season 2: One', date: '9/1/26' },
+        // Two of season 1's three: which two can't be told, so neither is guessed.
+        { title: 'Show: Season 1: First', date: '8/1/26' },
+        { title: 'Show: Season 1: Second', date: '8/2/26' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => `S${m.season}E${m.episode}@${m.at}`).sort()).toEqual(
+      [`S2E1@${noon(2026, 9, 1)}`, `S2E2@${noon(2026, 9, 2)}`].sort(),
+    );
+    expect(unmatched.sort()).toEqual(['Show: Season 1: First', 'Show: Season 1: Second']);
+  });
+
+  it('splits at the first label, and tries a label that is part of the episode’s own name', async () => {
+    expect(parseTitle('Midnight Mass: Limited Series: Book I: Genesis')).toMatchObject({
+      show: 'Midnight Mass',
+      season: 1,
+      episode: 'Book I: Genesis',
+    });
+    expect(findEpisode('Book I: Genesis', [{ number: 1, name: 'Book I: Genesis' }])).toBe(1);
+  });
+
+  it('finds a show TMDB knows by another name or a shorter one, only where its episodes bear it out', async () => {
+    const unnamedEpisodes = (count: number) =>
+      Array.from({ length: count }, (_, at) => ({ number: at + 1, name: `Episode ${at + 1}` }));
+    const lookups: Lookups = {
+      searchTv: async (query) =>
+        ({
+          // TMDB's alternative titles: "The Defeated" is Shadowplay, behind an unrelated first hit.
+          'The Defeated': [
+            { type: 'tv' as const, id: 1, name: 'The Great Jahy Will Not Be Defeated!' },
+            { type: 'tv' as const, id: 2, name: 'Shadowplay' },
+          ],
+          // Nothing under Netflix's longer name; TMDB's is "Itxaso".
+          Itxaso: [{ type: 'tv' as const, id: 3, name: 'Itxaso' }],
+          // A long series whose "Episode N" says nothing about which one "Zero" is.
+          Zero: [{ type: 'tv' as const, id: 4, name: 'Hawaii Five-0' }],
+        })[query] ?? [],
+      searchMulti: async () => [],
+      show: async (id) => shape(id === 1 ? { 1: 12 } : id === 4 ? { 1: 24 } : { 1: 3 }),
+      episodes: async (id) => unnamedEpisodes(id === 1 ? 12 : id === 4 ? 24 : 3),
+    };
+    const lines = (show: string, episodes: string[]) =>
+      episodes.map((episode, at) => ({ title: `${show}: ${episode}`, date: `9/${at + 1}/26` }));
+    const { marks, unmatched } = await plan(
+      [
+        ...lines('The Defeated', ['Homecoming', 'Nakam', 'Mutti']),
+        ...lines('Itxaso and the Sea', ['Episode 1', 'Episode 2', 'Episode 3']),
+        ...lines('Zero', ['Episode 1', 'Episode 2', 'Episode 3']),
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => `${m.id}:${m.episode}`).sort()).toEqual(
+      ['2:1', '2:2', '2:3', '3:1', '3:2', '3:3'].sort(),
+    );
+    expect(unmatched.sort()).toEqual(['Zero: Episode 1', 'Zero: Episode 2', 'Zero: Episode 3']);
   });
 
   it('takes a film over a series of the same name', async () => {
