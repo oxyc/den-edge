@@ -10,8 +10,9 @@ import {
   readDate,
   type Lookups,
   type SearchHit,
+  type Show,
 } from './netflixImport';
-import { importJournals } from './netflixJournal';
+import { importWrites, type Rows, type Writes } from './netflixJournal';
 import { trackerEvent } from './trackerEvents';
 import { ZERO_STAMP, type EpisodeRow } from './wire';
 
@@ -102,7 +103,7 @@ describe('matching edge cases', () => {
     const lookups: Lookups = {
       searchTv: async () => [],
       searchMulti: async (q) => [{ type: 'movie', id: 1, name: q }],
-      seasons: async () => [],
+      show: async () => null,
       episodes: async () => null,
     };
     // 10 March 2026, day-first; month-first it would be 3 October 2026 — still to come on 28 September.
@@ -121,7 +122,7 @@ describe('matching edge cases', () => {
         return q === 'Stranger Things' ? [{ type: 'tv', id: 66732, name: 'Stranger Things' }] : [];
       },
       searchMulti: async () => (filmSearches++, []),
-      seasons: async () => [1, 4],
+      show: async () => shape({ 1: 8, 4: 9 }),
       episodes: async (_id, season) =>
         season === 4
           ? [
@@ -149,6 +150,14 @@ describe('matching edge cases', () => {
   });
 });
 
+const shape = (
+  counts: Record<number, number>,
+  lastAired?: { season: number; episode: number },
+): Show => ({
+  counts: new Map(Object.entries(counts).map(([s, n]) => [Number(s), n])),
+  ...(lastAired ? { lastAired } : {}),
+});
+
 async function withNow<T>(now: number, run: () => Promise<T>): Promise<T> {
   const real = Date.now;
   Date.now = () => now;
@@ -165,7 +174,7 @@ describe('matching a history', () => {
     searchTv: async (q) => (q === 'Friends' ? [friends] : []),
     searchMulti: async (q) =>
       q === 'Office Romance' ? [{ type: 'movie', id: 1, name: 'Office Romance' }] : [],
-    seasons: async () => [0, 1, 2, 3, 4],
+    show: async () => shape({ 0: 1, 1: 24, 2: 24, 3: 25, 4: 24 }),
     episodes: async (_id, season) =>
       season === 4
         ? [
@@ -193,57 +202,88 @@ describe('matching a history', () => {
       lookups,
     );
     expect(result.marks).toEqual(
-      expect.arrayContaining([
-        { type: 'tv', id: 1668, name: 'Friends', season: 4, episode: 12, at: noon(2026, 9, 20) },
-        { type: 'tv', id: 1668, name: 'Friends', season: 4, episode: 1, at: noon(2026, 9, 14) },
-        { type: 'tv', id: 1668, name: 'Friends', season: 3, episode: 25, at: noon(2026, 9, 12) },
-        { type: 'movie', id: 1, name: 'Office Romance', at: noon(2026, 9, 12) },
-      ]),
+      expect.arrayContaining(
+        [
+          { type: 'tv', id: 1668, season: 4, episode: 12, at: noon(2026, 9, 20) },
+          { type: 'tv', id: 1668, season: 4, episode: 1, at: noon(2026, 9, 14) },
+          { type: 'tv', id: 1668, season: 3, episode: 25, at: noon(2026, 9, 12) },
+          { type: 'movie', id: 1, source: 'Office Romance', at: noon(2026, 9, 12) },
+        ].map((mark) => expect.objectContaining(mark)),
+      ),
     );
     expect(result.marks).toHaveLength(4);
+    expect(result.shows[1668]?.counts.get(4)).toBe(24);
     expect(result.unmatched.sort()).toEqual([
       'Fito Páez: The World Within a Song',
       'Friends: Season 4: The One Nobody Wrote',
     ]);
     expect(result.undated).toBe(1);
   });
+
+  it('looks nothing more up for a series or film the library already has as seen', async () => {
+    let seasonLookups = 0;
+    const counted: Lookups = {
+      ...lookups,
+      episodes: (id, season) => (seasonLookups++, lookups.episodes(id, season)),
+    };
+    const result = await plan(
+      [
+        { title: 'Friends: Season 4: The One with the Embryos', date: '9/20/26' },
+        { title: 'Friends: Season 4: The One with the Jellyfish', date: '9/14/26' },
+        { title: 'Office Romance', date: '9/12/26' },
+      ],
+      counted,
+      undefined,
+      () => true,
+    );
+    expect(result.marks).toEqual([]);
+    expect(result.known).toBe(3);
+    expect(seasonLookups).toBe(0);
+  });
 });
 
 describe('writing the marks', () => {
   const device = 'feedfacefeedface';
-  const ep = (at: number): EpisodeRow =>
+  const none: Rows = { title: () => undefined, episode: () => undefined };
+  const now = noon(2026, 9, 28);
+  const friends = { type: 'tv' as const, id: 1668, name: 'Friends', source: 'Friends' };
+  const ep = (episode: number, at: number): EpisodeRow =>
     markEpisode(
       {
         kind: 'ep',
         schema: 2,
         title: { type: 'tv', id: 1668 },
         season: 4,
-        episode: 12,
+        episode,
         progress: { value: 0, at: ZERO_STAMP, viewing: 0 },
       },
       true,
       [at, 0, 'tv'],
     );
+  const events = (writes: Writes[]) => writes.flatMap((w) => w.events).map((e) => trackerEvent(e)!);
 
   it('journals each mark stamped with the day it was watched, which the TV sends Simkl as the date', () => {
     const at = noon(2026, 9, 20);
-    const [journal, film] = importJournals(
-      [
-        { type: 'tv', id: 1668, name: 'Friends', season: 4, episode: 12, at },
-        { type: 'movie', id: 1, name: 'Office Romance', at },
-      ],
-      { title: () => undefined, episode: () => undefined },
-      device,
+    const [episode, film] = events(
+      importWrites(
+        [
+          { ...friends, season: 4, episode: 12, at },
+          { type: 'movie', id: 1, name: 'Office Romance', source: 'Office Romance', at },
+        ],
+        {},
+        none,
+        device,
+        now,
+      ),
     );
-    const event = trackerEvent(journal!)!;
-    expect(event.at).toEqual([at, 0, device]);
-    expect(event.after).toMatchObject({
+    expect(episode!.at).toEqual([at, 0, device]);
+    expect(episode!.after).toMatchObject({
       kind: 'ep',
       season: 4,
       episode: 12,
       progress: { value: 1 },
     });
-    expect(trackerEvent(film!)!.after).toMatchObject({
+    expect(film!.after).toMatchObject({
       kind: 'rec',
       status: { value: 'watched', at: [at, 1, device] },
       watchedAt: at,
@@ -252,38 +292,77 @@ describe('writing the marks', () => {
 
   it('writes nothing for a mark imported before, whatever its place in the file', () => {
     const at = noon(2026, 9, 20);
-    const mark = { type: 'tv' as const, id: 1668, name: 'Friends', season: 4, episode: 12, at };
-    const [first] = importJournals(
-      [mark],
-      { title: () => undefined, episode: () => undefined },
-      device,
-    );
-    const imported = trackerEvent(first!)!.after as EpisodeRow;
+    const mark = { ...friends, season: 4, episode: 12, at };
+    const imported = events(importWrites([mark], {}, none, device, now))[0]!.after as EpisodeRow;
     // The same file again, this mark now second: a higher counter on the same day.
-    const other = { ...mark, episode: 13 };
+    const rows: Rows = {
+      title: () => undefined,
+      episode: (_r, _s, e) => (e === 12 ? imported : undefined),
+    };
     expect(
-      importJournals(
-        [other, mark],
-        { title: () => undefined, episode: (_r, _s, e) => (e === 12 ? imported : undefined) },
-        device,
-      ),
+      events(importWrites([{ ...mark, episode: 13 }, mark], {}, rows, device, now)),
     ).toHaveLength(1);
   });
 
   it('leaves out a mark older than what the library already says, and dates a newer one by Netflix', () => {
-    const rows = (row: EpisodeRow) => ({ title: () => undefined, episode: () => row });
-    const mark = {
-      type: 'tv' as const,
-      id: 1668,
-      name: 'Friends',
-      season: 4,
-      episode: 12,
-      at: noon(2026, 9, 20),
-    };
-    expect(importJournals([mark], rows(ep(noon(2026, 9, 25))), device)).toEqual([]);
-    const newer = importJournals([mark], rows(ep(noon(2025, 1, 1))), device);
-    expect(trackerEvent(newer[0]!)!.after).toMatchObject({
-      progress: { at: [mark.at, 0, device] },
+    const mark = { ...friends, season: 4, episode: 12, at: noon(2026, 9, 20) };
+    const holding = (row: EpisodeRow): Rows => ({ title: () => undefined, episode: () => row });
+    expect(
+      events(importWrites([mark], {}, holding(ep(12, noon(2026, 9, 25))), device, now)),
+    ).toEqual([]);
+    const [newer] = events(
+      importWrites([mark], {}, holding(ep(12, noon(2025, 1, 1))), device, now),
+    );
+    expect(newer!.after).toMatchObject({ progress: { at: [mark.at, 0, device] } });
+  });
+
+  it('marks a series seen once the import and the library hold every aired episode', () => {
+    const show = shape({ 0: 3, 4: 3 }, { season: 4, episode: 2 });
+    const marks = [
+      { ...friends, season: 4, episode: 1, at: noon(2026, 9, 10) },
+      { ...friends, season: 4, episode: 2, at: noon(2026, 9, 12) },
+    ];
+    const series = events(importWrites(marks, { 1668: show }, none, device, now)).at(-1)!;
+    // Episode 3 hasn't aired, and specials don't count.
+    expect(series.after).toMatchObject({
+      kind: 'rec',
+      status: { value: 'watched', at: [noon(2026, 9, 12), 2, device] },
     });
+    // One aired episode only the library holds: still finished.
+    const rows: Rows = {
+      title: () => undefined,
+      episode: (_r, _s, e) => (e === 1 ? ep(1, noon(2020, 1, 1)) : undefined),
+    };
+    const partly = importWrites([marks[1]!], { 1668: show }, rows, device, now);
+    expect(events(partly).at(-1)!.after).toMatchObject({
+      kind: 'rec',
+      status: { value: 'watched' },
+    });
+  });
+
+  it('takes an unfinished series last watched over half a year ago off Continue Watching, and a recent one not', () => {
+    const show = shape({ 4: 24 });
+    const old = importWrites(
+      [{ ...friends, season: 4, episode: 1, at: noon(2025, 1, 5) }],
+      { 1668: show },
+      none,
+      device,
+      now,
+    );
+    expect(old[0]!.rows).toEqual([
+      expect.objectContaining({
+        kind: 'rec',
+        dismissed: { value: true, at: [noon(2025, 1, 5) + 1, 1, device] },
+      }),
+    ]);
+    const recent = importWrites(
+      [{ ...friends, season: 4, episode: 1, at: noon(2026, 9, 5) }],
+      { 1668: show },
+      none,
+      device,
+      now,
+    );
+    expect(recent[0]!.rows).toEqual([]);
+    expect(events(recent).every((e) => e.after.kind === 'ep')).toBe(true);
   });
 });

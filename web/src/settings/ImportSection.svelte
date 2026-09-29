@@ -2,26 +2,29 @@
      each film and episode at the day it was last watched. Read and matched in this browser; written as the same
      tracker events the web's own "Seen" writes, so the Apple TV passes them to Simkl in its own time. -->
 <script lang="ts" module>
+  import { SvelteSet } from 'svelte/reactivity';
   import type { Plan } from '../lib/netflixImport';
-  import type { SettingsRow } from '../lib/wire';
+  import type { Writes } from '../lib/netflixJournal';
 
   type State =
     | { step: 'idle' }
     | { step: 'matching'; done: number; total: number }
-    | { step: 'preview'; plan: Plan; journals: SettingsRow[] }
+    | { step: 'preview'; plan: Plan; writes: Writes[] }
     | { step: 'writing'; done: number; total: number }
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
   /** Kept with the module, not the section: matching a long history goes on while the viewer is elsewhere. */
   let state = $state<State>({ step: 'idle' });
+  /** The films and series (`importKey`) the viewer unticked in the preview. */
+  const excluded = new SvelteSet<string>();
 </script>
 
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import type { LibraryLog } from '../lib/log';
-  import { parseCsv, plan } from '../lib/netflixImport';
-  import { importJournals } from '../lib/netflixJournal';
+  import { parseCsv, plan, previewLines } from '../lib/netflixImport';
+  import { importWrites } from '../lib/netflixJournal';
   import { netflixLookups } from '../lib/netflixLookups';
   import { ensureSyncPolicy } from '../lib/syncLoader';
 
@@ -37,22 +40,34 @@
   const BATCH = 250;
 
   async function read(file: File) {
-    if (!log) return;
+    const opened = log;
+    if (!opened) return;
     const viewings = parseCsv(await file.text());
     if (!viewings.length) {
       state = { step: 'failed', message: 'That file has no viewing history in it.' };
       return;
     }
     state = { step: 'matching', done: 0, total: 0 };
+    excluded.clear();
     try {
-      const result = await plan(viewings, netflixLookups(tmdbKey), (done, total) => {
-        state = { step: 'matching', done, total };
-      });
+      // What the library already has as seen is found, and left: its episodes aren't looked up at all.
+      const seen = (ref: { type: string; id: number }) => {
+        const row = opened.title(ref);
+        return !!row && !row.deleted.value && row.status.value === 'watched';
+      };
+      const result = await plan(
+        viewings,
+        netflixLookups(tmdbKey),
+        (done, total) => {
+          state = { step: 'matching', done, total };
+        },
+        seen,
+      );
       await ensureSyncPolicy();
       state = {
         step: 'preview',
         plan: result,
-        journals: importJournals(result.marks, log, device),
+        writes: importWrites(result.marks, result.shows, opened, device, Date.now()),
       };
     } catch (error) {
       console.warn('den: Netflix import failed', error);
@@ -60,31 +75,31 @@
     }
   }
 
-  async function write(journals: SettingsRow[]) {
-    if (!log) return;
-    state = { step: 'writing', done: 0, total: journals.length };
-    for (let start = 0; start < journals.length; start += BATCH) {
-      const batch = journals.slice(start, start + BATCH);
-      if (!(await log.writeActions(batch))) {
+  async function write(writes: Writes[]) {
+    const opened = log;
+    if (!opened) return;
+    const events = writes.flatMap((w) => w.events);
+    const rows = writes.flatMap((w) => w.rows);
+    state = { step: 'writing', done: 0, total: events.length };
+    for (let start = 0; start < events.length; start += BATCH) {
+      const batch = events.slice(start, start + BATCH);
+      if (!(await opened.writeActions(batch))) {
         state = {
           step: 'failed',
-          message: `Saved ${start} of ${journals.length}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
+          message: `Saved ${start} of ${events.length}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
         };
         changed();
         return;
       }
-      state = { step: 'writing', done: start + batch.length, total: journals.length };
+      state = { step: 'writing', done: start + batch.length, total: events.length };
     }
+    // Off Continue Watching: a plain row, which nothing needs to be told about. Failing it loses no viewing.
+    if (rows.length && !(await opened.writeRows(rows)))
+      console.warn('den: Netflix import could not hide old series from Continue Watching');
     changed();
-    state = { step: 'done', written: journals.length };
+    state = { step: 'done', written: events.length };
   }
 
-  const counts = (p: Plan) => {
-    const films = p.marks.filter((m) => m.type === 'movie').length;
-    const episodes = p.marks.length - films;
-    const series = new Set(p.marks.filter((m) => m.type === 'tv').map((m) => m.id)).size;
-    return { films, episodes, series };
-  };
   const plural = (n: number, one: string, many = `${one}s`) =>
     `${n.toLocaleString()} ${n === 1 ? one : many}`;
 </script>
@@ -123,19 +138,42 @@
         Finding your titles{state.total ? ` — ${state.done} of ${state.total}` : '…'}
       </p>
     {:else if state.step === 'preview'}
-      {@const found = counts(state.plan)}
-      {@const journals = state.journals}
+      {@const all = previewLines(state.plan.marks)}
+      {@const chosen = state.writes.filter((w) => !excluded.has(w.key))}
+      {@const series = all.filter((l) => l.episodes > 0)}
       <p class="summary">
-        Found {plural(found.films, 'film')} and {plural(found.episodes, 'episode')} from {plural(
-          found.series,
-          'series',
-          'series',
-        )}.
-        {#if found.films + found.episodes > journals.length}
-          {(found.films + found.episodes - journals.length).toLocaleString()} are already marked, or were
-          changed later here.
+        Found {plural(all.length - series.length, 'film')} and {plural(
+          series.reduce((n, l) => n + l.episodes, 0),
+          'episode',
+        )} from {plural(series.length, 'series', 'series')}.
+        {#if state.plan.known}
+          {plural(state.plan.known, 'line')} of what you’ve already marked seen were skipped.
         {/if}
       </p>
+      <details class="foot">
+        <summary>Review what was found</summary>
+        <ul class="found">
+          {#each all as line (line.key)}
+            <li>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!excluded.has(line.key)}
+                  onchange={(event) => {
+                    if (event.currentTarget.checked) excluded.delete(line.key);
+                    else excluded.add(line.key);
+                  }}
+                />
+                <span>
+                  {line.label}{#if line.episodes}
+                    · {plural(line.episodes, 'episode')}{/if}
+                  {#if line.source}<small>Netflix: {line.source}</small>{/if}
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+      </details>
       {#if state.plan.unmatched.length || state.plan.undated}
         <details class="foot">
           <summary>
@@ -150,10 +188,14 @@
         <button
           type="button"
           class="primary"
-          disabled={!journals.length}
-          onclick={() => void write(journals)}
+          disabled={!chosen.some((w) => w.events.length || w.rows.length)}
+          onclick={() => void write(chosen)}
         >
-          Mark {journals.length.toLocaleString()} as seen
+          Mark {plural(
+            chosen.filter((w) => w.events.length).length,
+            'film or series',
+            'films and series',
+          )} as seen
         </button>
         <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}
           >Cancel</button
@@ -163,8 +205,8 @@
       <p class="status" role="status">Saving — {state.done} of {state.total}</p>
     {:else if state.step === 'done'}
       <p class="status" role="status">
-        Marked {plural(state.written, 'film and episode', 'films and episodes')} as seen. Your Apple TV
-        sends them to Simkl next time it’s on.
+        Saved {plural(state.written, 'change')}. Your Apple TV sends them to Simkl next time Den is
+        open on it.
       </p>
     {:else if state.step === 'failed'}
       <p class="status bad" role="alert">{state.message}</p>
@@ -190,10 +232,33 @@
     outline-offset: 2px;
   }
 
+  .found,
   .unmatched {
-    max-height: 240px;
+    max-height: 320px;
     overflow: auto;
     margin: 8px 0 0;
+  }
+
+  .found {
+    padding: 0;
+    list-style: none;
+  }
+
+  .found label {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 4px 0;
+    color: var(--fg);
+    cursor: pointer;
+  }
+
+  .found small {
+    display: block;
+    color: var(--muted);
+  }
+
+  .unmatched {
     padding-left: 18px;
   }
 </style>

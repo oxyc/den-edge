@@ -5,6 +5,7 @@
 import { parseSeason } from './detail';
 import type { Lookups, SearchHit } from './netflixImport';
 import { retryAfterMs } from './retryAfter';
+import { seriesShape } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
 
 const TMDB = 'https://api.themoviedb.org/3';
@@ -52,6 +53,8 @@ export function netflixLookups(key: string, fetchImpl: typeof fetch = tmdbFetch)
       if ((type !== 'movie' && type !== 'tv') || typeof r.id !== 'number') return [];
       const name = type === 'movie' ? r.title : r.name;
       const original = type === 'movie' ? r.original_title : r.original_name;
+      const date = type === 'movie' ? r.release_date : r.first_air_date;
+      const year = typeof date === 'string' ? Number(date.slice(0, 4)) : NaN;
       if (typeof name !== 'string') return [];
       return [
         {
@@ -59,6 +62,7 @@ export function netflixLookups(key: string, fetchImpl: typeof fetch = tmdbFetch)
           id: r.id,
           name,
           ...(typeof original === 'string' ? { originalName: original } : {}),
+          ...(year > 0 ? { year } : {}),
         },
       ];
     });
@@ -67,10 +71,9 @@ export function netflixLookups(key: string, fetchImpl: typeof fetch = tmdbFetch)
     searchMulti: async (query) =>
       hits(await get('/search/multi', { query, include_adult: 'false' })),
     searchTv: async (query) => hits(await get('/search/tv', { query }), 'tv'),
-    seasons: async (id) => {
+    show: async (id) => {
       const body = await get(`/tv/${id}`);
-      const seasons = Array.isArray(body?.seasons) ? (body.seasons as Json[]) : [];
-      return seasons.flatMap((s) => (typeof s.season_number === 'number' ? [s.season_number] : []));
+      return (body && seriesShape(body)) ?? null;
     },
     episodes: async (id, season) => {
       const body = await get(`/tv/${id}/season/${season}`);

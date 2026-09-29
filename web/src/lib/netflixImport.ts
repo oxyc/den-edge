@@ -2,6 +2,8 @@
 // where an episode's title is `Show: Season 4: Episode name` and a film's is its own name. Read here, matched to TMDB
 // titles and episodes, and turned into what to mark seen and when. Pure except for the lookups, which are passed in.
 
+import type { Shape } from './library';
+
 /** One line of the file: what Netflix called it, and the day it was watched. */
 export interface Viewing {
   title: string;
@@ -17,25 +19,36 @@ export type Parsed =
 export interface Mark {
   type: 'movie' | 'tv';
   id: number;
+  /** TMDB's name, and its year, so a remake can be told from its original in the preview. */
   name: string;
+  year?: number;
+  /** What Netflix called it: the film's title, or the show's name. */
+  source: string;
   season?: number;
   episode?: number;
   at: number;
 }
 
+/** A series' episodes per season and the last one aired (`tmdb.seriesShape`). */
+export type Show = Shape;
+
 export interface Plan {
   marks: Mark[];
+  /** Each matched series' layout, by TMDB id: what says whether the history covers all of it. */
+  shows: Record<number, Show>;
   /** Netflix titles nothing was found for, each once. */
   unmatched: string[];
   /** Lines whose date couldn't be read. */
   undated: number;
+  /** Lines of films and series the library already has as seen, which were not looked into further. */
+  known: number;
 }
 
 /** The TMDB lookups the matcher needs; each null or [] when TMDB can't answer. */
 export interface Lookups {
   searchMulti(query: string): Promise<SearchHit[]>;
   searchTv(query: string): Promise<SearchHit[]>;
-  seasons(id: number): Promise<number[]>;
+  show(id: number): Promise<Show | null>;
   episodes(id: number, season: number): Promise<{ number: number; name: string }[] | null>;
 }
 
@@ -44,6 +57,7 @@ export interface SearchHit {
   id: number;
   name: string;
   originalName?: string;
+  year?: number;
 }
 
 /** The file's lines, comma- or tab-separated (a spreadsheet copy), quotes as CSV writes them; the header dropped. */
@@ -171,11 +185,15 @@ function pick(hits: SearchHit[], query: string, loose: boolean): SearchHit | und
   return exact ?? (loose ? hits[0] : undefined);
 }
 
-/** Every Netflix viewing matched to a TMDB film or episode, each marked once at its latest date. */
+/**
+ * Every Netflix viewing matched to a TMDB film or episode, each marked once at its latest date. A film or series the
+ * library already has as seen (`seen`) is left there once found: nothing more is looked up for it.
+ */
 export async function plan(
   viewings: readonly Viewing[],
   lookups: Lookups,
   progress?: (done: number, total: number) => void,
+  seen: (ref: { type: 'movie' | 'tv'; id: number }) => boolean = () => false,
 ): Promise<Plan> {
   // A file whose every day is 12 or under reads either way; the order that puts no viewing in the future is the one.
   const inFuture = (dayFirstOrder: boolean) =>
@@ -231,10 +249,18 @@ export async function plan(
     if (!searches.has(key)) searches.set(key, lookups.searchTv(query));
     return searches.get(key)!;
   };
-  const seasonsCache = new Map<number, Promise<number[]>>();
-  const seasonsOf = (id: number) => {
-    if (!seasonsCache.has(id)) seasonsCache.set(id, lookups.seasons(id));
-    return seasonsCache.get(id)!;
+  const showCache = new Map<number, Promise<Show | null>>();
+  const showOf = (id: number) => {
+    if (!showCache.has(id)) showCache.set(id, lookups.show(id));
+    return showCache.get(id)!;
+  };
+  const seasonsOf = async (id: number) => [...((await showOf(id))?.counts.keys() ?? [])];
+  const layouts: Record<number, Show> = {};
+  let known = 0;
+  /** The series' layout, kept for the plan: asked for with its seasons, so it costs no lookup of its own. */
+  const keep = async (id: number) => {
+    const show = await showOf(id);
+    if (show) layouts[id] = show;
   };
   /**
    * The episode by name: in the season Netflix named first, then in every other one — those asked for together, on
@@ -260,20 +286,23 @@ export async function plan(
 
   const series = pool([...shows], 8, async ([show, lines]) => {
     const hit = pick(await searchTv(show), show, true);
+    if (hit && seen(hit)) {
+      known += lines.length;
+      return tick();
+    }
     if (hit) {
-      // Every season the history names, asked for at once.
+      // Every season the history names, and the series' layout, asked for at once.
       const named = new Set(
         lines.flatMap(({ parsed }) => (parsed.season === null ? [] : [parsed.season])),
       );
-      await Promise.all([...named].map((season) => episodesOf(hit.id, season)));
+      await Promise.all([keep(hit.id), ...[...named].map((season) => episodesOf(hit.id, season))]);
     }
     const found = await Promise.all(
       lines.map(({ parsed }) => (hit ? locate(hit.id, parsed.season, parsed.episode) : undefined)),
     );
     lines.forEach(({ title }, at) => {
       const where = found[at];
-      if (hit && where)
-        add({ type: 'tv', id: hit.id, name: hit.name, ...where, at: latest.get(title)! });
+      if (hit && where) add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
       else unmatched.push(title);
     });
     tick();
@@ -291,9 +320,10 @@ export async function plan(
     const shared = (firsts.get(title.split(': ')[0]!) ?? 0) > 1;
     if (shared && (await asSeasonless(title))) return tick();
     const hit = pick(await lookups.searchMulti(title), title, false);
-    if (hit?.type === 'movie')
-      add({ type: 'movie', id: hit.id, name: hit.name, at: latest.get(title)! });
-    else if (shared || !(await asSeasonless(title))) unmatched.push(title);
+    if (hit?.type === 'movie') {
+      if (seen(hit)) known++;
+      else add({ ...markOf(hit, title), at: latest.get(title)! });
+    } else if (shared || !(await asSeasonless(title))) unmatched.push(title);
     tick();
   });
   await Promise.all([series, films]);
@@ -305,15 +335,33 @@ export async function plan(
       const show = parts.slice(0, i).join(': ');
       const hit = pick(await searchTv(show), show, false);
       if (!hit) continue;
-      const found = await locate(hit.id, null, parts.slice(i).join(': '));
+      if (seen(hit)) {
+        known++;
+        return true;
+      }
+      const [found] = await Promise.all([
+        locate(hit.id, null, parts.slice(i).join(': ')),
+        keep(hit.id),
+      ]);
       if (!found) return false;
-      add({ type: 'tv', id: hit.id, name: hit.name, ...found, at: latest.get(title)! });
+      add({ ...markOf(hit, show), ...found, at: latest.get(title)! });
       return true;
     }
     return false;
   }
 
-  return { marks: [...marks.values()], unmatched, undated };
+  return { marks: [...marks.values()], shows: layouts, unmatched, undated, known };
+}
+
+/** A hit as a mark's identity: TMDB's name and year, and what Netflix called it. */
+function markOf(hit: SearchHit, source: string): Omit<Mark, 'at'> {
+  return {
+    type: hit.type,
+    id: hit.id,
+    name: hit.name,
+    ...(hit.year ? { year: hit.year } : {}),
+    source,
+  };
 }
 
 async function pool<T>(items: readonly T[], width: number, run: (item: T) => Promise<void>) {
@@ -322,5 +370,34 @@ async function pool<T>(items: readonly T[], width: number, run: (item: T) => Pro
     Array.from({ length: Math.min(width, items.length) }, async () => {
       while (next < items.length) await run(items[next++]!);
     }),
+  );
+}
+
+/** One film or series in the import's preview: its `type:id` (`importKey`), TMDB's name and year, and its episodes. */
+export interface PreviewLine {
+  key: string;
+  label: string;
+  /** What Netflix called it, where that isn't TMDB's name. */
+  source?: string;
+  episodes: number;
+}
+
+/** A line per film and series, series first, each by TMDB's name. */
+export function previewLines(marks: readonly Mark[]): PreviewLine[] {
+  const byKey = new Map<string, PreviewLine>();
+  for (const mark of marks) {
+    const key = `${mark.type}:${mark.id}`;
+    const line = byKey.get(key);
+    if (line) line.episodes++;
+    else
+      byKey.set(key, {
+        key,
+        label: mark.year ? `${mark.name} (${mark.year})` : mark.name,
+        ...(normalize(mark.source) !== normalize(mark.name) ? { source: mark.source } : {}),
+        episodes: mark.type === 'tv' ? 1 : 0,
+      });
+  }
+  return [...byKey.values()].sort(
+    (a, b) => Number(b.episodes > 0) - Number(a.episodes > 0) || a.label.localeCompare(b.label),
   );
 }
