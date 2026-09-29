@@ -144,9 +144,8 @@ describe('matching edge cases', () => {
     expect(unmatched).toEqual([]);
     expect(marks.map((m) => `S${m.season}E${m.episode}`).sort()).toEqual(['S4E1', 'S4E2']);
     expect(filmSearches).toBe(0);
-    // "…Chapter One", "…Chapter Two" each once, the shared "Stranger Things: Stranger Things 4" and "Stranger
-    // Things" once between them.
-    expect(searches).toBe(4);
+    // "Stranger Things 4" is read as the show's fourth season, so the show is searched for once.
+    expect(searches).toBe(1);
   });
 });
 
@@ -156,6 +155,135 @@ const shape = (
 ): Show => ({
   counts: new Map(Object.entries(counts).map(([s, n]) => [Number(s), n])),
   ...(lastAired ? { lastAired } : {}),
+});
+
+describe('what a real history needed', () => {
+  it('reads the labels Netflix uses beyond "Season N", and never "Chapter" as a season', () => {
+    expect(parseTitle('Love Is Blind: S10: Ohio: Um, Redo!')).toMatchObject({
+      show: 'Love Is Blind',
+      season: 10,
+    });
+    expect(parseTitle('The OA: Part II: Chapter 8: Overview')).toMatchObject({
+      show: 'The OA',
+      season: 2,
+    });
+    expect(parseTitle('3%: Season 1: Chapter 01: Cubes')).toMatchObject({
+      show: '3%',
+      season: 1,
+      episode: 'Chapter 01: Cubes',
+    });
+    expect(parseTitle('Stranger Things: Stranger Things 2: Chapter Five: Dig Dug')).toMatchObject({
+      show: 'Stranger Things',
+      season: 2,
+    });
+  });
+
+  it('finds two-parters, a trailing "The", a part alone, and a name only nearly the same', () => {
+    const grey = [
+      { number: 1, name: 'Dream a Little Dream of Me (1)' },
+      { number: 2, name: 'Dream a Little Dream of Me (2)' },
+      { number: 3, name: 'Here Comes the Flood' },
+    ];
+    expect(findEpisode('Dream A Little Dream Of Me: Part 2', grey)).toBe(2);
+    expect(findEpisode('Dream A Little Dream Of Me, Pt. 1', grey)).toBe(1);
+    const kardashians = [
+      { number: 9, name: 'The Kardashian Chainsaw Massacre' },
+      { number: 10, name: 'Other' },
+    ];
+    expect(findEpisode('Kardashian Chainsaw Massacre, The', kardashians)).toBe(9);
+    const sinner = [
+      { number: 1, name: 'Part I' },
+      { number: 2, name: 'Part II' },
+    ];
+    expect(findEpisode('Cora: Part II', sinner)).toBe(2);
+    const friends = [
+      { number: 7, name: "The One with Ross's Library Book" },
+      { number: 8, name: 'The One Where Chandler Doesn’t Like Dogs' },
+    ];
+    expect(findEpisode("The One with Ross' Library Book", friends)).toBe(7);
+    expect(findEpisode('The One with the Wedding Dresses', friends)).toBeUndefined();
+  });
+
+  it('leaves out trailers and previews, which are no viewing', async () => {
+    const result = await plan(
+      [
+        { title: 'Valeria: Season 1 Trailer: Valeria', date: '9/1/26' },
+        { title: 'Personal Shopper: Personal Shopper_hook_primary_16x9', date: '9/1/26' },
+      ],
+      {
+        searchTv: async () => [],
+        searchMulti: async () => [],
+        show: async () => null,
+        episodes: async () => null,
+      },
+    );
+    expect(result).toMatchObject({ marks: [], unmatched: [] });
+  });
+
+  it('takes the namesake whose episodes the history names, not TMDB’s first nor one with only "Episode N"', async () => {
+    const original = { type: 'tv' as const, id: 12998, name: 'Heartbreak High' };
+    const reboot = { type: 'tv' as const, id: 158154, name: 'Heartbreak High' };
+    const lookups: Lookups = {
+      searchTv: async () => [original, reboot],
+      searchMulti: async () => [],
+      show: async () => shape({ 1: 2 }),
+      episodes: async (id) =>
+        id === original.id
+          ? [
+              { number: 1, name: 'Episode 1' },
+              { number: 2, name: 'Episode 2' },
+            ]
+          : [
+              { number: 1, name: 'Map B**ch' },
+              { number: 2, name: 'Three of Swords' },
+            ],
+    };
+    const { marks } = await plan(
+      [
+        { title: 'Heartbreak High: Season 1: Map B**ch', date: '9/1/26' },
+        { title: 'Heartbreak High: Season 1: Three of Swords', date: '9/2/26' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => m.id)).toEqual([158154, 158154]);
+  });
+
+  it('places episodes TMDB names only "Episode N" in the order they were watched', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [{ type: 'tv', id: 254721, name: 'Kaulitz & Kaulitz' }],
+      searchMulti: async () => [],
+      show: async () => shape({ 3: 3 }),
+      episodes: async () => [1, 2, 3].map((n) => ({ number: n, name: `Episode ${n}` })),
+    };
+    const { marks } = await plan(
+      [
+        { title: 'Kaulitz & Kaulitz: Season 3: The Dream Wedding', date: '9/3/26' },
+        { title: 'Kaulitz & Kaulitz: Season 3: The Lost Prom', date: '9/1/26' },
+        { title: 'Kaulitz & Kaulitz: Season 3: Twins in Pool Position', date: '9/2/26' },
+      ],
+      lookups,
+    );
+    const bySource = Object.fromEntries(marks.map((m) => [m.at, m.episode]));
+    expect(bySource).toEqual({
+      [noon(2026, 9, 1)]: 1,
+      [noon(2026, 9, 2)]: 2,
+      [noon(2026, 9, 3)]: 3,
+    });
+  });
+
+  it('takes a film over a series of the same name', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [],
+      searchMulti: async () => [
+        { type: 'tv', id: 62687, name: 'Limitless' },
+        { type: 'movie', id: 51876, name: 'Limitless' },
+      ],
+      show: async () => null,
+      episodes: async () => null,
+    };
+    const { marks } = await plan([{ title: 'Limitless', date: '9/1/26' }], lookups);
+    expect(marks).toEqual([expect.objectContaining({ type: 'movie', id: 51876 })]);
+  });
 });
 
 async function withNow<T>(now: number, run: () => Promise<T>): Promise<T> {

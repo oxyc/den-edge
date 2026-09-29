@@ -124,20 +124,58 @@ export function readDate(date: string, dayFirstOrder: boolean): number | null {
   return at.getMonth() === month! - 1 && at.getDate() === day ? at.getTime() : null;
 }
 
-const SEASON = /^(?:season|series|part|volume|vol\.|chapter|book|collection)\s+(\d+)$/i;
+// Not "Chapter": that is an episode's own number ("3%: Season 1: Chapter 01: Cubes").
+const SEASON = /^(?:season|series|part|volume|vol\.|book|collection)\s+(\d+|[ivx]+)$/i;
 const LIMITED = /^(?:limited series|miniseries|mini-series)$/i;
+
+/** Roman numerals as Netflix numbers a show's parts ("The OA: Part II"). */
+const ROMAN: Record<string, number> = {
+  i: 1,
+  ii: 2,
+  iii: 3,
+  iv: 4,
+  v: 5,
+  vi: 6,
+  vii: 7,
+  viii: 8,
+  ix: 9,
+  x: 10,
+};
+
+/** The season a label names ("Season 4", "Series 5", "Part II", "S10"), or undefined for none. */
+function seasonOf(label: string): number | undefined {
+  if (LIMITED.test(label)) return 1;
+  const short = /^s(\d+)$/i.exec(label)?.[1];
+  if (short !== undefined) return Number(short);
+  const [, number] = SEASON.exec(label) ?? [];
+  if (number === undefined) return undefined;
+  return /^\d+$/.test(number) ? Number(number) : ROMAN[number.toLowerCase()];
+}
+
+/**
+ * Not a viewing: a trailer or preview Netflix lists among them ("Valeria: Season 1 Trailer: Valeria",
+ * "Personal Shopper: Personal Shopper_hook_primary_16x9").
+ */
+export const isPreview = (title: string) =>
+  /(?:^|: )[^:]*\btrailer(?::|$)/i.test(title) || /_hook_|_16x9\b/i.test(title);
 
 /** A Netflix title as show, season and episode name, split at its last season label; otherwise a name. */
 export function parseTitle(title: string): Parsed {
   const parts = title.split(': ');
   for (let i = parts.length - 2; i >= 1; i--) {
     const label = parts[i]!.trim();
-    const season = SEASON.exec(label)?.[1];
-    if (season === undefined && !LIMITED.test(label)) continue;
+    // "Stranger Things: Stranger Things 2: …" — the show's own name and a number is its season.
+    const own = /^(.+?)\s+(\d+)$/.exec(label);
+    const season =
+      seasonOf(label) ??
+      (own && normalize(own[1]!) === normalize(parts.slice(0, i).join(': '))
+        ? Number(own[2])
+        : undefined);
+    if (season === undefined) continue;
     return {
       kind: 'episode',
       show: parts.slice(0, i).join(': '),
-      season: season === undefined ? 1 : Number(season),
+      season,
       episode: parts.slice(i + 1).join(': '),
     };
   }
@@ -155,7 +193,53 @@ export function normalize(name: string): string {
     .trim();
 }
 
-/** The episode `name` is among `episodes`: the same name, or "Episode 5"/"Chapter 5" by number. */
+const PART_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, ...ROMAN };
+
+/**
+ * An episode name as its words and the part of a two-parter it is: Netflix's "Six Days: Part 1", "Pt. 1",
+ * "(Part One)" and "1/2" are TMDB's "Six Days (1)". A trailing ", The" goes back to the front, and a leading
+ * "Chapter 01:" is dropped, since one side often has it and the other not.
+ */
+function reading(name: string): { words: string; part?: number } {
+  let rest = name.trim().replace(/^(.*), (the|a|an)$/i, '$2 $1');
+  let part: number | undefined;
+  const found =
+    /[\s:,-]*\(?\b(?:part|pt\.?)\s*(\d+|one|two|three|four|[ivx]+)\)?$/i.exec(rest) ??
+    /\s*\((\d+)\)$/.exec(rest) ??
+    /\s+(\d+)\s*\/\s*\d+$/.exec(rest);
+  if (found) {
+    part = PART_WORDS[found[1]!.toLowerCase()] ?? Number(found[1]);
+    rest = rest.slice(0, found.index);
+  }
+  const words = normalize(rest).replace(/^chapter \S+ /, '');
+  return part === undefined ? { words } : { words, part };
+}
+
+/** How alike two names read, 0 to 1: the share of letter pairs they have in common. */
+function likeness(a: string, b: string): number {
+  const pairs = (s: string) => {
+    const out = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++)
+      out.set(s.slice(i, i + 2), (out.get(s.slice(i, i + 2)) ?? 0) + 1);
+    return out;
+  };
+  const [x, y] = [pairs(a), pairs(b)];
+  let shared = 0;
+  for (const [pair, n] of x) shared += Math.min(n, y.get(pair) ?? 0);
+  const total = Math.max(1, a.length - 1 + (b.length - 1));
+  return (2 * shared) / total;
+}
+
+/** TMDB's placeholder for an episode it has no name for: "Episode 3", "Episode Three". */
+export const unnamed = (name: string) =>
+  /^(?:episode|chapter|ep)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
+    normalize(name),
+  );
+
+/**
+ * The episode `name` is among `episodes`: the same name, "Episode 5" by number, the same part of a two-parter, one
+ * name inside the other, or failing those the one name alike enough to it and clearly more alike than any other.
+ */
 export function findEpisode(
   name: string,
   episodes: readonly { number: number; name: string }[],
@@ -167,22 +251,57 @@ export function findEpisode(
   const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
   if (numbered !== undefined && episodes.some((e) => e.number === Number(numbered)))
     return Number(numbered);
-  // One name inside the other ("The Reunion" and "The Reunion Special"), when it is long enough to mean it.
-  if (wanted.length < 8) return undefined;
-  const within = episodes.filter((e) => {
+
+  // One whole name inside the other ("Stranger Things 2: Chapter Five: Dig Dug" and "Chapter Five: Dig Dug").
+  const whole = episodes.filter((e) => {
     const other = normalize(e.name);
     return other.length >= 8 && (other.includes(wanted) || wanted.includes(other));
   });
-  return within.length === 1 ? within[0]!.number : undefined;
+  if (wanted.length >= 8 && whole.length === 1) return whole[0]!.number;
+
+  const mine = reading(name);
+  const theirs = episodes.map((e) => ({ number: e.number, ...reading(e.name) }));
+  // Episodes TMDB names by part alone ("Part I") are found by it: "Cora: Part I" is the first.
+  if (mine.part !== undefined && theirs.every((e) => !e.words && e.part !== undefined))
+    return theirs.find((e) => e.part === mine.part)?.number;
+  if (!mine.words) return undefined;
+  const same = theirs.filter((e) => e.words === mine.words);
+  // A two-parter TMDB lists as one episode is that episode, whichever part Netflix says.
+  const part = same.find((e) => e.part === mine.part) ?? (same.length === 1 ? same[0] : undefined);
+  if (part) return part.number;
+
+  // One name inside the other ("The Reunion" and "The Reunion Special"), when it is long enough to mean it.
+  if (mine.words.length >= 8) {
+    const within = theirs.filter(
+      (e) =>
+        e.words.length >= 8 &&
+        (e.part === undefined || e.part === mine.part) &&
+        (e.words.includes(mine.words) || mine.words.includes(e.words)),
+    );
+    if (within.length === 1) return within[0]!.number;
+  }
+
+  // "The One with Ross' Library Book" is TMDB's "Ross's"; "a Chick. And a Duck" is "the Chick and the Duck".
+  const scored = theirs
+    .filter((e) => e.part === mine.part && !unnamed(e.words))
+    .map((e) => ({ number: e.number, score: likeness(mine.words, e.words) }))
+    .sort((a, b) => b.score - a.score);
+  const [best, next] = scored;
+  return best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1
+    ? best.number
+    : undefined;
 }
 
-/** The hit named exactly `query`, or, for a show, TMDB's first. */
-function pick(hits: SearchHit[], query: string, loose: boolean): SearchHit | undefined {
+/**
+ * Every hit named exactly `query`, in TMDB's order, or, `loose`, TMDB's first where none is. More than one is common:
+ * Marco Polo, Bordertown and The Ranch each have a namesake, and TMDB's first is often not Netflix's.
+ */
+function named(hits: SearchHit[], query: string, loose: boolean): SearchHit[] {
   const wanted = normalize(query);
   const exact = wanted
-    ? hits.find((h) => normalize(h.name) === wanted || normalize(h.originalName ?? '') === wanted)
-    : undefined;
-  return exact ?? (loose ? hits[0] : undefined);
+    ? hits.filter((h) => normalize(h.name) === wanted || normalize(h.originalName ?? '') === wanted)
+    : [];
+  return exact.length ? exact.slice(0, 4) : loose && hits[0] ? [hits[0]] : [];
 }
 
 /**
@@ -204,6 +323,7 @@ export async function plan(
   // Latest date per Netflix title: a rewatch is one viewing more of the same thing.
   const latest = new Map<string, number>();
   for (const { title, date } of viewings) {
+    if (isPreview(title)) continue;
     const at = readDate(date, order);
     if (at === null) {
       undated++;
@@ -284,25 +404,79 @@ export async function plan(
   let done = 0;
   const tick = () => progress?.(++done, total);
 
+  /**
+   * Where each line is in the series `id`, by its episode's name; then, in a season whose episodes TMDB names only
+   * "Episode 1, 2, …", the lines still unplaced take its unclaimed episodes in the order they were watched.
+   */
+  const place = async (
+    id: number,
+    lines: { title: string; season: number | null; episode: string }[],
+  ) => {
+    const found = await Promise.all(lines.map((line) => locate(id, line.season, line.episode)));
+    const regular = (await seasonsOf(id)).filter((s) => s > 0).sort((a, b) => a - b);
+    // A line with no season named, in a series of one season, is of that season.
+    const only = regular.length === 1 ? regular[0]! : null;
+    const claimed = new Set(found.flatMap((f) => (f ? [`${f.season}:${f.episode}`] : [])));
+    const bySeason = new Map<number, number[]>();
+    lines.forEach((line, at) => {
+      const season = line.season ?? only;
+      if (found[at] || season === null) return;
+      bySeason.set(season, [...(bySeason.get(season) ?? []), at]);
+    });
+    for (const [season, waiting] of bySeason) {
+      const list = (await episodesOf(id, season)) ?? [];
+      if (!list.length || !list.every((e) => unnamed(e.name))) continue;
+      const free = list
+        .map((e) => e.number)
+        .filter((n) => !claimed.has(`${season}:${n}`))
+        .sort((a, b) => a - b);
+      if (free.length < waiting.length) continue;
+      waiting
+        .sort((a, b) => latest.get(lines[a]!.title)! - latest.get(lines[b]!.title)!)
+        .forEach((at, i) => (found[at] = { season, episode: free[i]! }));
+    }
+    return found;
+  };
+
   const series = pool([...shows], 8, async ([show, lines]) => {
-    const hit = pick(await searchTv(show), show, true);
-    if (hit && seen(hit)) {
-      known += lines.length;
-      return tick();
-    }
-    if (hit) {
+    const candidates = named(await searchTv(show), show, true);
+    const asked = lines.map(({ title, parsed }) => ({
+      title,
+      season: parsed.season,
+      episode: parsed.episode,
+    }));
+    // The namesake whose episodes the history names; TMDB's first where none of them fits better. Judged by names
+    // alone: any series whose episodes TMDB leaves unnamed would take every line by the order they were watched,
+    // which is how the 1994 Heartbreak High once took Netflix's.
+    let best:
+      { hit: SearchHit; found: Awaited<ReturnType<typeof place>>; byName: number } | undefined;
+    for (const hit of candidates) {
+      if (seen(hit)) {
+        known += lines.length;
+        return tick();
+      }
       // Every season the history names, and the series' layout, asked for at once.
-      const named = new Set(
-        lines.flatMap(({ parsed }) => (parsed.season === null ? [] : [parsed.season])),
-      );
-      await Promise.all([keep(hit.id), ...[...named].map((season) => episodesOf(hit.id, season))]);
+      const seasons = new Set(asked.flatMap((line) => (line.season === null ? [] : [line.season])));
+      await Promise.all([
+        keep(hit.id),
+        ...[...seasons].map((season) => episodesOf(hit.id, season)),
+      ]);
+      const byName = (
+        await Promise.all(asked.map((l) => locate(hit.id, l.season, l.episode)))
+      ).filter(Boolean).length;
+      const found = await place(hit.id, asked);
+      const count = found.filter(Boolean).length;
+      if (
+        !best ||
+        byName > best.byName ||
+        (byName === best.byName && count > best.found.filter(Boolean).length)
+      )
+        best = { hit, found, byName };
+      if (byName === lines.length) break;
     }
-    const found = await Promise.all(
-      lines.map(({ parsed }) => (hit ? locate(hit.id, parsed.season, parsed.episode) : undefined)),
-    );
     lines.forEach(({ title }, at) => {
-      const where = found[at];
-      if (hit && where) add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
+      const where = best?.found[at];
+      if (best && where) add({ ...markOf(best.hit, show), ...where, at: latest.get(title)! });
       else unmatched.push(title);
     });
     tick();
@@ -316,35 +490,62 @@ export async function plan(
     const first = title.split(': ')[0]!;
     if (first !== title) firsts.set(first, (firsts.get(first) ?? 0) + 1);
   }
+  /** `Show: Episode` lines with no season named, by the series they were found in, placed together at the end. */
+  const seasonless = new Map<
+    number,
+    { hit: SearchHit; show: string; lines: { title: string; episode: string }[] }
+  >();
   const films = pool(names, 12, async (title) => {
     const shared = (firsts.get(title.split(': ')[0]!) ?? 0) > 1;
     if (shared && (await asSeasonless(title))) return tick();
-    const hit = pick(await lookups.searchMulti(title), title, false);
-    if (hit?.type === 'movie') {
-      if (seen(hit)) known++;
-      else add({ ...markOf(hit, title), at: latest.get(title)! });
+    // A film before a series of the same name: "Limitless" and "Trust" are both.
+    const hits = named(await lookups.searchMulti(title), title, false);
+    const film = hits.find((h) => h.type === 'movie');
+    if (film) {
+      if (seen(film)) known++;
+      else add({ ...markOf(film, title), at: latest.get(title)! });
     } else if (shared || !(await asSeasonless(title))) unmatched.push(title);
     tick();
   });
   await Promise.all([series, films]);
+  for (const { hit, show, lines } of seasonless.values()) {
+    const found = await place(
+      hit.id,
+      lines.map((line) => ({ ...line, season: null })),
+    );
+    lines.forEach(({ title }, at) => {
+      const where = found[at];
+      if (where) add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
+      else unmatched.push(title);
+    });
+  }
 
-  /** `Show: Episode` with no season named (a series of one), looked for in every season. */
+  /**
+   * `Show: Episode` with no season named: the longest leading part a series is named, the namesake it names an
+   * episode of (or the first), kept to be placed with the rest of that series' lines. False when no series is.
+   */
   async function asSeasonless(title: string): Promise<boolean> {
     const parts = title.split(': ');
     for (let i = parts.length - 1; i >= 1; i--) {
       const show = parts.slice(0, i).join(': ');
-      const hit = pick(await searchTv(show), show, false);
-      if (!hit) continue;
-      if (seen(hit)) {
-        known++;
-        return true;
+      const candidates = named(await searchTv(show), show, false);
+      if (!candidates.length) continue;
+      const episode = parts.slice(i).join(': ');
+      let chosen = candidates[0]!;
+      for (const hit of candidates) {
+        if (seen(hit)) {
+          known++;
+          return true;
+        }
+        if (await locate(hit.id, null, episode)) {
+          chosen = hit;
+          break;
+        }
       }
-      const [found] = await Promise.all([
-        locate(hit.id, null, parts.slice(i).join(': ')),
-        keep(hit.id),
-      ]);
-      if (!found) return false;
-      add({ ...markOf(hit, show), ...found, at: latest.get(title)! });
+      await keep(chosen.id);
+      const group = seasonless.get(chosen.id) ?? { hit: chosen, show, lines: [] };
+      group.lines.push({ title, episode });
+      seasonless.set(chosen.id, group);
       return true;
     }
     return false;
