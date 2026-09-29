@@ -11,7 +11,7 @@ import { atlasWhere } from './atlasRows';
 import { RECIPES, recipeParts, retargeted } from './catalog';
 import { likeValue, type FilterItem } from './filterRoutes';
 import type { ExploreType } from './library';
-import { likeOf } from './route';
+import { fansOf, likeOf } from './route';
 
 /** A kind's counts: value → titles, and whether a value missing from them has none (`complete`). */
 export interface KindCounts {
@@ -71,8 +71,8 @@ export function filterOnlyKind(id: string): FilterOnlyKind | undefined {
 /**
  * What a facet id is in atlas's terms: `[kind, value]` pairs, several for a plot row that pairs two axes or a recipe
  * made of parts. A recipe atlas has no form of gives what it can — AND-joined genres, one language, one country —
- * which, counted, can only hide less. A "Like" for a title of the other type is nothing of this type's; under All,
- * where genres are the films' ids, a "Like" of either type is one, and a recipe is its film form.
+ * which, counted, can only hide less. A "Like" or a "Fans of" for a title of the other type is nothing of this type's;
+ * under All, where genres are the films' ids, one of either type is one, and a recipe is its film form.
  */
 export function facetParts(id: string, type: ExploreType): [kind: string, value: string][] {
   const genre = /^genre-(\d+)$/.exec(id)?.[1];
@@ -89,6 +89,8 @@ export function facetParts(id: string, type: ExploreType): [kind: string, value:
   if (rating) return [['rating', rating]];
   const like = likeOf(id);
   if (like) return like.type === type || type === 'all' ? [['like', likeValue(like, type)]] : [];
+  const fans = fansOf(id);
+  if (fans) return fans.type === type || type === 'all' ? [['fans', likeValue(fans, type)]] : [];
   const only = filterOnlyKind(id);
   if (only) return [[only, id.slice(only.length + 1)]];
   if (id.startsWith('recipe-')) {
@@ -115,8 +117,11 @@ export function facetParts(id: string, type: ExploreType): [kind: string, value:
   );
 }
 
-/** The kinds whose picks never OR together: a "Like" is one title's neighbours, and a rating is a floor. */
-const UNGROUPED = new Set(['like', 'rating']);
+/**
+ * The kinds whose picks never OR together: a "Like" is one title's neighbours, a "Fans of" one title's You Might Also
+ * Like, and a rating is a floor.
+ */
+const UNGROUPED = new Set(['like', 'fans', 'rating']);
 
 /**
  * The one atlas kind a pick is a value of, where it is one — undefined for a recipe, a pick of several parts (a plot
@@ -160,7 +165,7 @@ export const countItems = (selection: readonly string[], type: ExploreType): Fil
 
 /**
  * The selection as one atlas filter, or undefined where a pick has no form there: a recipe atlas doesn't know, a
- * "Like" for the other type, an id nothing reads. Picks of one kind are one OR group (`groupItems`).
+ * "Like" or a "Fans of" for the other type, an id nothing reads. Picks of one kind are one OR group (`groupItems`).
  */
 export function filterItems(
   selection: readonly string[],

@@ -8,7 +8,7 @@ import { filterItems, groupItems } from './facetCounts';
 import { browseChips, exploreChips, FOR_YOU, type Chip, type ChipGroup } from './explore';
 import { TRAIT_KINDS, type FilterItem, type PeopleCounts } from './filterRoutes';
 import type { ExploreType } from './library';
-import { FACET, likeOf, type Explore, type PeopleView } from './route';
+import { FACET, fansOf, likeOf, type Explore, type PeopleView } from './route';
 
 /** The traits, in the order the rail lists them. */
 export const TRAITS = ['role', 'gender', 'born', 'citizenship', 'occupation'] as const;
@@ -188,8 +188,8 @@ export function titleChips(type: ExploreType): Chip[] {
 
 /**
  * What Explore's tab link to People carries: the type, and the title facets atlas's people filter can read. For You
- * (one's own taste), a rating floor (TMDB's) and a "Like" (one title's neighbours) scope no credits, so they stay
- * behind, as does a typed query.
+ * (one's own taste), a rating floor (TMDB's), a "Like" (one title's neighbours) and a "Fans of" (one title's You
+ * Might Also Like) scope no credits, so they stay behind, as does a typed query.
  */
 export function peopleFromExplore({ type, chips = [] }: Explore): PeopleView {
   const kept = chips.filter(
@@ -197,6 +197,7 @@ export function peopleFromExplore({ type, chips = [] }: Explore): PeopleView {
       id !== FOR_YOU &&
       !id.startsWith('rating-') &&
       !likeOf(id) &&
+      !fansOf(id) &&
       filterItems([id], type ?? 'all') !== undefined,
   );
   return { ...(type ? { type } : {}), ...(kept.length ? { chips: kept } : {}) };

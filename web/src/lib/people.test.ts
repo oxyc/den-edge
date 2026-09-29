@@ -181,7 +181,7 @@ describe('Carrying a view between Explore and People', () => {
         chips: ['genre-27', 'for-you', 'rating-7', 'like-tv-1396', 'country-KR', 'person-Q25191'],
       }),
     ).toEqual({ type: 'tv', chips: ['genre-27', 'country-KR', 'person-Q25191'] });
-    expect(peopleFromExplore({ chips: ['for-you', 'rating-8'] })).toEqual({});
+    expect(peopleFromExplore({ chips: ['for-you', 'rating-8', 'fans-movie-550'] })).toEqual({});
     expect(peopleFromExplore({})).toEqual({});
   });
 

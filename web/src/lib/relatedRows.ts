@@ -7,7 +7,7 @@ import { fetchCollection, fetchFilmography, groupFilmography, type TitleDetail }
 import { filterTitles, likeValue } from './filterRoutes';
 import type { IconicStudio } from './iconicStudios';
 import type { MediaType, Title } from './library';
-import { likeId, personHref, searchHref } from './route';
+import { fansId, likeId, personHref, searchHref } from './route';
 import type { Browsable, TitleFacts } from './titleFacts';
 import { fetchTitle } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
@@ -270,11 +270,11 @@ export function moreLikeThisRow(
   return {
     id: affinity ? 'you-might-also-like' : 'more-like-this',
     title: affinity ? 'You might also like' : 'More like this',
-    // The same titles as a whole page to browse and narrow: Search with this title as its "Like", under All, where
-    // they are films and series together. Said once, on More like this, whose titles that page shows.
-    ...(affinity
-      ? {}
-      : { aside: { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) } }),
+    // The same titles as a whole page to browse and narrow: Search with this title as its "Like" — or, for You might
+    // also like, its "Fans of" — under All, where they are films and series together.
+    aside: affinity
+      ? { label: 'Explore', href: searchHref('', { chips: [fansId(self)] }) }
+      : { label: 'Explore similar', href: searchHref('', { chips: [likeId(self)] }) },
     load: async () => {
       while (source !== 'done') {
         const fresh = (await step()).filter((t) => {

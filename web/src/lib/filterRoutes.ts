@@ -69,6 +69,7 @@ export const FILTER_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = 
   format: { mode: 'and', id: 'qid' },
   character: { mode: 'and', id: 'character' },
   like: { mode: 'single', id: 'like' },
+  fans: { mode: 'single', id: 'like' },
 };
 
 /** Every person trait the people routes read in `traits` (atlas's `filter.traits` in `/index/schema.json`). */
@@ -84,8 +85,8 @@ export const TRAIT_KINDS: Record<string, { mode: FilterMode; id: IdFormat }> = {
 const TRAIT_VALUES = ['gender', 'citizenship', 'occupation'];
 
 /**
- * A "Like"'s value in atlas's filter: the title's id under its own type's route; under `all`, which holds both types'
- * ids, the id with its type (`movie-550`, `series-1396`). The one place that form is decided.
+ * A "Like"'s or a "Fans of"'s value in atlas's filter: the title's id under its own type's route; under `all`, which
+ * holds both types' ids, the id with its type (`movie-550`, `series-1396`). The one place that form is decided.
  */
 export const likeValue = (title: { type: MediaType; id: number }, route: ExploreType): string =>
   route === 'all' ? `${title.type === 'tv' ? 'series' : 'movie'}-${title.id}` : String(title.id);
@@ -212,7 +213,7 @@ const byString = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * An item's id may be an OR group of its kind's values (`country:FR|IT`, any of them): each value normalised alone,
  * the group sorted as strings and each value kept once, joined with a literal `|` (a one-value group has none) and
  * sorted among the items by that joined id. Every value must read as the same kind (the old `structure` spreads over
- * two), a "Like" never groups, and each value counts toward the cap.
+ * two), a "Like" or a "Fans of" never groups, and each value counts toward the cap.
  */
 function spelled(
   items: FilterItem[],

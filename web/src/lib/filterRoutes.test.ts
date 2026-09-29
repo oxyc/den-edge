@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 1d8fcb4): both ends hold to the same pairs.
+// A copy of den-atlas's tests/fixtures/facets-canonical.json (den-atlas 1d8fcb4, and fa20c6d's fans cases): both ends
+// hold to the same pairs.
 import fixture from './facets-canonical.json';
 import {
   canonicalFilterPath,
@@ -64,6 +65,15 @@ describe('canonical filter addresses', () => {
         skip: 24,
       }),
     ).toBe('/atlas/index/filter/all/titles.json?sel=genre:35,like:series-1396&skip=24');
+    // A "Fans of" is written as a "Like" is.
+    expect(
+      filterUrl('/atlas', 'all', 'titles', {
+        items: [
+          { kind: 'fans', id: likeValue({ type: 'movie', id: 550 }, 'all') },
+          { kind: 'genre', id: '35' },
+        ],
+      }),
+    ).toBe('/atlas/index/filter/all/titles.json?sel=fans:movie-550,genre:35');
     // The same builder reads an `all` address back, as it reads either type's.
     expect(
       canonicalFilterPath('/index/filter/all/counts.json?sel=like:SERIES-01396,genre:35'),

@@ -78,6 +78,15 @@ export function likeOf(id: string): { type: MediaType; id: number } | undefined 
   return match ? { type: match[1] as MediaType, id: Number(match[2]) } : undefined;
 }
 
+/** The facet "Fans of <title>", its You Might Also Like: `fans-movie-949`, `fans-tv-1396`. */
+export const fansId = (title: { type: MediaType; id: number }) => `fans-${title.type}-${title.id}`;
+
+/** The title a "Fans of" facet is for; undefined for any other facet. */
+export function fansOf(id: string): { type: MediaType; id: number } | undefined {
+  const match = /^fans-(movie|tv)-(\d+)$/.exec(id);
+  return match ? { type: match[1] as MediaType, id: Number(match[2]) } : undefined;
+}
+
 /** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
 const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
 

@@ -86,6 +86,8 @@ describe('moreLikeThisRow', () => {
     });
 
     expect(row.title).toBe('You might also like');
+    // Its "Explore" opens Search with this title's "Fans of", under All.
+    expect(row.aside).toEqual({ label: 'Explore', href: '/search?c=fans-movie-550' });
     expect((await row.load(1)).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:1396', 'movie:11']);
     const request = asked.find((entry) => entry.path === '/atlas/index/suggest.json');
     expect(request?.init?.method).toBe('POST');

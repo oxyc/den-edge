@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  fansId,
+  fansOf,
   legacyPath,
   likeId,
   likeOf,
@@ -150,6 +152,19 @@ describe('routes', () => {
     expect(likeOf('like-tv-1396')).toEqual({ type: 'tv', id: 1396 });
     expect(likeOf('like-person-1')).toBeUndefined();
     expect(likeOf('mood-cozy')).toBeUndefined();
+  });
+
+  it('carries a "Fans of" as a facet, apart from a "Like"', () => {
+    const href = searchHref('', { chips: [fansId({ type: 'movie', id: 550 })] });
+    expect(href).toBe('/search?c=fans-movie-550');
+    expect(parseRoute(href)).toStrictEqual({
+      page: 'search',
+      query: '',
+      chips: ['fans-movie-550'],
+    });
+    expect(fansOf('fans-tv-1396')).toEqual({ type: 'tv', id: 1396 });
+    expect(fansOf('like-tv-1396')).toBeUndefined();
+    expect(likeOf('fans-tv-1396')).toBeUndefined();
   });
 
   it('names a title in its link without letting the name identify it', () => {

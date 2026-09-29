@@ -46,6 +46,18 @@ describe('facetParts', () => {
     expect(facetParts('runtime-under-90', 'movie')).toEqual([['runtime', 'under-90']]);
     expect(facetParts('technique-live_action', 'movie')).toEqual([['technique', 'live_action']]);
   });
+
+  it('asks for a "Fans of" as a "Like" is asked, by its own kind, never grouped', () => {
+    expect(facetParts('fans-movie-949', 'movie')).toEqual([['fans', '949']]);
+    expect(facetParts('fans-tv-1396', 'movie')).toEqual([]);
+    expect(facetParts('fans-tv-1396', 'all')).toEqual([['fans', 'series-1396']]);
+    expect(groupKind('fans-movie-949', 'movie')).toBeUndefined();
+    expect(filterItems(['fans-movie-550', 'genre-35', 'decade-1990'], 'all')).toEqual([
+      { kind: 'fans', id: 'movie-550' },
+      { kind: 'genre', id: '35' },
+      { kind: 'decade', id: '1990' },
+    ]);
+  });
 });
 
 describe('recipes in atlas’s terms', () => {

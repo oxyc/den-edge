@@ -41,7 +41,7 @@ import {
 } from './filterRoutes';
 import type { ExploreType, MediaType, Title } from './library';
 import { moreLikeThisRow } from './relatedRows';
-import { FACET, likeOf } from './route';
+import { FACET, fansOf, likeOf } from './route';
 
 export const FOR_YOU = 'for-you';
 
@@ -66,6 +66,7 @@ export type ChipGroup =
   | 'decade'
   | 'rating'
   | 'like'
+  | 'fans'
   | 'people'
   | 'company'
   | 'studio'
@@ -110,6 +111,7 @@ export const KIND: Record<ChipGroup, string> = {
   decade: 'decade',
   rating: 'rating',
   like: 'like',
+  fans: 'fans',
   people: 'person',
   company: 'company',
   studio: 'studio',
@@ -162,6 +164,13 @@ export const likeChip = (id: string, name?: string): Chip => ({
   id,
   label: name ? `Like ${name}` : 'Like…',
   group: 'like',
+});
+
+/** A "Fans of" as a chip, as `likeChip`: picked from a title page's You might also like, never listed. */
+export const fansChip = (id: string, name?: string): Chip => ({
+  id,
+  label: name ? `Fans of ${name}` : 'Fans of…',
+  group: 'fans',
 });
 
 /** Languages a filter can find: those of the country rows, and a few catalogues rich enough to browse by. */
@@ -664,9 +673,9 @@ export const namesExactly = (text: string, chip: Chip) =>
 
 /**
  * Which slot a facet fills. A mood, a plot facet and a subgenre are all atlas's rows, and fill one slot. A "Like" —
- * the titles closest to one title — is atlas's too, and can't share a feed with a mood, but is its own kind. The
- * kinds only atlas's filter knows stack as genres do (`more`: people, studios, subjects…), but a runtime and whether
- * it is animated, which a title has one of.
+ * the titles closest to one title — is atlas's too, and can't share a feed with a mood, but is its own kind; so is a
+ * "Fans of", one title's You Might Also Like. The kinds only atlas's filter knows stack as genres do (`more`: people,
+ * studios, subjects…), but a runtime and whether it is animated, which a title has one of.
  */
 export type Slot =
   | 'genre'
@@ -678,6 +687,7 @@ export type Slot =
   | 'recipe'
   | 'atlas'
   | 'like'
+  | 'fans'
   | 'runtime'
   | 'animated'
   | 'more';
@@ -691,6 +701,7 @@ const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
   'rating',
   'atlas',
   'like',
+  'fans',
   'runtime',
   'animated',
 ]);
@@ -700,17 +711,19 @@ const stacks = (slot: Slot | undefined) => slot === 'genre' || slot === 'more';
 
 /**
  * Where atlas's filter answers, a second value of a kind joins the first as an OR group (`groupItems`: Swedish or
- * Danish), so every slot takes several values but these: one rating floor, one "Like", one recipe.
+ * Danish), so every slot takes several values but these: one rating floor, one "Like", one "Fans of", one recipe.
  */
 const ONE_WHERE_FILTERED: ReadonlySet<Slot | undefined> = new Set<Slot>([
   'rating',
   'like',
+  'fans',
   'recipe',
 ]);
 
 export function slotOf(id: string): Slot | undefined {
   if (id === FOR_YOU) return undefined;
   if (likeOf(id)) return 'like';
+  if (fansOf(id)) return 'fans';
   const only = filterOnlyKind(id);
   if (only) return only === 'runtime' || only === 'animated' ? only : 'more';
   if (id.startsWith('genre-')) return 'genre';
@@ -754,6 +767,7 @@ function clash(a: string, b: string, type: ExploreType, filtered = false): boole
   const fromAtlas = (slot: Slot | undefined) =>
     slot === 'atlas' ||
     slot === 'like' ||
+    slot === 'fans' ||
     slot === 'more' ||
     slot === 'runtime' ||
     slot === 'animated';
@@ -856,7 +870,7 @@ export function remapSet(
 ): { set: string[]; dropped: string[] } {
   const known = new Set(chips.map((chip) => chip.id));
   for (const id of set) {
-    const like = likeOf(id);
+    const like = likeOf(id) ?? fansOf(id);
     if (like && (to === 'all' || like.type === to)) known.add(id);
   }
   // A person, a studio, a subject… is the same for either type; a network only a series has.
@@ -915,7 +929,7 @@ export function facetQuery(
 ): DiscoverQuery | undefined {
   const tmdb = (id: string) => {
     const slot = slotOf(id);
-    return !(slot === 'atlas' || slot === 'like' || filterOnlyKind(id));
+    return !(slot === 'atlas' || slot === 'like' || slot === 'fans' || filterOnlyKind(id));
   };
   if (!set.length || !set.every(tmdb)) return undefined;
   const genres = set.filter((id) => slotOf(id) === 'genre').map(genreOf);
@@ -1026,7 +1040,9 @@ export function emptyOptions(
   const empty = new Set<string>();
   const picked = new Set(selection.map(slotOf));
   const groups = new Set(filtered ? selection.map((id) => groupKind(id, type)) : []);
-  const judged = complete || ((picked.has('atlas') || picked.has('like')) && loaded.length > 0);
+  const judged =
+    complete ||
+    ((picked.has('atlas') || picked.has('like') || picked.has('fans')) && loaded.length > 0);
   for (const chip of chips) {
     const slot = slotOf(chip.id);
     if (!slot || selection.includes(chip.id)) continue;
@@ -1182,7 +1198,8 @@ function forYou(type: MediaType, { pages, seeds, owned }: FeedSources): RowDef {
  * before it, from the page it had reached:
  *
  * A "Like" uses `moreLikeThisRow` in its literal Similar mode as a whole feed: atlas's closest titles, then its plot
- * neighbours, then TMDB's recommendations for as many pages as TMDB has. The title page uses affinity mode instead.
+ * neighbours, then TMDB's recommendations for as many pages as TMDB has. The title page uses affinity mode instead,
+ * which a "Fans of" uses too: its title's You might also like row, and nothing past it.
  *
  * All (`allFeed`) asks atlas's filter for both types at once, and otherwise shows each type's own feed, interleaved.
  */
@@ -1217,7 +1234,7 @@ function allFeed(set: readonly string[], sources: FeedSources): RowDef {
       TYPES.map((type) => ({ type, row: forYou(type, sources) })),
     );
   const id = `facets-${[...set].sort().join('+')}-all`;
-  const like = set.some((pick) => likeOf(pick));
+  const like = set.some((pick) => likeOf(pick) || fansOf(pick));
   const sides = perType(set).filter((side) => !side.dropped.length);
   const local: RowDef = like
     ? localFeed(set, 'all', sources, id)
@@ -1374,6 +1391,18 @@ function localFeed(
       key: sources.key ?? '',
       similarLimit: LIKE_DEPTH,
       mixed: type === 'all',
+    });
+    return { ...row, id, filter: atlasFilter(set, type) };
+  }
+  // A "Fans of" is the row its title's page shows, and nothing past it: empty where atlas has none.
+  const fans = set.map(fansOf).find((ref) => ref !== undefined);
+  if (fans) {
+    const row = moreLikeThisRow({ title: { ...fans, title: '' } }, sources.atlas, {
+      key: sources.key ?? '',
+      similarLimit: LIKE_DEPTH,
+      mixed: type === 'all',
+      affinity: true,
+      fallback: false,
     });
     return { ...row, id, filter: atlasFilter(set, type) };
   }
