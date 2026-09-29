@@ -501,6 +501,55 @@ describe('what a real history needed', () => {
     expect(marks).toEqual([expect.objectContaining({ id: 1, season: 1, episode: 1 })]);
   });
 
+  it('compares names of symbols as they are, and names past their articles', () => {
+    const back = [
+      { number: 1, name: '(⊙_⊙)' },
+      { number: 2, name: '(¬_¬)' },
+    ];
+    expect(findEpisode('(¬_¬)', back)).toBe(2);
+    expect(findEpisode('(;´∩`;)', back)).toBeUndefined();
+    const aloha = [
+      { number: 1, name: 'Terrace House in Aloha State' },
+      { number: 36, name: 'Bye Bye Terrace House in Aloha State' },
+    ];
+    expect(findEpisode('Terrace House in the Aloha State', aloha)).toBe(1);
+    // "Down This Road" is not "Down the Road": the article goes, the word that tells them apart stays.
+    expect(
+      findEpisode('Down This Road', [
+        { number: 10, name: 'Down the Road' },
+        { number: 19, name: 'Down This Road' },
+      ]),
+    ).toBe(19);
+    expect(filmKey('Bordertown: Mural Murders')).toBe(filmKey('Bordertown: The Mural Murders'));
+    expect(filmKey('El Pepe, a Supreme Life')).toBe(filmKey('El Pepe: A Supreme Life'));
+  });
+
+  it('tries a line its show has no episode for as a film, but never a line with no show', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [{ type: 'tv', id: 1, name: 'Bordertown' }],
+      searchMulti: async (q) =>
+        q.startsWith('Bordertown')
+          ? [{ type: 'movie', id: 2, name: 'Bordertown: The Mural Murders', year: 2021 }]
+          : [{ type: 'movie', id: 3, name: 'Episode 1', year: 2017 }],
+      show: async () => shape({ 1: 3 }),
+      episodes: async () => [
+        { number: 1, name: 'Dolls' },
+        { number: 2, name: 'Lady in the Lake' },
+        { number: 3, name: 'The Fury' },
+      ],
+    };
+    const { marks, unmatched } = await plan(
+      [
+        { title: 'Bordertown: Dolls', date: '1/1/21' },
+        { title: 'Bordertown: Mural Murders', date: '12/12/21' },
+        { title: ': Episode 1', date: '1/1/21' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => `${m.type}:${m.id}`).sort()).toEqual(['movie:2', 'tv:1'].sort());
+    expect(unmatched).toEqual([': Episode 1']);
+  });
+
   it('takes a film over a series of the same name', async () => {
     const lookups: Lookups = {
       searchTv: async () => [],

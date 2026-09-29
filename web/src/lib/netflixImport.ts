@@ -256,8 +256,11 @@ const NUMBER_WORDS: Record<string, string> = {
  */
 export const filmKey = (name: string) =>
   normalize(name)
-    .replace(/^(?:the|a|an) /, '')
-    .split(' ')
+    // Anywhere, not only first: "Bordertown: Mural Murders" is "Bordertown: The Mural Murders", and "El Pepe, a
+    // Supreme Life" is "El Pepe: A Supreme Life".
+    .replace(/\b(?:the|a|an)\b/g, ' ')
+    .trim()
+    .split(/\s+/)
     .map((word) => NUMBER_WORDS[word] ?? word)
     .join(' ');
 
@@ -279,7 +282,13 @@ function reading(name: string): { words: string; part?: number } {
     part = PART_WORDS[found[1]!.toLowerCase()] ?? Number(found[1]);
     rest = rest.slice(0, found.index);
   }
-  const words = normalize(rest).replace(/^chapter \S+ /, '');
+  // Articles aside: "Terrace House in the Aloha State" is TMDB's "Terrace House in Aloha State", which would
+  // otherwise read as near "Bye Bye Terrace House in Aloha State" as to itself.
+  const words = normalize(rest)
+    .replace(/^chapter \S+ /, '')
+    .replace(/\b(?:the|a|an)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return part === undefined ? { words } : { words, part };
 }
 
@@ -313,7 +322,11 @@ export function findEpisode(
   episodes: readonly { number: number; name: string }[],
 ): number | undefined {
   const wanted = normalize(name);
-  if (!wanted) return undefined;
+  // A name of symbols alone ("Back to 15: Season 1: (¬_¬)") has nothing to normalise: it is the same or not.
+  if (!wanted) {
+    const raw = (s: string) => s.normalize('NFC').replace(/\s+/g, '');
+    return raw(name) ? episodes.find((e) => raw(e.name) === raw(name))?.number : undefined;
+  }
   const exact = episodes.find((e) => normalize(e.name) === wanted);
   if (exact) return exact.number;
   const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
@@ -710,6 +723,8 @@ export async function plan(
    * films alone, three pages deep: the 2018 "Girl" is not among the first twenty things called something with "girl".
    */
   const findFilm = async (title: string): Promise<SearchHit | undefined> => {
+    // A line with no show's name (": Episode 7") is an episode of something unnamed, never the film "Episode 7".
+    if (title.startsWith(': ')) return undefined;
     const key = filmKey(title);
     const watched = new Date(latest.get(title)!).getFullYear();
     const first = (hits: SearchHit[]) =>
@@ -768,11 +783,18 @@ export async function plan(
       lines.map((line) => ({ ...line, season: null })),
       show,
     );
-    lines.forEach(({ title }, at) => {
+    for (const [at, { title }] of lines.entries()) {
       const where = found[at];
-      if (where) add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
+      if (where) {
+        add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
+        continue;
+      }
+      // Not an episode of the series its name starts with, but maybe a film of it ("Bordertown: Mural Murders").
+      const film = await findFilm(title);
+      if (film && seen(film)) known++;
+      else if (film) add({ ...markOf(film, title), at: latest.get(title)! });
       else unmatched.push(title);
-    });
+    }
   }
   for (const [show, { candidates, lines }] of unnamedShows) {
     let taken = false;
