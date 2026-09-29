@@ -1236,6 +1236,64 @@ test('a title’s "More like this" row links to Search with its "Like"', async (
   }
 });
 
+test('a title’s You might also like sits straight under More like this', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    // A lead, so a row about the people who made it follows.
+    await routeTmdb(page, (r) => {
+      const path = new URL(r.request().url()).pathname;
+      if (path.endsWith('/movie/101'))
+        return r.fulfill({
+          json: {
+            ...film(101),
+            genres: [],
+            credits: { cast: [{ id: 7, name: 'Lead Actor', order: 0 }] },
+            recommendations: { results: [] },
+          },
+        });
+      if (path.endsWith('/person/7/combined_credits'))
+        return r.fulfill({
+          json: { cast: [{ ...film(303), media_type: 'movie', poster_path: '/p.jpg' }], crew: [] },
+        });
+      return r.fallback();
+    });
+    // den-edge keeps no shared metadata for the lead's films.
+    await page.route('**/metadata/title/query', (r) => r.fulfill({ status: 404, json: {} }));
+    await page.route('**/atlas/index/similar/**', (r) =>
+      r.fulfill({ json: { ids: [300], mixed: [{ type: 'movie', id: 300 }] } }),
+    );
+    await page.route('**/atlas/index/suggest/movie/101.json*', (r) =>
+      r.fulfill({
+        json: {
+          mixed: [{ type: 'movie', id: 302 }],
+          titles: [{ type: 'movie', id: 302, title: 'Film 302', year: 2026, posterPath: '/p.jpg' }],
+          total: 1,
+        },
+      }),
+    );
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
+    const suggested = active(page).getByRole('region', { name: 'You might also like' });
+    await expect(suggested.getByRole('link', { name: 'Film 302 2026' })).toBeVisible();
+    await expect(active(page).getByRole('region', { name: 'Starring Lead Actor' })).toBeVisible();
+    const headings = await active(page)
+      .getByRole('region')
+      .evaluateAll((regions) => regions.map((r) => r.getAttribute('aria-label')));
+    const similar = headings.indexOf('More like this');
+    expect(similar).toBeGreaterThanOrEqual(0);
+    expect(headings[similar + 1]).toBe('You might also like');
+    expect(headings[similar + 2]).toBe('Starring Lead Actor');
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [1100, 1440])
   test(`the search field finds every kind, and the rail never scrolls sideways at ${width}px`, async () => {
     const browser = await chromium.launch({

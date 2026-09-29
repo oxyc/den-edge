@@ -1,6 +1,6 @@
-<!-- The rows under a title's cast: its franchise, other versions of its story, More like this and its strongest
-     mood, what its director, creator, writer and leads have done, its studio and network, its country or language,
-     and You might also like. A row shows its heading as soon as it is known, and goes on loading as it is scrolled
+<!-- The rows under a title's cast: its franchise, other versions of its story, More like this, You might also like
+     and its strongest mood, what its director, creator, writer and leads have done, its studio and network, and its
+     country or language. A row shows its heading as soon as it is known, and goes on loading as it is scrolled
      to its end (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
@@ -65,8 +65,8 @@
   // The rows are built as soon as the title is, and each loads its first page when the browser is next idle
   // (`BrowseRow`), so they are usually full before they are scrolled to. For a title's first build, every row it
   // is known to have shows its heading and card-sized placeholders at once and loads itself, hiding if it turns
-  // out empty; only the franchise, other-versions and You might also like rows, which are not known to exist until
-  // they are looked up, join once they have something to show.
+  // out empty; only the franchise and other-versions rows, which are not known to exist until they are looked up,
+  // join once they have something to show.
   // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
   // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
   $effect(() => {
@@ -112,10 +112,11 @@
             )
           : withPosters(languageRow(regionalLanguage, self, atlas), options);
     let live = true;
-    // Every title the rows above have shown, so You might also like, the last row, offers none of them again.
+    // Every title the rows above You might also like have shown — the franchise, other versions and More like this —
+    // so it offers none of them again.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read by loaders only, never rendered.
     const onPage = new Set<string>([titleKey(self)]);
-    // The same, as it grows: a row above that loads after You might also like drops its titles from that row then.
+    // The same, as it grows: other versions, which load after You might also like, drop their titles from it then.
     const above = new SvelteSet<string>();
     const noted = (row: RowDef): RowDef => ({
       ...row,
@@ -138,10 +139,10 @@
       row ? firstScreen(noted(row), shown) : null,
     );
     const author = atlas ? authorRow(known, self, atlas) : null;
-    // Closest first: what is like this title, then what else came from its source author's books, the people who
-    // made it, then the same of its strongest mood, its
-    // studio, network and country or language, which say less about this title in particular, and last the looser
-    // suggestions. atlas's filter sends no posters, so those rows draw their own (`withPosters`).
+    // Closest first: what is like this title and what its fans also love, then what else came from its source
+    // author's books, the people who made it, then the same of its strongest mood, its studio, network and country or
+    // language, which say less about this title in particular. atlas's filter sends no posters, so those rows draw
+    // their own (`withPosters`).
     // More like this and the mood row share what they have offered, so a title appears in only one of them.
     const suggested = new Set<string>();
     const similar = moreLikeThisRow(detail, atlas, {
@@ -155,11 +156,32 @@
     const mood = atlas
       ? moodRow(known.moods, self, atlas, { seen: suggested, after: similarLoaded })
       : null;
+    // atlas's You might also like order alone: the wider sources are More like this's. It is asked once More like
+    // this has its first page, and skips every title the rows above it have shown (`onPage`, `above`).
+    const affinity = atlas
+      ? moreLikeThisRow(detail, atlas, {
+          ...options,
+          mixed: true,
+          similarLimit: 200,
+          affinity: true,
+          fallback: false,
+          seen: onPage,
+        })
+      : null;
     const defined: RowDef[] = [
       // Films and series together; curated primary members have their own row and atlas excludes them here.
       // Ask for atlas's whole ranked row: the loader pages this answer into screenfuls before it falls through to
       // the broader plot-neighbour and TMDB sources.
-      { ...similar, load: (page: number) => similar.load(page).finally(similarIn) },
+      noted({ ...similar, load: (page: number) => similar.load(page).finally(similarIn) }),
+      ...(affinity
+        ? [
+            {
+              ...affinity,
+              load: (page: number) => similarLoaded.then(() => affinity.load(page)),
+              filter: (title: Title) => !above.has(titleKey(title)),
+            },
+          ]
+        : []),
       // Every adaptation of the same author's work, the franchise's and other versions' included: the whole list is
       // what someone asking "what else came from their books" wants.
       ...(author ? [withPosters(author, options)] : []),
@@ -173,40 +195,23 @@
           ].map((row) => withPosters(row, options))
         : []),
       ...(regional ? [regional] : []),
-    ].map(noted);
-    // atlas's structural-affinity order alone: the wider sources are More like this's. It is asked once More like
-    // this has its first page, and skips every title the rows above have shown (`onPage`) — so like the franchise
-    // it joins only with something to show, and last, where arriving late grows the page below the viewer rather
-    // than moving it. A row above that loads later (other versions) drops its titles from it then.
-    const affinity = atlas
-      ? similarLoaded.then(() => {
-          const row = moreLikeThisRow(detail, atlas, {
-            ...options,
-            mixed: true,
-            similarLimit: 200,
-            affinity: true,
-            fallback: false,
-            seen: onPage,
-          });
-          return firstScreen({ ...row, filter: (title) => !above.has(titleKey(title)) }, shown);
-        })
-      : Promise.resolve(null);
+    ];
     const build = ++builds;
     if (rebuild) {
       void Promise.all([
         franchise,
         versions,
         ...defined.map((row) => firstScreen(row, shown)),
-        affinity,
       ]).then((found) => {
         if (!live) return;
         const next = found
           .filter((row): row is RowDef => row !== null)
           .map((row) => ({ build, row }));
-        // A rebuild with no atlas has none to suggest: the suggestions already shown for this title stay, rather
-        // than shrinking the page under a viewer at its end.
-        const kept = found.at(-1) ? undefined : rows.find(({ row }) => row.id === SUGGESTED);
-        rows = kept ? [...next, kept] : next;
+        // A rebuild with no atlas has none to suggest: the suggestions already shown for this title stay, under
+        // More like this, rather than shrinking the page under the viewer.
+        const kept = affinity ? undefined : rows.find(({ row }) => row.id === SUGGESTED);
+        if (kept) next.splice(next.findIndex(({ row }) => row.id === similar.id) + 1, 0, kept);
+        rows = next;
       });
     } else {
       rows = defined.map((row) => ({ build, row }));
@@ -219,9 +224,6 @@
           ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
           : 0;
         rows = [...rows.slice(0, at), { build, row: other }, ...rows.slice(at)];
-      });
-      void affinity.then((row) => {
-        if (live && row) rows = [...rows, { build, row }];
       });
     }
     return () => {
