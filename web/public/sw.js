@@ -53,7 +53,15 @@ async function page(event) {
   const checked = fetch(request).then(async (response) => {
     if (response.ok && response.type === 'basic') {
       const release = response.headers.get('etag');
-      await cache.put('/', response.clone());
+      // The origin's Link header preloads today's day-keyed billboard on a cold navigation. Do not keep that URL
+      // in the offline shell: tomorrow it would preload yesterday's pool before main.ts asks for the current one.
+      const copy = response.clone();
+      const headers = new Headers(copy.headers);
+      headers.delete('link');
+      await cache.put(
+        '/',
+        new Response(copy.body, { status: copy.status, statusText: copy.statusText, headers }),
+      );
       if (kept && kept.headers.get('etag') !== release) await prune();
     } else if (kept && response.type === 'opaqueredirect') {
       await cache.delete('/');

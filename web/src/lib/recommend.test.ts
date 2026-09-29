@@ -1,15 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Title } from './library';
 import {
   billboardScope,
   nameSlides,
-  recommend,
+  personalizeEveryone,
   recommendationReason,
-  recommendBody,
   recommendForEveryone,
   startBillboard,
 } from './recommend';
-import { readPrefs } from './prefs';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
   type: 'movie',
@@ -18,264 +16,98 @@ const film = (id: number, extra: Partial<Title> = {}): Title => ({
   ...extra,
 });
 
-describe('recommendBody', () => {
-  it('names series as atlas does, ranks only ranked lists, and carries the hide rules', () => {
-    const prefs = {
-      ...readPrefs(undefined),
-      excludedGenres: new Set([27]),
-      excludedLanguages: new Set(['hi']),
-      hideAnime: true,
-      minReleaseYear: 1990,
-      services: [{ id: 8, country: 'FI' }],
-      servicesConfigured: true,
-    };
-    const body = recommendBody({
-      facet: 'tv',
-      prefs,
-      library: [
-        { ref: { type: 'tv', id: 1438 }, weight: 1.5, at: 7 },
-        { ref: { type: 'movie', id: 603 }, weight: 1, at: 6 },
-      ],
-      named: new Map([
-        [
-          'movie:603',
-          film(603, {
-            year: 1999,
-            genreIds: [28, 878],
-            countries: ['US'],
-            releaseDate: '1999-03-31',
-          }),
-        ],
-      ]),
-      owned: new Set(['tv:1438', 'movie:603', 'nonsense']),
-      lists: [
-        {
-          titles: [
-            film(1, {
-              releaseDate: '2026-09-01',
-              genreIds: [18],
-              popularity: 9,
-              rating: 8.4,
-              votes: 200,
-              ratingSource: 'tmdb',
-            }),
-          ],
-          ranked: true,
-        },
-        { titles: [film(2), film(3)], ranked: false },
-      ],
-      now: new Date('2026-09-12T00:00:00Z'),
-    });
-    expect(body.surface).toBe('series');
-    expect(body.now).toBe('2026-09-12T00:00:00.000Z');
-    expect(body.library[0]).toEqual({ type: 'series', id: 1438, weight: 1.5, at: 7 });
-    expect(body.library[1]).toMatchObject({
-      type: 'movie',
-      id: 603,
-      hint: {
-        title: 'T603',
-        year: 1999,
-        genreIds: [28, 878],
-        countries: ['US'],
-        releaseDate: '1999-03-31',
-      },
-    });
-    expect(body.owned).toEqual([
-      { type: 'series', id: 1438 },
-      { type: 'movie', id: 603 },
-    ]);
-    expect(body.hide).toEqual({ minYear: 1990, genres: [27], languages: ['hi'], anime: true });
-    expect(body.services).toEqual([{ id: 8, country: 'FI' }]);
-    expect(body.candidates[0]).toMatchObject({
-      type: 'movie',
-      id: 1,
-      rank: 0,
-      of: 1,
-      hint: { releaseDate: '2026-09-01', genreIds: [18], popularity: 9 },
-    });
-    expect(body.candidates[1]).not.toHaveProperty('rank');
-    expect(body.candidates[0]?.hint).toMatchObject({ rating: 8.4, votes: 200 });
-    expect(body.candidates).toHaveLength(3);
-  });
-
-  it('sends only explicitly sourced TMDB scores and never relabels another or legacy score', () => {
-    const body = recommendBody({
-      facet: null,
-      prefs: readPrefs(undefined),
-      library: [],
-      owned: new Set(),
-      lists: [
-        {
-          ranked: false,
-          titles: [
-            film(1, { rating: 7.4, votes: 900, ratingSource: 'tmdb' }),
-            film(2, { rating: 8.2, votes: 12_000, ratingSource: 'justwatch-imdb' }),
-            film(3, { rating: 9.1, votes: 20_000 }),
-            film(4, { rating: 8.1, votes: 99.5, ratingSource: 'tmdb' }),
-          ],
-        },
-      ],
-    });
-    expect(body.candidates[0]?.hint).toMatchObject({ rating: 7.4, votes: 900 });
-    expect(body.candidates[1]?.hint).not.toHaveProperty('rating');
-    expect(body.candidates[1]?.hint).not.toHaveProperty('votes');
-    expect(body.candidates[2]?.hint).not.toHaveProperty('rating');
-    expect(body.candidates[2]?.hint).not.toHaveProperty('votes');
-    expect(body.candidates[3]?.hint).toMatchObject({ rating: 8.1 });
-    expect(body.candidates[3]?.hint).not.toHaveProperty('votes');
-  });
-
-  it('ranks an unset guest against the visible defaults but preserves an explicit empty selection', () => {
-    const guest = readPrefs(undefined);
-    expect(
-      recommendBody({ facet: null, prefs: guest, library: [], owned: new Set(), lists: [] })
-        .services,
-    ).toHaveLength(6);
-
-    const explicitEmpty = { ...guest, servicesConfigured: true };
-    expect(
-      recommendBody({
-        facet: null,
-        prefs: explicitEmpty,
-        library: [],
-        owned: new Set(),
-        lists: [],
-      }).services,
-    ).toEqual([]);
-  });
-});
-
-describe('recommend', () => {
-  const answering = (status: number, body: unknown) => {
+describe('recommendForEveryone', () => {
+  it('asks for the scope’s billboard for the UTC day with GET', async () => {
     const asked: { url: string; init?: RequestInit }[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       asked.push({ url, init });
-      return new Response(JSON.stringify(body), { status });
+      return new Response(JSON.stringify({ slides: [{ type: 'series', id: 1438 }] }));
     }) as unknown as typeof fetch;
-    return { asked, fetchImpl };
-  };
-  const body = recommendBody({
-    facet: null,
-    prefs: readPrefs(undefined),
-    library: [],
-    owned: new Set(),
-    lists: [],
-  });
-
-  it('posts to this page’s atlas and reads the slides back in Den’s names', async () => {
-    const { asked, fetchImpl } = answering(200, {
-      slides: [
-        { type: 'series', id: 1438, imdbId: 'tt0306414' },
-        { type: 'movie', id: 603, imdbId: 'nope' },
-        { type: 'person', id: 1 },
-      ],
-      unjudged: [{ type: 'movie', id: 9 }],
-    });
-    expect(await recommend('/atlas/auto_nfx', body, fetchImpl)).toEqual({
-      slides: [
-        { type: 'tv', id: 1438, imdbId: 'tt0306414' },
-        { type: 'movie', id: 603, imdbId: undefined },
-      ],
-      unjudged: [{ type: 'movie', id: 9, imdbId: undefined }],
-    });
-    expect(asked[0]!.url).toBe('/atlas/auto_nfx/recommend');
-    expect(asked[0]!.init?.method).toBe('POST');
-  });
-
-  it('keeps every scoring diagnostic and the server-selected reason', async () => {
-    const why = {
-      score: 0.812,
-      fit: 0.722,
-      similar: 1.4,
-      profile: 0.62,
-      people: 0.31,
-      confidence: 0.9,
-      fresh: 0.8,
-      arrived: 0.4,
-      quality: 0.75,
-      buzz: 0.52,
-      reason: 'profile',
-    };
-    const result = await recommend(
-      '/atlas',
-      body,
-      answering(200, { slides: [{ type: 'movie', id: 1, why }] }).fetchImpl,
-    );
-    expect(result?.slides[0]?.why).toEqual(why);
-  });
-
-  it('keeps a slide when why is partial or malformed and preserves its usable fields', async () => {
-    const result = await recommend(
-      '/atlas',
-      body,
-      answering(200, {
-        slides: [
-          {
-            type: 'movie',
-            id: 1,
-            why: { score: 'high', fit: 0.7, similar: null, reason: 42 },
-          },
-          { type: 'series', id: 2, why: 'not-an-object' },
-        ],
-      }).fetchImpl,
-    );
-    expect(result?.slides).toEqual([
-      { type: 'movie', id: 1, imdbId: undefined, why: { fit: 0.7, similar: null } },
-      { type: 'tv', id: 2, imdbId: undefined, why: undefined },
-    ]);
-  });
-
-  it('is nothing where atlas can’t rank, so the page ranks for itself', async () => {
-    expect(
-      await recommend('/atlas', body, answering(404, { error: 'not_found' }).fetchImpl),
-    ).toBeNull();
-    expect(await recommend('/atlas', body, answering(200, { nope: true }).fetchImpl)).toBeNull();
-    const offline = (async () => {
-      throw new TypeError('offline');
-    }) as unknown as typeof fetch;
-    expect(await recommend('/atlas', body, offline)).toBeNull();
-  });
-});
-
-describe('recommendForEveryone', () => {
-  it('asks for the scope’s billboard for the UTC day, a GET, and is nothing where atlas can’t rank', async () => {
-    const asked: { url: string; init?: RequestInit }[] = [];
-    const answering = (status: number, body: unknown) =>
-      (async (url: string, init?: RequestInit) => {
-        asked.push({ url, init });
-        return new Response(JSON.stringify(body), { status });
-      }) as unknown as typeof fetch;
-    const late = new Date('2026-09-28T23:30:00-03:00');
     const slides = await recommendForEveryone(
       '/atlas',
       billboardScope('tv'),
-      late,
-      answering(200, { slides: [{ type: 'series', id: 1438 }], next: 100 }),
+      new Date('2026-09-28T23:30:00-03:00'),
+      fetchImpl,
     );
     expect(slides).toEqual([{ type: 'tv', id: 1438, imdbId: undefined, why: undefined }]);
     expect(asked[0]!.url).toBe('/atlas/recommend/series.json?day=2026-09-29');
     expect(asked[0]!.init?.method ?? 'GET').toBe('GET');
     expect(billboardScope(null)).toBe('home');
-    expect(
-      await recommendForEveryone('/atlas', 'home', late, answering(404, { error: 'not_found' })),
-    ).toBeNull();
   });
 
-  it('takes the billboard the app started asking for, once, and asks itself for any other', async () => {
+  it('returns nothing where atlas cannot rank', async () => {
+    const unavailable = (async () =>
+      new Response('{}', { status: 404 })) as unknown as typeof fetch;
+    const malformed = (async () => new Response('{}')) as unknown as typeof fetch;
+    expect(await recommendForEveryone('/atlas', 'home', new Date(), unavailable)).toBeNull();
+    expect(await recommendForEveryone('/atlas', 'home', new Date(), malformed)).toBeNull();
+  });
+
+  it('takes the billboard the app started asking for once', async () => {
     const asked: string[] = [];
-    const answering = (async (url: string) => {
+    const fetchImpl = (async (url: string) => {
       asked.push(url);
       return new Response(JSON.stringify({ slides: [{ type: 'movie', id: asked.length }] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/movies', now, answering);
-    startBillboard('/watchlist', now, answering);
+    startBillboard('/movies', now, fetchImpl);
+    startBillboard('/watchlist', now, fetchImpl);
     expect(asked).toEqual(['/atlas/recommend/movies.json?day=2026-09-28']);
-    const early = await recommendForEveryone('/atlas', 'movies', now, answering);
-    expect(early?.[0]?.id).toBe(1);
+    expect((await recommendForEveryone('/atlas', 'movies', now, fetchImpl))?.[0]?.id).toBe(1);
     expect(asked).toHaveLength(1);
-    await recommendForEveryone('/atlas', 'movies', now, answering);
+    await recommendForEveryone('/atlas', 'movies', now, fetchImpl);
     expect(asked).toHaveLength(2);
+  });
+});
+
+describe('personalizeEveryone', () => {
+  const slides = Array.from({ length: 20 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
+
+  it('keeps the shared prior, removes owned titles, and lifts fan matches without a POST', async () => {
+    const asked: { url: string; method: string }[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      asked.push({ url, method: init?.method ?? 'GET' });
+      return new Response(JSON.stringify({ mixed: [{ type: 'movie', id: 12 }] }));
+    }) as unknown as typeof fetch;
+    const ranked = await personalizeEveryone(
+      '/atlas',
+      slides,
+      [{ ref: { type: 'tv', id: 1438 }, weight: 2, at: 9 }],
+      new Set(['movie:1']),
+      fetchImpl,
+    );
+    expect(ranked.some((slide) => slide.id === 1)).toBe(false);
+    expect(ranked.findIndex((slide) => slide.id === 12)).toBeLessThan(11);
+    expect(ranked.find((slide) => slide.id === 12)?.why?.reason).toBe('profile');
+    expect(asked).toEqual([
+      { url: '/atlas/index/suggest/series/1438.json?skip=0&limit=100', method: 'GET' },
+    ]);
+  });
+
+  it('bounds fan lookups at four and degrades to the shared order', async () => {
+    let active = 0;
+    let peak = 0;
+    const fetchImpl = vi.fn(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active--;
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const ranked = await personalizeEveryone(
+      '/atlas',
+      slides,
+      Array.from({ length: 10 }, (_, i) => ({
+        ref: { type: 'movie' as const, id: 100 + i },
+        weight: 1,
+        at: i,
+      })),
+      new Set(),
+      fetchImpl,
+    );
+    expect(ranked).toEqual(slides);
+    expect(fetchImpl).toHaveBeenCalledTimes(10);
+    expect(peak).toBeLessThanOrEqual(4);
   });
 });
 
@@ -295,7 +127,7 @@ describe('recommendationReason', () => {
     expect(recommendationReason({ reason })).toBe(copy);
   });
 
-  it('stays silent for legacy, missing, and unknown reason codes', () => {
+  it('stays silent for missing and unknown reason codes', () => {
     expect(recommendationReason(undefined)).toBeUndefined();
     expect(recommendationReason({ fit: 0.7 })).toBeUndefined();
     expect(recommendationReason({ reason: 'future-signal' })).toBeUndefined();
@@ -303,7 +135,7 @@ describe('recommendationReason', () => {
 });
 
 describe('nameSlides', () => {
-  it('keeps atlas’s order, names from the lists first, looks up the rest, and drops what TMDB can’t name', async () => {
+  it('keeps atlas order, names known titles, and drops what TMDB cannot name', async () => {
     const looked: string[] = [];
     const titles = await nameSlides(
       [
@@ -324,7 +156,7 @@ describe('nameSlides', () => {
     expect(looked.sort()).toEqual(['movie:2', 'movie:9', 'tv:1']);
   });
 
-  it('carries why through TMDB naming so a kept billboard can restore it', async () => {
+  it('carries why through naming', async () => {
     const why = { score: 0.8, fit: 0.7, reason: 'similar' };
     const titles = await nameSlides(
       [{ type: 'movie', id: 1, why }],
@@ -333,6 +165,5 @@ describe('nameSlides', () => {
       1,
     );
     expect(titles).toEqual([{ ...film(1), imdbId: undefined, why }]);
-    expect(JSON.parse(JSON.stringify(titles))[0].why).toEqual(why);
   });
 });
