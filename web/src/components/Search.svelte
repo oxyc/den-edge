@@ -17,6 +17,7 @@
     emptyOptions,
     exploreChips,
     exploreFeed,
+    fansChip,
     filterChips,
     likeChip,
     offered,
@@ -44,7 +45,15 @@
   import { Pager } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import { FACET, likeId, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
+  import {
+    FACET,
+    fansOf,
+    likeId,
+    likeOf,
+    peopleHref,
+    searchHref,
+    type Explore,
+  } from '../lib/route';
   import { awaitingPicture, searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
   import { rememberSearch } from '../lib/recentSearches';
@@ -101,22 +110,24 @@
   const selection = $derived(selectionKey ? selectionKey.split(',') : []);
 
   /**
-   * The names of the titles a "Like" is for, by facet id: set as one is picked, and looked up for one the address
-   * brought, its pill saying "Like…" until then.
+   * The names of the titles a "Like" or a "Fans of" is for, by facet id: set as one is picked, and looked up for one
+   * the address brought, its pill saying "Like…" or "Fans of…" until then.
    */
   let likeNames = $state<Record<string, string>>({});
   const like = $derived(selection.find((id) => likeOf(id)));
+  const fans = $derived(selection.find((id) => fansOf(id)));
   $effect(() => {
-    const id = like;
-    const ref = id && likeOf(id);
-    if (!id || !ref || untrack(() => likeNames[id])) return;
     let current = true;
-    sources
-      .title(ref)
-      .then((title) => {
-        if (current && title) likeNames[id] = title.title;
-      })
-      .catch((error: unknown) => console.warn('search: no name for', id, error));
+    for (const id of [like, fans]) {
+      const ref = id && (likeOf(id) ?? fansOf(id));
+      if (!id || !ref || untrack(() => likeNames[id])) continue;
+      sources
+        .title(ref)
+        .then((title) => {
+          if (current && title) likeNames[id] = title.title;
+        })
+        .catch((error: unknown) => console.warn('search: no name for', id, error));
+    }
     return () => {
       current = false;
     };
@@ -152,6 +163,7 @@
     // their bare id, and those arrive the moment the pick is made.
     const all = [...Object.values(named), ...listed];
     if (like) all.push(likeChip(like, likeNames[like]));
+    if (fans) all.push(fansChip(fans, likeNames[fans]));
     for (const id of selection) {
       const pending = !all.some((chip) => chip.id === id) && pendingChip(id);
       if (pending) all.push(pending);
@@ -185,10 +197,10 @@
 
   /**
    * Under All, the picks one type has no form of, said as a standing note beside the status: "Horror: movies only."
-   * Their type's feed is the grid (`perType`). A "Like" is both types' already.
+   * Their type's feed is the grid (`perType`). A "Like" or a "Fans of" is both types' already.
    */
   const scope = $derived.by(() => {
-    if (exploreType !== 'all' || typing || !selection.length || like) return '';
+    if (exploreType !== 'all' || typing || !selection.length || like || fans) return '';
     return perType(selection)
       .map(({ type, dropped }) =>
         dropped.length ? `${names(dropped)}: ${type === 'tv' ? 'movies' : 'series'} only.` : '',

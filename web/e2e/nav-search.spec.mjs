@@ -1236,6 +1236,76 @@ test('a title’s "More like this" row links to Search with its "Like"', async (
   }
 });
 
+test('a title’s You might also like links to Search with its "Fans of", fed by atlas’s filter', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page, { atlasGate: Promise.resolve() });
+    await page.route('**/metadata/title/query', (r) => r.fulfill({ json: { titles: [] } }));
+    await page.route('**/atlas/index/similar/**', (r) =>
+      r.fulfill({ json: { ids: [300], mixed: [{ type: 'movie', id: 300 }] } }),
+    );
+    await page.route('**/atlas/index/suggest/movie/101.json*', (r) =>
+      r.fulfill({
+        json: {
+          mixed: [{ type: 'movie', id: 302 }],
+          titles: [{ type: 'movie', id: 302, title: 'Film 302', year: 2026, posterPath: '/p.jpg' }],
+          total: 1,
+        },
+      }),
+    );
+    const titles = [];
+    await page.route('**/atlas/index/filter/**', (r) => {
+      const url = new URL(r.request().url());
+      if (url.pathname.endsWith('/titles.json')) {
+        titles.push(url.pathname.replace(/^.*\/atlas/, '') + url.search);
+        return r.fulfill({
+          json: {
+            titles: [510, 511].map((id) => ({
+              type: 'movie',
+              id,
+              title: `Fan pick ${id}`,
+              year: 2020,
+              posterPath: '/p.jpg',
+            })),
+            total: 2,
+            order: 'fans:movie-101',
+            ignored: [],
+          },
+        });
+      }
+      return r.fulfill({ json: { total: 2, kinds: {}, ignored: [] } });
+    });
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
+    const row = active(page).getByRole('region', { name: 'You might also like' });
+    await expect(row.getByRole('link', { name: 'Film 302 2026' })).toBeVisible();
+    // More like this keeps its own.
+    await expect(
+      active(page)
+        .getByRole('region', { name: 'More like this' })
+        .getByRole('link', { name: 'Explore similar ›' }),
+    ).toBeVisible();
+    await row.getByRole('link', { name: 'Explore ›' }).click();
+    await expect(page).toHaveURL(/\/search\?c=fans-movie-101$/);
+    await expect(
+      active(page)
+        .getByRole('group', { name: 'Selected' })
+        .getByRole('button', { name: 'Remove Fans of Film 101' }),
+    ).toBeVisible();
+    const grid = active(page).locator('.grid');
+    await expect(grid.getByRole('link', { name: 'Fan pick 510 2020' })).toBeVisible();
+    await expect(grid.getByRole('link', { name: 'Fan pick 511 2020' })).toBeVisible();
+    expect(titles[0]).toBe('/index/filter/all/titles.json?sel=fans:movie-101');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a title’s You might also like sits straight under More like this', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

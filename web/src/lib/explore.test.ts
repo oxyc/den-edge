@@ -24,6 +24,7 @@ import {
   remapSet,
   browseChips,
   namesExactly,
+  slotOf,
 } from './explore';
 import type { FilterCounts } from './filterRoutes';
 import type { MediaType, Title } from './library';
@@ -386,6 +387,26 @@ describe('facets', () => {
         .removed,
     ).toEqual([]);
     expect(facetQuery(['like-movie-949', 'genre-35'], 'movie')).toBeUndefined();
+  });
+
+  it('take a "Fans of" as a "Like" is taken: one at a time, a whole feed, narrowed by what its titles carry', () => {
+    expect(slotOf('fans-movie-949')).toBe('fans');
+    expect(applyPick(['mood-cozy', 'genre-35'], 'fans-movie-949', 'movie')).toEqual({
+      set: ['genre-35', 'fans-movie-949'],
+      removed: ['mood-cozy'],
+    });
+    expect(offered(['fans-movie-949'], 'fans-movie-680', 'movie')).toBe(false);
+    expect(offered(['fans-movie-949'], 'fans-movie-680', 'movie', true)).toBe(false);
+    expect(offered(['fans-movie-949'], 'rating-7', 'movie')).toBe(true);
+    // Without atlas's filter each is a whole feed; with it, one title's fans and another's neighbours stand together.
+    expect(applyPick(['like-movie-949'], 'fans-movie-949', 'movie').removed).toEqual([
+      'like-movie-949',
+    ]);
+    expect(applyPick(['like-movie-949'], 'fans-movie-949', 'movie', true).removed).toEqual([]);
+    expect(facetQuery(['fans-movie-949', 'genre-35'], 'movie')).toBeUndefined();
+    const chips = exploreChips('tv');
+    expect(remapSet(['fans-tv-1396'], 'all', 'tv', chips).set).toEqual(['fans-tv-1396']);
+    expect(remapSet(['fans-movie-949'], 'movie', 'tv', chips).dropped).toEqual(['fans-movie-949']);
   });
 
   it('take a rating beside anything but a mood, whose titles carry none', () => {
@@ -813,6 +834,36 @@ describe('Explore feeds', () => {
       expect(row.filter?.({ ...title, rating: 6.9 })).toBe(false);
       // A rating on a handful of votes isn't one.
       expect(row.filter?.({ ...title, votes: 3 })).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('asks atlas’s filter for a "Fans of", and where atlas can’t apply it, shows its title’s You might also like alone', async () => {
+    const realFetch = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      asked.push(url);
+      // An atlas from before the kind: it answers, and says it left the kind out.
+      if (url.includes('/index/filter/'))
+        return Response.json({ titles: [], total: 0, ignored: ['fans'], kindsUnavailable: [] });
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+    try {
+      const row = exploreFeed(['fans-movie-949', 'genre-80'], 'all', {
+        ...sources(),
+        atlas: '/atlas',
+        key: 'k',
+      });
+      expect(await row.load(1)).toEqual([]);
+      expect(asked[0]).toBe('/atlas/index/filter/all/titles.json?sel=fans:movie-949,genre:80');
+      expect(asked[1]).toBe('/atlas/index/suggest/movie/949.json?skip=0&limit=20');
+      // Its row alone: no wider neighbours, no TMDB recommendations.
+      expect(asked.some((url) => url.includes('/similar/') || url.includes('/neighbours/'))).toBe(
+        false,
+      );
+      expect(asked.some((url) => url.includes('/recommendations'))).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
     }
