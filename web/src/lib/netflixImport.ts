@@ -218,6 +218,16 @@ export function parseTitle(title: string): Parsed {
   return { kind: 'name', name: title };
 }
 
+const LIGATURES: Record<string, string> = {
+  æ: 'ae',
+  œ: 'oe',
+  ø: 'o',
+  ß: 'ss',
+  ð: 'd',
+  þ: 'th',
+  ł: 'l',
+};
+
 /** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
 export function normalize(name: string): string {
   return (
@@ -225,6 +235,8 @@ export function normalize(name: string): string {
       .normalize('NFKD')
       .replace(/\p{M}/gu, '')
       .toLowerCase()
+      // Letters no accent comes off: "InnSæi" is Netflix's "Innsaei", "Demi-sœur" its "Demi-Soeur".
+      .replace(/[æœøßðþł]/g, (letter) => LIGATURES[letter]!)
       .replace(/&/g, ' and ')
       // "Un plus une" is TMDB's "Un + une"; "1,000 Times Good Night" a thousand, not "1 000".
       .replace(/\+/g, ' plus ')
@@ -259,6 +271,11 @@ export const filmKey = (name: string) =>
     // Anywhere, not only first: "Bordertown: Mural Murders" is "Bordertown: The Mural Murders", and "El Pepe, a
     // Supreme Life" is "El Pepe: A Supreme Life".
     .replace(/\b(?:the|a|an)\b/g, ' ')
+    // "Nymphomaniac: Volume 1" is "Nymphomaniac: Vol. I"; a numeral only after such a word, since "I" is a word too.
+    .replace(/\bvol\b/g, 'volume')
+    .replace(/\b(volume|part|chapter) ([ivx]+)\b/g, (whole, word: string, numeral: string) =>
+      ROMAN[numeral] ? `${word} ${ROMAN[numeral]}` : whole,
+    )
     .trim()
     .split(/\s+/)
     .map((word) => NUMBER_WORDS[word] ?? word)
@@ -722,19 +739,33 @@ export async function plan(
    * a series of the same name, since "Limitless" and "Trust" are both. Where the combined search has none, TMDB's
    * films alone, three pages deep: the 2018 "Girl" is not among the first twenty things called something with "girl".
    */
-  const findFilm = async (title: string): Promise<SearchHit | undefined> => {
+  const findFilm = async (title: string, shorter = false): Promise<SearchHit | undefined> => {
     // A line with no show's name (": Episode 7") is an episode of something unnamed, never the film "Episode 7".
     if (title.startsWith(': ')) return undefined;
     const key = filmKey(title);
     const watched = new Date(latest.get(title)!).getFullYear();
-    const first = (hits: SearchHit[]) =>
+    const first = (hits: SearchHit[], wanted = key) =>
       hits.find(
         (h) =>
           h.type === 'movie' &&
-          (filmKey(h.name) === key || filmKey(h.originalName ?? '') === key) &&
+          (filmKey(h.name) === wanted || filmKey(h.originalName ?? '') === wanted) &&
           (!h.year || h.year <= watched),
       );
-    const found = first(await lookups.searchMulti(title));
+    const hits = await lookups.searchMulti(title);
+    if (shorter) {
+      // What TMDB's search puts first for the whole name, named as Netflix's without what it added: a subtitle
+      // ("JOY - The Birth of IVF" is "JOY", "Hippocrates: Diary of a French Doctor" the film "Hippocrates") or a
+      // sequel's number ("Through My Window 2: Across the Sea"). Asked last, once the line is no series' episode.
+      const bare = title.split(/ [-–] |: /)[0]!;
+      const unnumbered = title.replace(/ \d+(?=: )/, '');
+      for (const wanted of [bare, unnumbered])
+        if (wanted !== title) {
+          const found = first(hits.slice(0, 3), filmKey(wanted));
+          if (found) return found;
+        }
+      return undefined;
+    }
+    const found = first(hits);
     if (found || !lookups.searchMovie || !key) return found;
     for (let page = 1; page <= 3; page++) {
       const hits = await lookups.searchMovie(title, page);
@@ -750,10 +781,19 @@ export async function plan(
     if (film) {
       if (seen(film)) known++;
       else add({ ...markOf(film, title), at: latest.get(title)! });
-    } else if (shared || !((await asSeasonless(title)) || (await asWhole(title))))
-      unmatched.push(title);
+    } else if (shared || !((await asSeasonless(title)) || (await asWhole(title)))) {
+      if (shared || !(await lastFilm(title, true))) unmatched.push(title);
+    }
     tick();
   });
+  /** A line no series had as an episode, as a film after all (`findFilm`); false, and nothing marked, for none. */
+  async function lastFilm(title: string, shorter: boolean): Promise<boolean> {
+    const film = (await findFilm(title)) ?? (shorter ? await findFilm(title, true) : undefined);
+    if (!film) return false;
+    if (seen(film)) known++;
+    else add({ ...markOf(film, title), at: latest.get(title)! });
+    return true;
+  }
   /**
    * A name with no episode that TMDB has as a series of that name, of three episodes or fewer, out by the year it
    * was watched: a TV film or two-parter ("Love in Lapland"), marked whole.
@@ -789,11 +829,9 @@ export async function plan(
         add({ ...markOf(hit, show), ...where, at: latest.get(title)! });
         continue;
       }
-      // Not an episode of the series its name starts with, but maybe a film of it ("Bordertown: Mural Murders").
-      const film = await findFilm(title);
-      if (film && seen(film)) known++;
-      else if (film) add({ ...markOf(film, title), at: latest.get(title)! });
-      else unmatched.push(title);
+      // Not an episode of the series its name starts with, but maybe a film of it ("Bordertown: Mural Murders"), or a
+      // film a series merely shares a name with ("Hippocrates: Diary of a French Doctor"), when it is the one line.
+      if (!(await lastFilm(title, lines.length === 1))) unmatched.push(title);
     }
   }
   for (const [show, { candidates, lines }] of unnamedShows) {
@@ -818,7 +856,9 @@ export async function plan(
         });
       break;
     }
-    if (!taken) unmatched.push(...lines.map((line) => line.title));
+    if (!taken)
+      for (const { title } of lines)
+        if (!(await lastFilm(title, lines.length === 1))) unmatched.push(title);
   }
 
   /**

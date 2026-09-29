@@ -550,6 +550,42 @@ describe('what a real history needed', () => {
     expect(unmatched).toEqual([': Episode 1']);
   });
 
+  it('reads æ and œ as two letters, and "Volume 1" as "Vol. I" but never a lone "I" as 1', () => {
+    expect(filmKey('Innsaei')).toBe(filmKey('InnSæi'));
+    expect(filmKey('Demi-Soeur')).toBe(filmKey('Demi-sœur'));
+    expect(filmKey('Nymphomaniac: Volume 1')).toBe(filmKey('Nymphomaniac: Vol. I'));
+    expect(filmKey('I Am Legend')).not.toBe(filmKey('1 Am Legend'));
+  });
+
+  it('takes a film named as Netflix’s without its subtitle or sequel number, only as a last resort', async () => {
+    const lookups: Lookups = {
+      searchTv: async () => [],
+      searchMulti: async (q) =>
+        ({
+          'JOY - The Birth of IVF': [{ type: 'movie' as const, id: 1, name: 'JOY', year: 2024 }],
+          'Through My Window 2: Across the Sea': [
+            {
+              type: 'movie' as const,
+              id: 2,
+              name: 'Through My Window: Across the Sea',
+              year: 2023,
+            },
+          ],
+        })[q] ?? [],
+      show: async () => null,
+      episodes: async () => null,
+    };
+    const { marks, unmatched } = await plan(
+      [
+        { title: 'JOY - The Birth of IVF', date: '12/8/24' },
+        { title: 'Through My Window 2: Across the Sea', date: '2/25/24' },
+      ],
+      lookups,
+    );
+    expect(marks.map((m) => m.id).sort()).toEqual([1, 2]);
+    expect(unmatched).toEqual([]);
+  });
+
   it('takes a film over a series of the same name', async () => {
     const lookups: Lookups = {
       searchTv: async () => [],
