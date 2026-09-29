@@ -1,0 +1,66 @@
+// The TMDB lookups a Netflix import matches with (`netflixImport.Lookups`), through the page's cached TMDB fetch.
+// A whole viewing history is hundreds of lookups, past den-edge's per-minute allowance, so a throttled answer is
+// waited out and asked again instead of read as "nothing found".
+
+import { parseSeason } from './detail';
+import type { Lookups, SearchHit } from './netflixImport';
+import { retryAfterMs } from './retryAfter';
+import { tmdbFetch } from './tmdbCache';
+
+const TMDB = 'https://api.themoviedb.org/3';
+const TRIES = 8;
+
+type Json = Record<string, unknown>;
+
+export function netflixLookups(key: string, fetchImpl: typeof fetch = tmdbFetch): Lookups {
+  async function get(path: string, params: Record<string, string> = {}): Promise<Json | null> {
+    const url = new URL(TMDB + path);
+    for (const [name, value] of Object.entries({ ...params, api_key: key }))
+      url.searchParams.set(name, value);
+    for (let attempt = 0; attempt < TRIES; attempt++) {
+      try {
+        const res = await fetchImpl(url.toString());
+        if (res.ok) return (await res.json()) as Json;
+        if (res.status !== 429 && res.status < 500) return null;
+        await sleep(res.status === 429 ? retryAfterMs(res, 10_000) : 2_000 * (attempt + 1));
+      } catch {
+        await sleep(2_000 * (attempt + 1));
+      }
+    }
+    return null;
+  }
+
+  const hits = (body: Json | null, only?: 'movie' | 'tv'): SearchHit[] =>
+    (Array.isArray(body?.results) ? (body.results as Json[]) : []).flatMap((r): SearchHit[] => {
+      const type = only ?? r.media_type;
+      if ((type !== 'movie' && type !== 'tv') || typeof r.id !== 'number') return [];
+      const name = type === 'movie' ? r.title : r.name;
+      const original = type === 'movie' ? r.original_title : r.original_name;
+      if (typeof name !== 'string') return [];
+      return [
+        {
+          type,
+          id: r.id,
+          name,
+          ...(typeof original === 'string' ? { originalName: original } : {}),
+        },
+      ];
+    });
+
+  return {
+    searchMulti: async (query) =>
+      hits(await get('/search/multi', { query, include_adult: 'false' })),
+    searchTv: async (query) => hits(await get('/search/tv', { query }), 'tv'),
+    seasons: async (id) => {
+      const body = await get(`/tv/${id}`);
+      const seasons = Array.isArray(body?.seasons) ? (body.seasons as Json[]) : [];
+      return seasons.flatMap((s) => (typeof s.season_number === 'number' ? [s.season_number] : []));
+    },
+    episodes: async (id, season) => {
+      const body = await get(`/tv/${id}/season/${season}`);
+      return body && parseSeason(body);
+    },
+  };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

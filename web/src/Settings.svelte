@@ -9,6 +9,7 @@
   import AdvancedSection from './settings/AdvancedSection.svelte';
   import ConnectionsSection from './settings/ConnectionsSection.svelte';
   import ContentSection from './settings/ContentSection.svelte';
+  import ImportSection from './settings/ImportSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
@@ -206,6 +207,12 @@
     <SharingSection {link} {plugins} {routes} ready={!!log} />
     <AssistantsSection />
     <PlaybackSection {prefs} {disabled} save={savePrefs} />
+    <ImportSection
+      {log}
+      device={clock.device}
+      tmdbKey={tmdbKeyOf(keys)}
+      changed={() => session.changed()}
+    />
     <ContentSection
       {prefs}
       tmdbKey={tmdbKeyOf(keys)}

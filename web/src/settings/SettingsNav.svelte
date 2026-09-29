@@ -6,6 +6,7 @@
     { id: 'sharing', label: 'Sharing' },
     { id: 'assistants', label: 'Assistants' },
     { id: 'playback', label: 'Playback' },
+    { id: 'import', label: 'Import' },
     { id: 'content', label: 'Content' },
     { id: 'advanced', label: 'Advanced' },
     { id: 'about', label: 'About' },
