@@ -89,7 +89,11 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
     head = 0;
     for (const entry of entries) stored.set(entry.k, { ...entry, seq: ++head });
   };
-  return { fetchImpl, stored, rewrite };
+  const append = async (row: Row) => {
+    const entry = await seal(keys, row);
+    stored.set(entry.k, { ...entry, seq: ++head });
+  };
+  return { fetchImpl, stored, rewrite, append, head: () => head };
 }
 
 function memoryVault() {
@@ -229,7 +233,7 @@ describe('LibraryLog', () => {
         'x-den-wire-min': generation === 'old' ? '2' : '3',
       });
       if (path.endsWith('/rewrite') && init.method === 'POST')
-        return new Response(JSON.stringify({ rewrite: 'stage', base: 2 }), { headers });
+        return new Response(JSON.stringify({ rewrite: 'stage', base: server.head() }), { headers });
       if (path.endsWith('/rewrite/stage/rows') && init.method === 'POST') {
         const writes = (
           JSON.parse(String(init.body)) as {
@@ -241,7 +245,7 @@ describe('LibraryLog', () => {
         return new Response('{}', { headers });
       }
       if (path.endsWith('/rewrite/stage/commit') && init.method === 'POST') {
-        expect(JSON.parse(String(init.body))).toEqual({ base: 2, wireMin: 3 });
+        expect(JSON.parse(String(init.body))).toEqual({ base: server.head(), wireMin: 3 });
         server.rewrite(staged);
         generation = 'new';
         headers.set('x-den-generation', generation);
@@ -256,6 +260,10 @@ describe('LibraryLog', () => {
       });
     };
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage, null))!;
+    // A final v2 write lands after this browser's read but before the rewrite fence. The switch must refresh through
+    // the offered base and include it rather than converting its stale in-memory snapshot.
+    const latest = row(550, { status: { value: 'watched', at: at(2400, device) } });
+    await server.append(latest);
     expect(
       await log.switchWebOnly({
         performer: device,
@@ -267,6 +275,10 @@ describe('LibraryLog', () => {
     const oldEpisodeKey = (await seal(keys, episode)).k;
     expect(staged.map(({ k }) => k)).not.toContain(oldEpisodeKey);
     const rewritten = await Promise.all(staged.map(({ k, v }) => open(keys, k, v)));
+    expect(
+      rewritten.find((row): row is TitleRow => row.kind === 'rec' && row.title.id === 550)?.status
+        .value,
+    ).toBe('watched');
     expect(rewritten.some((row) => row.kind === 'wat')).toBe(true);
     expect(rewritten.some((row) => row.kind === 'set' && row.name === 'trackers')).toBe(true);
     expect(rewritten.some((row) => row.kind === 'set' && row.name === 'deliver:simkl:42')).toBe(

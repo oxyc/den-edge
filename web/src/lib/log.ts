@@ -272,10 +272,18 @@ export class LibraryLog {
       const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
       if (typeof offer.rewrite !== 'string' || typeof offer.base !== 'number') return false;
       rewrite = offer.rewrite;
+      const offeredGeneration = opened.headers.get('x-den-generation');
+      // The fence fixes `base`; read through it before deriving the replacement. `entries` may also contain local,
+      // unacknowledged edits, which replay after the commit instead of being mistaken for state at `base`.
+      await this.refresh();
+      if (!offeredGeneration || this.generation !== offeredGeneration || this.head !== offer.base) {
+        await this.abortRewrite(rewrite);
+        return false;
+      }
       const now = Date.now();
       const converted = syncPolicy<Row[]>({
         op: 'v3_form',
-        rows: this.rows(),
+        rows: [...this.acknowledged.values()].map(({ row }) => row),
         now,
         context: context && {
           performer: context.performer,
