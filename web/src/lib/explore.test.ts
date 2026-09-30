@@ -566,6 +566,18 @@ describe('the kinds only atlas’s filter knows', () => {
         values: { Q159846: 4 },
         labels: { Q159846: 'A24' },
       },
+      subject: {
+        mode: 'and',
+        complete: false,
+        values: { Q12: 2, Q11: 2 },
+        labels: { Q12: 'zombies', Q11: 'artificial intelligence' },
+      },
+      format: {
+        mode: 'and',
+        complete: false,
+        values: { Q202866: 3 },
+        labels: { Q202866: 'animated film' },
+      },
     },
   };
 
@@ -585,6 +597,11 @@ describe('the kinds only atlas’s filter knows', () => {
       label: 'A24',
       group: 'studio',
     });
+    expect(chips.filter((c) => c.group === 'subject').map((c) => c.label)).toEqual([
+      'Artificial intelligence',
+      'Zombies',
+    ]);
+    expect(chips.find((c) => c.id === 'format-Q202866')?.label).toBe('Animated film');
   });
 
   it('names a pick before the counts do', () => {

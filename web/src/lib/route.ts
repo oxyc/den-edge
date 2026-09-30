@@ -36,7 +36,7 @@ export interface Explore {
 
 /**
  * What People is browsing: the type, the title facets that scope which credits count (Explore's ids, `c=`), the
- * person traits picked (`t=`: `role-director`, `gender-Q6581072`, `born-1970`, `born-1976-1996`, `born-from-1976`,
+ * person traits picked (`t=`: `role-director`, `gender-Q6581072`, `born-1976-1996`, `born-from-1976`,
  * `citizenship-Q34`, `occupation-Q33999`) and the order. Each absent for its default: All, no facets, no traits, prominence.
  * `query` is what is typed in the bar's search field there (`q=`), which offers facets and people by that name.
  */

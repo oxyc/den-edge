@@ -314,7 +314,7 @@ test('A second value of one kind is either-or, on People and on Explore', async 
   }
 });
 
-test('A birth-year range takes a decade’s place, stays in the address, and an open end is asked open', async () => {
+test('A birth-year range stays in the address, and an open end is asked open', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -333,32 +333,20 @@ test('A birth-year range takes a decade’s place, stays in the address, and an 
     const from = view.getByRole('textbox', { name: 'Born from (year)' });
     const to = view.getByRole('textbox', { name: 'Born to (year)' });
     const selected = view.getByRole('group', { name: 'Selected' });
-    const rail = view.getByRole('navigation', { name: 'Browse by category' });
-    const decade = rail.getByRole('group', { name: 'Born' }).getByRole('button', {
-      name: 'Born 1970s',
-      exact: true,
-    });
-
-    // A decade first, then a range: the range takes its place, and says so.
-    await decade.click();
-    await expect(page).toHaveURL(/\/people\?t=born-1970$/);
+    // A range is the only birth facet.
     await from.fill('1976');
     await to.fill('1996');
     await to.press('Enter');
     await expect(page).toHaveURL(/\/people\?t=born-1976-1996$/);
     await expect(selected.getByRole('button', { name: 'Remove Born 1976–1996' })).toBeVisible();
-    await expect(selected.getByRole('button', { name: 'Remove Born 1970s' })).toHaveCount(0);
     const status = view.locator('p.status');
-    await expect(status).toHaveText('Born 1976–1996 replaced Born 1970s.');
+    await expect(status).toHaveText('');
     await expect.poll(() => asked).toContain('/index/filter/all/people.json?traits=born:1976-1996');
     await expect
       .poll(() => asked)
       .toContain('/index/filter/all/people/counts.json?traits=born:1976-1996');
     // Moving from one field to the other was no pick of its own.
     expect(asked).not.toContain('/index/filter/all/people.json?traits=born:1976-');
-    // One born pick at a time: no decade is offered beside the range.
-    await expect(decade).toHaveCount(0);
-
     // An emptied end is an open one.
     await to.fill('');
     await to.press('Enter');

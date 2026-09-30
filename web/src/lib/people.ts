@@ -1,7 +1,7 @@
 // People: the people credited on the titles a selection matches, narrowed by what Wikidata says about them — the
-// credit (actor, director, writer, creator), gender, birth decade or years, nationality and occupation — from
+// credit (actor, director, screenwriter, creator), gender, birth years, nationality and occupation — from
 // den-atlas's people routes (`filterRoutes.ts`). The title facets are Explore's own chips; the person traits are
-// picked as `<trait>-<value>` ids (`role-director`, `gender-Q6581072`, `born-1970`, `born-1976-1996`), the
+// picked as `<trait>-<value>` ids (`role-director`, `gender-Q6581072`, `born-1976-1996`), the
 // address's `t=`.
 
 import { filterItems, groupItems } from './facetCounts';
@@ -17,9 +17,25 @@ export const TRAITS = ['role', 'gender', 'born', 'citizenship', 'occupation'] as
 const ROLES: Record<string, string> = {
   cast: 'Actors',
   director: 'Directors',
-  writer: 'Writers',
+  writer: 'Screenwriters',
   creator: 'Creators',
 };
+
+/** Occupations already expressed more accurately by the credit Role section. */
+const ROLE_OCCUPATIONS = new Set([
+  'Q33999', // actor
+  'Q10800557', // film actor
+  'Q10798782', // television actor
+  'Q2259451', // stage actor
+  'Q2405480', // voice actor
+  'Q11481802', // dub actor
+  'Q3455803', // director
+  'Q2526255', // film director
+  'Q2059704', // television director
+  'Q3387717', // theatre director
+  'Q28389', // screenwriter
+  'Q69423232', // film screenwriter
+]);
 
 /**
  * A birth-year range in an address, where an id may not end on a dash: `born-1976-1996`, and an open end as
@@ -35,6 +51,7 @@ export function traitItem(id: string): FilterItem | undefined {
   const at = id.indexOf('-');
   const [kind, raw] = [id.slice(0, at), id.slice(at + 1)];
   const value = kind === 'born' ? bornValue(raw) : raw;
+  if (kind === 'born' && !value.includes('-')) return undefined;
   return at > 0 && value && TRAIT_KINDS[kind] ? { kind, id: value } : undefined;
 }
 
@@ -44,7 +61,7 @@ export const bornRangeId = (from?: number, to?: number): string | undefined =>
     ? undefined
     : `born-${bornPart(`${from ?? ''}-${to ?? ''}`)}`;
 
-/** The birth-year range among the trait picks, its ends as years; undefined for none (a decade is no range). */
+/** The birth-year range among the trait picks, its ends as years; undefined for none. */
 export function bornRangeOf(traits: readonly string[]): { from?: number; to?: number } | undefined {
   for (const id of traits) {
     const item = traitItem(id);
@@ -87,9 +104,9 @@ export function pickTrait(traits: readonly string[], id: string): string[] {
   return [...traits.filter((x) => !gives(x)), id];
 }
 
-/** Whether a trait option is worth offering: not picked, and no birth decade beside a range of birth years. */
+/** Whether a trait option is worth offering: not picked, and no second born value beside a birth-year range. */
 export const traitOffered = (traits: readonly string[], id: string): boolean =>
-  !traits.includes(id) && !traits.some((x) => sameKind(x, id) && bornRange(x));
+  !!traitItem(id) && !traits.includes(id) && !traits.some((x) => sameKind(x, id) && bornRange(x));
 
 /**
  * Whether a trait option leaves no one beside the selection, by atlas's counts: none in a trait they list completely.
@@ -115,31 +132,46 @@ function bornLabel(range: string): string {
 }
 
 /**
- * A trait value's words: a role's plural, a decade's "1970s", a birth-year range, a Wikidata item by atlas's label.
+ * A trait value's words: a role's plural, a birth-year range, or a Wikidata item by atlas's label.
  */
 function traitLabel(kind: string, value: string, labels?: Record<string, string>): string {
   if (kind === 'role') return ROLES[value] ?? value;
-  if (kind === 'born') return value.includes('-') ? bornLabel(value) : `Born ${value}s`;
+  if (kind === 'born') return bornLabel(value);
   const label = labels?.[value];
   return label ? label.charAt(0).toUpperCase() + label.slice(1) : value;
 }
 
 /**
  * The trait options atlas's counts list beside the selection, and the picked ones: each has people there, since
- * atlas lists no value with none. Roles in atlas's order, birth decades latest first, the rest most people first.
+ * atlas lists no value with none. Roles are in atlas's order; the rest are ordered by people, label, then id.
  */
 export function traitChips(counts: PeopleCounts): Chip[] {
   return TRAITS.flatMap((kind) => {
     const answer = counts.traits[kind];
     if (!answer) return [];
-    // A born value is a decade; one before the common era (`-480`) has no address, and would read as a range.
+    if (kind === 'born')
+      return (answer.selected ?? []).flatMap(
+        (value) => traitChip(kind, value, answer.labels) ?? [],
+      );
     const values = Object.entries(answer.values ?? {}).filter(
-      ([value]) => kind !== 'born' || /^\d+$/.test(value),
+      ([value]) => kind !== 'occupation' || !ROLE_OCCUPATIONS.has(value),
     );
     if (kind === 'role') values.sort(([a], [b]) => roleRank(a) - roleRank(b));
-    else if (kind === 'born') values.sort(([a], [b]) => Number(b) - Number(a));
-    else values.sort(([, a], [, b]) => b - a);
-    const ids = [...new Set([...values.map(([value]) => value), ...(answer.selected ?? [])])];
+    else
+      values.sort(
+        ([a, an], [b, bn]) =>
+          bn - an ||
+          traitLabel(kind, a, answer.labels).localeCompare(traitLabel(kind, b, answer.labels)) ||
+          a.localeCompare(b),
+      );
+    const ids = [
+      ...new Set([
+        ...values.map(([value]) => value),
+        ...(answer.selected ?? []).filter(
+          (value) => kind !== 'occupation' || !ROLE_OCCUPATIONS.has(value),
+        ),
+      ]),
+    ];
     return ids.flatMap((value) => traitChip(kind, value, answer.labels) ?? []);
   });
 }
@@ -160,7 +192,7 @@ const roleRank = (role: string) => {
   return at < 0 ? Infinity : at;
 };
 
-/** A trait pick before atlas's counts have named it: a role and a decade by their words, an item as "Nationality…". */
+/** A trait pick before atlas's counts have named it: a role or range by its words, an item as "Nationality…". */
 export function pendingTraitChip(id: string): Chip | undefined {
   const item = traitItem(id);
   if (!item) return undefined;
@@ -206,9 +238,9 @@ export function peopleFromExplore({ type, chips = [] }: Explore): PeopleView {
 export { exploreFromPeople } from './route';
 
 /**
- * What the bar's search field offers on People, as Explore's Browse row does: the person traits the text names (a
- * role, a gender, a birth decade), then the nationalities and occupations atlas found by it (`found`), then the title
- * facets it names. Each once, and only those `offered` (not picked, and able to stand beside the picks).
+ * What the bar's search field offers on People, as Explore's Browse row does: the roles and genders the text names,
+ * then the nationalities and occupations atlas found by it (`found`), then the title facets it names. Each once,
+ * and only those `offered` (not picked, and able to stand beside the picks).
  */
 export function peopleSuggestions(
   query: string,
@@ -243,9 +275,8 @@ export const ORDERS: { value: string; label: string }[] = [
 export const SECTIONS: [ChipGroup, string][] = [
   ['role', 'Role'],
   ['gender', 'Gender'],
-  ['born', 'Born'],
   ['citizenship', 'Nationality'],
-  ['occupation', 'Occupation'],
+  ['occupation', 'Also works as'],
   ['genre', 'In genres'],
   ['mood', 'In moods'],
   ['recipe', 'In subgenres'],
@@ -255,9 +286,9 @@ export const SECTIONS: [ChipGroup, string][] = [
   ['region', 'Region'],
   ['company', 'Studio'],
   ['network', 'Network'],
-  ['subject', 'Subject'],
-  ['place', 'Place'],
-  ['format', 'Format'],
+  ['subject', 'Titles about'],
+  ['place', 'Titles set in'],
+  ['format', 'Title type'],
   ['source', 'Based on'],
   ['author', 'Adapted from'],
   ['technique', 'Made with'],
