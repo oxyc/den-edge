@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchSimklClientId, pollToken, requestPin } from './simkl';
+import { fetchSimklClientId, pollToken, requestPin, simklAccountID } from './simkl';
 
 const answering = (status: number, body: unknown, seen: string[] = [], headers: Headers[] = []) =>
   (async (input: string, init?: RequestInit) => {
@@ -66,5 +66,17 @@ describe('SIMKL sign-in', () => {
       token: 'tok',
     });
     expect(await pollToken('c', 'AB12C', answering(500, {}))).toEqual({ kind: 'failed' });
+  });
+
+  it('resolves the stable account id before moving a credential into v3', async () => {
+    const seen: string[] = [];
+    const headers: Headers[] = [];
+    expect(
+      await simklAccountID('client', 'token', answering(200, { user: { id: 42 } }, seen, headers)),
+    ).toBe('42');
+    expect(seen).toEqual(['https://api.simkl.com/users/settings']);
+    expect(headers[0]?.get('simkl-api-key')).toBe('client');
+    expect(headers[0]?.get('authorization')).toBe('Bearer token');
+    expect(await simklAccountID('client', 'token', answering(401, {}))).toBeNull();
   });
 });
