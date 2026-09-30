@@ -27,6 +27,7 @@ import {
 } from './wire';
 import { trackerEvent } from './trackerEvents';
 import { ensureSyncPolicy } from './syncLoader';
+import { syncPolicy } from './syncCore';
 
 interface Entry {
   seq: number;
@@ -60,6 +61,13 @@ const REFUSALS: Record<number, (string | undefined)[] | 'any'> = {
   413: 'any',
 };
 
+/** A ready build retains these writes and retries them after the library can be read again. */
+const RETRYABLE_REFUSALS = new Set([
+  'rewrite_in_progress',
+  'generation_changed',
+  'upgrade_required',
+]);
+
 interface Batch {
   applied: { k: string; seq: number }[];
   conflicts: { k: string; seq: number; v: string | null }[];
@@ -77,7 +85,7 @@ interface Snapshot {
 interface KeptWork {
   key: string;
   rows: Row[];
-  kind: 'restore' | 'bulk' | 'one';
+  kind: 'restore' | 'bulk' | 'one' | 'rows';
 }
 
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
@@ -128,6 +136,10 @@ export class LibraryLog {
   private writes: Promise<unknown> = Promise.resolve();
   private head = 0;
   private generation?: string;
+  /** Highest wire minimum this browser has observed for this library; it never falls back. */
+  private wireMin = 2;
+  /** A typed upgrade fence for the UI. This v3 build can satisfy minimum 3, but preserves future minima too. */
+  upgradeRequired: number | null = null;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -154,6 +166,10 @@ export class LibraryLog {
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
 
+  get wireMinimum(): number {
+    return this.wireMin;
+  }
+
   private constructor(
     private readonly keys: LibraryKeys,
     private readonly fetchImpl: typeof fetch,
@@ -161,7 +177,11 @@ export class LibraryLog {
     private readonly local: { vault: Vault; key: CryptoKey } | null = null,
     /** A library that lives only in this browser (`openLocal`): nothing is asked of den-edge, or sent to it. */
     private readonly offline = false,
-  ) {}
+  ) {
+    const remembered = Number(this.storage?.getItem(`den.libraryWireMin.${this.keys.id}`));
+    if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
+    if (this.wireMin > 3) this.upgradeRequired = this.wireMin;
+  }
 
   /**
    * A library kept only in this browser, for someone using Den with no TV: the same rows, sealed and merged the same
@@ -217,6 +237,85 @@ export class LibraryLog {
       rows.filter(trackerEvent),
       rows.filter((row) => !trackerEvent(row)),
     ]);
+  }
+
+  /** Atomically replace a web-only v2 library with den-core's v3 form. */
+  async switchWebOnly(): Promise<boolean> {
+    if (this.offline || this.moved || this.upgradeRequired) return false;
+    await ensureSyncPolicy();
+    const converted = syncPolicy<Row[]>({ op: 'v3_form', rows: this.rows(), now: Date.now() });
+    let rewrite: string | undefined;
+    try {
+      const opened = await this.send(`/lib/${this.keys.id}/rewrite`, {
+        method: 'POST',
+        headers: this.headers(),
+      });
+      if (!opened.ok) {
+        await this.failed(opened);
+        return false;
+      }
+      const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
+      if (typeof offer.rewrite !== 'string' || typeof offer.base !== 'number') return false;
+      rewrite = offer.rewrite;
+      const sealed = await Promise.all(converted.map((row) => seal(this.keys, row)));
+      const chunks: (typeof sealed)[] = [];
+      let chunk: typeof sealed = [];
+      for (const write of sealed) {
+        const candidate = [...chunk, write];
+        if (
+          chunk.length &&
+          new TextEncoder().encode(JSON.stringify({ writes: candidate })).length > 2_000_000
+        ) {
+          chunks.push(chunk);
+          chunk = [write];
+        } else chunk = candidate;
+      }
+      if (chunk.length) chunks.push(chunk);
+      for (const writes of chunks) {
+        const staged = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/rows`, {
+          method: 'POST',
+          headers: { ...this.headers(), 'content-type': 'application/json' },
+          body: JSON.stringify({ writes }),
+        });
+        if (!staged.ok) {
+          await this.failed(staged);
+          await this.abortRewrite(rewrite);
+          return false;
+        }
+      }
+      const committed = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/commit`, {
+        method: 'POST',
+        headers: { ...this.headers(), 'content-type': 'application/json' },
+        body: JSON.stringify({ base: offer.base, wireMin: 3 }),
+      });
+      if (!committed.ok) {
+        await this.failed(committed);
+        await this.abortRewrite(rewrite);
+        return false;
+      }
+      this.generation = committed.headers.get('x-den-generation') ?? undefined;
+      this.wireMin = Math.max(this.wireMin, 3);
+      this.head = 0;
+      this.entries.clear();
+      this.acknowledged.clear();
+      this.dirty = true;
+      this.unreported = true;
+      return await this.refresh();
+    } catch {
+      if (rewrite) await this.abortRewrite(rewrite);
+      return false;
+    }
+  }
+
+  private async abortRewrite(rewrite: string): Promise<void> {
+    try {
+      await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}`, {
+        method: 'DELETE',
+        headers: this.headers(),
+      });
+    } catch {
+      /* The server expires abandoned stages; no live library rows were changed. */
+    }
   }
 
   /**
@@ -614,10 +713,21 @@ export class LibraryLog {
    * ours is merged on top of it and written again. Resolves to the row as stored, or null when it couldn't be saved
    * — `moved` says when that is because the library moved to a new key.
    */
-  async write(local: Row, outcome?: Outcome): Promise<Row | null> {
+  async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
+    let kept: string | undefined;
+    if (durable && !this.offline && this.storage) {
+      kept = this.pendingPrefix + 'rows:' + crypto.randomUUID();
+      try {
+        this.storage.setItem(kept, JSON.stringify({ rows: [await seal(this.keys, local)] }));
+      } catch {
+        return null;
+      }
+    }
     const run = this.writes.then(() => this.writeSerial(local, outcome));
     this.writes = run.catch(() => null);
-    return run;
+    const saved = await run;
+    if (saved && kept) this.discard(kept);
+    return saved ?? (kept ? this.project(local) : null);
   }
 
   private async writeSerial(local: Row, outcome?: Outcome): Promise<Row | null> {
@@ -677,9 +787,14 @@ export class LibraryLog {
       this.moved = true;
       return;
     }
+    const code = await errorCode(res);
+    if (RETRYABLE_REFUSALS.has(code ?? '')) {
+      if (code === 'upgrade_required') this.upgradeRequired = this.wireMin;
+      this.refusal = code ?? String(res.status);
+      return;
+    }
     const refusals = REFUSALS[res.status];
     if (!refusals) return;
-    const code = await errorCode(res);
     if (res.status === 403 && code === 'new_libraries_closed') {
       this.refused = true;
       this.refusedAt = Date.now();
@@ -707,6 +822,7 @@ export class LibraryLog {
     } finally {
       clearTimeout(deadline);
     }
+    this.observeProtocol(res);
     if (!res.body) return res;
     const reader = res.body.getReader();
     const body = new ReadableStream<Uint8Array>({
@@ -739,7 +855,23 @@ export class LibraryLog {
   }
 
   private headers(): Record<string, string> {
-    return { 'x-den-library-token': this.keys.token };
+    return {
+      'x-den-library-token': this.keys.token,
+      'x-den-wire': '3',
+      'x-den-generation': this.generation ?? '0',
+    };
+  }
+
+  private observeProtocol(res: Response): void {
+    const minimum = Number(res.headers.get('x-den-wire-min'));
+    if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
+    this.wireMin = minimum;
+    if (minimum > 3) this.upgradeRequired = minimum;
+    try {
+      this.storage?.setItem(`den.libraryWireMin.${this.keys.id}`, String(minimum));
+    } catch {
+      /* The in-memory monotonic fence still holds for this visit. */
+    }
   }
 
   /** Register this browser's membership, once at a time: a cached open starts it while `refresh` may ask too. */
@@ -930,7 +1062,7 @@ export class LibraryLog {
     }
     const outcome = { refused: false };
     this.flushing.add(storageKey);
-    const accepted = await this.write(journal, outcome).finally(() =>
+    const accepted = await this.write(journal, outcome, false).finally(() =>
       this.flushing.delete(storageKey),
     );
     if (!accepted && outcome.refused) {
@@ -950,7 +1082,9 @@ export class LibraryLog {
       }
     }
     if (!accepted) return this.project(event.after);
-    const saved = await this.write(event.after);
+    // The accepted immutable event is the durable source of this projection; keeping a second generic row would
+    // send it twice when local pending cleanup itself failed.
+    const saved = await this.write(event.after, undefined, false);
     if (saved) return saved;
     return this.project(event.after);
   }
@@ -989,10 +1123,15 @@ export class LibraryLog {
           v: string;
           bulk?: { k: string; v: string }[];
           restore?: { k: string; v: string }[];
+          rows?: { k: string; v: string }[];
         };
-        const sealed = pending.restore ?? pending.bulk ?? [pending];
+        const sealed = pending.restore ?? pending.bulk ?? pending.rows ?? [pending];
         const rows = await Promise.all(sealed.map(({ k, v }) => open(this.keys, k, v)));
-        kept.push({ key, rows, kind: pending.restore ? 'restore' : pending.bulk ? 'bulk' : 'one' });
+        kept.push({
+          key,
+          rows,
+          kind: pending.restore ? 'restore' : pending.bulk ? 'bulk' : pending.rows ? 'rows' : 'one',
+        });
       } catch {
         /* Unreadable: `replay` keeps it, and it has nothing to show. */
       }
@@ -1073,6 +1212,11 @@ export class LibraryLog {
             ])
           )
             this.recoveryRows = undefined;
+          continue;
+        }
+        if (kind === 'rows') {
+          for (const row of rows) this.project(row);
+          await this.flushRows(key, [rows]);
           continue;
         }
         // Only `writeAction` and `writeActions` keep work other than recovery, and only actions: anything else can

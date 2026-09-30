@@ -11,7 +11,7 @@
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
   import { linkedDeviceRows } from './linkedDevices';
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
-  import { forgetDevice, parsePublicKey, type DeviceEntry } from './values';
+  import { parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
   import type { GrantAddon } from '../lib/grants';
   import { guestGrants } from '../lib/grants.svelte';
@@ -38,6 +38,7 @@
     selfId,
     disabled,
     write,
+    removeDevice,
     onjoin,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
@@ -52,6 +53,7 @@
     selfId: string;
     disabled: boolean;
     write: (group: string, changes: Changes) => Promise<boolean>;
+    removeDevice: (id: string) => Promise<void>;
     /**
      * For a browser using its own library: moves that library into the one `libraryKey` opens, before the browser
      * links to it, so what was saved here goes along. False when it couldn't.
@@ -807,7 +809,7 @@
                 detail="It still holds your library’s key, and lists itself again the next time it opens your library. To shut it out, reset the library key on your Apple TV."
                 confirmLabel="Remove"
                 {disabled}
-                onconfirm={() => void write('devices', forgetDevice(row.device!.id))}
+                onconfirm={() => void removeDevice(row.device!.id)}
               />
             {/if}
             {#each row.links as linked (linked.inboxKey)}
