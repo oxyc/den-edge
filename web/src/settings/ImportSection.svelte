@@ -21,6 +21,7 @@
 
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
+  import PrimeImportRow from './PrimeImportRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import type { LibraryLog } from '../lib/log';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
@@ -227,6 +228,7 @@
       <p class="status bad" role="alert">{state.message}</p>
     {/if}
   </SettingRow>
+  <PrimeImportRow {log} {device} {tmdbKey} {changed} />
 </SettingsSection>
 
 <style>

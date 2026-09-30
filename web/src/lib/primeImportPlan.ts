@@ -113,7 +113,9 @@ export async function planPrimeImport(
           known++;
           return;
         }
-        if ((await completion(viewing, await runtimeOf('movie', hit.id))) !== 'complete') return;
+        const fallback =
+          viewing.durationSeconds === undefined ? await runtimeOf('movie', hit.id) : null;
+        if ((await completion(viewing, fallback)) !== 'complete') return;
         add({
           type: 'movie',
           id: hit.id,

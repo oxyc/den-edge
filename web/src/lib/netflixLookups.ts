@@ -20,7 +20,7 @@ const IN_FLIGHT = 16;
  * `waiting` is told when den-edge's per-minute allowance is spent and every lookup pauses until it renews (the ms
  * left), and with 0 once they carry on: a pause that says nothing reads as a frozen import.
  */
-export function netflixLookups(
+export function viewingImportLookups(
   key: string,
   fetchImpl: typeof fetch = tmdbFetch,
   paused?: (ms: number) => void,
@@ -129,5 +129,8 @@ export function netflixLookups(
     },
   };
 }
+
+/** Compatibility name for the first provider; new importers use the provider-neutral name. */
+export const netflixLookups = viewingImportLookups;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
