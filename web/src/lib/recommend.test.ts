@@ -73,11 +73,11 @@ describe('personalizeEveryone', () => {
       '/atlas',
       slides,
       [{ ref: { type: 'tv', id: 1438 }, weight: 2, at: 9 }],
-      new Set(['movie:1']),
+      new Set(['movie:20']),
       fetchImpl,
     );
-    expect(ranked.some((slide) => slide.id === 1)).toBe(false);
-    expect(ranked.findIndex((slide) => slide.id === 12)).toBeLessThan(11);
+    expect(ranked.some((slide) => slide.id === 20)).toBe(false);
+    expect(ranked[0]?.id).toBe(12);
     expect(ranked.find((slide) => slide.id === 12)?.why?.reason).toBe('profile');
     expect(asked).toEqual([
       { url: '/atlas/index/suggest/series/1438.json?skip=0&limit=100', method: 'GET' },
@@ -110,7 +110,7 @@ describe('personalizeEveryone', () => {
     expect(peak).toBeLessThanOrEqual(4);
   });
 
-  it('bounds a ubiquitous fan match and applies dislikes instead of dropping them', async () => {
+  it('normalizes a ubiquitous fan match and applies dislikes instead of dropping them', async () => {
     const pool = Array.from({ length: 100 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
     const fetchImpl = vi.fn(async (url: string) => {
       const disliked = url.includes('/109.json');
@@ -135,10 +135,27 @@ describe('personalizeEveryone', () => {
       new Set(),
       fetchImpl,
     );
-    expect(ranked[0]?.id).toBe(1);
-    expect(ranked.findIndex((slide) => slide.id === 80)).toBeGreaterThan(0);
+    expect(ranked[0]?.id).toBe(80);
+    expect(ranked[0]?.why?.reason).toBe('profile');
     expect(ranked.findIndex((slide) => slide.id === 12)).toBeGreaterThan(11);
     expect(fetchImpl).toHaveBeenCalledTimes(10);
+  });
+
+  it('does not call one bottom-of-row coincidence a personal match', async () => {
+    const pool = Array.from({ length: 100 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
+    const mixed = Array.from({ length: 100 }, (_, i) => ({
+      type: 'movie',
+      id: i === 99 ? 80 : 200 + i,
+    }));
+    const ranked = await personalizeEveryone(
+      '/atlas',
+      pool,
+      [{ ref: { type: 'movie', id: 500 }, weight: 1, at: 1 }],
+      new Set(),
+      (async () => new Response(JSON.stringify({ mixed }))) as unknown as typeof fetch,
+    );
+    expect(ranked[0]?.id).toBe(1);
+    expect(ranked.find((slide) => slide.id === 80)?.why?.reason).toBeUndefined();
   });
 });
 

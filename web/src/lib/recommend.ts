@@ -160,6 +160,9 @@ const FAN_LIMIT = 100;
 // A perfect fan match may move a nearby shared pick to the lead, but cannot let a ubiquitous deep-pool title
 // overwhelm the quality/freshness prior merely because it appeared in every seed row.
 const PERSONAL_LIFT = 2;
+// One top-five hit among ten full-weight seeds, or several weaker agreements, is enough to make a title personal.
+// Anything below this remains evidence for ordering, but not enough to displace the shared lead on its own.
+const PERSONAL_MATCH = 0.01;
 const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
 
 /** Read one public, long-lived "fans of this title" row. Older atlases may answer same-type `ids` only. */
@@ -223,13 +226,16 @@ export async function personalizeEveryone(
         slide,
         rank,
         lift,
+        matched: lift / PERSONAL_LIFT >= PERSONAL_MATCH,
         // A slowly declining prior keeps a weak affinity hit from discarding atlas's quality/freshness ranking.
         score: 1 / (1 + rank * 0.05) + lift,
       };
     })
-    .sort((a, b) => b.score - a.score || a.rank - b.rank)
-    .map(({ slide, lift }) =>
-      lift > 0 ? { ...slide, why: { ...slide.why, reason: 'profile' } } : slide,
+    .sort((a, b) =>
+      a.matched !== b.matched ? (a.matched ? -1 : 1) : b.score - a.score || a.rank - b.rank,
+    )
+    .map(({ slide, matched }) =>
+      matched ? { ...slide, why: { ...slide.why, reason: 'profile' } } : slide,
     );
 }
 
