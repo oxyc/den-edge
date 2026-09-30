@@ -12,8 +12,18 @@ import {
 import { LibraryLog } from './log';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import { recordTrackerEvent, trackerEvent } from './trackerEvents';
+import { deliverSimkl } from './simklDelivery';
 import { fetchDetails } from './tmdb';
-import { deriveKeys, seal, type EpisodeRow, type Row, type Stamp, type TitleRow } from './wire';
+import {
+  deriveKeys,
+  open,
+  seal,
+  type EpisodeRow,
+  type Row,
+  type SettingsRow,
+  type Stamp,
+  type TitleRow,
+} from './wire';
 
 const LIBRARY_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
 const at = (t: number, device = 'tv01'): Stamp => [t, 0, device];
@@ -74,7 +84,12 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
       { status: 200 },
     );
   };
-  return { fetchImpl, stored };
+  const rewrite = (entries: { k: string; v: string }[]) => {
+    stored.clear();
+    head = 0;
+    for (const entry of entries) stored.set(entry.k, { ...entry, seq: ++head });
+  };
+  return { fetchImpl, stored, rewrite };
 }
 
 function memoryVault() {
@@ -158,21 +173,49 @@ describe('LibraryLog', () => {
   });
 
   it('rewrites a web-only v2 library atomically into den-core v3 rows', async () => {
+    const device = 'aaaaaaaaaaaaaaaa';
     const episode: EpisodeRow = {
       kind: 'ep',
       schema: 2,
       title: { type: 'tv', id: 95396 },
       season: 1,
       episode: 2,
-      progress: { value: 1, at: at(2000), viewing: 0 },
+      progress: { value: 1, at: at(2000, device), viewing: 0 },
     };
-    const server = await edge([row(95396, { title: { type: 'tv', id: 95396 } }), episode]);
+    const simkl: Row = {
+      kind: 'set',
+      schema: 2,
+      name: 'keys',
+      values: { simkl: { value: { string: 'token' }, at: at(1500, device) } },
+    };
+    const server = await edge([
+      row(95396, {
+        title: { type: 'tv', id: 95396 },
+        status: { value: 'watchlist', at: at(1000, device) },
+        reaction: { value: null, at: at(1000, device) },
+      }),
+      episode,
+      simkl,
+    ]);
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     let generation = 'old';
     const staged: { k: string; v: string }[] = [];
     const requests: { path: string; init: RequestInit }[] = [];
+    let simklSends = 0;
+    const simklPaths: string[] = [];
     const connection: typeof fetch = async (input, init = {}) => {
-      const path = new URL(String(input), 'https://den.example').pathname;
+      const url = new URL(String(input), 'https://den.example');
+      const path = url.pathname;
+      if (path === '/config') return new Response(JSON.stringify({ simklClientId: 'client' }));
+      if (url.hostname === 'api.simkl.com') {
+        if (path === '/sync/all-items')
+          return new Response(JSON.stringify({ movies: [], shows: [] }));
+        if (init.method === 'POST') {
+          simklSends++;
+          simklPaths.push(path);
+          return new Response('{}');
+        }
+      }
       requests.push({ path, init });
       const headers = new Headers({
         'x-den-generation': generation,
@@ -188,8 +231,7 @@ describe('LibraryLog', () => {
       }
       if (path.endsWith('/rewrite/stage/commit') && init.method === 'POST') {
         expect(JSON.parse(String(init.body))).toEqual({ base: 2, wireMin: 3 });
-        server.stored.clear();
-        staged.forEach((write, index) => server.stored.set(write.k, { ...write, seq: index + 1 }));
+        server.rewrite(staged);
         generation = 'new';
         headers.set('x-den-generation', generation);
         headers.set('x-den-wire-min', '3');
@@ -203,13 +245,38 @@ describe('LibraryLog', () => {
       });
     };
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage, null))!;
-    expect(await log.switchWebOnly()).toBe(true);
+    expect(
+      await log.switchWebOnly({
+        performer: device,
+        stamp: at(2500, device),
+        simkl: { account: '42', credential: 'token', connectedAt: at(1500, device) },
+      }),
+    ).toBe(true);
     expect(log.wireMinimum).toBe(3);
     const oldEpisodeKey = (await seal(keys, episode)).k;
     expect(staged.map(({ k }) => k)).not.toContain(oldEpisodeKey);
-    expect(staged).toHaveLength(2); // The rec plus den-core's replacement wat row.
+    const rewritten = await Promise.all(staged.map(({ k, v }) => open(keys, k, v)));
+    expect(rewritten.some((row) => row.kind === 'wat')).toBe(true);
+    expect(rewritten.some((row) => row.kind === 'set' && row.name === 'trackers')).toBe(true);
+    expect(rewritten.some((row) => row.kind === 'set' && row.name === 'deliver:simkl:42')).toBe(
+      true,
+    );
+    expect(
+      rewritten.find((row): row is SettingsRow => row.kind === 'set' && row.name === 'keys')?.values
+        .simkl?.value,
+    ).toBeNull();
     expect(requests.filter(({ path }) => path.endsWith('/rewrite/stage/rows'))).toHaveLength(1);
     expect(requests.at(-1)?.init.headers).toMatchObject({ 'x-den-generation': 'new' });
+
+    expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);
+    expect(simklSends).toBeGreaterThan(0);
+    const sentOnce = simklSends;
+    expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);
+    expect(simklSends, simklPaths.join(', ')).toBe(sentOnce);
+    expect(log.rows().some((row) => row.kind === 'snt')).toBe(true);
+
+    expect(await log.write(episode)).not.toBeNull();
+    expect(log.rows().some((row) => row.kind === 'ep')).toBe(false);
   });
 
   /**

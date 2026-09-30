@@ -1,5 +1,7 @@
 import { LIVE_PULL_MS } from './livePosition';
+import { browserClock } from './clock';
 import { LibraryLog } from './log';
+import { deliverSimkl } from './simklDelivery';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
@@ -17,6 +19,7 @@ export class LibrarySession {
   log = $state<LibraryLog | null | undefined>(undefined);
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
+  private readonly device = browserClock().device;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
   private early?: Promise<Routes> = fetchRoutes();
   /** Where the library's services answer, found once for every page (`sessionServices.svelte.ts`). */
@@ -75,6 +78,8 @@ export class LibrarySession {
           JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));
         const before = settings();
         if (await this.log.refresh()) this.changed(before !== settings());
+        if (this.log.wireMinimum >= 3 && (await deliverSimkl(this.log, this.device)))
+          this.changed(true);
       } catch {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
         if (!this.log) this.log = null;
