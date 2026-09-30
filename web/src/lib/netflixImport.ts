@@ -2,7 +2,26 @@
 // where an episode's title is `Show: Season 4: Episode name` and a film's is its own name. Read here, matched to TMDB
 // titles and episodes, and turned into what to mark seen and when. Pure except for the lookups, which are passed in.
 
-import type { Shape } from './library';
+import { parseDelimitedRows } from './viewingImportCsv';
+import {
+  isViewingPreview,
+  normalizeViewingName,
+  viewingFilmKey,
+  viewingPreviewLines,
+  type ImportShow,
+  type ViewingImportPlan,
+  type ViewingLookups,
+  type ViewingMark,
+  type ViewingPreviewLine,
+  type ViewingSearchHit,
+} from './viewingImport';
+import { findViewingEpisode, unnamedViewingEpisode } from './viewingImportMatch';
+
+export type Mark = ViewingMark;
+export type Show = ImportShow;
+export type Plan = ViewingImportPlan;
+export type Lookups = ViewingLookups;
+export type SearchHit = ViewingSearchHit;
 
 /** One line of the file: what Netflix called it, and the day it was watched. */
 export interface Viewing {
@@ -22,67 +41,10 @@ export type Parsed =
     }
   | { kind: 'name'; name: string };
 
-/** What the import will mark: a film, or one episode, each with the day it was last watched (local noon, ms). */
-export interface Mark {
-  type: 'movie' | 'tv';
-  id: number;
-  /** TMDB's name, and its year, so a remake can be told from its original in the preview. */
-  name: string;
-  year?: number;
-  /** What Netflix called it: the film's title, or the show's name. */
-  source: string;
-  season?: number;
-  episode?: number;
-  at: number;
-}
-
-/**
- * A series' episodes per season and the last one aired (`tmdb.seriesShape`), and each season's own name where TMDB
- * gives one: Trapped's third is "Entrapped", which is what Netflix calls it.
- */
-export type Show = Shape & { seasonNames?: Map<number, string> };
-
-export interface Plan {
-  marks: Mark[];
-  /** Each matched series' layout, by TMDB id: what says whether the history covers all of it. */
-  shows: Record<number, Show>;
-  /** Netflix titles nothing was found for, each once. */
-  unmatched: string[];
-  /** Lines whose date couldn't be read. */
-  undated: number;
-  /** Lines of films and series the library already has as seen, which were not looked into further. */
-  known: number;
-  /**
-   * Lines naming a season whose every episode the file's other lines already are: Netflix splits some seasons into
-   * more episodes than TMDB has ("Grey's Anatomy: Season 6: Goodbye"), so the extra line has nothing left to be.
-   */
-  covered: number;
-}
-
-/** The TMDB lookups the matcher needs; each null or [] when TMDB can't answer. */
-export interface Lookups {
-  searchMulti(query: string): Promise<SearchHit[]>;
-  searchTv(query: string): Promise<SearchHit[]>;
-  /** Films alone, a page of TMDB's at a time: a one-word title ("Girl") can be far down a popularity order. */
-  searchMovie?(query: string, page: number): Promise<SearchHit[]>;
-  show(id: number): Promise<Show | null>;
-  episodes(id: number, season: number): Promise<{ number: number; name: string }[] | null>;
-}
-
-export interface SearchHit {
-  type: 'movie' | 'tv';
-  id: number;
-  name: string;
-  originalName?: string;
-  year?: number;
-}
-
 /** The file's lines, comma- or tab-separated (a spreadsheet copy), quotes as CSV writes them; the header dropped. */
 export function parseCsv(text: string): Viewing[] {
-  const lines = text.trimStart().split(/\r?\n/);
   const out: Viewing[] = [];
-  for (const line of lines) {
-    const fields = splitLine(line);
+  for (const fields of parseDelimitedRows(text)) {
     if (fields.length < 2) continue;
     const date = fields[fields.length - 1]!.trim();
     const title = fields.slice(0, -1).join(',').trim();
@@ -90,29 +52,6 @@ export function parseCsv(text: string): Viewing[] {
     out.push({ title, date });
   }
   return out;
-}
-
-function splitLine(line: string): string[] {
-  if (!line.includes('"')) return line.includes('\t') ? line.split('\t') : line.split(',');
-  const fields: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (quoted) {
-      if (c === '"' && line[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else if (c === '"') quoted = false;
-      else field += c;
-    } else if (c === '"') quoted = true;
-    else if (c === ',' || c === '\t') {
-      fields.push(field);
-      field = '';
-    } else field += c;
-  }
-  fields.push(field);
-  return fields;
 }
 
 /**
@@ -178,8 +117,7 @@ function seasonOf(label: string): number | undefined {
  * Not a viewing: a trailer or preview Netflix lists among them ("Valeria: Season 1 Trailer: Valeria",
  * "Personal Shopper: Personal Shopper_hook_primary_16x9").
  */
-export const isPreview = (title: string) =>
-  /(?:^|: )[^:]*\btrailer(?::|$)/i.test(title) || /_hook_|_16x9\b/i.test(title);
+export const isPreview = isViewingPreview;
 
 /**
  * A line naming two episodes or more, as one line each: Netflix lists a double bill as one viewing ("The Killing:
@@ -218,178 +156,18 @@ export function parseTitle(title: string): Parsed {
   return { kind: 'name', name: title };
 }
 
-const LIGATURES: Record<string, string> = {
-  æ: 'ae',
-  œ: 'oe',
-  ø: 'o',
-  ß: 'ss',
-  ð: 'd',
-  þ: 'th',
-  ł: 'l',
-};
-
 /** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
-export function normalize(name: string): string {
-  return (
-    name
-      .normalize('NFKD')
-      .replace(/\p{M}/gu, '')
-      .toLowerCase()
-      // Letters no accent comes off: "InnSæi" is Netflix's "Innsaei", "Demi-sœur" its "Demi-Soeur".
-      .replace(/[æœøßðþł]/g, (letter) => LIGATURES[letter]!)
-      .replace(/&/g, ' and ')
-      // "Un plus une" is TMDB's "Un + une"; "1,000 Times Good Night" a thousand, not "1 000".
-      .replace(/\+/g, ' plus ')
-      .replace(/(\d),(?=\d{3}\b)/g, '$1')
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
-      .trim()
-  );
-}
-
-const NUMBER_WORDS: Record<string, string> = {
-  one: '1',
-  two: '2',
-  three: '3',
-  four: '4',
-  five: '5',
-  six: '6',
-  seven: '7',
-  eight: '8',
-  nine: '9',
-  ten: '10',
-  hundred: '100',
-  thousand: '1000',
-};
+export const normalize = normalizeViewingName;
 
 /**
  * A film's name for comparing, a leading article and spelt-out numbers aside: Netflix's "School of Rock",
  * "1,000 Times Good Night" and "Three Generations" are TMDB's "The School of Rock", "A Thousand Times Good Night"
  * and "3 Generations".
  */
-export const filmKey = (name: string) =>
-  normalize(name)
-    // Anywhere, not only first: "Bordertown: Mural Murders" is "Bordertown: The Mural Murders", and "El Pepe, a
-    // Supreme Life" is "El Pepe: A Supreme Life".
-    .replace(/\b(?:the|a|an)\b/g, ' ')
-    // "Nymphomaniac: Volume 1" is "Nymphomaniac: Vol. I"; a numeral only after such a word, since "I" is a word too.
-    .replace(/\bvol\b/g, 'volume')
-    .replace(/\b(volume|part|chapter) ([ivx]+)\b/g, (whole, word: string, numeral: string) =>
-      ROMAN[numeral] ? `${word} ${ROMAN[numeral]}` : whole,
-    )
-    .trim()
-    .split(/\s+/)
-    .map((word) => NUMBER_WORDS[word] ?? word)
-    .join(' ');
+export const filmKey = viewingFilmKey;
 
-const PART_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, ...ROMAN };
-
-/**
- * An episode name as its words and the part of a two-parter it is: Netflix's "Six Days: Part 1", "Pt. 1",
- * "(Part One)" and "1/2" are TMDB's "Six Days (1)". A trailing ", The" goes back to the front, and a leading
- * "Chapter 01:" is dropped, since one side often has it and the other not.
- */
-function reading(name: string): { words: string; part?: number } {
-  let rest = name.trim().replace(/^(.*), (the|a|an)$/i, '$2 $1');
-  let part: number | undefined;
-  const found =
-    /[\s:,-]*\(?\b(?:part|pt\.?)\s*(\d+|one|two|three|four|[ivx]+)\)?$/i.exec(rest) ??
-    /\s*\((\d+)\)$/.exec(rest) ??
-    /\s+(\d+)\s*\/\s*\d+$/.exec(rest);
-  if (found) {
-    part = PART_WORDS[found[1]!.toLowerCase()] ?? Number(found[1]);
-    rest = rest.slice(0, found.index);
-  }
-  // Articles aside: "Terrace House in the Aloha State" is TMDB's "Terrace House in Aloha State", which would
-  // otherwise read as near "Bye Bye Terrace House in Aloha State" as to itself.
-  const words = normalize(rest)
-    .replace(/^chapter \S+ /, '')
-    .replace(/\b(?:the|a|an)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return part === undefined ? { words } : { words, part };
-}
-
-/** How alike two names read, 0 to 1: the share of letter pairs they have in common. */
-function likeness(a: string, b: string): number {
-  const pairs = (s: string) => {
-    const out = new Map<string, number>();
-    for (let i = 0; i < s.length - 1; i++)
-      out.set(s.slice(i, i + 2), (out.get(s.slice(i, i + 2)) ?? 0) + 1);
-    return out;
-  };
-  const [x, y] = [pairs(a), pairs(b)];
-  let shared = 0;
-  for (const [pair, n] of x) shared += Math.min(n, y.get(pair) ?? 0);
-  const total = Math.max(1, a.length - 1 + (b.length - 1));
-  return (2 * shared) / total;
-}
-
-/** TMDB's placeholder for an episode it has no name for: "Episode 3", "Episode Three". */
-export const unnamed = (name: string) =>
-  /^(?:episode|chapter|ep)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
-    normalize(name),
-  );
-
-/**
- * The episode `name` is among `episodes`: the same name, "Episode 5" by number, the same part of a two-parter, one
- * name inside the other, or failing those the one name alike enough to it and clearly more alike than any other.
- */
-export function findEpisode(
-  name: string,
-  episodes: readonly { number: number; name: string }[],
-): number | undefined {
-  const wanted = normalize(name);
-  // A name of symbols alone ("Back to 15: Season 1: (¬_¬)") has nothing to normalise: it is the same or not.
-  if (!wanted) {
-    const raw = (s: string) => s.normalize('NFC').replace(/\s+/g, '');
-    return raw(name) ? episodes.find((e) => raw(e.name) === raw(name))?.number : undefined;
-  }
-  const exact = episodes.find((e) => normalize(e.name) === wanted);
-  if (exact) return exact.number;
-  const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
-  if (numbered !== undefined && episodes.some((e) => e.number === Number(numbered)))
-    return Number(numbered);
-
-  // One whole name inside the other ("Stranger Things 2: Chapter Five: Dig Dug" and "Chapter Five: Dig Dug").
-  const whole = episodes.filter((e) => {
-    const other = normalize(e.name);
-    return other.length >= 8 && (other.includes(wanted) || wanted.includes(other));
-  });
-  if (wanted.length >= 8 && whole.length === 1) return whole[0]!.number;
-
-  const mine = reading(name);
-  const theirs = episodes.map((e) => ({ number: e.number, ...reading(e.name) }));
-  // Episodes TMDB names by part alone ("Part I") are found by it: "Cora: Part I" is the first.
-  if (mine.part !== undefined && theirs.every((e) => !e.words && e.part !== undefined))
-    return theirs.find((e) => e.part === mine.part)?.number;
-  if (!mine.words) return undefined;
-  const same = theirs.filter((e) => e.words === mine.words);
-  // A two-parter TMDB lists as one episode is that episode, whichever part Netflix says.
-  const part = same.find((e) => e.part === mine.part) ?? (same.length === 1 ? same[0] : undefined);
-  if (part) return part.number;
-
-  // One name inside the other ("The Reunion" and "The Reunion Special"), when it is long enough to mean it.
-  if (mine.words.length >= 8) {
-    const within = theirs.filter(
-      (e) =>
-        e.words.length >= 8 &&
-        (e.part === undefined || e.part === mine.part) &&
-        (e.words.includes(mine.words) || mine.words.includes(e.words)),
-    );
-    if (within.length === 1) return within[0]!.number;
-  }
-
-  // "The One with Ross' Library Book" is TMDB's "Ross's"; "a Chick. And a Duck" is "the Chick and the Duck".
-  const scored = theirs
-    .filter((e) => e.part === mine.part && !unnamed(e.words))
-    .map((e) => ({ number: e.number, score: likeness(mine.words, e.words) }))
-    .sort((a, b) => b.score - a.score);
-  const [best, next] = scored;
-  if (best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1) return best.number;
-  // A note Netflix adds in brackets: "Wujing (No. 84)" is TMDB's "Wujing".
-  const bare = name.replace(/\s*\([^()]*\)\s*$/, '');
-  return bare !== name && normalize(bare) ? findEpisode(bare, episodes) : undefined;
-}
+export const unnamed = unnamedViewingEpisode;
+export const findEpisode = findViewingEpisode;
 
 /**
  * Every hit named exactly `query`, in TMDB's order, or, `loose`, TMDB's first where none is. More than one is common:
@@ -926,30 +704,9 @@ async function pool<T>(items: readonly T[], width: number, run: (item: T) => Pro
 }
 
 /** One film or series in the import's preview: its `type:id` (`importKey`), TMDB's name and year, and its episodes. */
-export interface PreviewLine {
-  key: string;
-  label: string;
-  /** What Netflix called it, where that isn't TMDB's name. */
-  source?: string;
-  episodes: number;
-}
+export type PreviewLine = ViewingPreviewLine;
 
 /** A line per film and series, series first, each by TMDB's name. */
 export function previewLines(marks: readonly Mark[]): PreviewLine[] {
-  const byKey = new Map<string, PreviewLine>();
-  for (const mark of marks) {
-    const key = `${mark.type}:${mark.id}`;
-    const line = byKey.get(key);
-    if (line) line.episodes++;
-    else
-      byKey.set(key, {
-        key,
-        label: mark.year ? `${mark.name} (${mark.year})` : mark.name,
-        ...(normalize(mark.source) !== normalize(mark.name) ? { source: mark.source } : {}),
-        episodes: mark.type === 'tv' ? 1 : 0,
-      });
-  }
-  return [...byKey.values()].sort(
-    (a, b) => Number(b.episodes > 0) - Number(a.episodes > 0) || a.label.localeCompare(b.label),
-  );
+  return viewingPreviewLines(marks);
 }

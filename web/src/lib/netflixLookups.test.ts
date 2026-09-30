@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { netflixLookups } from './netflixLookups';
+import { viewingImportLookups } from './viewingImportLookups';
 
 describe('Netflix import lookups', () => {
   it('waits out den-edge’s per-minute limit together, says so, and loses no answer to it', async () => {
@@ -26,5 +27,19 @@ describe('Netflix import lookups', () => {
     // The retry and the timer that clears the waiting notice become runnable together. Either may resume first,
     // so wait for the notice callback rather than making their event-loop order part of the contract.
     await vi.waitFor(() => expect(pauses.at(-1)).toBe(0));
+  });
+});
+
+describe('shared viewing import lookups', () => {
+  it('reads movie and series runtimes for providers with watch-time evidence', async () => {
+    const fetchImpl = (async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/movie/7')) return Response.json({ runtime: 123 });
+      if (path.endsWith('/tv/8')) return Response.json({ episode_run_time: [null, 47] });
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+    const lookups = viewingImportLookups('den-proxy', fetchImpl);
+    expect(await lookups.runtime?.('movie', 7)).toBe(123);
+    expect(await lookups.runtime?.('tv', 8)).toBe(47);
   });
 });

@@ -5,7 +5,7 @@
   import Settings from '../src/Settings.svelte';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
-  import type { ConfigValue, SettingsRow, Stamp } from '../src/lib/wire';
+  import type { ConfigValue, Row, SettingsRow, Stamp } from '../src/lib/wire';
   import '../src/app.css';
 
   const at = [1, 0, 'test'] as unknown as Stamp;
@@ -36,6 +36,7 @@
     }),
   };
 
+  const imported: Row[] = [];
   const log = {
     settings: (name: string) => settings[name],
     // A write lands in the same map the page reads, so a change made here shows here.
@@ -49,6 +50,13 @@
     newestStamp: () => at,
     kept: async () => undefined,
     keep: async () => {},
+    title: () => undefined,
+    episode: () => undefined,
+    refusal: null as string | null,
+    writeRows: async (rows: Row[]) => {
+      imported.push(...rows);
+      return true;
+    },
   };
 
   const session = $state({

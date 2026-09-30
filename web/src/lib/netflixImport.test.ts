@@ -88,6 +88,8 @@ describe('reading a title', () => {
     expect(findEpisode("The One with the 'Cuffs", episodes)).toBe(3);
     expect(findEpisode("The One Where They're Going to Party", episodes)).toBe(7);
     expect(findEpisode('Episode 1', episodes)).toBe(1);
+    expect(findEpisode('Bear Witness', [{ number: 10, name: 'Witness' }])).toBe(10);
+    expect(findEpisode('Unwoman', [{ number: 2, name: 'Unwomen' }])).toBe(2);
     expect(findEpisode('The One with the Embryos', episodes)).toBeUndefined();
   });
 });
