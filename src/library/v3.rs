@@ -10,6 +10,7 @@ use redb::{
     BackendError, Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend,
     TableDefinition,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -87,6 +88,19 @@ pub(super) struct BatchResult {
     pub conflicts: Vec<Conflict>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Protocol {
+    pub head: u64,
+    pub wire_min: u64,
+    pub generation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RewriteRow {
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RangePage {
     pub entries: Vec<StoredRow>,
@@ -110,9 +124,14 @@ struct PreparedPage {
 pub(super) trait LibraryStore: Send + Sync {
     #[cfg(test)]
     fn apply(&self, writes: &[Write]) -> Result<BatchResult, StoreError> {
-        self.apply_bounded(writes, 8 << 20)
+        self.apply_bounded(writes, 8 << 20, 2)
     }
-    fn apply_bounded(&self, writes: &[Write], live_cap: usize) -> Result<BatchResult, StoreError>;
+    fn apply_bounded(
+        &self,
+        writes: &[Write],
+        live_cap: usize,
+        wire_min: u64,
+    ) -> Result<BatchResult, StoreError>;
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError>;
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError>;
@@ -124,6 +143,14 @@ pub(super) trait LibraryStore: Send + Sync {
     fn live_bytes(&self) -> Result<usize, StoreError>;
     fn credentials(&self) -> Credentials;
     fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError>;
+    fn protocol(&self) -> Result<Protocol, StoreError>;
+    fn rewrite(
+        &self,
+        base: u64,
+        rows: &[RewriteRow],
+        wire_min: u64,
+        live_cap: usize,
+    ) -> Result<Protocol, StoreError>;
 }
 
 /// Aggregate disk reservation shared by every v3 database. File growth is reserved atomically before redb may
@@ -341,15 +368,29 @@ impl RedbLibrary {
                 let stored_member = metadata.get("member").map_err(StoreError::redb)?;
                 member_hash = stored_member.as_ref().map(|stored| stored.value().try_into().unwrap());
             }
-            transaction.abort().map_err(StoreError::redb)?;
+            {
+                let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+                if numbers.get("wire-min").map_err(StoreError::redb)?.is_none() {
+                    numbers.insert("wire-min", 2).map_err(StoreError::redb)?;
+                }
+                let mut bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+                if bytes.get("generation").map_err(StoreError::redb)?.is_none() {
+                    let generation = crate::hex(&crate::random_bytes::<16>());
+                    bytes.insert("generation", generation.as_bytes()).map_err(StoreError::redb)?;
+                }
+            }
+            transaction.commit().map_err(StoreError::redb)?;
         } else {
             member_hash = initial_member_hash;
             {
                 let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
                 numbers.insert("format", FORMAT_VERSION).map_err(StoreError::redb)?;
                 numbers.insert("head", 0).map_err(StoreError::redb)?;
+                numbers.insert("wire-min", 2).map_err(StoreError::redb)?;
                 let mut bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
                 bytes.insert("token", token_hash.as_slice()).map_err(StoreError::redb)?;
+                let generation = crate::hex(&crate::random_bytes::<16>());
+                bytes.insert("generation", generation.as_bytes()).map_err(StoreError::redb)?;
                 if let Some(member) = initial_member_hash {
                     bytes.insert("member", member.as_slice()).map_err(StoreError::redb)?;
                 }
@@ -368,6 +409,37 @@ impl RedbLibrary {
         })
     }
 
+    fn reconcile_protocol(
+        &self,
+        recorded: Option<&IndexedProtocol>,
+        newly_created: bool,
+    ) -> Result<Protocol, StoreError> {
+        let current = self.protocol()?;
+        let restored = !newly_created
+            && recorded
+                .is_none_or(|known| known.generation != current.generation || known.head != current.head);
+        let remembered_min = recorded.map_or(2, |known| known.wire_min);
+        if !restored && remembered_min <= current.wire_min {
+            return Ok(current);
+        }
+        let generation = if restored { crate::hex(&crate::random_bytes::<16>()) } else { current.generation };
+        let wire_min = current.wire_min.max(remembered_min);
+        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        transaction
+            .open_table(META_U64)
+            .map_err(StoreError::redb)?
+            .insert("wire-min", wire_min)
+            .map_err(StoreError::redb)?;
+        transaction
+            .open_table(META_BYTES)
+            .map_err(StoreError::redb)?
+            .insert("generation", generation.as_bytes())
+            .map_err(StoreError::redb)?;
+        transaction.commit().map_err(StoreError::redb)?;
+        *self.prepared.lock().unwrap() = None;
+        Ok(Protocol { head: current.head, wire_min, generation })
+    }
+
     fn row(&self, sequence: u64, fragment: &[u8]) -> StoredRow {
         StoredRow { sequence, fragment: Arc::from(fragment) }
     }
@@ -382,7 +454,12 @@ impl RedbLibrary {
 }
 
 impl LibraryStore for RedbLibrary {
-    fn apply_bounded(&self, writes: &[Write], live_cap: usize) -> Result<BatchResult, StoreError> {
+    fn apply_bounded(
+        &self,
+        writes: &[Write],
+        live_cap: usize,
+        wire_min: u64,
+    ) -> Result<BatchResult, StoreError> {
         let mut unique = HashSet::with_capacity(writes.len());
         if writes.len() > MAX_WRITES
             || writes.iter().any(|write| {
@@ -405,6 +482,7 @@ impl LibraryStore for RedbLibrary {
                 .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?;
             value.value()
         };
+        let started_empty = head == 0;
         let live_rows = {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
             keys.len().map_err(StoreError::redb)?
@@ -476,8 +554,13 @@ impl LibraryStore for RedbLibrary {
         }
         {
             let mut metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let current_min =
+                metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
             metadata.insert("head", head).map_err(StoreError::redb)?;
             metadata.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
+            if started_empty && !accepted.is_empty() {
+                metadata.insert("wire-min", current_min.max(wire_min)).map_err(StoreError::redb)?;
+            }
         }
         transaction.commit().map_err(StoreError::redb)?;
         *prepared = None;
@@ -647,6 +730,105 @@ impl LibraryStore for RedbLibrary {
         *cached = Some(member_hash);
         Ok(true)
     }
+
+    fn protocol(&self) -> Result<Protocol, StoreError> {
+        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+        let head = numbers
+            .get("head")
+            .map_err(StoreError::redb)?
+            .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+            .value();
+        let wire_min = numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+        let bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
+        let generation = bytes
+            .get("generation")
+            .map_err(StoreError::redb)?
+            .ok_or_else(|| StoreError::Invalid("v3 generation is missing".into()))?;
+        let generation = std::str::from_utf8(generation.value())
+            .map_err(|_| StoreError::Invalid("v3 generation is not UTF-8".into()))?
+            .to_owned();
+        Ok(Protocol { head, wire_min, generation })
+    }
+
+    fn rewrite(
+        &self,
+        base: u64,
+        rows: &[RewriteRow],
+        wire_min: u64,
+        live_cap: usize,
+    ) -> Result<Protocol, StoreError> {
+        let mut unique = HashSet::with_capacity(rows.len());
+        if rows.len() > MAX_ROWS
+            || rows.iter().any(|row| {
+                row.value.len() > MAX_VALUE || !valid_hex_id(&row.key) || !unique.insert(row.key.as_str())
+            })
+        {
+            return Err(StoreError::Invalid("invalid rewrite rows".into()));
+        }
+        let mut live_bytes = LIBRARY_OVERHEAD as u64;
+        let mut prepared_rows = Vec::with_capacity(rows.len());
+        for (offset, row) in rows.iter().enumerate() {
+            let sequence = base
+                .checked_add(offset as u64 + 1)
+                .ok_or_else(|| StoreError::Invalid("v3 head overflow".into()))?;
+            let fragment = row_fragment(sequence, &row.key, &row.value);
+            let charge = u64::try_from(row_bytes(&row.key, &row.value, fragment.len()))
+                .map_err(|_| StoreError::Full)?;
+            live_bytes = live_bytes.checked_add(charge).ok_or(StoreError::Full)?;
+            prepared_rows.push((row, sequence, fragment, charge));
+        }
+        if live_bytes > live_cap as u64 {
+            return Err(StoreError::Full);
+        }
+        let mut prepared = self.prepared.lock().unwrap();
+        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        let current = {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let current = numbers
+                .get("head")
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 head is missing".into()))?
+                .value();
+            current
+        };
+        if current != base {
+            return Err(StoreError::Invalid(format!("head_moved:{current}")));
+        }
+        {
+            let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
+            let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
+            let mut sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+            keys.retain(|_, _| false).map_err(StoreError::redb)?;
+            charges.retain(|_, _| false).map_err(StoreError::redb)?;
+            sequence.retain(|_, _| false).map_err(StoreError::redb)?;
+            for (row, seq, fragment, charge) in &prepared_rows {
+                keys.insert(row.key.as_str(), *seq).map_err(StoreError::redb)?;
+                charges.insert(row.key.as_str(), *charge).map_err(StoreError::redb)?;
+                sequence.insert(*seq, fragment.as_ref()).map_err(StoreError::redb)?;
+            }
+        }
+        let head = base + rows.len() as u64;
+        let generation = crate::hex(&crate::random_bytes::<16>());
+        let effective_min;
+        {
+            let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let current_min =
+                numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+            effective_min = current_min.max(wire_min);
+            numbers.insert("head", head).map_err(StoreError::redb)?;
+            numbers.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
+            numbers.insert("wire-min", effective_min).map_err(StoreError::redb)?;
+            transaction
+                .open_table(META_BYTES)
+                .map_err(StoreError::redb)?
+                .insert("generation", generation.as_bytes())
+                .map_err(StoreError::redb)?;
+        }
+        transaction.commit().map_err(StoreError::redb)?;
+        *prepared = None;
+        Ok(Protocol { head, wire_min: effective_min, generation })
+    }
 }
 
 struct Slot {
@@ -659,9 +841,60 @@ struct Registry {
     bytes: usize,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct IndexedProtocol {
+    generation: String,
+    head: u64,
+    wire_min: u64,
+}
+
+struct ProtocolIndex {
+    path: PathBuf,
+    entries: Mutex<HashMap<String, IndexedProtocol>>,
+}
+
+impl ProtocolIndex {
+    fn open(path: PathBuf) -> Result<Self, StoreError> {
+        let entries = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| StoreError::Invalid(format!("invalid library protocol index: {error}")))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(StoreError::io(error)),
+        };
+        Ok(Self { path, entries: Mutex::new(entries) })
+    }
+
+    fn get(&self, id: &str) -> Option<IndexedProtocol> {
+        self.entries.lock().unwrap().get(id).cloned()
+    }
+
+    fn record(&self, id: &str, protocol: &Protocol) -> Result<(), StoreError> {
+        let mut entries = self.entries.lock().unwrap();
+        entries.insert(
+            id.to_owned(),
+            IndexedProtocol {
+                generation: protocol.generation.clone(),
+                head: protocol.head,
+                wire_min: protocol.wire_min,
+            },
+        );
+        let bytes = serde_json::to_vec(&*entries).map_err(|error| StoreError::Failed(error.to_string()))?;
+        let temporary = self.path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(StoreError::io)?;
+        std::fs::File::open(&temporary).and_then(|file| file.sync_all()).map_err(StoreError::io)?;
+        std::fs::rename(&temporary, &self.path).map_err(StoreError::io)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(StoreError::io)?;
+        }
+        Ok(())
+    }
+}
+
 struct StoreLease {
+    id: String,
     store: Arc<RedbLibrary>,
     registry: Arc<Mutex<Registry>>,
+    index: Arc<ProtocolIndex>,
 }
 
 impl Drop for StoreLease {
@@ -698,8 +931,15 @@ impl Drop for StoreLease {
 }
 
 impl LibraryStore for StoreLease {
-    fn apply_bounded(&self, writes: &[Write], live_cap: usize) -> Result<BatchResult, StoreError> {
-        self.store.apply_bounded(writes, live_cap)
+    fn apply_bounded(
+        &self,
+        writes: &[Write],
+        live_cap: usize,
+        wire_min: u64,
+    ) -> Result<BatchResult, StoreError> {
+        let result = self.store.apply_bounded(writes, live_cap, wire_min)?;
+        self.index.record(&self.id, &self.store.protocol()?)?;
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -736,6 +976,22 @@ impl LibraryStore for StoreLease {
     fn register_member(&self, member_hash: [u8; 32]) -> Result<bool, StoreError> {
         self.store.register_member(member_hash)
     }
+
+    fn protocol(&self) -> Result<Protocol, StoreError> {
+        self.store.protocol()
+    }
+
+    fn rewrite(
+        &self,
+        base: u64,
+        rows: &[RewriteRow],
+        wire_min: u64,
+        live_cap: usize,
+    ) -> Result<Protocol, StoreError> {
+        let protocol = self.store.rewrite(base, rows, wire_min, live_cap)?;
+        self.index.record(&self.id, &protocol)?;
+        Ok(protocol)
+    }
 }
 
 /// Lazily opens independent databases and charges their measured fixed residency before opening. An active lease
@@ -747,11 +1003,17 @@ pub(crate) struct StoreManager {
     memory_cap: usize,
     file_cap: u64,
     quota: Arc<DiskQuota>,
+    index: Arc<ProtocolIndex>,
 }
 
 impl StoreManager {
-    fn lease(&self, store: Arc<RedbLibrary>) -> Arc<dyn LibraryStore> {
-        Arc::new(StoreLease { store, registry: Arc::clone(&self.registry) })
+    fn lease(&self, id: &str, store: Arc<RedbLibrary>) -> Arc<dyn LibraryStore> {
+        Arc::new(StoreLease {
+            id: id.to_owned(),
+            store,
+            registry: Arc::clone(&self.registry),
+            index: Arc::clone(&self.index),
+        })
     }
 
     #[cfg(test)]
@@ -774,6 +1036,7 @@ impl StoreManager {
         if used > disk_cap || file_cap > disk_cap || memory_cap < OPEN_DATABASE_BYTES {
             return Err(StoreError::Full);
         }
+        let index = Arc::new(ProtocolIndex::open(root.join("library-v3-index.json"))?);
         Ok(Self {
             root: root.to_owned(),
             registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
@@ -781,6 +1044,7 @@ impl StoreManager {
             memory_cap,
             file_cap,
             quota: Arc::new(DiskQuota(crate::store::Quota::standalone_with_used(disk_cap, used))),
+            index,
         })
     }
 
@@ -796,6 +1060,8 @@ impl StoreManager {
         if memory_cap < OPEN_DATABASE_BYTES {
             return Err(StoreError::Full);
         }
+        let index =
+            Arc::new(ProtocolIndex::open(root.parent().unwrap_or(root).join("library-v3-index.json"))?);
         Ok(Self {
             root: root.to_owned(),
             registry: Arc::new(Mutex::new(Registry { slots: HashMap::new(), bytes: 0 })),
@@ -803,6 +1069,7 @@ impl StoreManager {
             memory_cap,
             file_cap,
             quota: Arc::new(DiskQuota(quota)),
+            index,
         })
     }
 
@@ -970,7 +1237,7 @@ impl StoreManager {
             if !store.accepts(&token_hash) {
                 return Err(StoreError::Forbidden);
             }
-            return Ok(self.lease(Arc::clone(store)));
+            return Ok(self.lease(id, Arc::clone(store)));
         }
         let path = self.path(id);
         self.remove_path(&path.with_extension("redb.tmp"))?;
@@ -989,8 +1256,10 @@ impl StoreManager {
         let created = !path.exists();
         match shared_or_open(&path, Arc::clone(&self.quota), self.file_cap, token_hash, None) {
             Ok(store) => {
+                let protocol = store.reconcile_protocol(self.index.get(id).as_ref(), created)?;
+                self.index.record(id, &protocol)?;
                 *stored = Some(Arc::clone(&store));
-                Ok(self.lease(store))
+                Ok(self.lease(id, store))
             }
             Err(error) => {
                 let mut registry = self.registry.lock().unwrap();

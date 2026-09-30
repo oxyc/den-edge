@@ -99,7 +99,8 @@ fn load_generation(dir: &Path) -> io::Result<String> {
 }
 
 /// The kinds of record, one directory each.
-pub const NAMESPACES: [&str; 7] = ["inbox", "plugins", "settings", "sync", "lib", "grants", "oauth"];
+pub const NAMESPACES: [&str; 8] =
+    ["inbox", "plugins", "settings", "sync", "lib", "lib-rewrite", "grants", "oauth"];
 
 /// The cap unless `STORE_CAP_BYTES` sets one: far past one household's few MB.
 pub const DEFAULT_CAP: u64 = 1 << 30;
