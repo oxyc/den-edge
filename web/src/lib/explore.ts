@@ -1433,6 +1433,14 @@ function valueLabel(kind: string, id: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** Entity labels are Wikidata nouns; the browse controls read as labels, so sentence-case the generic kinds. */
+function filterValueLabel(kind: string, id: string, label?: string): string {
+  const named = label ?? valueLabel(kind, id);
+  return kind === 'subject' || kind === 'format'
+    ? named.charAt(0).toUpperCase() + named.slice(1)
+    : named;
+}
+
 /** The groups the filter-only kinds are listed under, in the rail's order. */
 const FILTER_GROUPS: [FilterOnlyKind, ChipGroup][] = [
   ['person', 'people'],
@@ -1477,7 +1485,14 @@ export function filterChips(counts: FilterCounts): Chip[] {
       ...new Set([
         ...(listed
           ? Object.entries(answer.values ?? {})
-              .sort(([, a], [, b]) => b - a)
+              .sort(
+                ([a, an], [b, bn]) =>
+                  bn - an ||
+                  filterValueLabel(kind, a, answer.labels?.[a]).localeCompare(
+                    filterValueLabel(kind, b, answer.labels?.[b]),
+                  ) ||
+                  a.localeCompare(b),
+              )
               .map(([value]) => value)
           : []),
         ...(answer.selected ?? []),
@@ -1486,7 +1501,7 @@ export function filterChips(counts: FilterCounts): Chip[] {
     for (const value of ids) {
       const id = `${kind}-${value}`;
       if (!addressable(id)) continue;
-      chips.push({ id, label: answer.labels?.[value] ?? valueLabel(kind, value), group });
+      chips.push({ id, label: filterValueLabel(kind, value, answer.labels?.[value]), group });
     }
   }
   return chips;

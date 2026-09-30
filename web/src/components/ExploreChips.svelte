@@ -27,9 +27,9 @@
     ['studio', 'Iconic studios'],
     ['company', 'Companies'],
     ['network', 'Networks'],
-    ['subject', 'Subjects'],
-    ['place', 'Places'],
-    ['format', 'Formats'],
+    ['subject', 'Titles about'],
+    ['place', 'Titles set in'],
+    ['format', 'Title type'],
     ['source', 'Based on'],
     ['author', 'Adapted from'],
     ['technique', 'Made with'],
@@ -43,6 +43,14 @@
   /** How many of each a section shows unfiltered: the rail's and the sheet's, and the phone strip's. */
   const LIST_FIRST = 8;
   const STRIP_FIRST = 3;
+  const COMPACT_FIRST: Partial<Record<ChipGroup, number>> = {
+    studio: 5,
+    company: 5,
+    network: 5,
+    subject: 5,
+    place: 5,
+    format: 5,
+  };
 </script>
 
 <script lang="ts">
@@ -54,6 +62,7 @@
     onchange,
     sections: order = SECTIONS,
     strip = STRIP_KINDS,
+    limits = {},
   }: {
     chips: Chip[];
     /** The picked chips' ids, in the order picked. None is For You — unless a query is what's showing. */
@@ -68,6 +77,8 @@
     sections?: [ChipGroup, string][];
     /** The kinds the phone strip samples. */
     strip?: ChipGroup[];
+    /** How many values a section shows before its explicit expansion control. */
+    limits?: Partial<Record<ChipGroup, number>>;
   } = $props();
 
   const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
@@ -87,12 +98,13 @@
     ...sections,
   ]);
   let expanded = $state<Partial<Record<ChipGroup, boolean>>>({});
+  const first = (group: ChipGroup) => limits[group] ?? COMPACT_FIRST[group] ?? LIST_FIRST;
   /** Each section unfiltered: its first few, or all of them once "Show all" is picked. */
   const listed = () =>
     sections.map((section) => ({
       ...section,
-      shown: expanded[section.group] ? section.chips : section.chips.slice(0, LIST_FIRST),
-      more: section.chips.length > LIST_FIRST,
+      shown: expanded[section.group] ? section.chips : section.chips.slice(0, first(section.group)),
+      more: section.chips.length > first(section.group),
     }));
 
   let sheet = $state<HTMLDialogElement>();
@@ -250,8 +262,10 @@
       <div class="sheet-section" role="group" aria-label={section.heading}>
         <h3 class="heading">{section.heading}</h3>
         <div class="row" class:spread={spread[section.group]}>
-          {#each section.chips as item (item.id)}{@render chip(item)}{/each}
-          {#if section.chips.length > STRIP_FIRST && !spread[section.group]}
+          {#each spread[section.group] ? section.chips : section.chips.slice(0, first(section.group)) as item (item.id)}{@render chip(
+              item,
+            )}{/each}
+          {#if section.chips.length > first(section.group) && !spread[section.group]}
             <button
               type="button"
               class="chip all"

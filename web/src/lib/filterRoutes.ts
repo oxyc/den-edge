@@ -170,13 +170,10 @@ function normalise(
       return number === undefined ? undefined : [kind, String(number)];
     case 'decade':
       return number === undefined ? undefined : [kind, String(Math.floor(number / 10) * 10)];
-    // A birth decade, or a range of birth years.
+    // A range of birth years; decades are deliberately not a second way to ask the same question.
     case 'born': {
-      if (id.includes('-')) {
-        const range = bornRange(id);
-        return range === undefined ? undefined : [kind, range];
-      }
-      return number === undefined ? undefined : [kind, String(Math.floor(number / 10) * 10)];
+      const range = bornRange(id);
+      return range === undefined ? undefined : [kind, range];
     }
     case 'lower':
       return [kind, id.toLowerCase()];
@@ -185,6 +182,7 @@ function normalise(
     case 'label':
       return [kind, id];
     case 'qid': {
+      if (kind === 'gender' && id.toLowerCase() === 'other') return [kind, 'other'];
       const digits = id.replace(/^[Qq]/, '');
       return /^\d+$/.test(digits) ? [kind, `Q${Number(digits)}`] : undefined;
     }

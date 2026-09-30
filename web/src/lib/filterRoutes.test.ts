@@ -109,7 +109,12 @@ describe('canonical filter addresses', () => {
         order: 'name',
         skip: 24,
       }),
-    ).toBe('/atlas/index/filter/movie/people/counts.json?traits=born:1970');
+    ).toBeUndefined();
+    expect(
+      filterUrl('/atlas', 'movie', 'peopleCounts', {
+        traits: [{ kind: 'gender', id: 'OTHER' }],
+      }),
+    ).toBe('/atlas/index/filter/movie/people/counts.json?traits=gender:other');
     expect(filterUrl('/atlas', 'all', { peopleValues: 'occupation' }, { q: 'Film Dir' })).toBe(
       '/atlas/index/filter/all/people/values/occupation.json?q=film%20dir',
     );

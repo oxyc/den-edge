@@ -1,5 +1,5 @@
 <!-- People: the people credited on the titles a selection matches, most prominent first, as Explore browses titles —
-     the same rail, pills and endless grid. Its person traits (role, gender, birth decade or years, nationality,
+     the same rail, pills and endless grid. Its person traits (role, gender, birth years, nationality,
      occupation) lead the rail, then Explore's title facets, which scope which credits count ("directors of Korean
      horror"). Its state is its address (`/people?type=…&c=…&t=…&order=…`), so a view can be linked and Back takes back a pick.
      Text typed in the bar's search field here (`q=`) offers traits and facets by name, as Explore's Browse row does,
@@ -264,9 +264,9 @@
   );
 
   /**
-   * Hidden: a birth decade beside a range of birth years, a title facet that can't stand beside the picks, and
-   * whatever atlas's counts say would leave nothing (only where they list a kind completely, and never another value
-   * of a kind picked, which joins it as either-or).
+   * Hidden: a second born value beside a birth-year range, a title facet that can't stand beside the picks, and
+   * whatever atlas's counts say would leave nothing (only where they list a kind completely, and never another
+   * value of a kind picked, which joins it as either-or).
    */
   const hidden = (id: string) => {
     if (traitItem(id))
@@ -295,8 +295,8 @@
   }
 
   /**
-   * The birth-year range's fields, as typed; set again from the address whenever it changes. A range is one `born`
-   * pick, so it takes the place of a birth decade, as another decade would.
+   * The birth-year range's fields, as typed; set again from the address whenever it changes. A range is the one
+   * `born` pick, so a new range takes the previous range's place.
    */
   let bornFrom = $state('');
   let bornTo = $state('');
@@ -471,7 +471,17 @@
           selected={[...traits, ...chips]}
           {hidden}
           sections={SECTIONS}
-          strip={['role', 'gender', 'born']}
+          strip={['role', 'gender']}
+          limits={{
+            gender: 3,
+            citizenship: 5,
+            occupation: 5,
+            company: 5,
+            network: 5,
+            subject: 5,
+            place: 5,
+            format: 5,
+          }}
           onchange={pick}
         />
       </div>
