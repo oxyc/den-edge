@@ -39,7 +39,8 @@
     type LibrarySwitchState,
   } from './lib/librarySwitch';
   import { tmdbKeyOf } from './lib/tmdb';
-  import type { ConfigValue, SettingsRow } from './lib/wire';
+  import { fetchSimklClientId, simklAccountID } from './settings/simkl';
+  import type { ConfigValue, SettingsRow, Stamp } from './lib/wire';
 
   /** `link` is null for a browser using its own library (`session.local`), with no TV linked yet. */
   let { link, session }: { link: Link | null; session: LibrarySession } = $props();
@@ -75,6 +76,7 @@
   };
   const prefs = $derived(readSyncedPrefs(group('prefs')));
   const keys = $derived(group('keys'));
+  const trackers = $derived(group('trackers'));
   // Kept by content: a re-read list is a new array each time the library refreshes, and what reads it (the addon
   // credits below, Sharing's escrow) asks the network again for a new one.
   const pluginsKey = $derived(JSON.stringify(readPlugins(group('plugins'))));
@@ -106,7 +108,20 @@
     switching = true;
     failure = null;
     try {
-      if (!(await log.switchWebOnly())) {
+      const token = readApiKey(keys, 'simkl');
+      let simkl: { account: string; credential: string; connectedAt: Stamp } | undefined;
+      if (token) {
+        const clientId = await fetchSimklClientId();
+        const account = clientId && (await simklAccountID(clientId, token));
+        const connectedAt = keys?.values.simkl?.at;
+        if (!account || !connectedAt) {
+          failure =
+            'SIMKL must be reachable before the library can switch. Reconnect it or try again.';
+          return;
+        }
+        simkl = { account, credential: token, connectedAt };
+      }
+      if (!(await log.switchWebOnly({ performer: clock.device, stamp: clock.issue(), simkl }))) {
         failure =
           'The library changed while the switch was being prepared. Nothing was replaced; try again.';
         return;
@@ -170,6 +185,7 @@
     name: string,
     changes: Record<string, ConfigValue | null>,
     quiet = false,
+    atOverride?: Stamp,
   ): Promise<boolean> {
     if (!log) return false;
     if (!quiet) {
@@ -179,7 +195,7 @@
     try {
       await ensureSyncPolicy();
       const base: SettingsRow = log.settings(name) ?? { kind: 'set', schema: 2, name, values: {} };
-      const at = clock.issue();
+      const at = atOverride ?? clock.issue();
       const values = { ...base.values };
       for (const [setting, value] of Object.entries(changes)) values[setting] = { value, at };
       const saved = await log.write({ ...base, values });
@@ -202,6 +218,47 @@
   }
 
   const savePrefs = (changes: PrefChanges) => void write('prefs', changes);
+
+  const simklConnection = $derived(
+    Object.entries(trackers?.values ?? {}).find(
+      ([name, stamped]) =>
+        name.startsWith('simkl:') && stamped.value !== null && !name.endsWith('.token'),
+    ),
+  );
+
+  async function saveSimkl(token: string | null): Promise<boolean> {
+    if (!log || log.wireMinimum < 3)
+      return write('keys', { simkl: token ? { string: token } : null });
+    const current = simklConnection;
+    if (!token) {
+      if (!current) return true;
+      return write('trackers', { [current[0]]: null });
+    }
+    const clientId = await fetchSimklClientId();
+    const account = clientId && (await simklAccountID(clientId, token));
+    if (!account) return false;
+    const at = clock.issue();
+    const connection = JSON.stringify({ access_token: token, connectedAt: at });
+    const connected = await write(
+      'trackers',
+      { [`simkl:${account}`]: { string: connection } },
+      false,
+      at,
+    );
+    if (!connected) return false;
+    // A delivery row is created only after the connection landed.
+    if (!log.settings(`deliver:simkl:${account}`)) {
+      const since = JSON.stringify(at);
+      if (
+        !(await write(`deliver:simkl:${account}`, {
+          since: { string: since },
+          lease: { strings: ['', '1'] },
+        }))
+      )
+        return false;
+    }
+    return true;
+  }
 
   /**
    * Linking a TV from a browser using its own library: every row goes into the TV's library, merged with what the TV
@@ -279,6 +336,8 @@
       {link}
       onjoin={session.local ? moveOwnLibrary : undefined}
       {keys}
+      simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
+      {saveSimkl}
       {plugins}
       {routes}
       {servers}

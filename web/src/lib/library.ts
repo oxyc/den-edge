@@ -4,7 +4,7 @@
 
 import { WATCHED } from './actions';
 import { syncPolicy } from './syncCore';
-import { wellFormed, type Row } from './wire';
+import { wellFormed, type Row, type Stamp } from './wire';
 
 export type MediaType = 'movie' | 'tv';
 /** What Explore browses and atlas's filter answers for: one type, or films and series together. */
@@ -189,7 +189,64 @@ export function applyLog(library: Library, rows: Row[]): Library {
   const flags = new Map(library.flags ?? []);
   const resets = new Map<string, number>();
   for (const row of rows) {
-    if (row.kind === 'set' || !wellFormed(row)) continue; // settings are read by prefs.ts
+    if (row.kind === 'set' || row.kind === 'snt' || !wellFormed(row)) continue; // settings and receipts have no display projection
+    if (row.kind === 'wat') {
+      if (row.title.type !== 'tv') continue;
+      const key = titleKey(row.title);
+      for (const [number, register] of Object.entries(row.entries)) {
+        const episode = {
+          type: 'tv' as const,
+          id: row.title.id,
+          season: row.season,
+          episode: Number(number),
+        };
+        const state = syncPolicy<{
+          watched: boolean;
+          resume: { value: number; at: Stamp; seconds?: number } | null;
+          watched_at: number | null;
+        }>({
+          op: 'episode_state',
+          register,
+          resets: [row.seasonReset].filter(Boolean),
+          now: Date.now(),
+        });
+        const held = marks.get(markKey(episode));
+        if (state.resume) {
+          const series = held ?? seriesMarks.get(key);
+          const mark = {
+            ...episode,
+            fraction: state.resume.value,
+            updatedAt: state.resume.at[0],
+            ...(state.resume.seconds !== undefined ? { seconds: state.resume.seconds } : {}),
+            title: series?.title ?? '',
+            posterPath: series?.posterPath,
+            voteAverage: series?.voteAverage ?? 0,
+          };
+          marks.set(markKey(episode), mark);
+          seriesMarks.set(key, mark);
+          flags.delete(markKey(episode));
+        } else if (state.watched) {
+          if (register.progress) {
+            const series = held ?? seriesMarks.get(key);
+            const mark = {
+              ...episode,
+              fraction: 1,
+              updatedAt: register.progress.at[0],
+              title: series?.title ?? '',
+              posterPath: series?.posterPath,
+              voteAverage: series?.voteAverage ?? 0,
+            };
+            marks.set(markKey(episode), mark);
+            seriesMarks.set(key, mark);
+            flags.delete(markKey(episode));
+          } else flags.set(markKey(episode), episode);
+        } else {
+          marks.delete(markKey(episode));
+          flags.delete(markKey(episode));
+        }
+      }
+      continue;
+    }
     if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {
@@ -237,6 +294,7 @@ export function applyLog(library: Library, rows: Row[]): Library {
       }
       continue;
     }
+    if (row.kind !== 'rec') continue;
     if (row.episodesReset) resets.set(key, row.episodesReset[0]);
     records.set(key, {
       title: records.get(key)?.title ?? { type: row.title.type, id: row.title.id, title: '' },

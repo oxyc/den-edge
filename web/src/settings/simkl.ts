@@ -1,7 +1,7 @@
 // SIMKL's PIN sign-in, from the browser as the TV does it (DenKit `SimklClient`): the app's public client id asks for a
 // code, the viewer enters it at simkl.com, and asking again with the code hands back the token. No secret is involved,
-// and SIMKL answers browsers (CORS `*`). The token goes into the library's `set:keys` as `simkl`, where every device
-// finds it and checks it with SIMKL before using it.
+// and SIMKL answers browsers (CORS `*`). In v2 the token lives in `set:keys`; v3 binds it to SIMKL's stable account
+// id in `set:trackers`, so delivery receipts cannot cross accounts.
 
 const API = 'https://api.simkl.com';
 
@@ -20,6 +20,26 @@ export type SimklPoll =
   | { kind: 'pending' }
   | { kind: 'slowDown' }
   | { kind: 'failed' };
+
+/** Resolve the stable user id before a credential is moved into Library v3. */
+export async function simklAccountID(
+  clientId: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    const res = await fetchImpl(`${API}/users/settings`, {
+      headers: { 'simkl-api-key': clientId, authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { user?: { id?: unknown } };
+    const id = body.user?.id;
+    return typeof id === 'number' || (typeof id === 'string' && id) ? String(id) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The client id den-edge publishes for SIMKL (`/config`), or null where it has none. */
 export async function fetchSimklClientId(fetchImpl: typeof fetch = fetch): Promise<string | null> {

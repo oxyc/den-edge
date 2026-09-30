@@ -12,6 +12,7 @@ import {
   mergeEpisode,
   mergeSettings,
   mergeTitle,
+  mergeV3,
   newest,
   open,
   rowName,
@@ -24,6 +25,7 @@ import {
   type SettingsRow,
   type Stamp,
   type TitleRow,
+  type WatchRow,
 } from './wire';
 import { trackerEvent } from './trackerEvents';
 import { ensureSyncPolicy } from './syncLoader';
@@ -227,6 +229,14 @@ export class LibraryLog {
 
   /** The rows, each merged over what the log already holds for it, written in batches. */
   async writeRows(rows: Row[]): Promise<boolean> {
+    if (this.wireMin >= 3) {
+      rows = rows.flatMap((row): Row[] => {
+        const projected = trackerEvent(row)?.after ?? row;
+        if (projected.kind !== 'ep') return [projected];
+        const converted = this.v3EpisodeWrite(projected);
+        return converted ? [converted] : [];
+      });
+    }
     if (this.offline) {
       for (const row of rows) this.keepLocally(row);
       // Kept once it is in this browser's store, which the next `openLocal` reads.
@@ -240,10 +250,13 @@ export class LibraryLog {
   }
 
   /** Atomically replace a web-only v2 library with den-core's v3 form. */
-  async switchWebOnly(): Promise<boolean> {
+  async switchWebOnly(context?: {
+    performer: string;
+    stamp: Stamp;
+    simkl?: { account: string; credential: string; connectedAt: Stamp };
+  }): Promise<boolean> {
     if (this.offline || this.moved || this.upgradeRequired) return false;
     await ensureSyncPolicy();
-    const converted = syncPolicy<Row[]>({ op: 'v3_form', rows: this.rows(), now: Date.now() });
     let rewrite: string | undefined;
     try {
       const opened = await this.send(`/lib/${this.keys.id}/rewrite`, {
@@ -257,6 +270,28 @@ export class LibraryLog {
       const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
       if (typeof offer.rewrite !== 'string' || typeof offer.base !== 'number') return false;
       rewrite = offer.rewrite;
+      const now = Date.now();
+      const converted = syncPolicy<Row[]>({
+        op: 'v3_form',
+        rows: this.rows(),
+        now,
+        context: context && {
+          performer: context.performer,
+          stamp: context.stamp,
+          base: offer.base,
+          seed_bound: now,
+          accounts: context.simkl
+            ? [
+                {
+                  provider: 'simkl',
+                  account: context.simkl.account,
+                  credential: context.simkl.credential,
+                  connected_at: context.simkl.connectedAt,
+                },
+              ]
+            : [],
+        },
+      });
       const sealed = await Promise.all(converted.map((row) => seal(this.keys, row)));
       const chunks: (typeof sealed)[] = [];
       let chunk: typeof sealed = [];
@@ -689,7 +724,74 @@ export class LibraryLog {
     episode: number,
   ): EpisodeRow | undefined {
     const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
-    return row?.kind === 'ep' ? row : undefined;
+    if (row?.kind === 'ep') return row;
+    if (ref.type !== 'tv') return undefined;
+    const block = Math.floor(episode / 32);
+    const watch = this.entries.get(`wat:tv:${ref.id}:${season}:${block}`)?.row;
+    if (watch?.kind !== 'wat') return undefined;
+    const register = watch.entries[String(episode)];
+    if (!register) return undefined;
+    const title = this.title(ref);
+    const resets = [watch.seasonReset, title?.episodesReset].filter(
+      (value): value is Stamp => value !== null && value !== undefined,
+    );
+    const state = syncPolicy<{
+      watched: boolean;
+      resume: EpisodeRow['progress'] | null;
+      viewing: number;
+      watched_at: number | null;
+    }>({ op: 'episode_state', register, resets, now: Date.now() });
+    const at: Stamp =
+      state.resume?.at ?? (state.watched_at ? [state.watched_at, 0, ''] : ZERO_STAMP);
+    return {
+      kind: 'ep',
+      schema: 2,
+      title: { type: 'tv', id: ref.id },
+      season,
+      episode,
+      progress: state.resume ?? { value: state.watched ? 1 : 0, viewing: state.viewing, at },
+    };
+  }
+
+  private v3EpisodeWrite(row: EpisodeRow): WatchRow | null {
+    const block = Math.floor(row.episode / 32);
+    const name = `wat:tv:${row.title.id}:${row.season}:${block}`;
+    const current = this.entries.get(name)?.row;
+    const watch: WatchRow =
+      current?.kind === 'wat'
+        ? current
+        : {
+            kind: 'wat',
+            schema: 3,
+            title: row.title,
+            season: row.season,
+            block,
+            seasonReset: null,
+            entries: {},
+          };
+    const previous = watch.entries[String(row.episode)] ?? null;
+    const kind =
+      row.progress.value >= 0.95
+        ? 'mark_watched'
+        : row.progress.value === 0
+          ? 'unwatch'
+          : 'progress';
+    const register = syncPolicy<WatchRow['entries'][string] | null>({
+      op: 'register_write',
+      action: {
+        kind,
+        value: row.progress.value,
+        viewing: row.progress.viewing,
+        seconds: row.progress.seconds,
+        watched_at: row.progress.at[0],
+        at: row.progress.at,
+      },
+      current: previous,
+      resets: [watch.seasonReset].filter((value): value is Stamp => value !== null),
+      now: Date.now(),
+    });
+    if (!register) return null;
+    return { ...watch, entries: { ...watch.entries, [String(row.episode)]: register } };
   }
 
   /** A group of settings: the TV's `prefs`, the user's API `keys`. */
@@ -714,6 +816,11 @@ export class LibraryLog {
    * — `moved` says when that is because the library moved to a new key.
    */
   async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
+    if (this.wireMin >= 3 && local.kind === 'ep') {
+      const converted = this.v3EpisodeWrite(local);
+      if (!converted) return local;
+      local = converted;
+    }
     let kept: string | undefined;
     if (durable && !this.offline && this.storage) {
       kept = this.pendingPrefix + 'rows:' + crypto.randomUUID();
@@ -1298,5 +1405,7 @@ function merge(theirs: Row, ours: Row): Row {
   if (theirs.kind === 'rec' && ours.kind === 'rec') return mergeTitle(theirs, ours);
   if (theirs.kind === 'ep' && ours.kind === 'ep') return mergeEpisode(theirs, ours);
   if (theirs.kind === 'set' && ours.kind === 'set') return mergeSettings(theirs, ours);
+  if (theirs.kind === 'wat' && ours.kind === 'wat') return mergeV3(theirs, ours);
+  if (theirs.kind === 'snt' && ours.kind === 'snt') return mergeV3(theirs, ours);
   return theirs;
 }

@@ -30,6 +30,8 @@
   let {
     link,
     keys,
+    simklConnected,
+    saveSimkl,
     plugins,
     routes,
     servers,
@@ -44,6 +46,8 @@
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
     keys: SettingsRow | undefined;
+    simklConnected: boolean;
+    saveSimkl: (token: string | null) => Promise<boolean>;
     plugins: string[];
     routes: Routes;
     servers: { kind: 'jellyfin' | 'plex'; url: string; user?: string }[];
@@ -187,7 +191,7 @@
   }
 
   // Away from home lives in Advanced; SIMKL's token is here, as a connection.
-  const simkl = $derived(!!readApiKey(keys, 'simkl'));
+  const simkl = $derived(simklConnected);
 
   // SIMKL sign-in, with the code SIMKL gives, as on the TV. den-edge publishes the app's client id; without one, Connect
   // is left to the TV. Each attempt has a number, so a cancelled or superseded one stops at its next step.
@@ -221,8 +225,7 @@
       if (attempt !== simklAttempt) return;
       if (answer.kind === 'authorized') {
         simklPin = null;
-        if (await write('keys', { simkl: { string: answer.token } }))
-          simklNote = { text: 'Connected to SIMKL.', bad: false };
+        if (await saveSimkl(answer.token)) simklNote = { text: 'Connected to SIMKL.', bad: false };
         return;
       }
       if (answer.kind === 'failed') {
@@ -579,7 +582,7 @@
           question="Disconnect SIMKL?"
           detail="Den stops syncing your watch history with it, on every device."
           {disabled}
-          onconfirm={() => void write('keys', { simkl: null })}
+          onconfirm={() => void saveSimkl(null)}
         />
       </div>
     {:else if simklPin}
