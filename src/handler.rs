@@ -96,6 +96,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let rid = crate::hex(&crate::random_bytes::<8>());
     let method = req.method().clone();
     let route = route_label(req.uri().path());
+    let library_request = req.uri().path().starts_with("/lib/");
     let origin = allowed_origin(&state, &req);
     let bulk = !is_control(route);
     let admission = admit(&state, bulk).await;
@@ -117,8 +118,22 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     if method == Method::HEAD {
         *resp.body_mut() = Body::empty();
     }
+    if library_request {
+        let headers = resp.headers_mut();
+        if !headers.contains_key("x-den-wire-min") {
+            headers.insert("x-den-wire-min", HeaderValue::from_static("2"));
+        }
+        if !headers.contains_key("x-den-generation") {
+            headers.insert("x-den-generation", HeaderValue::from_static("0"));
+        }
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     if let Some(origin) = origin {
         resp.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        resp.headers_mut().insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static("x-den-wire-min, x-den-generation"),
+        );
     }
     if !state.web_origins.is_empty() {
         resp.headers_mut().append(header::VARY, HeaderValue::from_static("origin"));
@@ -346,7 +361,8 @@ fn preflight() -> Response {
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
-            "content-type, x-den-link, x-den-library-token, x-den-library-member, x-den-grant",
+            "content-type, x-den-link, x-den-library-token, x-den-library-member, x-den-grant, \
+             x-den-wire, x-den-wire-min, x-den-generation",
         ),
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));

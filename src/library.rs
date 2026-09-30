@@ -59,6 +59,12 @@ const AUTHORITY_MOVED: u64 = 3;
 /// A deleted library's marker: its id is retired.
 const MOVED: &str = "moved";
 const TOKEN_HEADER: &str = "x-den-library-token";
+const WIRE_HEADER: &str = "x-den-wire";
+const WIRE_MIN_HEADER: &str = "x-den-wire-min";
+const GENERATION_HEADER: &str = "x-den-generation";
+const REWRITE_NS: &str = "lib-rewrite";
+const REWRITE_EXT: &str = "json";
+const REWRITE_IDLE_MS: u64 = 5 * 60 * 1000;
 /// `<id>:<token>` of a library the caller already holds, when it starts another (`NewLibraries::Members`).
 pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 /// Libraries an address may start a minute. A household starts one per TV and another when it moves to a new key;
@@ -386,6 +392,84 @@ struct Write {
     v: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct RewriteStage {
+    id: String,
+    base: u64,
+    touched: u64,
+    rows: Vec<RewriteStageRow>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct RewriteStageRow {
+    k: String,
+    v: String,
+}
+
+fn full_generation(state: &AppState, library: &str) -> String {
+    format!("{}.{}", state.store.generation(), library)
+}
+
+async fn protocol_for(state: &AppState, id: &str) -> Result<Option<v3::Protocol>, io::Error> {
+    let manager = Arc::clone(&state.library_v3);
+    let id = id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Some((token, _)) = manager.credentials(&id).map_err(v3_io)? else { return Ok(None) };
+        let store = manager.existing_library(&id, token).map_err(v3_io)?;
+        store.protocol().map(Some).map_err(v3_io)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+fn with_wire_headers(state: &AppState, mut response: Response, protocol: Option<&v3::Protocol>) -> Response {
+    let wire_min = protocol.map_or(2, |value| value.wire_min);
+    let generation =
+        protocol.map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
+    let headers = response.headers_mut();
+    headers.insert(WIRE_MIN_HEADER, HeaderValue::from_str(&wire_min.to_string()).unwrap());
+    headers.insert(GENERATION_HEADER, HeaderValue::from_str(&generation).unwrap());
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn load_rewrite(state: &AppState, id: &str) -> io::Result<Option<RewriteStage>> {
+    let Some(bytes) = state.store.get_file(REWRITE_NS, id, REWRITE_EXT).await? else { return Ok(None) };
+    let stage: RewriteStage = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if state.now().saturating_sub(stage.touched) >= REWRITE_IDLE_MS {
+        state.store.delete_file(REWRITE_NS, id, REWRITE_EXT).await?;
+        state.store.sync_dir(REWRITE_NS).await?;
+        return Ok(None);
+    }
+    Ok(Some(stage))
+}
+
+async fn save_rewrite(state: &AppState, id: &str, stage: &RewriteStage) -> io::Result<()> {
+    let bytes = serde_json::to_vec(stage).map_err(io::Error::other)?;
+    state.store.replace_file(REWRITE_NS, id, REWRITE_EXT, &bytes).await?;
+    state.store.sync_dir(REWRITE_NS).await
+}
+
+fn rewrite_id<'a>(action: &'a str, suffix: &str) -> Option<&'a str> {
+    action.strip_prefix("rewrite/")?.strip_suffix(suffix)
+}
+
+async fn library_store_locked(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    slot: &Arc<LibrarySlot>,
+    library: &mut Option<Library>,
+) -> Result<Option<Arc<dyn v3::LibraryStore>>, Box<Response>> {
+    match v3_store(state, id, token_hash, slot, library, false).await {
+        Ok(store) => Ok(store),
+        Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
+            Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("forbidden"))))
+        }
+        Err(reason) => Err(Box::new(read_error(reason))),
+    }
+}
+
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let Some(rest) = path.strip_prefix("/lib/") else {
@@ -393,18 +477,96 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     };
     let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
     if !valid_hex_id(id) {
-        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_library_id"));
+        return with_wire_headers(
+            state,
+            json_reply(StatusCode::BAD_REQUEST, &error("invalid_library_id")),
+            None,
+        );
     }
+    let protocol = match protocol_for(state, id).await {
+        Ok(protocol) => protocol,
+        Err(reason) => return with_wire_headers(state, read_error(reason), None),
+    };
+    let wire = req.headers().get(WIRE_HEADER).and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
+    let sent_generation =
+        req.headers().get(GENERATION_HEADER).and_then(|value| value.to_str().ok()).map(str::to_owned);
+    let home_check = action == "changes"
+        && req.method() == Method::GET
+        && query_param(&req, "since").as_deref() == Some("0")
+        && query_param(&req, "limit").as_deref() == Some("1");
+    let minimum = protocol.as_ref().map_or(2, |value| value.wire_min);
+    if minimum >= 3 && wire.unwrap_or(0) < minimum && !home_check {
+        let response =
+            json_reply(StatusCode::UPGRADE_REQUIRED, &json!({ "error": "upgrade_required", "min": minimum }));
+        return with_wire_headers(state, response, protocol.as_ref());
+    }
+    let is_write = matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE);
     let Some(token) = req
         .headers()
         .get(TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|t| !t.is_empty() && t.len() <= 256)
     else {
-        return json_reply(StatusCode::UNAUTHORIZED, &error("missing_token"));
+        return with_wire_headers(
+            state,
+            json_reply(StatusCode::UNAUTHORIZED, &error("missing_token")),
+            protocol.as_ref(),
+        );
     };
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    match (action, req.method().clone()) {
+    if protocol.is_some() {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        match tokio::task::spawn_blocking(move || manager.credentials(&owned_id)).await {
+            Ok(Ok(Some((stored, _)))) if constant_time_eq(&stored, &token_hash) => {}
+            Ok(Ok(Some(_))) => {
+                return with_wire_headers(
+                    state,
+                    json_reply(StatusCode::FORBIDDEN, &error("forbidden")),
+                    protocol.as_ref(),
+                );
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(reason)) => {
+                return with_wire_headers(
+                    state,
+                    internal("library credentials", v3_io(reason)),
+                    protocol.as_ref(),
+                );
+            }
+            Err(reason) => {
+                return with_wire_headers(
+                    state,
+                    internal("library credentials task", io::Error::other(reason)),
+                    protocol.as_ref(),
+                );
+            }
+        }
+    }
+    if is_write && wire.is_some() {
+        let current = protocol
+            .as_ref()
+            .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
+        if sent_generation.as_deref() != Some(current.as_str()) {
+            let response = json_reply(StatusCode::CONFLICT, &error("generation_changed"));
+            return with_wire_headers(state, response, protocol.as_ref());
+        }
+    }
+    if is_write && !action.starts_with("rewrite") {
+        match load_rewrite(state, id).await {
+            Ok(Some(_)) => {
+                let response = crate::handler::retry_after(
+                    StatusCode::CONFLICT,
+                    &error("rewrite_in_progress"),
+                    REWRITE_IDLE_MS,
+                );
+                return with_wire_headers(state, response, protocol.as_ref());
+            }
+            Ok(None) => {}
+            Err(reason) => return with_wire_headers(state, read_error(reason), protocol.as_ref()),
+        }
+    }
+    let response = match (action, req.method().clone()) {
         ("batch", Method::POST) => batch(state, id, token_hash, req).await,
         ("changes", Method::GET | Method::HEAD) => {
             let since = query_param(&req, "since").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -417,9 +579,199 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
         ("", Method::DELETE) => forget(state, id, token_hash).await,
-        ("batch" | "changes" | "member" | "", _) => method_not_allowed(),
+        ("rewrite", Method::POST) => rewrite_open(state, id, token_hash).await,
+        (action, Method::POST) if action.starts_with("rewrite/") && action.ends_with("/rows") => {
+            rewrite_rows(state, id, token_hash, action, req).await
+        }
+        (action, Method::POST) if action.starts_with("rewrite/") && action.ends_with("/commit") => {
+            rewrite_commit(state, id, token_hash, wire.unwrap_or(0), action, req).await
+        }
+        (action, Method::DELETE) if action.starts_with("rewrite/") => {
+            rewrite_abort(state, id, token_hash, action).await
+        }
+        ("batch" | "changes" | "member" | "" | "rewrite", _) => method_not_allowed(),
         _ => json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+    };
+    let latest = protocol_for(state, id).await.ok().flatten().or(protocol);
+    with_wire_headers(state, response, latest.as_ref())
+}
+
+async fn rewrite_open(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    }) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    match load_rewrite(state, id).await {
+        Ok(Some(_)) => return json_reply(StatusCode::CONFLICT, &error("rewrite_in_progress")),
+        Ok(None) => {}
+        Err(reason) => return read_error(reason),
     }
+    let protocol = match tokio::task::spawn_blocking(move || store.protocol()).await {
+        Ok(Ok(protocol)) => protocol,
+        Ok(Err(reason)) => return internal("rewrite open", v3_io(reason)),
+        Err(reason) => return internal("rewrite open task", io::Error::other(reason)),
+    };
+    let stage = RewriteStage {
+        id: crate::hex(&crate::random_bytes::<16>()),
+        base: protocol.head,
+        touched: state.now(),
+        rows: Vec::new(),
+    };
+    if let Err(reason) = save_rewrite(state, id, &stage).await {
+        return internal("rewrite stage", reason);
+    }
+    json_reply(StatusCode::OK, &json!({ "rewrite": stage.id, "base": stage.base }))
+}
+
+async fn rewrite_rows(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    action: &str,
+    req: Request,
+) -> Response {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    if let Err(response) = library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        return *response;
+    }
+    let Some(requested) = rewrite_id(action, "/rows") else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    let body = match read_json(req, BATCH_MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let Some(writes) = body.get("writes").and_then(Value::as_array) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+    };
+    if writes.is_empty() || writes.len() > MAX_WRITES {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+    }
+    let mut parsed = Vec::with_capacity(writes.len());
+    for write in writes {
+        let Some(k) = write.get("k").and_then(Value::as_str).filter(|key| valid_hex_id(key)) else {
+            return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+        };
+        let Some(v) = write.get("v").and_then(Value::as_str).filter(|value| value.len() <= MAX_VALUE) else {
+            return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+        };
+        parsed.push(RewriteStageRow { k: k.to_owned(), v: v.to_owned() });
+    }
+    let mut stage = match load_rewrite(state, id).await {
+        Ok(Some(stage)) if stage.id == requested => stage,
+        Ok(Some(_)) | Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        Err(reason) => return read_error(reason),
+    };
+    for row in parsed {
+        stage.rows.retain(|existing| existing.k != row.k);
+        stage.rows.push(row);
+    }
+    if stage.rows.len() > MAX_ROWS {
+        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+    }
+    let charged = stage.rows.iter().enumerate().try_fold(LIBRARY_OVERHEAD, |total, (offset, row)| {
+        let sequence = stage.base.checked_add(offset as u64 + 1)?;
+        let fragment = row_fragment(sequence, &row.k, &row.v);
+        total.checked_add(row_bytes(&row.k, &row.v, fragment.len()))
+    });
+    if charged.is_none_or(|bytes| bytes > state.library_limits.stored_bytes) {
+        return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+    }
+    stage.touched = state.now();
+    if let Err(reason) = save_rewrite(state, id, &stage).await {
+        return internal("rewrite rows", reason);
+    }
+    json_reply(StatusCode::OK, &json!({ "staged": stage.rows.len() }))
+}
+
+async fn rewrite_commit(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    wire: u64,
+    action: &str,
+    req: Request,
+) -> Response {
+    let Some(requested) = rewrite_id(action, "/commit") else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    let body = match read_json(req, 1024).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let Some(base) = body.get("base").and_then(Value::as_u64) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+    };
+    let Some(wire_min) = body.get("wireMin").and_then(Value::as_u64).filter(|minimum| *minimum <= wire)
+    else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+    };
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    let Some(store) = (match library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    }) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    let stage = match load_rewrite(state, id).await {
+        Ok(Some(stage)) if stage.id == requested => stage,
+        Ok(Some(_)) | Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        Err(reason) => return read_error(reason),
+    };
+    if base != stage.base {
+        return json_reply(StatusCode::CONFLICT, &json!({ "head": stage.base }));
+    }
+    let rows: Vec<_> =
+        stage.rows.iter().map(|row| v3::RewriteRow { key: row.k.clone(), value: row.v.clone() }).collect();
+    let live_cap = state.library_limits.stored_bytes;
+    match tokio::task::spawn_blocking(move || store.rewrite(base, &rows, wire_min, live_cap)).await {
+        Ok(Ok(protocol)) => {
+            if let Err(reason) = state.store.delete_file(REWRITE_NS, id, REWRITE_EXT).await {
+                return internal("rewrite cleanup", reason);
+            }
+            if let Err(reason) = state.store.sync_dir(REWRITE_NS).await {
+                return internal("rewrite cleanup publish", reason);
+            }
+            json_reply(StatusCode::OK, &json!({ "head": protocol.head }))
+        }
+        Ok(Err(v3::StoreError::Invalid(message))) if message.starts_with("head_moved:") => {
+            let head =
+                message.split_once(':').and_then(|(_, value)| value.parse::<u64>().ok()).unwrap_or(base);
+            json_reply(StatusCode::CONFLICT, &json!({ "head": head }))
+        }
+        Ok(Err(v3::StoreError::Full)) => json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full")),
+        Ok(Err(reason)) => internal("rewrite commit", v3_io(reason)),
+        Err(reason) => internal("rewrite commit task", io::Error::other(reason)),
+    }
+}
+
+async fn rewrite_abort(state: &AppState, id: &str, token_hash: [u8; 32], action: &str) -> Response {
+    let slot = state.libraries.slot(id, state.now());
+    let mut library = slot.library.lock().await;
+    if let Err(response) = library_store_locked(state, id, token_hash, &slot, &mut library).await {
+        return *response;
+    }
+    let Some(requested) = action.strip_prefix("rewrite/").filter(|value| !value.contains('/')) else {
+        return json_reply(StatusCode::NOT_FOUND, &error("not_found"));
+    };
+    match load_rewrite(state, id).await {
+        Ok(Some(stage)) if stage.id == requested => {}
+        Ok(Some(_)) | Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
+        Err(reason) => return read_error(reason),
+    }
+    if let Err(reason) = state.store.delete_file(REWRITE_NS, id, REWRITE_EXT).await {
+        return internal("rewrite abort", reason);
+    }
+    if let Err(reason) = state.store.sync_dir(REWRITE_NS).await {
+        return internal("rewrite abort publish", reason);
+    }
+    json_reply(StatusCode::OK, &json!({ "aborted": true }))
 }
 
 /// Replace the temporary legacy membership proof with the key derived specifically for relay membership.
@@ -435,6 +787,17 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
     let member_hash: [u8; 32] = Sha256::digest(member.as_bytes()).into();
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    match load_rewrite(state, id).await {
+        Ok(Some(_)) => {
+            return crate::handler::retry_after(
+                StatusCode::CONFLICT,
+                &error("rewrite_in_progress"),
+                REWRITE_IDLE_MS,
+            );
+        }
+        Ok(None) => {}
+        Err(reason) => return read_error(reason),
+    }
     let store = match v3_store(state, id, token_hash, &slot, &mut library, false).await {
         Ok(Some(store)) => store,
         Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
@@ -460,6 +823,17 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
 async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    match load_rewrite(state, id).await {
+        Ok(Some(_)) => {
+            return crate::handler::retry_after(
+                StatusCode::CONFLICT,
+                &error("rewrite_in_progress"),
+                REWRITE_IDLE_MS,
+            );
+        }
+        Ok(None) => {}
+        Err(reason) => return read_error(reason),
+    }
     let selected_v3 = match authority(state, &slot, id).await {
         Ok(AUTHORITY_MOVED) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
         Ok(selected) => selected == AUTHORITY_V3,
@@ -647,6 +1021,11 @@ async fn v3_store(
 async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     let member = req.headers().get(MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let wire = req.headers().get(WIRE_HEADER).and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let requested_min = req.headers().get(WIRE_MIN_HEADER).and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    if requested_min.zip(wire).is_some_and(|(minimum, supported)| minimum > supported) {
+        return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+    }
     let body = match read_json(req, BATCH_MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
@@ -656,6 +1035,17 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     };
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
+    match load_rewrite(state, id).await {
+        Ok(Some(_)) => {
+            return crate::handler::retry_after(
+                StatusCode::CONFLICT,
+                &error("rewrite_in_progress"),
+                REWRITE_IDLE_MS,
+            );
+        }
+        Ok(None) => {}
+        Err(reason) => return read_error(reason),
+    }
     let selected_v3 = match authority(state, &slot, id).await {
         Ok(AUTHORITY_MOVED) => return moved(),
         Ok(selected) => selected == AUTHORITY_V3,
@@ -666,7 +1056,22 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             return read_error(error);
         }
     }
-    if !selected_v3 && library.is_none() {
+    let new_library = !selected_v3 && library.is_none();
+    let mut first_min = requested_min.unwrap_or(2);
+    if new_library {
+        match member_wire_minimum(state, id, member.as_deref()).await {
+            Ok(Some(minimum)) => first_min = first_min.max(minimum),
+            Ok(None) => {}
+            Err(error) => return read_error(error),
+        }
+        if first_min >= 3 && wire.unwrap_or(0) < first_min {
+            return json_reply(
+                StatusCode::UPGRADE_REQUIRED,
+                &json!({ "error": "upgrade_required", "min": first_min }),
+            );
+        }
+    }
+    if new_library {
         if state.new_libraries == NewLibraries::Members {
             match holds_another(state, id, member.as_deref()).await {
                 Ok(true) => {}
@@ -686,21 +1091,35 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         }
         Err(error) => return read_error(error),
     };
+    let was_empty = match store.protocol() {
+        Ok(protocol) => protocol.head == 0,
+        Err(error) => return internal("library protocol", v3_io(error)),
+    };
     let writes: Vec<_> = writes
         .into_iter()
         .map(|write| v3::Write { key: write.k, base: write.base, value: write.v })
         .collect();
     let live_cap = state.library_limits.stored_bytes;
-    let result = match tokio::task::spawn_blocking(move || store.apply_bounded(&writes, live_cap)).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(v3::StoreError::Full)) => {
-            return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
-        }
-        Ok(Err(v3::StoreError::Forbidden)) => {
-            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-        }
-        Ok(Err(error)) => return internal("library write", v3_io(error)),
-        Err(error) => return internal("library write task", io::Error::other(error)),
+    let applied_min = if was_empty { first_min } else { 2 };
+    let write_store = Arc::clone(&store);
+    let result =
+        match tokio::task::spawn_blocking(move || write_store.apply_bounded(&writes, live_cap, applied_min))
+            .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(v3::StoreError::Full)) => {
+                return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
+            }
+            Ok(Err(v3::StoreError::Forbidden)) => {
+                return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+            }
+            Ok(Err(error)) => return internal("library write", v3_io(error)),
+            Err(error) => return internal("library write task", io::Error::other(error)),
+        };
+    let protocol = match tokio::task::spawn_blocking(move || store.protocol()).await {
+        Ok(Ok(protocol)) => protocol,
+        Ok(Err(error)) => return internal("library protocol", v3_io(error)),
+        Err(error) => return internal("library protocol task", io::Error::other(error)),
     };
     let applied: Vec<Value> =
         result.applied.iter().map(|(key, seq)| json!({ "k": key, "seq": seq })).collect();
@@ -719,7 +1138,8 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     state.metrics.record_library_writes(applied.len(), conflicts.len());
     json_reply(
         StatusCode::OK,
-        &json!({ "head": result.head, "applied": applied, "conflicts": conflicts, "generation": state.store.generation() }),
+        &json!({ "head": result.head, "applied": applied, "conflicts": conflicts,
+            "generation": full_generation(state, &protocol.generation) }),
     )
 }
 
@@ -831,19 +1251,22 @@ async fn changes(
         }
         Err(reason) => return read_error(reason),
         Ok(None) => {
-            return json_reply(
-                StatusCode::NOT_FOUND,
-                &json!({ "error": "not_found", "generation": state.store.generation() }),
-            );
+            return json_reply(StatusCode::NOT_FOUND, &json!({ "error": "not_found", "generation": "0" }));
         }
     };
     drop(library);
+    let protocol_store = Arc::clone(&store);
+    let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
+        Ok(Ok(protocol)) => protocol,
+        Ok(Err(reason)) => return internal("library protocol", v3_io(reason)),
+        Err(reason) => return internal("library protocol task", io::Error::other(reason)),
+    };
+    let generation = full_generation(state, &protocol.generation);
     let response_permit = Arc::clone(&state.library_response_bytes)
         .acquire_many_owned(PAGE_BYTES as u32)
         .await
         .expect("the library response budget is never closed");
     if !gzip {
-        let generation = state.store.generation().to_owned();
         let page = if let Some(page) = store.cached_range_chunks(since, limit, &generation) {
             page
         } else {
@@ -870,7 +1293,7 @@ async fn changes(
     };
     let entries: Vec<_> = page.entries.into_iter().map(|row| row.fragment).collect();
 
-    let mut body = changes_body(&entries, page.head, page.more, state.store.generation());
+    let mut body = changes_body(&entries, page.head, page.more, &generation);
     if gzip && body.len() >= 1024 {
         if let Ok(permit) = Arc::clone(&state.library_compression_slots).try_acquire_owned() {
             let job = state.metrics.compression_started();
@@ -998,6 +1421,16 @@ async fn holds_another(state: &AppState, id: &str, member: Option<&str>) -> io::
     Ok(header_of(state, &slot, other).await?.is_some_and(|(token_hash, member_hash)| {
         constant_time_eq(member_hash.as_ref().unwrap_or(&token_hash), &hash)
     }))
+}
+
+async fn member_wire_minimum(state: &AppState, id: &str, member: Option<&str>) -> io::Result<Option<u64>> {
+    let Some((other, _)) = member.and_then(|value| value.split_once(':')) else {
+        return Ok(None);
+    };
+    if !holds_another(state, id, member).await? {
+        return Ok(None);
+    }
+    Ok(Some(protocol_for(state, other).await?.map_or(2, |protocol| protocol.wire_min)))
 }
 
 /// Read one bounded log line. Even a corrupt/no-newline log cannot allocate its whole file.
@@ -1268,11 +1701,11 @@ mod tests {
             batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }, { "k": K2, "base": 0, "v": "c2" }]))
                 .await;
         assert_eq!(status, StatusCode::OK);
-        let generation = h.state.store.generation();
+        let generation = got["generation"].clone();
         assert_eq!(
             got,
             json!({ "head": 2, "applied": [{ "k": K1, "seq": 1 }, { "k": K2, "seq": 2 }], "conflicts": [],
-                    "generation": generation })
+                    "generation": generation.clone() })
         );
         let (_, all) = changes(&h, TOKEN, "").await;
         assert_eq!(
@@ -1357,7 +1790,7 @@ mod tests {
         let h = Harness::new();
         batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
         let first = changes(&h, TOKEN, "").await.1["generation"].clone();
-        assert_eq!(first.as_str().map(str::len), Some(32));
+        assert_eq!(first.as_str().map(str::len), Some(65));
 
         let restarted = Harness::in_dir(h.dir.clone());
         assert_eq!(changes(&restarted, TOKEN, "").await.1["generation"], first, "a restart keeps it");
@@ -1371,7 +1804,287 @@ mod tests {
         let empty = Harness::new();
         let (status, body) = changes(&empty, TOKEN, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["generation"].as_str(), Some(empty.state.store.generation()));
+        assert_eq!(body["generation"], "0");
+    }
+
+    #[tokio::test]
+    async fn wire_generation_and_the_rewrite_fence_switch_a_library_atomically() {
+        let h = Harness::new();
+        let missing =
+            h.send("GET", &format!("/lib/{LIB}/changes"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.headers()[super::WIRE_MIN_HEADER], "2");
+        assert_eq!(missing.headers()[super::GENERATION_HEADER], "0");
+        assert_eq!(missing.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+
+        let first_body = json!({ "writes": [{ "k": K1, "base": 0, "v": "old" }] }).to_string();
+        let first = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/batch"),
+                Some(first_body),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, "0"),
+                    (super::WIRE_MIN_HEADER, "2"),
+                ],
+            )
+            .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let generation = first.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned();
+        assert_ne!(generation, "0");
+
+        let stale = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/batch"),
+                Some(json!({ "writes": [{ "k": K2, "base": 0, "v": "stale" }] }).to_string()),
+                &[("x-den-library-token", TOKEN), (super::WIRE_HEADER, "3"), (super::GENERATION_HEADER, "0")],
+            )
+            .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(stale).await["error"], "generation_changed");
+
+        let opened = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/rewrite"),
+                None,
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, &generation),
+                ],
+            )
+            .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened = body_json(opened).await;
+        let rewrite = opened["rewrite"].as_str().unwrap();
+        let base = opened["base"].as_u64().unwrap();
+
+        for (method, path) in [
+            ("POST", format!("/lib/{LIB}/batch")),
+            ("PUT", format!("/lib/{LIB}/member")),
+            ("DELETE", format!("/lib/{LIB}")),
+        ] {
+            let refused = h
+                .send(
+                    method,
+                    &path,
+                    Some(json!({ "writes": [{ "k": K2, "base": 0, "v": "blocked" }] }).to_string()),
+                    &[
+                        ("x-den-library-token", TOKEN),
+                        (super::WIRE_HEADER, "3"),
+                        (super::GENERATION_HEADER, &generation),
+                    ],
+                )
+                .await;
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "{method} {path}");
+            assert_eq!(body_json(refused).await["error"], "rewrite_in_progress");
+        }
+
+        let staged = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/rewrite/{rewrite}/rows"),
+                Some(json!({ "writes": [{ "k": K2, "v": "new" }] }).to_string()),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, &generation),
+                ],
+            )
+            .await;
+        assert_eq!(staged.status(), StatusCode::OK);
+
+        let committed = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/rewrite/{rewrite}/commit"),
+                Some(json!({ "base": base, "wireMin": 3 }).to_string()),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, &generation),
+                ],
+            )
+            .await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        assert_eq!(committed.headers()[super::WIRE_MIN_HEADER], "3");
+        let next_generation = committed.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned();
+        assert_ne!(next_generation, generation);
+
+        let old_client =
+            h.send("GET", &format!("/lib/{LIB}/changes"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(old_client.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body_json(old_client).await["error"], "upgrade_required");
+
+        let home = h
+            .send(
+                "GET",
+                &format!("/lib/{LIB}/changes?since=0&limit=1"),
+                None,
+                &[("x-den-library-token", TOKEN)],
+            )
+            .await;
+        assert_eq!(home.status(), StatusCode::OK);
+
+        let current = h
+            .send(
+                "GET",
+                &format!("/lib/{LIB}/changes"),
+                None,
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, &next_generation),
+                ],
+            )
+            .await;
+        let current = body_json(current).await;
+        assert_eq!(current["entries"], json!([{ "k": K2, "seq": base + 1, "v": "new" }]));
+    }
+
+    #[tokio::test]
+    async fn a_library_only_restore_changes_generation_and_keeps_the_highest_wire_minimum() {
+        let h = Harness::new();
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "before" }])).await.0, StatusCode::OK);
+        let database = h.state.library_v3.path(LIB);
+        let backup = h.dir.join("library-before-switch.backup");
+        std::fs::copy(&database, &backup).unwrap();
+
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
+        let before = store.protocol().unwrap();
+        let switched = store
+            .rewrite(
+                before.head,
+                &[super::v3::RewriteRow { key: K2.to_owned(), value: "after".to_owned() }],
+                3,
+                h.state.library_limits.stored_bytes,
+            )
+            .unwrap();
+        drop(store);
+        let dir = h.dir.clone();
+        drop(h);
+        std::fs::copy(&backup, &database).unwrap();
+
+        let restored = Harness::in_dir(dir);
+        let response = restored
+            .send(
+                "GET",
+                &format!("/lib/{LIB}/changes"),
+                None,
+                &[(super::WIRE_HEADER, "3"), ("x-den-library-token", TOKEN)],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[super::WIRE_MIN_HEADER], "3");
+        let generation = response.headers()[super::GENERATION_HEADER].to_str().unwrap();
+        assert!(!generation.ends_with(&switched.generation));
+        let body = body_json(response).await;
+        assert_eq!(body["entries"], json!([{ "k": K1, "seq": 1, "v": "before" }]));
+    }
+
+    #[tokio::test]
+    async fn rewrite_fences_survive_restart_and_expire_or_abort() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "before" }])).await;
+        let opened =
+            h.send("POST", &format!("/lib/{LIB}/rewrite"), None, &[("x-den-library-token", TOKEN)]).await;
+        let rewrite = body_json(opened).await["rewrite"].as_str().unwrap().to_owned();
+        let dir = h.dir.clone();
+        drop(h);
+
+        let restarted = Harness::in_dir(dir);
+        let blocked = restarted
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/batch"),
+                Some(json!({ "writes": [{ "k": K2, "base": 0, "v": "blocked" }] }).to_string()),
+                &[("x-den-library-token", TOKEN)],
+            )
+            .await;
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        assert!(blocked.headers().contains_key(axum::http::header::RETRY_AFTER));
+
+        let aborted = restarted
+            .send("DELETE", &format!("/lib/{LIB}/rewrite/{rewrite}"), None, &[("x-den-library-token", TOKEN)])
+            .await;
+        assert_eq!(aborted.status(), StatusCode::OK);
+        let reopened = restarted
+            .send("POST", &format!("/lib/{LIB}/rewrite"), None, &[("x-den-library-token", TOKEN)])
+            .await;
+        assert_eq!(reopened.status(), StatusCode::OK);
+        restarted.advance(super::REWRITE_IDLE_MS);
+        let after_timeout = restarted
+            .send(
+                "POST",
+                &format!("/lib/{LIB}/batch"),
+                Some(json!({ "writes": [{ "k": K2, "base": 0, "v": "after" }] }).to_string()),
+                &[("x-den-library-token", TOKEN)],
+            )
+            .await;
+        assert_eq!(after_timeout.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn only_one_concurrent_rewrite_opens() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "before" }])).await;
+        let path = format!("/lib/{LIB}/rewrite");
+        let first = h.send("POST", &path, None, &[("x-den-library-token", TOKEN)]);
+        let second = h.send("POST", &path, None, &[("x-den-library-token", TOKEN)]);
+        let (first, second) = tokio::join!(first, second);
+        let mut statuses = [first.status(), second.status()];
+        statuses.sort();
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+    }
+
+    #[tokio::test]
+    async fn a_first_batch_inherits_its_members_wire_minimum() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "member" }])).await;
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let member_store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
+        let protocol = member_store.protocol().unwrap();
+        member_store.rewrite(protocol.head, &[], 3, h.state.library_limits.stored_bytes).unwrap();
+
+        let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "new" }] }).to_string();
+        let member = format!("{LIB}:{TOKEN}");
+        let old = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB2}/batch"),
+                Some(body.clone()),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::MEMBER_HEADER, &member),
+                    (super::WIRE_HEADER, "2"),
+                    (super::GENERATION_HEADER, "0"),
+                    (super::WIRE_MIN_HEADER, "2"),
+                ],
+            )
+            .await;
+        assert_eq!(old.status(), StatusCode::UPGRADE_REQUIRED);
+
+        let current = h
+            .send(
+                "POST",
+                &format!("/lib/{LIB2}/batch"),
+                Some(body),
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::MEMBER_HEADER, &member),
+                    (super::WIRE_HEADER, "3"),
+                    (super::GENERATION_HEADER, "0"),
+                    (super::WIRE_MIN_HEADER, "2"),
+                ],
+            )
+            .await;
+        assert_eq!(current.status(), StatusCode::OK);
+        assert_eq!(current.headers()[super::WIRE_MIN_HEADER], "3");
     }
 
     /// A write based on a stale sequence gets the current row back; one based on the current one lands.
