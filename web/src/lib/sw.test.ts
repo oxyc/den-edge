@@ -81,6 +81,7 @@ function worker(shell?: string) {
     const behind: Promise<unknown>[] = [];
     listeners.get('fetch')!({
       request: { url: new URL(path, ORIGIN).href, method: 'GET', mode: 'navigate' },
+      resultingClientId: 'page',
       respondWith: (response) => (answer = response),
       waitUntil: (work) => void behind.push(work),
     });
@@ -197,6 +198,14 @@ describe('the service worker', () => {
     const warm = worker('kept shell');
     expect(await warm.navigate('/movie/550')).toBe('kept shell');
     expect(warm.fetched).toEqual(['/']);
+  });
+
+  it('reloads a page immediately when its background check keeps a newer release', async () => {
+    const current = worker('kept shell');
+    expect(await current.navigate('/')).toBe('kept shell');
+    expect(current.messages).toEqual(['den:reload']);
+    expect(await current.navigate('/')).toBe('network /');
+    expect(current.messages).toEqual(['den:reload']);
   });
 
   it('drops a kept shell whose release is gone and reloads the page onto the current one', async () => {

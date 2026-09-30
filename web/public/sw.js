@@ -2,7 +2,8 @@
 // the build's hashed files, nothing else. The library, the addons and TMDB never pass through here — they are private,
 // or already kept where they belong.
 //
-// The kept page is shown and checked behind it, so a release shows on the visit after it lands. Files are kept per
+// The kept page is shown and checked behind it. When that check finds a release, the worker reloads the client onto
+// the new shell immediately rather than leaving it on old application logic for the whole visit. Files are kept per
 // release, the last two of them, because a kept page asks for its own release's files after den-edge has replaced
 // them; one it never fetched drops the kept page and reloads onto the current release (`file`, main.ts). A check that meets Cloudflare
 // Access's login instead of the page drops the kept page and reloads, so an expired session still reaches the login.
@@ -62,7 +63,10 @@ async function page(event) {
         '/',
         new Response(copy.body, { status: copy.status, statusText: copy.statusText, headers }),
       );
-      if (kept && kept.headers.get('etag') !== release) await prune();
+      if (kept && release && kept.headers.get('etag') !== release) {
+        await prune();
+        (await self.clients.get(event.resultingClientId))?.postMessage('den:reload');
+      }
     } else if (kept && response.type === 'opaqueredirect') {
       await cache.delete('/');
       (await self.clients.get(event.resultingClientId))?.postMessage('den:reload');
