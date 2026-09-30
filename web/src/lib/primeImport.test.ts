@@ -115,4 +115,18 @@ Full,2026-01-10T11:59:00Z,1800,Pilot-Second Show - Season 2,1800000,Private`;
     ]);
     expect(Object.keys(result.viewings[0]!)).not.toContain('City');
   });
+
+  it('refuses the same raw title when Prime calls it both a film and an episode', () => {
+    const one = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,1800,Shared title,Shared`;
+    const conflicting = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Feature,2026-01-01T11:59:00Z,1800,Shared
+Full,2026-01-01T11:58:00Z,1800,Shared`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: one },
+      { name: 'history.csv', text: conflicting },
+    ]);
+    expect(result.viewings).toEqual([]);
+    expect(result.diagnostics.ambiguous).toEqual(['Shared']);
+  });
 });

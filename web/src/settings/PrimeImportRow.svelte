@@ -109,7 +109,8 @@
   <p class="foot">
     From your Amazon privacy-data download, choose <em>Watch Events.csv</em> and
     <em>Viewing History.csv</em> together. The files are matched in this browser; location and device
-    details are discarded.
+    details are discarded. Amazon does not identify named profiles in this export, so it imports the account’s
+    combined history.
   </p>
   {#if state.step === 'idle' || state.step === 'failed' || state.step === 'done'}
     <div class="form">

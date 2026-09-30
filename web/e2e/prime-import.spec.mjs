@@ -45,6 +45,7 @@ test('Prime import requires both schemas, previews locally, and writes the compl
 
     await page.getByRole('button', { name: /Prime Video viewing history/ }).click();
     const importRow = page.getByRole('region', { name: 'Prime Video viewing history' });
+    await expect(importRow).toContainText('combined history');
     const input = importRow.locator('input[type=file]');
     await input.setInputFiles({
       name: 'Watch Events.csv',

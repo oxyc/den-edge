@@ -156,18 +156,19 @@ export function parsePrimeFiles(files: readonly PrimeSourceFile[]): PrimeImportS
       return raw === wanted || raw.startsWith(`${wanted} `);
     });
     const nearby = candidates.filter((session) => Math.abs(session.at - event.at) <= CLOSE_MS);
-    const rawTitles = distinctRawTitles(nearby.length ? nearby : candidates);
-    if (!rawTitles.length) {
+    const identities = distinctIdentities(nearby.length ? nearby : candidates);
+    if (!identities.length) {
       unmatched.push(event.title);
       continue;
     }
-    if (rawTitles.length !== 1) {
+    if (identities.length !== 1) {
       ambiguous.push(event.title);
       continue;
     }
-    const rawTitle = rawTitles[0]!;
-    const sameTitle = sessions.filter((session) => session.rawTitle === rawTitle);
-    const material = sameTitle[0]!.material;
+    const { rawTitle, material } = identities[0]!;
+    const sameTitle = sessions.filter(
+      (session) => session.rawTitle === rawTitle && session.material === material,
+    );
     const durations = sameTitle.flatMap((session) =>
       session.durationSeconds === undefined ? [] : [session.durationSeconds],
     );
@@ -205,8 +206,13 @@ export function primeEpisodeHint(
   return { show: season[1]!.trim(), season: Number(season[2]) };
 }
 
-function distinctRawTitles(sessions: readonly PlaybackSession[]): string[] {
-  return [...new Set(sessions.map((session) => session.rawTitle))];
+function distinctIdentities(
+  sessions: readonly PlaybackSession[],
+): { rawTitle: string; material: PlaybackSession['material'] }[] {
+  const found = new Map<string, { rawTitle: string; material: PlaybackSession['material'] }>();
+  for (const { rawTitle, material } of sessions)
+    found.set(`${material}\u0000${rawTitle}`, { rawTitle, material });
+  return [...found.values()];
 }
 
 function primeText(value: string | undefined): string {
