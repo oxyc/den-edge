@@ -1,4 +1,3 @@
-import { WATCHED } from './actions';
 import type { PrimeViewing } from './primeImport';
 import {
   normalizeViewingName as normalize,
@@ -15,8 +14,6 @@ export interface PrimeImportPlan {
   shows: Record<number, ImportShow>;
   unmatched: string[];
   ambiguous: string[];
-  incomplete: { title: string; fraction: number }[];
-  unknownDuration: string[];
   known: number;
 }
 
@@ -35,8 +32,8 @@ interface PendingSeason {
 }
 
 /**
- * Resolve Prime's safe observations to TMDB identities and retain only completed viewings. Completion uses Prime's
- * duration first, then TMDB's runtime; an uncertain partial or duration-less play is reported, never marked seen.
+ * Resolve Prime's safe observations to TMDB identities. Every play in Watch Events is viewing history, regardless
+ * of how much Prime says was watched; this deliberately matches the Netflix import's semantics.
  */
 export async function planPrimeImport(
   viewings: readonly PrimeViewing[],
@@ -48,8 +45,6 @@ export async function planPrimeImport(
   const shows: Record<number, ImportShow> = {};
   const unmatched: string[] = [];
   const ambiguous: string[] = [];
-  const incomplete: { title: string; fraction: number }[] = [];
-  const unknownDuration: string[] = [];
   const pendingSeasons: PendingSeason[] = [];
   const unnamedSeries: PrimeViewing[] = [];
   let known = 0;
@@ -78,37 +73,11 @@ export async function planPrimeImport(
     if (!episodeCache.has(key)) episodeCache.set(key, lookups.episodes(id, season));
     return episodeCache.get(key)!;
   };
-  const runtimeCache = new Map<string, Promise<number | null>>();
-  const runtimeOf = (type: 'movie' | 'tv', id: number) => {
-    if (!lookups.runtime) return Promise.resolve(null);
-    const key = `${type}:${id}`;
-    if (!runtimeCache.has(key)) runtimeCache.set(key, lookups.runtime(type, id));
-    return runtimeCache.get(key)!;
-  };
-
   const add = (mark: ViewingMark) => {
     const key = `${mark.type}:${mark.id}:${mark.season ?? ''}:${mark.episode ?? ''}`;
     const previous = marks.get(key);
     if (!previous || previous.at < mark.at) marks.set(key, mark);
   };
-  const completion = async (
-    viewing: PrimeViewing,
-    fallbackMinutes: number | null | undefined,
-  ): Promise<'complete' | 'incomplete' | 'unknown'> => {
-    const duration =
-      viewing.durationSeconds ?? (fallbackMinutes ? fallbackMinutes * 60 : undefined);
-    if (!duration || duration <= 0) {
-      unknownDuration.push(viewing.rawTitle);
-      return 'unknown';
-    }
-    const fraction = viewing.watchedSeconds / duration;
-    if (fraction < WATCHED) {
-      incomplete.push({ title: viewing.rawTitle, fraction: Math.max(0, fraction) });
-      return 'incomplete';
-    }
-    return 'complete';
-  };
-
   await pool(viewings, 12, async (viewing) => {
     try {
       if (viewing.kind === 'movie') {
@@ -141,9 +110,6 @@ export async function planPrimeImport(
           known++;
           return;
         }
-        const fallback =
-          viewing.durationSeconds === undefined ? await runtimeOf('movie', hit.id) : null;
-        if ((await completion(viewing, fallback)) !== 'complete') return;
         add({
           type: 'movie',
           id: hit.id,
@@ -208,7 +174,6 @@ export async function planPrimeImport(
         known++;
         return;
       }
-      if ((await completion(viewing, match.episode.runtime)) !== 'complete') return;
       shows[match.hit.id] = match.show;
       add({
         type: 'tv',
@@ -249,7 +214,6 @@ export async function planPrimeImport(
         known++;
         continue;
       }
-      if ((await completion(pending.viewing, episode.runtime)) !== 'complete') continue;
       shows[pending.hit.id] = pending.show;
       add({
         type: 'tv',
@@ -311,12 +275,10 @@ export async function planPrimeImport(
         matched ??
         (season === 1 && normalize(viewing.title) === normalize(hit.name) ? 1 : undefined);
       if (number === undefined) continue;
-      const episode = episodes.find((candidate) => candidate.number === number)!;
       if (seen({ type: 'tv', id: hit.id })) {
         known++;
         continue;
       }
-      if ((await completion(viewing, episode.runtime)) !== 'complete') continue;
       shows[hit.id] = show;
       add({
         type: 'tv',
@@ -336,8 +298,6 @@ export async function planPrimeImport(
     shows,
     unmatched,
     ambiguous,
-    incomplete,
-    unknownDuration,
     known,
   };
 }

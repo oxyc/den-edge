@@ -45,7 +45,7 @@ function fake(overrides: Partial<ViewingLookups> = {}): ViewingLookups {
 }
 
 describe('Prime import planning', () => {
-  it('resolves completed movies and episodes and preserves their viewing times', async () => {
+  it('resolves movies and episodes and preserves their viewing times', async () => {
     const progress: number[] = [];
     const result = await planPrimeImport([movie(), episode()], fake(), (done) =>
       progress.push(done),
@@ -74,7 +74,7 @@ describe('Prime import planning', () => {
     expect(progress.sort()).toEqual([1, 2]);
   });
 
-  it('uses TMDB runtime only when Prime has no duration and refuses partial or unknown plays', async () => {
+  it('imports partial and duration-less plays without asking TMDB for runtime', async () => {
     let runtimeCalls = 0;
     const result = await planPrimeImport(
       [
@@ -83,25 +83,17 @@ describe('Prime import planning', () => {
         movie({ title: 'Unknown', rawTitle: 'Unknown', durationSeconds: undefined }),
       ],
       fake({
+        searchMulti: async (query) => [
+          { type: 'movie', id: { Complete: 1, Partial: 2, Unknown: 3 }[query]!, name: query },
+        ],
         runtime: async (_type, id) => {
           runtimeCalls++;
           return id === 1 ? 100 : null;
         },
       }),
     );
-    // The fake search gives every film id 1, so the complete runtime fallback and latest completed occurrence dedupe.
-    expect(result.marks).toHaveLength(1);
-    expect(result.incomplete).toEqual([{ title: 'Partial', fraction: 2_000 / 6_100 }]);
-    expect(result.unknownDuration).toEqual([]);
-    // Only duration-less observations ask, and their shared TMDB identity is cached.
-    expect(runtimeCalls).toBe(1);
-
-    const unknown = await planPrimeImport(
-      [movie({ durationSeconds: undefined })],
-      fake({ runtime: async () => null }),
-    );
-    expect(unknown.marks).toEqual([]);
-    expect(unknown.unknownDuration).toEqual(['Goodrich']);
+    expect(result.marks.map((mark) => mark.source)).toEqual(['Complete', 'Partial', 'Unknown']);
+    expect(runtimeCalls).toBe(0);
   });
 
   it('uses episode evidence to choose between namesake shows', async () => {

@@ -104,7 +104,7 @@
 <SettingRow
   id="prime-video-import"
   label="Prime Video viewing history"
-  detail="Mark completed films and episodes as seen"
+  detail="Mark played films and episodes as seen"
 >
   <p class="foot">
     From your Amazon privacy-data download, choose <em>Watch Events.csv</em> and
@@ -132,7 +132,7 @@
   {/if}
   {#if state.step === 'matching'}
     <p class="status" role="status">
-      Finding completed titles — {state.done.toLocaleString()} of {state.total.toLocaleString()}
+      Finding titles — {state.done.toLocaleString()} of {state.total.toLocaleString()}
     </p>
     {#if state.paused}<p class="foot">Pausing for den-edge’s limit — carrying on shortly.</p>{/if}
   {:else if state.step === 'preview'}
@@ -172,17 +172,6 @@
         {/each}
       </ul>
     </details>
-    {#if state.plan.incomplete.length || state.plan.unknownDuration.length}
-      <details class="foot">
-        <summary>
-          {plural(state.plan.incomplete.length + state.plan.unknownDuration.length, 'partial play')} not
-          marked seen
-        </summary>
-        <p>
-          Prime reported less than 95% watched, or neither Prime nor TMDB supplied a usable runtime.
-        </p>
-      </details>
-    {/if}
     {#if sourceMisses || matchMisses}
       <details class="foot">
         <summary>{plural(sourceMisses + matchMisses, 'line')} couldn’t be matched safely</summary>
@@ -201,7 +190,7 @@
         disabled={!chosen.some((entry) => entry.rows.length)}
         onclick={() => void write(chosen)}
       >
-        Import completed history
+        Import viewing history
       </button>
       <button type="button" class="quiet" onclick={() => (state = { step: 'idle' })}>Cancel</button>
     </div>

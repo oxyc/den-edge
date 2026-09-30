@@ -6,7 +6,7 @@ no,2026-06-14T02:38:10Z,6000,A film,Goodrich`;
 const viewingHistory = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title","Video Duration in 1080p","City","ISP Name"
 Feature,2026-06-14T02:37:00Z,6000,Goodrich,6000000,Private City,Private ISP`;
 
-test('Prime import requires both schemas, previews locally, and writes the completed film', async () => {
+test('Prime import requires both schemas, previews locally, and writes the played film', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -59,7 +59,7 @@ test('Prime import requires both schemas, previews locally, and writes the compl
       { name: 'Viewing History.csv', mimeType: 'text/csv', buffer: Buffer.from(viewingHistory) },
     ]);
     await expect(importRow.getByText('Found 1 film and 0 episodes from 0 series.')).toBeVisible();
-    await importRow.getByRole('button', { name: 'Import completed history' }).click();
+    await importRow.getByRole('button', { name: 'Import viewing history' }).click();
     await expect(importRow.getByRole('status')).toContainText('Saved 1 change');
   } finally {
     await browser.close();
