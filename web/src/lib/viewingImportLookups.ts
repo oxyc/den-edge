@@ -24,6 +24,7 @@ export function viewingImportLookups(
   let running = 0;
   const waiting: (() => void)[] = [];
   let pausedUntil = 0;
+  const translationCache = new Map<string, Promise<Json[]>>();
 
   async function limited(url: string): Promise<Response> {
     while (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now());
@@ -87,6 +88,31 @@ export function viewingImportLookups(
       },
     );
 
+  const translations = (type: 'movie' | 'tv', id: number) => {
+    const key = `${type}:${id}`;
+    if (!translationCache.has(key))
+      translationCache.set(
+        key,
+        get(`/${type}/${id}/translations`).then((body) =>
+          Array.isArray(body?.translations) ? (body.translations as Json[]) : [],
+        ),
+      );
+    return translationCache.get(key)!;
+  };
+
+  const translatedValues = async (type: 'movie' | 'tv', id: number, field: string) => [
+    ...new Set(
+      (await translations(type, id)).flatMap((translation): string[] => {
+        const data =
+          translation.data && typeof translation.data === 'object'
+            ? (translation.data as Json)
+            : {};
+        const value = data[field];
+        return typeof value === 'string' && value.trim() ? [value] : [];
+      }),
+    ),
+  ];
+
   return {
     searchMulti: async (query) =>
       hits(await get('/search/multi', { query, include_adult: 'false' })),
@@ -114,6 +140,8 @@ export function viewingImportLookups(
       const body = await get(`/tv/${id}/season/${season}`);
       return body && parseSeason(body);
     },
+    translatedTitles: (type, id) => translatedValues(type, id, type === 'movie' ? 'title' : 'name'),
+    translatedOverviews: (type, id) => translatedValues(type, id, 'overview'),
     runtime: async (type, id) => {
       const body = await get(`/${type}/${id}`);
       if (!body) return null;

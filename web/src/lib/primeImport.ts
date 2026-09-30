@@ -53,6 +53,8 @@ export interface PrimeViewing {
   watchedSeconds: number;
   durationSeconds?: number;
   show?: string;
+  /** Series identities from nearby composite playback rows; the resolver must corroborate one with TMDB. */
+  contextShows?: string[];
   season?: number;
 }
 
@@ -172,6 +174,21 @@ export function parsePrimeFiles(files: readonly PrimeSourceFile[]): PrimeImportS
       resolveExactIdentity(event, candidates) ??
       resolveTranslatedIdentity(event, sessions);
     if (!identity) {
+      const contextShows = contextualShows(
+        sessions.filter((session) => Math.abs(session.at - event.at) <= CLOSE_MS),
+      );
+      if (contextShows.length && !unsafeContextEpisode(event.title)) {
+        viewings.push({
+          kind: 'episode',
+          title: event.title,
+          description: event.description,
+          rawTitle: event.title,
+          watchedAt: event.at,
+          watchedSeconds: event.watchedSeconds,
+          contextShows,
+        });
+        continue;
+      }
       const identities = distinctIdentities(nearby);
       if (identities.length) ambiguous.push(event.title);
       else unmatched.push(event.title);
@@ -362,7 +379,7 @@ function resolveTranslatedIdentity(
   event: WatchEvent,
   sessions: readonly PlaybackSession[],
 ): { rawTitle: string } | undefined {
-  if (event.watchedSeconds < 300) return undefined;
+  if (event.watchedSeconds <= 0 || unsafeContextEpisode(event.title)) return undefined;
   const eligible = sessions.filter(
     (session) => Math.abs(session.at - event.at) <= 14 * 60 * 60 * 1000,
   );
@@ -382,11 +399,40 @@ function resolveTranslatedIdentity(
   const [best, second] = ranked;
   if (!best) return undefined;
   const episode = /(?:season|series|temporada)\s*#?\s*\d+|\bs\d+\b/i.test(best.rows[0]!.rawTitle);
-  const limit = episode ? Math.min(20, event.watchedSeconds * 0.01) : event.watchedSeconds * 0.02;
+  const limit = episode
+    ? Math.min(20, event.watchedSeconds * 0.01)
+    : event.watchedSeconds < 300
+      ? Math.max(2, event.watchedSeconds * 0.03)
+      : event.watchedSeconds * 0.05;
   if (best.delta > limit) return undefined;
-  if (second && best.delta + Math.max(30, event.watchedSeconds * 0.01) >= second.delta)
-    return undefined;
+  const lead =
+    event.watchedSeconds < 300
+      ? Math.max(5, event.watchedSeconds * 0.1)
+      : Math.max(30, event.watchedSeconds * 0.01);
+  if (second && best.delta + lead >= second.delta) return undefined;
   return { rawTitle: best.rows[0]!.rawTitle };
+}
+
+function contextualShows(sessions: readonly PlaybackSession[]): string[] {
+  const shows = sessions.flatMap((session) => {
+    const show = [...session.rawTitle.matchAll(/[-–—]/g)]
+      .map((match) => match.index)
+      .reverse()
+      .map((index) => primeShowHint(session.rawTitle.slice(index! + 1)).show)
+      .find((candidate) => candidate && !/^season \d+$/i.test(normalizeViewingName(candidate)));
+    return show ? [show] : [];
+  });
+  return [...new Set(shows)];
+}
+
+function unsafeContextEpisode(title: string): boolean {
+  const normalized = normalizeViewingName(title);
+  return (
+    normalized === 'pilot' ||
+    /^(?:episode|chapter|ep|episodio|capitulo)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
+      normalized,
+    )
+  );
 }
 
 function playbackSession(record: Record<string, string>): PlaybackSession[] {

@@ -42,4 +42,25 @@ describe('shared viewing import lookups', () => {
     expect(await lookups.runtime?.('movie', 7)).toBe(123);
     expect(await lookups.runtime?.('tv', 8)).toBe(47);
   });
+
+  it('shares one TMDB translations response between localized titles and overviews', async () => {
+    let requests = 0;
+    const fetchImpl = (async (url: string) => {
+      expect(new URL(url).pathname).toBe('/3/movie/7/translations');
+      requests++;
+      return Response.json({
+        translations: [
+          { data: { title: 'La película', overview: 'La historia localizada.' } },
+          { data: { title: 'The Film', overview: 'The localized story.' } },
+        ],
+      });
+    }) as typeof fetch;
+    const lookups = viewingImportLookups('den-proxy', fetchImpl);
+    expect(await lookups.translatedTitles?.('movie', 7)).toEqual(['La película', 'The Film']);
+    expect(await lookups.translatedOverviews?.('movie', 7)).toEqual([
+      'La historia localizada.',
+      'The localized story.',
+    ]);
+    expect(requests).toBe(1);
+  });
 });
