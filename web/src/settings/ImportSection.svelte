@@ -1,15 +1,15 @@
 <!-- Settings › Import: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
      each film and episode at the day it was last watched. Read and matched in this browser; written as the library's
-     own rows (`netflixJournal`), which the Apple TV's catch-up passes to Simkl in its own time, each at its date. -->
+     own rows (`viewingImportJournal`), which the Apple TV's catch-up passes to Simkl in its own time, each at its date. -->
 <script lang="ts" module>
   import { SvelteSet } from 'svelte/reactivity';
   import type { Plan } from '../lib/netflixImport';
-  import type { Writes } from '../lib/netflixJournal';
+  import type { ImportWrites } from '../lib/viewingImportJournal';
 
   type State =
     | { step: 'idle' }
     | { step: 'matching'; done: number; total: number; paused?: boolean }
-    | { step: 'preview'; plan: Plan; writes: Writes[] }
+    | { step: 'preview'; plan: Plan; writes: ImportWrites[] }
     | { step: 'writing'; done: number; total: number }
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
@@ -25,8 +25,8 @@
   import SettingsSection from './SettingsSection.svelte';
   import type { LibraryLog } from '../lib/log';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
-  import { importWrites } from '../lib/netflixJournal';
-  import { netflixLookups } from '../lib/netflixLookups';
+  import { importWrites, writeImportBatches } from '../lib/viewingImportJournal';
+  import { viewingImportLookups } from '../lib/viewingImportLookups';
   import { ensureSyncPolicy } from '../lib/syncLoader';
 
   let {
@@ -36,9 +36,6 @@
     changed,
   }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
     $props();
-
-  /** Rows written a batch at a time, so the count shown moves and a stop says roughly how far it got. */
-  const BATCH = 250;
 
   async function read(file: File) {
     const opened = log;
@@ -56,7 +53,7 @@
         const row = opened.title(ref);
         return !!row && !row.deleted.value && row.status.value === 'watched';
       };
-      const lookups = netflixLookups(tmdbKey, undefined, (ms) => {
+      const lookups = viewingImportLookups(tmdbKey, undefined, (ms) => {
         if (state.step === 'matching') state = { ...state, paused: ms > 0 };
       });
       const result = await plan(
@@ -79,29 +76,24 @@
     }
   }
 
-  async function write(writes: Writes[]) {
+  async function write(writes: ImportWrites[]) {
     const opened = log;
     if (!opened) return;
-    const rows = writes.flatMap((w) => w.rows);
-    state = { step: 'writing', done: 0, total: rows.length };
-    for (let start = 0; start < rows.length; start += BATCH) {
-      const batch = rows.slice(start, start + BATCH);
-      opened.refusal = null;
-      if (!(await opened.writeRows(batch))) {
-        const full = opened.refusal === 'library_full';
-        state = {
-          step: 'failed',
-          message: full
-            ? `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
-            : `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
-        };
-        changed();
-        return;
-      }
-      state = { step: 'writing', done: start + batch.length, total: rows.length };
-    }
+    const total = writes.reduce((count, entry) => count + entry.rows.length, 0);
+    state = { step: 'writing', done: 0, total };
+    const result = await writeImportBatches(writes, opened, (done, all) => {
+      state = { step: 'writing', done, total: all };
+    });
     changed();
-    state = { step: 'done', written: rows.length };
+    state = result.complete
+      ? { step: 'done', written: result.written }
+      : {
+          step: 'failed',
+          message:
+            result.refusal === 'library_full'
+              ? `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
+              : `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. The rest couldn’t be saved; importing the file again picks up where this stopped.`,
+        };
   }
 
   const plural = (n: number, one: string, many = `${one}s`) =>

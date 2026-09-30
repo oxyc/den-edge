@@ -75,18 +75,26 @@ describe('Prime import planning', () => {
   });
 
   it('uses TMDB runtime only when Prime has no duration and refuses partial or unknown plays', async () => {
+    let runtimeCalls = 0;
     const result = await planPrimeImport(
       [
         movie({ title: 'Complete', rawTitle: 'Complete', durationSeconds: undefined }),
         movie({ title: 'Partial', rawTitle: 'Partial', watchedSeconds: 2_000 }),
         movie({ title: 'Unknown', rawTitle: 'Unknown', durationSeconds: undefined }),
       ],
-      fake({ runtime: async (_type, id) => (id === 1 ? 100 : null) }),
+      fake({
+        runtime: async (_type, id) => {
+          runtimeCalls++;
+          return id === 1 ? 100 : null;
+        },
+      }),
     );
     // The fake search gives every film id 1, so the complete runtime fallback and latest completed occurrence dedupe.
     expect(result.marks).toHaveLength(1);
     expect(result.incomplete).toEqual([{ title: 'Partial', fraction: 2_000 / 6_100 }]);
     expect(result.unknownDuration).toEqual([]);
+    // Only duration-less observations ask, and their shared TMDB identity is cached.
+    expect(runtimeCalls).toBe(1);
 
     const unknown = await planPrimeImport(
       [movie({ durationSeconds: undefined })],

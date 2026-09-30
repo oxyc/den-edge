@@ -89,4 +89,30 @@ describe('Prime export parsing', () => {
     );
     expect(primeEpisodeHint('Pilot', 'Pilot-A Show')).toEqual({ show: 'A Show' });
   });
+
+  it('uses the watch date to separate identical episode names from different shows', () => {
+    const sameNames = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,1800,First show,Pilot
+no,2026-01-10T12:00:00Z,1800,Second show,Pilot`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title","Video Duration in 1080p","City"
+Full,2026-01-01T11:59:00Z,1800,Pilot-First Show - Season 1,1800000,Private
+Full,2026-01-01T11:00:00Z,20,Pilot-First Show - Season 1,1800000,Private
+Full,2026-01-10T11:59:00Z,1800,Pilot-Second Show - Season 2,1800000,Private`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: sameNames },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.diagnostics.ambiguous).toEqual([]);
+    expect(
+      result.viewings.map(({ show, season, durationSeconds }) => ({
+        show,
+        season,
+        durationSeconds,
+      })),
+    ).toEqual([
+      { show: 'First Show', season: 1, durationSeconds: 1800 },
+      { show: 'Second Show', season: 2, durationSeconds: 1800 },
+    ]);
+    expect(Object.keys(result.viewings[0]!)).not.toContain('City');
+  });
 });

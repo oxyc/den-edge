@@ -2,12 +2,12 @@
   import { SvelteSet } from 'svelte/reactivity';
   import type { PrimeImportSource } from '../lib/primeImport';
   import type { PrimeImportPlan } from '../lib/primeImportPlan';
-  import type { Writes } from '../lib/netflixJournal';
+  import type { ImportWrites } from '../lib/viewingImportJournal';
 
   type State =
     | { step: 'idle' }
     | { step: 'matching'; done: number; total: number; paused?: boolean }
-    | { step: 'preview'; source: PrimeImportSource; plan: PrimeImportPlan; writes: Writes[] }
+    | { step: 'preview'; source: PrimeImportSource; plan: PrimeImportPlan; writes: ImportWrites[] }
     | { step: 'writing'; done: number; total: number }
     | { step: 'done'; written: number }
     | { step: 'failed'; message: string };
@@ -18,11 +18,11 @@
 
 <script lang="ts">
   import type { LibraryLog } from '../lib/log';
-  import { importWrites } from '../lib/netflixJournal';
+  import { importWrites, writeImportBatches } from '../lib/viewingImportJournal';
   import { parsePrimeFiles } from '../lib/primeImport';
   import { planPrimeImport } from '../lib/primeImportPlan';
   import { ensureSyncPolicy } from '../lib/syncLoader';
-  import { viewingImportLookups } from '../lib/netflixLookups';
+  import { viewingImportLookups } from '../lib/viewingImportLookups';
   import { viewingPreviewLines } from '../lib/viewingImport';
   import SettingRow from './SettingRow.svelte';
 
@@ -33,8 +33,6 @@
     changed,
   }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
     $props();
-
-  const BATCH = 250;
 
   async function read(files: FileList) {
     const opened = log;
@@ -79,29 +77,24 @@
     }
   }
 
-  async function write(writes: Writes[]) {
+  async function write(writes: ImportWrites[]) {
     const opened = log;
     if (!opened) return;
-    const rows = writes.flatMap((entry) => entry.rows);
-    state = { step: 'writing', done: 0, total: rows.length };
-    for (let start = 0; start < rows.length; start += BATCH) {
-      const batch = rows.slice(start, start + BATCH);
-      opened.refusal = null;
-      if (!(await opened.writeRows(batch))) {
-        state = {
+    const total = writes.reduce((count, entry) => count + entry.rows.length, 0);
+    state = { step: 'writing', done: 0, total };
+    const result = await writeImportBatches(writes, opened, (done, all) => {
+      state = { step: 'writing', done, total: all };
+    });
+    changed();
+    state = result.complete
+      ? { step: 'done', written: result.written }
+      : {
           step: 'failed',
           message:
-            opened.refusal === 'library_full'
-              ? `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
-              : `Saved ${start.toLocaleString()} of ${rows.length.toLocaleString()}. Importing both files again picks up where this stopped.`,
+            result.refusal === 'library_full'
+              ? `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}: the library on den-edge is full. Nothing already saved is lost.`
+              : `Saved ${result.written.toLocaleString()} of ${result.total.toLocaleString()}. Importing both files again picks up where this stopped.`,
         };
-        changed();
-        return;
-      }
-      state = { step: 'writing', done: start + batch.length, total: rows.length };
-    }
-    changed();
-    state = { step: 'done', written: rows.length };
   }
 
   const plural = (count: number, one: string, many = `${one}s`) =>
