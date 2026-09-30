@@ -9,7 +9,7 @@
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
-  import { linkedDeviceRows } from './linkedDevices';
+  import { syncedDeviceRows } from './linkedDevices';
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
@@ -417,7 +417,7 @@
     return 'computer';
   };
   const listedDevices = $derived(
-    linkedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
+    syncedDeviceRows(devices, links.list, links.shared, link?.libraryKey),
   );
 
   /**
@@ -504,8 +504,6 @@
       );
       if (row.device.seen) status.push(`seen ${day(row.device.seen)}`);
     }
-    for (const linked of row.links)
-      status.push(`linked to this browser${linked.linkedAt ? ` ${day(linked.linkedAt)}` : ''}`);
     for (const shared of row.shared) {
       const relation =
         shared.libraryKey === link?.libraryKey
@@ -516,6 +514,11 @@
       status.push(`${relation} ${day(shared.at)}`);
     }
     return status.join(' · ');
+  };
+
+  const libraryLinkStatus = (linked: Link): string => {
+    const status = linked.inboxKey === link?.inboxKey ? 'Currently open' : 'Saved link';
+    return `${status}${linked.linkedAt ? ` · linked ${day(linked.linkedAt)}` : ''}`;
   };
 </script>
 
@@ -815,16 +818,6 @@
                 onconfirm={() => void removeDevice(row.device!.id)}
               />
             {/if}
-            {#each row.links as linked (linked.inboxKey)}
-              <Confirm
-                label="Unlink this browser"
-                ariaLabel="Unlink this browser from {row.name}"
-                question="Unlink this browser from {linked.name ?? 'this Apple TV'}?"
-                detail="This browser stops opening its library. The TV keeps running."
-                confirmLabel="Unlink browser"
-                onconfirm={() => unlink(linked)}
-              />
-            {/each}
             {#each row.shared as shared (shared.name + shared.at)}
               <button
                 type="button"
@@ -843,6 +836,39 @@
       <p class="foot">
         Forgetting a handoff only stops listing it here — the device keeps the library key it was
         given.
+      </p>
+    {/if}
+
+    {#if links.list.length}
+      <h3>Libraries this browser opens</h3>
+      <ul class="list">
+        {#each links.list as linked (linked.inboxKey)}
+          {@const current = linked.inboxKey === link?.inboxKey}
+          <li class="line">
+            {@render icon('tv')}
+            <span class="label"
+              >{linked.name ?? 'Apple TV library'}<small>{libraryLinkStatus(linked)}</small></span
+            >
+            <Confirm
+              label={current ? 'Stop using this library' : 'Forget link'}
+              ariaLabel={current
+                ? `Stop using ${linked.name ?? 'this Apple TV'}’s library`
+                : `Forget the link to ${linked.name ?? 'this Apple TV'}`}
+              question={current
+                ? `Stop using ${linked.name ?? 'this Apple TV'}’s library in this browser?`
+                : `Forget the link to ${linked.name ?? 'this Apple TV'}?`}
+              detail={current
+                ? 'This browser will no longer open this library. The Apple TV and its other linked devices keep running.'
+                : 'This browser forgets the saved link. The Apple TV and its other linked devices keep running.'}
+              confirmLabel={current ? 'Stop using library' : 'Forget link'}
+              onconfirm={() => unlink(linked)}
+            />
+          </li>
+        {/each}
+      </ul>
+      <p class="foot">
+        These are this browser’s saved ways into libraries. A linked date is when access was paired,
+        not when an Apple TV was last seen, and it does not affect Library v3 readiness.
       </p>
     {/if}
 

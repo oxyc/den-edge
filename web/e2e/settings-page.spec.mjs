@@ -133,17 +133,24 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(
         devices.getByRole('heading', { name: 'Linked to this browser', exact: true }),
       ).toHaveCount(0);
-      // The TV link and handoff are folded into their current-library device rows, with both actions retained.
+      await expect(
+        devices.getByRole('heading', { name: 'Libraries this browser opens', exact: true }),
+      ).toBeVisible();
+      // A synced device and this browser's credential for opening its library are separate records and actions.
       const listed = devices.getByRole('listitem');
-      const tv = listed.filter({ hasText: 'Living Room TV' });
-      await expect(tv).toHaveCount(1);
+      const tv = listed
+        .filter({ hasText: 'Living Room TV' })
+        .filter({ hasText: 'Apple TV · seen' });
       await expect(tv).toContainText('Apple TV · seen');
-      await expect(tv).toContainText('linked to this browser');
       await expect(
         tv.getByRole('button', { name: 'Remove Living Room TV from list' }),
       ).toBeVisible();
+      const tvLink = listed
+        .filter({ hasText: 'Living Room TV' })
+        .filter({ hasText: 'Currently open · linked' });
+      await expect(tvLink).toContainText('Currently open · linked');
       await expect(
-        tv.getByRole('button', { name: 'Unlink this browser from Living Room TV' }),
+        tvLink.getByRole('button', { name: 'Stop using Living Room TV’s library' }),
       ).toBeVisible();
       const mac = listed.filter({ hasText: 'Mac' });
       await expect(mac).toHaveCount(1);

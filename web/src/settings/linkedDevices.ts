@@ -76,3 +76,15 @@ export function linkedDeviceRows(
 
   return rows;
 }
+
+/** Rows that represent devices known to the shared library, not this browser's local credentials for opening one. */
+export function syncedDeviceRows(
+  devices: readonly DeviceEntry[],
+  links: readonly Link[],
+  shared: readonly Shared[],
+  currentLibraryKey?: string,
+): LinkedDeviceRow[] {
+  return linkedDeviceRows(devices, links, shared, currentLibraryKey).filter(
+    (row) => row.device !== undefined || row.shared.length > 0,
+  );
+}

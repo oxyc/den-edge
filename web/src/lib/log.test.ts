@@ -124,6 +124,22 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('keeps an acknowledged write before it returns so an immediate reload cannot restore stale data', async () => {
+    const server = await edge([row(1)]);
+    const { storage } = memoryStorage();
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, vault))!;
+
+    await log.write(row(2));
+
+    const offline: typeof fetch = async () => {
+      throw new TypeError('offline');
+    };
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, offline, storage, vault))!;
+    expect(reopened.fromCache).toBe(true);
+    expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
+  });
+
   it('advertises wire 3 and the generation on every library request', async () => {
     const server = await edge([row(1)]);
     const requests: RequestInit[] = [];

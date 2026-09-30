@@ -845,7 +845,14 @@ export class LibraryLog {
     const run = this.writes.then(() => this.writeSerial(local, outcome));
     this.writes = run.catch(() => null);
     const saved = await run;
-    if (saved && kept) this.discard(kept);
+    if (saved) {
+      // A return visit opens the acknowledged snapshot before it reaches den-edge. Keep the applied row there before
+      // dropping its recovery copy, or an immediate reload briefly restores the older row and an offline reload loses
+      // the edit altogether.
+      this.persist();
+      await this.saving;
+      if (kept) this.discard(kept);
+    }
     return saved ?? (kept ? this.project(local) : null);
   }
 
