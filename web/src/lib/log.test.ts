@@ -105,6 +105,113 @@ function memoryStorage() {
 }
 
 describe('LibraryLog', () => {
+  it('advertises wire 3 and the generation on every library request', async () => {
+    const server = await edge([row(1)]);
+    const requests: RequestInit[] = [];
+    const recording: typeof fetch = async (input, init = {}) => {
+      requests.push(init);
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, recording, undefined, null))!;
+    await log.write(row(2));
+    await log.forget();
+    expect(requests.length).toBeGreaterThan(2);
+    for (const request of requests) {
+      expect(request.headers).toMatchObject({ 'x-den-wire': '3', 'x-den-generation': '0' });
+    }
+  });
+
+  it('remembers the highest wire minimum and exposes a future upgrade fence', async () => {
+    const server = await edge([row(1)]);
+    const { storage } = memoryStorage();
+    const future: typeof fetch = async (input, init) => {
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '4');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, future, storage, null))!;
+    expect(log.wireMinimum).toBe(4);
+    expect(log.upgradeRequired).toBe(4);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, null))!;
+    expect(reopened.wireMinimum).toBe(4);
+  });
+
+  it('keeps a settings-style row across a generation or rewrite refusal', async () => {
+    const server = await edge([row(1)]);
+    const { storage } = memoryStorage();
+    let refusal: 'generation_changed' | 'rewrite_in_progress' | null = 'generation_changed';
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST' && refusal) {
+        const code = refusal;
+        refusal = null;
+        return new Response(JSON.stringify({ error: code }), { status: 409 });
+      }
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, storage, null))!;
+    expect(await log.write(row(2)), 'durable locally').not.toBeNull();
+    expect(log.pendingActions).toBe(1);
+    await log.refresh();
+    expect(log.pendingActions).toBe(0);
+    expect(log.title({ type: 'movie', id: 2 })).toBeDefined();
+  });
+
+  it('rewrites a web-only v2 library atomically into den-core v3 rows', async () => {
+    const episode: EpisodeRow = {
+      kind: 'ep',
+      schema: 2,
+      title: { type: 'tv', id: 95396 },
+      season: 1,
+      episode: 2,
+      progress: { value: 1, at: at(2000), viewing: 0 },
+    };
+    const server = await edge([row(95396, { title: { type: 'tv', id: 95396 } }), episode]);
+    const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
+    let generation = 'old';
+    let staged: { k: string; v: string }[] = [];
+    const requests: { path: string; init: RequestInit }[] = [];
+    const connection: typeof fetch = async (input, init = {}) => {
+      const path = new URL(String(input), 'https://den.example').pathname;
+      requests.push({ path, init });
+      const headers = new Headers({
+        'x-den-generation': generation,
+        'x-den-wire-min': generation === 'old' ? '2' : '3',
+      });
+      if (path.endsWith('/rewrite') && init.method === 'POST')
+        return new Response(JSON.stringify({ rewrite: 'stage', base: 2 }), { headers });
+      if (path.endsWith('/rewrite/stage/rows') && init.method === 'POST') {
+        staged.push(
+          ...(JSON.parse(String(init.body)) as { writes: { k: string; v: string }[] }).writes,
+        );
+        return new Response('{}', { headers });
+      }
+      if (path.endsWith('/rewrite/stage/commit') && init.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({ base: 2, wireMin: 3 });
+        server.stored.clear();
+        staged.forEach((write, index) => server.stored.set(write.k, { ...write, seq: index + 1 }));
+        generation = 'new';
+        headers.set('x-den-generation', generation);
+        headers.set('x-den-wire-min', '3');
+        return new Response('{}', { headers });
+      }
+      const response = await server.fetchImpl(input, init);
+      const body = (await response.json()) as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, generation }), {
+        status: response.status,
+        headers,
+      });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, memoryStorage().storage, null))!;
+    expect(await log.switchWebOnly()).toBe(true);
+    expect(log.wireMinimum).toBe(3);
+    const oldEpisodeKey = (await seal(keys, episode)).k;
+    expect(staged.map(({ k }) => k)).not.toContain(oldEpisodeKey);
+    expect(staged).toHaveLength(2); // The rec plus den-core's replacement wat row.
+    expect(requests.filter(({ path }) => path.endsWith('/rewrite/stage/rows'))).toHaveLength(1);
+    expect(requests.at(-1)?.init.headers).toMatchObject({ 'x-den-generation': 'new' });
+  });
+
   /**
    * The default fetch is kept on the instance and later called as `this.fetchImpl(…)` — a METHOD call,
    * and a browser's `fetch` refuses one whose `this` is anything but the window. So every write threw
