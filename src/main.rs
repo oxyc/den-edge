@@ -832,7 +832,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let client = tokio::spawn(tokio::net::TcpStream::connect(addr));
         let (server, _) = listener.accept().await.unwrap();
-        client.await.unwrap().unwrap();
+        let client = client.await.unwrap().unwrap();
 
         bound_connection_buffers(&server).unwrap();
         let socket = socket2::SockRef::from(&server);
@@ -842,6 +842,7 @@ mod tests {
         assert!(
             socket.recv_buffer_size().unwrap() <= CONNECTION_RECV_BUFFER * SOCKET_BUFFER_ACCOUNTING_FACTOR
         );
+        drop(client);
     }
 
     /// A client that sends half a request head must not hold shutdown open past the grace.
