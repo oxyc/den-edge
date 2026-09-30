@@ -127,11 +127,52 @@ export interface SettingsRow {
   [unknown: string]: unknown;
 }
 
-export type Row = TitleRow | EpisodeRow | SettingsRow;
+export interface WatchRegister {
+  imported: boolean;
+  progress?: Progress;
+  plays: Record<string, number>;
+  cleared: [number, Stamp] | null;
+  [unknown: string]: unknown;
+}
+
+/** Thirty-two episode registers (or a film's register 0), `wat:<type>:<id>:<season>:<block>`. */
+export interface WatchRow {
+  kind: 'wat';
+  schema: 3;
+  title: { type: MediaType; id: number };
+  season: number;
+  block: number;
+  seasonReset: Stamp | null;
+  entries: Record<string, WatchRegister>;
+  [unknown: string]: unknown;
+}
+
+/** Provider settlement entries. Their tuple shape is interpreted only by den-core. */
+export interface ReceiptRow {
+  kind: 'snt';
+  schema: 3;
+  provider: string;
+  account: string;
+  target: string;
+  entries: Record<string, unknown>;
+  [unknown: string]: unknown;
+}
+
+export type Row = TitleRow | EpisodeRow | SettingsRow | WatchRow | ReceiptRow;
 
 /** The name a row's key is the HMAC of. */
 export function rowName(row: Row): string {
   if (row.kind === 'set') return `set:${row.name}`;
+  if (row.kind === 'wat') return `wat:${row.title.type}:${row.title.id}:${row.season}:${row.block}`;
+  if (row.kind === 'snt') {
+    if (row.target.startsWith('wat:')) return `snt:${row.provider}:${row.account}:${row.target}`;
+    return syncPolicy<string>({
+      op: 'receipt_name',
+      provider: row.provider,
+      account: row.account,
+      target: row.target,
+    });
+  }
   const title = `${row.title.type}:${row.title.id}`;
   return row.kind === 'rec' ? `rec:${title}` : `ep:${title}:${row.season}:${row.episode}`;
 }
@@ -147,6 +188,7 @@ const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
 export function believe<T extends Row>(row: T, now = Date.now()): T {
   const fix = (stamp: Stamp): Stamp => (stamp[0] > now + FUTURE_TOLERANCE_MS ? ZERO_STAMP : stamp);
   const fixed = <V>(s: Stamped<V>): Stamped<V> => ({ ...s, at: fix(s.at) });
+  if (row.kind === 'wat' || row.kind === 'snt') return row;
   if (row.kind === 'ep') return { ...row, progress: { ...row.progress, at: fix(row.progress.at) } };
   if (row.kind === 'set') {
     return {
@@ -204,7 +246,13 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
     bytes.slice(12),
   );
   const parsed = JSON.parse(new TextDecoder().decode(plain)) as { kind?: unknown };
-  if (parsed.kind !== 'rec' && parsed.kind !== 'ep' && parsed.kind !== 'set') {
+  if (
+    parsed.kind !== 'rec' &&
+    parsed.kind !== 'ep' &&
+    parsed.kind !== 'set' &&
+    parsed.kind !== 'wat' &&
+    parsed.kind !== 'snt'
+  ) {
     throw new Error(`unknown row kind ${String(parsed.kind)}`);
   }
   const row = parsed as Row;
@@ -216,6 +264,7 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
 
 /** The newest stamp in a row. */
 export function newest(row: Row): Stamp {
+  if (row.kind === 'wat' || row.kind === 'snt') return syncPolicy<Stamp>({ op: 'newest', row });
   const stamps =
     row.kind === 'ep'
       ? [row.progress.at]
@@ -243,6 +292,10 @@ export function mergeEpisode(a: EpisodeRow, b: EpisodeRow): EpisodeRow {
 /** Per setting, the later stamp; a setting only one version has is kept. */
 export function mergeSettings(a: SettingsRow, b: SettingsRow): SettingsRow {
   return syncPolicy<SettingsRow>({ op: 'merge', a, b });
+}
+
+export function mergeV3<T extends WatchRow | ReceiptRow>(a: T, b: T): T {
+  return syncPolicy<T>({ op: 'merge', a, b });
 }
 
 export function fromHex(text: string): Uint8Array<ArrayBuffer> {
