@@ -117,7 +117,7 @@ describe('recommendationReason', () => {
     ['profile', 'Fits your viewing taste'],
     ['people', 'Cast and creators you like'],
     ['franchise', 'From a franchise you like'],
-    ['arrived', 'New on your services'],
+    ['arrived', 'New on streaming'],
     ['recent', 'Recently released'],
     ['upcoming', 'Coming soon'],
     ['timely', 'New or coming soon'],
