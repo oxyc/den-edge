@@ -24,7 +24,7 @@ if (invited) {
 }
 
 // Home's billboard for everyone, asked now rather than once the app has found atlas and opened the library.
-startBillboard(location.pathname);
+startBillboard(location.pathname, !!links.current);
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

@@ -192,7 +192,10 @@ async fn serve_file(
         };
         if let Some(scope) = scope {
             let day = crate::cache::iso_date(SystemTime::now());
-            let link = format!("</atlas/recommend/{scope}.json?day={day}>; rel=preload; as=fetch");
+            // `crossorigin` gives the preload the credentials mode of `main.ts`'s plain `fetch()`. Without it the
+            // browser refuses the preload for that fetch and asks the same address a second time.
+            let link =
+                format!("</atlas/recommend/{scope}.json?day={day}>; rel=preload; as=fetch; crossorigin");
             if let Ok(value) = HeaderValue::from_str(&link) {
                 resp.headers_mut().insert(header::LINK, value);
             }
@@ -940,7 +943,8 @@ mod tests {
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
         let link = root.headers()[header::LINK].to_str().unwrap();
         assert!(link.starts_with("</atlas/recommend/home.json?day="));
-        assert!(link.ends_with(">; rel=preload; as=fetch"));
+        // Without `crossorigin` the browser refuses the preload for `main.ts`'s fetch and asks twice (#192).
+        assert!(link.ends_with(">; rel=preload; as=fetch; crossorigin"));
         assert!(body_text(root).await.contains("<title>Den</title>"));
 
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;

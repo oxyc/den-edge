@@ -1754,6 +1754,40 @@ test('a guest paints the billboard from the daily GET and never POSTs a library'
   }
 });
 
+// #192: a member's Home asks for its billboard and each fan list once. A build re-run while Home loads would send
+// every one of them again.
+test('a member’s Home asks for its billboard and each fan list once', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await setup(page, {
+      atlasGate: Promise.resolve(),
+      billboard: {
+        version: 1,
+        slides: [
+          { type: 'movie', id: 501 },
+          { type: 'series', id: 701 },
+        ],
+      },
+    });
+    const asked = [];
+    page.on('request', (request) => {
+      const { pathname } = new URL(request.url());
+      if (/\/atlas\/(recommend|index\/suggest)\//.test(pathname)) asked.push(request.url());
+    });
+    await page.goto(`${FIXTURE}?fixtureWatched=101,102`);
+    await expect(active(page).locator('.billboard .slide').first()).toContainText('Film 501');
+    await expect.poll(() => asked.filter((url) => url.includes('/suggest/')).length).toBe(2);
+    await page.waitForTimeout(1000);
+    expect(asked.filter((url, i) => asked.indexOf(url) !== i)).toEqual([]);
+    expect(asked.filter((url) => url.includes('/recommend/'))).toHaveLength(1);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('immediate search cancellation returns Home during its opening animation', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
