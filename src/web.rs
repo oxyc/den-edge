@@ -178,8 +178,26 @@ async fn serve_file(
     } else {
         Identity::Disk(opened)
     };
-    let resp =
+    let mut resp =
         encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await;
+    // A cold browser can ask for the shared billboard while it is still downloading/parsing the app bundle. The
+    // service worker deliberately strips this header from the shell it keeps: tomorrow's page must not preload
+    // yesterday's day-keyed URL. A warm visit starts the same request at the top of `main.ts` instead.
+    if shell {
+        let scope = match path {
+            "/" | "/index.html" => Some("home"),
+            "/movies" => Some("movies"),
+            "/series" => Some("series"),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            let day = crate::cache::iso_date(SystemTime::now());
+            let link = format!("</atlas/recommend/{scope}.json?day={day}>; rel=preload; as=fetch");
+            if let Ok(value) = HeaderValue::from_str(&link) {
+                resp.headers_mut().insert(header::LINK, value);
+            }
+        }
+    }
     (if shell { "shell" } else { "asset" }, resp)
 }
 
@@ -920,6 +938,9 @@ mod tests {
         assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
         assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+        let link = root.headers()[header::LINK].to_str().unwrap();
+        assert!(link.starts_with("</atlas/recommend/home.json?day="));
+        assert!(link.ends_with(">; rel=preload; as=fetch"));
         assert!(body_text(root).await.contains("<title>Den</title>"));
 
         let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
@@ -942,6 +963,11 @@ mod tests {
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
         assert!(body_text(route).await.contains("<title>Den</title>"), "an app route gets the shell");
+        assert!(!h.send("GET", "/movies/603", None, &[]).await.headers().contains_key(header::LINK));
+        assert!(h.send("GET", "/movies", None, &[]).await.headers()[header::LINK]
+            .to_str()
+            .unwrap()
+            .contains("/recommend/movies.json?day="));
         assert_eq!(h.send("GET", "/assets/missing.js", None, &[]).await.status(), StatusCode::NOT_FOUND);
     }
 

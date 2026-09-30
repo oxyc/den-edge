@@ -1,26 +1,16 @@
-// Home's billboard as atlas ranks it (`POST /recommend`, den-atlas). This page sends what its library holds and says
-// about taste, the household's hide rules, and the TMDB lists it already fetched for its rows; atlas answers with the
-// titles to show, best first, and this page only draws them. An atlas without the route — or out of reach — answers
-// nothing, and the caller ranks here instead.
+// Home's billboard as atlas ranks it once per UTC day. Everyone reads the same cacheable pool; a browser with a
+// library moves titles found in the public "fans of" rows for its strongest titles upward, without disclosing the
+// library in a recommendation request.
 
 import type { MediaType, Title } from './library';
-import type { Prefs } from './prefs';
 import { relayFetch } from './relayFetch';
 import { ATLAS } from './scout';
-import { GUEST_PICKS } from './services';
 
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
 export interface Weighted {
   ref: { type: MediaType; id: number };
   weight: number;
   at: number;
-}
-
-/** One of the lists this page fetched, in the order it offers them. */
-export interface OfferedList {
-  titles: Title[];
-  /** Whether the list is itself a ranking (trending), so a place in it says something. */
-  ranked: boolean;
 }
 
 export interface Slide {
@@ -68,107 +58,6 @@ const REASONS: Readonly<Record<string, string>> = {
 export const recommendationReason = (why: RecommendationWhy | undefined): string | undefined =>
   why?.reason ? REASONS[why.reason] : undefined;
 
-/** What atlas calls a series. */
-const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
-
-/** What TMDB said about a title. atlas reads it only where it knows nothing itself. */
-function hintOf(title: Title) {
-  const tmdbRating =
-    title.ratingSource === 'tmdb' &&
-    typeof title.rating === 'number' &&
-    Number.isFinite(title.rating) &&
-    title.rating > 0 &&
-    title.rating <= 10
-      ? title.rating
-      : undefined;
-  return {
-    // For a library title outside Atlas's corpus, these let /recommend build a transient semantic vector instead
-    // of losing all plot-taste evidence. They are public TMDB identity, never persisted by Atlas.
-    title: title.title,
-    year: title.year,
-    releaseDate: title.releaseDate,
-    genreIds: title.genreIds,
-    originalLanguage: title.originalLanguage,
-    countries: title.countries,
-    popularity: title.popularity,
-    ...(tmdbRating !== undefined
-      ? {
-          rating: tmdbRating,
-          ...(typeof title.votes === 'number' && Number.isInteger(title.votes) && title.votes >= 0
-            ? { votes: title.votes }
-            : {}),
-        }
-      : {}),
-    adult: title.adult,
-    imdbId: title.imdbId,
-  };
-}
-
-/**
- * The request for a billboard on the page showing `facet` (Home: null). A library title TMDB has named goes with what
- * TMDB said about it: atlas holds a subset of titles, and until its facts cover what a household watches, a library
- * title it has never seen says nothing about taste without one.
- */
-export function recommendBody({
-  facet,
-  prefs,
-  library,
-  named = new Map(),
-  owned,
-  lists,
-  now = new Date(),
-}: {
-  facet: MediaType | null;
-  prefs: Prefs;
-  library: Weighted[];
-  /** The library's titles TMDB has named, by `type:id`. */
-  named?: Map<string, Title>;
-  /** Every title the library holds, by `type:id`. */
-  owned: Set<string>;
-  lists: OfferedList[];
-  now?: Date;
-}) {
-  return {
-    version: 1,
-    surface: facet === 'movie' ? 'movies' : facet === 'tv' ? 'series' : 'home',
-    now: now.toISOString(),
-    // Home uses these same six picks until the household saves a selection. Keep atlas's ranking input in
-    // step with the shelves on screen; an explicitly saved empty array remains empty.
-    services: prefs.servicesConfigured ? prefs.services : GUEST_PICKS,
-    library: library.map(({ ref, weight, at }) => {
-      const title = named.get(`${ref.type}:${ref.id}`);
-      return {
-        type: atlasType(ref.type),
-        id: ref.id,
-        weight,
-        at,
-        ...(title ? { hint: hintOf(title) } : {}),
-      };
-    }),
-    owned: [...owned].flatMap((key) => {
-      const [type, id] = key.split(':');
-      const numeric = Number(id);
-      return (type === 'movie' || type === 'tv') && Number.isInteger(numeric)
-        ? [{ type: atlasType(type), id: numeric }]
-        : [];
-    }),
-    hide: {
-      minYear: prefs.minReleaseYear,
-      genres: [...prefs.excludedGenres],
-      languages: [...prefs.excludedLanguages],
-      anime: prefs.hideAnime,
-    },
-    candidates: lists.flatMap(({ titles, ranked }) =>
-      titles.map((title, rank) => ({
-        type: atlasType(title.type),
-        id: title.id,
-        ...(ranked ? { rank, of: titles.length } : {}),
-        hint: hintOf(title),
-      })),
-    ),
-  };
-}
-
 const WHY_NUMBERS = [
   'score',
   'fit',
@@ -207,34 +96,6 @@ function slidesOf(value: unknown): Slide[] {
       return [{ type, id: slide.id, imdbId, why: whyOf(slide.why) }];
     },
   );
-}
-
-export interface Recommended {
-  /** The slides, best first. */
-  slides: Slide[];
-  /** Titles atlas knew nothing about, most worth describing first: described, they can be ranked. */
-  unjudged: Slide[];
-}
-
-/** atlas's answer for `body`; null where atlas can't rank (no route, out of reach, a malformed answer). */
-export async function recommend(
-  base: string,
-  body: ReturnType<typeof recommendBody>,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<Recommended | null> {
-  try {
-    const res = await fetchImpl(`${base}/recommend`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return null;
-    const answer = (await res.json()) as { slides?: unknown; unjudged?: unknown };
-    if (!Array.isArray(answer.slides)) return null;
-    return { slides: slidesOf(answer.slides), unjudged: slidesOf(answer.unjudged) };
-  } catch {
-    return null;
-  }
 }
 
 /** The billboard's scope for the page showing `facet` (Home: null), as `GET /recommend/<scope>.json` names it. */
@@ -291,6 +152,75 @@ export function recommendForEveryone(
   const early = started.get(url);
   started.delete(url);
   return early ?? askEveryone(url, fetchImpl);
+}
+
+const PERSONAL_SEEDS = 10;
+const PERSONAL_REQUESTS = 4;
+const FAN_LIMIT = 100;
+const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
+
+/** Read one public, long-lived "fans of this title" row. Older atlases may answer same-type `ids` only. */
+async function fansOf(base: string, seed: Weighted, fetchImpl: typeof fetch): Promise<Slide[]> {
+  const kind = seed.ref.type === 'tv' ? 'series' : 'movie';
+  try {
+    const res = await fetchImpl(
+      `${base}/index/suggest/${kind}/${seed.ref.id}.json?skip=0&limit=${FAN_LIMIT}`,
+    );
+    if (!res.ok) return [];
+    const answer = (await res.json()) as { mixed?: unknown; ids?: unknown };
+    if (Array.isArray(answer.mixed)) return slidesOf(answer.mixed);
+    return (Array.isArray(answer.ids) ? answer.ids : []).flatMap((id): Slide[] =>
+      typeof id === 'number' && Number.isInteger(id) ? [{ type: seed.ref.type, id }] : [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Re-rank the shared pool locally from public per-title affinity rows. The shared order remains the quality,
+ * freshness and buzz prior; fan matches add a bounded reciprocal-rank lift. At most four requests run at once so
+ * opening Home cannot occupy the relay's whole request budget. A missing/older atlas simply leaves the shared order.
+ */
+export async function personalizeEveryone(
+  base: string,
+  slides: Slide[],
+  library: Weighted[],
+  owned: ReadonlySet<string>,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Slide[]> {
+  const candidates = slides.filter((slide) => !owned.has(slideKey(slide)));
+  const seeds = library
+    .filter(({ weight }) => weight > 0)
+    .sort((a, b) => b.weight - a.weight || b.at - a.at)
+    .slice(0, PERSONAL_SEEDS);
+  if (!seeds.length || !candidates.length) return candidates;
+
+  const affinity = new Map<string, number>();
+  const queue = seeds.slice();
+  const work = async () => {
+    for (let seed = queue.shift(); seed; seed = queue.shift()) {
+      const fans = await fansOf(base, seed, fetchImpl);
+      fans.forEach((slide, rank) => {
+        const key = slideKey(slide);
+        affinity.set(key, (affinity.get(key) ?? 0) + seed.weight / (rank + 5));
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PERSONAL_REQUESTS, seeds.length) }, work));
+
+  return candidates
+    .map((slide, rank) => ({
+      slide,
+      rank,
+      lift: affinity.get(slideKey(slide)) ?? 0,
+      // A slowly declining prior keeps a weak affinity hit from discarding atlas's quality/freshness ranking.
+      score: 1 / (1 + rank * 0.05) + (affinity.get(slideKey(slide)) ?? 0),
+    }))
+    .sort((a, b) => b.score - a.score || a.rank - b.rank)
+    .map(({ slide, lift }) =>
+      lift > 0 ? { ...slide, why: { ...slide.why, reason: 'profile' } } : slide,
+    );
 }
 
 /**

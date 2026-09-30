@@ -79,8 +79,7 @@
   import {
     billboardScope,
     nameSlides,
-    recommend,
-    recommendBody,
+    personalizeEveryone,
     recommendForEveryone,
     type RecommendedTitle,
   } from './lib/recommend';
@@ -178,9 +177,7 @@
             session,
             untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
             key,
-          ).then(() => {
-            if (!disposed) libraryNamed = true;
-          });
+          );
         });
       } else shelvesReady = true;
     });
@@ -689,10 +686,9 @@
     !isHidden(title, prefs, { requirePoster: false }) &&
     !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
-   * Every title the library holds with how much it says about taste, straight from the log: what atlas ranks the
-   * billboard against (`recommendBody`). Watched and part-watched titles are a verdict and count full; a watchlisted
-   * one is an intention and counts for less; a reaction is the one thing said outright, so it counts for more than
-   * either, and a dislike counts against. Ids and weights need no names, so nothing here waits for TMDB.
+   * Every title the library holds with how much it says about taste. Watched and part-watched titles are a verdict
+   * and count full; a watchlisted one is an intention and counts for less; a reaction is the one thing said outright,
+   * so it counts for more than either, and a dislike counts against. Ids and weights need no names.
    */
   const weighted = $derived.by(() => {
     void version;
@@ -723,11 +719,6 @@
           ];
     });
   });
-  /**
-   * Whether TMDB has named the whole library, watched history included: atlas is asked again once it has, since
-   * it reads a title it doesn't hold by the name TMDB gives it.
-   */
-  let libraryNamed = $state(false);
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
@@ -891,7 +882,7 @@
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
-   * What the billboard cycles. Not a row: a pool of its own, ranked by atlas (`POST /recommend`) — what is being
+   * What the billboard cycles. Not a row: a shared daily pool ranked by atlas and personalized locally — what is being
    * watched now, what is new or still to come, and what has just landed on this household's own services, weighted
    * towards the library's taste and away from anything it already holds.
    */
@@ -938,124 +929,68 @@
       return;
     const here = atlas;
     if (!tmdbKey) return;
-    // atlas needs no profile read here first: it knows the library's titles by id, so it is asked as soon as the log
-    // is open — and once more when TMDB has named the whole library, which is what atlas reads a title it has never
-    // seen by.
+    // The shared pool needs no profile read: ask as soon as discovery and TMDB naming are available. `null` is a
+    // guest with no log; a paired/local library is ready when `applied` is not null.
     if (!here) {
       untrack(() => buildTrending(++billboardRun));
       return;
     }
-    void libraryNamed;
-    if (libraryOpen) untrack(() => buildRecommended(here));
+    if (log === null || libraryOpen) untrack(() => buildRecommended(here));
   });
 
   /** Whether the log's rows have been read: once, rather than every time they change. */
   const libraryOpen = $derived(applied !== null);
 
   /**
-   * The billboard as atlas ranks it (`lib/recommend.ts`). The TMDB lists go along as candidates — the rows below
-   * fetch them anyway — and what atlas answers with is drawn: named from those lists where they hold it, and from
-   * TMDB where only atlas's own lists did. An atlas that can't rank leaves what is trending (`buildTrending`).
+   * Everyone starts with atlas's one cacheable ranking for this surface and UTC day. A library re-ranks that pool
+   * from its strongest titles' public "fans of" rows in the browser; guests simply keep atlas's order. Naming is in
+   * two waves so the lead's backdrop starts after one TMDB lookup instead of waiting for the slowest of twenty.
    */
   function buildRecommended(here: string) {
-    const table = rows;
     const type = facet;
     const key = tmdbKey;
     const run = ++billboardRun;
     const kept = keptBillboard(type);
-    // A library with nothing in it has no taste to send: everyone's billboard, one GET that Cloudflare and this
-    // browser keep for the day, asked at once rather than after the TMDB lists.
-    if (!weighted.length && !seeds.owned.size) {
-      void recommendForEveryone(here, billboardScope(type)).then(async (slides) => {
+    void recommendForEveryone(here, billboardScope(type))
+      .then(async (shared) => {
         if (run !== billboardRun) return;
-        if (!slides) {
+        if (!shared?.length) {
           buildTrending(run);
           return;
         }
+        // Do not put the affinity fan-out in front of first paint. Name atlas's shared lead while those public,
+        // cached rows arrive; the personalized order replaces it without blanking the billboard.
+        const personal = personalizeEveryone(here, shared, weighted, seeds.owned);
+        const sharedLead = shared.find((slide) => !seeds.owned.has(`${slide.type}:${slide.id}`));
         const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
-        // The first screenfuls only: each slide atlas names by id alone is one TMDB lookup.
-        const picked = await nameSlides(
-          slides.slice(0, EVERYONE_NAMED),
-          new Map(),
-          lookup,
-          LOOKUPS,
-        );
-        if (run !== billboardRun || !picked.length) return;
-        featured = picked;
+        const first = sharedLead
+          ? await nameSlides([sharedLead], new Map(), lookup, 1)
+          : ([] as RecommendedTitle[]);
+        if (run !== billboardRun) return;
+        if (first.length) {
+          // A member may already be looking at the kept personal lead. A guest's temporary TMDB fallback is not
+          // their billboard and must not stay ahead of the shared answer.
+          const lead = log ? featured[0] : undefined;
+          featured = keepLead(first, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
+        }
+        const slides = await personal;
+        if (run !== billboardRun || !slides.length) {
+          if (!slides.length) buildTrending(run);
+          return;
+        }
+        const wanted = slides.slice(0, EVERYONE_NAMED);
+        const known = new Map(first.map((title) => [titleKey(title), title] as const));
+        const picked = await nameSlides(wanted, known, lookup, LOOKUPS);
+        if (run !== billboardRun) return;
+        if (!picked.length) {
+          buildTrending(run);
+          return;
+        }
+        const lead = featured[0];
+        featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
         void log?.keep(kept, picked).catch(warnKeep);
-      });
-      return;
-    }
-    if (!table.length) return;
-    const row = (id: string) =>
-      table
-        .find((r) => r.id === id)
-        ?.load(1)
-        .catch(() => []) ?? Promise.resolve([]);
-    const feed = pages;
-    const trendingTv = feed
-      ? feed('/trending/tv/week', 'tv', {}, 1).catch(() => [])
-      : Promise.resolve([]);
-    void Promise.all([
-      row('trending'),
-      trendingTv,
-      row('new-releases'),
-      row('upcoming'),
-      row('popular'),
-    ])
-      .then(async ([hotMovies, hotSeries, fresh, soon, popular]) => {
-        const lists = [
-          { titles: hotMovies, ranked: true },
-          { titles: hotSeries, ranked: true },
-          { titles: [...fresh, ...soon, ...popular], ranked: false },
-        ];
-        const named = new Map(
-          (library?.records ?? [])
-            .filter((r) => r.title.title)
-            .map((r) => [titleKey(r.title), r.title] as const),
-        );
-        const ask = (offered: typeof lists) =>
-          recommend(
-            here,
-            recommendBody({
-              facet: type,
-              prefs,
-              library: weighted,
-              named,
-              owned: seeds.owned,
-              lists: offered,
-            }),
-          );
-        const first = await ask(lists);
-        if (run !== billboardRun) return;
-        if (!first) {
-          buildTrending(run);
-          return;
-        }
-        // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A local lookup for this build; nothing renders from it.
-        const known = new Map(
-          lists.flatMap(({ titles }) => titles.map((t) => [titleKey(t), t] as const)),
-        );
-        const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
-        const show = async (slides: typeof first.slides) => {
-          const picked = await nameSlides(slides, known, lookup, LOOKUPS);
-          if (run !== billboardRun || (!picked.length && featured.length)) return;
-          const lead = featured[0];
-          featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
-          // What is kept is this pick in its own order. Keeping `featured` kept the lead too, so a title that led
-          // once led every later visit, whatever atlas picked since.
-          if (picked.length) void log?.keep(kept, picked).catch(warnKeep);
-        };
-        await show(first.slides);
-        // What atlas has never seen it can't judge, and drops, however new it is: the likeliest of those are named
-        // from TMDB (which this browser caches) and offered again, described.
-        const described = await nameSlides(first.unjudged, known, lookup, LOOKUPS);
-        if (!described.length || run !== billboardRun) return;
-        for (const title of described) known.set(titleKey(title), title);
-        const again = await ask([...lists, { titles: described, ranked: false }]);
-        if (again && run === billboardRun) await show(again.slides);
       })
-      .catch(() => undefined);
+      .catch(() => buildTrending(run));
   }
 
   /**

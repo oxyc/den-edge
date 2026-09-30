@@ -26,6 +26,7 @@
       ? { query: r.query, type: r.type, chips: r.chips, traits: r.traits, order: r.order }
       : {};
   let people = $state<PeopleView>(untrack(() => peopleOf(route)));
+  const guest = new URL(location.href).searchParams.has('fixtureGuest');
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });
@@ -47,12 +48,12 @@
     settingsRevision: 0,
     displays: [],
     shapes: new Map(),
-    log,
-    opened: Promise.resolve(log),
+    log: guest ? null : log,
+    opened: Promise.resolve(guest ? null : log),
     routes: fetchRoutes,
     services: new SessionServices(fetchRoutes, () => {}),
   } as unknown as LibrarySession;
-  const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
+  const link = guest ? null : { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
 </script>
 
 <NavigationBar {route} query={route.page === 'people' ? (route.query ?? '') : query} />

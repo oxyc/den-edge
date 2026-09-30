@@ -34,7 +34,7 @@ const input = (page) =>
 // returning Home returns to the address the document was opened at.
 const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
 const HOME = /\/test\/nav-search\.html$/;
-async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
+async function setup(page, { atlasGate, catalogueGate, searchGate, billboard } = {}) {
   await guardNetwork(page);
   const queries = [];
   await page.route('**/routes', (r) => r.fulfill({ json: {} }));
@@ -49,6 +49,7 @@ async function setup(page, { atlasGate, catalogueGate, searchGate } = {}) {
   });
   // Once atlas is found it ranks the billboard itself: for this empty library, everyone's billboard (the GET).
   await page.route('**/atlas/recommend**', async (r) => {
+    if (billboard) return r.fulfill({ json: billboard });
     await catalogueGate;
     return r.fulfill({ json: { version: 1, slides: [] } });
   });
@@ -1715,6 +1716,39 @@ test('late discovery keeps the already visible billboard and selected slide', as
     await page.waitForTimeout(150);
     await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
     expect(await page.evaluate(() => window.heroBlanked)).toBe(false);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a guest paints the billboard from the daily GET and never POSTs a library', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
+    await setup(page, {
+      atlasGate: Promise.resolve(),
+      billboard: {
+        version: 1,
+        slides: [
+          { type: 'movie', id: 501 },
+          { type: 'series', id: 701 },
+        ],
+      },
+    });
+    const recommendationRequests = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/atlas/recommend'))
+        recommendationRequests.push({ method: request.method(), url: request.url() });
+    });
+    await page.goto(`${FIXTURE}?fixtureGuest=1`);
+    await expect.poll(() => recommendationRequests.length).toBe(1);
+    expect(recommendationRequests[0].method).toBe('GET');
+    expect(recommendationRequests[0].url).toMatch(
+      /\/atlas\/recommend\/home\.json\?day=\d{4}-\d{2}-\d{2}$/,
+    );
+    await expect(active(page).locator('.billboard .slide').first()).toContainText('Film 501');
   } finally {
     await browser.close();
   }
