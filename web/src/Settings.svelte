@@ -19,6 +19,7 @@
     readSyncedPrefs,
     readTrust,
     selfEntry,
+    forgetDevice,
     type PrefChanges,
   } from './settings/values';
   import { browserClock } from './lib/clock';
@@ -32,6 +33,11 @@
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { ensureSyncPolicy } from './lib/syncLoader';
+  import {
+    librarySwitchState,
+    switchBlockerText,
+    type LibrarySwitchState,
+  } from './lib/librarySwitch';
   import { tmdbKeyOf } from './lib/tmdb';
   import type { ConfigValue, SettingsRow } from './lib/wire';
 
@@ -45,6 +51,8 @@
   const clock = browserClock();
   let failure = $state<string | null>(null);
   let saving = $state(false);
+  let switching = $state(false);
+  let switchState = $state<LibrarySwitchState | null>(null);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
   let routes = $state<Routes>({});
   void fetchRoutes().then((fetched) => (routes = fetched));
@@ -76,6 +84,55 @@
   const devicesRow = $derived(group('devices'));
   const devices = $derived(readDevices(devicesRow));
   const disabled = $derived(!log || saving);
+
+  $effect(() => {
+    const listed = devices;
+    void version;
+    let cancelled = false;
+    void ensureSyncPolicy()
+      .then(() => {
+        if (!cancelled) switchState = librarySwitchState(listed, clock.device, Date.now());
+      })
+      .catch(() => {
+        if (!cancelled) switchState = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  async function performWebSwitch(): Promise<void> {
+    if (!log || !switchState?.performable || !switchState.webOnly) return;
+    switching = true;
+    failure = null;
+    try {
+      if (!(await log.switchWebOnly())) {
+        failure =
+          'The library changed while the switch was being prepared. Nothing was replaced; try again.';
+        return;
+      }
+      session.changed(true);
+      switchState = librarySwitchState(
+        readDevices(log.settings('devices')),
+        clock.device,
+        Date.now(),
+      );
+    } finally {
+      switching = false;
+    }
+  }
+
+  /** Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. */
+  async function removeLibraryDevice(id: string): Promise<void> {
+    if (!log || !(await write('devices', forgetDevice(id)))) return;
+    const suffix = `:${id}`;
+    for (const row of log.rows()) {
+      if (row.kind !== 'set' || !row.name.startsWith('handoff:') || !row.name.endsWith(suffix))
+        continue;
+      const cleared = Object.fromEntries(Object.keys(row.values).map((name) => [name, null]));
+      if (Object.keys(cleared).length && !(await write(row.name, cleared))) return;
+    }
+  }
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own
   // addons anything; den-atlas's statements stand in while its manifest can't be read or doesn't name them yet, since
@@ -190,6 +247,33 @@
       </p>
     {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
+    {#if log && devices.length && switchState}
+      <section class="banner" aria-label="Library v3">
+        <strong>Library v3</strong>
+        {#if log.wireMinimum >= 3}
+          <p>This library uses Library v3.</p>
+        {:else if switchState.performable && switchState.webOnly}
+          <p>This browser can switch this web-only library without changing tracker accounts.</p>
+          <button class="primary" disabled={switching} onclick={() => void performWebSwitch()}>
+            {switching ? 'Switching…' : 'Switch library'}
+          </button>
+        {:else if switchState.offered}
+          <p>The switch is offered when these items finish:</p>
+          <ul>
+            {#each switchState.blockers as blocker, index (`${blocker.device ?? 'library'}:${blocker.reason}:${index}`)}
+              <li>{switchBlockerText(blocker, devices)}</li>
+            {/each}
+          </ul>
+        {:else}
+          <p>The switch is not offered yet:</p>
+          <ul>
+            {#each switchState.blockers as blocker, index (`${blocker.device ?? 'library'}:${blocker.reason}:${index}`)}
+              <li>{switchBlockerText(blocker, devices)}</li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
 
     <ConnectionsSection
       {link}
@@ -203,6 +287,7 @@
       selfId={clock.device}
       {disabled}
       {write}
+      removeDevice={removeLibraryDevice}
     />
     <SharingSection {link} {plugins} {routes} ready={!!log} />
     <AssistantsSection />

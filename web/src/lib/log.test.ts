@@ -169,7 +169,7 @@ describe('LibraryLog', () => {
     const server = await edge([row(95396, { title: { type: 'tv', id: 95396 } }), episode]);
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     let generation = 'old';
-    let staged: { k: string; v: string }[] = [];
+    const staged: { k: string; v: string }[] = [];
     const requests: { path: string; init: RequestInit }[] = [];
     const connection: typeof fetch = async (input, init = {}) => {
       const path = new URL(String(input), 'https://den.example').pathname;

@@ -128,22 +128,53 @@ describe('synced prefs', () => {
       'aaaa000000000001.seen': { value: { int: 5000 }, at },
       'bbbb000000000002.name': { value: { string: 'Mac' }, at },
       'bbbb000000000002.seen': { value: { int: 9000 }, at },
+      'bbbb000000000002.format': { value: { int: 3 }, at },
+      'bbbb000000000002.facade': { value: { strings: [] }, at },
+      'bbbb000000000002.delivers': { value: { strings: [] }, at },
       'aaaa000000000001.pending': {
         value: { strings: ['https://addon.example/manifest.json'] },
         at,
       },
-      // Taken off the list: its name was cleared.
+      // An incomplete old removal still has an entry and must remain visible to the v3 readiness gate.
       'cccc000000000003.name': { value: null, at },
       'cccc000000000003.kind': { value: { string: 'browser' }, at },
     });
     expect(readDevices(devices)).toEqual([
-      { id: 'bbbb000000000002', name: 'Mac', kind: 'browser', seen: 9000, pending: [] },
+      {
+        id: 'bbbb000000000002',
+        name: 'Mac',
+        kind: 'browser',
+        seen: 9000,
+        pending: [],
+        format: 3,
+        facade: [],
+        delivers: [],
+        waiting: {},
+        connectedAt: {},
+        handoff: {},
+      },
       {
         id: 'aaaa000000000001',
         name: 'Apple TV',
         kind: 'tv',
         seen: 5000,
         pending: ['https://addon.example/manifest.json'],
+        facade: [],
+        delivers: [],
+        waiting: {},
+        connectedAt: {},
+        handoff: {},
+      },
+      {
+        id: 'cccc000000000003',
+        name: 'Device cccc000000000003',
+        kind: 'browser',
+        pending: [],
+        facade: [],
+        delivers: [],
+        waiting: {},
+        connectedAt: {},
+        handoff: {},
       },
     ]);
     const self = { id: 'bbbb000000000002', name: 'Mac', kind: 'browser' as const };
@@ -155,8 +186,11 @@ describe('synced prefs', () => {
       'bbbb000000000002.name': { string: 'Mac' },
       'bbbb000000000002.kind': { string: 'browser' },
       'bbbb000000000002.seen': { int: 9000 + SEEN_EVERY },
+      'bbbb000000000002.format': { int: 3 },
+      'bbbb000000000002.facade': { strings: [] },
+      'bbbb000000000002.delivers': { strings: [] },
     });
-    expect(Object.values(forgetDevice('aaaa000000000001'))).toEqual([null, null, null]);
+    expect(Object.keys(forgetDevice('aaaa000000000001'))).toHaveLength(13);
   });
 
   it('reads servers and pinned signing keys, and takes a key only when it is one', () => {

@@ -9,6 +9,11 @@ const device = (id: string, name: string, kind: 'tv' | 'browser', seen = 10): De
   kind,
   seen,
   pending: [],
+  facade: [],
+  delivers: [],
+  waiting: {},
+  connectedAt: {},
+  handoff: {},
 });
 const link = (inboxKey: string, name: string, libraryKey = 'current', deviceId?: string): Link => ({
   inboxKey,

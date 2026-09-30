@@ -103,34 +103,61 @@ export interface DeviceEntry {
   seen?: number;
   /** A TV's addons waiting for its approval, by manifest URL. */
   pending: string[];
+  /** Library wire understood by the device; absent is a pre-ready build. */
+  format?: number;
+  /** Tracker providers the device can operate. */
+  facade: string[];
+  /** Provider/account identities this device still delivers in v2 form. */
+  delivers: string[];
+  waiting: Record<string, number>;
+  connectedAt: Record<string, string>;
+  handoff: Record<string, string>;
 }
 
 /** Every device in `set:devices` that still names itself, most recently seen first. */
 export function readDevices(row: SettingsRow | undefined): DeviceEntry[] {
   const devices = new Map<string, Partial<DeviceEntry>>();
   for (const [name, stamped] of Object.entries(row?.values ?? {})) {
-    const match = /^([0-9a-z]+)\.(name|kind|seen|pending)$/i.exec(name);
+    const match =
+      /^([0-9a-z]+)\.(name|kind|seen|pending|format|facade|delivers|waiting:[^:]+|connectedAt:[^:]+|handoff:[^:]+)$/i.exec(
+        name,
+      );
     const value = stamped.value;
     if (!match || !value) continue;
-    const [, id = '', field] = match;
+    const [, id = '', field = ''] = match;
     const device = devices.get(id) ?? { id };
     if (field === 'name' && 'string' in value && value.string.trim()) device.name = value.string;
     if (field === 'kind' && 'string' in value)
       device.kind = value.string === 'tv' ? 'tv' : 'browser';
     if (field === 'seen' && 'int' in value) device.seen = value.int;
     if (field === 'pending' && 'strings' in value) device.pending = value.strings;
+    if (field === 'format' && 'int' in value) device.format = value.int;
+    if (field === 'facade' && 'strings' in value) device.facade = value.strings;
+    if (field === 'delivers' && 'strings' in value) device.delivers = value.strings;
+    if (field.startsWith('waiting:') && 'int' in value)
+      (device.waiting ??= {})[field.slice('waiting:'.length)] = value.int;
+    if (field.startsWith('connectedAt:') && 'string' in value)
+      (device.connectedAt ??= {})[field.slice('connectedAt:'.length)] = value.string;
+    if (field.startsWith('handoff:') && 'string' in value)
+      (device.handoff ??= {})[field.slice('handoff:'.length)] = value.string;
     devices.set(id, device);
   }
   return [...devices.values()]
     .flatMap((d): DeviceEntry[] =>
-      d.id && d.name
+      d.id
         ? [
             {
               id: d.id,
-              name: d.name,
+              name: d.name ?? `Device ${d.id}`,
               kind: d.kind ?? 'browser',
               seen: d.seen,
               pending: d.pending ?? [],
+              format: d.format,
+              facade: d.facade ?? [],
+              delivers: d.delivers ?? [],
+              waiting: d.waiting ?? {},
+              connectedAt: d.connectedAt ?? {},
+              handoff: d.handoff ?? {},
             },
           ]
         : [],
@@ -153,22 +180,41 @@ export function selfEntry(
     listed.name === self.name &&
     listed.kind === self.kind &&
     listed.seen !== undefined &&
-    now - listed.seen < SEEN_EVERY
+    now - listed.seen < SEEN_EVERY &&
+    listed.format === 3 &&
+    listed.facade.length === 0 &&
+    listed.delivers.length === 0
   )
     return null;
   return {
     [`${self.id}.name`]: { string: self.name },
     [`${self.id}.kind`]: { string: self.kind },
     [`${self.id}.seen`]: { int: now },
+    [`${self.id}.format`]: { int: 3 },
+    [`${self.id}.facade`]: { strings: [] },
+    [`${self.id}.delivers`]: { strings: [] },
   };
 }
 
 /** Takes a device off the list: it lists itself again when it next opens the library. */
-export const forgetDevice = (id: string): Record<string, null> => ({
-  [`${id}.name`]: null,
-  [`${id}.kind`]: null,
-  [`${id}.seen`]: null,
-});
+export const forgetDevice = (id: string): Record<string, null> =>
+  Object.fromEntries(
+    [
+      'name',
+      'kind',
+      'seen',
+      'pending',
+      'format',
+      'facade',
+      'delivers',
+      'connectedAt:simkl',
+      'connectedAt:trakt',
+      'waiting:simkl',
+      'waiting:trakt',
+      'handoff:simkl',
+      'handoff:trakt',
+    ].map((field) => [`${id}.${field}`, null]),
+  );
 
 /** The connected media servers in `set:servers`. */
 export function readServers(
