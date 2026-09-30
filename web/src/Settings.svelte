@@ -139,14 +139,27 @@
 
   /** Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. */
   async function removeLibraryDevice(id: string): Promise<void> {
-    if (!log || !(await write('devices', forgetDevice(id)))) return;
+    if (!log) return;
+    console.info('den: removing device from the library list', { device: id });
+    if (!(await write('devices', forgetDevice(id)))) {
+      console.warn('den: device removal was not saved', { device: id });
+      return;
+    }
     const suffix = `:${id}`;
     for (const row of log.rows()) {
       if (row.kind !== 'set' || !row.name.startsWith('handoff:') || !row.name.endsWith(suffix))
         continue;
       const cleared = Object.fromEntries(Object.keys(row.values).map((name) => [name, null]));
-      if (Object.keys(cleared).length && !(await write(row.name, cleared))) return;
+      if (Object.keys(cleared).length && !(await write(row.name, cleared))) {
+        console.warn('den: device removal saved, but its handoff cleanup was not saved', {
+          device: id,
+          handoff: row.name,
+        });
+        return;
+      }
     }
+    const removed = !readDevices(log.settings('devices')).some((device) => device.id === id);
+    console.info('den: device removal completed', { device: id, removed });
   }
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own

@@ -872,7 +872,18 @@ export class LibraryLog {
           body: JSON.stringify({ writes: [{ k, base, v }] }),
         });
         if (!res.ok) {
-          await this.failed(res, outcome);
+          const code = await this.failed(res, outcome);
+          if (code === 'generation_changed') {
+            const current = res.headers.get('x-den-generation');
+            if (current && current !== this.generation) {
+              console.warn(
+                `den: library generation changed during a write; retrying with ${current}`,
+              );
+              this.generation = current;
+              this.dirty = true;
+              continue;
+            }
+          }
           return null;
         }
         batch = (await res.json()) as Batch;
@@ -908,7 +919,7 @@ export class LibraryLog {
    * `REFUSALS` refuses the write itself, and sending it again gets the same answer: `outcome.refused`. Anything else
    * may pass.
    */
-  private async failed(res: Response, outcome?: Outcome): Promise<void> {
+  private async failed(res: Response, outcome?: Outcome): Promise<string | undefined> {
     if (res.status === 410) {
       this.moved = true;
       return;
@@ -917,7 +928,7 @@ export class LibraryLog {
     if (RETRYABLE_REFUSALS.has(code ?? '')) {
       if (code === 'upgrade_required') this.upgradeRequired = this.wireMin;
       this.refusal = code ?? String(res.status);
-      return;
+      return code;
     }
     const refusals = REFUSALS[res.status];
     if (!refusals) return;
@@ -931,6 +942,7 @@ export class LibraryLog {
     if (outcome) outcome.refused = true;
     this.refusal = code ?? String(res.status);
     console.warn(`den: den-edge refused a library write (${res.status} ${code ?? ''})`);
+    return code;
   }
 
   /**

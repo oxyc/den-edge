@@ -192,6 +192,42 @@ describe('LibraryLog', () => {
     expect(log.title({ type: 'movie', id: 2 })).toBeDefined();
   });
 
+  it('adopts the server generation and retries the refused write immediately', async () => {
+    const server = await edge([row(1)]);
+    const writeGenerations: string[] = [];
+    let changed = false;
+    const connection: typeof fetch = async (input, init = {}) => {
+      const headers = init.headers as Record<string, string>;
+      if (init.method === 'POST') {
+        writeGenerations.push(headers['x-den-generation'] ?? 'missing');
+        if (!changed) {
+          changed = true;
+          return new Response(JSON.stringify({ error: 'generation_changed' }), {
+            status: 409,
+            headers: { 'x-den-generation': 'new' },
+          });
+        }
+      }
+      const response = await server.fetchImpl(input, init);
+      if (init.method) return response;
+      const body = (await response.json()) as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, generation: 'old' }), {
+        status: response.status,
+        headers: { 'x-den-generation': 'old' },
+      });
+    };
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+
+    expect(await log.write(row(2))).not.toBeNull();
+    expect(writeGenerations).toEqual(['old', 'new']);
+    expect(log.title({ type: 'movie', id: 2 })).toBeDefined();
+    expect(warning).toHaveBeenCalledWith(
+      'den: library generation changed during a write; retrying with new',
+    );
+    warning.mockRestore();
+  });
+
   it('rewrites a web-only v2 library atomically into den-core v3 rows', async () => {
     const device = 'aaaaaaaaaaaaaaaa';
     const episode: EpisodeRow = {
