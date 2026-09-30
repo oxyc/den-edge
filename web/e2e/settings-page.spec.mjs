@@ -142,7 +142,9 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(
         tv.getByRole('button', { name: 'Remove Living Room TV from list' }),
       ).toBeVisible();
-      await expect(tv.getByRole('button', { name: 'Unlink Living Room TV' })).toBeVisible();
+      await expect(
+        tv.getByRole('button', { name: 'Unlink this browser from Living Room TV' }),
+      ).toBeVisible();
       const mac = listed.filter({ hasText: 'Mac' });
       await expect(mac).toHaveCount(1);
       await expect(mac).toContainText('Browser · seen');

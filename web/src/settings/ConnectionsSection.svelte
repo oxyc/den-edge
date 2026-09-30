@@ -817,10 +817,11 @@
             {/if}
             {#each row.links as linked (linked.inboxKey)}
               <Confirm
-                label="Unlink"
-                ariaLabel="Unlink {row.name}"
-                question="Unlink {linked.name ?? 'this Apple TV'}?"
+                label="Unlink this browser"
+                ariaLabel="Unlink this browser from {row.name}"
+                question="Unlink this browser from {linked.name ?? 'this Apple TV'}?"
                 detail="This browser stops opening its library. The TV keeps running."
+                confirmLabel="Unlink browser"
                 onconfirm={() => unlink(linked)}
               />
             {/each}
