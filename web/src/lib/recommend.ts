@@ -105,9 +105,12 @@ function slidesOf(value: unknown): Slide[] {
 export const billboardScope = (facet: MediaType | null) =>
   facet === 'movie' ? 'movies' : facet === 'tv' ? 'series' : 'home';
 
-/** Where everyone's billboard for `scope` is asked on `now`'s UTC day, from atlas at `base`. */
-const everyoneUrl = (base: string, scope: string, now: Date) =>
-  `${base}/recommend/${scope}.json?day=${now.toISOString().slice(0, 10)}`;
+/**
+ * Where everyone's billboard for `scope` is asked on `now`'s UTC day, from atlas at `base`; with `fresh`, the one of
+ * only new titles (`freshOn`), which atlas ranks and keeps apart.
+ */
+const everyoneUrl = (base: string, scope: string, fresh: boolean, now: Date) =>
+  `${base}/recommend/${scope}.json?day=${now.toISOString().slice(0, 10)}${fresh ? '&fresh=1' : ''}`;
 
 async function askEveryone(url: string, fetchImpl: typeof fetch): Promise<Slide[] | null> {
   try {
@@ -134,13 +137,14 @@ const started = new Map<string, Promise<Slide[] | null>>();
 export function startBillboard(
   path: string,
   paired: boolean,
+  fresh: boolean,
   now = new Date(),
   fetchImpl: typeof fetch = fetch,
 ): void {
   const scope =
     path === '/' ? 'home' : path === '/movies' ? 'movies' : path === '/series' ? 'series' : null;
   if (!scope || paired) return;
-  const url = everyoneUrl(ATLAS.path, scope, now);
+  const url = everyoneUrl(ATLAS.path, scope, fresh, now);
   started.set(url, askEveryone(url, fetchImpl));
 }
 
@@ -152,37 +156,50 @@ export function startBillboard(
 export function recommendForEveryone(
   base: string,
   scope: string,
+  fresh: boolean,
   now = new Date(),
   fetchImpl: typeof fetch = relayFetch,
 ): Promise<Slide[] | null> {
-  const url = everyoneUrl(base, scope, now);
+  const url = everyoneUrl(base, scope, fresh, now);
   const early = started.get(url);
   started.delete(url);
   return early ?? askEveryone(url, fetchImpl);
 }
 
-/** Where the member switch is kept in this browser, and the query parameter that sets it (`memberPostOn`). */
-const MEMBER_POST = 'den.billboard.member-post';
-const MEMBER_POST_PARAM = 'billboard-post';
+type SwitchStorage = Pick<Storage, 'getItem' | 'setItem'> | undefined;
 
 /**
- * Whether a browser with a library asks atlas to rank its billboard against the whole library (`POST /recommend`).
- * Off until the owner has judged the ranking (den#161). `?billboard-post=1` turns it on for this browser and
- * `?billboard-post=0` off again; either is remembered, so the parameter is needed once.
+ * A billboard switch this browser keeps under `name`: `?<param>=1` turns it on and `?<param>=0` off again; either is
+ * remembered, so the parameter is needed once.
  */
-export function memberPostOn(
-  search = globalThis.location?.search ?? '',
-  storage: Pick<Storage, 'getItem' | 'setItem'> | undefined = globalThis.localStorage,
-): boolean {
-  const asked = new URLSearchParams(search).get(MEMBER_POST_PARAM);
+function switchOn(name: string, param: string, search: string, storage: SwitchStorage): boolean {
+  const asked = new URLSearchParams(search).get(param);
   try {
-    if (asked === '1' || asked === '0') storage?.setItem(MEMBER_POST, asked);
-    return storage?.getItem(MEMBER_POST) === '1';
+    if (asked === '1' || asked === '0') storage?.setItem(name, asked);
+    return storage?.getItem(name) === '1';
   } catch {
     // Storage refused (a private window): the parameter still counts for this page.
     return asked === '1';
   }
 }
+
+/**
+ * Whether a browser with a library asks atlas to rank its billboard against the whole library (`POST /recommend`):
+ * `?billboard-post=1`, kept as `den.billboard.member-post`. Off until the owner has judged the ranking (den#161).
+ */
+export const memberPostOn = (
+  search = globalThis.location?.search ?? '',
+  storage: SwitchStorage = globalThis.localStorage,
+) => switchOn('den.billboard.member-post', 'billboard-post', search, storage);
+
+/**
+ * Whether the billboard is atlas's pool of only new titles (`fresh`), for the shared GET and the member POST alike:
+ * `?billboard-fresh=1`, kept as `den.billboard.fresh`. Off until the owner has judged it (den#161).
+ */
+export const freshOn = (
+  search = globalThis.location?.search ?? '',
+  storage: SwitchStorage = globalThis.localStorage,
+) => switchOn('den.billboard.fresh', 'billboard-fresh', search, storage);
 
 /** What atlas calls a series. */
 const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
@@ -235,6 +252,7 @@ export function recommendBody({
   library,
   named = new Map(),
   owned,
+  fresh = false,
   now = new Date(),
 }: {
   facet: MediaType | null;
@@ -244,12 +262,15 @@ export function recommendBody({
   named?: Map<string, Title>;
   /** Every title the library holds, by `type:id`. */
   owned: Set<string>;
+  /** Only new titles (`freshOn`). */
+  fresh?: boolean;
   now?: Date;
 }) {
   return {
     version: 1,
     surface: billboardScope(facet),
     now: now.toISOString(),
+    ...(fresh ? { fresh: true } : {}),
     // Home uses these same six picks until the household saves a selection; a saved empty selection stays empty.
     services: prefs.servicesConfigured ? prefs.services : GUEST_PICKS,
     // Past atlas's limit it would refuse the whole request, so the most recent titles go.

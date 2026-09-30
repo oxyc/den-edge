@@ -79,6 +79,7 @@
   import {
     billboardScope,
     freshKept,
+    freshOn,
     memberPostOn,
     nameSlides,
     recommend,
@@ -905,11 +906,18 @@
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
   // v4 invalidates the additive blend that let an unmatched shared lead stay ahead of credible personal matches.
   // Earlier namespaces cover the unbounded multi-seed and removed POST rankers.
-  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v4.${type ?? 'all'}`;
+  // Only-new-titles billboards (`fresh`) are kept under names of their own, so neither opens the other's page.
+  const keptBillboard = (type: 'movie' | 'tv' | null) =>
+    `billboard.v4.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
   /** Where atlas's ranking for this library (`POST /recommend`) is kept, with when it was ranked (`KeptBillboard`). */
-  const keptPersonal = (type: 'movie' | 'tv' | null) => `billboard.personal.v1.${type ?? 'all'}`;
-  /** Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`). */
+  const keptPersonal = (type: 'movie' | 'tv' | null) =>
+    `billboard.personal.v1.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
+  /**
+   * Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`), and whether
+   * the billboard is only new titles (`freshOn`).
+   */
   const memberPost = memberPostOn();
+  const fresh = freshOn();
   /** The slide on screen, as an index into the titles the billboard draws. */
   let slideShown = $state(0);
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
@@ -991,6 +999,7 @@
                   .map((r) => [titleKey(r.title), r.title] as const),
               ),
               owned: seeds.owned,
+              fresh,
             }),
           )
         : null;
@@ -1019,7 +1028,7 @@
   async function paintShared(here: string, run: number) {
     const type = facet;
     const key = tmdbKey;
-    const shared = (await recommendForEveryone(here, billboardScope(type)))?.filter(
+    const shared = (await recommendForEveryone(here, billboardScope(type), fresh))?.filter(
       (slide) => !seeds.owned.has(`${slide.type}:${slide.id}`),
     );
     if (run !== billboardRun) return;

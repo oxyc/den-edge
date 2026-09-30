@@ -1758,11 +1758,11 @@ test('a guest paints the billboard from the daily GET and never POSTs a library'
 function watchBillboard(page) {
   const asked = { gets: [], posts: [], fans: [] };
   page.on('request', (request) => {
-    const { pathname } = new URL(request.url());
+    const { pathname, search } = new URL(request.url());
     if (pathname.includes('/index/suggest/')) asked.fans.push(pathname);
     else if (pathname.endsWith('/recommend') && request.method() === 'POST')
       asked.posts.push(request.postDataJSON());
-    else if (pathname.includes('/recommend/')) asked.gets.push(pathname);
+    else if (pathname.includes('/recommend/')) asked.gets.push(pathname + search);
   });
   return asked;
 }
@@ -1775,75 +1775,97 @@ const SHARED = {
   ],
 };
 
-test('behind the member switch, atlas ranks the library and the slide on screen stays', async () => {
-  const browser = await chromium.launch({
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  });
-  try {
-    const page = await browser.newPage({
-      viewport: { width: 390, height: 800 },
-      reducedMotion: 'reduce',
+for (const fresh of [false, true])
+  test(`behind the member switch${fresh ? ', with only new titles,' : ''} atlas ranks the library and the slide on screen stays`, async () => {
+    const browser = await chromium.launch({
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     });
-    await page.addInitScript(() => localStorage.setItem('den.billboard.member-post', '1'));
-    await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
-    let answer;
-    const ranked = new Promise((resolve) => (answer = resolve));
-    let sharedGate = Promise.resolve();
-    await page.route('**/atlas/recommend**', async (r) => {
-      if (r.request().method() !== 'POST') {
-        await sharedGate;
-        return r.fallback();
-      }
-      await ranked;
-      return r.fulfill({
-        json: {
-          version: 1,
-          slides: [
-            { type: 'movie', id: 601, why: { reason: 'profile' } },
-            { type: 'series', id: 701 },
-            { type: 'movie', id: 501 },
-          ],
-        },
+    try {
+      const page = await browser.newPage({
+        viewport: { width: 390, height: 800 },
+        reducedMotion: 'reduce',
       });
-    });
-    const asked = watchBillboard(page);
-    await page.goto(`${FIXTURE}?fixtureWatched=101,102`);
-    const hero = active(page).locator('.billboard');
-    const onScreen = hero.locator('.slide[aria-hidden="false"]');
-    // First paint is the shared billboard; the ranking is asked for in the background with the whole library.
-    await expect(onScreen).toContainText('Film 501');
-    await expect.poll(() => asked.posts.length).toBe(1);
-    expect(asked.posts[0].library.map((entry) => `${entry.type}:${entry.id}`).sort()).toEqual([
-      'movie:101',
-      'movie:102',
-    ]);
-    expect(asked.posts[0].owned).toHaveLength(2);
-    expect(asked.posts[0]).not.toHaveProperty('candidates');
-    await hero.locator('.dot').nth(1).click();
-    await expect(onScreen).toContainText('Film 502');
+      await page.addInitScript((fresh) => {
+        localStorage.setItem('den.billboard.member-post', '1');
+        // Set once, so a later `?billboard-fresh=0` holds across the reload.
+        if (fresh && localStorage.getItem('den.billboard.fresh') === null)
+          localStorage.setItem('den.billboard.fresh', '1');
+      }, fresh);
+      await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
+      let answer;
+      const ranked = new Promise((resolve) => (answer = resolve));
+      let sharedGate = Promise.resolve();
+      await page.route('**/atlas/recommend**', async (r) => {
+        if (r.request().method() !== 'POST') {
+          await sharedGate;
+          return r.fallback();
+        }
+        await ranked;
+        return r.fulfill({
+          json: {
+            version: 1,
+            slides: [
+              { type: 'movie', id: 601, why: { reason: 'profile' } },
+              { type: 'series', id: 701 },
+              { type: 'movie', id: 501 },
+            ],
+          },
+        });
+      });
+      const asked = watchBillboard(page);
+      await page.goto(`${FIXTURE}?fixtureWatched=101,102`);
+      const hero = active(page).locator('.billboard');
+      const onScreen = hero.locator('.slide[aria-hidden="false"]');
+      // First paint is the shared billboard; the ranking is asked for in the background with the whole library.
+      await expect(onScreen).toContainText('Film 501');
+      await expect.poll(() => asked.posts.length).toBe(1);
+      expect(asked.posts[0].library.map((entry) => `${entry.type}:${entry.id}`).sort()).toEqual([
+        'movie:101',
+        'movie:102',
+      ]);
+      expect(asked.posts[0].owned).toHaveLength(2);
+      expect(asked.posts[0]).not.toHaveProperty('candidates');
+      expect(asked.posts[0].fresh).toBe(fresh ? true : undefined);
+      expect(asked.gets).toEqual([
+        expect.stringMatching(
+          fresh
+            ? /\/recommend\/home\.json\?day=[\d-]+&fresh=1$/
+            : /\/recommend\/home\.json\?day=[\d-]+$/,
+        ),
+      ]);
+      await hero.locator('.dot').nth(1).click();
+      await expect(onScreen).toContainText('Film 502');
 
-    answer();
-    await expect(hero.locator('.slide')).toHaveCount(4);
-    const slides = await hero.locator('.slide').allTextContents();
-    expect(slides.map((text) => /(Film|Series) \d+/.exec(text)?.[0])).toEqual([
-      'Film 501',
-      'Film 502',
-      'Film 601',
-      'Series 701',
-    ]);
-    await expect(onScreen).toContainText('Film 502');
-    await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
-    expect(asked.fans).toEqual([]);
-    expect(asked.gets).toHaveLength(1);
+      answer();
+      await expect(hero.locator('.slide')).toHaveCount(4);
+      const slides = await hero.locator('.slide').allTextContents();
+      expect(slides.map((text) => /(Film|Series) \d+/.exec(text)?.[0])).toEqual([
+        'Film 501',
+        'Film 502',
+        'Film 601',
+        'Series 701',
+      ]);
+      await expect(onScreen).toContainText('Film 502');
+      await expect(hero.locator('.dot').nth(1)).toHaveAttribute('aria-current', 'true');
+      expect(asked.fans).toEqual([]);
+      expect(asked.gets).toHaveLength(1);
 
-    // The next visit opens on the kept ranking without waiting for the shared billboard.
-    sharedGate = new Promise(() => {});
-    await page.reload();
-    await expect(onScreen).toContainText('Film 601');
-  } finally {
-    await browser.close();
-  }
-});
+      // The next visit opens on the kept ranking without waiting for the shared billboard.
+      sharedGate = new Promise(() => {});
+      await page.reload();
+      await expect(onScreen).toContainText('Film 601');
+
+      if (fresh) {
+        // The only-new-titles ranking is kept apart: with fresh off, the page opens on the shared billboard.
+        sharedGate = Promise.resolve();
+        await page.goto(`${FIXTURE}?fixtureWatched=101,102&billboard-fresh=0`);
+        await expect(onScreen).toContainText('Film 501');
+        expect(asked.gets.at(-1)).not.toContain('fresh');
+      }
+    } finally {
+      await browser.close();
+    }
+  });
 
 // Also #192's pin: the billboard is asked for once, however often Home's build runs while it loads.
 test('with the member switch off a member gets the shared billboard, and a guest does either way', async () => {
