@@ -50,13 +50,26 @@ describe('recommendForEveryone', () => {
       return new Response(JSON.stringify({ slides: [{ type: 'movie', id: asked.length }] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/movies', now, fetchImpl);
-    startBillboard('/watchlist', now, fetchImpl);
+    startBillboard('/movies', false, now, fetchImpl);
+    startBillboard('/watchlist', false, now, fetchImpl);
     expect(asked).toEqual(['/atlas/recommend/movies.json?day=2026-09-28']);
     expect((await recommendForEveryone('/atlas', 'movies', now, fetchImpl))?.[0]?.id).toBe(1);
     expect(asked).toHaveLength(1);
     await recommendForEveryone('/atlas', 'movies', now, fetchImpl);
     expect(asked).toHaveLength(2);
+  });
+
+  it('starts nothing for a paired browser, whose Home asks its own atlas install', async () => {
+    const asked: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      asked.push(url);
+      return new Response(JSON.stringify({ slides: [{ type: 'movie', id: 1 }] }));
+    }) as unknown as typeof fetch;
+    const now = new Date('2026-09-28T12:00:00Z');
+    startBillboard('/', true, now, fetchImpl);
+    expect(asked).toEqual([]);
+    await recommendForEveryone('/atlas/us_8', 'home', now, fetchImpl);
+    expect(asked).toEqual(['/atlas/us_8/recommend/home.json?day=2026-09-28']);
   });
 });
 

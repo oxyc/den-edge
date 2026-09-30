@@ -124,15 +124,19 @@ const started = new Map<string, Promise<Slide[] | null>>();
  * Ask for this page's billboard for everyone as the app starts (`main.ts`), before it has found atlas or opened the
  * library: at the address a browser with no library of its own finds atlas at (`findAtlas`'s same-origin `/atlas`).
  * `recommendForEveryone` takes this answer when it asks the same address; if nothing asks, it was one kept GET.
+ *
+ * Not for a `paired` browser: its library's own atlas install answers at `/atlas/<config>`, which atlas ranks for that
+ * install's region and services, so its Home asks that address and this one would be a second billboard nobody reads.
  */
 export function startBillboard(
   path: string,
+  paired: boolean,
   now = new Date(),
   fetchImpl: typeof fetch = fetch,
 ): void {
   const scope =
     path === '/' ? 'home' : path === '/movies' ? 'movies' : path === '/series' ? 'series' : null;
-  if (!scope) return;
+  if (!scope || paired) return;
   const url = everyoneUrl(ATLAS.path, scope, now);
   started.set(url, askEveryone(url, fetchImpl));
 }

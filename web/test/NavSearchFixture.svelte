@@ -27,6 +27,26 @@
       : {};
   let people = $state<PeopleView>(untrack(() => peopleOf(route)));
   const guest = new URL(location.href).searchParams.has('fixtureGuest');
+  // `?fixtureWatched=101,102` gives the member a library of those films, watched.
+  const watched = (new URL(location.href).searchParams.get('fixtureWatched') ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map(Number);
+  const at = [100, 0, 'test'];
+  const stamped = <T,>(value: T) => ({ value, at });
+  const rows = watched.map((id) => ({
+    kind: 'rec',
+    schema: 2,
+    title: { type: 'movie', id },
+    status: stamped('watched'),
+    resume: { value: 0, at, viewing: 1 },
+    reaction: stamped(null),
+    deleted: stamped(false),
+    dismissed: stamped(false),
+    episodesReset: null,
+    addedAt: 1,
+    watchedAt: 1,
+  }));
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });
@@ -36,7 +56,7 @@
         ? { values: { tmdb: { value: { string: 'fixture-key' }, at: [1, 0, 'test'] } } }
         : undefined,
     refresh: async () => false,
-    rows: () => [],
+    rows: () => rows,
     newestStamp: () => [1, 0, 'test'],
     title: () => undefined,
     kept: async () => undefined,
