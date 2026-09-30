@@ -5,6 +5,14 @@ const PART_WORDS: Record<string, number> = {
   two: 2,
   three: 3,
   four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
   i: 1,
   ii: 2,
   iii: 3,
@@ -51,6 +59,22 @@ function likeness(a: string, b: string): number {
   return (2 * shared) / Math.max(1, a.length - 1 + (b.length - 1));
 }
 
+function oneEditApart(left: string, right: string): boolean {
+  if (Math.abs(left.length - right.length) > 1) return false;
+  let edits = 0;
+  for (let l = 0, r = 0; l < left.length || r < right.length;) {
+    if (left[l] === right[r]) {
+      l++;
+      r++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (left.length >= right.length) l++;
+    if (right.length >= left.length) r++;
+  }
+  return edits === 1;
+}
+
 /** TMDB's placeholder for an episode it has no name for: "Episode 3", "Episode Three". */
 export const unnamedViewingEpisode = (name: string) =>
   /^(?:episode|chapter|ep)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
@@ -71,15 +95,26 @@ export function findViewingEpisode(
   }
   const exact = episodes.find((episode) => normalize(episode.name) === wanted);
   if (exact) return exact.number;
-  const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
-  if (numbered !== undefined && episodes.some((episode) => episode.number === Number(numbered)))
-    return Number(numbered);
+  const numbered =
+    /^(?:episode|chapter|ep)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.exec(
+      wanted,
+    )?.[1];
+  const episodeNumber =
+    numbered === undefined ? undefined : (PART_WORDS[numbered] ?? Number(numbered));
+  if (episodeNumber !== undefined && episodes.some((episode) => episode.number === episodeNumber))
+    return episodeNumber;
 
   const whole = episodes.filter((episode) => {
     const other = normalize(episode.name);
-    return other.length >= 8 && (other.includes(wanted) || wanted.includes(other));
+    return other.length >= 5 && (other.includes(wanted) || wanted.includes(other));
   });
-  if (wanted.length >= 8 && whole.length === 1) return whole[0]!.number;
+  if (wanted.length >= 5 && whole.length === 1) return whole[0]!.number;
+
+  const typo = episodes.filter((episode) => {
+    const other = normalize(episode.name);
+    return wanted.length >= 5 && other.length >= 5 && oneEditApart(wanted, other);
+  });
+  if (typo.length === 1) return typo[0]!.number;
 
   const mine = reading(name);
   const theirs = episodes.map((episode) => ({ number: episode.number, ...reading(episode.name) }));

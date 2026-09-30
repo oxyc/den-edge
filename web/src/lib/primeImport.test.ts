@@ -88,6 +88,14 @@ describe('Prime export parsing', () => {
       },
     );
     expect(primeEpisodeHint('Pilot', 'Pilot-A Show')).toEqual({ show: 'A Show' });
+    expect(primeEpisodeHint('Pilot', 'Pilot-A Show S1')).toEqual({ show: 'A Show', season: 1 });
+    expect(primeEpisodeHint('Pilot', 'Pilot-A Show, Season #1 (4K UHD)')).toEqual({
+      show: 'A Show',
+      season: 1,
+    });
+    expect(primeEpisodeHint('Ep 205 - Das Vergessen', 'Das Vergessen-The Missing')).toEqual({
+      show: 'The Missing',
+    });
   });
 
   it('uses the watch date to separate identical episode names from different shows', () => {
@@ -116,7 +124,7 @@ Full,2026-01-10T11:59:00Z,1800,Pilot-Second Show - Season 2,1800000,Private`;
     expect(Object.keys(result.viewings[0]!)).not.toContain('City');
   });
 
-  it('refuses the same raw title when Prime calls it both a film and an episode', () => {
+  it('collapses material-label changes for one raw identity', () => {
     const one = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
 no,2026-01-01T12:00:00Z,1800,Shared title,Shared`;
     const conflicting = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
@@ -126,7 +134,88 @@ Full,2026-01-01T11:58:00Z,1800,Shared`;
       { name: 'events.csv', text: one },
       { name: 'history.csv', text: conflicting },
     ]);
+    expect(result.viewings).toEqual([
+      expect.objectContaining({ kind: 'movie', title: 'Shared', rawTitle: 'Shared' }),
+    ]);
+    expect(result.diagnostics.ambiguous).toEqual([]);
+  });
+
+  it('uses composite identity rather than unstable material labels to distinguish films and episodes', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2020-01-01T12:00:00Z,1800,Old episode,Pilot
+no,2026-01-02T12:00:00Z,6000,New film,Standalone`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Feature,2020-01-01T11:30:00Z,1800,Pilot-Old Show - Season 1
+Full,2026-01-02T10:20:00Z,6000,Standalone`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings).toEqual([
+      expect.objectContaining({ kind: 'episode', show: 'Old Show', season: 1 }),
+      expect.objectContaining({ kind: 'movie', title: 'Standalone' }),
+    ]);
+  });
+
+  it('uses exact identity and watch seconds to resolve safe prefix collisions', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,6000,Film,After
+no,2026-01-02T12:00:00Z,1500,Season two,Episode 6`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2026-01-01T11:00:00Z,5900,After
+Full,2026-01-01T10:00:00Z,5700,After We Fell
+Full,2026-01-02T11:30:00Z,1498,Episode 6-Show - Season 2
+Full,2026-01-02T11:00:00Z,1100,Episode 6-Show - Season 1`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.diagnostics.ambiguous).toEqual([]);
+    expect(result.viewings.map((viewing) => viewing.rawTitle)).toEqual([
+      'After',
+      'Episode 6-Show - Season 2',
+    ]);
+  });
+
+  it('joins a composite episode title with one provider spelling difference', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,25,Episode,Laura y Jan - Tiago y Mimi`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2026-01-01T11:59:00Z,24,Laia-Jan/Tiago-Mimi-Citas Barcelona - Temporada 1`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings[0]).toMatchObject({
+      kind: 'episode',
+      show: 'Citas Barcelona',
+      season: 1,
+    });
+  });
+
+  it('does not join a generic episode name to a matching row years away', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2019-01-01T12:00:00Z,1300,Old pilot,Pilot`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2023-01-01T11:30:00Z,1300,Pilot-New Show - Season 1`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
     expect(result.viewings).toEqual([]);
-    expect(result.diagnostics.ambiguous).toEqual(['Shared']);
+    expect(result.diagnostics.unmatched).toEqual(['Pilot']);
+  });
+
+  it('silently excludes trailers even when Amazon labels them as full content', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,120,Preview,The Show - Official Trailer`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2026-01-01T11:58:00Z,120,The Show - Official Trailer`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings).toEqual([]);
+    expect(result.diagnostics.unmatched).toEqual([]);
   });
 });

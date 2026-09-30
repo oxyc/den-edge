@@ -38,6 +38,7 @@ export interface ViewingEpisode {
   number: number;
   name: string;
   runtime?: number;
+  airDate?: string;
 }
 
 export interface ViewingSearchHit {
@@ -71,6 +72,14 @@ export function normalizeViewingName(name: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
+
+/** Provider history rows that advertise content rather than record a film or episode. */
+export const isViewingPreview = (title: string) =>
+  /(?:^|: )[^:]*\b(?:(?:official|main)\s+)?(?:trailer|teaser)(?:\s+(?:official|oficial|\d+))?(?::|$)/i.test(
+    title,
+  ) ||
+  /\bbande[- ]annonce\b/i.test(title) ||
+  /_hook_|_16x9\b/i.test(title);
 
 export interface ViewingPreviewLine {
   key: string;

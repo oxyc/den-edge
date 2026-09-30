@@ -4,6 +4,7 @@
 
 import { parseDelimitedRows } from './viewingImportCsv';
 import {
+  isViewingPreview,
   normalizeViewingName,
   viewingPreviewLines,
   type ImportShow,
@@ -115,8 +116,7 @@ function seasonOf(label: string): number | undefined {
  * Not a viewing: a trailer or preview Netflix lists among them ("Valeria: Season 1 Trailer: Valeria",
  * "Personal Shopper: Personal Shopper_hook_primary_16x9").
  */
-export const isPreview = (title: string) =>
-  /(?:^|: )[^:]*\btrailer(?::|$)/i.test(title) || /_hook_|_16x9\b/i.test(title);
+export const isPreview = isViewingPreview;
 
 /**
  * A line naming two episodes or more, as one line each: Netflix lists a double bill as one viewing ("The Killing:

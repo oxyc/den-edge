@@ -145,4 +145,60 @@ describe('Prime import planning', () => {
     expect(result.marks[0]!.at).toBe(500);
     expect(result.known).toBe(1);
   });
+
+  it('places a complete season in viewing order when provider and TMDB episode names differ', async () => {
+    const result = await planPrimeImport(
+      [
+        episode({
+          title: 'Uno',
+          rawTitle: 'Uno-The Show - Season 1',
+          show: 'The Show',
+          season: 1,
+          watchedAt: 100,
+        }),
+        episode({
+          title: 'Dos',
+          rawTitle: 'Dos-The Show - Season 1',
+          show: 'The Show',
+          season: 1,
+          watchedAt: 200,
+        }),
+      ],
+      fake({
+        searchTv: async () => [{ type: 'tv', id: 2, name: 'The Show' }],
+        show: async () => shape({ 1: 2 }),
+        episodes: async () => [
+          { number: 1, name: 'First', runtime: 50 },
+          { number: 2, name: 'Second', runtime: 50 },
+        ],
+      }),
+    );
+    expect(result.marks.map((mark) => mark.episode)).toEqual([1, 2]);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it('identifies a show omitted by Prime only when every episode corroborates one complete season', async () => {
+    const result = await planPrimeImport(
+      [
+        episode({
+          title: 'The Show',
+          rawTitle: 'The Show-Season 01',
+          show: 'Season 01',
+          season: 1,
+        }),
+        episode({ title: 'Second', rawTitle: 'Second-Season 01', show: 'Season 01', season: 1 }),
+      ],
+      fake({
+        searchTv: async (query) =>
+          query === 'The Show' ? [{ type: 'tv', id: 2, name: 'The Show' }] : [],
+        show: async () => shape({ 1: 2 }),
+        episodes: async () => [
+          { number: 1, name: 'The Show', runtime: 50 },
+          { number: 2, name: 'Second', runtime: 50 },
+        ],
+      }),
+    );
+    expect(result.marks.map((mark) => mark.episode)).toEqual([1, 2]);
+    expect(result.unmatched).toEqual([]);
+  });
 });
