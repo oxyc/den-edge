@@ -96,6 +96,80 @@ describe('Prime import planning', () => {
     expect(runtimeCalls).toBe(0);
   });
 
+  it('accepts a unique TMDB alternate-title result and uses runtime to split film namesakes', async () => {
+    const result = await planPrimeImport(
+      [
+        movie({ title: 'Título localizado', rawTitle: 'Título localizado' }),
+        movie({
+          title: "Dr. Seuss' How the Grinch Stole Christmas",
+          rawTitle: "Dr. Seuss' How the Grinch Stole Christmas",
+          durationSeconds: 6_000,
+        }),
+      ],
+      fake({
+        searchMulti: async (query) =>
+          query === 'Título localizado'
+            ? [{ type: 'movie', id: 10, name: 'English Title', year: 2020 }]
+            : query === 'How the Grinch Stole Christmas'
+              ? [
+                  { type: 'movie', id: 20, name: 'How the Grinch Stole Christmas', year: 2000 },
+                  { type: 'movie', id: 21, name: 'How the Grinch Stole Christmas!', year: 1966 },
+                ]
+              : [],
+        searchMovie: async () => [],
+        runtime: async (_type, id) => (id === 20 ? 104 : 26),
+      }),
+    );
+    expect(result.marks.map((mark) => mark.id)).toEqual([10, 20]);
+  });
+
+  it('prefers the composite history episode, understands localized numbers, and checks specials', async () => {
+    const result = await planPrimeImport(
+      [
+        episode({
+          title: 'The Next Episode',
+          rawTitle: 'The Actual Episode-The Show - Season 1',
+          show: 'The Show',
+          season: 1,
+        }),
+        episode({
+          title: 'Episodio 1',
+          rawTitle: 'Episodio 1-Other Show - Season 1',
+          show: 'Other Show',
+          season: 1,
+        }),
+        episode({
+          title: 'Swan Song',
+          rawTitle: 'Swan Song-Third Show - Season 8',
+          show: 'Third Show',
+          season: 8,
+        }),
+      ],
+      fake({
+        searchTv: async (query) => [
+          {
+            type: 'tv',
+            id: { 'The Show': 10, 'Other Show': 11, 'Third Show': 12 }[query]!,
+            name: query,
+          },
+        ],
+        show: async (id) => (id === 12 ? shape({ 0: 1, 8: 1 }) : shape({ 1: 1 })),
+        episodes: async (id, season) => {
+          if (id === 10) return [{ number: 1, name: 'The Actual Episode' }];
+          if (id === 11) return [{ number: 1, name: 'Episode One' }];
+          return season === 0
+            ? [{ number: 1, name: 'Swan Song' }]
+            : [{ number: 1, name: 'Finale' }];
+        },
+      }),
+    );
+    expect(result.marks.map(({ id, season, episode }) => ({ id, season, episode }))).toEqual([
+      { id: 10, season: 1, episode: 1 },
+      { id: 11, season: 1, episode: 1 },
+      { id: 12, season: 0, episode: 1 },
+    ]);
+  });
+
   it('uses episode evidence to choose between namesake shows', async () => {
     const namesakes: ViewingSearchHit[] = [
       { type: 'tv', id: 10, name: 'The Show' },
@@ -116,14 +190,21 @@ describe('Prime import planning', () => {
 
   it('searches every season only when Prime omitted one, and rejects a cross-season ambiguity', async () => {
     const ambiguous = await planPrimeImport(
-      [episode({ season: undefined, title: 'Pilot', watchedSeconds: 3_000 })],
+      [
+        episode({
+          season: undefined,
+          title: 'Pilot',
+          rawTitle: "Pilot-Clarkson's Farm - Season 5",
+          watchedSeconds: 3_000,
+        }),
+      ],
       fake({
         show: async () => shape({ 1: 1, 2: 1 }),
         episodes: async (_id, season) => [{ number: 1, name: 'Pilot', runtime: 50 + season }],
       }),
     );
     expect(ambiguous.marks).toEqual([]);
-    expect(ambiguous.ambiguous).toEqual(["Updating-Clarkson's Farm - Season 5"]);
+    expect(ambiguous.ambiguous).toEqual(["Pilot-Clarkson's Farm - Season 5"]);
   });
 
   it('deduplicates a rewatch to its latest date and skips a title already seen locally', async () => {

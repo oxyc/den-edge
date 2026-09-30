@@ -1,6 +1,7 @@
 import type { PrimeViewing } from './primeImport';
 import {
   normalizeViewingName as normalize,
+  viewingFilmKey,
   type ImportShow,
   type ViewingEpisode,
   type ViewingLookups,
@@ -73,6 +74,32 @@ export async function planPrimeImport(
     if (!episodeCache.has(key)) episodeCache.set(key, lookups.episodes(id, season));
     return episodeCache.get(key)!;
   };
+  const runtimeCache = new Map<number, Promise<number | null>>();
+  const movieRuntime = (id: number) => {
+    if (!lookups.runtime) return Promise.resolve(null);
+    if (!runtimeCache.has(id)) runtimeCache.set(id, lookups.runtime('movie', id));
+    return runtimeCache.get(id)!;
+  };
+  const chooseMovie = async (candidates: ViewingSearchHit[], duration?: number) => {
+    if (candidates.length <= 1) return candidates[0];
+    if (!duration) return candidates[0];
+    const ranked = (
+      await Promise.all(
+        candidates.map(async (candidate) => ({
+          candidate,
+          runtime: await movieRuntime(candidate.id),
+        })),
+      )
+    )
+      .flatMap(({ candidate, runtime }) =>
+        runtime ? [{ candidate, difference: Math.abs(runtime * 60 - duration) / duration }] : [],
+      )
+      .sort((left, right) => left.difference - right.difference);
+    const [best, next] = ranked;
+    return best && best.difference <= 0.15 && best.difference + 0.15 < (next?.difference ?? 1)
+      ? best.candidate
+      : candidates[0];
+  };
   const add = (mark: ViewingMark) => {
     const key = `${mark.type}:${mark.id}:${mark.season ?? ''}:${mark.episode ?? ''}`;
     const previous = marks.get(key);
@@ -85,25 +112,51 @@ export async function planPrimeImport(
         const clean = (dated?.[1] ?? viewing.title)
           .replace(/\s*\((?:4k|uhd|hd)[^)]*\)\s*$/i, '')
           .trim();
+        const parenthetical = /^(.*?\S)\s*\(([^()]*)\)\s*$/.exec(clean);
         const queries = [clean];
+        if (parenthetical) queries.push(parenthetical[1]!, parenthetical[2]!);
+        const attributed = clean.replace(/^dr\.?\s+seuss['’]s?\s+/i, '');
+        if (attributed !== clean) queries.push(attributed);
         const colon = clean.indexOf(': ');
         if (colon >= 4) queries.push(clean.slice(0, colon));
-        let candidates: ViewingSearchHit[] = [];
-        for (const query of queries) {
-          candidates = exact(await search('movie', query), query);
-          if (candidates.length) break;
-        }
         const watchedYear =
           viewing.watchedAt >= Date.UTC(2000, 0)
             ? new Date(viewing.watchedAt).getUTCFullYear()
             : Infinity;
-        const hit = candidates.find(
-          (candidate) =>
-            (!dated || !candidate.year || candidate.year === Number(dated[2])) &&
-            (!candidate.year || candidate.year <= watchedYear),
-        );
+        const eligible = (candidate: ViewingSearchHit) =>
+          (!dated || !candidate.year || candidate.year === Number(dated[2])) &&
+          (!candidate.year || candidate.year <= watchedYear);
+        const loose = new Map<number, ViewingSearchHit>();
+        let hit: ViewingSearchHit | undefined;
+        let foundAny = false;
+        for (const query of [...new Set(queries)]) {
+          const candidates = (await search('movie', query)).filter(eligible);
+          foundAny ||= candidates.length > 0;
+          const named = exactFilm(candidates, query);
+          if (named.length) {
+            hit = await chooseMovie(named, viewing.durationSeconds);
+            if (hit) break;
+          }
+          if (candidates.length === 1) loose.set(candidates[0]!.id, candidates[0]!);
+        }
+        if (!hit && lookups.searchMovie) {
+          for (const query of [...new Set(queries)]) {
+            for (let page = 1; page <= 3; page++) {
+              const candidates = (await lookups.searchMovie(query, page)).filter(eligible);
+              foundAny ||= candidates.length > 0;
+              const named = exactFilm(candidates, query);
+              if (named.length) {
+                hit = await chooseMovie(named, viewing.durationSeconds);
+                if (hit) break;
+              }
+              if (candidates.length < 20) break;
+            }
+            if (hit) break;
+          }
+        }
+        if (!hit && loose.size === 1) hit = loose.values().next().value;
         if (!hit) {
-          (candidates.length ? ambiguous : unmatched).push(viewing.rawTitle);
+          (foundAny ? ambiguous : unmatched).push(viewing.rawTitle);
           return;
         }
         if (seen({ type: 'movie', id: hit.id })) {
@@ -249,15 +302,9 @@ export async function planPrimeImport(
       const [show, episodes] = await Promise.all([showOf(hit.id), episodesOf(hit.id, season)]);
       if (!show || !episodes) continue;
       const numbers = group.map((viewing) => {
-        const found = new Set(
-          episodeNames(viewing).flatMap((name) => {
-            const number = findViewingEpisode(name, episodes);
-            return number === undefined ? [] : [number];
-          }),
-        );
-        if (!found.size && season === 1 && normalize(viewing.title) === normalize(hit.name))
-          found.add(1);
-        return found.size === 1 ? [...found][0] : undefined;
+        const found = matchingEpisode(viewing, episodes);
+        if (found !== undefined) return found;
+        return season === 1 && normalize(viewing.title) === normalize(hit.name) ? 1 : undefined;
       });
       if (numbers.every((number) => number !== undefined) && new Set(numbers).size === group.length)
         verified.push({ hit, show, episodes });
@@ -268,9 +315,7 @@ export async function planPrimeImport(
     }
     const { hit, show, episodes } = verified[0]!;
     for (const viewing of group) {
-      const matched = episodeNames(viewing)
-        .map((name) => findViewingEpisode(name, episodes))
-        .find((found) => found !== undefined);
+      const matched = matchingEpisode(viewing, episodes);
       const number =
         matched ??
         (season === 1 && normalize(viewing.title) === normalize(hit.name) ? 1 : undefined);
@@ -310,55 +355,89 @@ async function matchEpisode(
 ): Promise<EpisodeMatch[]> {
   const show = await showOf(hit.id);
   if (!show) return [];
-  const seasons =
-    viewing.season !== undefined
-      ? [viewing.season]
-      : [...show.counts.keys()].filter((season) => season > 0);
-  const found = (
-    await Promise.all(
-      seasons.map(async (season): Promise<EpisodeMatch | null> => {
-        const episodes = await episodesOf(hit.id, season);
-        if (!episodes) return null;
-        const aired = episodes.filter(
-          (episode) =>
-            !episode.airDate || Date.parse(episode.airDate) <= viewing.watchedAt + 86_400_000,
-        );
-        const numbers = new Set(
-          episodeNames(viewing).flatMap((name) => {
-            const number = findViewingEpisode(name, aired);
-            return number === undefined ? [] : [number];
-          }),
-        );
-        const number = numbers.size === 1 ? [...numbers][0] : undefined;
-        const episode = aired.find((candidate) => candidate.number === number);
-        return episode ? { hit, show, season, episode } : null;
-      }),
-    )
-  ).flatMap((match) => (match ? [match] : []));
-  return found;
+  const inSeasons = async (seasons: number[]) =>
+    (
+      await Promise.all(
+        seasons.map(async (season): Promise<EpisodeMatch | null> => {
+          const episodes = await episodesOf(hit.id, season);
+          if (!episodes) return null;
+          const aired = episodes.filter(
+            (episode) =>
+              !episode.airDate || Date.parse(episode.airDate) <= viewing.watchedAt + 86_400_000,
+          );
+          const number = matchingEpisode(viewing, aired);
+          const episode = aired.find((candidate) => candidate.number === number);
+          return episode ? { hit, show, season, episode } : null;
+        }),
+      )
+    ).flatMap((match) => (match ? [match] : []));
+  if (viewing.season === undefined)
+    return inSeasons([...show.counts.keys()].filter((season) => season > 0));
+  const named = await inSeasons([viewing.season]);
+  if (named.length) return named;
+  return inSeasons([...show.counts.keys()].filter((season) => season !== viewing.season));
 }
 
-function episodeNames(viewing: PrimeViewing): string[] {
-  const names = [viewing.title];
+function episodeNameGroups(viewing: PrimeViewing): string[][] {
   const show = normalize(viewing.show ?? '');
   for (const match of viewing.rawTitle.matchAll(/[-–—]/g)) {
     const suffix = normalize(viewing.rawTitle.slice(match.index! + 1));
     if (!suffix.startsWith(show)) continue;
     const raw = viewing.rawTitle.slice(0, match.index).trim();
-    if (raw) names.push(raw);
-    break;
+    if (raw) {
+      const primary = episodeNameVariants(raw, viewing.show);
+      const fallback = episodeNameVariants(viewing.title, viewing.show);
+      return primary.some((name) => fallback.some((other) => normalize(name) === normalize(other)))
+        ? [primary]
+        : [primary, fallback];
+    }
   }
-  for (const name of [...names]) {
+  return [episodeNameVariants(viewing.title, viewing.show)];
+}
+
+function matchingEpisode(viewing: PrimeViewing, episodes: readonly ViewingEpisode[]) {
+  for (const names of episodeNameGroups(viewing)) {
+    const found = new Set(
+      names.flatMap((name) => {
+        const number = findPrimeEpisode(name, episodes);
+        return number === undefined ? [] : [number];
+      }),
+    );
+    if (found.size === 1) return [...found][0];
+    if (found.size > 1) return undefined;
+  }
+  return undefined;
+}
+
+function findPrimeEpisode(name: string, episodes: readonly ViewingEpisode[]) {
+  const found = findViewingEpisode(name, episodes);
+  if (found !== undefined) return found;
+  return normalize(name) === 'pilot' && episodes.some((episode) => episode.number === 1)
+    ? 1
+    : undefined;
+}
+
+function episodeNameVariants(name: string, show?: string): string[] {
+  const names = [name];
+  for (const candidate of [...names]) {
     const direct =
-      viewing.show && name.toLocaleLowerCase().startsWith(viewing.show.toLocaleLowerCase())
-        ? name
-            .slice(viewing.show.length)
+      show && candidate.toLocaleLowerCase().startsWith(show.toLocaleLowerCase())
+        ? candidate
+            .slice(show.length)
             .replace(/^\s*[-–—:]\s*/, '')
             .trim()
         : '';
     if (direct) names.push(direct);
   }
   return [...new Set(names)];
+}
+
+function exactFilm(hits: readonly ViewingSearchHit[], query: string): ViewingSearchHit[] {
+  const wanted = viewingFilmKey(query);
+  return hits.filter(
+    (hit) =>
+      viewingFilmKey(hit.name) === wanted || viewingFilmKey(hit.originalName ?? '') === wanted,
+  );
 }
 
 function exact(hits: readonly ViewingSearchHit[], query: string): ViewingSearchHit[] {

@@ -73,6 +73,47 @@ export function normalizeViewingName(name: string): string {
     .trim();
 }
 
+const VIEWING_NUMBER_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  hundred: '100',
+  thousand: '1000',
+};
+
+const VIEWING_ROMAN: Record<string, number> = {
+  i: 1,
+  ii: 2,
+  iii: 3,
+  iv: 4,
+  v: 5,
+  vi: 6,
+  vii: 7,
+  viii: 8,
+  ix: 9,
+  x: 10,
+};
+
+/** A provider film title for comparison with TMDB, ignoring articles and equivalent number spelling. */
+export const viewingFilmKey = (name: string) =>
+  normalizeViewingName(name)
+    .replace(/\b(?:the|a|an)\b/g, ' ')
+    .replace(/\bvol\b/g, 'volume')
+    .replace(/\b(volume|part|chapter) ([ivx]+)\b/g, (whole, word: string, numeral: string) =>
+      VIEWING_ROMAN[numeral] ? `${word} ${VIEWING_ROMAN[numeral]}` : whole,
+    )
+    .trim()
+    .split(/\s+/)
+    .map((word) => VIEWING_NUMBER_WORDS[word] ?? word)
+    .join(' ');
+
 /** Provider history rows that advertise content rather than record a film or episode. */
 export const isViewingPreview = (title: string) =>
   /(?:^|: )[^:]*\b(?:(?:official|main)\s+)?(?:trailer|teaser)(?:\s+(?:official|oficial|\d+))?(?::|$)/i.test(

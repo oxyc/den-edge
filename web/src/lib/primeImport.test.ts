@@ -96,6 +96,16 @@ describe('Prime export parsing', () => {
     expect(primeEpisodeHint('Ep 205 - Das Vergessen', 'Das Vergessen-The Missing')).toEqual({
       show: 'The Missing',
     });
+    expect(primeEpisodeHint('Cake', 'Cake: una razón para vivir')).toEqual({});
+    expect(
+      primeEpisodeHint('Surprise, Motherf**ker!', 'Surprise, Motherf*****!-Dexter Season 7'),
+    ).toEqual({ show: 'Dexter', season: 7 });
+    expect(
+      primeEpisodeHint(
+        "Sebastian Fitzek's Therapy - Returning",
+        "Sebastian Fitzek's Therapy - Frantic-Sebastian Fitzek's Therapy",
+      ),
+    ).toEqual({ show: "Sebastian Fitzek's Therapy" });
   });
 
   it('uses the watch date to separate identical episode names from different shows', () => {
@@ -217,5 +227,38 @@ Full,2026-01-01T11:58:00Z,120,The Show - Official Trailer`;
     ]);
     expect(result.viewings).toEqual([]);
     expect(result.diagnostics.unmatched).toEqual([]);
+  });
+
+  it('recognizes a trailer from Viewing History unless a full play of that title also exists', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,76,Trailer shown as a film,Maria
+no,2026-01-02T12:00:00Z,73,Partial film,Devil's Knot`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Trailer,2026-01-01T11:59:00Z,76,Maria
+Trailer,2026-01-02T11:59:00Z,52,Devil's Knot
+Full,2026-01-02T12:01:00Z,58,Devil's Knot`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings.map((viewing) => viewing.title)).toEqual(["Devil's Knot"]);
+    expect(result.diagnostics.unmatched).toEqual([]);
+  });
+
+  it('joins a translated episode only with a uniquely corroborating duration', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,1978,The O.C. pilot,Pilot`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2026-01-01T11:27:00Z,1960,Fremde Welten-The O.C. Season 1`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings[0]).toMatchObject({
+      kind: 'episode',
+      rawTitle: 'Fremde Welten-The O.C. Season 1',
+      show: 'The O.C.',
+      season: 1,
+    });
   });
 });

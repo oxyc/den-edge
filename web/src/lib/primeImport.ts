@@ -111,33 +111,21 @@ export function parsePrimeFiles(files: readonly PrimeSourceFile[]): PrimeImportS
       },
     ];
   });
-  const sessions = csvRecords(history.text).flatMap((record): PlaybackSession[] => {
+  const historyRecords = csvRecords(history.text);
+  const trailerSessions = historyRecords.flatMap((record): PlaybackSession[] => {
+    if (primeText(record['Material Type Description']) !== 'Trailer') return [];
+    return playbackSession(record);
+  });
+  const sessions = historyRecords.flatMap((record): PlaybackSession[] => {
     const material = primeText(record['Material Type Description']);
     // Older exports used this value when Amazon no longer retained the otherwise valid content label.
     if (material !== 'Feature' && material !== 'Full' && material !== 'Not available') return [];
-    const at = Date.parse(primeText(record['Playback Start Datetime (UTC)']));
-    const rawTitle = primeText(record.Title);
-    const viewedSeconds = number(primeText(record['Seconds Viewed']));
-    if (!rawTitle || !Number.isFinite(at) || viewedSeconds === undefined) {
+    const parsed = playbackSession(record);
+    if (!parsed.length) {
       invalid++;
       return [];
     }
-    const durations = Object.entries(record).flatMap(([header, value]) => {
-      if (!header.startsWith('Video Duration in')) return [];
-      const milliseconds = number(primeText(value));
-      return milliseconds !== undefined && milliseconds > 0 ? [milliseconds / 1000] : [];
-    });
-    const keys = primeTitleKeys(rawTitle);
-    return [
-      {
-        rawTitle,
-        keys,
-        matchWords: keys.at(-1)!.split(' '),
-        at,
-        viewedSeconds,
-        ...(durations.length ? { durationSeconds: Math.max(...durations) } : {}),
-      },
-    ];
+    return parsed;
   });
 
   const byFirstWord = new Map<string, PlaybackSession[]>();
@@ -157,7 +145,8 @@ export function parsePrimeFiles(files: readonly PrimeSourceFile[]): PrimeImportS
       deleted++;
       continue;
     }
-    if (isViewingPreview(event.title)) continue;
+    if (isViewingPreview(event.title) || trailerOnlyEvent(event, trailerSessions, sessions))
+      continue;
     const wanted = primeTitleKeys(event.title);
     const wantedWords = wanted.at(-1)!.split(' ');
     const likely = new Set(
@@ -181,7 +170,7 @@ export function parsePrimeFiles(files: readonly PrimeSourceFile[]): PrimeImportS
     const identity =
       resolveIdentity(event, nearby) ??
       resolveExactIdentity(event, candidates) ??
-      resolveTranslatedMovie(event, sessions);
+      resolveTranslatedIdentity(event, sessions);
     if (!identity) {
       const identities = distinctIdentities(nearby);
       if (identities.length) ambiguous.push(event.title);
@@ -221,6 +210,15 @@ export function primeEpisodeHint(
   rawTitle: string,
 ): { show?: string; season?: number } {
   const eventKeys = new Set(primeTitleKeys(episodeTitle));
+  const repeated = [...rawTitle.matchAll(/[-–—]/g)]
+    .map((match) => match.index)
+    .reverse()
+    .find((index) => {
+      const suffix = normalizeViewingName(rawTitle.slice(index + 1));
+      const prefix = normalizeViewingName(rawTitle.slice(0, index));
+      return suffix.length >= 4 && prefix.startsWith(`${suffix} `);
+    });
+  if (repeated !== undefined) return primeShowHint(rawTitle.slice(repeated + 1));
   const direct = rawTitle.toLocaleLowerCase().startsWith(episodeTitle.toLocaleLowerCase())
     ? episodeTitle.length
     : undefined;
@@ -229,16 +227,34 @@ export function primeEpisodeHint(
     .filter(
       (index) =>
         primeTitleKeys(rawTitle.slice(0, index)).some((key) => eventKeys.has(key)) ||
+        ((episodeTitle.includes('*') || rawTitle.slice(0, index).includes('*')) &&
+          primeEpisodeTitleNear(episodeTitle, rawTitle.slice(0, index))) ||
         primeTitleNearPrefix(episodeTitle, rawTitle.slice(0, index)),
     )
     .at(0);
   const prefix = direct ?? alias;
-  if (prefix === undefined) return {};
+  if (prefix === undefined) {
+    const inferred = [...rawTitle.matchAll(/[-–—]/g)]
+      .map((match) => match.index)
+      .reverse()
+      .map((index) => rawTitle.slice(index + 1).trim())
+      .find(
+        (rest) =>
+          !/^(?:season|series|temporada)\s*#?\s*\d+$/i.test(rest) &&
+          /(?:(?:season|series|temporada)\s*#?\s*|s)\d+(?:\s*\([^)]*\))?$/i.test(rest),
+      );
+    return inferred ? primeShowHint(inferred) : {};
+  }
+  if (direct !== undefined && !/^\s*[-–—]/.test(rawTitle.slice(prefix))) return {};
   const rest = rawTitle
     .slice(prefix)
     .replace(/^\s*[-–—]\s*/, '')
     .trim();
   if (!rest) return {};
+  return primeShowHint(rest);
+}
+
+function primeShowHint(rest: string): { show?: string; season?: number } {
   const clean = rest.replace(/\s*\((?:4k|uhd|hd)[^)]*\)\s*$/i, '').trim();
   const loneSeason = /^(?:season|series|temporada)\s*#?\s*(\d+)$/i.exec(clean);
   if (loneSeason) return { show: clean, season: Number(loneSeason[1]) };
@@ -312,6 +328,13 @@ function primeTitleNearPrefix(title: string, rawTitle: string): boolean {
   return primeTitleKeysNear(primeTitleKeys(title), primeTitleKeys(rawTitle));
 }
 
+function primeEpisodeTitleNear(title: string, rawTitle: string): boolean {
+  const [wanted, candidate] = [normalizeViewingName(title), normalizeViewingName(rawTitle)];
+  const shorter = wanted.length < candidate.length ? wanted : candidate;
+  const longer = wanted.length < candidate.length ? candidate : wanted;
+  return shorter.length >= 10 && shorter.split(' ').length >= 2 && longer.startsWith(`${shorter} `);
+}
+
 function primeTitleKeysNear(title: readonly string[], rawTitle: readonly string[]): boolean {
   return primeTitleWordsNear(title.at(-1)!.split(' '), rawTitle.at(-1)!.split(' '));
 }
@@ -335,16 +358,13 @@ function resolveExactIdentity(
 
 /** A translated film can have no shared title text. Accept it only when a substantial watch has one very close
  * duration match in the local playback window, and the history identity is not shaped like a series episode. */
-function resolveTranslatedMovie(
+function resolveTranslatedIdentity(
   event: WatchEvent,
   sessions: readonly PlaybackSession[],
 ): { rawTitle: string } | undefined {
   if (event.watchedSeconds < 300) return undefined;
   const eligible = sessions.filter(
-    (session) =>
-      Math.abs(session.at - event.at) <= 14 * 60 * 60 * 1000 &&
-      !/[-–—]/.test(session.rawTitle) &&
-      !/(?:season|series|temporada)\s*#?\s*\d+|\bs\d+\b/i.test(session.rawTitle),
+    (session) => Math.abs(session.at - event.at) <= 14 * 60 * 60 * 1000,
   );
   const groups = new Map<string, PlaybackSession[]>();
   for (const session of eligible) {
@@ -360,10 +380,58 @@ function resolveTranslatedMovie(
     }))
     .sort((left, right) => left.delta - right.delta);
   const [best, second] = ranked;
-  if (!best || best.delta > event.watchedSeconds * 0.02) return undefined;
+  if (!best) return undefined;
+  const episode = /(?:season|series|temporada)\s*#?\s*\d+|\bs\d+\b/i.test(best.rows[0]!.rawTitle);
+  const limit = episode ? Math.min(20, event.watchedSeconds * 0.01) : event.watchedSeconds * 0.02;
+  if (best.delta > limit) return undefined;
   if (second && best.delta + Math.max(30, event.watchedSeconds * 0.01) >= second.delta)
     return undefined;
   return { rawTitle: best.rows[0]!.rawTitle };
+}
+
+function playbackSession(record: Record<string, string>): PlaybackSession[] {
+  const at = Date.parse(primeText(record['Playback Start Datetime (UTC)']));
+  const rawTitle = primeText(record.Title);
+  const viewedSeconds = number(primeText(record['Seconds Viewed']));
+  if (!rawTitle || !Number.isFinite(at) || viewedSeconds === undefined) return [];
+  const durations = Object.entries(record).flatMap(([header, value]) => {
+    if (!header.startsWith('Video Duration in')) return [];
+    const milliseconds = number(primeText(value));
+    return milliseconds !== undefined && milliseconds > 0 ? [milliseconds / 1000] : [];
+  });
+  const keys = primeTitleKeys(rawTitle);
+  return [
+    {
+      rawTitle,
+      keys,
+      matchWords: keys.at(-1)!.split(' '),
+      at,
+      viewedSeconds,
+      ...(durations.length ? { durationSeconds: Math.max(...durations) } : {}),
+    },
+  ];
+}
+
+function trailerOnlyEvent(
+  event: WatchEvent,
+  trailers: readonly PlaybackSession[],
+  content: readonly PlaybackSession[],
+): boolean {
+  if (event.watchedSeconds > 10 * 60) return false;
+  const wanted = normalizeViewingName(event.title);
+  if (
+    content.some(
+      (session) => session.keys[0] === wanted && Math.abs(session.at - event.at) <= CLOSE_MS,
+    )
+  )
+    return false;
+  return trailers.some(
+    (session) =>
+      session.keys[0] === wanted &&
+      Math.abs(session.at - event.at) <= CLOSE_MS &&
+      Math.abs(session.viewedSeconds - event.watchedSeconds) <=
+        Math.max(15, event.watchedSeconds * 0.2),
+  );
 }
 
 /**

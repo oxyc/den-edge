@@ -6,6 +6,7 @@ import { parseDelimitedRows } from './viewingImportCsv';
 import {
   isViewingPreview,
   normalizeViewingName,
+  viewingFilmKey,
   viewingPreviewLines,
   type ImportShow,
   type ViewingImportPlan,
@@ -158,40 +159,12 @@ export function parseTitle(title: string): Parsed {
 /** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
 export const normalize = normalizeViewingName;
 
-const NUMBER_WORDS: Record<string, string> = {
-  one: '1',
-  two: '2',
-  three: '3',
-  four: '4',
-  five: '5',
-  six: '6',
-  seven: '7',
-  eight: '8',
-  nine: '9',
-  ten: '10',
-  hundred: '100',
-  thousand: '1000',
-};
-
 /**
  * A film's name for comparing, a leading article and spelt-out numbers aside: Netflix's "School of Rock",
  * "1,000 Times Good Night" and "Three Generations" are TMDB's "The School of Rock", "A Thousand Times Good Night"
  * and "3 Generations".
  */
-export const filmKey = (name: string) =>
-  normalize(name)
-    // Anywhere, not only first: "Bordertown: Mural Murders" is "Bordertown: The Mural Murders", and "El Pepe, a
-    // Supreme Life" is "El Pepe: A Supreme Life".
-    .replace(/\b(?:the|a|an)\b/g, ' ')
-    // "Nymphomaniac: Volume 1" is "Nymphomaniac: Vol. I"; a numeral only after such a word, since "I" is a word too.
-    .replace(/\bvol\b/g, 'volume')
-    .replace(/\b(volume|part|chapter) ([ivx]+)\b/g, (whole, word: string, numeral: string) =>
-      ROMAN[numeral] ? `${word} ${ROMAN[numeral]}` : whole,
-    )
-    .trim()
-    .split(/\s+/)
-    .map((word) => NUMBER_WORDS[word] ?? word)
-    .join(' ');
+export const filmKey = viewingFilmKey;
 
 export const unnamed = unnamedViewingEpisode;
 export const findEpisode = findViewingEpisode;

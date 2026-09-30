@@ -77,7 +77,7 @@ function oneEditApart(left: string, right: string): boolean {
 
 /** TMDB's placeholder for an episode it has no name for: "Episode 3", "Episode Three". */
 export const unnamedViewingEpisode = (name: string) =>
-  /^(?:episode|chapter|ep)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
+  /^(?:episode|chapter|ep|episodio|capitulo)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
     normalize(name),
   );
 
@@ -96,14 +96,13 @@ export function findViewingEpisode(
   const exact = episodes.find((episode) => normalize(episode.name) === wanted);
   if (exact) return exact.number;
   const numbered =
-    /^(?:episode|chapter|ep)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.exec(
+    /^(?:episode|chapter|ep|episodio|capitulo)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.exec(
       wanted,
     )?.[1];
   const episodeNumber =
     numbered === undefined ? undefined : (PART_WORDS[numbered] ?? Number(numbered));
   if (episodeNumber !== undefined && episodes.some((episode) => episode.number === episodeNumber))
     return episodeNumber;
-
   const whole = episodes.filter((episode) => {
     const other = normalize(episode.name);
     return other.length >= 5 && (other.includes(wanted) || wanted.includes(other));
@@ -115,6 +114,9 @@ export function findViewingEpisode(
     return wanted.length >= 5 && other.length >= 5 && oneEditApart(wanted, other);
   });
   if (typo.length === 1) return typo[0]!.number;
+
+  const inflection = episodes.filter((episode) => inflectionApart(wanted, normalize(episode.name)));
+  if (inflection.length === 1) return inflection[0]!.number;
 
   const mine = reading(name);
   const theirs = episodes.map((episode) => ({ number: episode.number, ...reading(episode.name) }));
@@ -147,4 +149,26 @@ export function findViewingEpisode(
   if (best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1) return best.number;
   const bare = name.replace(/\s*\([^()]*\)\s*$/, '');
   return bare !== name && normalize(bare) ? findViewingEpisode(bare, episodes) : undefined;
+}
+
+function inflectionApart(left: string, right: string): boolean {
+  const [a, b] = [left.split(' '), right.split(' ')];
+  if (a.length !== b.length) return false;
+  let changed = 0;
+  for (const [at, word] of a.entries()) {
+    const other = b[at]!;
+    if (word === other) continue;
+    if (++changed > 1 || !wordForms(word).some((form) => wordForms(other).includes(form)))
+      return false;
+  }
+  return changed === 1;
+}
+
+function wordForms(word: string): string[] {
+  const forms = [word];
+  if (word.endsWith('ing') && word.length > 5) {
+    const stem = word.slice(0, -3);
+    forms.push(stem, `${stem}e`);
+  }
+  return forms;
 }
