@@ -1,10 +1,13 @@
-// Home's billboard as atlas ranks it once per UTC day. Everyone reads the same cacheable pool; a browser with a
-// library moves titles found in the public "fans of" rows for its strongest titles upward, without disclosing the
-// library in a recommendation request.
+// Home's billboard, as atlas ranks it: atlas is the only ranker, and this page only draws what it answers. Everyone
+// first reads the same cacheable pool for the UTC day (`GET /recommend/<scope>.json`). Behind a switch
+// (`memberPostOn`), a browser with a library then asks atlas to rank against the whole of it (`POST /recommend`),
+// and that answer takes every slide after the one on screen and is kept for the next visit's first paint.
 
 import type { MediaType, Title } from './library';
+import type { Prefs } from './prefs';
 import { relayFetch } from './relayFetch';
 import { ATLAS } from './scout';
+import { GUEST_PICKS } from './services';
 
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
 export interface Weighted {
@@ -158,89 +161,182 @@ export function recommendForEveryone(
   return early ?? askEveryone(url, fetchImpl);
 }
 
-const PERSONAL_SEEDS = 10;
-const PERSONAL_REQUESTS = 4;
-const FAN_LIMIT = 100;
-// A perfect fan match may move a nearby shared pick to the lead, but cannot let a ubiquitous deep-pool title
-// overwhelm the quality/freshness prior merely because it appeared in every seed row.
-const PERSONAL_LIFT = 2;
-// One top-five hit among ten full-weight seeds, or several weaker agreements, is enough to make a title personal.
-// Anything below this remains evidence for ordering, but not enough to displace the shared lead on its own.
-const PERSONAL_MATCH = 0.01;
-const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
+/** Where the member switch is kept in this browser, and the query parameter that sets it (`memberPostOn`). */
+const MEMBER_POST = 'den.billboard.member-post';
+const MEMBER_POST_PARAM = 'billboard-post';
 
-/** Read one public, long-lived "fans of this title" row. Older atlases may answer same-type `ids` only. */
-async function fansOf(base: string, seed: Weighted, fetchImpl: typeof fetch): Promise<Slide[]> {
-  const kind = seed.ref.type === 'tv' ? 'series' : 'movie';
+/**
+ * Whether a browser with a library asks atlas to rank its billboard against the whole library (`POST /recommend`).
+ * Off until the owner has judged the ranking (den#161). `?billboard-post=1` turns it on for this browser and
+ * `?billboard-post=0` off again; either is remembered, so the parameter is needed once.
+ */
+export function memberPostOn(
+  search = globalThis.location?.search ?? '',
+  storage: Pick<Storage, 'getItem' | 'setItem'> | undefined = globalThis.localStorage,
+): boolean {
+  const asked = new URLSearchParams(search).get(MEMBER_POST_PARAM);
   try {
-    const res = await fetchImpl(
-      `${base}/index/suggest/${kind}/${seed.ref.id}.json?skip=0&limit=${FAN_LIMIT}`,
-    );
-    if (!res.ok) return [];
-    const answer = (await res.json()) as { mixed?: unknown; ids?: unknown };
-    if (Array.isArray(answer.mixed)) return slidesOf(answer.mixed);
-    return (Array.isArray(answer.ids) ? answer.ids : []).flatMap((id): Slide[] =>
-      typeof id === 'number' && Number.isInteger(id) ? [{ type: seed.ref.type, id }] : [],
-    );
+    if (asked === '1' || asked === '0') storage?.setItem(MEMBER_POST, asked);
+    return storage?.getItem(MEMBER_POST) === '1';
   } catch {
-    return [];
+    // Storage refused (a private window): the parameter still counts for this page.
+    return asked === '1';
   }
 }
 
+/** What atlas calls a series. */
+const atlasType = (type: MediaType) => (type === 'tv' ? 'series' : 'movie');
+
 /**
- * Re-rank the shared pool locally from public per-title affinity rows. The shared order remains the quality,
- * freshness and buzz prior; fan matches add a bounded reciprocal-rank lift. At most four requests run at once so
- * opening Home cannot occupy the relay's whole request budget. A missing/older atlas simply leaves the shared order.
+ * What TMDB said about a library title. atlas reads it only for a title it knows nothing about itself, and keeps
+ * none of it: without it, a watched title outside atlas's corpus says nothing about taste.
  */
-export async function personalizeEveryone(
-  base: string,
-  slides: Slide[],
-  library: Weighted[],
-  owned: ReadonlySet<string>,
-  fetchImpl: typeof fetch = relayFetch,
-): Promise<Slide[]> {
-  const candidates = slides.filter((slide) => !owned.has(slideKey(slide)));
-  const seeds = library
-    .filter(({ weight }) => weight !== 0)
-    .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight) || b.at - a.at)
-    .slice(0, PERSONAL_SEEDS);
-  if (!seeds.length || !candidates.length) return candidates;
-  const seedWeight = seeds.reduce((sum, seed) => sum + Math.abs(seed.weight), 0);
-
-  const affinity = new Map<string, number>();
-  const queue = seeds.slice();
-  const work = async () => {
-    for (let seed = queue.shift(); seed; seed = queue.shift()) {
-      const fans = await fansOf(base, seed, fetchImpl);
-      const seen = new Set<string>();
-      fans.forEach((slide, rank) => {
-        const key = slideKey(slide);
-        if (seen.has(key)) return;
-        seen.add(key);
-        affinity.set(key, (affinity.get(key) ?? 0) + seed.weight / (rank + 5));
-      });
-    }
+function hintOf(title: Title) {
+  const tmdbRating =
+    title.ratingSource === 'tmdb' &&
+    typeof title.rating === 'number' &&
+    Number.isFinite(title.rating) &&
+    title.rating > 0 &&
+    title.rating <= 10
+      ? title.rating
+      : undefined;
+  return {
+    title: title.title,
+    year: title.year,
+    releaseDate: title.releaseDate,
+    genreIds: title.genreIds,
+    originalLanguage: title.originalLanguage,
+    countries: title.countries,
+    popularity: title.popularity,
+    ...(tmdbRating !== undefined
+      ? {
+          rating: tmdbRating,
+          ...(typeof title.votes === 'number' && Number.isInteger(title.votes) && title.votes >= 0
+            ? { votes: title.votes }
+            : {}),
+        }
+      : {}),
+    adult: title.adult,
+    imdbId: title.imdbId,
   };
-  await Promise.all(Array.from({ length: Math.min(PERSONAL_REQUESTS, seeds.length) }, work));
+}
 
-  return candidates
-    .map((slide, rank) => {
-      const lift = ((affinity.get(slideKey(slide)) ?? 0) / seedWeight) * PERSONAL_LIFT;
-      return {
-        slide,
-        rank,
-        lift,
-        matched: lift / PERSONAL_LIFT >= PERSONAL_MATCH,
-        // A slowly declining prior keeps a weak affinity hit from discarding atlas's quality/freshness ranking.
-        score: 1 / (1 + rank * 0.05) + lift,
-      };
-    })
-    .sort((a, b) =>
-      a.matched !== b.matched ? (a.matched ? -1 : 1) : b.score - a.score || a.rank - b.rank,
-    )
-    .map(({ slide, matched }) =>
-      matched ? { ...slide, why: { ...slide.why, reason: 'profile' } } : slide,
-    );
+/** The most library and owned titles one request may name (den-atlas `recommend.rs` `MAX_LIBRARY`, `MAX_OWNED`). */
+const MAX_LIBRARY = 5000;
+const MAX_OWNED = 10_000;
+
+/**
+ * The request for a billboard ranked against this library, on the page showing `facet` (Home: null). No candidate
+ * lists: den-edge adds TMDB's trending and current releases to it (`billboard.rs`), and atlas has its own.
+ */
+export function recommendBody({
+  facet,
+  prefs,
+  library,
+  named = new Map(),
+  owned,
+  now = new Date(),
+}: {
+  facet: MediaType | null;
+  prefs: Prefs;
+  library: Weighted[];
+  /** The library's titles TMDB has named, by `type:id`. */
+  named?: Map<string, Title>;
+  /** Every title the library holds, by `type:id`. */
+  owned: Set<string>;
+  now?: Date;
+}) {
+  return {
+    version: 1,
+    surface: billboardScope(facet),
+    now: now.toISOString(),
+    // Home uses these same six picks until the household saves a selection; a saved empty selection stays empty.
+    services: prefs.servicesConfigured ? prefs.services : GUEST_PICKS,
+    // Past atlas's limit it would refuse the whole request, so the most recent titles go.
+    library: [...library]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, MAX_LIBRARY)
+      .map(({ ref, weight, at }) => {
+        const title = named.get(`${ref.type}:${ref.id}`);
+        return {
+          type: atlasType(ref.type),
+          id: ref.id,
+          weight,
+          at,
+          ...(title ? { hint: hintOf(title) } : {}),
+        };
+      }),
+    owned: [...owned].slice(0, MAX_OWNED).flatMap((key) => {
+      const [type, id] = key.split(':');
+      const numeric = Number(id);
+      return (type === 'movie' || type === 'tv') && Number.isInteger(numeric)
+        ? [{ type: atlasType(type), id: numeric }]
+        : [];
+    }),
+    hide: {
+      minYear: prefs.minReleaseYear,
+      genres: [...prefs.excludedGenres],
+      languages: [...prefs.excludedLanguages],
+      anime: prefs.hideAnime,
+    },
+  };
+}
+
+/** atlas's billboard for `body`, best first; null where atlas can't rank (no route, out of reach, a malformed answer). */
+export async function recommend(
+  base: string,
+  body: ReturnType<typeof recommendBody>,
+  fetchImpl: typeof fetch = relayFetch,
+): Promise<Slide[] | null> {
+  try {
+    const res = await fetchImpl(`${base}/recommend`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    const answer = (await res.json()) as { slides?: unknown };
+    return Array.isArray(answer.slides) ? slidesOf(answer.slides) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A billboard atlas ranked for this library, kept for the next visit (`LibraryLog.keep`), with when it was ranked. */
+export interface KeptBillboard {
+  at: number;
+  titles: RecommendedTitle[];
+}
+
+/** How long a kept personal billboard may open the next visit before the shared one does instead. */
+const KEPT_FOR_MS = 86_400_000;
+
+/** The kept billboard's titles while it is under a day old; null when there is none, or it is older. */
+export function freshKept(
+  kept: KeptBillboard | null | undefined,
+  now = Date.now(),
+): RecommendedTitle[] | null {
+  if (!kept || typeof kept.at !== 'number' || !Array.isArray(kept.titles)) return null;
+  const age = now - kept.at;
+  return kept.titles.length && age >= 0 && age < KEPT_FOR_MS ? kept.titles : null;
+}
+
+const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
+
+/**
+ * `next` in place of every slide after `visible`, the one on screen. It and the slides before it stay where they
+ * are, so nothing moves under the viewer and the rail keeps its place; `next` follows, less what they already show.
+ * With nothing on screen, `next` is the whole billboard.
+ */
+export function swapAfter<T extends Pick<Slide, 'type' | 'id'>>(
+  shown: T[],
+  visible: Pick<Slide, 'type' | 'id'> | undefined,
+  next: T[],
+): T[] {
+  const at = visible ? shown.findIndex((slide) => slideKey(slide) === slideKey(visible)) : -1;
+  const kept = shown.slice(0, at + 1);
+  const keys = new Set(kept.map(slideKey));
+  return [...kept, ...next.filter((slide) => !keys.has(slideKey(slide)))];
 }
 
 /**
