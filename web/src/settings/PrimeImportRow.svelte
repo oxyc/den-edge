@@ -34,7 +34,7 @@
   }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
     $props();
 
-  async function read(files: FileList) {
+  async function read(files: readonly File[]) {
     const opened = log;
     if (!opened) return;
     excluded.clear();
@@ -121,9 +121,9 @@
           multiple
           disabled={!log}
           onchange={(event) => {
-            const files = event.currentTarget.files;
+            const files = [...(event.currentTarget.files ?? [])];
             event.currentTarget.value = '';
-            if (files?.length) void read(files);
+            if (files.length) void read(files);
           }}
         />
       </label>
