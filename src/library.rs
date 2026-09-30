@@ -548,6 +548,12 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             .as_ref()
             .map_or_else(|| "0".to_owned(), |value| full_generation(state, &value.generation));
         if sent_generation.as_deref() != Some(current.as_str()) {
+            eprintln!(
+                "library generation changed: library={} sent={} current={}",
+                &id[..id.len().min(8)],
+                sent_generation.as_deref().unwrap_or("missing"),
+                current
+            );
             let response = json_reply(StatusCode::CONFLICT, &error("generation_changed"));
             return with_wire_headers(state, response, protocol.as_ref());
         }
