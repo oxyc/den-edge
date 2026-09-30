@@ -4,7 +4,7 @@ import App from './App.svelte';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
-import { startBillboard } from './lib/recommend';
+import { freshOn, startBillboard } from './lib/recommend';
 import { legacyPath } from './lib/route';
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
@@ -24,7 +24,7 @@ if (invited) {
 }
 
 // Home's billboard for everyone, asked now rather than once the app has found atlas and opened the library.
-startBillboard(location.pathname, !!links.current);
+startBillboard(location.pathname, !!links.current, freshOn());
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

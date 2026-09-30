@@ -78,9 +78,15 @@
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import {
     billboardScope,
+    freshKept,
+    freshOn,
+    memberPostOn,
     nameSlides,
-    personalizeEveryone,
+    recommend,
+    recommendBody,
     recommendForEveryone,
+    swapAfter,
+    type KeptBillboard,
     type RecommendedTitle,
   } from './lib/recommend';
   import { atlasRows } from './lib/atlasRows';
@@ -882,9 +888,9 @@
   /** The screen's own facet: Movies shows your movies, Series your series, Home both. */
   const facet = $derived(route.page === 'movies' ? 'movie' : route.page === 'series' ? 'tv' : null);
   /**
-   * What the billboard cycles. Not a row: a shared daily pool ranked by atlas and personalized locally — what is being
-   * watched now, what is new or still to come, and what has just landed on this household's own services, weighted
-   * towards the library's taste and away from anything it already holds.
+   * What the billboard cycles. Not a row: a pool ranked by atlas (`buildRecommended`) — what is being watched now,
+   * what is new or still to come, and what has just landed on this household's own services, away from anything the
+   * library already holds.
    */
   let featured = $state<RecommendedTitle[]>([]);
   let heroReady = $state(false);
@@ -900,14 +906,35 @@
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
   // v4 invalidates the additive blend that let an unmatched shared lead stay ahead of credible personal matches.
   // Earlier namespaces cover the unbounded multi-seed and removed POST rankers.
-  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v4.${type ?? 'all'}`;
+  // Only-new-titles billboards (`fresh`) are kept under names of their own, so neither opens the other's page.
+  const keptBillboard = (type: 'movie' | 'tv' | null) =>
+    `billboard.v4.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
+  /** Where atlas's ranking for this library (`POST /recommend`) is kept, with when it was ranked (`KeptBillboard`). */
+  const keptPersonal = (type: 'movie' | 'tv' | null) =>
+    `billboard.personal.v1.${fresh ? 'fresh.' : ''}${type ?? 'all'}`;
+  /**
+   * Read once per page: whether a library's billboard is ranked by atlas against it (`memberPostOn`), and whether
+   * the billboard is only new titles (`freshOn`).
+   */
+  const memberPost = memberPostOn();
+  const fresh = freshOn();
+  /** The slide on screen, as an index into the titles the billboard draws. */
+  let slideShown = $state(0);
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
-  // for the library's profile, and the page shouldn't.
+  // for atlas and TMDB, and the page shouldn't. With the member switch on, only atlas's ranking for this library
+  // opens it, and only while it is under a day old; otherwise the shared billboard does.
   $effect(() => {
     const opened = log;
-    const name = keptBillboard(facet);
+    const type = facet;
     if (!opened || !tmdbKey) return;
-    void opened.kept<RecommendedTitle[]>(name).then((saved) => {
+    if (memberPost) {
+      void opened.kept<KeptBillboard>(keptPersonal(type)).then((saved) => {
+        const titles = freshKept(saved);
+        if (titles && !featured.length) featured = titles;
+      });
+      return;
+    }
+    void opened.kept<RecommendedTitle[]>(keptBillboard(type)).then((saved) => {
       if (saved?.length && !featured.length) featured = saved;
     });
   });
@@ -944,53 +971,87 @@
   const libraryOpen = $derived(applied !== null);
 
   /**
-   * Everyone starts with atlas's one cacheable ranking for this surface and UTC day. A library re-ranks that pool
-   * from its strongest titles' public "fans of" rows in the browser; guests simply keep atlas's order. Naming is in
-   * two waves so the lead's backdrop starts after one TMDB lookup instead of waiting for the slowest of twenty.
+   * Everyone starts with atlas's one cacheable ranking for this surface and UTC day, less what the library holds.
+   * Naming is in two waves so the lead's backdrop starts after one TMDB lookup instead of waiting for the slowest of
+   * twenty.
+   *
+   * With the member switch on, a library's billboard is then ranked by atlas against the whole library, asked at
+   * once and applied once the first paint is up. A kept ranking under a day old is that first paint instead of the
+   * shared one. The new ranking takes every slide after the one on screen and is kept for the next visit.
    */
   function buildRecommended(here: string) {
     const type = facet;
     const key = tmdbKey;
     const run = ++billboardRun;
-    const kept = keptBillboard(type);
-    void recommendForEveryone(here, billboardScope(type))
-      .then(async (shared) => {
+    const opened = log;
+    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const ranked =
+      opened && memberPost
+        ? recommend(
+            here,
+            recommendBody({
+              facet: type,
+              prefs,
+              library: weighted,
+              named: new Map(
+                (library?.records ?? [])
+                  .filter((r) => r.title.title)
+                  .map((r) => [titleKey(r.title), r.title] as const),
+              ),
+              owned: seeds.owned,
+              fresh,
+            }),
+          )
+        : null;
+    const kept =
+      ranked && opened
+        ? opened.kept<KeptBillboard>(keptPersonal(type)).then(freshKept, () => null)
+        : Promise.resolve(null);
+    void kept
+      .then(async (personal) => {
         if (run !== billboardRun) return;
-        if (!shared?.length) {
-          buildTrending(run);
-          return;
-        }
-        // Do not put the affinity fan-out in front of first paint. Name atlas's shared lead while those public,
-        // cached rows arrive; the personalized order replaces it without blanking the billboard.
-        const personal = personalizeEveryone(here, shared, weighted, seeds.owned);
-        const sharedLead = shared.find((slide) => !seeds.owned.has(`${slide.type}:${slide.id}`));
-        const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
-        const first = sharedLead
-          ? await nameSlides([sharedLead], new Map(), lookup, 1)
-          : ([] as RecommendedTitle[]);
-        if (run !== billboardRun) return;
-        // Keep a member's last locally ranked answer visible while affinity loads, but never treat that temporary
-        // paint as part of the new ranking. A guest's generic fallback can be replaced by the shared lead at once.
-        if (first.length && (!log || !featured.length)) featured = first;
-        const slides = await personal;
-        if (run !== billboardRun || !slides.length) {
-          if (!slides.length) buildTrending(run);
-          return;
-        }
-        const wanted = slides.slice(0, EVERYONE_NAMED);
-        const known = new Map(first.map((title) => [titleKey(title), title] as const));
-        const picked = await nameSlides(wanted, known, lookup, LOOKUPS);
-        if (run !== billboardRun) return;
-        if (!picked.length) {
-          buildTrending(run);
-          return;
-        }
-        // This is the completed ranking. Replacing the temporary/kept paint is essential: keeping its old first
-        // slide here made a pre-GET recommendation lead forever, with its stale explanation attached.
-        featured = picked;
-        void log?.keep(kept, picked).catch(warnKeep);
+        if (personal) {
+          if (!featured.length) featured = personal;
+        } else await paintShared(here, run);
+        const slides = await ranked;
+        if (run !== billboardRun || !slides?.length) return;
+        const known = new Map(featured.map((title) => [titleKey(title), title] as const));
+        const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
+        if (run !== billboardRun || !picked.length) return;
+        featured = swapAfter(featured, featured.filter(featuredShown)[slideShown], picked);
+        void opened?.keep(keptPersonal(type), { at: Date.now(), titles: picked }).catch(warnKeep);
       })
       .catch(() => buildTrending(run));
+  }
+
+  /** The shared billboard (`GET /recommend/<scope>.json`) as the first paint, less what the library holds. */
+  async function paintShared(here: string, run: number) {
+    const type = facet;
+    const key = tmdbKey;
+    const shared = (await recommendForEveryone(here, billboardScope(type), fresh))?.filter(
+      (slide) => !seeds.owned.has(`${slide.type}:${slide.id}`),
+    );
+    if (run !== billboardRun) return;
+    if (!shared?.length) {
+      buildTrending(run);
+      return;
+    }
+    const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
+    const first = await nameSlides(shared.slice(0, 1), new Map(), lookup, 1);
+    if (run !== billboardRun) return;
+    // A member's kept billboard stays up while the rest is named. A guest's generic fallback gives way at once.
+    if (first.length && (!log || !featured.length)) featured = first;
+    const known = new Map(first.map((title) => [titleKey(title), title] as const));
+    const picked = await nameSlides(shared.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
+    if (run !== billboardRun) return;
+    if (!picked.length) {
+      buildTrending(run);
+      return;
+    }
+    // Replacing the kept paint is essential: keeping its old first slide made a pre-GET recommendation lead
+    // forever, with its stale explanation attached.
+    featured = picked;
+    void log?.keep(keptBillboard(type), picked).catch(warnKeep);
   }
 
   /**
@@ -1159,6 +1220,7 @@
     <Billboard
       active={active && !playing}
       titles={featured.filter(featuredShown)}
+      bind:index={slideShown}
       {tmdbKey}
       {reel}
       {routes}

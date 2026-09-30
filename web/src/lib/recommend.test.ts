@@ -1,12 +1,19 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
+import type { Prefs } from './prefs';
 import {
   billboardScope,
+  freshKept,
+  freshOn,
+  memberPostOn,
   nameSlides,
-  personalizeEveryone,
+  recommend,
   recommendationReason,
+  recommendBody,
   recommendForEveryone,
   startBillboard,
+  swapAfter,
+  type KeptBillboard,
 } from './recommend';
 
 const film = (id: number, extra: Partial<Title> = {}): Title => ({
@@ -26,6 +33,7 @@ describe('recommendForEveryone', () => {
     const slides = await recommendForEveryone(
       '/atlas',
       billboardScope('tv'),
+      false,
       new Date('2026-09-28T23:30:00-03:00'),
       fetchImpl,
     );
@@ -39,8 +47,25 @@ describe('recommendForEveryone', () => {
     const unavailable = (async () =>
       new Response('{}', { status: 404 })) as unknown as typeof fetch;
     const malformed = (async () => new Response('{}')) as unknown as typeof fetch;
-    expect(await recommendForEveryone('/atlas', 'home', new Date(), unavailable)).toBeNull();
-    expect(await recommendForEveryone('/atlas', 'home', new Date(), malformed)).toBeNull();
+    expect(await recommendForEveryone('/atlas', 'home', false, new Date(), unavailable)).toBeNull();
+    expect(await recommendForEveryone('/atlas', 'home', false, new Date(), malformed)).toBeNull();
+  });
+
+  it('asks for only new titles with fresh, as an address of its own', async () => {
+    const asked: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      asked.push(url);
+      return new Response(JSON.stringify({ slides: [] }));
+    }) as unknown as typeof fetch;
+    const now = new Date('2026-09-28T12:00:00Z');
+    startBillboard('/', false, true, now, fetchImpl);
+    expect(asked).toEqual(['/atlas/recommend/home.json?day=2026-09-28&fresh=1']);
+    // The started answer is only-new-titles, so a page without fresh asks for its own.
+    await recommendForEveryone('/atlas', 'home', false, now, fetchImpl);
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).toBe('/atlas/recommend/home.json?day=2026-09-28');
+    await recommendForEveryone('/atlas', 'home', true, now, fetchImpl);
+    expect(asked).toHaveLength(2);
   });
 
   it('takes the billboard the app started asking for once', async () => {
@@ -50,12 +75,14 @@ describe('recommendForEveryone', () => {
       return new Response(JSON.stringify({ slides: [{ type: 'movie', id: asked.length }] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/movies', false, now, fetchImpl);
-    startBillboard('/watchlist', false, now, fetchImpl);
+    startBillboard('/movies', false, false, now, fetchImpl);
+    startBillboard('/watchlist', false, false, now, fetchImpl);
     expect(asked).toEqual(['/atlas/recommend/movies.json?day=2026-09-28']);
-    expect((await recommendForEveryone('/atlas', 'movies', now, fetchImpl))?.[0]?.id).toBe(1);
+    expect((await recommendForEveryone('/atlas', 'movies', false, now, fetchImpl))?.[0]?.id).toBe(
+      1,
+    );
     expect(asked).toHaveLength(1);
-    await recommendForEveryone('/atlas', 'movies', now, fetchImpl);
+    await recommendForEveryone('/atlas', 'movies', false, now, fetchImpl);
     expect(asked).toHaveLength(2);
   });
 
@@ -66,109 +93,184 @@ describe('recommendForEveryone', () => {
       return new Response(JSON.stringify({ slides: [{ type: 'movie', id: 1 }] }));
     }) as unknown as typeof fetch;
     const now = new Date('2026-09-28T12:00:00Z');
-    startBillboard('/', true, now, fetchImpl);
+    startBillboard('/', true, false, now, fetchImpl);
     expect(asked).toEqual([]);
-    await recommendForEveryone('/atlas/us_8', 'home', now, fetchImpl);
+    await recommendForEveryone('/atlas/us_8', 'home', false, now, fetchImpl);
     expect(asked).toEqual(['/atlas/us_8/recommend/home.json?day=2026-09-28']);
   });
 });
 
-describe('personalizeEveryone', () => {
-  const slides = Array.from({ length: 20 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
+describe('memberPostOn', () => {
+  const storage = () => {
+    const kept = new Map<string, string>();
+    return {
+      getItem: (name: string) => kept.get(name) ?? null,
+      setItem: (name: string, value: string) => void kept.set(name, value),
+    };
+  };
 
-  it('keeps the shared prior, removes owned titles, and lifts fan matches without a POST', async () => {
-    const asked: { url: string; method: string }[] = [];
-    const fetchImpl = (async (url: string, init?: RequestInit) => {
-      asked.push({ url, method: init?.method ?? 'GET' });
-      return new Response(JSON.stringify({ mixed: [{ type: 'movie', id: 12 }] }));
-    }) as unknown as typeof fetch;
-    const ranked = await personalizeEveryone(
-      '/atlas',
-      slides,
-      [{ ref: { type: 'tv', id: 1438 }, weight: 2, at: 9 }],
-      new Set(['movie:20']),
-      fetchImpl,
-    );
-    expect(ranked.some((slide) => slide.id === 20)).toBe(false);
-    expect(ranked[0]?.id).toBe(12);
-    expect(ranked.find((slide) => slide.id === 12)?.why?.reason).toBe('profile');
-    expect(asked).toEqual([
-      { url: '/atlas/index/suggest/series/1438.json?skip=0&limit=100', method: 'GET' },
-    ]);
+  it('keeps the fresh switch apart from the member switch, set the same way', () => {
+    const kept = storage();
+    expect(freshOn('', kept)).toBe(false);
+    expect(freshOn('?billboard-fresh=1', kept)).toBe(true);
+    expect(kept.getItem('den.billboard.fresh')).toBe('1');
+    expect(memberPostOn('', kept)).toBe(false);
+    expect(freshOn('', kept)).toBe(true);
+    expect(freshOn('?billboard-fresh=0', kept)).toBe(false);
+    expect(freshOn('', kept)).toBe(false);
   });
 
-  it('bounds fan lookups at four and degrades to the shared order', async () => {
-    let active = 0;
-    let peak = 0;
-    const fetchImpl = vi.fn(async () => {
-      active++;
-      peak = Math.max(peak, active);
-      await Promise.resolve();
-      active--;
-      return new Response('{}', { status: 404 });
-    }) as unknown as typeof fetch;
-    const ranked = await personalizeEveryone(
-      '/atlas',
-      slides,
-      Array.from({ length: 10 }, (_, i) => ({
-        ref: { type: 'movie' as const, id: 100 + i },
-        weight: 1,
-        at: i,
-      })),
-      new Set(),
-      fetchImpl,
-    );
-    expect(ranked).toEqual(slides);
-    expect(fetchImpl).toHaveBeenCalledTimes(10);
-    expect(peak).toBeLessThanOrEqual(4);
+  it('is off until this browser turns it on, and the parameter is remembered', () => {
+    const kept = storage();
+    expect(memberPostOn('', kept)).toBe(false);
+    expect(memberPostOn('?billboard-post=1', kept)).toBe(true);
+    expect(memberPostOn('', kept)).toBe(true);
+    expect(memberPostOn('?billboard-post=0', kept)).toBe(false);
+    expect(memberPostOn('', kept)).toBe(false);
   });
 
-  it('normalizes a ubiquitous fan match and applies dislikes instead of dropping them', async () => {
-    const pool = Array.from({ length: 100 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
-    const fetchImpl = vi.fn(async (url: string) => {
-      const disliked = url.includes('/109.json');
+  it('reads the flag set by hand, and the parameter where storage refuses', () => {
+    const kept = storage();
+    kept.setItem('den.billboard.member-post', '1');
+    expect(memberPostOn('', kept)).toBe(true);
+    const refusing = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+    };
+    expect(memberPostOn('?billboard-post=1', refusing)).toBe(true);
+    expect(memberPostOn('', refusing)).toBe(false);
+  });
+});
+
+describe('recommend', () => {
+  const prefs = {
+    excludedGenres: new Set([27]),
+    excludedLanguages: new Set(['ja']),
+    hideAnime: true,
+    minReleaseYear: 1990,
+    services: [{ id: 8, country: 'US' }],
+    servicesConfigured: true,
+  } as unknown as Prefs;
+
+  it('sends the whole library with what TMDB said of it, and nothing to rank it against', () => {
+    const body = recommendBody({
+      facet: 'tv',
+      prefs,
+      library: [
+        { ref: { type: 'tv', id: 1438 }, weight: 1, at: 5 },
+        { ref: { type: 'movie', id: 2 }, weight: -1.5, at: 9 },
+      ],
+      named: new Map([
+        ['movie:2', film(2, { year: 2020, rating: 7, ratingSource: 'tmdb', votes: 10 })],
+      ]),
+      owned: new Set(['tv:1438', 'movie:2', 'bogus']),
+      now: new Date('2026-09-30T12:00:00Z'),
+    });
+    expect(body).toEqual({
+      version: 1,
+      surface: 'series',
+      now: '2026-09-30T12:00:00.000Z',
+      services: [{ id: 8, country: 'US' }],
+      library: [
+        {
+          type: 'movie',
+          id: 2,
+          weight: -1.5,
+          at: 9,
+          hint: expect.objectContaining({ title: 'T2', year: 2020, rating: 7, votes: 10 }),
+        },
+        { type: 'series', id: 1438, weight: 1, at: 5 },
+      ],
+      owned: [
+        { type: 'series', id: 1438 },
+        { type: 'movie', id: 2 },
+      ],
+      hide: { minYear: 1990, genres: [27], languages: ['ja'], anime: true },
+    });
+    expect(body).not.toHaveProperty('candidates');
+    expect(body).not.toHaveProperty('fresh');
+  });
+
+  it('asks for only new titles with fresh', () => {
+    const body = recommendBody({ facet: null, prefs, library: [], owned: new Set(), fresh: true });
+    expect(body).toMatchObject({ surface: 'home', fresh: true });
+  });
+
+  it('keeps a library past atlas’s limit to its most recent titles', () => {
+    const library = Array.from({ length: 5001 }, (_, i) => ({
+      ref: { type: 'movie' as const, id: i },
+      weight: 1,
+      at: i,
+    }));
+    const body = recommendBody({ facet: null, prefs, library, owned: new Set() });
+    expect(body.library).toHaveLength(5000);
+    expect(body.library.some((entry) => entry.id === 0)).toBe(false);
+  });
+
+  it('POSTs the body and reads atlas’s slides; null where atlas can’t rank', async () => {
+    const asked: { url: string; init?: RequestInit }[] = [];
+    const answering = (async (url: string, init?: RequestInit) => {
+      asked.push({ url, init });
       return new Response(
-        JSON.stringify({
-          mixed: [
-            { type: 'movie', id: 80 },
-            { type: 'movie', id: disliked ? 12 : 81 },
-            { type: 'movie', id: 80 }, // a malformed duplicate cannot multiply one seed's vote
-          ],
-        }),
+        JSON.stringify({ slides: [{ type: 'series', id: 7, why: { reason: 'profile' } }] }),
       );
     }) as unknown as typeof fetch;
-    const ranked = await personalizeEveryone(
-      '/atlas',
-      pool,
-      Array.from({ length: 10 }, (_, i) => ({
-        ref: { type: 'movie' as const, id: 100 + i },
-        weight: i === 9 ? -1.5 : 1,
-        at: i,
-      })),
-      new Set(),
-      fetchImpl,
-    );
-    expect(ranked[0]?.id).toBe(80);
-    expect(ranked[0]?.why?.reason).toBe('profile');
-    expect(ranked.findIndex((slide) => slide.id === 12)).toBeGreaterThan(11);
-    expect(fetchImpl).toHaveBeenCalledTimes(10);
+    const body = recommendBody({ facet: null, prefs, library: [], owned: new Set() });
+    expect(await recommend('/atlas/us_8', body, answering)).toEqual([
+      { type: 'tv', id: 7, imdbId: undefined, why: { reason: 'profile' } },
+    ]);
+    expect(asked[0]!.url).toBe('/atlas/us_8/recommend');
+    expect(asked[0]!.init?.method).toBe('POST');
+    expect(JSON.parse(String(asked[0]!.init?.body))).toEqual(body);
+
+    const failing = (async () => new Response('{}', { status: 400 })) as unknown as typeof fetch;
+    const unreachable = (async () => {
+      throw new TypeError('offline');
+    }) as unknown as typeof fetch;
+    expect(await recommend('/atlas', body, failing)).toBeNull();
+    expect(await recommend('/atlas', body, unreachable)).toBeNull();
+  });
+});
+
+describe('freshKept', () => {
+  const now = Date.parse('2026-09-30T12:00:00Z');
+  const titles = [film(1)];
+
+  it('opens the page with a kept ranking under a day old, and not otherwise', () => {
+    expect(freshKept({ at: now - 60_000, titles }, now)).toEqual(titles);
+    expect(freshKept({ at: now - 86_400_000 + 1, titles }, now)).toEqual(titles);
+    expect(freshKept({ at: now - 86_400_000, titles }, now)).toBeNull();
+    expect(freshKept({ at: now + 60_000, titles }, now)).toBeNull();
+    expect(freshKept({ at: now, titles: [] }, now)).toBeNull();
+    expect(freshKept(undefined, now)).toBeNull();
+    // A bare list, as the shared billboard is kept, has no age to judge.
+    expect(freshKept(titles as unknown as KeptBillboard, now)).toBeNull();
+  });
+});
+
+describe('swapAfter', () => {
+  const slides = (...ids: number[]) => ids.map((id) => film(id));
+  const ids = (titles: Title[]) => titles.map((t) => t.id);
+
+  it('never replaces the slide on screen or those before it', () => {
+    const shown = slides(1, 2, 3, 4);
+    expect(ids(swapAfter(shown, shown[1], slides(9, 2, 8, 1, 7)))).toEqual([1, 2, 9, 8, 7]);
+    expect(ids(swapAfter(shown, shown[0], slides(9, 8)))).toEqual([1, 9, 8]);
+    expect(ids(swapAfter(shown, shown[3], slides(9)))).toEqual([1, 2, 3, 4, 9]);
   });
 
-  it('does not call one bottom-of-row coincidence a personal match', async () => {
-    const pool = Array.from({ length: 100 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
-    const mixed = Array.from({ length: 100 }, (_, i) => ({
-      type: 'movie',
-      id: i === 99 ? 80 : 200 + i,
-    }));
-    const ranked = await personalizeEveryone(
-      '/atlas',
-      pool,
-      [{ ref: { type: 'movie', id: 500 }, weight: 1, at: 1 }],
-      new Set(),
-      (async () => new Response(JSON.stringify({ mixed }))) as unknown as typeof fetch,
-    );
-    expect(ranked[0]?.id).toBe(1);
-    expect(ranked.find((slide) => slide.id === 80)?.why?.reason).toBeUndefined();
+  it('is the new ranking whole with nothing on screen', () => {
+    expect(ids(swapAfter([], undefined, slides(9, 8)))).toEqual([9, 8]);
+  });
+
+  it('matches the slide by type and id, not by the object', () => {
+    const shown = slides(1, 2, 3);
+    expect(ids(swapAfter(shown, { type: 'movie', id: 2 }, slides(5)))).toEqual([1, 2, 5]);
+    expect(ids(swapAfter(shown, { type: 'tv', id: 2 }, slides(5)))).toEqual([5]);
   });
 });
 

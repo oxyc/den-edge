@@ -845,6 +845,12 @@ async fn relay_with(
     };
     drop(body_slot);
     drop(recommend_slot);
+    // Asked before an upstream slot is taken: on the day's first ranking this waits on TMDB.
+    let body = if recommend && method == Method::POST {
+        crate::billboard::with_tmdb_lists(state, body).await
+    } else {
+        body
+    };
     // Held until this answer is done with, so the cap counts what is actually in flight upstream.
     let slot = tokio::time::timeout(SLOT_WAIT, Arc::clone(&state.relay_slots).acquire_owned()).await;
     let slot = match slot {

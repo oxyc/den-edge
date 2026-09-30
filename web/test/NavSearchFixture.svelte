@@ -50,6 +50,8 @@
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });
+  // A kept billboard survives a reload, as it does in the library; nothing else is kept.
+  const KEPT = 'fixture.kept.';
   const log = {
     settings: (group: string) =>
       group === 'keys'
@@ -59,8 +61,13 @@
     rows: () => rows,
     newestStamp: () => [1, 0, 'test'],
     title: () => undefined,
-    kept: async () => undefined,
-    keep: async () => {},
+    kept: async (name: string) =>
+      name.startsWith('billboard.')
+        ? (JSON.parse(localStorage.getItem(KEPT + name) ?? 'null') ?? undefined)
+        : undefined,
+    keep: async (name: string, value: unknown) => {
+      if (name.startsWith('billboard.')) localStorage.setItem(KEPT + name, JSON.stringify(value));
+    },
   };
   const session = {
     changed: () => {},

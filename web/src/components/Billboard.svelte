@@ -30,6 +30,7 @@
 
   let {
     titles,
+    index = $bindable(0),
     active = true,
     tmdbKey,
     onplay,
@@ -39,6 +40,8 @@
   }: {
     /** The billboard's titles, best first. */
     titles: RecommendedTitle[];
+    /** The slide on screen, as an index into `titles`: bound where a new ranking must leave it in place. */
+    index?: number;
     active?: boolean;
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
@@ -82,7 +85,6 @@
   const WARM_IDLE_TIMEOUT_MS = 3_000;
 
   const shown = $derived(titles.slice(0, SLIDES));
-  let index = $state(0);
   /** Set once you move it by hand: from then on it holds still and is yours to drive. */
   let paging = $state(false);
   let held = $state(false);
