@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Link, Shared } from '../lib/links.svelte';
 import type { DeviceEntry } from './values';
-import { linkedDeviceRows } from './linkedDevices';
+import { linkedDeviceRows, syncedDeviceRows } from './linkedDevices';
 
 const device = (id: string, name: string, kind: 'tv' | 'browser', seen = 10): DeviceEntry => ({
   id,
@@ -71,6 +71,22 @@ describe('linked device presentation', () => {
       'link:inbox-2',
     ]);
     expect(rows.slice(0, 2).every((row) => row.links.length === 0)).toBe(true);
+  });
+
+  it('does not present a browser-local library link as another synced device', () => {
+    const tv = device('tv-1', 'Apple TV', 'tv');
+    const legacyLink = link('inbox-1', 'Apple TV');
+
+    expect(syncedDeviceRows([tv], [legacyLink], [], 'current')).toEqual([
+      {
+        id: 'device:tv-1',
+        name: 'Apple TV',
+        kind: 'tv',
+        device: tv,
+        links: [],
+        shared: [],
+      },
+    ]);
   });
 
   it('never attaches a stable id to another library or a pending new pairing by name', () => {
