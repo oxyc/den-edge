@@ -898,7 +898,9 @@
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
-  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v1.${type ?? 'all'}`;
+  // v2 deliberately does not read snapshots written by the removed POST ranker: their first slide and explanation
+  // describe a different algorithm and must not be pinned ahead of today's shared/local answer.
+  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v2.${type ?? 'all'}`;
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for the library's profile, and the page shouldn't.
   $effect(() => {
@@ -967,12 +969,9 @@
           ? await nameSlides([sharedLead], new Map(), lookup, 1)
           : ([] as RecommendedTitle[]);
         if (run !== billboardRun) return;
-        if (first.length) {
-          // A member may already be looking at the kept personal lead. A guest's temporary TMDB fallback is not
-          // their billboard and must not stay ahead of the shared answer.
-          const lead = log ? featured[0] : undefined;
-          featured = keepLead(first, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
-        }
+        // Keep a member's last locally ranked answer visible while affinity loads, but never treat that temporary
+        // paint as part of the new ranking. A guest's generic fallback can be replaced by the shared lead at once.
+        if (first.length && (!log || !featured.length)) featured = first;
         const slides = await personal;
         if (run !== billboardRun || !slides.length) {
           if (!slides.length) buildTrending(run);
@@ -986,8 +985,9 @@
           buildTrending(run);
           return;
         }
-        const lead = featured[0];
-        featured = keepLead(picked, lead && !seeds.owned.has(titleKey(lead)) ? lead : undefined);
+        // This is the completed ranking. Replacing the temporary/kept paint is essential: keeping its old first
+        // slide here made a pre-GET recommendation lead forever, with its stale explanation attached.
+        featured = picked;
         void log?.keep(kept, picked).catch(warnKeep);
       })
       .catch(() => buildTrending(run));
@@ -1011,19 +1011,6 @@
           )
           .slice(0, 20);
       });
-  }
-
-  /**
-   * `picked`, with the title the billboard already shows kept in front, whether or not this pick chose it: a
-   * rebuild — or this visit's pick replacing the last one's — must not swap the picture out from under someone
-   * looking at it. The rest of the slides are this pick's, and the next visit leads with it.
-   */
-  function keepLead(
-    picked: RecommendedTitle[],
-    lead: RecommendedTitle | undefined,
-  ): RecommendedTitle[] {
-    if (!lead || !picked.length) return picked;
-    return [lead, ...picked.filter((t) => titleKey(t) !== titleKey(lead))];
   }
 
   /** Everything watched, for the Watchlist page: read from the log's rows, named as the library is. */
