@@ -189,6 +189,12 @@ describe('LibraryLog', () => {
       values: { simkl: { value: { string: 'token' }, at: at(1500, device) } },
     };
     const server = await edge([
+      ...Array.from({ length: 198 }, (_, index): SettingsRow => ({
+        kind: 'set',
+        schema: 2,
+        name: `fixture:${index}`,
+        values: { enabled: { value: { bool: true }, at: at(1000, device) } },
+      })),
       row(95396, {
         title: { type: 'tv', id: 95396 },
         status: { value: 'watchlist', at: at(1000, device) },
@@ -200,6 +206,7 @@ describe('LibraryLog', () => {
     const keys = await deriveKeys(Uint8Array.from(atob(LIBRARY_KEY), (c) => c.charCodeAt(0)));
     let generation = 'old';
     const staged: { k: string; v: string }[] = [];
+    const stagedBatchSizes: number[] = [];
     const requests: { path: string; init: RequestInit }[] = [];
     let simklSends = 0;
     const simklPaths: string[] = [];
@@ -224,9 +231,13 @@ describe('LibraryLog', () => {
       if (path.endsWith('/rewrite') && init.method === 'POST')
         return new Response(JSON.stringify({ rewrite: 'stage', base: 2 }), { headers });
       if (path.endsWith('/rewrite/stage/rows') && init.method === 'POST') {
-        staged.push(
-          ...(JSON.parse(String(init.body)) as { writes: { k: string; v: string }[] }).writes,
-        );
+        const writes = (
+          JSON.parse(String(init.body)) as {
+            writes: { k: string; v: string }[];
+          }
+        ).writes;
+        stagedBatchSizes.push(writes.length);
+        staged.push(...writes);
         return new Response('{}', { headers });
       }
       if (path.endsWith('/rewrite/stage/commit') && init.method === 'POST') {
@@ -265,7 +276,8 @@ describe('LibraryLog', () => {
       rewritten.find((row): row is SettingsRow => row.kind === 'set' && row.name === 'keys')?.values
         .simkl?.value,
     ).toBeNull();
-    expect(requests.filter(({ path }) => path.endsWith('/rewrite/stage/rows'))).toHaveLength(1);
+    expect(stagedBatchSizes.length).toBeGreaterThan(1);
+    expect(stagedBatchSizes.every((size) => size <= 200)).toBe(true);
     expect(requests.at(-1)?.init.headers).toMatchObject({ 'x-den-generation': 'new' });
 
     expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);

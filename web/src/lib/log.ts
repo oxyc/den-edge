@@ -112,6 +112,8 @@ const REQUEST_MS = 20_000;
 
 /** Conflict rounds per write: another device writing the same row every time is not a thing a person does. */
 const ROUNDS = 3;
+const REWRITE_BATCH_MAX = 200;
+const REWRITE_BATCH_MAX_BYTES = 2_000_000;
 
 const utf8 = new TextEncoder();
 
@@ -299,7 +301,9 @@ export class LibraryLog {
         const candidate = [...chunk, write];
         if (
           chunk.length &&
-          new TextEncoder().encode(JSON.stringify({ writes: candidate })).length > 2_000_000
+          (candidate.length > REWRITE_BATCH_MAX ||
+            new TextEncoder().encode(JSON.stringify({ writes: candidate })).length >
+              REWRITE_BATCH_MAX_BYTES)
         ) {
           chunks.push(chunk);
           chunk = [write];
