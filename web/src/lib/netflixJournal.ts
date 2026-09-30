@@ -20,7 +20,7 @@ import {
   WATCHED,
 } from './actions';
 import { isAired } from './library';
-import type { Mark, Show } from './netflixImport';
+import type { ImportShow as Show, ViewingMark as Mark } from './viewingImport';
 import type { EpisodeRow, Row, Stamp, TitleRow } from './wire';
 
 export interface Rows {

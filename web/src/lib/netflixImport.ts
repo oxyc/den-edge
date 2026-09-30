@@ -2,7 +2,23 @@
 // where an episode's title is `Show: Season 4: Episode name` and a film's is its own name. Read here, matched to TMDB
 // titles and episodes, and turned into what to mark seen and when. Pure except for the lookups, which are passed in.
 
-import type { Shape } from './library';
+import { parseDelimitedRows } from './viewingImportCsv';
+import {
+  normalizeViewingName,
+  viewingPreviewLines,
+  type ImportShow,
+  type ViewingImportPlan,
+  type ViewingLookups,
+  type ViewingMark,
+  type ViewingPreviewLine,
+  type ViewingSearchHit,
+} from './viewingImport';
+
+export type Mark = ViewingMark;
+export type Show = ImportShow;
+export type Plan = ViewingImportPlan;
+export type Lookups = ViewingLookups;
+export type SearchHit = ViewingSearchHit;
 
 /** One line of the file: what Netflix called it, and the day it was watched. */
 export interface Viewing {
@@ -22,67 +38,10 @@ export type Parsed =
     }
   | { kind: 'name'; name: string };
 
-/** What the import will mark: a film, or one episode, each with the day it was last watched (local noon, ms). */
-export interface Mark {
-  type: 'movie' | 'tv';
-  id: number;
-  /** TMDB's name, and its year, so a remake can be told from its original in the preview. */
-  name: string;
-  year?: number;
-  /** What Netflix called it: the film's title, or the show's name. */
-  source: string;
-  season?: number;
-  episode?: number;
-  at: number;
-}
-
-/**
- * A series' episodes per season and the last one aired (`tmdb.seriesShape`), and each season's own name where TMDB
- * gives one: Trapped's third is "Entrapped", which is what Netflix calls it.
- */
-export type Show = Shape & { seasonNames?: Map<number, string> };
-
-export interface Plan {
-  marks: Mark[];
-  /** Each matched series' layout, by TMDB id: what says whether the history covers all of it. */
-  shows: Record<number, Show>;
-  /** Netflix titles nothing was found for, each once. */
-  unmatched: string[];
-  /** Lines whose date couldn't be read. */
-  undated: number;
-  /** Lines of films and series the library already has as seen, which were not looked into further. */
-  known: number;
-  /**
-   * Lines naming a season whose every episode the file's other lines already are: Netflix splits some seasons into
-   * more episodes than TMDB has ("Grey's Anatomy: Season 6: Goodbye"), so the extra line has nothing left to be.
-   */
-  covered: number;
-}
-
-/** The TMDB lookups the matcher needs; each null or [] when TMDB can't answer. */
-export interface Lookups {
-  searchMulti(query: string): Promise<SearchHit[]>;
-  searchTv(query: string): Promise<SearchHit[]>;
-  /** Films alone, a page of TMDB's at a time: a one-word title ("Girl") can be far down a popularity order. */
-  searchMovie?(query: string, page: number): Promise<SearchHit[]>;
-  show(id: number): Promise<Show | null>;
-  episodes(id: number, season: number): Promise<{ number: number; name: string }[] | null>;
-}
-
-export interface SearchHit {
-  type: 'movie' | 'tv';
-  id: number;
-  name: string;
-  originalName?: string;
-  year?: number;
-}
-
 /** The file's lines, comma- or tab-separated (a spreadsheet copy), quotes as CSV writes them; the header dropped. */
 export function parseCsv(text: string): Viewing[] {
-  const lines = text.trimStart().split(/\r?\n/);
   const out: Viewing[] = [];
-  for (const line of lines) {
-    const fields = splitLine(line);
+  for (const fields of parseDelimitedRows(text)) {
     if (fields.length < 2) continue;
     const date = fields[fields.length - 1]!.trim();
     const title = fields.slice(0, -1).join(',').trim();
@@ -90,29 +49,6 @@ export function parseCsv(text: string): Viewing[] {
     out.push({ title, date });
   }
   return out;
-}
-
-function splitLine(line: string): string[] {
-  if (!line.includes('"')) return line.includes('\t') ? line.split('\t') : line.split(',');
-  const fields: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (quoted) {
-      if (c === '"' && line[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else if (c === '"') quoted = false;
-      else field += c;
-    } else if (c === '"') quoted = true;
-    else if (c === ',' || c === '\t') {
-      fields.push(field);
-      field = '';
-    } else field += c;
-  }
-  fields.push(field);
-  return fields;
 }
 
 /**
@@ -218,33 +154,8 @@ export function parseTitle(title: string): Parsed {
   return { kind: 'name', name: title };
 }
 
-const LIGATURES: Record<string, string> = {
-  æ: 'ae',
-  œ: 'oe',
-  ø: 'o',
-  ß: 'ss',
-  ð: 'd',
-  þ: 'th',
-  ł: 'l',
-};
-
 /** A name for comparing: accents, case, quote styles and punctuation left out; letters of every script kept. */
-export function normalize(name: string): string {
-  return (
-    name
-      .normalize('NFKD')
-      .replace(/\p{M}/gu, '')
-      .toLowerCase()
-      // Letters no accent comes off: "InnSæi" is Netflix's "Innsaei", "Demi-sœur" its "Demi-Soeur".
-      .replace(/[æœøßðþł]/g, (letter) => LIGATURES[letter]!)
-      .replace(/&/g, ' and ')
-      // "Un plus une" is TMDB's "Un + une"; "1,000 Times Good Night" a thousand, not "1 000".
-      .replace(/\+/g, ' plus ')
-      .replace(/(\d),(?=\d{3}\b)/g, '$1')
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
-      .trim()
-  );
-}
+export const normalize = normalizeViewingName;
 
 const NUMBER_WORDS: Record<string, string> = {
   one: '1',
@@ -926,30 +837,9 @@ async function pool<T>(items: readonly T[], width: number, run: (item: T) => Pro
 }
 
 /** One film or series in the import's preview: its `type:id` (`importKey`), TMDB's name and year, and its episodes. */
-export interface PreviewLine {
-  key: string;
-  label: string;
-  /** What Netflix called it, where that isn't TMDB's name. */
-  source?: string;
-  episodes: number;
-}
+export type PreviewLine = ViewingPreviewLine;
 
 /** A line per film and series, series first, each by TMDB's name. */
 export function previewLines(marks: readonly Mark[]): PreviewLine[] {
-  const byKey = new Map<string, PreviewLine>();
-  for (const mark of marks) {
-    const key = `${mark.type}:${mark.id}`;
-    const line = byKey.get(key);
-    if (line) line.episodes++;
-    else
-      byKey.set(key, {
-        key,
-        label: mark.year ? `${mark.name} (${mark.year})` : mark.name,
-        ...(normalize(mark.source) !== normalize(mark.name) ? { source: mark.source } : {}),
-        episodes: mark.type === 'tv' ? 1 : 0,
-      });
-  }
-  return [...byKey.values()].sort(
-    (a, b) => Number(b.episodes > 0) - Number(a.episodes > 0) || a.label.localeCompare(b.label),
-  );
+  return viewingPreviewLines(marks);
 }

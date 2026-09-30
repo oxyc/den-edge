@@ -3,7 +3,7 @@
 // waited out and asked again instead of read as "nothing found".
 
 import { parseSeason } from './detail';
-import type { Lookups, SearchHit } from './netflixImport';
+import type { ViewingLookups as Lookups, ViewingSearchHit as SearchHit } from './viewingImport';
 import { retryAfterMs } from './retryAfter';
 import { seriesShape } from './tmdb';
 import { tmdbFetch } from './tmdbCache';
