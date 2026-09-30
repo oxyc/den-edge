@@ -29,7 +29,15 @@ export interface ViewingLookups {
   searchTv(query: string): Promise<ViewingSearchHit[]>;
   searchMovie?(query: string, page: number): Promise<ViewingSearchHit[]>;
   show(id: number): Promise<ImportShow | null>;
-  episodes(id: number, season: number): Promise<{ number: number; name: string }[] | null>;
+  episodes(id: number, season: number): Promise<ViewingEpisode[] | null>;
+  /** Runtime in minutes; used when a provider reports watch time but not the title's duration. */
+  runtime?(type: 'movie' | 'tv', id: number): Promise<number | null>;
+}
+
+export interface ViewingEpisode {
+  number: number;
+  name: string;
+  runtime?: number;
 }
 
 export interface ViewingSearchHit {

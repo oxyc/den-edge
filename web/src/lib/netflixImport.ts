@@ -13,6 +13,7 @@ import {
   type ViewingPreviewLine,
   type ViewingSearchHit,
 } from './viewingImport';
+import { findViewingEpisode, unnamedViewingEpisode } from './viewingImportMatch';
 
 export type Mark = ViewingMark;
 export type Show = ImportShow;
@@ -192,115 +193,8 @@ export const filmKey = (name: string) =>
     .map((word) => NUMBER_WORDS[word] ?? word)
     .join(' ');
 
-const PART_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, ...ROMAN };
-
-/**
- * An episode name as its words and the part of a two-parter it is: Netflix's "Six Days: Part 1", "Pt. 1",
- * "(Part One)" and "1/2" are TMDB's "Six Days (1)". A trailing ", The" goes back to the front, and a leading
- * "Chapter 01:" is dropped, since one side often has it and the other not.
- */
-function reading(name: string): { words: string; part?: number } {
-  let rest = name.trim().replace(/^(.*), (the|a|an)$/i, '$2 $1');
-  let part: number | undefined;
-  const found =
-    /[\s:,-]*\(?\b(?:part|pt\.?)\s*(\d+|one|two|three|four|[ivx]+)\)?$/i.exec(rest) ??
-    /\s*\((\d+)\)$/.exec(rest) ??
-    /\s+(\d+)\s*\/\s*\d+$/.exec(rest);
-  if (found) {
-    part = PART_WORDS[found[1]!.toLowerCase()] ?? Number(found[1]);
-    rest = rest.slice(0, found.index);
-  }
-  // Articles aside: "Terrace House in the Aloha State" is TMDB's "Terrace House in Aloha State", which would
-  // otherwise read as near "Bye Bye Terrace House in Aloha State" as to itself.
-  const words = normalize(rest)
-    .replace(/^chapter \S+ /, '')
-    .replace(/\b(?:the|a|an)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return part === undefined ? { words } : { words, part };
-}
-
-/** How alike two names read, 0 to 1: the share of letter pairs they have in common. */
-function likeness(a: string, b: string): number {
-  const pairs = (s: string) => {
-    const out = new Map<string, number>();
-    for (let i = 0; i < s.length - 1; i++)
-      out.set(s.slice(i, i + 2), (out.get(s.slice(i, i + 2)) ?? 0) + 1);
-    return out;
-  };
-  const [x, y] = [pairs(a), pairs(b)];
-  let shared = 0;
-  for (const [pair, n] of x) shared += Math.min(n, y.get(pair) ?? 0);
-  const total = Math.max(1, a.length - 1 + (b.length - 1));
-  return (2 * shared) / total;
-}
-
-/** TMDB's placeholder for an episode it has no name for: "Episode 3", "Episode Three". */
-export const unnamed = (name: string) =>
-  /^(?:episode|chapter|ep)\s*(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/.test(
-    normalize(name),
-  );
-
-/**
- * The episode `name` is among `episodes`: the same name, "Episode 5" by number, the same part of a two-parter, one
- * name inside the other, or failing those the one name alike enough to it and clearly more alike than any other.
- */
-export function findEpisode(
-  name: string,
-  episodes: readonly { number: number; name: string }[],
-): number | undefined {
-  const wanted = normalize(name);
-  // A name of symbols alone ("Back to 15: Season 1: (¬_¬)") has nothing to normalise: it is the same or not.
-  if (!wanted) {
-    const raw = (s: string) => s.normalize('NFC').replace(/\s+/g, '');
-    return raw(name) ? episodes.find((e) => raw(e.name) === raw(name))?.number : undefined;
-  }
-  const exact = episodes.find((e) => normalize(e.name) === wanted);
-  if (exact) return exact.number;
-  const numbered = /^(?:episode|chapter|ep)\s*(\d+)$/.exec(wanted)?.[1];
-  if (numbered !== undefined && episodes.some((e) => e.number === Number(numbered)))
-    return Number(numbered);
-
-  // One whole name inside the other ("Stranger Things 2: Chapter Five: Dig Dug" and "Chapter Five: Dig Dug").
-  const whole = episodes.filter((e) => {
-    const other = normalize(e.name);
-    return other.length >= 8 && (other.includes(wanted) || wanted.includes(other));
-  });
-  if (wanted.length >= 8 && whole.length === 1) return whole[0]!.number;
-
-  const mine = reading(name);
-  const theirs = episodes.map((e) => ({ number: e.number, ...reading(e.name) }));
-  // Episodes TMDB names by part alone ("Part I") are found by it: "Cora: Part I" is the first.
-  if (mine.part !== undefined && theirs.every((e) => !e.words && e.part !== undefined))
-    return theirs.find((e) => e.part === mine.part)?.number;
-  if (!mine.words) return undefined;
-  const same = theirs.filter((e) => e.words === mine.words);
-  // A two-parter TMDB lists as one episode is that episode, whichever part Netflix says.
-  const part = same.find((e) => e.part === mine.part) ?? (same.length === 1 ? same[0] : undefined);
-  if (part) return part.number;
-
-  // One name inside the other ("The Reunion" and "The Reunion Special"), when it is long enough to mean it.
-  if (mine.words.length >= 8) {
-    const within = theirs.filter(
-      (e) =>
-        e.words.length >= 8 &&
-        (e.part === undefined || e.part === mine.part) &&
-        (e.words.includes(mine.words) || mine.words.includes(e.words)),
-    );
-    if (within.length === 1) return within[0]!.number;
-  }
-
-  // "The One with Ross' Library Book" is TMDB's "Ross's"; "a Chick. And a Duck" is "the Chick and the Duck".
-  const scored = theirs
-    .filter((e) => e.part === mine.part && !unnamed(e.words))
-    .map((e) => ({ number: e.number, score: likeness(mine.words, e.words) }))
-    .sort((a, b) => b.score - a.score);
-  const [best, next] = scored;
-  if (best && best.score >= 0.8 && best.score - (next?.score ?? 0) >= 0.1) return best.number;
-  // A note Netflix adds in brackets: "Wujing (No. 84)" is TMDB's "Wujing".
-  const bare = name.replace(/\s*\([^()]*\)\s*$/, '');
-  return bare !== name && normalize(bare) ? findEpisode(bare, episodes) : undefined;
-}
+export const unnamed = unnamedViewingEpisode;
+export const findEpisode = findViewingEpisode;
 
 /**
  * Every hit named exactly `query`, in TMDB's order, or, `loose`, TMDB's first where none is. More than one is common:

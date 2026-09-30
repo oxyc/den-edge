@@ -116,6 +116,17 @@ export function netflixLookups(
       const body = await get(`/tv/${id}/season/${season}`);
       return body && parseSeason(body);
     },
+    runtime: async (type, id) => {
+      const body = await get(`/${type}/${id}`);
+      if (!body) return null;
+      const runtime = body.runtime;
+      if (typeof runtime === 'number' && runtime > 0) return runtime;
+      const episodes = body.episode_run_time;
+      const typical = Array.isArray(episodes)
+        ? episodes.find((value) => typeof value === 'number' && value > 0)
+        : undefined;
+      return typeof typical === 'number' ? typical : null;
+    },
   };
 }
 
