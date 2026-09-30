@@ -109,6 +109,37 @@ describe('personalizeEveryone', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(10);
     expect(peak).toBeLessThanOrEqual(4);
   });
+
+  it('bounds a ubiquitous fan match and applies dislikes instead of dropping them', async () => {
+    const pool = Array.from({ length: 100 }, (_, i) => ({ type: 'movie' as const, id: i + 1 }));
+    const fetchImpl = vi.fn(async (url: string) => {
+      const disliked = url.includes('/109.json');
+      return new Response(
+        JSON.stringify({
+          mixed: [
+            { type: 'movie', id: 80 },
+            { type: 'movie', id: disliked ? 12 : 81 },
+            { type: 'movie', id: 80 }, // a malformed duplicate cannot multiply one seed's vote
+          ],
+        }),
+      );
+    }) as unknown as typeof fetch;
+    const ranked = await personalizeEveryone(
+      '/atlas',
+      pool,
+      Array.from({ length: 10 }, (_, i) => ({
+        ref: { type: 'movie' as const, id: 100 + i },
+        weight: i === 9 ? -1.5 : 1,
+        at: i,
+      })),
+      new Set(),
+      fetchImpl,
+    );
+    expect(ranked[0]?.id).toBe(1);
+    expect(ranked.findIndex((slide) => slide.id === 80)).toBeGreaterThan(0);
+    expect(ranked.findIndex((slide) => slide.id === 12)).toBeGreaterThan(11);
+    expect(fetchImpl).toHaveBeenCalledTimes(10);
+  });
 });
 
 describe('recommendationReason', () => {
