@@ -157,6 +157,9 @@ export function recommendForEveryone(
 const PERSONAL_SEEDS = 10;
 const PERSONAL_REQUESTS = 4;
 const FAN_LIMIT = 100;
+// A perfect fan match may move a nearby shared pick to the lead, but cannot let a ubiquitous deep-pool title
+// overwhelm the quality/freshness prior merely because it appeared in every seed row.
+const PERSONAL_LIFT = 2;
 const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;
 
 /** Read one public, long-lived "fans of this title" row. Older atlases may answer same-type `ids` only. */
@@ -191,18 +194,22 @@ export async function personalizeEveryone(
 ): Promise<Slide[]> {
   const candidates = slides.filter((slide) => !owned.has(slideKey(slide)));
   const seeds = library
-    .filter(({ weight }) => weight > 0)
-    .sort((a, b) => b.weight - a.weight || b.at - a.at)
+    .filter(({ weight }) => weight !== 0)
+    .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight) || b.at - a.at)
     .slice(0, PERSONAL_SEEDS);
   if (!seeds.length || !candidates.length) return candidates;
+  const seedWeight = seeds.reduce((sum, seed) => sum + Math.abs(seed.weight), 0);
 
   const affinity = new Map<string, number>();
   const queue = seeds.slice();
   const work = async () => {
     for (let seed = queue.shift(); seed; seed = queue.shift()) {
       const fans = await fansOf(base, seed, fetchImpl);
+      const seen = new Set<string>();
       fans.forEach((slide, rank) => {
         const key = slideKey(slide);
+        if (seen.has(key)) return;
+        seen.add(key);
         affinity.set(key, (affinity.get(key) ?? 0) + seed.weight / (rank + 5));
       });
     }
@@ -210,13 +217,16 @@ export async function personalizeEveryone(
   await Promise.all(Array.from({ length: Math.min(PERSONAL_REQUESTS, seeds.length) }, work));
 
   return candidates
-    .map((slide, rank) => ({
-      slide,
-      rank,
-      lift: affinity.get(slideKey(slide)) ?? 0,
-      // A slowly declining prior keeps a weak affinity hit from discarding atlas's quality/freshness ranking.
-      score: 1 / (1 + rank * 0.05) + (affinity.get(slideKey(slide)) ?? 0),
-    }))
+    .map((slide, rank) => {
+      const lift = ((affinity.get(slideKey(slide)) ?? 0) / seedWeight) * PERSONAL_LIFT;
+      return {
+        slide,
+        rank,
+        lift,
+        // A slowly declining prior keeps a weak affinity hit from discarding atlas's quality/freshness ranking.
+        score: 1 / (1 + rank * 0.05) + lift,
+      };
+    })
     .sort((a, b) => b.score - a.score || a.rank - b.rank)
     .map(({ slide, lift }) =>
       lift > 0 ? { ...slide, why: { ...slide.why, reason: 'profile' } } : slide,
