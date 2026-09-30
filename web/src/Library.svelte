@@ -898,9 +898,9 @@
   /** Which build of the billboard is the current one: a slower earlier one must not overwrite a later answer. */
   let billboardRun = 0;
   /** Where the billboard picked for a facet is kept for the next visit (`LibraryLog.keep`). */
-  // v3 also invalidates answers written before multi-seed affinity was normalized; v1 was the removed POST ranker.
-  // Neither old algorithm's first slide should paint ahead of today's bounded shared/local answer.
-  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v3.${type ?? 'all'}`;
+  // v4 invalidates the additive blend that let an unmatched shared lead stay ahead of credible personal matches.
+  // Earlier namespaces cover the unbounded multi-seed and removed POST rankers.
+  const keptBillboard = (type: 'movie' | 'tv' | null) => `billboard.v4.${type ?? 'all'}`;
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for the library's profile, and the page shouldn't.
   $effect(() => {
