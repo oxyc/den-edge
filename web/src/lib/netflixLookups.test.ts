@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { netflixLookups } from './netflixLookups';
 
 describe('Netflix import lookups', () => {
@@ -23,6 +23,8 @@ describe('Netflix import lookups', () => {
     // Refused once, then both asked again after the pause; the pause announced, then its end.
     expect(asked).toHaveLength(3);
     expect(pauses[0]).toBeGreaterThan(0);
-    expect(pauses.at(-1)).toBe(0);
+    // The retry and the timer that clears the waiting notice become runnable together. Either may resume first,
+    // so wait for the notice callback rather than making their event-loop order part of the contract.
+    await vi.waitFor(() => expect(pauses.at(-1)).toBe(0));
   });
 });
