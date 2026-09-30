@@ -391,7 +391,7 @@ fn allowed(path: &str) -> bool {
 /// asks TMDB: joined as they were decoded, `a%3Db%26c=d` (one parameter) and `a=b&c=d` (two) were one key, and an
 /// answer to the first was served for the second. Nothing else is escaped, so a question with none of those three
 /// characters keeps the key it has always had and what is already kept still answers it.
-fn cache_key(path: &str, query: Option<&str>) -> String {
+pub(crate) fn cache_key(path: &str, query: Option<&str>) -> String {
     let mut params: Vec<(String, String)> = query
         .map(|q| {
             url::form_urlencoded::parse(q.as_bytes())
@@ -408,7 +408,7 @@ fn cache_key(path: &str, query: Option<&str>) -> String {
 
 /// Where that key lives on disk. The name is a digest, so a key can hold anything and the file name stays one
 /// flat, safe token.
-fn cache_path(dir: &Path, key: &str) -> PathBuf {
+pub(crate) fn cache_path(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{}.json", crate::hex(&Sha256::digest(key.as_bytes()))))
 }
 

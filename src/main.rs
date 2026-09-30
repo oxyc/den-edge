@@ -4,6 +4,7 @@
 //!
 //! State lives in files under `DATA_DIR`; pairing sessions live in memory only.
 
+mod billboard;
 mod cache;
 mod grants;
 mod handler;
