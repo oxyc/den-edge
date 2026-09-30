@@ -245,20 +245,51 @@ Full,2026-01-02T12:01:00Z,58,Devil's Knot`;
     expect(result.diagnostics.unmatched).toEqual([]);
   });
 
-  it('joins a translated episode only with a uniquely corroborating duration', () => {
+  it('joins a translated named episode only with a uniquely corroborating duration', () => {
     const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
-no,2026-01-01T12:00:00Z,1978,The O.C. pilot,Pilot`;
+no,2026-01-01T12:00:00Z,1978,A Rings episode,Adar`;
     const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
-Full,2026-01-01T11:27:00Z,1960,Fremde Welten-The O.C. Season 1`;
+Full,2026-01-01T11:27:00Z,1960,Der Feind-The Rings Season 1`;
     const result = parsePrimeFiles([
       { name: 'events.csv', text: events },
       { name: 'history.csv', text: sessions },
     ]);
     expect(result.viewings[0]).toMatchObject({
       kind: 'episode',
-      rawTitle: 'Fremde Welten-The O.C. Season 1',
-      show: 'The O.C.',
+      rawTitle: 'Der Feind-The Rings Season 1',
+      show: 'The Rings',
       season: 1,
     });
+  });
+
+  it('keeps exact low-duration translated films and exposes only safe nearby series context', () => {
+    const events = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
+no,2026-01-01T12:00:00Z,14,A translated film,The Longest Week
+no,2026-01-02T12:00:00Z,4000,Adar overview,Adar
+no,2026-01-03T12:00:00Z,1900,Generic pilot overview,Pilot
+no,2026-01-04T12:00:00Z,1800,Generic chapter overview,Capítulo 1`;
+    const sessions = `"Material Type Description","Playback Start Datetime (UTC)","Seconds Viewed","Title"
+Full,2026-01-01T11:59:00Z,14.5,La semana más larga
+Full,2026-01-02T11:30:00Z,3900,Partings-The Rings - Season 1
+Full,2026-01-03T11:30:00Z,1850,Second-The O.C. - Season 1
+Full,2026-01-04T11:30:00Z,1800,Otro capítulo-La Serie - Temporada 1`;
+    const result = parsePrimeFiles([
+      { name: 'events.csv', text: events },
+      { name: 'history.csv', text: sessions },
+    ]);
+    expect(result.viewings).toEqual([
+      expect.objectContaining({
+        kind: 'movie',
+        title: 'The Longest Week',
+        rawTitle: 'La semana más larga',
+      }),
+      expect.objectContaining({
+        kind: 'episode',
+        title: 'Adar',
+        rawTitle: 'Adar',
+        contextShows: expect.arrayContaining(['The Rings']),
+      }),
+    ]);
+    expect(result.diagnostics.unmatched).toEqual(['Pilot', 'Capítulo 1']);
   });
 });

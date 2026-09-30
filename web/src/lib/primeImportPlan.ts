@@ -80,6 +80,43 @@ export async function planPrimeImport(
     if (!runtimeCache.has(id)) runtimeCache.set(id, lookups.runtime('movie', id));
     return runtimeCache.get(id)!;
   };
+  const translationCache = new Map<string, Promise<string[]>>();
+  const translatedTitles = (type: 'movie' | 'tv', id: number) => {
+    if (!lookups.translatedTitles) return Promise.resolve([]);
+    const key = `${type}:${id}`;
+    if (!translationCache.has(key)) translationCache.set(key, lookups.translatedTitles(type, id));
+    return translationCache.get(key)!;
+  };
+  const overviewCache = new Map<string, Promise<string[]>>();
+  const translatedOverviews = (type: 'movie' | 'tv', id: number) => {
+    if (!lookups.translatedOverviews) return Promise.resolve([]);
+    const key = `${type}:${id}`;
+    if (!overviewCache.has(key)) overviewCache.set(key, lookups.translatedOverviews(type, id));
+    return overviewCache.get(key)!;
+  };
+  const exactOrTranslated = async (
+    type: 'movie' | 'tv',
+    candidates: readonly ViewingSearchHit[],
+    query: string,
+  ) => {
+    const direct = type === 'movie' ? exactFilm(candidates, query) : exact(candidates, query);
+    if (direct.length || !lookups.translatedTitles) return direct;
+    const wanted = type === 'movie' ? viewingFilmKey(query) : normalize(query);
+    return (
+      await Promise.all(
+        candidates.slice(0, 8).map(async (candidate) => ({
+          candidate,
+          titles: await translatedTitles(type, candidate.id),
+        })),
+      )
+    ).flatMap(({ candidate, titles }) =>
+      titles.some((title) =>
+        type === 'movie' ? viewingFilmKey(title) === wanted : normalize(title) === wanted,
+      )
+        ? [candidate]
+        : [],
+    );
+  };
   const chooseMovie = async (candidates: ViewingSearchHit[], duration?: number) => {
     if (candidates.length <= 1) return candidates[0];
     if (!duration) return candidates[0];
@@ -99,6 +136,31 @@ export async function planPrimeImport(
     return best && best.difference <= 0.15 && best.difference + 0.15 < (next?.difference ?? 1)
       ? best.candidate
       : candidates[0];
+  };
+  const chooseDescribedMovie = async (
+    candidates: readonly ViewingSearchHit[],
+    description: string,
+    minimumShared = 5,
+    minimumScore = 0.45,
+  ) => {
+    if (!lookups.translatedOverviews || !description.trim()) return undefined;
+    const ranked = (
+      await Promise.all(
+        candidates.slice(0, 12).map(async (candidate) => ({
+          candidate,
+          score: Math.max(
+            0,
+            ...(await translatedOverviews('movie', candidate.id)).map((overview) =>
+              descriptionLikeness(description, overview, minimumShared),
+            ),
+          ),
+        })),
+      )
+    ).sort((left, right) => right.score - left.score);
+    const [best, next] = ranked;
+    return best && best.score >= minimumScore && best.score - (next?.score ?? 0) >= 0.15
+      ? best.candidate
+      : undefined;
   };
   const add = (mark: ViewingMark) => {
     const key = `${mark.type}:${mark.id}:${mark.season ?? ''}:${mark.episode ?? ''}`;
@@ -127,10 +189,14 @@ export async function planPrimeImport(
           (!dated || !candidate.year || candidate.year === Number(dated[2])) &&
           (!candidate.year || candidate.year <= watchedYear);
         const loose = new Map<number, ViewingSearchHit>();
+        const possibleTranslations = new Map<number, ViewingSearchHit>();
+        const rawNamesakes = new Map<number, ViewingSearchHit>();
         let hit: ViewingSearchHit | undefined;
         let foundAny = false;
         for (const query of [...new Set(queries)]) {
           const candidates = (await search('movie', query)).filter(eligible);
+          for (const candidate of candidates.slice(0, 8))
+            possibleTranslations.set(candidate.id, candidate);
           foundAny ||= candidates.length > 0;
           const named = exactFilm(candidates, query);
           if (named.length) {
@@ -143,6 +209,8 @@ export async function planPrimeImport(
           for (const query of [...new Set(queries)]) {
             for (let page = 1; page <= 3; page++) {
               const candidates = (await lookups.searchMovie(query, page)).filter(eligible);
+              for (const candidate of candidates.slice(0, 8))
+                possibleTranslations.set(candidate.id, candidate);
               foundAny ||= candidates.length > 0;
               const named = exactFilm(candidates, query);
               if (named.length) {
@@ -154,6 +222,46 @@ export async function planPrimeImport(
             if (hit) break;
           }
         }
+        // A joined Viewing History row can carry the canonical title while Watch Events carries a translation.
+        // Treat it only as candidate evidence: localized overview/title corroboration below still has to choose one.
+        if (!hit && normalize(viewing.rawTitle) !== normalize(clean)) {
+          const multiCandidates = (await search('movie', viewing.rawTitle)).filter(eligible);
+          foundAny ||= multiCandidates.length > 0;
+          for (const candidate of multiCandidates.slice(0, 8))
+            possibleTranslations.set(candidate.id, candidate);
+          for (const candidate of exactFilm(multiCandidates, viewing.rawTitle).slice(0, 8))
+            rawNamesakes.set(candidate.id, candidate);
+          if (lookups.searchMovie) {
+            const movieCandidates = (await lookups.searchMovie(viewing.rawTitle, 1)).filter(
+              eligible,
+            );
+            foundAny ||= movieCandidates.length > 0;
+            for (const candidate of movieCandidates.slice(0, 8))
+              possibleTranslations.set(candidate.id, candidate);
+            for (const candidate of exactFilm(movieCandidates, viewing.rawTitle).slice(0, 8))
+              rawNamesakes.set(candidate.id, candidate);
+          }
+        }
+        if (!hit && possibleTranslations.size) {
+          const translated = new Map<number, ViewingSearchHit>();
+          for (const query of [...new Set(queries)])
+            for (const candidate of await exactOrTranslated(
+              'movie',
+              [...possibleTranslations.values()],
+              query,
+            ))
+              translated.set(candidate.id, candidate);
+          if (translated.size === 1) hit = translated.values().next().value;
+        }
+        if (!hit && possibleTranslations.size)
+          hit = await chooseDescribedMovie([...possibleTranslations.values()], viewing.description);
+        if (!hit && rawNamesakes.size)
+          hit = await chooseDescribedMovie(
+            [...rawNamesakes.values()],
+            viewing.description,
+            3,
+            0.25,
+          );
         if (!hit && loose.size === 1) hit = loose.values().next().value;
         if (!hit) {
           (foundAny ? ambiguous : unmatched).push(viewing.rawTitle);
@@ -174,6 +282,45 @@ export async function planPrimeImport(
         return;
       }
 
+      if (!viewing.show && viewing.contextShows?.length) {
+        const contextHits = new Map<number, ViewingSearchHit>();
+        for (const context of viewing.contextShows)
+          for (const candidate of await exactOrTranslated(
+            'tv',
+            await search('tv', context),
+            context,
+          ))
+            contextHits.set(candidate.id, candidate);
+        const possible = (
+          await Promise.all(
+            [...contextHits.values()].map((hit) =>
+              matchContextEpisode(viewing, hit, showOf, episodesOf),
+            ),
+          )
+        ).flat();
+        const unique = uniqueEpisodes(possible);
+        if (unique.length !== 1) {
+          (unique.length ? ambiguous : unmatched).push(viewing.rawTitle);
+          return;
+        }
+        const match = unique[0]!;
+        if (seen({ type: 'tv', id: match.hit.id })) {
+          known++;
+          return;
+        }
+        shows[match.hit.id] = match.show;
+        add({
+          type: 'tv',
+          id: match.hit.id,
+          name: match.hit.name,
+          ...(match.hit.year ? { year: match.hit.year } : {}),
+          source: match.hit.name,
+          season: match.season,
+          episode: match.episode.number,
+          at: viewing.watchedAt,
+        });
+        return;
+      }
       if (!viewing.show) {
         unmatched.push(viewing.rawTitle);
         return;
@@ -183,7 +330,7 @@ export async function planPrimeImport(
         return;
       }
       const searched = await search('tv', viewing.show);
-      const namesakes = exact(searched, viewing.show).slice(0, 4);
+      const namesakes = (await exactOrTranslated('tv', searched, viewing.show)).slice(0, 4);
       const hits = (namesakes.length ? namesakes : searched.slice(0, 4)).filter(
         (hit) =>
           !hit.year ||
@@ -378,6 +525,38 @@ async function matchEpisode(
   return inSeasons([...show.counts.keys()].filter((season) => season !== viewing.season));
 }
 
+/**
+ * A Watch Events row can outlive the playback row carrying its series name. Nearby composite rows provide only
+ * candidates: both TMDB's episode title and overview must independently corroborate one identity before importing.
+ */
+async function matchContextEpisode(
+  viewing: PrimeViewing,
+  hit: ViewingSearchHit,
+  showOf: (id: number) => Promise<ImportShow | null>,
+  episodesOf: (id: number, season: number) => Promise<ViewingEpisode[] | null>,
+): Promise<EpisodeMatch[]> {
+  const show = await showOf(hit.id);
+  if (!show || !normalize(viewing.description)) return [];
+  const matches = (
+    await Promise.all(
+      [...show.counts.keys()]
+        .filter((season) => season > 0)
+        .map(async (season): Promise<EpisodeMatch[]> => {
+          const episodes = await episodesOf(hit.id, season);
+          if (!episodes) return [];
+          return episodes.flatMap((episode): EpisodeMatch[] =>
+            normalize(episode.name) === normalize(viewing.title) &&
+            normalize(episode.overview ?? '') === normalize(viewing.description) &&
+            (!episode.airDate || Date.parse(episode.airDate) <= viewing.watchedAt + 86_400_000)
+              ? [{ hit, show, season, episode }]
+              : [],
+          );
+        }),
+    )
+  ).flat();
+  return matches;
+}
+
 function episodeNameGroups(viewing: PrimeViewing): string[][] {
   const show = normalize(viewing.show ?? '');
   for (const match of viewing.rawTitle.matchAll(/[-–—]/g)) {
@@ -452,6 +631,41 @@ function uniqueEpisodes(matches: readonly EpisodeMatch[]): EpisodeMatch[] {
   for (const match of matches)
     byKey.set(`${match.hit.id}:${match.season}:${match.episode.number}`, match);
   return [...byKey.values()];
+}
+
+const DESCRIPTION_STOP_WORDS = new Set([
+  'and',
+  'are',
+  'but',
+  'con',
+  'del',
+  'ella',
+  'for',
+  'his',
+  'las',
+  'los',
+  'para',
+  'por',
+  'que',
+  'the',
+  'una',
+  'with',
+]);
+
+function descriptionLikeness(left: string, right: string, minimumShared: number): number {
+  const words = (text: string) =>
+    new Set(
+      normalize(text)
+        .split(' ')
+        .filter((word) => word.length >= 3 && !DESCRIPTION_STOP_WORDS.has(word)),
+    );
+  const [a, b] = [words(left), words(right)];
+  if (Math.min(a.size, b.size) < minimumShared) return 0;
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared++;
+  return shared < minimumShared
+    ? 0
+    : Math.max(shared / Math.min(a.size, b.size), Math.min(0.8, shared / 10));
 }
 
 async function pool<T>(items: readonly T[], width: number, run: (item: T) => Promise<void>) {

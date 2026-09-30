@@ -123,6 +123,153 @@ describe('Prime import planning', () => {
     expect(result.marks.map((mark) => mark.id)).toEqual([10, 20]);
   });
 
+  it('uses TMDB translations to select one localized movie or show identity', async () => {
+    const result = await planPrimeImport(
+      [
+        movie({ title: 'La búsqueda de la felicidad', rawTitle: 'La búsqueda de la felicidad' }),
+        episode({
+          title: 'Episodio 1',
+          rawTitle: 'Episodio 1-Ochocientas palabras - Temporada 1',
+          show: 'Ochocientas palabras',
+          season: 1,
+        }),
+      ],
+      fake({
+        searchMulti: async () => [
+          { type: 'movie', id: 10, name: 'Wrong Film' },
+          { type: 'movie', id: 11, name: 'The Escape' },
+        ],
+        searchMovie: async () => [],
+        searchTv: async () => [{ type: 'tv', id: 12, name: '800 Words' }],
+        translatedTitles: async (type, id) =>
+          type === 'movie' && id === 11
+            ? ['La búsqueda de la felicidad']
+            : type === 'tv' && id === 12
+              ? ['Ochocientas palabras']
+              : [],
+        show: async () => shape({ 1: 1 }),
+        episodes: async () => [{ number: 1, name: 'Episode 1' }],
+      }),
+    );
+    expect(result.marks.map(({ type, id }) => ({ type, id }))).toEqual([
+      { type: 'movie', id: 11 },
+      { type: 'tv', id: 12 },
+    ]);
+  });
+
+  it('uses a uniquely matching localized overview to split translated film namesakes', async () => {
+    const result = await planPrimeImport(
+      [
+        movie({
+          title: 'Localized title',
+          rawTitle: 'Shared English title',
+          description:
+            'A mother inherits a house and fights murderous intruders to protect her daughters.',
+          durationSeconds: undefined,
+        }),
+      ],
+      fake({
+        searchMulti: async () => [
+          { type: 'movie', id: 30, name: 'Shared English title' },
+          { type: 'movie', id: 31, name: 'Shared English title' },
+        ],
+        searchMovie: async () => [],
+        translatedTitles: async () => [],
+        translatedOverviews: async (_type, id) =>
+          id === 31
+            ? ['A mother inherits a house and fights murderous intruders to protect her daughters.']
+            : ['A documentary about the making of an unrelated horror film and its cast.'],
+      }),
+    );
+    expect(result.marks.map((mark) => mark.id)).toEqual([31]);
+  });
+
+  it('uses a canonical history title only when its overview adds distinct evidence', async () => {
+    const result = await planPrimeImport(
+      [
+        movie({
+          title: 'Despertar',
+          rawTitle: 'The Awakening',
+          description: 'An investigator visits a haunted boarding school.',
+          durationSeconds: undefined,
+        }),
+      ],
+      fake({
+        searchMulti: async (query) =>
+          query === 'The Awakening'
+            ? [
+                { type: 'movie', id: 40, name: 'The Awakening' },
+                { type: 'movie', id: 41, name: 'The Awakening' },
+              ]
+            : [],
+        searchMovie: async () => [],
+        translatedTitles: async () => [],
+        translatedOverviews: async (_type, id) =>
+          id === 41
+            ? ['An investigator uncovers haunted school secrets.']
+            : ['A family comedy set during a summer holiday.'],
+      }),
+    );
+    expect(result.marks.map((mark) => mark.id)).toEqual([41]);
+  });
+
+  it('keeps canonical-title namesakes unresolved when overview evidence ties', async () => {
+    const result = await planPrimeImport(
+      [
+        movie({
+          title: 'Despertar',
+          rawTitle: 'The Awakening',
+          description: 'An investigator visits a haunted boarding school.',
+          durationSeconds: undefined,
+        }),
+      ],
+      fake({
+        searchMulti: async (query) =>
+          query === 'The Awakening'
+            ? [
+                { type: 'movie', id: 40, name: 'The Awakening' },
+                { type: 'movie', id: 41, name: 'The Awakening' },
+              ]
+            : [],
+        searchMovie: async () => [],
+        translatedTitles: async () => [],
+        translatedOverviews: async () => ['An investigator uncovers haunted school secrets.'],
+      }),
+    );
+    expect(result.marks).toEqual([]);
+    expect(result.ambiguous).toEqual(['The Awakening']);
+  });
+
+  it('resolves a contextual orphan only when TMDB title and overview both agree', async () => {
+    const contextual = episode({
+      title: 'Adar',
+      rawTitle: 'Adar',
+      show: undefined,
+      season: undefined,
+      contextShows: ['The Rings', 'Nearby But Unrelated'],
+      description: 'Arondir is held captive.',
+    });
+    const result = await planPrimeImport(
+      [contextual],
+      fake({
+        searchTv: async (query) => [
+          { type: 'tv', id: query === 'The Rings' ? 20 : 21, name: query },
+        ],
+        show: async () => shape({ 1: 2 }),
+        episodes: async (id) =>
+          id === 20
+            ? [
+                { number: 1, name: 'Adar', overview: 'Arondir is held captive.' },
+                { number: 2, name: 'Other', overview: 'Other' },
+              ]
+            : [{ number: 1, name: 'Adar', overview: 'A different story.' }],
+      }),
+    );
+    expect(result.marks).toEqual([
+      expect.objectContaining({ type: 'tv', id: 20, season: 1, episode: 1 }),
+    ]);
+  });
+
   it('prefers the composite history episode, understands localized numbers, and checks specials', async () => {
     const result = await planPrimeImport(
       [

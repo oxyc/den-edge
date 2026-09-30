@@ -30,6 +30,10 @@ export interface ViewingLookups {
   searchMovie?(query: string, page: number): Promise<ViewingSearchHit[]>;
   show(id: number): Promise<ImportShow | null>;
   episodes(id: number, season: number): Promise<ViewingEpisode[] | null>;
+  /** Localized titles TMDB knows for a title; used to validate provider translations. */
+  translatedTitles?(type: 'movie' | 'tv', id: number): Promise<string[]>;
+  /** Localized summaries TMDB knows for a title; used only to break otherwise ambiguous film matches. */
+  translatedOverviews?(type: 'movie' | 'tv', id: number): Promise<string[]>;
   /** Runtime in minutes; used when a provider reports watch time but not the title's duration. */
   runtime?(type: 'movie' | 'tv', id: number): Promise<number | null>;
 }
@@ -37,6 +41,7 @@ export interface ViewingLookups {
 export interface ViewingEpisode {
   number: number;
   name: string;
+  overview?: string;
   runtime?: number;
   airDate?: string;
 }
