@@ -28,6 +28,8 @@
 
   const params = new URLSearchParams(location.search);
   const populated = params.has('populated');
+  /** Every action refused, as a library that can't be reached refuses it. */
+  const failing = params.has('failing');
   let route = $state<Route>(
     params.get('page') === 'watchlist' ? { page: 'watchlist' } : { page: 'library' },
   );
@@ -109,6 +111,7 @@
      * A journal that isn't a tracker event is kept as the row it is, which is what the real log does with it.
      */
     writeActions: async (journals: SettingsRow[]) => {
+      if (failing) return false;
       for (const journal of journals) {
         const event = trackerEvent(journal);
         put(event ? event.after : journal);
@@ -118,6 +121,7 @@
     },
     /** One action, as `act` writes it (Remove, Mark watched on a movie): its journal's row, as `writeActions` keeps them. */
     writeAction: async (journal: SettingsRow) => {
+      if (failing) return null;
       const event = trackerEvent(journal);
       const row = event ? event.after : journal;
       put(row);

@@ -27,6 +27,7 @@
     notice = null,
     detailPage = false,
     playLabel = 'Play',
+    compact = false,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -34,7 +35,8 @@
     failure: string | null;
     onwatchlist: (on: boolean) => void;
     onseen: (on: boolean) => void;
-    onreact: (reaction: Reaction | null) => void;
+    /** Set the opinion; no picker without it. */
+    onreact?: (reaction: Reaction | null) => void;
     /** Play it on the linked TV; no button without it. */
     onplay?: () => void;
     /** Play it in this browser; no button without it. */
@@ -67,6 +69,11 @@
     notice?: string | null;
     detailPage?: boolean;
     playLabel?: string;
+    /**
+     * Glyphs only, each named for what pressing it does ("Add to watchlist", "Mark as seen"): the billboard's
+     * slide, which has its own Play and More beside them and no room for words.
+     */
+    compact?: boolean;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
@@ -106,7 +113,7 @@
 
 <svelte:window bind:innerWidth={viewportWidth} />
 
-<div class="actions" class:detail-page={detailPage} aria-busy={busy}>
+<div class="actions" class:detail-page={detailPage} class:compact aria-busy={busy}>
   {#if restricted}
     <!-- The ceiling's own slot, where Play would be: the title is still named and rated on the page, but
          nothing here starts it. The TV says the same thing in the same place. -->
@@ -156,23 +163,27 @@
         >{@render tv()}<span class="label">Play on TV</span></button
       >
     {/if}
+    <!-- Compact, the name says what a press does and the fill says the state: a pressed toggle whose name
+         changed with it would be read out as the opposite of what it is. -->
     <button
       class="pill"
       class:on={listed}
-      aria-pressed={listed}
+      aria-pressed={compact ? undefined : listed}
+      aria-label={compact ? (listed ? 'Remove from watchlist' : 'Add to watchlist') : undefined}
       disabled={busy}
       onclick={() => onwatchlist(!listed)}
     >
-      {@render bookmark()}<span class="label">Watchlist</span>
+      {@render bookmark()}{#if !compact}<span class="label">Watchlist</span>{/if}
     </button>
     <button
       class="pill"
       class:on={seen}
-      aria-pressed={seen}
+      aria-pressed={compact ? undefined : seen}
+      aria-label={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : undefined}
       disabled={busy}
       onclick={() => onseen(!seen)}
     >
-      {@render eye()}<span class="label">Seen</span>
+      {@render eye()}{#if !compact}<span class="label">Seen</span>{/if}
     </button>
     {#if share}
       <button class="pill" disabled={busy} onclick={() => void shareTitle()}>
@@ -184,20 +195,22 @@
 
     <!-- The select is the control, invisible over the whole pill: the browser opens its own menu — a sheet on a
          phone — and a screen reader reads a pop-up button. -->
-    <div class="pick" class:on={reaction !== null}>
-      {@render opinion(reaction)}
-      <span class="value" aria-hidden="true">{rated}</span>
-      {@render chevron()}
-      <select
-        aria-label="Your opinion"
-        value={reaction ?? ''}
-        disabled={busy}
-        onchange={(event) => onreact((event.currentTarget.value || null) as Reaction | null)}
-      >
-        <option value="">No rating</option>
-        {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}
-      </select>
-    </div>
+    {#if onreact}
+      <div class="pick" class:on={reaction !== null}>
+        {@render opinion(reaction)}
+        <span class="value" aria-hidden="true">{rated}</span>
+        {@render chevron()}
+        <select
+          aria-label="Your opinion"
+          value={reaction ?? ''}
+          disabled={busy}
+          onchange={(event) => onreact((event.currentTarget.value || null) as Reaction | null)}
+        >
+          <option value="">No rating</option>
+          {#each reactions as [value, label] (value)}<option {value}>{label}</option>{/each}
+        </select>
+      </div>
+    {/if}
   </div>
 </div>
 {#if failure}<p class="failure" role="alert">{failure}</p>{:else if notice}<p
@@ -456,6 +469,26 @@
 
   .failure {
     color: var(--danger);
+  }
+
+  /* A row of round glyphs beside the billboard's own buttons, and the line saying a press didn't save on a
+     row of its own beneath them, legible over the picture. */
+  .compact {
+    display: flex;
+    margin-bottom: 0;
+  }
+
+  .compact .pill {
+    flex: 0 0 auto;
+    width: 48px;
+    padding: 0;
+  }
+
+  .compact + .failure {
+    flex-basis: 100%;
+    margin: 0;
+    font-weight: 600;
+    text-shadow: 0 1px 2px rgb(0 0 0 / 0.8);
   }
 
   .notice {

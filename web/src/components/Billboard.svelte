@@ -10,8 +10,12 @@
      nothing to press. It is decoration, so it gives way whenever it would cost more than it gives: Reduce
      Motion, Data Saver, or the billboard scrolled off the screen leave the still picture in its place. -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import DetailIcon from './DetailIcon.svelte';
+  import TitleActions from './TitleActions.svelte';
+  import { leavesBillboard, nextSlide, type SlideAction } from '../lib/billboardActions';
+  import type { TitleRow } from '../lib/wire';
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import { fetchDetail, type TitleDetail } from '../lib/detail';
   import { billboardFacts } from '../lib/detailPresentation';
@@ -37,11 +41,27 @@
     onready,
     reel,
     routes,
+    // eslint-disable-next-line no-useless-assignment -- An output binding: written below, read by the parent.
+    showing = $bindable(),
+    rowOf,
+    onwatchlist,
+    onseen,
+    watchlistPage = false,
   }: {
     /** The billboard's titles, best first. */
     titles: RecommendedTitle[];
-    /** The slide on screen, as an index into `titles`: bound where a new ranking must leave it in place. */
+    /** The slide on screen, as an index into the slides drawn: `titles`, less those handled from a slide. */
     index?: number;
+    /** The title on screen: bound where a new ranking must leave it in place. */
+    showing?: Title;
+    /** A title's library row as last read. Without it — a guest, with no library — a slide has no Watchlist or Seen. */
+    rowOf?: (title: Title) => TitleRow | undefined;
+    /** Save it to the watchlist or take it off, as the title page does; true once saved. */
+    onwatchlist?: (title: Title, on: boolean) => Promise<boolean | undefined>;
+    /** Mark it seen or unseen, as the title page does; true once saved. */
+    onseen?: (title: Title, on: boolean) => Promise<boolean | undefined>;
+    /** The Watchlist page's own billboard, where a title taken off the watchlist is done with (`leavesBillboard`). */
+    watchlistPage?: boolean;
     active?: boolean;
     tmdbKey: string;
     /** Play it in this browser; no button without it. */
@@ -84,11 +104,23 @@
   /** The longest the next trailer's idle warm may wait once the current trailer is actually playing. */
   const WARM_IDLE_TIMEOUT_MS = 3_000;
 
-  const shown = $derived(titles.slice(0, SLIDES));
+  /** Titles handled from their slide this visit — saved, seen — which don't come round again. */
+  const handled = new SvelteSet<string>();
+  /**
+   * The slides as they stood when an action was pressed, held until the rail has moved past it: saving can change
+   * `titles` underneath — a title marked seen leaves the Watchlist page's list as it is written — and the rail
+   * would otherwise be scrolling to a slide whose title had just moved.
+   */
+  let pinned = $state<RecommendedTitle[] | null>(null);
+  const unhandled = () => titles.filter((title) => !handled.has(keyOf(title))).slice(0, SLIDES);
+  const shown = $derived(pinned ?? unhandled());
   /** Set once you move it by hand: from then on it holds still and is yours to drive. */
   let paging = $state(false);
   let held = $state(false);
   const current = $derived(shown[Math.min(index, shown.length - 1)]);
+  $effect(() => {
+    showing = current;
+  });
   const firstTitleKey = $derived(shown[0] ? `${shown[0].type}:${shown[0].id}` : '');
 
   const keyOf = (title: Title) => `${title.type}:${title.id}`;
@@ -514,6 +546,67 @@
     goTo(n);
   }
 
+  // --- Watchlist and Seen ---
+
+  /** The title whose press is being saved, and the one whose press didn't save. */
+  let pressed = $state('');
+  let unsaved = $state('');
+
+  /** Once the rail has stopped: on `scrollend`, or after a second where the browser sends none. */
+  function settled(box: HTMLElement): Promise<void> {
+    return new Promise((done) => {
+      const finish = () => {
+        clearTimeout(timer);
+        box.removeEventListener('scrollend', finish);
+        done();
+      };
+      const timer = setTimeout(finish, 1000);
+      box.addEventListener('scrollend', finish);
+    });
+  }
+
+  /**
+   * Save the press through the title page's own path, and once it is saved move on from a title the viewer is done
+   * with, exactly as the auto-advance would, then take it out of the slides. Not before: a write that fails leaves
+   * the slide where it is, saying so.
+   */
+  async function press(title: RecommendedTitle, action: SlideAction, on: boolean) {
+    const write = action === 'seen' ? onseen : onwatchlist;
+    if (!write) return;
+    const key = keyOf(title);
+    const leaves = leavesBillboard(action, on, watchlistPage);
+    pressed = key;
+    unsaved = '';
+    if (leaves) pinned = shown;
+    const saved = (await write(title, on).catch(() => false)) === true;
+    pressed = '';
+    if (!saved) {
+      pinned = null;
+      unsaved = key;
+      return;
+    }
+    if (!leaves) return;
+    // Only from the slide on screen: one paged away from while it saved has already been left.
+    const here = shown[index];
+    if (shown.length > 1 && here && keyOf(here) === key) {
+      const next = nextSlide(index, shown.length);
+      goTo(next, next !== 0);
+      if (rail) await settled(rail);
+    }
+    // Whatever is on screen now: the viewer may have paged on while the rail settled.
+    const ahead = shown[index];
+    handled.add(key);
+    pinned = null;
+    // The slide on screen keeps its title as the handled one drops out before it: index and rail move with it,
+    // in the same frame, so neither the words nor the picture change. Back on the handled slide itself, the one
+    // after it takes its place.
+    const left = unhandled();
+    const kept = left.findIndex((title) => ahead !== undefined && keyOf(title) === keyOf(ahead));
+    index = kept >= 0 ? kept : Math.max(0, Math.min(index, left.length - 1));
+    await tick();
+    goTo(index, false);
+  }
+
   function keyed(event: KeyboardEvent) {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
@@ -551,7 +644,7 @@
   $effect(() => {
     if (!active || !onScreen || paging || held || shown.length < 2 || still()) return;
     const timer = setInterval(() => {
-      const next = (index + 1) % shown.length;
+      const next = nextSlide(index, shown.length);
       // The wrap is a jump rather than a scroll back through forty slides.
       goTo(next, next !== 0);
     }, ADVANCE_MS);
@@ -719,6 +812,16 @@
                 </button>
               {/if}
               <a class="more" href={titleHref(title)} tabindex={n === index ? 0 : -1}>More</a>
+              {#if rowOf && onwatchlist && onseen}
+                <TitleActions
+                  compact
+                  row={rowOf(title)}
+                  busy={pressed === keyOf(title)}
+                  failure={unsaved === keyOf(title) ? 'Couldn’t save that. Nothing changed.' : null}
+                  onwatchlist={(on) => void press(title, 'watchlist', on)}
+                  onseen={(on) => void press(title, 'seen', on)}
+                />
+              {/if}
             </div>
           </div>
         </div>
