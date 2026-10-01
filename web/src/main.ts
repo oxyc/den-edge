@@ -5,6 +5,7 @@ import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links } from './lib/links.svelte';
 import { freshOn, startBillboard } from './lib/recommend';
+import { releaseWaiting, reloadOnce, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
@@ -32,29 +33,24 @@ if (!target) throw new Error('index.html has no #app element');
 target.replaceChildren();
 mount(App, { target });
 
-/** Reload onto the current release, at most once in a while: a missing file must not become a reload loop. */
-function reloadOnce(): void {
-  try {
-    const last = Number(sessionStorage.getItem('den.reloadedAt'));
-    if (Date.now() - last < 10_000) return;
-    sessionStorage.setItem('den.reloadedAt', String(Date.now()));
-  } catch {
-    // Without storage there is no loop guard; a reload is still better than a page that stays broken.
-  }
-  location.reload();
-}
-
-// A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has. Offline, the file is
-// simply out of reach, and reloading would not bring it back. The event is left uncancelled: cancelling it makes
-// Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8), and the screen that asked
-// for it then never learns it failed. Rejected, it says so and offers another try (`screens.svelte.ts`).
+// A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has, so a newer release is
+// waiting; the page moves onto it with the next page opened (`release.ts`), and at once only if the screen the person
+// opened is the one that failed (`ScreenLoading`). Offline, the file is simply out of reach, and reloading would not
+// bring it back. The event is left uncancelled: cancelling it makes Vite's import resolve to `undefined` rather than
+// reject (`handlePreloadError` in Vite 8), and the screen that asked for it then never learns it failed.
 window.addEventListener('vite:preloadError', () => {
-  if (navigator.onLine) reloadOnce();
+  if (navigator.onLine) releaseWaiting();
 });
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (event) => {
-    if (event.data === 'den:reload') reloadOnce();
+    if (event.data === 'den:release') releaseWaiting();
+    // The check met Cloudflare Access's login: the session has expired, and nothing on the page works until it is
+    // renewed.
+    else if (event.data === 'den:reload') reloadOnce();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) swapWhileHidden();
   });
   navigator.serviceWorker
     // The worker chooses every app-shell response. Never let a browser or intermediary freshness lifetime

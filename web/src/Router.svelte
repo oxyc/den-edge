@@ -11,6 +11,7 @@
   import RoutePage from './components/RoutePage.svelte';
   import { Navigation, appPath, nearest, routeKey } from './lib/navigation';
   import { parseRoute, type Route } from './lib/route';
+  import { swapOnNavigation } from './lib/release';
 
   let {
     children,
@@ -174,6 +175,12 @@
     };
     async function follow(path: string, push: boolean, replace = false, native = false) {
       if (push && appPath(path, location.href) === null) return;
+      // A newer release is kept: the page opened next is loaded whole, onto it, rather than drawn in place
+      // (`release.ts`). Not for a query growing by a letter, which opens nothing.
+      if (!replace) {
+        if (push) writeAddress();
+        if (swapOnNavigation(push ? path : null)) return;
+      }
       const key = routeKey(parseRoute(path));
       // The same page at a new address: a search query that grew by a letter is not somewhere a person
       // navigated to, and giving it a history entry would bury the page they came from under the spelling

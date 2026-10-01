@@ -161,30 +161,35 @@ async fn serve_file(
     let cast_origin = state.cast_origin.as_deref();
     let modified = opened.2;
     let shell = file.file_name().is_some_and(|name| name == "index.html");
+    let mut build = None;
     let identity = if shell {
         let Ok((bytes, etag)) = state.web_files.shell(&file, &mut opened).await else {
             return ("404", not_found());
         };
+        let release = release(&etag);
         // The shell says which page this is before any of it has run, for whatever is about to build a link
         // preview from it (`meta.rs`). Injected bytes are served as they are: the gzip sidecar on disk is of
         // the file, not of this answer, and serving it would hand out the generic block to everything that
         // asks for gzip — which is everything.
         if let Some(html) = crate::meta::rewrite(state, &bytes, path, query, headers).await {
             let (etag, length) = (digest(html.as_bytes()), html.len() as u64);
-            return (
-                "preview",
-                crate::cache::revalidate(
-                    respond(Body::from(html), length, etag, &file, false, media, cast_origin),
-                    headers,
-                ),
+            let mut resp = crate::cache::revalidate(
+                respond(Body::from(html), length, etag, &file, false, media, cast_origin),
+                headers,
             );
+            resp.headers_mut().insert(RELEASE, release);
+            return ("preview", resp);
         }
+        build = Some(release);
         Identity::Shell(bytes, etag)
     } else {
         Identity::Disk(opened)
     };
     let mut resp =
         encoded(&state.web_files, identity, modified, &file, immutable, media, cast_origin, headers).await;
+    if let Some(release) = build {
+        resp.headers_mut().insert(RELEASE, release);
+    }
     // A cold browser can ask for the shared billboard while it is still downloading/parsing the app bundle. The
     // service worker deliberately strips this header from the shell it keeps: tomorrow's page must not preload
     // yesterday's day-keyed URL. A warm visit starts the same request at the top of `main.ts` instead.
@@ -677,6 +682,18 @@ fn respond(
 
 const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
 
+/// The web build a shell belongs to, which the service worker compares against the shell it kept to learn of a
+/// release (`web/public/sw.js`). Not the ETag: Cloudflare drops that when it re-encodes the page, and it also
+/// moves with the policy. The shell names every other file of its build by hash, so its own hash is the build's.
+const RELEASE: HeaderName = HeaderName::from_static("x-den-release");
+
+/// The shell's digest, unquoted: the service worker names its file caches after it.
+fn release(shell: &HeaderValue) -> HeaderValue {
+    let bare =
+        shell.as_bytes().strip_prefix(b"\"").and_then(|b| b.strip_suffix(b"\"")).unwrap_or(shell.as_bytes());
+    HeaderValue::from_bytes(bare).unwrap_or_else(|_| shell.clone())
+}
+
 fn not_found() -> Response {
     let mut resp = Response::new(Body::from("not found"));
     *resp.status_mut() = StatusCode::NOT_FOUND;
@@ -916,6 +933,37 @@ mod tests {
         let identity = h.send("GET", "/", None, &[("if-none-match", &gzip_etag)]).await;
         assert_eq!(identity.status(), StatusCode::OK);
         assert_ne!(identity.headers()[header::ETAG], gzip_etag);
+    }
+
+    /// The service worker learns of a release from this header, since Cloudflare strips the ETag from `/`: it
+    /// names the shell's build the same way in every encoding, on a 304 and on an app route, and changes only
+    /// when the shell does.
+    #[tokio::test]
+    async fn the_shell_names_its_release() {
+        let h = with_app();
+        let release = |response: &axum::http::Response<axum::body::Body>| {
+            response.headers()["x-den-release"].to_str().unwrap().to_owned()
+        };
+        let root = h.send("GET", "/", None, &[]).await;
+        let first = release(&root);
+        assert_eq!(first.len(), 64, "the shell's SHA-256, unquoted: {first}");
+        let etag = root.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let unchanged = h.send("GET", "/", None, &[("if-none-match", &etag)]).await;
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(release(&unchanged), first);
+        assert_eq!(release(&h.send("GET", "/movies", None, &[]).await), first);
+        std::fs::write(h.dir.join("web/index.html.gz"), b"compressed representation").unwrap();
+        let gzip = h.send("GET", "/", None, &[("accept-encoding", "gzip")]).await;
+        assert_eq!(gzip.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(release(&gzip), first);
+        // Not on the build's other files: they are named by hash already.
+        let asset = h.send("GET", "/assets/index-abc123.js", None, &[]).await;
+        assert!(!asset.headers().contains_key("x-den-release"));
+
+        std::fs::remove_file(h.dir.join("web/index.html.gz")).unwrap();
+        let next = "<!doctype html><title>Den</title><script src=new>";
+        std::fs::write(h.dir.join("web/index.html"), next).unwrap();
+        assert_ne!(release(&h.send("GET", "/", None, &[]).await), first);
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
      never ends would say the page is on its way when nothing is fetching it. -->
 <script lang="ts">
   import Loading from './Loading.svelte';
+  import { swapFailedScreen } from '../lib/release';
 
   let {
     screen,
@@ -11,6 +12,12 @@
     /** Over the whole page (`Loading`'s `page`), or in place, as inside a dialog. */
     page?: boolean;
   } = $props();
+
+  // The screen the person opened is a file of a release den-edge has replaced: loading the page onto the new
+  // release is what brings it, and there is nothing on screen to lose.
+  $effect(() => {
+    if (screen.failed) swapFailedScreen();
+  });
 </script>
 
 {#if screen.failed}

@@ -2,11 +2,14 @@
 // the build's hashed files, nothing else. The library, the addons and TMDB never pass through here — they are private,
 // or already kept where they belong.
 //
-// The kept page is shown and checked behind it. When that check finds a release, the worker reloads the client onto
-// the new shell immediately rather than leaving it on old application logic for the whole visit. Files are kept per
-// release, the last two of them, because a kept page asks for its own release's files after den-edge has replaced
-// them; one it never fetched drops the kept page and reloads onto the current release (`file`, main.ts). A check that meets Cloudflare
-// Access's login instead of the page drops the kept page and reloads, so an expired session still reaches the login.
+// The kept page is shown and checked behind it. A release is read from `x-den-release`, which den-edge puts on the
+// shell (`web.rs`) — not from the ETag, which Cloudflare drops when it re-encodes the page, so a check comparing ETags
+// never found one. When the check keeps a new release it tells the page (`den:release`), which moves onto it at the
+// next moment that interrupts nothing: the next page opened, or while hidden (`release.ts`). Never at once: a person
+// mid-scroll lost their place to it. Files are kept per release, the one a page runs and the one it moves to, because
+// a kept page asks for its own release's files after den-edge has replaced them; one it never fetched drops the kept
+// page and tells the page the same (`file`). A check that meets Cloudflare Access's login instead of the page drops
+// the kept page and reloads, so an expired session still reaches the login.
 //
 // The kept page answers every navigation to one of the app's own pages (`src/lib/route.ts`), not only `/`: den-edge
 // serves the same shell for all of them (`web.rs`), and the app reads the path itself. Only the pages named below —
@@ -15,6 +18,8 @@
 
 const PAGE = 'den-page-v1';
 const FILES = 'den-files-';
+/** The build a shell belongs to, set by den-edge (`web.rs`). */
+const RELEASE = 'x-den-release';
 
 /** The app's pages that are a single segment, `/movies`, and the ones that carry an id after it, `/movie/550`. */
 const PAGES = new Set(['/', '/movies', '/series', '/watchlist', '/settings', '/search', '/people']);
@@ -28,7 +33,10 @@ function appPage(pathname) {
 }
 
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+// Files were kept under `unreleased` while a release was read from the ETag Cloudflare drops, and nothing pruned it.
+self.addEventListener('activate', (event) =>
+  event.waitUntil(Promise.all([self.clients.claim(), caches.delete(FILES + 'unreleased')])),
+);
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
@@ -53,7 +61,7 @@ async function page(event) {
       : event.request;
   const checked = fetch(request).then(async (response) => {
     if (response.ok && response.type === 'basic') {
-      const release = response.headers.get('etag');
+      const release = response.headers.get(RELEASE);
       // The origin's Link header preloads today's day-keyed billboard on a cold navigation. Do not keep that URL
       // in the offline shell: tomorrow it would preload yesterday's pool before main.ts asks for the current one.
       const copy = response.clone();
@@ -63,9 +71,11 @@ async function page(event) {
         '/',
         new Response(copy.body, { status: copy.status, statusText: copy.statusText, headers }),
       );
-      if (kept && release && kept.headers.get('etag') !== release) {
-        await prune();
-        (await self.clients.get(event.resultingClientId))?.postMessage('den:reload');
+      // A shell kept before den-edge named releases has none, and differs from every named one.
+      const was = kept?.headers.get(RELEASE) ?? null;
+      if (kept && release !== was) {
+        await prune([was, release]);
+        (await self.clients.get(event.resultingClientId))?.postMessage('den:release');
       }
     } else if (kept && response.type === 'opaqueredirect') {
       await cache.delete('/');
@@ -85,22 +95,26 @@ async function file(event) {
   if (kept) return kept;
   const response = await fetch(request);
   if (response.ok) {
-    const page = await (await caches.open(PAGE)).match('/');
-    const cache = await caches.open(FILES + (page?.headers.get('etag') ?? 'unreleased'));
-    await cache.put(request, response.clone());
+    // Kept only under a named release, so `prune` can drop it; with none (a den-edge that names no release) the
+    // browser's own cache still holds it, as it does every hashed file for a year.
+    const release = (await (await caches.open(PAGE)).match('/'))?.headers.get(RELEASE);
+    if (release) await (await caches.open(FILES + release)).put(request, response.clone());
   } else if (response.status === 404) {
     // A file of a release den-edge no longer serves, and not kept here: the page asking is that release's, shown
     // from the kept shell a visit behind. On 2026-09-28 two releases half an hour apart left such a page with its
     // navigation drawn and no rows or screens, and reloading onto the same kept shell kept it there. Without the
-    // shell the reload goes to the network and gets the current release.
+    // shell the page's next load goes to the network and gets the current release. That load waits for the next
+    // page opened, as a release found by the check does: the screens are fetched ahead of use (`screens.svelte.ts`),
+    // so a missing one is usually one nobody is looking at, and reloading for it threw a person off the page.
     await (await caches.open(PAGE)).delete('/');
-    (await self.clients.get(event.clientId))?.postMessage('den:reload');
+    (await self.clients.get(event.clientId))?.postMessage('den:release');
   }
   return response;
 }
 
-/** Keep the files of the last two releases: caches list in the order they were made. */
-async function prune() {
-  const releases = (await caches.keys()).filter((name) => name.startsWith(FILES));
-  await Promise.all(releases.slice(0, -2).map((name) => caches.delete(name)));
+/** Keep the files of `releases` — the one a page runs and the one it moves to — and drop every other's. */
+async function prune(releases) {
+  const keep = new Set(releases.filter(Boolean).map((release) => FILES + release));
+  const gone = (await caches.keys()).filter((name) => name.startsWith(FILES) && !keep.has(name));
+  await Promise.all(gone.map((name) => caches.delete(name)));
 }
