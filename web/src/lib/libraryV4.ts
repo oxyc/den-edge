@@ -137,13 +137,13 @@ export function opsFor(before: Row, after: Row): Op[] {
       ops.push({ target, write: { kind: 'mark_watched', at: resume.at } });
       statusWritten = true;
     } else {
+      // den-core derives the film's status from the position (in progress, or watched past the credits).
       ops.push({
         target,
         write: {
           kind: 'progress',
           value: resume.value,
           ...(resume.seconds !== undefined ? { seconds: resume.seconds } : {}),
-          ...(statusChanged ? { status: after.status.value } : {}),
           at: resume.at,
         },
       });
@@ -188,8 +188,8 @@ function newestOf(row: TitleRow): Stamp {
 }
 
 /**
- * `ops` applied, in order, to the documents `stored` holds: the documents that changed. A `title` write sets only the
- * fields whose stamp is later than the stored one, so a write kept and sent late never sets a field back.
+ * `ops` applied, in order, to the documents `stored` holds: the documents that changed. A write kept and sent after a
+ * newer change writes nothing over it (`apply_write`, §8 *Replays write nothing*).
  */
 export function applyOps(
   ops: Op[],
@@ -201,22 +201,12 @@ export function applyOps(
   for (const { target, write } of ops) {
     const key = `${target.type}:${target.id}`;
     const title = read(`title:${key}`);
-    let applied = write;
-    if (write.kind === 'title' && title) {
-      const fields = Object.fromEntries(
-        Object.entries(write.fields as Record<string, unknown>).filter(([field]) => {
-          const held = (title[field] as { at?: Stamp } | undefined)?.at ?? ZERO_STAMP;
-          return compareStamps(write.at as Stamp, held) > 0;
-        }),
-      );
-      applied = { ...write, fields };
-    }
     const seasons = [...new Set(seasonsOf(write))]
       .map((season) => read(`season:${key}:${season}`))
       .filter((document): document is DocumentRow => document !== undefined);
     const { documents } = syncPolicy<{ documents: DocumentRow[] }>({
       op: 'apply_write',
-      write: applied,
+      write,
       target,
       ...(title ? { title } : {}),
       seasons,

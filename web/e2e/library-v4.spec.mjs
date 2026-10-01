@@ -16,7 +16,9 @@ test('the switch to Library v4 shows its toast, and About shows the library form
     await routeTmdb(page, (route) => route.fulfill({ json: { results: [], images: {} } }));
     await page.goto('http://127.0.0.1:5198/test/settings.html?switched');
 
-    await expect(page.getByRole('status').filter({ hasText: 'Library updated to v4' })).toBeVisible();
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Library updated to v4' }),
+    ).toBeVisible();
 
     const about = page.locator('#about');
     await expect(about.locator('#version')).toContainText('den-edge 0.242.1');

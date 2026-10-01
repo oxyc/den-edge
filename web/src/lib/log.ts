@@ -387,9 +387,8 @@ export class LibraryLog {
       }
       const rest = rows.filter((row) => isDocument(row) || (row.kind === 'set' && !legacy(row)));
       return (
-        (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [
-          [...documents, ...rest],
-        ])) && this.writeOps(ops)
+        (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [[...documents, ...rest]])) &&
+        this.writeOps(ops)
       );
     }
     if (this.wireMin >= 3) {
