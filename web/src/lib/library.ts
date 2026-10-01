@@ -373,6 +373,17 @@ export function watchlist(library: Library): Title[] {
     .map((r) => r.title);
 }
 
+/**
+ * The Watchlist page's billboard: what the page lists under Watchlist, newest addition first. A series with an
+ * episode seen (`seen`, by `type:id`) is under way, so it is in Continue Watching rather than here.
+ */
+export function watchlistSlides(
+  library: Library,
+  seen: ReadonlyMap<string, readonly unknown[]>,
+): Title[] {
+  return watchlist(library).filter((title) => !seen.get(titleKey(title))?.length);
+}
+
 /** What the library says of a title, for the mark in its poster's corner. */
 export type Standing = 'watched' | 'watchlist' | 'inProgress';
 

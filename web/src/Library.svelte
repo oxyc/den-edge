@@ -45,6 +45,7 @@
     titleKey,
     untitled,
     watchlist,
+    watchlistSlides,
     withDisplay,
     type ContinueEntry,
     type Title,
@@ -1202,6 +1203,17 @@
   {:else if !WatchlistScreen.current}
     <ScreenLoading screen={WatchlistScreen} />
   {:else}
+    {@const slides = watchlistSlides(library, seenOfSeries)}
+    {#if tmdbKey && slides.length}
+      <Billboard
+        active={active && !playing}
+        titles={slides}
+        {tmdbKey}
+        {reel}
+        {routes}
+        onplay={playHere && ((title) => playHere(title))}
+      />
+    {/if}
     <WatchlistScreen.current
       resume={continueWatching(library)}
       saved={watchlist(library)}

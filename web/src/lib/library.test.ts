@@ -7,6 +7,7 @@ import {
   standings,
   titleCaption,
   watchlist,
+  watchlistSlides,
   type Library,
 } from './library';
 
@@ -198,6 +199,16 @@ describe("the TV's rows", () => {
       posterPath: '/11.jpg',
       rating: 7.5,
     });
+  });
+
+  it('leads the Watchlist billboard with the newest addition, less a series already under way', () => {
+    expect(watchlistSlides(library, new Map()).map((t) => `${t.type}:${t.id}`)).toEqual([
+      'tv:11',
+      'movie:10',
+    ]);
+    const started = new Map([['tv:11', [{ season: 1, episode: 1 }]]]);
+    expect(watchlistSlides(library, started).map((t) => `${t.type}:${t.id}`)).toEqual(['movie:10']);
+    expect(watchlistSlides(emptyLibrary(), new Map())).toEqual([]);
   });
 
   it('continues series then movies, newest first, the way the TV does', () => {
