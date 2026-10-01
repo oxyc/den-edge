@@ -17,7 +17,11 @@ interface FakeEvent {
   waitUntil(work: Promise<unknown>): void;
 }
 
-function worker(shell?: string) {
+/** `/` as Cloudflare hands it over: re-encoded, so with no ETag, and with den-edge's release header intact. */
+const RELEASED = (release: string): Record<string, string> =>
+  release ? { 'x-den-release': release } : {};
+
+function worker(shell?: string, { network = 'r2', files = [] as string[] } = {}) {
   const listeners = new Map<string, Listener>();
   const stores = new Map<string, Map<string, Response>>();
   const store = (name: string) => {
@@ -46,7 +50,7 @@ function worker(shell?: string) {
     fetched.push(key(request));
     // A file of a release den-edge no longer serves.
     if (key(request).startsWith('/assets/gone')) return new Response('', { status: 404 });
-    const response = new Response(`network ${key(request)}`, { headers: { etag: '"r2"' } });
+    const response = new Response(`network ${key(request)}`, { headers: RELEASED(network) });
     Object.defineProperty(response, 'type', { value: 'basic' });
     return response;
   };
@@ -73,7 +77,13 @@ function worker(shell?: string) {
     fetchImpl,
     FakeRequest,
   ) as (pathname: string) => boolean;
-  if (shell) store('den-page-v1').set('/', new Response(shell, { headers: { etag: '"r1"' } }));
+  // The kept shell went through Cloudflare too; an ETag on it changes nothing, as no fresh `/` carries one.
+  if (shell)
+    store('den-page-v1').set(
+      '/',
+      new Response(shell, { headers: { ...RELEASED('r1'), etag: '"r1-origin"' } }),
+    );
+  for (const name of files) store(name).set('/assets/kept.js', new Response('kept'));
 
   /** The answer the worker gives a navigation to `path`, or undefined when it leaves it to the network. */
   async function navigate(path: string) {
@@ -100,13 +110,26 @@ function worker(shell?: string) {
     });
     return (await answer)?.status;
   }
+  /** The worker taking over: what it clears out of what an earlier one kept. */
+  async function activate() {
+    const behind: Promise<unknown>[] = [];
+    listeners.get('activate')!({
+      waitUntil: (work: Promise<unknown>) => void behind.push(work),
+    } as never);
+    await Promise.all(behind);
+  }
   return {
     appPage,
     navigate,
     asset,
+    activate,
     fetched,
     messages,
     kept: () => [...store('den-page-v1').keys()],
+    /** The release the kept shell is from. */
+    keptRelease: async () =>
+      (await cache('den-page-v1').match('/'))?.headers.get('x-den-release') ?? null,
+    fileCaches: () => [...stores.keys()].filter((name) => name.startsWith('den-files-')).sort(),
   };
 }
 
@@ -200,15 +223,54 @@ describe('the service worker', () => {
     expect(warm.fetched).toEqual(['/']);
   });
 
-  it('reloads a page immediately when its background check keeps a newer release', async () => {
+  it('finds a release by its header when `/` arrives with no ETag, and tells the page without reloading it', async () => {
     const current = worker('kept shell');
     expect(await current.navigate('/')).toBe('kept shell');
-    expect(current.messages).toEqual(['den:reload']);
-    expect(await current.navigate('/')).toBe('network /');
-    expect(current.messages).toEqual(['den:reload']);
+    expect(await current.keptRelease()).toBe('r2');
+    // The page is told a release is waiting, and moves onto it with the next page opened (`release.test.ts`).
+    expect(current.messages).toEqual(['den:release']);
+    // That next load is the new release, and finds nothing newer.
+    expect(await current.navigate('/movie/550')).toBe('network /');
+    expect(current.messages).toEqual(['den:release']);
   });
 
-  it('drops a kept shell whose release is gone and reloads the page onto the current one', async () => {
+  it('tells the page nothing when the release is the one it kept', async () => {
+    const same = worker('kept shell', { network: 'r1' });
+    expect(await same.navigate('/')).toBe('kept shell');
+    expect(same.messages).toEqual([]);
+  });
+
+  it('keeps files under their release, and only the releases a page runs or moves to', async () => {
+    const files = [
+      'den-files-r0',
+      'den-files-r1',
+      'den-files-"etag-named"',
+      'den-files-unreleased',
+    ];
+    const current = worker('kept shell', { files });
+    expect(await current.asset('/assets/Home-abc.js')).toBe(200);
+    expect(current.fileCaches()).toEqual(files.sort());
+
+    await current.navigate('/');
+    expect(current.fileCaches()).toEqual(['den-files-r1']);
+    expect(await current.asset('/assets/Detail-def.js')).toBe(200);
+    expect(current.fileCaches()).toEqual(['den-files-r1', 'den-files-r2']);
+  });
+
+  it('clears the never-pruned files kept before releases were named, once it takes over', async () => {
+    const current = worker('kept shell', { files: ['den-files-r1', 'den-files-unreleased'] });
+    await current.activate();
+    expect(current.fileCaches()).toEqual(['den-files-r1']);
+  });
+
+  it('keeps no file when den-edge names no release', async () => {
+    const cold = worker(undefined, { network: '' });
+    await cold.navigate('/');
+    expect(await cold.asset('/assets/Home-abc.js')).toBe(200);
+    expect(cold.fileCaches()).toEqual([]);
+  });
+
+  it('drops a kept shell whose release is gone and tells the page, which moves on with the next page', async () => {
     const { asset, kept, messages } = worker('kept shell');
     expect(await asset('/assets/Detail-abc.js')).toBe(200);
     expect(kept()).toEqual(['/']);
@@ -216,6 +278,6 @@ describe('the service worker', () => {
 
     expect(await asset('/assets/gone-Detail-old.js')).toBe(404);
     expect(kept()).toEqual([]);
-    expect(messages).toEqual(['den:reload']);
+    expect(messages).toEqual(['den:release']);
   });
 });
