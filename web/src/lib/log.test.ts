@@ -64,6 +64,8 @@ async function edge(rows: Row[] = [], extra: { k: string; v: string }[] = []) {
       const { writes } = JSON.parse(String(init.body)) as {
         writes: { k: string; base: number; v: string }[];
       };
+      if (new Set(writes.map((write) => write.k)).size !== writes.length)
+        return new Response('{"error":"invalid_batch"}', { status: 400 });
       const applied: { k: string; seq: number }[] = [];
       const conflicts: { k: string; seq: number; v: string | null }[] = [];
       for (const write of writes) {
@@ -1520,6 +1522,29 @@ describe('a library kept only in this browser', () => {
       expect(reopened.rows().some((row) => row.kind === 'wat')).toBe(true);
       expect(reopened.title({ type: 'movie', id: 1 })).toBeDefined();
     });
+  });
+
+  it('writes several episodes of one v3 block as one row, which den-edge would refuse twice in a batch', async () => {
+    const server = await edge([row(1)]);
+    const batches: string[][] = [];
+    const v3: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST')
+        batches.push(
+          (JSON.parse(String(init.body)) as { writes: { k: string }[] }).writes.map(({ k }) => k),
+        );
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '3');
+      return new Response(await response.text(), { status: response.status, headers });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, v3, memoryStorage().storage, null))!;
+    expect(log.wireMinimum).toBe(3);
+    // An import's episodes 1–3 all live in the same 32-episode watch row.
+    expect(await log.writeRows([watched(1, 1000), watched(2, 1001), watched(3, 1002)])).toBe(true);
+    expect(batches).toEqual([[expect.any(String)]]);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, v3, memoryStorage().storage, null))!;
+    for (const number of [1, 2, 3])
+      expect(reopened.episode({ type: 'tv', id: 95396 }, 1, number)?.progress.value).toBe(1);
   });
 
   it('is not written into a v2 library it cannot switch, and stays as it was', async () => {
