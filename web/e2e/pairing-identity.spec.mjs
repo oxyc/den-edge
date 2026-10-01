@@ -122,8 +122,10 @@ test('two browsers pair and join their stable identities through encrypted link 
       .toBe('bbbb000000000002');
     const joined = devices.getByRole('listitem').filter({ hasText: 'Mac' });
     await expect(joined).toHaveCount(1);
-    await expect(joined).toContainText('given this library');
-    await expect(joined.getByRole('button', { name: 'Forget Mac' })).toBeVisible();
+    // The joiner's stable id is the fixture's listed Mac, so the record of giving it the library joins that row.
+    await expect(joined).toContainText('Browser · seen');
+    await expect(joined.getByRole('button')).toHaveCount(1);
+    await expect(joined.getByRole('button', { name: 'Remove Mac' })).toBeVisible();
 
     // Learning the first stable id must not stop authenticated updates. A browser resends after a rename and the
     // host drains that same sealed inbox again even though the Shared record already has an id.

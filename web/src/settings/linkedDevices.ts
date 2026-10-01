@@ -77,6 +77,34 @@ export function linkedDeviceRows(
   return rows;
 }
 
+/**
+ * A row's second line: what the device is and when it last opened the library, or, for a device this browser gave a
+ * library to that hasn't listed itself yet, when that was.
+ */
+export function deviceStatus(
+  row: LinkedDeviceRow,
+  selfId: string,
+  currentLibraryKey: string | undefined,
+  day: (at: number) => string,
+): string {
+  if (row.device) {
+    const what =
+      row.device.id === selfId ? 'This browser' : row.device.kind === 'tv' ? 'Apple TV' : 'Browser';
+    return row.device.seen ? `${what} · seen ${day(row.device.seen)}` : what;
+  }
+  return row.shared
+    .map((entry) =>
+      entry.libraryKey && entry.libraryKey !== currentLibraryKey
+        ? `added to another library ${day(entry.at)}`
+        : `added ${day(entry.at)}`,
+    )
+    .join(' · ');
+}
+
+/** A saved library's name. Libraries carry no name of their own, so it's said by whether it's the one open here. */
+export const libraryName = (linked: Link, currentLibraryKey: string | undefined): string =>
+  linked.libraryKey === currentLibraryKey ? 'Your library' : 'Another library';
+
 /** Rows that represent devices known to the shared library, not this browser's local credentials for opening one. */
 export function syncedDeviceRows(
   devices: readonly DeviceEntry[],

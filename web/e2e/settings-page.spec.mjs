@@ -27,6 +27,8 @@ for (const width of [320, 390, 820, 1280]) {
       });
       await context.addInitScript(() => {
         const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+        // Its own name: on a Mac the page guesses "Mac", the seeded device's name.
+        localStorage.setItem('den.deviceName', 'Test Browser');
         localStorage.setItem(
           'den.links',
           JSON.stringify([
@@ -37,6 +39,13 @@ for (const width of [320, 390, 820, 1280]) {
               libraryKey: fixtureLibraryKey,
               linkKey: 'fixture',
               deviceId: 'aaaa000000000001',
+            },
+            {
+              inboxKey: 'feedface00001234',
+              name: 'Cabin TV',
+              linkedAt: 3000,
+              libraryKey: btoa(String.fromCharCode(...new Uint8Array(32).fill(9))),
+              linkKey: 'fixture-2',
             },
           ]),
         );
@@ -49,6 +58,7 @@ for (const width of [320, 390, 820, 1280]) {
               libraryKey: fixtureLibraryKey,
               deviceId: 'bbbb000000000002',
             },
+            { name: 'Phone', at: 8500, libraryKey: fixtureLibraryKey },
           ]),
         );
       });
@@ -134,35 +144,54 @@ for (const width of [320, 390, 820, 1280]) {
         devices.getByRole('heading', { name: 'Linked to this browser', exact: true }),
       ).toHaveCount(0);
       await expect(
-        devices.getByRole('heading', { name: 'Libraries this browser opens', exact: true }),
+        devices.getByRole('heading', { name: 'Your library', exact: true }),
       ).toBeVisible();
-      // A synced device and this browser's credential for opening its library are separate records and actions.
+      await expect(
+        devices.getByRole('heading', { name: 'Join another library', exact: true }),
+      ).toBeVisible();
+      await expect(devices).toContainText('reset the library key on your Apple TV');
+      for (const gone of ['Libraries this browser opens', 'handoff', 'linked', 'Library v3'])
+        await expect(devices).not.toContainText(gone);
+      // A synced device and this browser's way into its library are separate rows with separate actions.
       const listed = devices.getByRole('listitem');
-      const tv = listed
-        .filter({ hasText: 'Living Room TV' })
-        .filter({ hasText: 'Apple TV · seen' });
+      const tv = listed.filter({ hasText: 'Living Room TV' });
+      await expect(tv).toHaveCount(1);
       await expect(tv).toContainText('Apple TV · seen');
+      await expect(tv.getByRole('button', { name: 'Remove Living Room TV' })).toBeVisible();
+      // Libraries are named by whether they're the one open here, not after the TV they came through.
+      const open = listed.filter({ hasText: 'Open on this browser' });
+      await expect(open).toContainText('Your library');
+      await expect(open.getByRole('button', { name: 'Sign out on this browser' })).toBeVisible();
+      const other = listed.filter({ hasText: 'Another library' });
+      await expect(other).toContainText('Saved on this browser · joined through Cabin TV');
       await expect(
-        tv.getByRole('button', { name: 'Remove Living Room TV from list' }),
-      ).toBeVisible();
-      const tvLink = listed
-        .filter({ hasText: 'Living Room TV' })
-        .filter({ hasText: 'Currently open · linked' });
-      await expect(tvLink).toContainText('Currently open · linked');
-      await expect(
-        tvLink.getByRole('button', { name: 'Stop using Living Room TV’s library' }),
+        other.getByRole('button', { name: 'Remove the library joined through Cabin TV' }),
       ).toBeVisible();
       const mac = listed.filter({ hasText: 'Mac' });
       await expect(mac).toHaveCount(1);
       await expect(mac).toContainText('Browser · seen');
-      await expect(mac).toContainText('given this library');
-      await expect(mac.getByRole('button', { name: 'Remove Mac from list' })).toBeVisible();
-      await expect(mac.getByRole('button', { name: 'Forget Mac' })).toBeVisible();
-      // A regular expression, so it's matched with its case: the device's own row reads "This browser · seen".
-      await expect(listed.filter({ hasText: /Browser · seen/ })).toContainText('Mac');
-      // The page lists itself a second after Settings opens, so this waits for that row; a plain string would also
-      // match the TV's "linked to this browser" (string matching ignores case), and passed or failed on the timing.
-      await expect(listed.filter({ hasText: /This browser · seen/ })).toHaveCount(1);
+      await expect(mac.getByRole('button')).toHaveCount(1);
+      const phone = listed.filter({ hasText: 'Phone' });
+      await expect(phone).toContainText('added');
+      await expect(phone.getByRole('button', { name: 'Remove Phone' })).toBeVisible();
+      // The page lists itself a second after Settings opens, so this waits for that row. A regular expression, so
+      // it's matched with its case.
+      const self = listed.filter({ hasText: /This browser · seen/ });
+      await expect(self).toHaveCount(1);
+      await expect(self.getByRole('button', { name: 'This device' })).toBeDisabled();
+
+      // One Remove takes the device off the library's list and drops this browser's record of giving it the library.
+      await mac.getByRole('button', { name: 'Remove Mac' }).click();
+      await expect(
+        devices.getByRole('group', { name: 'Remove Mac from this list?' }),
+      ).toContainText('It can still use your library');
+      await devices.getByRole('button', { name: 'Remove', exact: true }).click();
+      await expect(listed.filter({ hasText: 'Mac' })).toHaveCount(0);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(localStorage.getItem('den.shared') ?? '[]').map((entry) => entry.name),
+        ),
+      ).toEqual(['Phone']);
 
       // The long lists, open for the screenshot: content warnings in their ten groups, and the languages.
       await page.getByRole('button', { name: /Content warnings All/ }).click();
