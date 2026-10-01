@@ -15,10 +15,14 @@ export function stableViewportHeight(node: HTMLElement) {
     width = window.innerWidth;
     measure();
   };
-  measure();
+  // At the next frame rather than as the node mounts: reading a computed style mid-mount forced a style pass over
+  // the half-built page (7-11 ms on a phone opening a title). Until then the property is unset, and the hero's own
+  // fallback is the very value this would read.
+  const first = requestAnimationFrame(measure);
   window.addEventListener('resize', resized);
   return {
     destroy() {
+      cancelAnimationFrame(first);
       window.removeEventListener('resize', resized);
       if (previous) node.style.setProperty('--stable-hero-height', previous);
       else node.style.removeProperty('--stable-hero-height');
