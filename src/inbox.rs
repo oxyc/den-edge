@@ -27,6 +27,11 @@ const MAX_MESSAGES: usize = 50;
 const MAX_SEALED_CHARS: usize = 4096;
 /// Queues one `POST /inbox/drain` may take: a TV drains one per linked device, and a household links a handful.
 const MAX_DRAIN_KEYS: usize = 16;
+/// Held `POST /inbox/drain?wait=` requests per address (`hold.rs`); past it a drain is answered at once. A TV holds
+/// one. A key is no credential to den-edge — anyone can make one up — so the address is what a hold is charged to.
+pub const MAX_HELD_PER_ADDRESS: usize = 2;
+/// Held drains across every address. Each keeps a connection open, though no admission slot.
+pub const MAX_HELD: usize = 16;
 
 /// Cleanup is independent of requests to an abandoned link. Run once before serving, then hourly.
 pub async fn sweep(state: &AppState) {
@@ -65,8 +70,14 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
 /// names it, and one malformed key refuses the request rather than being skipped, so a client never mistakes a
 /// refused key for an empty queue. The keys travel in the body, which is never logged, like the header does for
 /// one.
+///
+/// `?wait=S`: when every queue asked for is empty, the drain is held up to S ≤ 25 seconds until a message lands in
+/// one of them, so a TV hears of a "Play on TV" at once rather than at its next poll. The drain is priced once,
+/// held or not.
 async fn drain_many(state: &AppState, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
+    let wait = crate::hold::wait(crate::handler::query_param(&req, "wait"));
+    let admission = req.extensions().get::<crate::handler::AdmissionSlot>().cloned();
     let body = match read_json(req, MAX_BODY_BYTES).await {
         Ok(body) => body,
         Err(resp) => return *resp,
@@ -88,6 +99,26 @@ async fn drain_many(state: &AppState, req: Request) -> Response {
     if let Some(wait) = drain_budget(state, &ip, keys.len()) {
         return retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
     }
+    // Registered before the queues are read: a message appended after the read must still wake the wait.
+    let mut hold = wait.and_then(|wait| Some((state.inbox_holds.hold(&ip, &keys)?, wait)));
+    loop {
+        let queues = take(state, &keys).await;
+        if let Some((held, wait)) = hold.take() {
+            if queues.iter().all(Vec::is_empty) {
+                // No admission slot is held while waiting; the queues are read afresh after it.
+                if !crate::handler::AdmissionSlot::wait_out(admission.as_ref(), state, held.wait(wait)).await
+                {
+                    return crate::handler::busy();
+                }
+                continue;
+            }
+        }
+        return json_reply(StatusCode::OK, &json!({ "queues": queues }));
+    }
+}
+
+/// Each queue in `keys`, emptied, in the order asked.
+async fn take(state: &AppState, keys: &[&str]) -> Vec<Vec<Value>> {
     let now = state.now();
     let mut queues = Vec::with_capacity(keys.len());
     for key in keys {
@@ -110,7 +141,7 @@ async fn drain_many(state: &AppState, req: Request) -> Response {
             }
         });
     }
-    json_reply(StatusCode::OK, &json!({ "queues": queues }))
+    queues
 }
 
 /// Queues drained per address per minute, a queue each whether asked one at a time or together. A drain is a read
@@ -165,6 +196,7 @@ async fn append(state: &AppState, req: Request) -> Response {
     if let Err(e) = state.store.put(NS, key, stored.to_string().as_bytes()).await {
         return internal("inbox write", e);
     }
+    state.inbox_holds.wake(key);
     json_reply(StatusCode::OK, &json!({ "ok": true }))
 }
 
@@ -270,6 +302,67 @@ mod tests {
         let (_, again) = h.call("POST", "/inbox/drain", Some(json!({ "keys": [KEY, other] }))).await;
         assert_eq!(again, json!({ "queues": [[], []] }), "each queue was emptied");
         assert!(drain(&h).await.is_empty());
+    }
+
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(200);
+    const PROMPT: std::time::Duration = std::time::Duration::from_secs(2);
+    const OTHER: &str = "0123456789abcdef0123";
+
+    async fn held_drain(h: &Harness, wait: u64, keys: &[&str]) -> (StatusCode, Value) {
+        h.call("POST", &format!("/inbox/drain?wait={wait}"), Some(json!({ "keys": keys }))).await
+    }
+
+    /// A held drain answers the moment a message lands in one of its queues, holding no admission slot meanwhile.
+    #[tokio::test]
+    async fn a_held_drain_answers_when_a_message_lands_in_one_of_its_queues() {
+        let h = Harness::new();
+        let mut held = Box::pin(held_drain(&h, 20, &[OTHER, KEY]));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "every queue empty: held");
+        assert_eq!(h.state.request_slots.available_permits(), crate::handler::REQUESTS);
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let (status, answer) = tokio::time::timeout(PROMPT, held).await.expect("woken by the append");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer, json!({ "queues": [[], [{ "sealed": "AAEC" }]] }));
+        assert!(drain(&h).await.is_empty(), "and drained");
+    }
+
+    #[tokio::test]
+    async fn a_held_drain_answers_empty_at_its_timeout_and_at_once_when_a_queue_has_messages() {
+        let h = Harness::new();
+        let started = std::time::Instant::now();
+        assert_eq!(held_drain(&h, 1, &[KEY]).await, (StatusCode::OK, json!({ "queues": [[]] })));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900), "held for its wait");
+
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let answer = tokio::time::timeout(PROMPT, held_drain(&h, 20, &[OTHER, KEY])).await.expect("not held");
+        assert_eq!(answer.1, json!({ "queues": [[], [{ "sealed": "AAEC" }]] }));
+    }
+
+    #[tokio::test]
+    async fn an_append_to_another_queue_does_not_wake_a_held_drain() {
+        let h = Harness::new();
+        let mut held = Box::pin(held_drain(&h, 20, &[KEY]));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err());
+        let elsewhere = json!({ "inboxKey": OTHER, "sealed": "BBBB" });
+        assert_eq!(h.call("POST", "/inbox/append", Some(elsewhere)).await.0, StatusCode::OK);
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "not one of its queues");
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        let (_, answer) = tokio::time::timeout(PROMPT, held).await.expect("its own queue wakes it");
+        assert_eq!(answer, json!({ "queues": [[{ "sealed": "AAEC" }]] }));
+    }
+
+    /// Anyone can make up a key, so holds are charged to the address: past its share a drain is answered at once.
+    #[tokio::test]
+    async fn held_drains_are_capped_per_address() {
+        let h = Harness::new();
+        let mut held: Vec<_> =
+            (0..super::MAX_HELD_PER_ADDRESS).map(|_| Box::pin(held_drain(&h, 20, &[KEY]))).collect();
+        for drain in &mut held {
+            assert!(tokio::time::timeout(SHORT, drain).await.is_err());
+        }
+        let over =
+            tokio::time::timeout(PROMPT, held_drain(&h, 20, &[OTHER])).await.expect("answered at once");
+        assert_eq!(over, (StatusCode::OK, json!({ "queues": [[]] })));
     }
 
     /// Each key is its own credential, so one that is not a key refuses the request instead of reading as an

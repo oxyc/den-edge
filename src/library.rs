@@ -9,6 +9,8 @@
 //!                                                       (from wire minimum 4, a conflict past 2 MiB of values is
 //!                                                       { k, seq, omitted: true })
 //!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation } (gzip when accepted)
+//!                                                       (`&wait=S`: with nothing after `since`, held up to S ≤ 25
+//!                                                       seconds until a write to this library commits)
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
 //! All carry `x-den-library-token`. The first write to a library sets it — only its SHA-256 is kept — and
@@ -100,6 +102,11 @@ const ROW_OVERHEAD: usize = 192;
 const MAX_LOG_LINE: usize = 6 * (MAX_VALUE + 128) + 128;
 const MAX_CACHED_LIBRARIES: usize = 128;
 const PAGE_BYTES: usize = 512 * 1024;
+/// Held `/changes?wait=` requests per library (`hold.rs`); past it a request is answered at once. A household holds
+/// one per TV and per open browser.
+pub const MAX_HELD_PER_LIBRARY: usize = 4;
+/// Held `/changes` requests across every library. Each keeps a connection open, though no admission slot.
+pub const MAX_HELD: usize = 16;
 /// Leave networking and small control work cores while large sync pages are compressed. When both are busy a
 /// caller receives identity; compression is a representation choice, not a reason to queue or reject the page.
 pub(crate) const COMPRESSION_JOBS: usize = 4;
@@ -604,7 +611,15 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
                 .unwrap_or(DEFAULT_LIMIT)
                 .clamp(1, MAX_LIMIT);
             let (_, gzip, identity) = crate::web::encodings(req.headers());
-            changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity).await
+            // Only a GET is held: a HEAD asks about the answer, not for a wait.
+            let hold = crate::hold::wait(query_param(&req, "wait"))
+                .filter(|_| req.method() == Method::GET)
+                .map(|wait| Hold {
+                    wait,
+                    generation: sent_generation.clone(),
+                    admission: req.extensions().get::<crate::handler::AdmissionSlot>().cloned(),
+                });
+            changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity, hold).await
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
         ("", Method::DELETE) => forget(state, id, token_hash).await,
@@ -762,6 +777,8 @@ async fn rewrite_commit(
     let write_store = Arc::clone(&store);
     match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap)).await {
         Ok(Ok(protocol)) => {
+            // Committed whatever the cleanup does: a held reader learns of the new rows and generation now.
+            state.library_holds.wake(id);
             if let Err(reason) = state.store.delete_file(REWRITE_NS, id, REWRITE_EXT).await {
                 return internal("rewrite cleanup", reason);
             }
@@ -911,6 +928,8 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
         return internal("library retire publish", e);
     }
     slot.authority.store(AUTHORITY_MOVED, Ordering::Release);
+    // A held reader is told now that the library moved, rather than at the end of its wait.
+    state.library_holds.wake(id);
     if selected_v3 {
         let manager = Arc::clone(&state.library_v3);
         let owned_id = id.to_owned();
@@ -1208,6 +1227,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         Err(error) => return internal("library protocol task", io::Error::other(error)),
     };
     if !result.applied.is_empty() {
+        state.library_holds.wake(id);
         maintain_v3(state, id, store).await;
     }
     let applied: Vec<Value> =
@@ -1325,6 +1345,14 @@ impl http_body::Body for ChunkBody {
     }
 }
 
+/// A `/changes` request that may be held: for how long, the generation the client read `since` in, and the
+/// admission it gives back while it waits.
+struct Hold {
+    wait: std::time::Duration,
+    generation: Option<String>,
+    admission: Option<crate::handler::AdmissionSlot>,
+}
+
 async fn changes(
     state: &AppState,
     id: &str,
@@ -1332,32 +1360,60 @@ async fn changes(
     since: u64,
     limit: usize,
     gzip: bool,
+    hold: Option<Hold>,
 ) -> Response {
-    let slot = state.libraries.slot(id, state.now());
-    let mut library = slot.library.lock().await;
-    match authority(state, &slot, id).await {
-        Ok(AUTHORITY_MOVED) => return moved(),
-        Ok(_) => {}
-        Err(reason) => return read_error(reason),
-    }
-    let store = match v3_store(state, id, token_hash, &slot, &mut library, false).await {
-        Ok(Some(store)) => store,
-        Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
-            return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    // Registered before the head is read: a write that lands after the read must still wake the wait.
+    let mut hold = hold.and_then(|hold| Some((state.library_holds.hold(id, &[id])?, hold)));
+    let (store, generation) = loop {
+        let slot = state.libraries.slot(id, state.now());
+        let mut library = slot.library.lock().await;
+        match authority(state, &slot, id).await {
+            Ok(AUTHORITY_MOVED) => return moved(),
+            Ok(_) => {}
+            Err(reason) => return read_error(reason),
         }
-        Err(reason) => return read_error(reason),
-        Ok(None) => {
-            return json_reply(StatusCode::NOT_FOUND, &json!({ "error": "not_found", "generation": "0" }));
+        let store = match v3_store(state, id, token_hash, &slot, &mut library, false).await {
+            Ok(Some(store)) => store,
+            Err(reason) if reason.kind() == io::ErrorKind::PermissionDenied => {
+                return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+            }
+            Err(reason) => return read_error(reason),
+            Ok(None) => {
+                return json_reply(
+                    StatusCode::NOT_FOUND,
+                    &json!({ "error": "not_found", "generation": "0" }),
+                );
+            }
+        };
+        drop(library);
+        let protocol_store = Arc::clone(&store);
+        let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
+            Ok(Ok(protocol)) => protocol,
+            Ok(Err(reason)) => return internal("library protocol", v3_io(reason)),
+            Err(reason) => return internal("library protocol task", io::Error::other(reason)),
+        };
+        let generation = full_generation(state, &protocol.generation);
+        // Held only when the client is exactly up to date: anything after `since`, a `since` past the head, or a
+        // generation other than the one it read in is an answer it needs now.
+        if let Some((waiter, hold)) = hold.take() {
+            if protocol.head == since && hold.generation.as_deref().is_none_or(|sent| sent == generation) {
+                // Neither the library's lock, its open database nor an admission slot is held while waiting: a
+                // write, a compaction or a delete goes ahead, and its answer is read afresh.
+                drop((slot, store));
+                if !crate::handler::AdmissionSlot::wait_out(
+                    hold.admission.as_ref(),
+                    state,
+                    waiter.wait(hold.wait),
+                )
+                .await
+                {
+                    return crate::handler::busy();
+                }
+                continue;
+            }
         }
+        break (store, generation);
     };
-    drop(library);
-    let protocol_store = Arc::clone(&store);
-    let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
-        Ok(Ok(protocol)) => protocol,
-        Ok(Err(reason)) => return internal("library protocol", v3_io(reason)),
-        Err(reason) => return internal("library protocol task", io::Error::other(reason)),
-    };
-    let generation = full_generation(state, &protocol.generation);
     let response_permit = Arc::clone(&state.library_response_bytes)
         .acquire_many_owned(PAGE_BYTES as u32)
         .await
@@ -3067,5 +3123,155 @@ mod tests {
             }
         }
         assert_eq!(count, 8);
+    }
+
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(200);
+    const PROMPT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn a_held_request_answers_as_soon_as_another_client_writes() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let mut held = Box::pin(changes(&h, TOKEN, "?since=1&wait=20"));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "nothing after since: held");
+        assert_eq!(
+            h.state.request_slots.available_permits(),
+            crate::handler::REQUESTS,
+            "a waiting request holds no admission slot"
+        );
+        // The held request holds no lock: another client's write goes straight through.
+        let started = std::time::Instant::now();
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "c2" }])).await.0, StatusCode::OK);
+        let (status, page) = tokio::time::timeout(PROMPT, held).await.expect("woken by the write");
+        assert!(started.elapsed() < PROMPT);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["entries"], json!([{ "k": K2, "seq": 2, "v": "c2" }]));
+        assert_eq!(page["head"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_held_request_answers_empty_at_its_timeout() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let started = std::time::Instant::now();
+        let (status, page) = changes(&h, TOKEN, "?since=1&wait=1").await;
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900), "held for its wait");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["entries"], json!([]));
+        assert_eq!(page["head"], 1);
+        assert_eq!(page["more"], false);
+    }
+
+    #[tokio::test]
+    async fn rows_after_since_are_answered_without_waiting() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let (status, page) =
+            tokio::time::timeout(PROMPT, changes(&h, TOKEN, "?since=0&wait=25")).await.expect("not held");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["entries"], json!([{ "k": K1, "seq": 1, "v": "c1" }]));
+        // A `since` past the head, or a generation the client did not read in, is news too.
+        let ahead = tokio::time::timeout(PROMPT, changes(&h, TOKEN, "?since=7&wait=25")).await;
+        assert_eq!(ahead.expect("not held").0, StatusCode::OK);
+        let path = format!("/lib/{LIB}/changes?since=1&wait=25");
+        let other_generation = h.send(
+            "GET",
+            &path,
+            None,
+            &[("x-den-library-token", TOKEN), (super::GENERATION_HEADER, "another")],
+        );
+        assert_eq!(
+            tokio::time::timeout(PROMPT, other_generation).await.expect("not held").status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_to_one_library_does_not_wake_another_librarys_wait() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let other = |v: &str| json!({ "writes": [{ "k": K1, "base": 0, "v": v }] }).to_string();
+        let path = format!("/lib/{LIB2}/batch");
+        h.send("POST", &path, Some(other("first")), &[("x-den-library-token", TOKEN)]).await;
+
+        let mut held = Box::pin(changes(&h, TOKEN, "?since=1&wait=20"));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err());
+        let body = json!({ "writes": [{ "k": K2, "base": 0, "v": "elsewhere" }] }).to_string();
+        let written = h.send("POST", &path, Some(body), &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(written.status(), StatusCode::OK);
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "another library's write is not news");
+
+        batch(&h, TOKEN, json!([{ "k": K2, "base": 0, "v": "here" }])).await;
+        let (_, page) = tokio::time::timeout(PROMPT, held).await.expect("its own library's write wakes it");
+        assert_eq!(page["entries"][0]["v"], "here");
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_commit_wakes_a_held_request_with_the_new_generation() {
+        let h = Harness::new();
+        let headers = |generation: &str| {
+            vec![
+                ("x-den-library-token", TOKEN.to_owned()),
+                (super::WIRE_HEADER, "3".to_owned()),
+                (super::GENERATION_HEADER, generation.to_owned()),
+            ]
+        };
+        let send = |method: &'static str, path: String, body: Option<String>, generation: String| {
+            let h = &h;
+            async move {
+                let owned = headers(&generation);
+                let borrowed: Vec<(&str, &str)> = owned.iter().map(|(n, v)| (*n, v.as_str())).collect();
+                h.send(method, &path, body, &borrowed).await
+            }
+        };
+        let first = json!({ "writes": [{ "k": K1, "base": 0, "v": "old" }] }).to_string();
+        let first = send("POST", format!("/lib/{LIB}/batch"), Some(first), "0".to_owned()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let generation = first.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned();
+
+        let mut held =
+            Box::pin(send("GET", format!("/lib/{LIB}/changes?since=1&wait=20"), None, generation.clone()));
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err());
+
+        let opened = send("POST", format!("/lib/{LIB}/rewrite"), None, generation.clone()).await;
+        let opened = body_json(opened).await;
+        let rewrite = opened["rewrite"].as_str().unwrap().to_owned();
+        let rows = json!({ "writes": [{ "k": K2, "v": "new" }] }).to_string();
+        let staged =
+            send("POST", format!("/lib/{LIB}/rewrite/{rewrite}/rows"), Some(rows), generation.clone()).await;
+        assert_eq!(staged.status(), StatusCode::OK);
+        assert!(tokio::time::timeout(SHORT, &mut held).await.is_err(), "staging commits nothing");
+
+        let commit = json!({ "base": opened["base"], "wireMin": 3 }).to_string();
+        let committed =
+            send("POST", format!("/lib/{LIB}/rewrite/{rewrite}/commit"), Some(commit), generation.clone())
+                .await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        let answer = tokio::time::timeout(PROMPT, held).await.expect("the commit wakes it");
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_ne!(answer.headers()[super::GENERATION_HEADER].to_str().unwrap(), generation);
+    }
+
+    #[tokio::test]
+    async fn held_requests_are_capped_per_library() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "c1" }])).await;
+        let mut held: Vec<_> = (0..super::MAX_HELD_PER_LIBRARY)
+            .map(|_| Box::pin(changes(&h, TOKEN, "?since=1&wait=20")))
+            .collect();
+        for request in &mut held {
+            assert!(tokio::time::timeout(SHORT, request).await.is_err());
+        }
+        let (status, page) = tokio::time::timeout(PROMPT, changes(&h, TOKEN, "?since=1&wait=20"))
+            .await
+            .expect("past the cap a request is answered at once");
+        assert_eq!((status, page["entries"].clone()), (StatusCode::OK, json!([])));
+
+        drop(held);
+        let mut again = Box::pin(changes(&h, TOKEN, "?since=1&wait=20"));
+        assert!(
+            tokio::time::timeout(SHORT, &mut again).await.is_err(),
+            "a finished wait gives its place back"
+        );
     }
 }
