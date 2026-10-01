@@ -17,6 +17,13 @@
       if (!root) return;
       const ticket = ++activation;
       if (!visible) {
+        // Whatever plays on a page left behind stops with it, at once and silenced, whichever component owns it:
+        // the page stays mounted, and its trailer was heard from the page in front of it. Each one starts its
+        // own again when its page is back.
+        for (const media of root.querySelectorAll<HTMLMediaElement>('video, audio')) {
+          media.pause();
+          media.muted = true;
+        }
         controls = Array.from(
           root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
             'input:not([type="file"]), textarea, select',

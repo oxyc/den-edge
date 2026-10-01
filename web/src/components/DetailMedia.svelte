@@ -504,6 +504,15 @@
     if (!canPlay) {
       player.pause();
       playing = false;
+      // Left for another page, or behind another tab: silent as well as still, so it comes back muted. And on a
+      // page left behind, let go of what it was playing. Its `src` is already gone (`source` is null off the
+      // active page), but removing one unloads nothing, and WebKit's own player goes on sounding past `pause()`
+      // and `muted` (`quieten`): a trailer opened on a phone was heard from the page Back went to.
+      if (!active || !foreground) {
+        sound = false;
+        quieten(player);
+      }
+      if (!active && !managed && !player.getAttribute('src') && player.currentSrc) player.load();
       return;
     }
     let live = true;

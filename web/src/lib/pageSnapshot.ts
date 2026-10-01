@@ -140,6 +140,12 @@ export function capturePage(
         node.checked = original.checked;
       }
       if (!(original instanceof HTMLVideoElement)) return;
+      // A media element starts loading the moment it is given a `src`, cloned or not, in a document or not; with
+      // `autoplay` it plays, unseen. Taken off before the load can begin, in this same task.
+      if (node instanceof HTMLVideoElement) {
+        node.removeAttribute('src');
+        node.removeAttribute('autoplay');
+      }
       const frame = frames.get(original);
       if (!frame) return node.remove();
       const canvas = frame.cloneNode() as HTMLCanvasElement;
