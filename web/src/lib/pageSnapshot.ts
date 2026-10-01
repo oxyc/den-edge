@@ -14,6 +14,24 @@ export interface PageSnapshot {
   show(): HTMLElement;
   refresh(): PageSnapshot;
 }
+/** What a copy freezes at the source's painted values, since a paused clone starts at animation time zero. */
+const PAINTED = [
+  'transform',
+  'translate',
+  'rotate',
+  'scale',
+  'opacity',
+  'filter',
+  'backdrop-filter',
+];
+/**
+ * Measures the page now, and copies it only when the copy is first shown.
+ *
+ * What depends on the page being laid out on screen — where it sits, its rails' offsets, the painted values of
+ * what is in view, a playing trailer's frame — is read here, while it still is. The copy itself, ~20 ms of
+ * `cloneNode` on Home at 4x CPU, is made from the page as it is when it is first wanted: a swipe or a loading
+ * cover, which most pages left are never shown as. Leaving a page by a tap no longer pays for it.
+ */
 export function capturePage(
   source = document.querySelector<HTMLElement>('[data-route-page][data-active="true"]'),
   rootStyle?: string,
@@ -21,12 +39,7 @@ export function capturePage(
   if (!source) return null;
   const rect = source.getBoundingClientRect();
   const savedY = window.scrollY;
-  const copy = source.cloneNode(true) as HTMLElement;
-  const originals = [source, ...source.querySelectorAll<HTMLElement>('*')];
-  const copies = [copy, ...copy.querySelectorAll<HTMLElement>('*')];
-  const offsets = new Map(
-    copies.map((node, i) => [node, { x: originals[i]!.scrollLeft, y: originals[i]!.scrollTop }]),
-  );
+  const viewport = `${innerWidth}x${innerHeight}`;
   // Reading every node's computed style is what this cost on the tap path: 1,500 nodes took ~55 ms
   // at 4x CPU throttling in headless Chromium, against 3-14 ms reading only these. A node that paints
   // nowhere in the viewport can't be seen in the copy, and one that isn't animated computes the same
@@ -44,81 +57,130 @@ export function capturePage(
     if (box.width === 0 || box.height === 0) return true;
     return box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth;
   };
-  copy.setAttribute(FROZEN, '');
-  frozenStyle();
-  copies.forEach((node, i) => {
-    node.removeAttribute('id');
-    node.removeAttribute('data-route-page');
-    node.removeAttribute('data-active');
-    const original = originals[i];
-    if (original && seen(original)) {
-      // A paused clone starts at animation time zero. Freeze the source's painted values instead,
-      // including the billboard's scroll-driven transform and any in-flight artwork fades.
-      const painted = getComputedStyle(original);
-      for (const property of [
-        'transform',
-        'translate',
-        'rotate',
-        'scale',
-        'opacity',
-        'filter',
-        'backdrop-filter',
-      ]) {
-        node.style.setProperty(property, painted.getPropertyValue(property), 'important');
-      }
-    }
-    if (node instanceof HTMLInputElement && original instanceof HTMLInputElement) {
-      node.value = original.value;
-      node.checked = original.checked;
-    }
-  });
-  if (rootStyle !== undefined) copy.style.cssText = rootStyle;
+  /** Each node scrolled away from its origin, by node: a copy made later finds its own by the same walk. */
+  const offsets = new Map<Element, { x: number; y: number }>();
+  const painted = new Map<Element, string[]>();
+  for (const node of [source, ...source.querySelectorAll<HTMLElement>('*')]) {
+    if (node.scrollLeft || node.scrollTop)
+      offsets.set(node, { x: node.scrollLeft, y: node.scrollTop });
+    if (!seen(node)) continue;
+    const style = getComputedStyle(node);
+    painted.set(
+      node,
+      PAINTED.map((property) => style.getPropertyValue(property)),
+    );
+  }
   // cloneNode cannot copy a decoder's current frame. Paint it into an inert canvas so a swipe
-  // freezes the visible trailer instead of abruptly exposing the backdrop beneath it.
-  copies.forEach((node, i) => {
-    const original = originals[i];
-    if (!(original instanceof HTMLVideoElement)) return;
-    const painted = getComputedStyle(original);
+  // freezes the visible trailer instead of abruptly exposing the backdrop beneath it. Now, while the
+  // element is still decoding on screen.
+  const frames = new Map<HTMLVideoElement, HTMLCanvasElement>();
+  for (const original of source.querySelectorAll('video')) {
+    const style = getComputedStyle(original);
     const bounds = original.getBoundingClientRect();
     if (
-      original.readyState >= 2 &&
-      original.videoWidth &&
-      original.videoHeight &&
-      Number(painted.opacity) > 0 &&
-      bounds.bottom > 0 &&
-      bounds.top < innerHeight &&
-      bounds.right > 0 &&
-      bounds.left < innerWidth
-    ) {
-      const canvas = document.createElement('canvas');
-      const scale = Math.min(1, 1920 / original.videoWidth);
-      canvas.width = Math.max(1, Math.round(original.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(original.videoHeight * scale));
-      // Preserve replaced-element sizing/object-fit even where the stylesheet targets `video`.
-      for (const property of painted)
-        canvas.style.setProperty(property, painted.getPropertyValue(property));
-      canvas.style.setProperty('animation', 'none', 'important');
-      canvas.style.setProperty('transition', 'none', 'important');
-      try {
-        const context = canvas.getContext('2d');
-        if (context) {
-          context.drawImage(original, 0, 0, canvas.width, canvas.height);
-          offsets.set(canvas, { x: 0, y: 0 });
-          node.replaceWith(canvas);
-          return;
-        }
-      } catch {
-        /* A decoder without a readable frame keeps the still artwork underneath. */
-      }
+      original.readyState < 2 ||
+      !original.videoWidth ||
+      !original.videoHeight ||
+      Number(style.opacity) <= 0 ||
+      bounds.bottom <= 0 ||
+      bounds.top >= innerHeight ||
+      bounds.right <= 0 ||
+      bounds.left >= innerWidth
+    )
+      continue;
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 1920 / original.videoWidth);
+    canvas.width = Math.max(1, Math.round(original.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(original.videoHeight * scale));
+    // Preserve replaced-element sizing/object-fit even where the stylesheet targets `video`.
+    for (const property of style)
+      canvas.style.setProperty(property, style.getPropertyValue(property));
+    canvas.style.setProperty('animation', 'none', 'important');
+    canvas.style.setProperty('transition', 'none', 'important');
+    try {
+      const context = canvas.getContext('2d');
+      if (!context) continue;
+      context.drawImage(original, 0, 0, canvas.width, canvas.height);
+      frames.set(original, canvas);
+    } catch {
+      /* A decoder without a readable frame keeps the still artwork underneath. */
     }
-    node.remove();
-  });
-  copy.querySelectorAll('iframe').forEach((node) => node.remove());
-  const retained = [copy, ...copy.querySelectorAll<HTMLElement>('*')];
-  const retainedOffsets = retained.map((node) => offsets.get(node)!);
+  }
+  let made:
+    | {
+        copy: HTMLElement;
+        retained: HTMLElement[];
+        offsets: ({ x: number; y: number } | undefined)[];
+      }
+    | undefined;
+  /**
+   * The copy, made from the page as it is now if it has not been made since the page last changed. A page left
+   * hidden still receives its data, so one that has changed since its copy was made is copied again.
+   */
+  const make = () => {
+    if (made) return made;
+    const copy = source.cloneNode(true) as HTMLElement;
+    const originals = [source, ...source.querySelectorAll<HTMLElement>('*')];
+    const copies = [copy, ...copy.querySelectorAll<HTMLElement>('*')];
+    const copyOffsets = new Map<Element, { x: number; y: number }>();
+    copy.setAttribute(FROZEN, '');
+    frozenStyle();
+    copies.forEach((node, i) => {
+      const original = originals[i]!;
+      node.removeAttribute('id');
+      node.removeAttribute('data-route-page');
+      node.removeAttribute('data-active');
+      const values = painted.get(original);
+      if (values)
+        PAINTED.forEach((property, k) => node.style.setProperty(property, values[k]!, 'important'));
+      const offset = offsets.get(original);
+      if (offset) copyOffsets.set(node, offset);
+      if (node instanceof HTMLInputElement && original instanceof HTMLInputElement) {
+        node.value = original.value;
+        node.checked = original.checked;
+      }
+      if (!(original instanceof HTMLVideoElement)) return;
+      // A media element starts loading the moment it is given a `src`, cloned or not, in a document or not; with
+      // `autoplay` it plays, unseen. Taken off before the load can begin, in this same task.
+      if (node instanceof HTMLVideoElement) {
+        node.removeAttribute('src');
+        node.removeAttribute('autoplay');
+      }
+      const frame = frames.get(original);
+      if (!frame) return node.remove();
+      const canvas = frame.cloneNode() as HTMLCanvasElement;
+      canvas.getContext('2d')?.drawImage(frame, 0, 0);
+      node.replaceWith(canvas);
+    });
+    // A page copied once it was left is hidden; its copy is not.
+    copy.hidden = false;
+    copy.querySelectorAll('iframe').forEach((node) => node.remove());
+    if (rootStyle !== undefined) copy.style.cssText = rootStyle;
+    const retained = [copy, ...copy.querySelectorAll<HTMLElement>('*')];
+    made = { copy, retained, offsets: retained.map((node) => copyOffsets.get(node)) };
+    // Watched only once copied, until the first change: its own `hidden` and `inert` flipping as it is
+    // left are not one. A page back on screen is captured afresh before it is shown again (`refresh`).
+    const changed = new MutationObserver((records) => {
+      if (source.hidden && records.every((record) => record.target === source)) return;
+      made = undefined;
+      changed.disconnect();
+    });
+    changed.observe(source, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+    return made;
+  };
   return {
     refresh() {
       if (!source.isConnected || !source.hidden) return capturePage(source) ?? this;
+      // A page that only received data while hidden needs nothing here: its copy is made, or made again, from
+      // the page as it is when shown. Measuring it afresh lays the whole page out offscreen — on Home at 4x CPU
+      // a frame of over 200 ms on the first move of a swipe — and is worth that only once the window it was measured in
+      // has changed shape, as a phone turned on its side does.
+      if (`${innerWidth}x${innerHeight}` === viewport) return this;
       const active = document.querySelector<HTMLElement>('[data-route-page][data-active="true"]');
       if (!active) return this;
       const activeRect = active.getBoundingClientRect();
@@ -130,10 +192,8 @@ export function capturePage(
         // route. This happens synchronously under the outgoing page, without changing its scroll.
         source.style.cssText += `;position:fixed;visibility:hidden;left:${activeRect.left}px;top:${documentTop - savedY}px;width:${activeRect.width}px;margin:0;`;
         source.hidden = false;
-        originals.forEach((node, i) => {
-          const offset = offsets.get(copies[i]!);
-          if (offset) node.scrollTo({ left: offset.x, top: offset.y, behavior: 'instant' });
-        });
+        for (const [node, { x, y }] of offsets)
+          node.scrollTo({ left: x, top: y, behavior: 'instant' });
         let bottomSpace = 0;
         for (let ancestor = source.parentElement; ancestor; ancestor = ancestor.parentElement) {
           const css = getComputedStyle(ancestor);
@@ -162,6 +222,7 @@ export function capturePage(
         'position:absolute;inset:0;overflow:hidden;background:var(--bg,#0b0b0f);';
       // Each display owns its DOM. Loading and gesture overlays can overlap without stealing
       // the saved frame from one another or mutating the cached snapshot.
+      const { copy, retained, offsets: retainedOffsets } = make();
       const displayed = copy.cloneNode(true) as HTMLElement;
       const displayedNodes = [displayed, ...displayed.querySelectorAll<HTMLElement>('*')];
       retained.forEach((node, i) => {
@@ -174,9 +235,10 @@ export function capturePage(
       frame.append(displayed);
       // Restore once attached, since detached elements have no scrollable layout.
       requestAnimationFrame(() =>
-        retainedOffsets.forEach(({ x, y }, i) =>
-          displayedNodes[i]?.scrollTo({ left: x, top: y, behavior: 'instant' }),
-        ),
+        retainedOffsets.forEach((offset, i) => {
+          if (offset)
+            displayedNodes[i]?.scrollTo({ left: offset.x, top: offset.y, behavior: 'instant' });
+        }),
       );
       return frame;
     },

@@ -1,5 +1,19 @@
+<script module lang="ts">
+  /**
+   * Whether the last thing the viewer did was press a key rather than point or touch. Focus put back on a page
+   * shows its ring only then: a poster tapped, then Back, came back ringed for someone who never used a key.
+   */
+  let keyboard = false;
+  if (typeof document !== 'undefined') {
+    const listen = { capture: true, passive: true };
+    document.addEventListener('keydown', () => (keyboard = true), listen);
+    document.addEventListener('pointerdown', () => (keyboard = false), listen);
+  }
+</script>
+
 <script lang="ts">
   import { tick, untrack, type Snippet } from 'svelte';
+  import { scrolledWithin } from '../lib/scrolled';
   let { active, children }: { active: boolean; children: Snippet } = $props();
   let root: HTMLDivElement;
   let scrolls: { element: HTMLElement; x: number; y: number }[] = [];
@@ -16,6 +30,13 @@
       if (!root) return;
       const ticket = ++activation;
       if (!visible) {
+        // Whatever plays on a page left behind stops with it, at once and silenced, whichever component owns it:
+        // the page stays mounted, and its trailer was heard from the page in front of it. Each one starts its
+        // own again when its page is back.
+        for (const media of root.querySelectorAll<HTMLMediaElement>('video, audio')) {
+          media.pause();
+          media.muted = true;
+        }
         controls = Array.from(
           root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
             'input:not([type="file"]), textarea, select',
@@ -28,7 +49,7 @@
         focused = root.contains(document.activeElement)
           ? (document.activeElement as HTMLElement)
           : null;
-        scrolls = Array.from(root.querySelectorAll<HTMLElement>('*'))
+        scrolls = (scrolledWithin(root) as HTMLElement[])
           .filter((element) => element.scrollLeft !== 0 || element.scrollTop !== 0)
           .map((element) => ({ element, x: element.scrollLeft, y: element.scrollTop }));
       } else {
@@ -38,7 +59,7 @@
           // Restoring the page's old focus must not take focus or the keyboard away from it.
           const currentFocus = document.activeElement;
           if (!currentFocus || currentFocus === document.body || root.contains(currentFocus)) {
-            focused?.focus({ preventScroll: true });
+            focused?.focus({ preventScroll: true, focusVisible: keyboard });
           }
           const restore = () => {
             if (!active || activation !== ticket) return;

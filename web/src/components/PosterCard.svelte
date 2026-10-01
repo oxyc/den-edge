@@ -4,8 +4,10 @@
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
      faded, as on the TV. -->
 <script lang="ts">
+  import { getContext } from 'svelte';
   import { availability } from '../lib/availability.svelte';
-  import { warmDetail } from '../lib/detail';
+  import { ROW_NEAR } from './PosterRow.svelte';
+  import { notePressed, warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
@@ -49,6 +51,8 @@
    */
   let failed = $state('');
   const art = $derived(poster && poster !== failed ? poster : undefined);
+  /** A card in a row far from the screen draws no poster yet (`PosterRow`); one in no row always does. */
+  const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
   const faded = $derived(availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   const standing = $derived(libraryStandings.of(title));
@@ -57,10 +61,12 @@
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
   // answer already under way. Delayed, and dropped on `pointercancel` — what a touch that turns into a scroll
-  // fires — so a swipe across a row fetches nothing.
+  // fires — so a swipe across a row fetches nothing. A press also leaves this card's poster for the title page
+  // to paint until its details arrive (`notePressed`), as a click does for a keyboard.
   let warming: ReturnType<typeof setTimeout> | undefined;
   function intend(event: PointerEvent, ms: number) {
     if (!href || (event.type === 'pointerenter' && event.pointerType !== 'mouse')) return;
+    if (event.type === 'pointerdown') notePressed(title, art);
     clearTimeout(warming);
     warming = setTimeout(() => warmDetail(title), ms);
   }
@@ -73,7 +79,15 @@
 {#snippet body()}
   <span class="art">
     {#if art}
-      <img src={art} alt="" loading="lazy" decoding="async" onerror={() => (failed = art ?? '')} />
+      {#if row?.near ?? true}
+        <img
+          src={art}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onerror={() => (failed = art ?? '')}
+        />
+      {/if}
     {:else}
       <span class="placeholder">{title.title}</span>
     {/if}
@@ -129,7 +143,10 @@
       class="card pick"
       class:faded
       {href}
-      onclick={onopen}
+      onclick={() => {
+        notePressed(title, art);
+        onopen?.();
+      }}
       onpointerenter={(event) => intend(event, 100)}
       onpointerdown={(event) => intend(event, 60)}
       onpointerleave={drop}
@@ -193,9 +210,15 @@
     opacity: 0.8;
   }
 
+  /* One ring, the artwork's, drawn inside its edge: the browser's own ring around the whole link made two,
+     and one drawn outside was cut off by the row, which clips what overflows it vertically. */
+  .pick:focus-visible {
+    outline: none;
+  }
+
   .pick:focus-visible .art {
     outline: 3px solid var(--accent);
-    outline-offset: 3px;
+    outline-offset: -3px;
   }
 
   img {

@@ -6,7 +6,7 @@ import type { MediaType, Title } from './library';
 import { strictest } from './parental';
 import { toTitle } from './tmdb';
 
-import { TMDB_PROXY_KEY, tmdbFetch } from './tmdbCache';
+import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson } from './tmdbCache';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -343,7 +343,7 @@ async function tmdb(
     url.searchParams.set(name, value);
   try {
     const res = await fetchImpl(url.toString());
-    return res.ok ? obj(await res.json()) : null;
+    return res.ok ? obj(await tmdbJson(res)) : null;
   } catch {
     return null;
   }
@@ -369,6 +369,22 @@ export async function fetchDetail(
  */
 export function warmDetail(ref: { type: MediaType; id: number }): void {
   void fetchDetail({ type: ref.type, id: ref.id }, TMDB_PROXY_KEY);
+}
+
+/** The card last pressed: its title, and the picture it was showing, which this browser already holds. */
+let pressed: { title: Title; still?: string } | undefined;
+
+/** A card is being opened. Its title page paints what the card showed while TMDB is asked for the rest. */
+export function notePressed(title: Title, still?: string): void {
+  pressed = { title, still };
+}
+
+/** The last pressed card, if it was this title's. */
+export function pressedCard(ref: {
+  type: MediaType;
+  id: number;
+}): { title: Title; still?: string } | undefined {
+  return pressed?.title.type === ref.type && pressed.title.id === ref.id ? pressed : undefined;
 }
 
 /** A season's episodes; null when TMDB couldn't say. */

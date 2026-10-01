@@ -1284,6 +1284,8 @@ test('a title’s You might also like links to Search with its "Fans of", fed by
     });
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
     const row = active(page).getByRole('region', { name: 'You might also like' });
+    // A title's rows load as they near the screen.
+    await row.scrollIntoViewIfNeeded();
     await expect(row.getByRole('link', { name: 'Film 302 2026' })).toBeVisible();
     // More like this keeps its own.
     await expect(
@@ -1351,6 +1353,8 @@ test('a title’s You might also like sits straight under More like this', async
     );
     await page.goto(`${FIXTURE}?at=${encodeURIComponent('/movie/101')}`);
     const suggested = active(page).getByRole('region', { name: 'You might also like' });
+    // A title's rows load as they near the screen.
+    await suggested.scrollIntoViewIfNeeded();
     await expect(suggested.getByRole('link', { name: 'Film 302 2026' })).toBeVisible();
     await expect(active(page).getByRole('region', { name: 'Starring Lead Actor' })).toBeVisible();
     const headings = await active(page)

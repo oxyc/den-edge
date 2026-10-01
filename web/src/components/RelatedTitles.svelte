@@ -1,7 +1,7 @@
 <!-- The rows under a title's cast: its franchise, other versions of its story, More like this, You might also like
      and its strongest mood, what its director, creator, writer and leads have done, its studio and network, and its
-     country or language. A row shows its heading as soon as it is known, and goes on loading as it is scrolled
-     to its end (`BrowseRow`). -->
+     country or language. A row shows its heading as soon as it is known, loads as it nears the screen, and goes on
+     loading as it is scrolled to its end (`BrowseRow`). -->
 <script lang="ts">
   import type { RowDef } from '../lib/catalog';
   import type { TitleDetail } from '../lib/detail';
@@ -62,10 +62,10 @@
   let rowsFor = '';
   let builds = 0;
 
-  // The rows are built as soon as the title is, and each loads its first page when the browser is next idle
-  // (`BrowseRow`), so they are usually full before they are scrolled to. For a title's first build, every row it
-  // is known to have shows its heading and card-sized placeholders at once and loads itself, hiding if it turns
-  // out empty; only the franchise and other-versions rows, which are not known to exist until they are looked up,
+  // The rows are built as soon as the title is, and each loads its first page as it nears the screen
+  // (`BrowseRow`'s `prefetch`), so a title asks for the rows its viewer scrolls to, not all of them. For a title's
+  // first build, every row it is known to have shows its heading and card-sized placeholders at once and loads
+  // itself, hiding if it turns out empty; only the franchise and other-versions rows, which are not known to exist until they are looked up,
   // join once they have something to show.
   // A row remembers what it has loaded, so an atlas that answers late builds them afresh — and then the rows already
   // shown stay until the rebuilt ones have their first page, rather than falling back to placeholders.
@@ -234,6 +234,6 @@
 
 <div aria-hidden={!active}>
   {#each rows as { build, row } (`${build}:${row.id}`)}
-    <BrowseRow {row} {shown} />
+    <BrowseRow {row} {shown} prefetch={false} />
   {/each}
 </div>

@@ -1,5 +1,5 @@
 import { guardNetwork } from './network.mjs';
-import { test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 
@@ -71,4 +71,51 @@ test('snapshots regressions', async () => {
   } finally {
     await browser.close();
   }
+});
+
+// Leaving a page measures it; copying it waits until the copy is wanted, and a hidden page that has changed
+// since is copied again, so the copy is never older than the page it stands for.
+test('a snapshot copies the page only when shown, and again once the hidden page has changed', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.goto('http://127.0.0.1:5198/test/snapshot.html');
+  await page.waitForSelector('.hero');
+  const result = await page.evaluate(async () => {
+    const { capturePage } = await import('/src/lib/pageSnapshot.ts');
+    const source = document.querySelector('[data-route-page]');
+    let clones = 0;
+    const clone = Node.prototype.cloneNode;
+    Node.prototype.cloneNode = function (deep) {
+      if (deep && this === source) clones++;
+      return clone.call(this, deep);
+    };
+    const snapshot = capturePage();
+    const measured = clones;
+    source.hidden = true;
+    const first = snapshot.show().textContent.includes('Snapshot geometry');
+    const shown = clones;
+    snapshot.show();
+    const reused = clones;
+    source.querySelector('h1').textContent = 'Changed while hidden';
+    await new Promise((r) => setTimeout(r));
+    const again = snapshot.show().textContent.includes('Changed while hidden');
+    // A swipe asks for the hidden page's current layout. In the same window that is the copy already in hand;
+    // laying the page out again offscreen was a long frame on the swipe's first move.
+    const kept = snapshot.refresh() === snapshot;
+    window.snapshot = snapshot;
+    return { measured, first, shown, reused, again, copies: clones, kept };
+  });
+  expect(result).toEqual({
+    measured: 0,
+    first: true,
+    shown: 1,
+    reused: 1,
+    again: true,
+    copies: 2,
+    kept: true,
+  });
+  // A turned phone is a different window, and the page is measured again in it.
+  await page.setViewportSize({ width: 600, height: 400 });
+  expect(await page.evaluate(() => window.snapshot.refresh() === window.snapshot)).toBe(false);
 });

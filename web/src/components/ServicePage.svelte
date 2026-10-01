@@ -161,7 +161,7 @@
   <div class="hero branded">
     <!-- Billboard reserves its final responsive height even with no titles. Keeping it mounted makes directory,
          atlas, poster and trailer latency unable to move the service rows below it. -->
-    <Billboard titles={featured} {tmdbKey} {reel} {routes} />
+    <Billboard titles={featured} {tmdbKey} {reel} {routes} {active} />
     {#if heroLoading}
       <div class="hero-loading"><Loading label="Loading featured titles" /></div>
     {/if}

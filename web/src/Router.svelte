@@ -6,7 +6,7 @@
     prepareSwipeLanding,
     type PageSnapshot,
   } from './lib/pageSnapshot';
-  import { swipeHistory } from './lib/swipeBack';
+  import { browserSwipesBack, swipeHistory } from './lib/swipeBack';
   import LoadingSnapshot from './components/LoadingSnapshot.svelte';
   import RoutePage from './components/RoutePage.svelte';
   import { Navigation, appPath, nearest, routeKey } from './lib/navigation';
@@ -38,6 +38,48 @@
     ]);
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Frozen DOM cache is outside Svelte rendering and must not create reactive dependencies.
     const snapshots = new Map<string, PageSnapshot>();
+    /** The page just left, whose snapshot the next update takes (`follow`). */
+    let unsaved: string | null = null;
+    /**
+     * Keep the page where it was just put until the viewer does something.
+     *
+     * A poster tapped while Home was still gliding from a fling opened its title at the top, and the glide carried
+     * on — on the title, which then slid down by the rest of it. The scroll that follows a navigation and comes
+     * from no new touch, wheel or key, while the page was still moving as it was left, is that glide, and is
+     * undone until it stops — a frame with no movement — or any of those inputs hands scrolling back. Scrolls
+     * made after a page has settled, by the page itself or anything else, are left alone.
+     */
+    let releaseScroll = () => {};
+    /** When the document last moved: a page left mid-glide moved within the last frame or two. */
+    let scrolledAt = -Infinity;
+    const scrolled = () => (scrolledAt = performance.now());
+    window.addEventListener('scroll', scrolled, { passive: true });
+    const holdScroll = (x: number, y: number, gliding: boolean) => {
+      releaseScroll();
+      if (!gliding) return;
+      let quiet = 0;
+      const pin = () => {
+        quiet = 0;
+        if (window.scrollX !== x || window.scrollY !== y)
+          window.scrollTo({ left: x, top: y, behavior: 'instant' });
+      };
+      const watch = () => {
+        if (++quiet > 2) return release();
+        frame = requestAnimationFrame(watch);
+      };
+      let frame = requestAnimationFrame(watch);
+      const inputs = ['touchstart', 'wheel', 'keydown', 'pointerdown'] as const;
+      const release = () => {
+        cancelAnimationFrame(frame);
+        window.removeEventListener('scroll', pin);
+        for (const type of inputs) window.removeEventListener(type, release, true);
+        releaseScroll = () => {};
+      };
+      window.addEventListener('scroll', pin, { passive: true });
+      for (const type of inputs)
+        window.addEventListener(type, release, { capture: true, passive: true });
+      releaseScroll = release;
+    };
     let swiping = false;
     let stopLoading = () => {};
     function watchLoading(snapshot: PageSnapshot | null, ticket: number) {
@@ -80,26 +122,34 @@
       return previewHistory(prepared, direction);
     };
     const inScope = () => history.state?.denNavigation?.scope === scope;
-    const stopSwipe = swipeHistory(document, {
-      back: {
-        canNavigate: () => inScope() && position > 0 && !!destination(-1),
-        navigate: () => {
-          swiping = true;
-          writeAddress();
-          history.back();
-        },
-        preview: () => previewDestination(-1, 1),
-      },
-      forward: {
-        canNavigate: () => inScope() && !!destination(1),
-        navigate: () => {
-          swiping = true;
-          writeAddress();
-          history.forward();
-        },
-        preview: () => previewDestination(1, -1),
-      },
-    });
+    // Den's own swipe between pages, except where the browser has one (`browserSwipesBack`). Without it no page
+    // left is ever shown again as a snapshot, so Back need not copy the page it leaves.
+    const swipes = !browserSwipesBack(
+      navigator,
+      () => matchMedia('(display-mode: standalone)').matches,
+    );
+    const stopSwipe = swipes
+      ? swipeHistory(document, {
+          back: {
+            canNavigate: () => inScope() && position > 0 && !!destination(-1),
+            navigate: () => {
+              swiping = true;
+              writeAddress();
+              history.back();
+            },
+            preview: () => previewDestination(-1, 1),
+          },
+          forward: {
+            canNavigate: () => inScope() && !!destination(1),
+            navigate: () => {
+              swiping = true;
+              writeAddress();
+              history.forward();
+            },
+            preview: () => previewDestination(1, -1),
+          },
+        })
+      : () => {};
     onchange(current.route);
     const address = () => location.pathname + location.search;
     /**
@@ -122,7 +172,7 @@
       clearTimeout(unwritten?.timer);
       unwritten = undefined;
     };
-    async function follow(path: string, push: boolean, replace = false) {
+    async function follow(path: string, push: boolean, replace = false, native = false) {
       if (push && appPath(path, location.href) === null) return;
       const key = routeKey(parseRoute(path));
       // The same page at a new address: a search query that grew by a letter is not somewhere a person
@@ -139,7 +189,6 @@
       }
       if (push) writeAddress();
       else dropAddress();
-      const previousPosition = position;
       if (!push) {
         const state = history.state?.denNavigation;
         if (state?.scope === scope && entries.get(state.position)?.routeKey === key) {
@@ -179,13 +228,12 @@
         swiping = false;
       }
       // Loading covers may depict a different route. Never save that cover as this page's history.
-      const captured = capturePage();
-      const outgoing = loadingSnapshot ?? captured;
+      const cover = loadingSnapshot;
       stopLoading();
       loadingSnapshot = null;
       if (!restoring) {
         navigation.save(window.scrollX, window.scrollY);
-        if (captured) snapshots.set(current.key, captured);
+        unsaved = current.key;
       }
       restoring = true;
       if (push && address() !== path) {
@@ -198,17 +246,33 @@
         entries.set(position, { routeKey: key, pageKey });
         history.pushState({ denNavigation: { scope, position } }, '', path);
       }
-      document.documentElement.dataset.denNavigation =
-        !push && position < previousPosition ? 'back' : 'forward';
-      document.documentElement.dataset.denOpeningDetail = String(
-        push && (key.startsWith('title/') || key.startsWith('person/')),
-      );
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
+      const gliding = performance.now() - scrolledAt < 100;
       const ticket = ++revision;
       transition?.skipTransition();
+      // No animation of Den's own where the browser has just animated the page itself: its swipe back on iOS
+      // (`hasUAVisualTransition`), or Den's own swipe, whose preview already moved it.
+      const animate = !(
+        native ||
+        swiping ||
+        !document.startViewTransition ||
+        matchMedia('(prefers-reduced-motion: reduce)').matches ||
+        document.hidden
+      );
       const update = async () => {
+        // The page being left is measured here rather than in the tap that left it, which it held up by tens
+        // of milliseconds on a phone. It is still the page on screen: no update has changed it yet, including
+        // one a quicker navigation has overtaken, which is why that one measures it too before giving way.
+        // A copy is for a swipe to show, or for a loading cover over a page opened. Going Back with no swipe of
+        // Den's own, neither can follow, and the copy is skipped.
+        const captured = push || swipes ? capturePage() : null;
+        if (unsaved !== null) {
+          if (captured) snapshots.set(unsaved, captured);
+          unsaved = null;
+        }
         if (ticket !== revision) return;
+        const outgoing = cover ?? captured;
         current = navigation.visit(path, visitKey);
         // Selecting a detail is a new visit; history traversal restores the saved position.
         // Top-level tabs still retain their browsing position when selected explicitly.
@@ -222,6 +286,7 @@
         await tick();
         if (ticket !== revision) return;
         window.scrollTo({ left: current.x, top: current.y, behavior: 'instant' });
+        holdScroll(current.x, current.y, gliding);
         // Flush RoutePage's nested-scroll restoration before the new snapshot is captured.
         // Rendering is paused here, so waiting for an animation frame would stall the transition.
         await tick();
@@ -238,12 +303,7 @@
           }
         }
       };
-      if (
-        swiping ||
-        !document.startViewTransition ||
-        matchMedia('(prefers-reduced-motion: reduce)').matches ||
-        document.hidden
-      ) {
+      if (!animate) {
         await update();
         return;
       }
@@ -271,7 +331,13 @@
       const { path, replace } = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
       void follow(path, true, replace);
     };
-    const traversed = () => void follow(address(), false);
+    const traversed = (event: PopStateEvent) =>
+      void follow(
+        address(),
+        false,
+        false,
+        (event as PopStateEvent & { hasUAVisualTransition?: boolean }).hasUAVisualTransition,
+      );
     const clicked = (event: MouseEvent) => {
       if (
         event.defaultPrevented ||
@@ -304,8 +370,6 @@
       writeAddress();
       window.removeEventListener('pagehide', writeAddress);
       transition?.skipTransition();
-      delete document.documentElement.dataset.denNavigation;
-      delete document.documentElement.dataset.denOpeningDetail;
       stopLoading();
       stopSwipe();
       revision++;
@@ -315,6 +379,8 @@
       document.removeEventListener('den:back', backRequested);
       document.removeEventListener('den:back-out', outRequested);
       window.removeEventListener('popstate', traversed);
+      window.removeEventListener('scroll', scrolled);
+      releaseScroll();
     };
   });
 </script>
@@ -359,10 +425,12 @@
     outline-offset: 3px;
   }
 
-  /* The outgoing snapshot stays opaque underneath the incoming page: no fade through the background. */
+  /* Every page change, opening and Back alike, is one short cross-fade: the incoming page fades in over the
+     outgoing one, which stays opaque underneath so the background never shows through. Opacity alone, on
+     the browser's own snapshots: sideways and upward slides dropped frames in desktop Chrome, and so did
+     morphing a pressed poster into the title's hero, whose box is resized on the main thread. */
   :global(::view-transition-group(root)) {
-    animation-duration: 180ms;
-    animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+    animation-duration: 150ms;
   }
 
   :global(::view-transition-old(root)) {
@@ -371,7 +439,7 @@
   }
 
   :global(::view-transition-new(root)) {
-    animation: 180ms cubic-bezier(0.2, 0, 0, 1) both den-page-reveal;
+    animation: 150ms ease-out both den-page-reveal;
     mix-blend-mode: normal;
   }
 
@@ -385,64 +453,9 @@
     }
   }
 
-  :global(html[data-den-opening-detail='true']::view-transition-new(root)) {
-    animation: 180ms cubic-bezier(0.2, 0, 0, 1) both den-detail-open;
-  }
-
-  @keyframes -global-den-detail-open {
-    from {
-      opacity: 0;
-      transform: translateY(8px);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  /* Back reveals the restored page beneath a frozen outgoing snapshot. Their opaque surfaces overlap
-     throughout the movement, including when the two pages have very different scroll positions. */
-  :global(html[data-den-navigation='back']::view-transition-old(root)) {
-    z-index: 2;
-    animation: 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both den-back-out;
-  }
-
-  :global(html[data-den-navigation='back']::view-transition-new(root)) {
-    z-index: 1;
-    animation: 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both den-back-in;
-  }
-
-  @keyframes -global-den-back-out {
-    from {
-      transform: translateX(0);
-      opacity: 1;
-    }
-
-    to {
-      transform: translateX(100%);
-      opacity: 1;
-    }
-  }
-
-  @keyframes -global-den-back-in {
-    from {
-      transform: translateX(-18%);
-      opacity: 1;
-    }
-
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     :global(::view-transition-group(root)),
-    :global(::view-transition-new(root)),
-    :global(html[data-den-opening-detail='true']::view-transition-new(root)),
-    :global(html[data-den-navigation='back']::view-transition-old(root)),
-    :global(html[data-den-navigation='back']::view-transition-new(root)) {
+    :global(::view-transition-new(root)) {
       animation: none;
     }
   }
