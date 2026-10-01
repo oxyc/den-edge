@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
   import {
@@ -328,21 +328,25 @@
     };
   });
 
+  /** Which trailer `candidates` were found for. Kept while the page is away, so coming back resumes it. */
+  let foundFor = '';
+  // One that had finished plays again from the start when its page is come back to, as a page opened afresh does.
+  $effect(() => {
+    if (active) untrack(() => (ended = false));
+  });
   $effect(() => {
     const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
+    const key = JSON.stringify([ids, base, mediaType]);
+    const wanted =
+      canResolveTrailer && autoplay && !reduced && !saving && !!(ids.tmdb || ids.imdb) && !!base;
+    // The page left and come back to: the same trailer, already found. Found again, it started over from
+    // the backdrop; kept, it carries on from where it was left (`keepFrame`).
+    if (wanted && key === foundFor) return;
+    foundFor = '';
     candidates = [];
     candidate = 0;
     playing = ended = failed = false;
-    if (
-      !canResolveTrailer ||
-      !autoplay ||
-      !active ||
-      reduced ||
-      saving ||
-      (!ids.tmdb && !ids.imdb) ||
-      !base
-    )
-      return;
+    if (!wanted || !active || !base) return;
     const controller = new AbortController();
     // Resolve only. YouTube's adaptive stream carries sound and plays in every browser now — its
     // master directly where HLS is native, reel's proxy of it everywhere else — so a download and
@@ -351,7 +355,9 @@
       signal: controller.signal,
       prewarm: 'direct',
     }).then((found) => {
-      if (!controller.signal.aborted) candidates = found;
+      if (controller.signal.aborted) return;
+      candidates = found;
+      foundFor = key;
     });
     return () => controller.abort();
   });
@@ -536,14 +542,18 @@
       player.pause();
       playing = false;
       // Left for another page, or behind another tab: silent as well as still, so it comes back muted. And on a
-      // page left behind, let go of what it was playing. Its `src` is already gone (`source` is null off the
-      // active page), but removing one unloads nothing, and WebKit's own player goes on sounding past `pause()`
-      // and `muted` (`quieten`): a trailer opened on a phone was heard from the page Back went to.
+      // page left behind, let go of what it was playing. Its `src` is already gone (it is set only on the active
+      // page), but removing one unloads nothing, and WebKit's own player goes on sounding past `pause()` and
+      // `muted` (`quieten`): a trailer opened on a phone was heard from the page Back went to. Its frame and its
+      // place are kept first, so coming back shows that frame and carries on from there.
       if (!active || !foreground) {
         sound = false;
         quieten(player);
       }
-      if (!active && !managed && !player.getAttribute('src') && player.currentSrc) player.load();
+      if (!active && !managed && !player.getAttribute('src') && player.currentSrc) {
+        keepFrame(player);
+        player.load();
+      }
       return;
     }
     let live = true;
@@ -572,11 +582,43 @@
     };
   });
 
+  /**
+   * The trailer's last frame and its place, kept as its page is left (`keepFrame`). Coming back, the frame stands
+   * where the trailer was until the trailer itself is playing again, from that place: the element reloads, and
+   * would otherwise show the backdrop in between and start the trailer over.
+   */
+  let held = $state<HTMLCanvasElement | null>(null);
+  let resumeAt = 0;
+  function keepFrame(player: HTMLVideoElement) {
+    if (player.readyState < 2 || !player.videoWidth || player.ended) return;
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 1280 / player.videoWidth);
+    canvas.width = Math.round(player.videoWidth * scale);
+    canvas.height = Math.round(player.videoHeight * scale);
+    try {
+      canvas.getContext('2d')?.drawImage(player, 0, 0, canvas.width, canvas.height);
+    } catch {
+      return; // A frame the page may not read leaves the backdrop to stand in, as before.
+    }
+    resumeAt = player.currentTime;
+    held = canvas;
+  }
+  /** Draws the kept frame into the canvas on the page, which exists only while it is held. */
+  function paint(node: HTMLCanvasElement, shot: HTMLCanvasElement) {
+    node.width = shot.width;
+    node.height = shot.height;
+    node.getContext('2d')?.drawImage(shot, 0, 0);
+  }
+
   function metadata() {
     if (!video) return;
     // A master's audio renditions do not exist until metadata has been read, so every earlier attempt at
     // silence had nothing to switch off. This is the first point at which it can be made to stick.
     quieten(video);
+    if (resumeAt) {
+      video.currentTime = resumeAt;
+      resumeAt = 0;
+    }
     // Keep the trailer at its actual beginning. Seeking during metadata loading can defer
     // WebKit's first painted frame while the audio/video clock is already advancing.
     if (video.videoHeight > video.videoWidth) nextTrailer();
@@ -621,8 +663,10 @@
       !player.seeking &&
       !player.paused &&
       !player.ended
-    )
+    ) {
       playing = true;
+      held = null;
+    }
   }
 </script>
 
@@ -655,7 +699,7 @@
        up and the video paused. A behaviour no test can intercept is one that breaks quietly later. -->
   <video
     bind:this={video}
-    src={managed ? undefined : (source ?? undefined)}
+    src={active && !managed ? (source ?? undefined) : undefined}
     style={cropStyle(heroCrop) ?? undefined}
     class:playing
     class:present={!!source && !failed && !ended}
@@ -686,6 +730,14 @@
       quieten(event.currentTarget);
     }}
   ></video>
+  {#if held}
+    <canvas
+      class="frame"
+      use:paint={held}
+      style={cropStyle(heroCrop) ?? undefined}
+      aria-hidden="true"
+    ></canvas>
+  {/if}
   <div class="scrim" aria-hidden="true"></div>
   <!-- Glass, because this is a control over media — the one place the look is for. Desktop only:
        a phone already gets the video's own controls, and its full-screen is a tap on those. -->
@@ -721,6 +773,7 @@
 
   .backdrop,
   .under,
+  .frame,
   video {
     position: absolute;
     inset: 0;
@@ -763,6 +816,12 @@
 
   video.present {
     opacity: 1;
+  }
+
+  /* The trailer's last frame, framed as the trailer is, standing in for it until it plays again. */
+  .frame {
+    pointer-events: none;
+    background: #000;
   }
 
   .scrim {
@@ -820,7 +879,8 @@
   }
 
   @media (width <= 759px) {
-    video {
+    video,
+    .frame {
       object-fit: contain;
     }
 

@@ -154,6 +154,64 @@ test('a title’s trailer, playing with sound, stops and goes quiet when its pag
   await expectQuiet(page);
 });
 
+// Coming back to a title whose trailer was playing shows the frame it was left on, and carries on from there: the
+// backdrop is never shown in between, and the trailer does not start over.
+test('a trailer left playing comes back on its last frame and carries on from there', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mock(page);
+  await page.addInitScript(() => history.replaceState(null, '', '/'));
+  await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+  await go(page, '/movie/42');
+  const active = page.locator('[data-active="true"]');
+  await expect(active.locator('h1')).toHaveText('The Movie');
+  const trailer = active.locator('[data-detail-media] video');
+  await expect(trailer).toHaveClass(/\bplaying\b/, { timeout: 15000 });
+  await expect.poll(() => trailer.evaluate((v) => v.currentTime)).toBeGreaterThan(0.5);
+  const handle = await trailer.elementHandle();
+
+  await active
+    .getByRole('region', { name: 'Cast & Crew' })
+    .getByRole('link', { name: 'An Actor' })
+    .click();
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('An Actor');
+  const left = await handle.evaluate(
+    (v) => v.closest('[data-detail-media]').querySelector('canvas.frame') !== null,
+  );
+  expect(left, 'its frame is kept as the page is left').toBe(true);
+
+  // Every frame from Back until the trailer plays again: what the hero shows.
+  await page.evaluate(() => {
+    window.shown = [];
+    const loop = () => {
+      const media = document.querySelector('[data-active="true"] [data-detail-media]');
+      if (media) {
+        const video = media.querySelector('video');
+        const playing = video.classList.contains('playing');
+        window.shown.push({
+          frame: media.querySelector('canvas.frame') !== null,
+          playing,
+          at: video.currentTime,
+        });
+        if (playing) return;
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+  await page.goBack();
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
+  await expect(trailer).toHaveClass(/\bplaying\b/, { timeout: 15000 });
+  const shown = await page.evaluate(() => window.shown);
+  expect(shown.length).toBeGreaterThan(0);
+  expect(
+    shown.filter((s) => !s.frame && !s.playing),
+    'never the backdrop',
+  ).toEqual([]);
+  expect(shown.at(-1).at, 'carried on rather than started over').toBeGreaterThan(0.4);
+});
+
 test('a trailer playing with sound on a phone stops when the page is swiped back, or the tab hidden', async ({
   browser,
 }) => {
