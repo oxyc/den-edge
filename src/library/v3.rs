@@ -1,7 +1,7 @@
 //! Transactional library-v3 storage: one independently writable redb database per library.
 
 use super::{
-    constant_time_eq, row_fragment, valid_hex_id, MAX_LIMIT, MAX_ROWS, MAX_VALUE, MAX_WRITES, PAGE_BYTES,
+    constant_time_eq, row_fragment, valid_hex_id, value_fits, MAX_LIMIT, MAX_ROWS, MAX_WRITES, PAGE_BYTES,
 };
 use axum::body::Bytes;
 use redb::backends::FileBackend;
@@ -64,6 +64,8 @@ fn compaction_turn() -> &'static Mutex<()> {
 pub(crate) enum StoreError {
     Full,
     Forbidden,
+    /// A value over the cap of the library's wire minimum (`super::value_fits`).
+    TooLarge,
     Invalid(String),
     Failed(String),
 }
@@ -584,11 +586,7 @@ impl LibraryStore for RedbLibrary {
     ) -> Result<BatchResult, StoreError> {
         let mut unique = HashSet::with_capacity(writes.len());
         if writes.len() > MAX_WRITES
-            || writes.iter().any(|write| {
-                write.value.len() > MAX_VALUE
-                    || !valid_hex_id(&write.key)
-                    || !unique.insert(write.key.as_str())
-            })
+            || writes.iter().any(|write| !valid_hex_id(&write.key) || !unique.insert(write.key.as_str()))
         {
             return Err(StoreError::Invalid("invalid or duplicate v3 write".into()));
         }
@@ -606,6 +604,17 @@ impl LibraryStore for RedbLibrary {
             value.value()
         };
         let started_empty = head == 0;
+        let current_min = {
+            let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let value = metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+            value
+        };
+        // The minimum this batch leaves: a first batch sets it, as below. Read inside the transaction, so a rewrite
+        // committed between the handler's read and this write is the minimum applied.
+        let effective_min = if started_empty { current_min.max(wire_min) } else { current_min };
+        if writes.iter().any(|write| !value_fits(&write.value, effective_min)) {
+            return Err(StoreError::TooLarge);
+        }
         let live_rows = {
             let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
             keys.len().map_err(StoreError::redb)?
@@ -674,12 +683,10 @@ impl LibraryStore for RedbLibrary {
         }
         {
             let mut metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let current_min =
-                metadata.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
             metadata.insert("head", head).map_err(StoreError::redb)?;
             metadata.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
             if started_empty && !accepted.is_empty() {
-                metadata.insert("wire-min", current_min.max(wire_min)).map_err(StoreError::redb)?;
+                metadata.insert("wire-min", effective_min).map_err(StoreError::redb)?;
             }
         }
         transaction.commit().map_err(StoreError::redb)?;
@@ -883,9 +890,7 @@ impl LibraryStore for RedbLibrary {
     ) -> Result<Protocol, StoreError> {
         let mut unique = HashSet::with_capacity(rows.len());
         if rows.len() > MAX_ROWS
-            || rows.iter().any(|row| {
-                row.value.len() > MAX_VALUE || !valid_hex_id(&row.key) || !unique.insert(row.key.as_str())
-            })
+            || rows.iter().any(|row| !valid_hex_id(&row.key) || !unique.insert(row.key.as_str()))
         {
             return Err(StoreError::Invalid("invalid rewrite rows".into()));
         }
@@ -918,6 +923,16 @@ impl LibraryStore for RedbLibrary {
         if current != base {
             return Err(StoreError::Invalid(format!("head_moved:{current}")));
         }
+        let effective_min = {
+            let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+            let current_min =
+                numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
+            current_min.max(wire_min)
+        };
+        // The cap of the minimum the commit leaves: staged rows may be v4-sized, and only a commit to 4 keeps them.
+        if rows.iter().any(|row| !value_fits(&row.value, effective_min)) {
+            return Err(StoreError::TooLarge);
+        }
         {
             let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
             let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
@@ -933,12 +948,8 @@ impl LibraryStore for RedbLibrary {
         }
         let head = base + rows.len() as u64;
         let generation = crate::hex(&crate::random_bytes::<16>());
-        let effective_min;
         {
             let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let current_min =
-                numbers.get("wire-min").map_err(StoreError::redb)?.map_or(2, |value| value.value());
-            effective_min = current_min.max(wire_min);
             numbers.insert("head", head).map_err(StoreError::redb)?;
             numbers.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
             numbers.insert("wire-min", effective_min).map_err(StoreError::redb)?;
