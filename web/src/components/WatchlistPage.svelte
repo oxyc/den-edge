@@ -300,15 +300,6 @@
     <div class="heading">
       <h2>Watched <span class="count">{shown.length}</span></h2>
       <div class="filters">
-        <TypeFilter
-          value={kind}
-          onchange={(value) => {
-            kind = value;
-            // A different filter starts the list from its top again.
-            count = STEP;
-          }}
-          label="Show in Watched"
-        />
         <Select
           label="Year watched"
           value={year ?? ''}
@@ -317,6 +308,15 @@
             count = STEP;
             onyear(value || undefined);
           }}
+        />
+        <TypeFilter
+          value={kind}
+          onchange={(value) => {
+            kind = value;
+            // A different filter starts the list from its top again.
+            count = STEP;
+          }}
+          label="Show in Watched"
         />
       </div>
     </div>
