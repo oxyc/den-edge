@@ -1208,7 +1208,8 @@ export class LibraryLog {
     // Replayed by `replay` only once this send is over, rather than sent twice at once.
     this.flushing.add(key);
     const run = this.writes.then(async () => {
-      for (const rows of groups) {
+      for (const group of groups) {
+        const rows = coalesce(group);
         for (let offset = 0; offset < rows.length; offset += 32) {
           const due = rows.slice(offset, offset + 32).flatMap((local) => {
             const name = rowName(local),
@@ -1516,6 +1517,21 @@ function canonical(value: unknown): string {
 function exclusive<T>(name: string, work: () => Promise<T>): Promise<T> {
   const locks = globalThis.navigator?.locks;
   return locks ? locks.request(name, work) : work();
+}
+
+/**
+ * One row per name, the rows that share it merged. Under v3 every episode of a 32-episode block is a write of the
+ * same `wat` row, so an import marking several of them would otherwise send that row twice in one batch, which
+ * den-edge refuses whole (`invalid_batch`).
+ */
+function coalesce(rows: Row[]): Row[] {
+  const byName = new Map<string, Row>();
+  for (const row of rows) {
+    const name = rowName(row);
+    const held = byName.get(name);
+    byName.set(name, held ? merge(held, row) : row);
+  }
+  return [...byName.values()];
 }
 
 function merge(theirs: Row, ours: Row): Row {
