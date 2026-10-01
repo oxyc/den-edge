@@ -8,9 +8,12 @@
 
   let {
     edgeVersion,
+    libraryFormat = null,
     credits,
   }: {
     edgeVersion: string | null;
+    /** The library's wire format (`LibraryLog.wireMinimum`), when one is open. */
+    libraryFormat?: number | null;
     /** What the installed addons credit, in their order. */
     credits: readonly Credit[];
   } = $props();
@@ -62,6 +65,9 @@
     {/each}
   </SettingRow>
   <SettingRow id="version" label="Version" value={edgeVersion ? `den-edge ${edgeVersion}` : ''} />
+  {#if libraryFormat !== null}
+    <SettingRow id="library-format" label="Library format" value={`v${libraryFormat}`} />
+  {/if}
 </SettingsSection>
 
 <!-- TMDB's terms require its credit and logo wherever its data is shown; every other source's statement is as its

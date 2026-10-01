@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import Router from './Router.svelte';
   import Library from './Library.svelte';
+  import LibraryStatus from './components/LibraryStatus.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { LibrarySession } from './lib/librarySession.svelte';
   import { links, type Link } from './lib/links.svelte';
@@ -46,6 +47,7 @@
 </script>
 
 {#key session}
+  <LibraryStatus toast={session.toast} alert={session.alert} />
   <Router
     onchange={(route) => {
       // With no library at all — a browser that keeps nothing — there are no keys or plugins to show, so Settings is

@@ -1,7 +1,14 @@
 import { fetchSimklClientId } from '../settings/simkl';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
-import { rowName, type ReceiptRow, type Row, type SettingsRow, type Stamp } from './wire';
+import {
+  rowName,
+  type DocumentRow,
+  type ReceiptRow,
+  type Row,
+  type SettingsRow,
+  type Stamp,
+} from './wire';
 
 const pageStartedAt = Date.now();
 const pageStartedMono = globalThis.performance?.now() ?? 0;
@@ -208,6 +215,164 @@ async function send(
   ).ok;
 }
 
+/** What SIMKL holds for a target, as den-core's `decide` asks it. */
+function remoteFacts(snapshot: Snapshot, id: string, title: string) {
+  const rating = snapshot.ratings.get(title);
+  return {
+    authoritative: true,
+    account_matches: true,
+    simkl: true,
+    watched: snapshot.watched.has(id) ? { at: null } : null,
+    listed: snapshot.listed.has(title) ? { at: null } : null,
+    rated: rating === undefined ? null : { at: null, value: rating },
+    any_title_watch: snapshot.watched.has(title),
+    unknown_or_newer_title_watch: false,
+    episodes_complete: true,
+    plays: [],
+    unwatch_then_remark: false,
+  };
+}
+
+/** A command or a silent settle of `pending_targets_v4`: which delivery document and key it is for. */
+interface V4Target {
+  document: string;
+  key: string;
+  built_from: Record<string, unknown>;
+}
+
+interface V4Pass {
+  account: string;
+  token: string;
+  clientId: string;
+  snapshot: Snapshot;
+  since: Stamp;
+  epoch: number;
+  device: string;
+  fetchImpl: typeof fetch;
+}
+
+/** The title (and season) a delivery document's name spells: `dlv:simkl:<account>:<type>:<id>[:<season>]`. */
+function deliveryTitle(name: string): { media: 'movie' | 'tv'; id: number; season?: number } {
+  const [, , , media, id, season] = name.split(':');
+  return {
+    media: media === 'tv' ? 'tv' : 'movie',
+    id: Number(id),
+    ...(season === undefined ? {} : { season: Number(season) }),
+  };
+}
+
+/**
+ * One Library v4 delivery pass (§9) on the documents read to the head: den-core's `pending_targets_v4` decides
+ * what to send and what settles silently. A command whose receipt would not fit its delivery document is held, not
+ * sent. Each delivery document is then written once, compare-and-set on the seq it was read at; a conflict is
+ * dropped, and its targets are decided again next pass.
+ */
+async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
+  const { account, epoch, device, snapshot } = pass;
+  const held = log.documents();
+  const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
+  const pending = syncPolicy<{
+    commands: (V4Target & Record<string, unknown>)[];
+    settle: V4Target[];
+  }>({
+    op: 'pending_targets_v4',
+    documents: held.map(({ document }) => document),
+    deliver: { provider: 'simkl', account, since: pass.since },
+    now: Date.now(),
+  });
+  const entry = (name: string, key: string) =>
+    (stored.get(name)?.document.entries as Record<string, unknown> | undefined)?.[key] ?? null;
+  let order = 0;
+  const settle = (outcome: Record<string, unknown>, target: V4Target, at: number) =>
+    syncPolicy<unknown>({
+      op: 'settle_v4',
+      outcome,
+      built_from: target.built_from,
+      order: [epoch, at, device],
+      entry: entry(target.document, target.key),
+    });
+  const writes = new Map<string, { key: string; settle: unknown }[]>();
+  const add = (target: V4Target, settled: unknown) => {
+    if (settled === null) return;
+    const list = writes.get(target.document) ?? [];
+    list.push({ key: target.key, settle: settled });
+    writes.set(target.document, list);
+  };
+  const shape = (name: string) => {
+    const document = stored.get(name)?.document;
+    if (document) return { document };
+    const { media, id, season } = deliveryTitle(name);
+    return {
+      identity: {
+        provider: 'simkl',
+        account,
+        title: { type: media, id },
+        ...(season === undefined ? {} : { season }),
+      },
+    };
+  };
+  for (const target of pending.settle)
+    add(target, settle({ action: 'acknowledge' }, target, ++order));
+
+  // Fit before sending: each document as it would be with every settle this pass writes to it.
+  const commands = pending.commands.slice(0, 100).map((command) => ({ command, at: ++order }));
+  const full = new Set<string>();
+  for (const name of new Set(commands.map(({ command }) => command.document))) {
+    const fit = syncPolicy<{ held: { key: string }[] }>({
+      op: 'delivery_write',
+      ...shape(name),
+      commands: [
+        ...(writes.get(name) ?? []),
+        ...commands
+          .filter(({ command }) => command.document === name)
+          .map(({ command, at }) => ({
+            key: command.key,
+            settle: settle({ action: 'send' }, command, at),
+          })),
+      ],
+    });
+    for (const { key } of fit.held) full.add(`${name}#${key}`);
+  }
+
+  for (const { command, at } of commands) {
+    if (full.has(`${command.document}#${command.key}`)) {
+      console.warn(`den: ${command.document} is full; ${command.key} is held, not sent`);
+      continue;
+    }
+    const { media, id, season } = deliveryTitle(command.document);
+    const episode = command.episode === true ? Number(command.key) : undefined;
+    const target = { media, id, season, episode_number: episode } as Target;
+    const outcome = syncPolicy<{ action: string }>({
+      op: 'decide',
+      command,
+      remote: remoteFacts(
+        snapshot,
+        identity(media, id, episode === undefined ? undefined : season, episode),
+        identity(media, id),
+      ),
+    });
+    if (outcome.action === 'hold' || outcome.action === 'superseded') continue;
+    if (
+      outcome.action === 'send' &&
+      !(await send(command, target, pass.clientId, pass.token, pass.fetchImpl))
+    )
+      continue;
+    add(command, settle(outcome, command, at));
+  }
+
+  for (const [name, settles] of writes) {
+    const written = syncPolicy<{ document: DocumentRow }>({
+      op: 'delivery_write',
+      ...shape(name),
+      commands: settles,
+    });
+    if (!(await log.writeDelivery(written.document, stored.get(name)?.seq ?? 0)))
+      console.warn(
+        `den: the receipts in ${name} were not written; they are decided again next pass`,
+      );
+  }
+}
+
 /** One bounded Library v3 delivery pass. False means observation, lease or provider facts were not ready. */
 export async function deliverSimkl(
   log: LibraryLog,
@@ -227,6 +392,8 @@ export async function deliverSimkl(
       'string' in value.value,
   );
   if (!connection) return false;
+  // While a row can't be read, it may be a delivery document: nothing is delivered until it is removed (v4 §4).
+  if (log.wireMinimum >= 4 && (log.unreadable.size || log.newerFraming.size)) return false;
   const account = connection[0].slice('simkl:'.length);
   let token: string;
   try {
@@ -280,10 +447,14 @@ export async function deliverSimkl(
   );
   if (!snapshotResponse.ok) return false;
   const snapshot = collectSnapshot(await snapshotResponse.json());
-  const rows = log.rows();
-  const allTargets = targets(rows, Date.now());
   const sinceText = base.values.since?.value;
   const since = sinceText && 'string' in sinceText ? (JSON.parse(sinceText.string) as Stamp) : at;
+  if (log.wireMinimum >= 4) {
+    await deliverV4(log, { account, token, clientId, snapshot, since, epoch, device, fetchImpl });
+    return true;
+  }
+  const rows = log.rows();
+  const allTargets = targets(rows, Date.now());
   const pending = syncPolicy<Record<string, unknown>[]>({
     op: 'pending_targets',
     targets: allTargets,
@@ -296,21 +467,11 @@ export async function deliverSimkl(
     const target = command.built_from as Target;
     const id = identity(target.media, target.id, target.season, target.episode_number);
     const title = identity(target.media, target.id);
-    const rating = snapshot.ratings.get(title);
-    const remote = {
-      authoritative: true,
-      account_matches: true,
-      simkl: true,
-      watched: snapshot.watched.has(id) ? { at: null } : null,
-      listed: snapshot.listed.has(title) ? { at: null } : null,
-      rated: rating === undefined ? null : { at: null, value: rating },
-      any_title_watch: snapshot.watched.has(title),
-      unknown_or_newer_title_watch: false,
-      episodes_complete: true,
-      plays: [],
-      unwatch_then_remark: false,
-    };
-    const outcome = syncPolicy<{ action: string }>({ op: 'decide', command, remote });
+    const outcome = syncPolicy<{ action: string }>({
+      op: 'decide',
+      command,
+      remote: remoteFacts(snapshot, id, title),
+    });
     if (outcome.action === 'hold' || outcome.action === 'superseded') continue;
     if (outcome.action === 'send' && !(await send(command, target, clientId, token, fetchImpl)))
       continue;

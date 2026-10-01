@@ -3,6 +3,7 @@
   // the TV's hide rules, an addon, and two devices. Everything is in memory, so the page has something to show
   // without a paired TV or a den-edge behind it, and a save lands where the page reads it back from.
   import Settings from '../src/Settings.svelte';
+  import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import type { ConfigValue, Row, SettingsRow, Stamp } from '../src/lib/wire';
@@ -45,6 +46,7 @@
       return true;
     },
     moved: false,
+    wireMinimum: 4,
     refresh: async () => false,
     rows: () => Object.values(settings),
     newestStamp: () => at,
@@ -72,6 +74,9 @@
     log,
     opened: Promise.resolve(log),
     routes: fetchRoutes,
+    // `?switched`: this browser just moved the library to v4, as the real session says after `switchLibraryToV4`.
+    toast: new URLSearchParams(location.search).has('switched') ? 'Library updated to v4' : null,
+    alert: null,
   }) as unknown as LibrarySession;
   const fixtureLibraryKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
   const link = {
@@ -83,5 +88,6 @@
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
+  <LibraryStatus toast={session.toast} alert={session.alert} />
   <Settings {link} {session} />
 </main>

@@ -142,7 +142,7 @@ describe('LibraryLog', () => {
     expect(reopened.title({ type: 'movie', id: 2 })).toBeDefined();
   });
 
-  it('advertises wire 3 and the generation on every library request', async () => {
+  it('advertises wire 4 and the generation on every library request', async () => {
     const server = await edge([row(1)]);
     const requests: RequestInit[] = [];
     const recording: typeof fetch = async (input, init = {}) => {
@@ -154,7 +154,7 @@ describe('LibraryLog', () => {
     await log.forget();
     expect(requests.length).toBeGreaterThan(2);
     for (const request of requests) {
-      expect(request.headers).toMatchObject({ 'x-den-wire': '3', 'x-den-generation': '0' });
+      expect(request.headers).toMatchObject({ 'x-den-wire': '4', 'x-den-generation': '0' });
     }
   });
 
@@ -164,14 +164,16 @@ describe('LibraryLog', () => {
     const future: typeof fetch = async (input, init) => {
       const response = await server.fetchImpl(input, init);
       const headers = new Headers(response.headers);
-      headers.set('x-den-wire-min', '4');
+      headers.set('x-den-wire-min', '5');
       return new Response(response.body, { status: response.status, headers });
     };
     const log = (await LibraryLog.open(LIBRARY_KEY, future, storage, null))!;
-    expect(log.wireMinimum).toBe(4);
-    expect(log.upgradeRequired).toBe(4);
+    expect(log.wireMinimum).toBe(5);
+    expect(log.upgradeRequired).toBe(5);
+    expect(log.readOnly).toBe(true);
+    expect(await log.write(row(2))).toBeNull();
     const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, storage, null))!;
-    expect(reopened.wireMinimum).toBe(4);
+    expect(reopened.wireMinimum).toBe(5);
   });
 
   it('keeps a settings-style row across a generation or rewrite refusal', async () => {
