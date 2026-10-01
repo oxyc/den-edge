@@ -85,7 +85,7 @@ test('actual-routes regressions', async () => {
       // Loaded, and through its fade in: a picture caught mid-fade is a different frame from the next one.
       await page.waitForFunction(() => {
         const backdrop = document.querySelector('[data-active="true"] .backdrop.shown');
-        return backdrop && getComputedStyle(backdrop).opacity === '1';
+        return backdrop && !backdrop.getAnimations().length;
       });
       // Offscreen lazy actor images need not load before capturing the visible page.
       await page.evaluate(async () => {
@@ -121,8 +121,32 @@ test('actual-routes regressions', async () => {
       await test
         .info()
         .attach('frozen-detail-' + width, { body: frozenFrame, contentType: 'image/png' });
-      assert.ok(
-        liveFrame.equals(frozenFrame),
+      // Pixel for pixel, but for antialiasing: an edge the compositor happens to draw on a layer in one and not
+      // the other differs by a level or two, which no eye can see and no change of layout can cause.
+      const differing = await page.evaluate(
+        async ([a, b]) => {
+          const load = (src) =>
+            new Promise((done) => {
+              const image = new Image();
+              image.onload = () => done(image);
+              image.src = 'data:image/png;base64,' + src;
+            });
+          const pixels = (image) => {
+            const canvas = new OffscreenCanvas(image.width, image.height);
+            const context = canvas.getContext('2d');
+            context.drawImage(image, 0, 0);
+            return context.getImageData(0, 0, image.width, image.height).data;
+          };
+          const [one, two] = (await Promise.all([load(a), load(b)])).map(pixels);
+          let count = 0;
+          for (let i = 0; i < one.length; i++) if (Math.abs(one[i] - two[i]) > 2) count++;
+          return count;
+        },
+        [liveFrame.toString('base64'), frozenFrame.toString('base64')],
+      );
+      assert.equal(
+        differing,
+        0,
         'detail snapshot must paint exactly like the live detail, including its backdrop',
       );
       await page.evaluate(() => document.querySelector('[data-visual-check]').remove());

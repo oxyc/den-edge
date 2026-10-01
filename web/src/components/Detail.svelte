@@ -371,23 +371,50 @@
   }
 </script>
 
-{#if detail === undefined}
-  <div aria-busy="true" aria-label="Loading title">
-    <header class="hero" aria-hidden="true" use:stableViewportHeight>
-      <!-- `data-morph-hero`: where a pressed poster lands as the page opens (`Router`), in both of its states. -->
-      <div class="visual" data-morph-hero>
-        {#if seedStill}
-          <img class="seed-still" src={seedStill} alt="" />
-        {:else if placeholder}
-          <img class="seed-still blurred" src={placeholder} alt="" />
-        {:else}
-          <!-- A spinner only where there is nothing to look at, and only in the picture's own frame. Not
-               `page`: that asks the router to hold the page the viewer just left over this one until TMDB
-               answers, when this skeleton is already the page's own placeholder. -->
-          <div class="still-loading"><Loading label="Loading title" /></div>
-        {/if}
-      </div>
-      <div class="hero-content">
+{#if detail === null}
+  <p class="note">Couldn’t load this title from TMDB.</p>
+  <button class="retry" onclick={() => retry++}>Try again</button>
+{:else}
+  <!-- One hero, and one picture frame in it, from the moment the page opens until it is left: TMDB's answer fills
+       them in rather than replacing them. A pressed poster flies into this frame as the page opens (`Router`,
+       `data-morph-hero`), and the browser abandons that flight if the element it is landing on is replaced. -->
+  <header
+    class="hero"
+    use:stableViewportHeight
+    aria-busy={detail ? undefined : 'true'}
+    aria-label={detail ? undefined : 'Loading title'}
+  >
+    <div class="visual" data-morph-hero aria-hidden={detail ? undefined : 'true'}>
+      {#if detail}
+        <DetailMedia
+          {placeholder}
+          autoplay={autoplay && !restricted}
+          type={ref.type}
+          tmdbId={ref.id}
+          imdbId={detail.imdbId}
+          {active}
+          {reel}
+          {routes}
+          backdrop={detail.backdropPath
+            ? `https://image.tmdb.org/t/p/w1280${detail.backdropPath}`
+            : undefined}
+          poster={detail.title.posterPath
+            ? `https://image.tmdb.org/t/p/w780${detail.title.posterPath}`
+            : undefined}
+        />
+      {:else if seedStill}
+        <img class="seed-still" src={seedStill} alt="" />
+      {:else if placeholder}
+        <img class="seed-still blurred" src={placeholder} alt="" />
+      {:else}
+        <!-- A spinner only where there is nothing to look at, and only in the picture's own frame. Not
+             `page`: that asks the router to hold the page the viewer just left over this one until TMDB
+             answers, when this skeleton is already the page's own placeholder. -->
+        <div class="still-loading"><Loading label="Loading title" /></div>
+      {/if}
+    </div>
+    {#if !detail}
+      <div class="hero-content" aria-hidden="true">
         <div class="head">
           {#if seed?.posterPath}
             <img
@@ -405,264 +432,247 @@
         </div>
         <div class="hero-actions"><div class="loading-actions placeholder"></div></div>
       </div>
-    </header>
-    <div class="loading-overview placeholder" aria-hidden="true"></div>
-  </div>
-{:else if detail === null}
-  <p class="note">Couldn’t load this title from TMDB.</p>
-  <button class="retry" onclick={() => retry++}>Try again</button>
-{:else}
-  {@const d = detail}
-  <header class="hero" use:stableViewportHeight>
-    <div class="visual" data-morph-hero>
-      <DetailMedia
-        {placeholder}
-        autoplay={autoplay && !restricted}
-        type={ref.type}
-        tmdbId={ref.id}
-        imdbId={d.imdbId}
-        {active}
-        {reel}
-        {routes}
-        backdrop={d.backdropPath ? `https://image.tmdb.org/t/p/w1280${d.backdropPath}` : undefined}
-        poster={d.title.posterPath
-          ? `https://image.tmdb.org/t/p/w780${d.title.posterPath}`
-          : undefined}
-      />
-    </div>
-    <div class="hero-content">
-      <div class="head">
-        {#if d.title.posterPath}<img
-            class="poster"
-            src="https://image.tmdb.org/t/p/w500{d.title.posterPath}"
-            alt=""
-            width="280"
-            height="420"
-          />
-        {:else}<span class="poster placeholder" aria-hidden="true"></span>{/if}
-        <div class="copy">
-          <h1>{d.title.title}</h1>
-          <TitleMetadata
-            detail={d}
-            {ratings}
-            enabled={ratingSources}
-            pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
-            {warningKey}
-            {warningCategories}
-            {region}
-          />
-          {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
-          <div class="desktop-overview">
-            <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
+    {:else}
+      {@const d = detail}
+      <div class="hero-content">
+        <div class="head">
+          {#if d.title.posterPath}<img
+              class="poster"
+              src="https://image.tmdb.org/t/p/w500{d.title.posterPath}"
+              alt=""
+              width="280"
+              height="420"
+            />
+          {:else}<span class="poster placeholder" aria-hidden="true"></span>{/if}
+          <div class="copy">
+            <h1>{d.title.title}</h1>
+            <TitleMetadata
+              detail={d}
+              {ratings}
+              enabled={ratingSources}
+              pending={!!d.imdbId && ratingSources.some((s) => s !== 'tmdb')}
+              {warningKey}
+              {warningCategories}
+              {region}
+            />
+            {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
+            <div class="desktop-overview">
+              <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
+            </div>
+            {#if d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
+                {ratings?.awards ? ratings.awards : ''}
+              </p>{/if}
           </div>
-          {#if d.imdbId}<p class="awards desktop-overview" title={ratings?.awards}>
-              {ratings?.awards ? ratings.awards : ''}
-            </p>{/if}
         </div>
-      </div>
-      {#if continuing}
-        <button
-          class="continue"
-          onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
-        >
-          <DetailIcon name="play" filled /><span
-            ><strong>{continueLabel}</strong>
-            {#if target && series?.kind === 'resume'}<small
-                >S{target.season} · E{target.episode}</small
-              >{/if}
-            {#if fraction > RESUME_FLOOR && fraction < WATCHED}<span class="resume-track"
-                ><span style:width={`${fraction * 100}%`}></span></span
-              >{/if}
-          </span>
-        </button>
-      {/if}
-      <div class="hero-actions">
-        <TitleActions
-          {row}
-          {busy}
-          {failure}
-          {notice}
-          detailPage
-          playLabel={continuing ? 'Resume' : 'Play'}
-          onwatchlist={(on) => onwatchlist(d.title, on)}
-          onseen={(on) => onseen(d.title, on)}
-          onreact={(reaction) => onreact(d.title, reaction)}
-          onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
-          onplayhere={onplayhere
-            ? () => onplayhere(d.title, target?.season, target?.episode)
-            : undefined}
-          {away}
-          {blocked}
-          {restricted}
-          trailerHref={d.trailer
-            ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
-            : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
-          ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
-          share={{
-            title: d.title.title,
-            // The title's own address, named: what the person sharing it means, and what a preview can
-            // describe. Built from the route rather than from wherever this page happens to be open.
-            url: `${location.origin}${titleHref(d.title)}`,
-          }}
-        />
-      </div>
-    </div>
-  </header>
-  {#if trailerOpen && d.trailer}
-    <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailerOpen = false)} />
-  {/if}
-  <div class="mobile-overview">
-    {#if d.overview}<p class="overview">{d.overview}</p>{/if}
-    <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
-    {#if d.imdbId}<p class="awards" title={ratings?.awards}>
-        {ratings?.awards ?? ''}
-      </p>{/if}
-  </div>
-  {#if !guestScout}
-    <div class="title-sources" hidden={restricted}>
-      <TitleSources
-        bind:this={sourcesPanel}
-        imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
-        {scout}
-        {routes}
-        {active}
-        {remux}
-        season={ref.type === 'tv' ? sourceCoord?.season : undefined}
-        episode={sourceCoord?.episode}
-        onplay={onplayhere
-          ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
-          : undefined}
-      />
-    </div>
-  {/if}
-  <DetailReactions
-    value={row && !row.deleted.value ? row.reaction.value : null}
-    {busy}
-    onchange={(value) => onreact(d.title, value)}
-  />
-
-  {#if d.seasons.length && !restricted}
-    {@const regular = d.seasons.filter((s) => s.number > 0)}
-    <section class="seasons" aria-label="Episodes">
-      <p class="totals">
-        {regular.length}
-        {regular.length === 1 ? 'season' : 'seasons'} · {regular.reduce(
-          (sum, s) => sum + s.episodeCount,
-          0,
-        )} episodes
-      </p>
-      <div class="section-heading">
-        <h2>Episodes</h2>
-        {#if series && series.total > 0}<span class="watched-count"
-            >{series.watched === series.total
-              ? 'All watched'
-              : `${series.watched} of ${series.total} watched`}</span
-          >{/if}
-      </div>
-      <div class="season-bar">
-        <DetailTabs
-          tabs={d.seasons.map((s) => ({ value: String(s.number), label: s.name }))}
-          value={String(season)}
-          label="Seasons"
-          {panel}
-          onchange={(value) => (season = Number(value))}
-        />
-        <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
-             foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
-        {#if scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
-          <SeasonDownload
-            {scout}
-            imdb={d.imdbId}
-            season={displayedSeason}
-            episodes={seasonEpisodes}
-            {routes}
-            disabled={seasonLoading}
-            compact
-          />
-        {/if}
-        {#if onseason && seasonMarkable.length}
+        {#if continuing}
           <button
-            class="season-seen"
-            aria-pressed={seasonSeen}
-            aria-label={seasonSeen
-              ? `Mark season ${displayedSeason} unwatched`
-              : `Mark season ${displayedSeason} watched`}
-            title={seasonSeen ? 'Mark season unwatched' : 'Mark season watched'}
-            disabled={busy || seasonLoading}
-            onclick={() => markSeason(!seasonSeen)}
+            class="continue"
+            onclick={() => (onplayhere ?? onplay)?.(d.title, target?.season, target?.episode)}
           >
-            <DetailIcon name={seasonSeen ? 'eye' : 'check'} />
+            <DetailIcon name="play" filled /><span
+              ><strong>{continueLabel}</strong>
+              {#if target && series?.kind === 'resume'}<small
+                  >S{target.season} · E{target.episode}</small
+                >{/if}
+              {#if fraction > RESUME_FLOOR && fraction < WATCHED}<span class="resume-track"
+                  ><span style:width={`${fraction * 100}%`}></span></span
+                >{/if}
+            </span>
           </button>
         {/if}
+        <div class="hero-actions">
+          <TitleActions
+            {row}
+            {busy}
+            {failure}
+            {notice}
+            detailPage
+            playLabel={continuing ? 'Resume' : 'Play'}
+            onwatchlist={(on) => onwatchlist(d.title, on)}
+            onseen={(on) => onseen(d.title, on)}
+            onreact={(reaction) => onreact(d.title, reaction)}
+            onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
+            onplayhere={onplayhere
+              ? () => onplayhere(d.title, target?.season, target?.episode)
+              : undefined}
+            {away}
+            {blocked}
+            {restricted}
+            trailerHref={d.trailer
+              ? `https://www.youtube.com/watch?v=${encodeURIComponent(d.trailer)}`
+              : `https://www.youtube.com/results?search_query=${encodeURIComponent([d.title.title, d.title.year, 'official trailer'].filter(Boolean).join(' '))}`}
+            ontrailer={d.trailer ? () => (trailerOpen = true) : undefined}
+            share={{
+              title: d.title.title,
+              // The title's own address, named: what the person sharing it means, and what a preview can
+              // describe. Built from the route rather than from wherever this page happens to be open.
+              url: `${location.origin}${titleHref(d.title)}`,
+            }}
+          />
+        </div>
       </div>
-      <div
-        id={panel}
-        role="tabpanel"
-        aria-labelledby={`${panel}-tab-${d.seasons.findIndex((s) => s.number === season)}`}
-        aria-busy={seasonLoading}
-        class="episode-panel"
-      >
-        {#if seasonLoading}<div class="season-loading">
-            <Loading label="Loading episodes" />
-          </div>{/if}
-        {#if seasonEpisodes === null && !seasonLoading}<p class="note">
-            Couldn’t load this season from TMDB.
-          </p>
-          <button class="retry" onclick={() => seasonRetry++}>Try again</button>
-        {:else if seasonEpisodes}
-          <ol
-            class="episodes"
-            class:loading={seasonLoading}
-            inert={seasonLoading}
-            aria-hidden={seasonLoading}
-          >
-            {#each seasonEpisodes as e (e.number)}
-              <EpisodeCard
-                episode={e}
-                progress={episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row)}
-                {busy}
-                fallback={d.backdropPath}
-                onplay={() => playEpisode(e.number)}
-                onseen={(seen) =>
-                  displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
-                onplaytv={onplay && displayedSeason !== null
-                  ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
-                  : undefined}
-                onsources={guestScout
-                  ? undefined
-                  : () => {
-                      if (displayedSeason !== null) {
-                        sourceTarget = { season: displayedSeason, episode: e.number };
-                        void sourcesPanel?.show();
-                      }
-                    }}
-              />
-            {/each}
-          </ol>
-        {/if}
+    {/if}
+  </header>
+  {#if !detail}
+    <div class="loading-overview placeholder" aria-hidden="true"></div>
+  {:else}
+    {@const d = detail}
+    {#if trailerOpen && d.trailer}
+      <Trailer key={d.trailer} title={d.title.title} onclose={() => (trailerOpen = false)} />
+    {/if}
+    <div class="mobile-overview">
+      {#if d.overview}<p class="overview">{d.overview}</p>{/if}
+      <ProductionMetadata detail={d} studios={iconicStudios} facts={titleFacts} />
+      {#if d.imdbId}<p class="awards" title={ratings?.awards}>
+          {ratings?.awards ?? ''}
+        </p>{/if}
+    </div>
+    {#if !guestScout}
+      <div class="title-sources" hidden={restricted}>
+        <TitleSources
+          bind:this={sourcesPanel}
+          imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
+          {scout}
+          {routes}
+          {active}
+          {remux}
+          season={ref.type === 'tv' ? sourceCoord?.season : undefined}
+          episode={sourceCoord?.episode}
+          onplay={onplayhere
+            ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
+            : undefined}
+        />
       </div>
-    </section>
+    {/if}
+    <DetailReactions
+      value={row && !row.deleted.value ? row.reaction.value : null}
+      {busy}
+      onchange={(value) => onreact(d.title, value)}
+    />
+
+    {#if d.seasons.length && !restricted}
+      {@const regular = d.seasons.filter((s) => s.number > 0)}
+      <section class="seasons" aria-label="Episodes">
+        <p class="totals">
+          {regular.length}
+          {regular.length === 1 ? 'season' : 'seasons'} · {regular.reduce(
+            (sum, s) => sum + s.episodeCount,
+            0,
+          )} episodes
+        </p>
+        <div class="section-heading">
+          <h2>Episodes</h2>
+          {#if series && series.total > 0}<span class="watched-count"
+              >{series.watched === series.total
+                ? 'All watched'
+                : `${series.watched} of ${series.total} watched`}</span
+            >{/if}
+        </div>
+        <div class="season-bar">
+          <DetailTabs
+            tabs={d.seasons.map((s) => ({ value: String(s.number), label: s.name }))}
+            value={String(season)}
+            label="Seasons"
+            {panel}
+            onchange={(value) => (season = Number(value))}
+          />
+          <!-- Beside the seasons rather than under the episodes: it downloads the season being shown, and at the
+             foot of a two-dozen-episode list it was both out of sight and not obviously about this season. -->
+          {#if scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
+            <SeasonDownload
+              {scout}
+              imdb={d.imdbId}
+              season={displayedSeason}
+              episodes={seasonEpisodes}
+              {routes}
+              disabled={seasonLoading}
+              compact
+            />
+          {/if}
+          {#if onseason && seasonMarkable.length}
+            <button
+              class="season-seen"
+              aria-pressed={seasonSeen}
+              aria-label={seasonSeen
+                ? `Mark season ${displayedSeason} unwatched`
+                : `Mark season ${displayedSeason} watched`}
+              title={seasonSeen ? 'Mark season unwatched' : 'Mark season watched'}
+              disabled={busy || seasonLoading}
+              onclick={() => markSeason(!seasonSeen)}
+            >
+              <DetailIcon name={seasonSeen ? 'eye' : 'check'} />
+            </button>
+          {/if}
+        </div>
+        <div
+          id={panel}
+          role="tabpanel"
+          aria-labelledby={`${panel}-tab-${d.seasons.findIndex((s) => s.number === season)}`}
+          aria-busy={seasonLoading}
+          class="episode-panel"
+        >
+          {#if seasonLoading}<div class="season-loading">
+              <Loading label="Loading episodes" />
+            </div>{/if}
+          {#if seasonEpisodes === null && !seasonLoading}<p class="note">
+              Couldn’t load this season from TMDB.
+            </p>
+            <button class="retry" onclick={() => seasonRetry++}>Try again</button>
+          {:else if seasonEpisodes}
+            <ol
+              class="episodes"
+              class:loading={seasonLoading}
+              inert={seasonLoading}
+              aria-hidden={seasonLoading}
+            >
+              {#each seasonEpisodes as e (e.number)}
+                <EpisodeCard
+                  episode={e}
+                  progress={episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row)}
+                  {busy}
+                  fallback={d.backdropPath}
+                  onplay={() => playEpisode(e.number)}
+                  onseen={(seen) =>
+                    displayedSeason !== null && onepisode(d.title, displayedSeason, e.number, seen)}
+                  onplaytv={onplay && displayedSeason !== null
+                    ? () => onplay(d.title, displayedSeason ?? undefined, e.number)
+                    : undefined}
+                  onsources={guestScout
+                    ? undefined
+                    : () => {
+                        if (displayedSeason !== null) {
+                          sourceTarget = { season: displayedSeason, episode: e.number };
+                          void sourcesPanel?.show();
+                        }
+                      }}
+                />
+              {/each}
+            </ol>
+          {/if}
+        </div>
+      </section>
+    {/if}
+    {#if cast.length}
+      <PosterRow heading="Cast & Crew">
+        {#each cast.slice(0, castShown) as c (c.id)}<PersonCard
+            id={c.id}
+            name={c.name}
+            role={c.role}
+            profilePath={c.profilePath}
+          />{/each}
+        <span use:castEnd class="cast-end" aria-hidden="true"></span>
+      </PosterRow>
+    {/if}
+    <RelatedTitles
+      detail={d}
+      {tmdbKey}
+      {atlas}
+      studios={iconicStudios}
+      facts={titleFacts}
+      {active}
+      {shown}
+    />
   {/if}
-  {#if cast.length}
-    <PosterRow heading="Cast & Crew">
-      {#each cast.slice(0, castShown) as c (c.id)}<PersonCard
-          id={c.id}
-          name={c.name}
-          role={c.role}
-          profilePath={c.profilePath}
-        />{/each}
-      <span use:castEnd class="cast-end" aria-hidden="true"></span>
-    </PosterRow>
-  {/if}
-  <RelatedTitles
-    detail={d}
-    {tmdbKey}
-    {atlas}
-    studios={iconicStudios}
-    facts={titleFacts}
-    {active}
-    {shown}
-  />
 {/if}
 
 <style>
