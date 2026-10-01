@@ -665,6 +665,14 @@ pub fn route_label(path: &str) -> &'static str {
         p if crate::grants::is_host_path(p) => "/lib/:id/grants/:gid",
         p if p.starts_with("/lib/") && p.ends_with("/batch") => "/lib/:id/batch",
         p if p.starts_with("/lib/") && p.ends_with("/changes") => "/lib/:id/changes",
+        p if p.starts_with("/lib/") && p.ends_with("/rows") && p.contains("/rewrite/") => {
+            "/lib/:id/rewrite/:rid/rows"
+        }
+        p if p.starts_with("/lib/") && p.ends_with("/commit") && p.contains("/rewrite/") => {
+            "/lib/:id/rewrite/:rid/commit"
+        }
+        p if p.starts_with("/lib/") && p.ends_with("/rewrite") => "/lib/:id/rewrite",
+        p if p.starts_with("/lib/") && p.contains("/rewrite/") => "/lib/:id/rewrite/:rid",
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         "/tmdb/warm" => "/tmdb/warm",
         p if p.starts_with("/tmdb/") => "/tmdb",
@@ -707,17 +715,25 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" => Some(GET_PUT),
-        "/inbox/append" | "/lib/:id/batch" | "/pair/new" | "/pair/open" => Some(POST),
+        "/inbox/append"
+        | "/lib/:id/batch"
+        | "/lib/:id/rewrite"
+        | "/lib/:id/rewrite/:rid/rows"
+        | "/lib/:id/rewrite/:rid/commit"
+        | "/pair/new"
+        | "/pair/open" => Some(POST),
         "/metadata/title/query" | "/tmdb/warm" => Some(POST),
         "/metadata/title" => Some(PUT),
-        "/link" | "/pair/:sid" | "/lib/:id" | "/sync/:id" | "/grant/:gid" => Some(DELETE),
+        "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
+            Some(DELETE)
+        }
         _ => None,
     }
 }
 
 fn body_cap(route: &str) -> usize {
     match route {
-        "/lib/:id/batch" => crate::library::BATCH_MAX_BODY_BYTES,
+        "/lib/:id/batch" | "/lib/:id/rewrite/:rid/rows" => crate::library::BATCH_MAX_BODY_BYTES,
         // The relay holds each atlas path to its own cap (`relay::is_recommend`); this only refuses what no atlas
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
@@ -941,6 +957,17 @@ pub mod tests {
         assert_eq!(route_label("/scout/cfg/manifest.json"), "/scout");
         assert_eq!(route_label("/atlas/recommend"), "/atlas");
         assert_eq!(route_label("/nope"), "other");
+    }
+
+    #[test]
+    fn library_rewrite_routes_have_stable_labels_and_the_large_body_cap() {
+        let root = "/lib/0123456789abcdef/rewrite";
+        let action = format!("{root}/abcdef0123456789");
+        assert_eq!(route_label(root), "/lib/:id/rewrite");
+        assert_eq!(route_label(&format!("{action}/rows")), "/lib/:id/rewrite/:rid/rows");
+        assert_eq!(route_label(&format!("{action}/commit")), "/lib/:id/rewrite/:rid/commit");
+        assert_eq!(route_label(&action), "/lib/:id/rewrite/:rid");
+        assert_eq!(body_cap("/lib/:id/rewrite/:rid/rows"), crate::library::BATCH_MAX_BODY_BYTES);
     }
 
     /// A 503 is refused for several reasons, and the request log is where the box's operator has to tell them
@@ -1588,6 +1615,15 @@ pub mod tests {
         let declared = |n: usize| n.to_string();
         let too_big = declared(crate::library::BATCH_MAX_BODY_BYTES + 1);
         let r = h.send("POST", "/lib/0123456789abcdef/batch", None, &[("content-length", &too_big)]).await;
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let r = h
+            .send(
+                "POST",
+                "/lib/0123456789abcdef/rewrite/abcdef0123456789/rows",
+                None,
+                &[("content-length", &too_big)],
+            )
+            .await;
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
         // A batch carries a library's rows while every other route keeps the small cap.
         let over_small = declared(MAX_BODY_BYTES + 1);
