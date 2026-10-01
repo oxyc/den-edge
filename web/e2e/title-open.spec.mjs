@@ -78,6 +78,12 @@ test('a title opens on its own skeleton, with no cover of the page it was opened
   const loading = page.locator('[data-active="true"] [aria-label="Loading title"]');
   await expect(loading).toHaveCount(1);
   await expect(page.locator('[data-loading-snapshot]')).toHaveCount(0);
+  // The hero stands in with the very poster the card was showing, which needs no request, so no spinner.
+  await expect(loading.locator('img.seed-still')).toHaveAttribute(
+    'src',
+    'https://image.tmdb.org/t/p/w342/another.jpg',
+  );
+  await expect(loading.locator('.spinner')).toHaveCount(0);
   releaseTitle();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
   expect(await page.evaluate(() => window.covered)).toBe(false);

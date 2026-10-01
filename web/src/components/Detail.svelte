@@ -72,6 +72,7 @@
     onseason,
     shown = () => true,
     seed,
+    still,
   }: {
     ref: { type: MediaType; id: number };
     active?: boolean;
@@ -124,13 +125,18 @@
      * picture. The row or billboard that was just pressed is holding the poster and backdrop.
      */
     seed?: Title;
+    /**
+     * The poster the pressed card was showing (`notePressed`). It is already loaded, so it paints with the page,
+     * under the backdrop that has yet to arrive.
+     */
+    still?: string;
   } = $props();
 
   /** The still to stand in with: the backdrop it will end up using, or the poster as a last resort. */
   const seedStill = $derived(
     seed?.backdropPath
       ? `https://image.tmdb.org/t/p/w1280${seed.backdropPath}`
-      : seed?.posterPath
+      : seed?.posterPath && !still
         ? `https://image.tmdb.org/t/p/w780${seed.posterPath}`
         : null,
   );
@@ -355,9 +361,10 @@
   <div aria-busy="true" aria-label="Loading title">
     <header class="hero" aria-hidden="true" use:stableViewportHeight>
       <div class="visual">
+        {#if still}<img class="seed-still portrait" src={still} alt="" />{/if}
         {#if seedStill}
           <img class="seed-still" class:portrait={!seed?.backdropPath} src={seedStill} alt="" />
-        {:else}
+        {:else if !still}
           <!-- A spinner only where there is nothing to look at, and only in the picture's own frame. Not
                `page`: that asks the router to hold the page the viewer just left over this one until TMDB
                answers, when this skeleton is already the page's own placeholder. -->
@@ -699,6 +706,8 @@
      one takes over from the other. A poster standing in for a missing backdrop is portrait, and is
      held to the top rather than centre-cropped through the middle of a face. */
   .seed-still {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;

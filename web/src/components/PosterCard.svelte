@@ -5,7 +5,7 @@
      faded, as on the TV. -->
 <script lang="ts">
   import { availability } from '../lib/availability.svelte';
-  import { warmDetail } from '../lib/detail';
+  import { notePressed, warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
@@ -57,10 +57,12 @@
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
   // answer already under way. Delayed, and dropped on `pointercancel` — what a touch that turns into a scroll
-  // fires — so a swipe across a row fetches nothing.
+  // fires — so a swipe across a row fetches nothing. A press also leaves this card's poster for the title page
+  // to paint until its details arrive (`notePressed`), as a click does for a keyboard.
   let warming: ReturnType<typeof setTimeout> | undefined;
   function intend(event: PointerEvent, ms: number) {
     if (!href || (event.type === 'pointerenter' && event.pointerType !== 'mouse')) return;
+    if (event.type === 'pointerdown') notePressed(title, art);
     clearTimeout(warming);
     warming = setTimeout(() => warmDetail(title), ms);
   }
@@ -129,7 +131,10 @@
       class="card pick"
       class:faded
       {href}
-      onclick={onopen}
+      onclick={() => {
+        notePressed(title, art);
+        onopen?.();
+      }}
       onpointerenter={(event) => intend(event, 100)}
       onpointerdown={(event) => intend(event, 60)}
       onpointerleave={drop}

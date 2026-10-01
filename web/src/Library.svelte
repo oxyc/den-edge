@@ -63,6 +63,7 @@
   import { navigate } from './lib/navigation';
   import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
+  import { pressedCard } from './lib/detail';
   import {
     atlasCatalogs,
     GUEST_PICKS,
@@ -639,11 +640,12 @@
     const opening = page;
     if (!opening) return undefined;
     const here = (t: Title) => t.type === opening.type && t.id === opening.id;
-    // The billboard, then anything named through the library. A browse row's titles are loaded
-    // inside the row itself and are not reachable from here, so a press on one of those still opens
-    // on the placeholder — worth doing, but not worth threading a callback through every card for.
-    return featured.find(here) ?? session.displays.find(here);
+    // The billboard, then anything named through the library, then the card that was pressed: a browse
+    // row's titles are loaded inside the row itself, and the card says what it held (`notePressed`).
+    return featured.find(here) ?? session.displays.find(here) ?? pressedCard(opening)?.title;
   });
+  /** The pressed card's own poster, already loaded, which the hero paints at once while TMDB is asked. */
+  const pageStill = $derived(page ? pressedCard(page)?.still : undefined);
 
   /** The TV's hide rules, from the log's `set:prefs`: re-read when settings change, not on every refresh. */
   const prefs = $derived.by(() => {
@@ -1150,6 +1152,7 @@
     row={pageRow}
     episodes={pageEpisodes}
     seed={pageSeed}
+    still={pageStill}
     {busy}
     {failure}
     {notice}
