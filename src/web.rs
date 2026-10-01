@@ -658,6 +658,13 @@ fn respond(
         let policy = HeaderValue::from_str(&csp(media, cast_origin))
             .or_else(|_| HeaderValue::from_str(&csp(&[], None)))
             .expect("the policy is ASCII");
+        // The policy is part of the answer, so it is part of its validator. A release that changes only the policy
+        // leaves the file's bytes alone; with the file's hash as the ETag, a cache revalidating it (Cloudflare,
+        // the browser) got a 304 and went on serving the old policy, which refused every Simkl call from the page.
+        let mut validator =
+            headers.get(header::ETAG).map(|etag| etag.as_bytes().to_vec()).unwrap_or_default();
+        validator.extend_from_slice(policy.as_bytes());
+        headers.insert(header::ETAG, digest(&validator));
         headers.insert(header::CONTENT_SECURITY_POLICY, policy);
         // `robots.txt` asks crawlers not to fetch; this tells the ones that fetch anyway not to keep what
         // they got. A household's library is nobody's search result. Link unfurlers are unaffected — they
@@ -756,6 +763,24 @@ mod tests {
             assert!(directive("connect-src").contains(origin), "{policy}");
             assert!(!directive("media-src").contains(origin), "{policy}");
         }
+    }
+
+    /// The same page under a different policy is a different answer: a cache revalidating it must not get a 304
+    /// and keep serving the old policy. A file that carries no policy keeps its own hash.
+    #[test]
+    fn a_page_s_etag_changes_with_its_policy() {
+        let etag = |file: &str, media: &[String]| {
+            let file = std::path::Path::new(file);
+            let etag = axum::http::HeaderValue::from_static("\"same-bytes\"");
+            super::respond(axum::body::Body::empty(), 0, etag, file, false, media, None).headers()
+                [header::ETAG]
+                .clone()
+        };
+        let other = ["https://media.example.test".to_owned()];
+        assert_eq!(etag("index.html", &[]), etag("index.html", &[]));
+        assert_ne!(etag("index.html", &[]), etag("index.html", &other));
+        assert_eq!(etag("app.js", &[]), "\"same-bytes\"");
+        assert_eq!(etag("app.js", &other), "\"same-bytes\"");
     }
 
     /// Signing in to Simkl and delivering to it both run in the page.
