@@ -66,7 +66,24 @@ accept writes. An unknown marker fails closed; it must not be guessed as v2 or p
 This is storage negotiation, not a wire protocol fork: v2 and v3 must return the same `entries`, `head`, `more`,
 `generation`, applied rows, and conflict rows. Mixed-format libraries may run in one process because selection and
 locking are per library. Rollback may retain a v2 file only as an explicitly stale artifact; after v3 activation it
-must never receive writes or be selected as current.
+must never receive writes or be selected as current. It is kept for 30 days after the marker's mtime (the switch: the
+marker is written once and never rewritten), then removed after a write under the library's lock; never while the
+marker is absent.
+
+## Charge and compaction
+
+A v3 library's charge is its stored bytes: `k + v` per live row, against `Limits::stored_bytes` (32 MiB). The v2
+in-memory formula `2(k + v) + fragment + 192` (plus a 512-byte base) overstated a v3 library about threefold; a store
+written under it carries no `charge` metadata and is recounted once, in the transaction that opens it. The rewrite
+staging allowance uses the same charge. Clients deciding whether to switch still apply the old formula (den-spec
+library-v3 §9), which is only stricter.
+
+redb reuses freed pages but does not shrink its file. After a committed write (a batch or a rewrite commit) and with
+no rewrite staged, an open library measures its file at most once an hour: when more than half of it, and at least
+2 MiB, is free pages by redb's own page count, it runs `Database::compact` holding the database exclusively (every
+transaction runs under a read guard). One compaction runs at a time in the process, and its transient heap (measured
+~260 KB for a 13.7 MB file, ~1.04 MB for a 67 MB one) is reserved as 1.5 MiB in the open-database budget first; with no
+room it waits for a later hour.
 
 ## Lazy migration and crash boundaries
 
