@@ -182,16 +182,14 @@ test('navigation regressions', async () => {
         );
         assert.ok(transitions.length > 0, 'view transitions should run');
         assert.ok(
-          transitions.every((t) =>
-            t.direction === 'back'
-              ? t.oldAnimation === 'den-back-out' &&
-                t.newAnimation === 'den-back-in' &&
-                t.oldOpacity === '1' &&
-                t.newOpacity === '1'
-              : t.oldAnimation === 'none' &&
-                ['den-page-reveal', 'den-detail-open', 'den-slide-in'].includes(t.newAnimation),
+          transitions.every(
+            (t) =>
+              t.oldAnimation === 'none' &&
+              t.oldOpacity === '1' &&
+              t.newAnimation === 'den-page-reveal',
           ),
-          'Back uses two opaque snapshots; forward opens gently: ' + JSON.stringify(transitions),
+          'every page change fades the new page in over the opaque old one: ' +
+            JSON.stringify(transitions),
         );
         assert.deepEqual(errors, []);
         console.log(

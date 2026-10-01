@@ -58,7 +58,22 @@ export function swipeHistory(
       target.removeEventListener('touchend', end, true);
     }
   };
+  /** Where the finger last put the preview, waiting for the next frame to draw it. */
+  let moved: number | null = null;
+  let frame = 0;
+  let drawn = false;
+  const draw = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+    if (moved !== null) visual?.move(moved);
+    moved = null;
+    drawn = true;
+  };
   const reset = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+    moved = null;
+    drawn = false;
     clearTimeout(fallback);
     start = null;
     destination = null;
@@ -152,7 +167,10 @@ export function swipeHistory(
       claimed = true;
     }
     if (event.cancelable) event.preventDefault();
-    visual?.move(start.direction! * rawX);
+    // Drawn once a frame, however many moves the finger sends in it; the first at once.
+    moved = start.direction! * rawX;
+    if (!drawn || !globalThis.requestAnimationFrame) return draw();
+    frame ||= requestAnimationFrame(draw);
   };
   const end = (event: TouchEvent) => {
     if (!start) {
@@ -177,6 +195,8 @@ export function swipeHistory(
       }
       return;
     }
+    // The last move the finger made is where the landing starts from.
+    draw();
     const held = visual;
     const next = destination;
     if (event.cancelable) event.preventDefault();
@@ -237,3 +257,18 @@ export function swipeHistory(
 }
 
 export const isBackSwipe = (dx: number, dy: number) => dx >= 72 && dx > Math.abs(dy) * 2;
+
+/**
+ * Whether the browser itself turns the page when the screen's edge is swiped: iOS and iPadOS, where every browser
+ * is WebKit, in a browser tab. There Den's own swipe only competes with it — every touch on the page waited on
+ * this page's listeners, and a swipe back lagged under the finger — so the browser's is left to do it, and Den
+ * answers the Back it ends in. Added to the Home Screen there is no browser around the page, and no such gesture.
+ */
+export function browserSwipesBack(
+  nav: Pick<Navigator, 'platform' | 'maxTouchPoints'> & { standalone?: boolean },
+  standalone: () => boolean,
+): boolean {
+  const ios =
+    /^iP(hone|ad|od)/.test(nav.platform) || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1);
+  return ios && nav.standalone !== true && !standalone();
+}

@@ -1,5 +1,20 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { isBackSwipe, swipeHistory } from './swipeBack';
+import { browserSwipesBack, isBackSwipe, swipeHistory } from './swipeBack';
+
+it('leaves the edge swipe to the browser in an iOS or iPadOS tab, and nowhere else', () => {
+  const tab = () => false;
+  const home = () => true;
+  expect(browserSwipesBack({ platform: 'iPhone', maxTouchPoints: 5 }, tab)).toBe(true);
+  // iPadOS asks for desktop sites, and says it is a Mac with a touch screen.
+  expect(browserSwipesBack({ platform: 'MacIntel', maxTouchPoints: 5 }, tab)).toBe(true);
+  // Added to the Home Screen: no browser, so no gesture of its own.
+  expect(browserSwipesBack({ platform: 'iPhone', maxTouchPoints: 5 }, home)).toBe(false);
+  expect(browserSwipesBack({ platform: 'iPhone', maxTouchPoints: 5, standalone: true }, tab)).toBe(
+    false,
+  );
+  expect(browserSwipesBack({ platform: 'MacIntel', maxTouchPoints: 0 }, tab)).toBe(false);
+  expect(browserSwipesBack({ platform: 'Linux armv8l', maxTouchPoints: 5 }, tab)).toBe(false);
+});
 it('requires a deliberate rightward swipe, not left, short, vertical or diagonal motion', () => {
   expect(isBackSwipe(100, 12)).toBe(true);
   for (const [x, y] of [
