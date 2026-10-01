@@ -195,6 +195,17 @@ describe('recommend', () => {
     expect(body).not.toHaveProperty('fresh');
   });
 
+  it('names the surface of the page it ranks for: Home, Movies or Series', () => {
+    const surface = (facet: 'movie' | 'tv' | null) =>
+      recommendBody({ facet, prefs, library: [], owned: new Set() }).surface;
+    expect([surface(null), surface('movie'), surface('tv')]).toEqual(['home', 'movies', 'series']);
+    expect([billboardScope(null), billboardScope('movie'), billboardScope('tv')]).toEqual([
+      'home',
+      'movies',
+      'series',
+    ]);
+  });
+
   it('asks for only new titles with fresh', () => {
     const body = recommendBody({ facet: null, prefs, library: [], owned: new Set(), fresh: true });
     expect(body).toMatchObject({ surface: 'home', fresh: true });

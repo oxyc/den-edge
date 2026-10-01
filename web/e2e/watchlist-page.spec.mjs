@@ -91,6 +91,43 @@ test('Watched lists the years it has watches in and shows one at a time', async 
   }
 });
 
+test('the Watchlist billboard shows the watchlist, newest addition first, and goes when it empties', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await openWatchlist(browser, 1280);
+    const billboard = page.locator('.billboard');
+    // Series 2001 was added after Movie 1002. Neither the part-watched series nor anything watched is on it.
+    await expect(billboard.locator('.slide')).toHaveCount(2);
+    const slides = await billboard.locator('.slide').allTextContents();
+    expect(slides.map((text) => /(Movie|Series) \d+/.exec(text)?.[0])).toEqual([
+      'Series 2001',
+      'Movie 1002',
+    ]);
+
+    const watchlist = page.getByRole('region', { name: 'Watchlist', exact: true });
+    for (const title of ['Movie 1002', 'Series 2001']) {
+      await watchlist.getByRole('link', { name: new RegExp(title) }).hover();
+      await watchlist
+        .getByRole('button', { name: `Remove from Watchlist ${title}`, exact: true })
+        .click();
+    }
+    await expect(watchlist).toHaveCount(0);
+    await expect(billboard).toHaveCount(0);
+
+    // An empty library has no billboard on its Watchlist page at all.
+    const empty = await browser.newPage({ viewport: { width: 1280, height: 852 } });
+    await guardNetwork(empty);
+    await empty.route('**/routes', (r) => r.fulfill({ json: {} }));
+    await empty.goto('http://127.0.0.1:5198/test/library.html?page=watchlist');
+    await expect(empty.getByRole('heading', { name: 'Watchlist', level: 1 })).toBeVisible();
+    await expect(empty.locator('.billboard')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [393, 1280]) {
   test(`the Watchlist page lists continue watching, the watchlist by type and the watched history at ${width}px`, async () => {
     const browser = await chromium.launch({
