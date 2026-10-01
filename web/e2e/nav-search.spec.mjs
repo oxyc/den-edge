@@ -1900,6 +1900,58 @@ test('with the member switch off a member gets the shared billboard, and a guest
   }
 });
 
+test("a member's Movies billboard is ranked by atlas for movies and kept apart from Home's", async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+      reducedMotion: 'reduce',
+    });
+    await page.addInitScript(() => localStorage.setItem('den.billboard.member-post', '1'));
+    await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
+    await page.route('**/atlas/recommend**', (r) =>
+      r.request().method() === 'POST'
+        ? r.fulfill({
+            json: {
+              version: 1,
+              slides:
+                r.request().postDataJSON().surface === 'movies'
+                  ? [{ type: 'movie', id: 611 }]
+                  : [{ type: 'movie', id: 601 }],
+            },
+          })
+        : r.fallback(),
+    );
+    const asked = watchBillboard(page);
+    await page.goto(`${FIXTURE}?fixtureWatched=101,102`);
+    await expect.poll(() => asked.posts.map((body) => body.surface)).toEqual(['home']);
+
+    await page.getByRole('link', { name: 'Movies', exact: true }).first().click();
+    await expect(page).toHaveURL(/\/movies$/);
+    await expect.poll(() => asked.posts.map((body) => body.surface)).toEqual(['home', 'movies']);
+    expect(asked.gets.at(-1)).toMatch(/\/recommend\/movies\.json\?day=/);
+    expect(asked.posts[1].library.map((entry) => `${entry.type}:${entry.id}`).sort()).toEqual([
+      'movie:101',
+      'movie:102',
+    ]);
+    // The ranking for movies takes the slides after the one on screen, and is kept under Movies' own name.
+    const hero = active(page).locator('.billboard');
+    await expect(hero.locator('.slide').filter({ hasText: 'Film 611' })).toHaveCount(1);
+    await expect(hero.locator('.slide').filter({ hasText: 'Film 601' })).toHaveCount(0);
+    expect(
+      await page.evaluate(() =>
+        Object.keys(localStorage)
+          .filter((name) => name.includes('billboard.personal'))
+          .sort(),
+      ),
+    ).toEqual([expect.stringMatching(/\.all$/), expect.stringMatching(/\.movie$/)]);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('immediate search cancellation returns Home during its opening animation', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
