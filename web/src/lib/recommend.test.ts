@@ -111,28 +111,28 @@ describe('memberPostOn', () => {
 
   it('keeps the fresh switch apart from the member switch, set the same way', () => {
     const kept = storage();
-    expect(freshOn('', kept)).toBe(false);
-    expect(freshOn('?billboard-fresh=1', kept)).toBe(true);
-    expect(kept.getItem('den.billboard.fresh')).toBe('1');
-    expect(memberPostOn('', kept)).toBe(false);
     expect(freshOn('', kept)).toBe(true);
     expect(freshOn('?billboard-fresh=0', kept)).toBe(false);
+    expect(kept.getItem('den.billboard.fresh')).toBe('0');
+    expect(memberPostOn('', kept)).toBe(true);
     expect(freshOn('', kept)).toBe(false);
+    expect(freshOn('?billboard-fresh=1', kept)).toBe(true);
+    expect(freshOn('', kept)).toBe(true);
   });
 
-  it('is off until this browser turns it on, and the parameter is remembered', () => {
+  it('is on until this browser turns it off, and the parameter is remembered', () => {
     const kept = storage();
-    expect(memberPostOn('', kept)).toBe(false);
-    expect(memberPostOn('?billboard-post=1', kept)).toBe(true);
     expect(memberPostOn('', kept)).toBe(true);
     expect(memberPostOn('?billboard-post=0', kept)).toBe(false);
     expect(memberPostOn('', kept)).toBe(false);
+    expect(memberPostOn('?billboard-post=1', kept)).toBe(true);
+    expect(memberPostOn('', kept)).toBe(true);
   });
 
   it('reads the flag set by hand, and the parameter where storage refuses', () => {
     const kept = storage();
-    kept.setItem('den.billboard.member-post', '1');
-    expect(memberPostOn('', kept)).toBe(true);
+    kept.setItem('den.billboard.member-post', '0');
+    expect(memberPostOn('', kept)).toBe(false);
     const refusing = {
       getItem: () => {
         throw new Error('denied');
@@ -141,8 +141,8 @@ describe('memberPostOn', () => {
         throw new Error('denied');
       },
     };
-    expect(memberPostOn('?billboard-post=1', refusing)).toBe(true);
-    expect(memberPostOn('', refusing)).toBe(false);
+    expect(memberPostOn('?billboard-post=0', refusing)).toBe(false);
+    expect(memberPostOn('', refusing)).toBe(true);
   });
 });
 
@@ -198,6 +198,21 @@ describe('recommend', () => {
   it('asks for only new titles with fresh', () => {
     const body = recommendBody({ facet: null, prefs, library: [], owned: new Set(), fresh: true });
     expect(body).toMatchObject({ surface: 'home', fresh: true });
+  });
+
+  it('sends only the last 180 days of the library for taste, all of what it owns, and the whole library when nothing is that recent', () => {
+    const now = new Date('2026-09-30T12:00:00Z');
+    const day = 86_400_000;
+    const library = [
+      { ref: { type: 'movie' as const, id: 1 }, weight: 1, at: now.getTime() - 10 * day },
+      { ref: { type: 'movie' as const, id: 2 }, weight: 2, at: now.getTime() - 400 * day },
+    ];
+    const owned = new Set(['movie:1', 'movie:2']);
+    const body = recommendBody({ facet: null, prefs, library, owned, now });
+    expect(body.library.map((entry) => entry.id)).toEqual([1]);
+    expect(body.owned.map((entry) => entry.id)).toEqual([1, 2]);
+    const old = recommendBody({ facet: null, prefs, library: library.slice(1), owned, now });
+    expect(old.library.map((entry) => entry.id)).toEqual([2]);
   });
 
   it('keeps a library past atlas’s limit to its most recent titles', () => {
