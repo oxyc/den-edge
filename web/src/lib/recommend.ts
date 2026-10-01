@@ -169,23 +169,24 @@ export function recommendForEveryone(
 type SwitchStorage = Pick<Storage, 'getItem' | 'setItem'> | undefined;
 
 /**
- * A billboard switch this browser keeps under `name`: `?<param>=1` turns it on and `?<param>=0` off again; either is
- * remembered, so the parameter is needed once.
+ * A billboard switch this browser keeps under `name`, on unless turned off: `?<param>=0` turns it off and
+ * `?<param>=1` on again; either is remembered, so the parameter is needed once.
  */
 function switchOn(name: string, param: string, search: string, storage: SwitchStorage): boolean {
   const asked = new URLSearchParams(search).get(param);
   try {
     if (asked === '1' || asked === '0') storage?.setItem(name, asked);
-    return storage?.getItem(name) === '1';
+    return storage?.getItem(name) !== '0';
   } catch {
     // Storage refused (a private window): the parameter still counts for this page.
-    return asked === '1';
+    return asked !== '0';
   }
 }
 
 /**
- * Whether a browser with a library asks atlas to rank its billboard against the whole library (`POST /recommend`):
- * `?billboard-post=1`, kept as `den.billboard.member-post`. Off until the owner has judged the ranking (den#161).
+ * Whether a browser with a library asks atlas to rank its billboard against its recent library (`POST /recommend`):
+ * on by default, `?billboard-post=0` turns it off (kept as `den.billboard.member-post`). Judged on den#161: it put
+ * more of what the household went on to add in its top 10 than the shared order, and none of its dislikes near the top.
  */
 export const memberPostOn = (
   search = globalThis.location?.search ?? '',
@@ -194,7 +195,7 @@ export const memberPostOn = (
 
 /**
  * Whether the billboard is atlas's pool of only new titles (`fresh`), for the shared GET and the member POST alike:
- * `?billboard-fresh=1`, kept as `den.billboard.fresh`. Off until the owner has judged it (den#161).
+ * on by default, `?billboard-fresh=0` turns it off (kept as `den.billboard.fresh`).
  */
 export const freshOn = (
   search = globalThis.location?.search ?? '',
@@ -243,6 +244,13 @@ const MAX_LIBRARY = 5000;
 const MAX_OWNED = 10_000;
 
 /**
+ * How far back the library speaks for taste: the last 180 days. Ranked against the whole history, a household's
+ * years-old titles (and a second viewer's) outweighed what it watches now, and the billboard did no better than the
+ * shared order (den#161). A library with nothing that recent is sent whole.
+ */
+const TASTE_WINDOW_MS = 180 * 86_400_000;
+
+/**
  * The request for a billboard ranked against this library, on the page showing `facet` (Home: null). No candidate
  * lists: den-edge adds TMDB's trending and current releases to it (`billboard.rs`), and atlas has its own.
  */
@@ -266,6 +274,7 @@ export function recommendBody({
   fresh?: boolean;
   now?: Date;
 }) {
+  const recent = library.filter((title) => title.at >= now.getTime() - TASTE_WINDOW_MS);
   return {
     version: 1,
     surface: billboardScope(facet),
@@ -274,7 +283,7 @@ export function recommendBody({
     // Home uses these same six picks until the household saves a selection; a saved empty selection stays empty.
     services: prefs.servicesConfigured ? prefs.services : GUEST_PICKS,
     // Past atlas's limit it would refuse the whole request, so the most recent titles go.
-    library: [...library]
+    library: [...(recent.length ? recent : library)]
       .sort((a, b) => b.at - a.at)
       .slice(0, MAX_LIBRARY)
       .map(({ ref, weight, at }) => {

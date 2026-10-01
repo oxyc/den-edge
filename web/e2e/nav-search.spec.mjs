@@ -1745,8 +1745,9 @@ test('a guest paints the billboard from the daily GET and never POSTs a library'
     await page.goto(`${FIXTURE}?fixtureGuest=1`);
     await expect.poll(() => recommendationRequests.length).toBe(1);
     expect(recommendationRequests[0].method).toBe('GET');
+    // Only new titles is the default.
     expect(recommendationRequests[0].url).toMatch(
-      /\/atlas\/recommend\/home\.json\?day=\d{4}-\d{2}-\d{2}$/,
+      /\/atlas\/recommend\/home\.json\?day=\d{4}-\d{2}-\d{2}&fresh=1$/,
     );
     await expect(active(page).locator('.billboard .slide').first()).toContainText('Film 501');
   } finally {
@@ -1787,9 +1788,9 @@ for (const fresh of [false, true])
       });
       await page.addInitScript((fresh) => {
         localStorage.setItem('den.billboard.member-post', '1');
-        // Set once, so a later `?billboard-fresh=0` holds across the reload.
-        if (fresh && localStorage.getItem('den.billboard.fresh') === null)
-          localStorage.setItem('den.billboard.fresh', '1');
+        // Set once, so a later `?billboard-fresh=0` holds across the reload. Fresh is on unless turned off.
+        if (localStorage.getItem('den.billboard.fresh') === null)
+          localStorage.setItem('den.billboard.fresh', fresh ? '1' : '0');
       }, fresh);
       await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
       let answer;
@@ -1878,8 +1879,11 @@ test('with the member switch off a member gets the shared billboard, and a guest
       [`${FIXTURE}?fixtureGuest=1`, true],
     ]) {
       const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
-      if (switched)
-        await page.addInitScript(() => localStorage.setItem('den.billboard.member-post', '1'));
+      // The member switch is on unless turned off; a guest never POSTs, switched on or not.
+      await page.addInitScript(
+        (on) => localStorage.setItem('den.billboard.member-post', on ? '1' : '0'),
+        switched,
+      );
       await setup(page, { atlasGate: Promise.resolve(), billboard: SHARED });
       const asked = watchBillboard(page);
       await page.goto(address);
