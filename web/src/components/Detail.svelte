@@ -353,13 +353,15 @@
 
 {#if detail === undefined}
   <div aria-busy="true" aria-label="Loading title">
-    <!-- A spinner only where there is nothing to look at. Over the title's own picture it is just
-         furniture on the thing the viewer came for. -->
-    {#if !seedStill}<Loading label="Loading title" page />{/if}
     <header class="hero" aria-hidden="true" use:stableViewportHeight>
       <div class="visual">
         {#if seedStill}
           <img class="seed-still" class:portrait={!seed?.backdropPath} src={seedStill} alt="" />
+        {:else}
+          <!-- A spinner only where there is nothing to look at, and only in the picture's own frame. Not
+               `page`: that asks the router to hold the page the viewer just left over this one until TMDB
+               answers, when this skeleton is already the page's own placeholder. -->
+          <div class="still-loading"><Loading label="Loading title" /></div>
         {/if}
       </div>
       <div class="hero-content">
@@ -704,6 +706,13 @@
 
   .seed-still.portrait {
     object-position: center top;
+  }
+
+  .still-loading {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
   }
 
   /* The full-screen button belongs to the video, but the whole hero should offer it. It lives inside the
