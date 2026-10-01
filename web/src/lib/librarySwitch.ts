@@ -53,17 +53,3 @@ export function librarySwitchState(
   });
   return { ...result, webOnly };
 }
-
-export function switchBlockerText(blocker: SwitchBlocker, devices: readonly DeviceEntry[]): string {
-  const name = devices.find((device) => device.id === blocker.device)?.name ?? blocker.device;
-  switch (blocker.reason) {
-    case 'format':
-      return `${name ?? 'A device'} needs a Library v3 build.`;
-    case 'handoff':
-      return `${name ?? 'A device'} still delivers to a tracker and must finish its handoff.`;
-    case 'waiting_commands':
-      return 'Changes are waiting for a disconnected tracker.';
-    case 'facade':
-      return 'No ready device can operate one of the connected trackers.';
-  }
-}

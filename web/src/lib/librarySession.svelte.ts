@@ -2,6 +2,7 @@ import { LIVE_PULL_MS } from './livePosition';
 import { browserClock } from './clock';
 import { LibraryLog } from './log';
 import { deliverSimkl } from './simklDelivery';
+import { upgradeLibrary } from './libraryUpgrade';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
@@ -66,6 +67,7 @@ export class LibrarySession {
             this.log = await LibraryLog.openLocal(this.key);
             if (this.log) this.changed(true);
           }
+          if (this.log && (await upgradeLibrary(this.log, true))) this.changed(true);
           return;
         }
         if (!this.log) {
@@ -78,6 +80,7 @@ export class LibrarySession {
           JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));
         const before = settings();
         if (await this.log.refresh()) this.changed(before !== settings());
+        if (await upgradeLibrary(this.log, false)) this.changed(true);
         if (this.log.wireMinimum >= 3 && (await deliverSimkl(this.log, this.device)))
           this.changed(true);
       } catch {
