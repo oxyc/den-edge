@@ -11,6 +11,7 @@ import {
 import { libraryAlert } from './librarySession.svelte';
 import { switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
+import type { Vault } from './localVault';
 import { LibraryLog } from './log';
 import { deliverSimkl } from './simklDelivery';
 import { recordTrackerEvent } from './trackerEvents';
@@ -117,6 +118,10 @@ async function edge(
     if (url.pathname === '/version') return new Response(JSON.stringify({ version }));
     const action = url.pathname.split('/').slice(3).join('/');
     const method = init.method ?? 'GET';
+    // A write from an older generation is refused before anything else looks at it, as library.rs does.
+    const sent = new Headers(init.headers);
+    if (method !== 'GET' && sent.has('x-den-wire') && sent.get('x-den-generation') !== generation)
+      return reply({ error: 'generation_changed' }, 409);
     if (action === 'rewrite' && method === 'POST') {
       fence = { base: head, staged: [] };
       return reply({ rewrite: 'stage', base: head });
@@ -182,7 +187,9 @@ async function edge(
   const put = (entry: { k: string; v: string }) => stored.set(entry.k, { ...entry, seq: ++head });
   /** What den-edge holds, opened. */
   const opened = () => Promise.all([...stored.values()].map(({ k, v }) => open(keys, k, v)));
-  return { keys, fetchImpl, stored, append, put, opened, log, wireMin: () => wireMin };
+  /** A restore: the same rows under a new generation. */
+  const restore = () => void (generation = `${generation}-restored`);
+  return { keys, fetchImpl, stored, append, put, opened, restore, log, wireMin: () => wireMin };
 }
 
 const document = (rows: Row[], name: string) =>
@@ -428,7 +435,6 @@ describe('the switch to Library v4', () => {
     expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
 
     // An edit made before this browser learns of the switch is refused by the fence's successor, and kept.
-    server.log.refuseNext = 'generation_changed';
     const before = other.title({ type: 'movie', id: 550 })!;
     expect(
       await other.write({ ...before, dismissed: { value: true, at: at(9000) } }),
@@ -550,8 +556,8 @@ describe('SIMKL delivery on Library v4', () => {
   });
 
   /** den-edge, with SIMKL answering an empty account and counting what it is sent. */
-  async function simkl(rows: Row[]) {
-    const server = await edge(rows);
+  async function simkl(rows: Row[], options?: Parameters<typeof edge>[1]) {
+    const server = await edge(rows, options);
     const sent = { count: 0 };
     const connection: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -648,9 +654,100 @@ describe('SIMKL delivery on Library v4', () => {
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
     expect(sent.count).toBe(1);
   });
+
+  it('a browser kept at v3 and an old generation takes the switch another device made', async () => {
+    // A library larger than this browser's storage has room for twice over: every title, and SIMKL connected.
+    const titles = Array.from({ length: 40 }, (_, i) => rec('movie', 1000 + i));
+    const { server, connection } = await simkl(
+      [rec('movie', 550), ...titles, watch, prefs, trackers, deliver(['', '1'])],
+      { wireMin: 3 },
+    );
+    const vault = memoryVault();
+    const storage = memoryStorage(8_000);
+
+    // A visit while the library was v3: it is kept here, and an edit den-edge refused for now is kept with it.
+    const visit = (await LibraryLog.open(LIBRARY_KEY, connection, storage, vault.vault))!;
+    await vi.waitFor(() => expect(vault.data.size).toBe(1));
+    server.log.refuseNext = 'rewrite_in_progress';
+    const film = visit.title({ type: 'movie', id: 550 })!;
+    expect(await visit.write({ ...film, dismissed: { value: true, at: at(9000) } })).not.toBeNull();
+    expect(visit.pendingActions).toBe(1);
+
+    // The TV switches it to v4: minimum 4, a new generation.
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    // Its dry run lists the rating commands v4 no longer sends for titles nobody rated.
+    const quiet = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await switchLibraryToV4(tv, Date.now(), server.fetchImpl)).toBe(true);
+    quiet.mockRestore();
+    const generations = server.log.commits.length;
+
+    // The next load, as `LibrarySession.refresh` runs it.
+    const asked: { method: string; action: string; status: number }[] = [];
+    const recording: typeof fetch = async (input, init) => {
+      const res = await connection(input, init);
+      const action = new URL(String(input), 'https://den.example').pathname.split('/')[3] ?? '';
+      if (String(input).startsWith('/lib/'))
+        asked.push({ method: init?.method ?? 'GET', action, status: res.status });
+      return res;
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, recording, storage, vault.vault))!;
+    expect(log.fromCache).toBe(true);
+    await log.refresh();
+    await switchLibraryToV4(log, Date.now(), recording);
+    await deliverSimkl(log, DEVICE, recording, 600_000);
+
+    expect(asked.filter(({ action }) => action === 'rewrite')).toEqual([]);
+    expect(server.log.commits).toHaveLength(generations);
+    // At most one refusal, by which it learns the new generation.
+    expect(asked.filter(({ status }) => status === 409).slice(1)).toEqual([]);
+    const writes = asked.filter(({ action }) => action === 'batch');
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.at(-1)?.status).toBe(200);
+    expect(log.wireMinimum).toBe(4);
+    expect(log.needsV4).toBe(false);
+    expect(libraryAlert(log)).toBeNull();
+    // The kept edit, written back as v4 writes; the lease taken under the current generation.
+    const stored = await server.opened();
+    expect(document(stored, 'title:movie:550')?.dismissed).toEqual({ value: true, at: at(9000) });
+    expect(stored.filter((row) => ['rec', 'wat', 'ep'].includes(row.kind))).toEqual([]);
+    const lease = stored.find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.lease?.value;
+    expect(lease).toEqual({ strings: [DEVICE, expect.any(String)] });
+    expect(log.pendingActions).toBe(0);
+
+    // Written back once: the next refresh sends nothing.
+    asked.length = 0;
+    await log.refresh();
+    expect(asked.filter(({ method }) => method !== 'GET')).toEqual([]);
+  });
+
+  it('a lease refused by a generation change reads the new log, and the next pass takes it', async () => {
+    const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    // The library is restored between this browser's read and its lease write: a new generation.
+    await server.append(filmDocument(551));
+    server.restore();
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(log.title({ type: 'movie', id: 551 })).toBeDefined();
+  });
 });
 
-function memoryStorage(): Storage {
+function memoryVault() {
+  const data = new Map<string, Uint8Array>();
+  const vault: Vault = {
+    get: async (k) => data.get(k),
+    put: async (k, value) => void data.set(k, value),
+    remove: async (prefix) => {
+      for (const k of [...data.keys()]) if (k.startsWith(prefix)) data.delete(k);
+    },
+  };
+  return { data, vault };
+}
+
+/** localStorage, with a browser's quota when `quota` (in characters) is given. */
+function memoryStorage(quota = Infinity): Storage {
   const data = new Map<string, string>();
   return {
     get length() {
@@ -658,7 +755,12 @@ function memoryStorage(): Storage {
     },
     key: (i: number) => [...data.keys()][i] ?? null,
     getItem: (k: string) => data.get(k) ?? null,
-    setItem: (k: string, v: string) => void data.set(k, v),
+    setItem: (k: string, v: string) => {
+      let used = k.length + v.length;
+      for (const [key, value] of data) if (key !== k) used += key.length + value.length;
+      if (used > quota) throw new DOMException('quota exceeded', 'QuotaExceededError');
+      data.set(k, v);
+    },
     removeItem: (k: string) => void data.delete(k),
     clear: () => data.clear(),
   } as Storage;

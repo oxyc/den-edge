@@ -653,7 +653,9 @@ export class LibraryLog {
         headers: this.headers(),
       });
       if (!opened.ok) {
-        await this.failed(opened);
+        // Another device's switch or a restore since this browser read the log: it reads the new one instead, which
+        // may need no rewrite at all (`needsV4`).
+        if ((await this.failed(opened)) === 'generation_changed') await this.refresh();
         return false;
       }
       const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
@@ -881,8 +883,9 @@ export class LibraryLog {
       if (log.generation && page.generation && log.generation !== page.generation) {
         if (!(await log.stageRecovery())) return null;
         log.memberRegistered = false;
-        await log.registerMember();
+        // Registered under the generation it now reads: under the old one den-edge refuses it.
         log.generation = page.generation;
+        await log.registerMember();
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
         if (log.wireMin >= WIRE)
@@ -1009,9 +1012,10 @@ export class LibraryLog {
           ) {
             if (!(await this.stageRecovery())) return null;
             this.memberRegistered = false;
-            await this.registerMember();
+            // Registered under the generation it now reads: under the old one den-edge refuses it.
             this.generation = page.generation;
             this.writeGeneration = undefined;
+            await this.registerMember();
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
             // Switched to v4 meanwhile: what was read of the v3 log is not drawn beside its documents.
@@ -1317,6 +1321,35 @@ export class LibraryLog {
   }
 
   /**
+   * `before` as den-edge holds it, without kept work drawn over it: kept work is drawn into `entries` as soon as the
+   * library opens, so an edit kept from before read from there would already be made, and would be dropped unsent.
+   */
+  private storedBefore(row: TitleRow | EpisodeRow): Row {
+    const stored = (name: string) => {
+      const held = this.acknowledged.get(name)?.row;
+      return held && isDocument(held) ? held : undefined;
+    };
+    if (row.kind === 'rec') {
+      const document = stored(`title:${row.title.type}:${row.title.id}`);
+      return document
+        ? (projectDocument(document)[0] as TitleRow)
+        : blankTitle(row.title, row.addedAt);
+    }
+    const season = row.title.type === 'tv' && stored(`season:tv:${row.title.id}:${row.season}`);
+    return (
+      (season &&
+        projectEpisode(
+          stored(`title:tv:${row.title.id}`),
+          season,
+          row.title,
+          row.season,
+          row.episode,
+        )) ||
+      blankEpisode(row.title, row.season, row.episode)
+    );
+  }
+
+  /**
    * Library v4 §8: one edit, written as den-core's writes on the documents it touches. Resolves to the title or
    * episode as it now reads, or null when it was not saved.
    */
@@ -1500,6 +1533,7 @@ export class LibraryLog {
    */
   async writeAt(row: DocumentRow | SettingsRow, base: number): Promise<boolean> {
     if (this.readOnly || this.offline) return false;
+    let changed = false;
     const run = this.writes.then(async () => {
       const name = rowName(row);
       const { k, v } = await seal(this.keys, row);
@@ -1509,7 +1543,7 @@ export class LibraryLog {
         body: JSON.stringify({ writes: [{ k, base, v }] }),
       });
       if (!res.ok) {
-        await this.failed(res);
+        changed = (await this.failed(res)) === 'generation_changed';
         return false;
       }
       const batch = (await res.json()) as Batch;
@@ -1530,6 +1564,8 @@ export class LibraryLog {
     this.writes = run.catch(() => false);
     const written = await run.catch(() => false);
     if (written) this.persist();
+    // `base` is a seq of a log that is gone: the new one is read now, so the caller's next pass decides on it.
+    if (changed) await this.refresh();
     return written;
   }
 
@@ -1778,8 +1814,11 @@ export class LibraryLog {
   }
 
   private async stageRecovery(): Promise<boolean> {
+    // A library now at v4 takes no v2 or v3 row back (`v4Work`): the switch already converted what this browser read
+    // of the old log. Staging them anyway can overflow localStorage for a large library, and then the new log is
+    // never read: every write goes on carrying the old generation.
     const rows = [...this.entries.values()]
-      .filter((entry) => entry.seq > 0)
+      .filter((entry) => entry.seq > 0 && !(this.wireMin >= WIRE && legacy(entry.row)))
       .map((entry) => entry.row);
     if (!rows.length) return true;
     try {
@@ -1797,7 +1836,11 @@ export class LibraryLog {
       }
       this.recoveryRows = [...retained.values()];
       return true;
-    } catch {
+    } catch (error) {
+      console.warn(
+        'den: the library changed generation, but its rows could not be kept to recover',
+        error,
+      );
       return false;
     } // Do not discard the old cursors until recovery work is safely retained.
   }
@@ -2055,7 +2098,7 @@ export class LibraryLog {
             : row,
         );
       else if ((row.kind === 'rec' || row.kind === 'ep') && work.kind !== 'restore')
-        ops.push(...opsFor(this.before(row), row));
+        ops.push(...opsFor(this.storedBefore(row), row));
     }
     return { restore, ops };
   }
