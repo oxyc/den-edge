@@ -1,51 +1,103 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
+/** The library fixture's Watchlist page at `width`, every title named by a stand-in TMDB. */
+async function openWatchlist(browser, width, query = '') {
+  const page = await browser.newPage({
+    viewport: { width, height: 852 },
+    reducedMotion: 'reduce',
+    // Watches are filed by the viewer's calendar; the fixture's, a few seconds into 1970, stay in 1970 in UTC.
+    timezoneId: 'UTC',
+  });
+  await guardNetwork(page);
+  await page.route('**/routes', (r) => r.fulfill({ json: {} }));
+  await routeTmdb(page, (route) => {
+    const [, type, id] =
+      new URL(route.request().url()).pathname.match(/\/(movie|tv)\/(\d+)$/) ?? [];
+    if (!id) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
+    return route.fulfill({
+      json: {
+        id: Number(id),
+        ...(type === 'movie'
+          ? { title: `Movie ${id}` }
+          : {
+              name: `Series ${id}`,
+              seasons: [
+                { season_number: 1, episode_count: 8 },
+                { season_number: 2, episode_count: 10 },
+              ],
+              last_episode_to_air: { season_number: 2, episode_number: 6 },
+            }),
+        poster_path: '/poster.jpg',
+        release_date: '2026-01-01',
+        first_air_date: '2026-01-01',
+        vote_average: 7.5,
+        vote_count: 500,
+        genres: [{ id: 18, name: 'Drama' }],
+      },
+    });
+  });
+  await page.route('https://image.tmdb.org/**', (r) =>
+    r.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="342" height="513"><rect width="342" height="513" fill="blue"/></svg>',
+    }),
+  );
+  await page.goto(`http://127.0.0.1:5198/test/library.html?populated&page=watchlist${query}`);
+  return page;
+}
+
+test('Watched lists the years it has watches in and shows one at a time', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const width = 393;
+    const page = await openWatchlist(browser, width, '&years');
+    const watched = page.getByRole('region', { name: 'Watched', exact: true });
+    const year = watched.getByRole('combobox', { name: 'Year watched' });
+    // Newest first with each year's count, the oldest dated year saying how far back it goes, the undated last.
+    await expect(year.locator('option')).toHaveText([
+      'All years',
+      '2024 (1)',
+      '2019 (1)',
+      '1970 (4)',
+      'Unknown (1)',
+    ]);
+    await expect(watched.locator('.name')).toHaveCount(7);
+
+    await year.selectOption('2019');
+    await expect(watched.locator('.name')).toHaveText(['Movie 1006']);
+    await expect(watched.getByRole('heading', { name: /Watched/ })).toHaveText('Watched 1');
+
+    // The undated are under Unknown rather than nowhere.
+    await year.selectOption('unknown');
+    await expect(watched.locator('.name')).toHaveText(['Movie 1007']);
+
+    // The year holds under a type tab, which counts only its own.
+    await year.selectOption('1970');
+    await watched
+      .getByRole('group', { name: 'Show in Watched' })
+      .getByRole('button', { name: 'Series' })
+      .click();
+    await expect(watched.locator('.name')).toHaveText(['Series 2002']);
+    await expect(year.locator('option')).toHaveText(['All years', '2024 (1)', '1970 (1)']);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+
+    await year.selectOption('');
+    await expect(watched.locator('.name')).toHaveText(['Series 2003', 'Series 2002']);
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const width of [393, 1280]) {
   test(`the Watchlist page lists continue watching, the watchlist by type and the watched history at ${width}px`, async () => {
     const browser = await chromium.launch({
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     });
     try {
-      const page = await browser.newPage({
-        viewport: { width, height: 852 },
-        reducedMotion: 'reduce',
-      });
-      await guardNetwork(page);
-      await page.route('**/routes', (r) => r.fulfill({ json: {} }));
-      await routeTmdb(page, (route) => {
-        const [, type, id] =
-          new URL(route.request().url()).pathname.match(/\/(movie|tv)\/(\d+)$/) ?? [];
-        if (!id) return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
-        return route.fulfill({
-          json: {
-            id: Number(id),
-            ...(type === 'movie'
-              ? { title: `Movie ${id}` }
-              : {
-                  name: `Series ${id}`,
-                  seasons: [
-                    { season_number: 1, episode_count: 8 },
-                    { season_number: 2, episode_count: 10 },
-                  ],
-                  last_episode_to_air: { season_number: 2, episode_number: 6 },
-                }),
-            poster_path: '/poster.jpg',
-            release_date: '2026-01-01',
-            first_air_date: '2026-01-01',
-            vote_average: 7.5,
-            vote_count: 500,
-            genres: [{ id: 18, name: 'Drama' }],
-          },
-        });
-      });
-      await page.route('https://image.tmdb.org/**', (r) =>
-        r.fulfill({
-          contentType: 'image/svg+xml',
-          body: '<svg xmlns="http://www.w3.org/2000/svg" width="342" height="513"><rect width="342" height="513" fill="blue"/></svg>',
-        }),
-      );
-      await page.goto('http://127.0.0.1:5198/test/library.html?populated&page=watchlist');
+      const page = await openWatchlist(browser, width);
 
       await expect(page.getByRole('heading', { name: 'Watchlist', level: 1 })).toBeVisible();
       const resume = page.getByRole('region', { name: 'Continue Watching', exact: true });

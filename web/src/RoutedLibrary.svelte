@@ -13,12 +13,14 @@
     query,
     explore,
     people,
+    watchedYear,
     onchange,
   }: {
     link: Link | null;
     query: string;
     explore: Explore;
     people: PeopleView;
+    watchedYear: string | undefined;
     onchange: (route: Route) => void;
   } = $props();
   // With no TV, the browser's own library: the whole app, kept here, until a TV is linked.
@@ -67,7 +69,7 @@
           <ScreenLoading screen={LinkScreen} />
         {/if}
       {:else}
-        <Library {link} {session} {route} {active} {query} {explore} {people} />
+        <Library {link} {session} {route} {active} {query} {explore} {people} {watchedYear} />
       {/if}
     {/snippet}
   </Router>
