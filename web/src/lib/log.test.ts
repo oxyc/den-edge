@@ -1469,6 +1469,71 @@ describe('a library kept only in this browser', () => {
     expect(await local.forget()).toBe(true);
     expect(data.size).toBe(0);
   });
+
+  const watched = (number: number, t: number): EpisodeRow => ({
+    kind: 'ep',
+    schema: 2,
+    title: { type: 'tv', id: 95396 },
+    season: 1,
+    episode: number,
+    // A device id den-core's v3 rules take (sixteen hex digits), as every real one is.
+    progress: { value: 1, at: at(t, 'aaaaaaaaaaaaaaaa'), viewing: 0 },
+  });
+
+  it('switches to v3 in this browser, asking den-edge nothing, and opens as v3 again', async () => {
+    const { vault } = memoryVault();
+    const asked: string[] = [];
+    const counting: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response('{}', { status: 500 });
+    };
+    const log = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
+    await log.write(row(1));
+    await log.write(watched(2, 2000));
+    expect(await log.switchWebOnly()).toBe(true);
+    expect(log.wireMinimum).toBe(3);
+    expect(log.rows().some((row) => row.kind === 'ep')).toBe(false);
+    expect(log.rows().some((row) => row.kind === 'wat')).toBe(true);
+    expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
+    const again = (await LibraryLog.openLocal(LOCAL_KEY, vault, counting))!;
+    expect(again.wireMinimum).toBe(3);
+    // An episode written after the switch goes into the v3 watch, not back in as a v2 row.
+    await again.write(watched(3, 3000));
+    expect(again.rows().some((row) => row.kind === 'ep')).toBe(false);
+    expect(asked).toEqual([]);
+  });
+
+  it('a tab opened before another switched it writes in v3 and keeps both tabs’ rows', async () => {
+    const { vault } = memoryVault();
+    const first = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    const second = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    await first.write(row(1));
+    expect(await first.switchWebOnly()).toBe(true);
+    await second.write(watched(4, 4000));
+    expect(second.wireMinimum).toBe(3);
+    expect(second.rows().some((row) => row.kind === 'ep')).toBe(false);
+    expect(second.title({ type: 'movie', id: 1 })).toBeDefined();
+    await vi.waitFor(async () => {
+      const reopened = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+      expect(reopened.wireMinimum).toBe(3);
+      expect(reopened.rows().some((row) => row.kind === 'ep')).toBe(false);
+      expect(reopened.rows().some((row) => row.kind === 'wat')).toBe(true);
+      expect(reopened.title({ type: 'movie', id: 1 })).toBeDefined();
+    });
+  });
+
+  it('is not written into a v2 library it cannot switch, and stays as it was', async () => {
+    const { vault } = memoryVault();
+    const server = await edge([row(2)]);
+    const local = (await LibraryLog.openLocal(LOCAL_KEY, vault, server.fetchImpl))!;
+    await local.write(watched(2, 2000));
+    expect(await local.switchWebOnly()).toBe(true);
+    // This den-edge has no rewrite, so the v2 library can't be switched: nothing moves, nothing in v3 form lands in it.
+    expect(await local.moveTo(LIBRARY_KEY)).toBeNull();
+    const tv = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(tv.rows().some((row) => row.kind === 'wat')).toBe(false);
+    expect(local.rows().some((row) => row.kind === 'wat')).toBe(true);
+  });
 });
 
 describe('applyLog', () => {

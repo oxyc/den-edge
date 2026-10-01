@@ -81,6 +81,18 @@ interface Snapshot {
   head: number;
   entries: [name: string, seq: number, row: Row][];
   memberRegistered?: boolean;
+  /**
+   * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
+   * on den-edge remembers den-edge's answer in localStorage instead.
+   */
+  wireMin?: number;
+}
+
+/** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
+interface SwitchContext {
+  performer: string;
+  stamp: Stamp;
+  simkl?: { account: string; credential: string; connectedAt: Stamp };
 }
 
 /** One piece of work kept in this browser (`pendingPrefix`), opened: a recovery, a bulk of actions, or one action. */
@@ -209,12 +221,44 @@ export class LibraryLog {
     );
     await ensureSyncPolicy();
     const saved = await log.kept<Snapshot>(SNAPSHOT);
+    log.takeForm(saved);
     for (const [name, seq, row] of saved?.entries ?? []) {
       if (!wellFormed(row)) continue;
       log.acknowledged.set(name, { seq, row });
       log.entries.set(name, { seq, row });
     }
     return log;
+  }
+
+  /**
+   * The wire form a library kept only here was saved in, where it is newer than this tab's: another tab switched it to
+   * v3 (`switchWebOnly`). This tab's rows are in the older form and are dropped for the saved ones, which `takeKept`
+   * then reads; merging them in would put v2 episode rows beside the v3 watches made from them. True when it changed.
+   */
+  private takeForm(saved: Snapshot | undefined): boolean {
+    const form = saved?.wireMin;
+    if (!Number.isInteger(form) || form! <= this.wireMin) return false;
+    this.wireMin = form!;
+    if (this.wireMin > 3) this.upgradeRequired = this.wireMin;
+    this.entries.clear();
+    this.acknowledged.clear();
+    return true;
+  }
+
+  /**
+   * Before a library kept only here takes a write: when another tab has switched it to v3 since this one opened it,
+   * take that form first, so the write is made in it (`write` converts an episode row only in v3) and not dropped
+   * when it is saved (`takeKept`).
+   */
+  private async followKeptForm(): Promise<void> {
+    if (!this.offline) return;
+    const saved = await this.kept<Snapshot>(SNAPSHOT);
+    if (!this.takeForm(saved)) return;
+    for (const [name, , row] of saved?.entries ?? []) {
+      if (!wellFormed(row)) continue;
+      this.entries.set(name, { seq: 0, row });
+      this.acknowledged.set(name, { seq: 0, row });
+    }
   }
 
   /**
@@ -226,11 +270,16 @@ export class LibraryLog {
     await this.saving;
     const next = await LibraryLog.open(libraryKey, this.fetchImpl, this.storage);
     if (!next || next.moved) return null;
+    // v3 rows written into a v2 library would be rows its devices don't read: its watched episodes would go missing
+    // there. So that library is switched to v3 first; the TV reads the new form from den-edge's wire minimum. A v2
+    // library taking v2 rows, or a v3 one taking either, needs nothing (`writeRows` converts v2 episode rows).
+    if (this.wireMin >= 3 && next.wireMin < 3 && !(await next.switchWebOnly())) return null;
     return (await next.writeRows(this.rows())) ? next : null;
   }
 
   /** The rows, each merged over what the log already holds for it, written in batches. */
   async writeRows(rows: Row[]): Promise<boolean> {
+    await this.followKeptForm();
     if (this.wireMin >= 3) {
       rows = rows.flatMap((row): Row[] => {
         const projected = trackerEvent(row)?.after ?? row;
@@ -252,13 +301,10 @@ export class LibraryLog {
   }
 
   /** Atomically replace a web-only v2 library with den-core's v3 form. */
-  async switchWebOnly(context?: {
-    performer: string;
-    stamp: Stamp;
-    simkl?: { account: string; credential: string; connectedAt: Stamp };
-  }): Promise<boolean> {
-    if (this.offline || this.moved || this.upgradeRequired) return false;
+  async switchWebOnly(context?: SwitchContext): Promise<boolean> {
+    if (this.moved || this.upgradeRequired) return false;
     await ensureSyncPolicy();
+    if (this.offline) return this.switchLocal(context);
     let rewrite: string | undefined;
     try {
       const opened = await this.send(`/lib/${this.keys.id}/rewrite`, {
@@ -280,28 +326,7 @@ export class LibraryLog {
         await this.abortRewrite(rewrite);
         return false;
       }
-      const now = Date.now();
-      const converted = syncPolicy<Row[]>({
-        op: 'v3_form',
-        rows: [...this.acknowledged.values()].map(({ row }) => row),
-        now,
-        context: context && {
-          performer: context.performer,
-          stamp: context.stamp,
-          base: offer.base,
-          seed_bound: now,
-          accounts: context.simkl
-            ? [
-                {
-                  provider: 'simkl',
-                  account: context.simkl.account,
-                  credential: context.simkl.credential,
-                  connected_at: context.simkl.connectedAt,
-                },
-              ]
-            : [],
-        },
-      });
+      const converted = this.v3Form(offer.base, context);
       const sealed = await Promise.all(converted.map((row) => seal(this.keys, row)));
       const chunks: (typeof sealed)[] = [];
       let chunk: typeof sealed = [];
@@ -350,6 +375,62 @@ export class LibraryLog {
       return await this.refresh();
     } catch {
       if (rewrite) await this.abortRewrite(rewrite);
+      return false;
+    }
+  }
+
+  /** den-core's v3 form of the rows this browser holds as acknowledged, at `base`. */
+  private v3Form(base: number, context?: SwitchContext): Row[] {
+    const now = Date.now();
+    return syncPolicy<Row[]>({
+      op: 'v3_form',
+      rows: [...this.acknowledged.values()].map(({ row }) => row),
+      now,
+      context: context && {
+        performer: context.performer,
+        stamp: context.stamp,
+        base,
+        seed_bound: now,
+        accounts: context.simkl
+          ? [
+              {
+                provider: 'simkl',
+                account: context.simkl.account,
+                credential: context.simkl.credential,
+                connected_at: context.simkl.connectedAt,
+              },
+            ]
+          : [],
+      },
+    });
+  }
+
+  /**
+   * `switchWebOnly` for a library kept only here: the same v3 form, replacing the copy in this browser rather than on
+   * den-edge, which has none. Under the library's lock, after taking up what another tab saved (`takeKept`), so no
+   * tab's rows are left out; the saved copy records the form, which every other tab then takes (`followKeptForm`).
+   */
+  private async switchLocal(context?: SwitchContext): Promise<boolean> {
+    await this.saving;
+    try {
+      return await exclusive(`den.library.${this.keys.id}`, async () => {
+        await this.takeKept();
+        if (this.wireMin >= 3) return true;
+        const converted = this.v3Form(this.head, context);
+        const entries = converted.map((row): [string, number, Row] => [rowName(row), 0, row]);
+        if (entries.length) await this.keep(SNAPSHOT, { ...this.snapshot(), entries, wireMin: 3 });
+        else await this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`);
+        this.entries.clear();
+        this.acknowledged.clear();
+        for (const [name, seq, row] of entries) {
+          this.entries.set(name, { seq, row });
+          this.acknowledged.set(name, { seq, row });
+        }
+        this.wireMin = 3;
+        return true;
+      });
+    } catch (error) {
+      console.warn('den: the library kept in this browser could not be switched', error);
       return false;
     }
   }
@@ -693,6 +774,7 @@ export class LibraryLog {
   /** Every row another tab kept of this library kept only here, merged with this tab's the way a write is merged. */
   private async takeKept(): Promise<void> {
     const saved = await this.kept<Snapshot>(SNAPSHOT);
+    this.takeForm(saved);
     for (const [name, , row] of saved?.entries ?? []) {
       const ours = this.acknowledged.get(name)?.row;
       const merged = ours ? merge(row, ours) : row;
@@ -707,6 +789,7 @@ export class LibraryLog {
       head: this.head,
       memberRegistered: this.memberRegistered,
       entries: [...this.acknowledged].map(([name, { seq, row }]) => [name, seq, row]),
+      ...(this.offline && this.wireMin > 2 ? { wireMin: this.wireMin } : {}),
     };
   }
 
@@ -828,6 +911,7 @@ export class LibraryLog {
    * — `moved` says when that is because the library moved to a new key.
    */
   async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
+    await this.followKeptForm();
     if (this.wireMin >= 3 && local.kind === 'ep') {
       const converted = this.v3EpisodeWrite(local);
       if (!converted) return local;
@@ -1042,6 +1126,7 @@ export class LibraryLog {
     if (!journals.length) return true;
     if (journals.some((row) => !trackerEvent(row))) return false;
     if (this.offline) {
+      await this.followKeptForm();
       for (const row of journals) {
         this.keepLocally(row);
         this.keepLocally(trackerEvent(row)!.after);
@@ -1187,6 +1272,7 @@ export class LibraryLog {
     const event = trackerEvent(journal);
     if (!event) return null;
     if (this.offline) {
+      await this.followKeptForm();
       this.keepLocally(journal);
       return this.keepLocally(event.after);
     }
