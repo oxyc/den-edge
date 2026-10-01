@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack, type Snippet } from 'svelte';
+  import { scrolledWithin } from '../lib/scrolled';
   let { active, children }: { active: boolean; children: Snippet } = $props();
   let root: HTMLDivElement;
   let scrolls: { element: HTMLElement; x: number; y: number }[] = [];
@@ -28,7 +29,7 @@
         focused = root.contains(document.activeElement)
           ? (document.activeElement as HTMLElement)
           : null;
-        scrolls = Array.from(root.querySelectorAll<HTMLElement>('*'))
+        scrolls = (scrolledWithin(root) as HTMLElement[])
           .filter((element) => element.scrollLeft !== 0 || element.scrollTop !== 0)
           .map((element) => ({ element, x: element.scrollLeft, y: element.scrollTop }));
       } else {
