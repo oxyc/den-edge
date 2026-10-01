@@ -1,5 +1,5 @@
 import { fetchSimklClientId } from '../settings/simkl';
-import type { LibraryLog } from './log';
+import { exclusive, type LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
 import {
   rowName,
@@ -240,15 +240,53 @@ interface V4Target {
   built_from: Record<string, unknown>;
 }
 
+/** `pending_targets_v4`'s answer, read before the lease is taken so the take's epoch can pass every settle epoch. */
+interface V4Pending {
+  commands: (V4Target & Record<string, unknown>)[];
+  settle: V4Target[];
+  greatest_epoch: number;
+}
+
 interface V4Pass {
-  account: string;
   token: string;
   clientId: string;
   snapshot: Snapshot;
-  since: Stamp;
+  pending: V4Pending;
+  stored: Map<string, { seq: number; document: DocumentRow }>;
+  account: string;
   epoch: number;
   device: string;
+  /** The next settle order in this epoch (`orderCounter`). */
+  order: () => number;
   fetchImpl: typeof fetch;
+}
+
+const ordersHere = new Map<string, number>();
+
+/**
+ * Settle orders that never repeat within an epoch (v3 §6): the last one this device used is kept in this browser,
+ * which every tab of it shares, and a pass takes its orders under one lock per account (`deliverSimkl`). Starting
+ * at 0 on every pass reused `[E, 1, device]` across passes and tabs, and a merge of two equal orders falls back to
+ * byte order, which could bring back an older receipt.
+ */
+function orderCounter(account: string, epoch: number): () => number {
+  const key = `den.simklOrder.${account}.${epoch}`;
+  let last = ordersHere.get(key) ?? 0;
+  try {
+    last = Math.max(last, Number(globalThis.localStorage?.getItem(key)) || 0);
+  } catch {
+    // Storage blocked: this page's own count still never repeats.
+  }
+  return () => {
+    last++;
+    ordersHere.set(key, last);
+    try {
+      globalThis.localStorage?.setItem(key, String(last));
+    } catch {
+      // As above.
+    }
+    return last;
+  };
 }
 
 /** The title (and season) a delivery document's name spells: `dlv:simkl:<account>:<type>:<id>[:<season>]`. */
@@ -268,21 +306,9 @@ function deliveryTitle(name: string): { media: 'movie' | 'tv'; id: number; seaso
  * dropped, and its targets are decided again next pass.
  */
 async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
-  const { account, epoch, device, snapshot } = pass;
-  const held = log.documents();
-  const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
-  const pending = syncPolicy<{
-    commands: (V4Target & Record<string, unknown>)[];
-    settle: V4Target[];
-  }>({
-    op: 'pending_targets_v4',
-    documents: held.map(({ document }) => document),
-    deliver: { provider: 'simkl', account, since: pass.since },
-    now: Date.now(),
-  });
+  const { account, epoch, device, snapshot, pending, stored, order } = pass;
   const entry = (name: string, key: string) =>
     (stored.get(name)?.document.entries as Record<string, unknown> | undefined)?.[key] ?? null;
-  let order = 0;
   const settle = (outcome: Record<string, unknown>, target: V4Target, at: number) =>
     syncPolicy<unknown>({
       op: 'settle_v4',
@@ -312,10 +338,10 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
     };
   };
   for (const target of pending.settle)
-    add(target, settle({ action: 'acknowledge' }, target, ++order));
+    add(target, settle({ action: 'acknowledge' }, target, order()));
 
   // Fit before sending: each document as it would be with every settle this pass writes to it.
-  const commands = pending.commands.slice(0, 100).map((command) => ({ command, at: ++order }));
+  const commands = pending.commands.slice(0, 100).map((command) => ({ command, at: order() }));
   const full = new Set<string>();
   for (const name of new Set(commands.map(({ command }) => command.document))) {
     const fit = syncPolicy<{ held: { key: string }[] }>({
@@ -366,7 +392,7 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
       ...shape(name),
       commands: settles,
     });
-    if (!(await log.writeDelivery(written.document, stored.get(name)?.seq ?? 0)))
+    if (!(await log.writeAt(written.document, stored.get(name)?.seq ?? 0)))
       console.warn(
         `den: the receipts in ${name} were not written; they are decided again next pass`,
       );
@@ -403,39 +429,58 @@ export async function deliverSimkl(
   } catch {
     return false;
   }
-  const deliver = log.settings(`deliver:simkl:${account}`);
+  // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
+  return exclusive(`den.simkl.${account}`, () =>
+    deliverAccount(log, device, fetchImpl, observedFor, account, token),
+  );
+}
+
+async function deliverAccount(
+  log: LibraryLog,
+  device: string,
+  fetchImpl: typeof fetch,
+  observedFor: number,
+  account: string,
+  token: string,
+): Promise<boolean> {
+  const name = `deliver:simkl:${account}`;
+  const deliver = log.settings(name);
   const leaseValue = deliver?.values.lease?.value;
   const lease = leaseValue && 'strings' in leaseValue ? leaseValue.strings : ['', '0'];
   if (lease[0] !== device && observedFor < TEN_MINUTES) return false;
-  const held = heldLeases.get(log);
+  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  const base: SettingsRow = deliver ?? { kind: 'set', schema: 2, name, values: {} };
+  const sinceText = base.values.since?.value;
+  const since = sinceText && 'string' in sinceText ? (JSON.parse(sinceText.string) as Stamp) : at;
+  // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
+  const held = log.wireMinimum >= 4 ? log.documents() : [];
+  const pendingV4 =
+    log.wireMinimum >= 4
+      ? syncPolicy<V4Pending>({
+          op: 'pending_targets_v4',
+          documents: held.map(({ document }) => document),
+          deliver: { provider: 'simkl', account, since },
+          now: Date.now(),
+        })
+      : null;
+  const kept = heldLeases.get(log);
   const locallyHeld =
-    lease[0] === device && held?.account === account && Date.now() - held.at < 120_000;
+    lease[0] === device && kept?.account === account && Date.now() - kept.at < 120_000;
   const epoch = locallyHeld
-    ? held.epoch
+    ? kept.epoch
     : lease[0] === device
       ? Number(lease[1] ?? 0)
-      : Number(lease[1] ?? 0) + 1;
-  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
-  const base: SettingsRow = deliver ?? {
-    kind: 'set',
-    schema: 2,
-    name: `deliver:simkl:${account}`,
-    values: {},
-  };
-  if (!locallyHeld || Date.now() - held!.at >= 60_000) {
-    if (
-      !(await log.write(
-        {
-          ...base,
-          values: { ...base.values, lease: { value: { strings: [device, String(epoch)] }, at } },
-        },
-        undefined,
-        false,
-      ))
-    )
-      return false;
+      : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0) + 1;
+  if (!locallyHeld || Date.now() - kept!.at >= 60_000) {
+    // Compare-and-set on the lease as read: another device that took or renewed it since wins, and this pass stops.
+    const leased: SettingsRow = {
+      ...base,
+      values: { ...base.values, lease: { value: { strings: [device, String(epoch)] }, at } },
+    };
+    if (!(await log.writeAt(leased, log.seqOf(rowName(leased))))) return false;
     heldLeases.set(log, { account, epoch, at: Date.now() });
   }
+  const order = orderCounter(account, epoch);
 
   const clientId = await fetchSimklClientId(fetchImpl);
   if (!clientId) return false;
@@ -447,10 +492,20 @@ export async function deliverSimkl(
   );
   if (!snapshotResponse.ok) return false;
   const snapshot = collectSnapshot(await snapshotResponse.json());
-  const sinceText = base.values.since?.value;
-  const since = sinceText && 'string' in sinceText ? (JSON.parse(sinceText.string) as Stamp) : at;
-  if (log.wireMinimum >= 4) {
-    await deliverV4(log, { account, token, clientId, snapshot, since, epoch, device, fetchImpl });
+  if (pendingV4) {
+    const stored = new Map(held.map(({ seq, document }) => [rowName(document), { seq, document }]));
+    await deliverV4(log, {
+      token,
+      clientId,
+      snapshot,
+      pending: pendingV4,
+      stored,
+      account,
+      epoch,
+      device,
+      order,
+      fetchImpl,
+    });
     return true;
   }
   const rows = log.rows();
@@ -462,7 +517,6 @@ export async function deliverSimkl(
     since,
     now: Date.now(),
   });
-  let order = 0;
   for (const command of pending.slice(0, 100)) {
     const target = command.built_from as Target;
     const id = identity(target.media, target.id, target.season, target.episode_number);
@@ -479,7 +533,7 @@ export async function deliverSimkl(
       op: 'settle',
       outcome,
       built_from: target,
-      order: [epoch, ++order, device],
+      order: [epoch, order(), device],
     });
     if (settled === null) continue;
     const name = syncPolicy<string>({

@@ -6,6 +6,7 @@ import {
   markEpisode,
   markWatched,
   react,
+  updateEpisodeProgress,
 } from './actions';
 import { libraryAlert } from './librarySession.svelte';
 import { switchLibraryToV4 } from './libraryUpgrade';
@@ -445,6 +446,64 @@ describe('the switch to Library v4', () => {
     expect(other.pendingActions).toBe(0);
   });
 
+  it('keeps episode progress written on v3 while the fence is held, through the commit', async () => {
+    const server = await edge(v3(), { wireMin: 3 });
+    const player = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
+    const switcher = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    // What a write gets while another device holds the switch's fence: refused for now, and kept (as a `wat` row).
+    server.log.refuseNext = 'rewrite_in_progress';
+    const ref = { type: 'tv' as const, id: 1399 };
+    const before = player.episode(ref, 1, 5) ?? blankEpisode(ref, 1, 5);
+    expect(await player.write(updateEpisodeProgress(before, 0.4, 500, at(9000)))).not.toBeNull();
+    expect(player.pendingActions).toBe(1);
+    expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
+
+    await player.refresh();
+    await player.refresh();
+    const season = document(await server.opened(), 'season:tv:1399:1')!;
+    const episodes = season.episodes as Record<string, { progress?: unknown }>;
+    expect(episodes['5']?.progress).toMatchObject({ value: 0.4, seconds: 500 });
+    expect(episodes['2']?.progress).toMatchObject({ value: 1 });
+    expect(player.episode(ref, 1, 5)?.progress).toMatchObject({ value: 0.4, seconds: 500 });
+    expect(player.pendingActions).toBe(0);
+  });
+
+  it('lifts a failed switch here once another device commits it', async () => {
+    const server = await edge(v3(), { wireMin: 3 });
+    const failing = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    dryRun.fail = true;
+    try {
+      expect(await switchLibraryToV4(failing, Date.now(), server.fetchImpl)).toBe(false);
+    } finally {
+      dryRun.fail = false;
+      error.mockRestore();
+    }
+    expect(failing.readOnly).toBe(true);
+    const switcher = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(await switchLibraryToV4(switcher, Date.now(), server.fetchImpl)).toBe(true);
+
+    await failing.refresh();
+    expect(failing.readOnly).toBe(false);
+    expect(libraryAlert(failing)).toBeNull();
+    const film = failing.title({ type: 'movie', id: 550 })!;
+    expect(await failing.write(react(film, 'like', at(9500)))).not.toBeNull();
+    expect(document(await server.opened(), 'title:movie:550')?.reaction).toEqual({
+      value: 'like',
+      at: at(9500),
+    });
+  });
+
+  it('gives den-core an episode row of a film as the TV does, so it is not staged into the v4 log', async () => {
+    const stray = markEpisode(blankEpisode({ type: 'movie', id: 550 }, 1, 1), true, at(1200));
+    const server = await edge([...v3(), stray], { wireMin: 3 });
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(await switchLibraryToV4(log, Date.now(), server.fetchImpl)).toBe(true);
+    // Two titles, a season and the settings row: the stray row is dropped, not kept for a second switch.
+    expect(server.stored.size).toBe(4);
+    expect(log.needsV4).toBe(false);
+  });
+
   it('waits for a den-edge that takes minimum 4', async () => {
     const server = await edge(v3(), { wireMin: 3, version: '0.242.0' });
     const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
@@ -472,40 +531,113 @@ describe('the switch to Library v4', () => {
 });
 
 describe('SIMKL delivery on Library v4', () => {
-  it('sends what is pending once, and keeps its receipt in a delivery document', async () => {
-    const trackers: SettingsRow = {
-      kind: 'set',
-      schema: 2,
-      name: 'trackers',
-      values: {
-        'simkl:42': { value: { string: JSON.stringify({ access_token: 'token' }) }, at: at(1000) },
-      },
-    };
-    const deliver: SettingsRow = {
-      kind: 'set',
-      schema: 2,
-      name: 'deliver:simkl:42',
-      values: {
-        since: { value: { string: JSON.stringify(at(500)) }, at: at(500) },
-        lease: { value: { strings: ['', '1'] }, at: at(500) },
-      },
-    };
-    const server = await edge([filmDocument(550), trackers, deliver]);
-    let sends = 0;
+  const trackers: SettingsRow = {
+    kind: 'set',
+    schema: 2,
+    name: 'trackers',
+    values: {
+      'simkl:42': { value: { string: JSON.stringify({ access_token: 'token' }) }, at: at(1000) },
+    },
+  };
+  const deliver = (lease: [string, string], t = 500): SettingsRow => ({
+    kind: 'set',
+    schema: 2,
+    name: 'deliver:simkl:42',
+    values: {
+      since: { value: { string: JSON.stringify(at(500)) }, at: at(500) },
+      lease: { value: { strings: lease }, at: at(t) },
+    },
+  });
+
+  /** den-edge, with SIMKL answering an empty account and counting what it is sent. */
+  async function simkl(rows: Row[]) {
+    const server = await edge(rows);
+    const sent = { count: 0 };
     const connection: typeof fetch = async (input, init) => {
       const url = String(input);
       if (url === '/config') return new Response(JSON.stringify({ simklClientId: 'client' }));
       if (url.includes('/sync/all-items'))
         return new Response(JSON.stringify({ movies: [], shows: [] }));
       if (url.includes('api.simkl.com') && init?.method === 'POST') {
-        sends++;
+        sent.count++;
         return new Response('{}');
       }
       return server.fetchImpl(input, init);
     };
+    return { server, connection, sent };
+  }
+
+  /** The settle order of every receipt den-edge holds: a watch entry's fifth element, a list or rating's third. */
+  const orders = (rows: Row[]) =>
+    rows
+      .filter((row): row is DocumentRow => row.kind === 'delivery')
+      .flatMap((row) =>
+        Object.values(row.entries as Record<string, unknown[]>).map((entry) =>
+          JSON.stringify(['w', 'u', 'n'].includes(entry[0] as string) ? entry[4] : entry[2]),
+        ),
+      );
+
+  it('never repeats a settle order within an epoch, pass after pass', async () => {
+    const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
-    expect(sends).toBe(1);
+    await server.append(filmDocument(551));
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    const all = orders(await server.opened());
+    expect(all.length).toBeGreaterThan(2);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it('takes the lease past every settle epoch its receipts hold', async () => {
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [7, 3, 'bbbbbbbbbbbbbbbb']] },
+    };
+    const { server, connection } = await simkl([
+      filmDocument(550),
+      receipts,
+      trackers,
+      deliver(['bbbbbbbbbbbbbbbb', '2']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    const lease = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.lease?.value;
+    expect(lease).toEqual({ strings: [DEVICE, '8'] });
+  });
+
+  it('takes the lease compare-and-set: another device that renewed it since keeps it', async () => {
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    // The TV renews its lease after this browser read the row, with an older stamp than this browser would issue.
+    await server.append(deliver(['cccccccccccccccc', '3'], 600));
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
+    expect(sent.count).toBe(0);
+    const lease = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.lease?.value;
+    expect(lease).toEqual({ strings: ['cccccccccccccccc', '3'] });
+  });
+
+  it('sends what is pending once, and keeps its receipt in a delivery document', async () => {
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(sent.count).toBe(1);
     const receipts = (await server.opened()).find((row) => row.kind === 'delivery') as DocumentRow;
     expect(receipts).toMatchObject({
       provider: 'simkl',
@@ -514,7 +646,7 @@ describe('SIMKL delivery on Library v4', () => {
     });
     expect((receipts.entries as Record<string, unknown[]>).list?.[0]).toBe('in');
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
-    expect(sends).toBe(1);
+    expect(sent.count).toBe(1);
   });
 });
 

@@ -295,7 +295,7 @@ export type Opened =
   | { row: Row; newer?: true; dropped?: unknown[] }
   | { unknown: Record<string, unknown> }
   | { newerFraming: true }
-  | { unreadable: string };
+  | { unreadable: string; json?: Record<string, unknown> };
 
 const LEGACY_KINDS = new Set(['rec', 'ep', 'set', 'wat', 'snt']);
 
@@ -326,8 +326,10 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
     }
     if (typeof parsed.kind === 'string' && LEGACY_KINDS.has(parsed.kind)) {
       const row = parsed as Row;
-      if (!wellFormed(row)) return { unreadable: 'episode_of_film' };
-      return (await named(rowName(row))) ? { row } : { unreadable: 'identity' };
+      if (!(await named(rowName(row)))) return { unreadable: 'identity' };
+      // Not read as state (den-core refuses an episode of a film), but its JSON is what the switch is given, as the
+      // TV gives it, so whichever client switches stages the same rows.
+      return wellFormed(row) ? { row } : { unreadable: 'episode_of_film', json: parsed };
     }
   }
   const decoded = syncPolicy<{
