@@ -188,6 +188,56 @@ test('a pressed poster morphs into the hero, which then never resizes or rescale
   await page.close();
 });
 
+// A poster tapped while the page is still scrolling under the finger's last fling: the title opens at its top and
+// stays there, rather than carrying on the glide that was moving the page it came from.
+test('a poster tapped mid-scroll opens its title at the top, and Back returns to where the page was', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
+  const { card, release } = await setup(page);
+  release();
+  // Room to scroll on both pages, and the poster somewhere down the first.
+  await page.evaluate(() => (document.body.style.paddingBottom = '3000px'));
+  await card.scrollIntoViewIfNeeded();
+  const left = await page.evaluate(() => scrollY);
+  expect(left).toBeGreaterThan(0);
+  // The glide a fling leaves running: the page keeps moving, frame after frame, with no new touch, while the
+  // poster is tapped. It went on moving the document once the title had replaced the page, which opened partway
+  // down. It runs until ten frames after the title is the page in front.
+  await page.evaluate(() => {
+    // Where the page was as it was left: where Back must bring it.
+    addEventListener('click', () => (window.leftAt = scrollY), { capture: true, once: true });
+    let after = 0;
+    window.glided = new Promise((done) => {
+      const glide = () => {
+        scrollBy({ top: 8, behavior: 'instant' });
+        const title = document.querySelector('[data-route-page][data-active="true"] h1');
+        if (title?.textContent === 'Another Movie') after++;
+        if (after < 10) requestAnimationFrame(glide);
+        else done();
+      };
+      requestAnimationFrame(glide);
+    });
+  });
+  await card.tap();
+  await page.evaluate(() => window.glided);
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => scrollY), 'the title stays at its top').toBe(0);
+  // A new touch is the viewer's own scrolling again.
+  await page.touchscreen.tap(200, 700);
+  await page.evaluate(() => scrollTo(0, 300));
+  expect(await page.evaluate(() => scrollY)).toBe(300);
+
+  await page.goBack();
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => scrollY), 'Back returns to where the page was').toBe(
+    await page.evaluate(() => window.leftAt),
+  );
+  await page.close();
+});
+
 /** The rings a poster card draws: the link's own, the artwork's, and whether the row cuts the artwork's off. */
 const rings = (card) =>
   card.evaluate((link) => {

@@ -48,6 +48,46 @@
       anchor.querySelector<HTMLElement>('[data-morph-art]') ??
       anchor.closest('[data-morph-scope]')?.querySelector<HTMLElement>('[data-morph-art]') ??
       null;
+    /**
+     * Keep the page where it was just put until the viewer does something.
+     *
+     * A poster tapped while Home was still gliding from a fling opened its title at the top, and the glide carried
+     * on — on the title, which then slid down by the rest of it. The scroll that follows a navigation and comes
+     * from no new touch, wheel or key, while the page was still moving as it was left, is that glide, and is
+     * undone until it stops — a frame with no movement — or any of those inputs hands scrolling back. Scrolls
+     * made after a page has settled, by the page itself or anything else, are left alone.
+     */
+    let releaseScroll = () => {};
+    /** When the document last moved: a page left mid-glide moved within the last frame or two. */
+    let scrolledAt = -Infinity;
+    const scrolled = () => (scrolledAt = performance.now());
+    window.addEventListener('scroll', scrolled, { passive: true });
+    const holdScroll = (x: number, y: number, gliding: boolean) => {
+      releaseScroll();
+      if (!gliding) return;
+      let quiet = 0;
+      const pin = () => {
+        quiet = 0;
+        if (window.scrollX !== x || window.scrollY !== y)
+          window.scrollTo({ left: x, top: y, behavior: 'instant' });
+      };
+      const watch = () => {
+        if (++quiet > 2) return release();
+        frame = requestAnimationFrame(watch);
+      };
+      let frame = requestAnimationFrame(watch);
+      const inputs = ['touchstart', 'wheel', 'keydown', 'pointerdown'] as const;
+      const release = () => {
+        cancelAnimationFrame(frame);
+        window.removeEventListener('scroll', pin);
+        for (const type of inputs) window.removeEventListener(type, release, true);
+        releaseScroll = () => {};
+      };
+      window.addEventListener('scroll', pin, { passive: true });
+      for (const type of inputs)
+        window.addEventListener(type, release, { capture: true, passive: true });
+      releaseScroll = release;
+    };
     const inView = (box: DOMRect) =>
       box.width > 0 &&
       box.bottom > 0 &&
@@ -222,6 +262,7 @@
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;
+      const gliding = performance.now() - scrolledAt < 100;
       const ticket = ++revision;
       transition?.skipTransition();
       // No animation of Den's own where the browser has just animated the page itself: its swipe back on iOS
@@ -282,6 +323,7 @@
         await tick();
         if (ticket !== revision) return;
         window.scrollTo({ left: current.x, top: current.y, behavior: 'instant' });
+        holdScroll(current.x, current.y, gliding);
         // Flush RoutePage's nested-scroll restoration before the new snapshot is captured.
         // Rendering is paused here, so waiting for an animation frame would stall the transition.
         await tick();
@@ -398,6 +440,8 @@
       document.removeEventListener('den:back', backRequested);
       document.removeEventListener('den:back-out', outRequested);
       window.removeEventListener('popstate', traversed);
+      window.removeEventListener('scroll', scrolled);
+      releaseScroll();
     };
   });
 </script>
