@@ -426,6 +426,9 @@
     };
   });
 
+  /** How often one fragment may be fetched before the engine is taken for looping (see `FRAG_LOADING` below). */
+  const MOST_FRAGMENT_LOADS = 4;
+
   // MSE, where the browser will not play a playlist itself. hls.js takes the element rather than a
   // `src`, and is torn down with the source it was given — switching candidates must never leave two
   // engines feeding one element. A master that will not play steps on exactly as the element's own
@@ -476,9 +479,25 @@
         // found nothing to play. Autoplay begins here, once there is something to begin.
         if (allowed) void player.play().catch(() => {});
       });
-      engine.on(Hls.Events.FRAG_BUFFERED, () => {
-        // The opening rung was ours; every one after it is the line's to choose.
-        if (engine) engine.nextLevel = -1;
+      engine.once(Hls.Events.FRAG_BUFFERED, () => {
+        // The opening rung was ours; every one after it is the line's to choose. `loadLevel`, not `nextLevel`:
+        // that asks for a switch, which throws away what is buffered ahead and fetches it again. Asked on every
+        // buffered fragment, it never ended: one segment fetched 830 times in four seconds.
+        if (engine) engine.loadLevel = -1;
+      });
+      // And whatever else might start one: a fragment asked for again and again is a loop, not a recovery. hls.js
+      // retrying a failed fragment asks a few times; past that the trailer is given up for the next one.
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A count the handler reads, never rendered.
+      const loads = new Map<string, number>();
+      engine.on(Hls.Events.FRAG_LOADING, (_event, { frag }) => {
+        const key = `${frag.type}:${frag.level}:${frag.sn}`;
+        const count = (loads.get(key) ?? 0) + 1;
+        loads.set(key, count);
+        if (count <= MOST_FRAGMENT_LOADS || !live) return;
+        live = false;
+        console.warn('hls.js kept fetching one fragment; the trailer is given up.', key);
+        engine?.stopLoad();
+        nextTrailer();
       });
       engine.loadSource(master);
       engine.attachMedia(player);
