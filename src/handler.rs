@@ -1236,7 +1236,8 @@ pub mod tests {
         assert!(
             csp.contains(
                 "connect-src 'self' https://api.themoviedb.org \
-                 https://*.ts.net:8443 https://1.1.1.1 https://api.ipify.org https://pve.example:8443;"
+                 https://*.ts.net:8443 https://1.1.1.1 https://api.ipify.org https://api.simkl.com \
+                 https://pve.example:8443;"
             ),
             "{csp}"
         );

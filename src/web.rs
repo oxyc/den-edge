@@ -55,6 +55,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 /// seen over IPv6 reports when it starts a public remux session, so the media listener can open for that one
 /// address rather than wide. Both are reachable over IPv4 only, and both send `Access-Control-Allow-Origin: *`.
 ///
+/// `api.simkl.com` is the page's own Simkl connection: signing in (`web/src/settings/simkl.ts`) and delivering
+/// watched work (`web/src/lib/simklDelivery.ts`), each with the household's own token. Simkl answers the
+/// preflight and sends `Access-Control-Allow-Origin: *`. Without it every Simkl call from the page was refused
+/// before it left the browser.
+///
 /// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
 /// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
 /// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
@@ -68,7 +73,7 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
          media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 https://1.1.1.1 \
-         https://api.ipify.org{media}; \
+         https://api.ipify.org https://api.simkl.com{media}; \
          frame-src https://www.youtube-nocookie.com{cast}; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
@@ -751,6 +756,14 @@ mod tests {
             assert!(directive("connect-src").contains(origin), "{policy}");
             assert!(!directive("media-src").contains(origin), "{policy}");
         }
+    }
+
+    /// Signing in to Simkl and delivering to it both run in the page.
+    #[test]
+    fn policy_lets_the_page_reach_simkl() {
+        let policy = super::csp(&[], None);
+        let connect = policy.split("connect-src").nth(1).unwrap().split(';').next().unwrap().to_owned();
+        assert!(connect.contains("https://api.simkl.com"), "{policy}");
     }
 
     #[test]
