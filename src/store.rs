@@ -336,7 +336,7 @@ impl Store {
 /// Adds `bytes` to `counter` unless that passes `limit`; whether it did.
 fn take(counter: &AtomicU64, bytes: u64, limit: u64) -> bool {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
             used.checked_add(bytes).filter(|total| bytes == 0 || *total <= limit)
         })
         .is_ok()
@@ -344,8 +344,7 @@ fn take(counter: &AtomicU64, bytes: u64, limit: u64) -> bool {
 
 /// Takes `bytes` off `counter`, never below nothing: a count that drifted must not wrap around to "full".
 fn give_back(counter: &AtomicU64, bytes: u64) {
-    let _ =
-        counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(bytes)));
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(bytes)));
 }
 
 /// A file's size, or 0 when there is none.
