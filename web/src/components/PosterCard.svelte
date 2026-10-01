@@ -211,9 +211,15 @@
     opacity: 0.8;
   }
 
+  /* One ring, the artwork's, drawn inside its edge: the browser's own ring around the whole link made two,
+     and one drawn outside was cut off by the row, which clips what overflows it vertically. */
+  .pick:focus-visible {
+    outline: none;
+  }
+
   .pick:focus-visible .art {
     outline: 3px solid var(--accent);
-    outline-offset: 3px;
+    outline-offset: -3px;
   }
 
   img {

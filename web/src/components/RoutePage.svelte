@@ -1,3 +1,16 @@
+<script module lang="ts">
+  /**
+   * Whether the last thing the viewer did was press a key rather than point or touch. Focus put back on a page
+   * shows its ring only then: a poster tapped, then Back, came back ringed for someone who never used a key.
+   */
+  let keyboard = false;
+  if (typeof document !== 'undefined') {
+    const listen = { capture: true, passive: true };
+    document.addEventListener('keydown', () => (keyboard = true), listen);
+    document.addEventListener('pointerdown', () => (keyboard = false), listen);
+  }
+</script>
+
 <script lang="ts">
   import { tick, untrack, type Snippet } from 'svelte';
   import { scrolledWithin } from '../lib/scrolled';
@@ -46,7 +59,7 @@
           // Restoring the page's old focus must not take focus or the keyboard away from it.
           const currentFocus = document.activeElement;
           if (!currentFocus || currentFocus === document.body || root.contains(currentFocus)) {
-            focused?.focus({ preventScroll: true });
+            focused?.focus({ preventScroll: true, focusVisible: keyboard });
           }
           const restore = () => {
             if (!active || activation !== ticket) return;

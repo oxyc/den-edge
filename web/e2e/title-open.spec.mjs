@@ -187,3 +187,42 @@ test('a pressed poster morphs into the hero, which then never resizes or rescale
   expect(await page.evaluate(() => window.transitionErrors)).toEqual([]);
   await page.close();
 });
+
+/** The rings a poster card draws: the link's own, the artwork's, and whether the row cuts the artwork's off. */
+const rings = (card) =>
+  card.evaluate((link) => {
+    const art = link.querySelector('.art');
+    const ring = getComputedStyle(art);
+    const box = art.getBoundingClientRect();
+    const track = link.closest('.track').getBoundingClientRect();
+    const offset = parseFloat(ring.outlineOffset);
+    const reach = Math.max(0, offset + parseFloat(ring.outlineWidth));
+    return {
+      visible: link.matches(':focus-visible'),
+      link: getComputedStyle(link).outlineStyle,
+      art: ring.outlineStyle,
+      clipped: box.top - reach < track.top || box.bottom + reach > track.bottom,
+    };
+  });
+
+test('a poster card shows one unclipped ring for the keyboard, and none after a tap and Back', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
+  const { card, release } = await setup(page);
+  release();
+  // Reached by the keyboard.
+  await page.keyboard.press('Shift');
+  await card.focus();
+  expect(await rings(card)).toEqual({ visible: true, link: 'none', art: 'solid', clipped: false });
+
+  // Tapped, opened, and come back to: focus returns to the card, but no ring, since no key was pressed.
+  await card.tap();
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
+  await page.goBack();
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
+  await page.evaluate(() => window.lastTransition);
+  await expect.poll(() => card.evaluate((link) => document.activeElement === link)).toBe(true);
+  expect(await rings(card)).toMatchObject({ visible: false, art: 'none' });
+  await page.close();
+});
