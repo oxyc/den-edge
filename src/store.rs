@@ -184,6 +184,19 @@ impl Store {
         }
     }
 
+    /// When a file was last written, in Unix milliseconds, or `None` when there is no such file.
+    pub async fn modified_ms(&self, ns: &str, key: &str, ext: &str) -> io::Result<Option<u64>> {
+        match tokio::fs::metadata(self.path(ns, key, ext)).await {
+            Ok(metadata) => {
+                let since_epoch =
+                    metadata.modified()?.duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?;
+                Ok(Some(u64::try_from(since_epoch.as_millis()).map_err(io::Error::other)?))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Stream an append-only log without materializing its historical versions in memory.
     pub async fn open_file(&self, ns: &str, key: &str, ext: &str) -> io::Result<Option<tokio::fs::File>> {
         match tokio::fs::File::open(self.path(ns, key, ext)).await {
