@@ -3,7 +3,7 @@
 // Watching, and drops off that once caught up. Here a series counts from its first seen episode.
 
 import { WATCHED } from './actions';
-import { isAired, titleKey, type Shape, type Title } from './library';
+import { isAired, titleKey, type MediaType, type Shape, type Title } from './library';
 import type { Row, TitleRow } from './wire';
 
 export interface WatchedEntry {
@@ -117,4 +117,37 @@ export function watchedHistory(rows: Row[], names: ReadonlyMap<string, Title>): 
   }
   // A watch with no time sorts after every dated one, as `at` 0 already does.
   return entries.sort((a, b) => b.at - a.at || titleKey(a.title).localeCompare(titleKey(b.title)));
+}
+
+/** A watch the library has no time for is filed under this year. */
+export const UNKNOWN_YEAR = 'unknown';
+
+/** The year a watch is filed under, in the viewer's calendar as its month heading is: `2019`, or `unknown`. */
+export const watchedYear = (entry: WatchedEntry): string =>
+  entry.at > 0 ? String(new Date(entry.at).getFullYear()) : UNKNOWN_YEAR;
+
+/**
+ * The history under Watched's tabs: `kind` (null for every type) and `year` (a `watchedYear`; undefined for every
+ * year). `years` is each year the type has a watch in, newest first and the undated last, with how many — the last
+ * dated one is how far back the library goes. A picked year the type has nothing in is listed at 0, so the picker
+ * still shows what is picked.
+ */
+export function watchedView(
+  history: readonly WatchedEntry[],
+  kind: MediaType | null,
+  year?: string,
+): { years: { year: string; count: number }[]; shown: WatchedEntry[] } {
+  const ofKind = kind ? history.filter((e) => e.title.type === kind) : [...history];
+  const counts = new Map<string, number>(year ? [[year, 0]] : []);
+  for (const entry of ofKind) {
+    const filed = watchedYear(entry);
+    counts.set(filed, (counts.get(filed) ?? 0) + 1);
+  }
+  const rank = (filed: string) => (filed === UNKNOWN_YEAR ? -Infinity : Number(filed));
+  return {
+    years: [...counts]
+      .map(([filed, count]) => ({ year: filed, count }))
+      .sort((a, b) => rank(b.year) - rank(a.year)),
+    shown: year ? ofKind.filter((e) => watchedYear(e) === year) : ofKind,
+  };
 }

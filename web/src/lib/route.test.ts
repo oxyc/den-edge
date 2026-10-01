@@ -13,6 +13,7 @@ import {
   serviceHref,
   slug,
   titleHref,
+  watchlistHref,
 } from './route';
 
 describe('routes', () => {
@@ -225,6 +226,16 @@ describe('routes', () => {
     expect(routePath({ page: 'search', query: 'fight club' })).toBe('/search?q=fight%20club');
     expect(routePath({ page: 'title', type: 'tv', id: 1399 })).toBe('/tv/1399');
     expect(routePath({ page: 'person', id: 287 })).toBe('/person/287');
+  });
+
+  it('carries the year Watched shows, and drops one that is not a year', () => {
+    expect(parseRoute('/watchlist?year=2019')).toEqual({ page: 'watchlist', year: '2019' });
+    expect(parseRoute('/watchlist?year=unknown')).toEqual({ page: 'watchlist', year: 'unknown' });
+    expect(parseRoute('/watchlist?year=19')).toEqual({ page: 'watchlist' });
+    expect(parseRoute('/watchlist?year=<b>')).toEqual({ page: 'watchlist' });
+    expect(watchlistHref('2019')).toBe('/watchlist?year=2019');
+    expect(watchlistHref()).toBe('/watchlist');
+    expect(routePath({ page: 'watchlist', year: 'unknown' })).toBe('/watchlist?year=unknown');
   });
 });
 

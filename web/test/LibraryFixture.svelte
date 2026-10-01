@@ -2,6 +2,7 @@
   // Home and the Watchlist page on a library that already holds something, with writes that land where the
   // page reads them back from. Without them, pressing Remove or Mark watched threw and the page said
   // "Couldn't save that" — so the actions a test most wants to press were the ones it could not.
+  import { onMount } from 'svelte';
   import Library from '../src/Library.svelte';
   import '../src/app.css';
   import {
@@ -12,7 +13,7 @@
     markWatched,
     updateProgress,
   } from '../src/lib/actions';
-  import type { Route } from '../src/lib/route';
+  import { parseRoute, type Route } from '../src/lib/route';
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import { SessionServices } from '../src/lib/sessionServices.svelte';
@@ -27,8 +28,29 @@
 
   const params = new URLSearchParams(location.search);
   const populated = params.has('populated');
-  const route: Route =
-    params.get('page') === 'watchlist' ? { page: 'watchlist' } : { page: 'library' };
+  let route = $state<Route>(
+    params.get('page') === 'watchlist' ? { page: 'watchlist' } : { page: 'library' },
+  );
+  // The app's Router answers a page's `navigate`; here the route just follows it, so a pick that lives in the address
+  // (Watched's year) is drawn.
+  onMount(() => {
+    const follow = (event: Event) =>
+      (route = parseRoute((event as CustomEvent<{ path: string }>).detail.path));
+    document.addEventListener('den:navigate', follow);
+    return () => document.removeEventListener('den:navigate', follow);
+  });
+  /** Watches in other years, and one with no time, for Watched's year picker. */
+  const years = params.has('years')
+    ? [
+        markWatched(blankTitle({ type: 'movie', id: 1006 }, 6), [Date.UTC(2019, 5, 15), 0, 'test']),
+        markEpisode(blankEpisode({ type: 'tv', id: 2003 }, 1, 1), true, [
+          Date.UTC(2024, 5, 15),
+          0,
+          'test',
+        ]),
+        markWatched(blankTitle({ type: 'movie', id: 1007 }, 7), [0, 0, 'test']),
+      ]
+    : [];
   let stored = $state<Row[]>(
     populated
       ? [
@@ -42,6 +64,7 @@
             ? [
                 addToWatchlist(blankTitle({ type: 'tv', id: 2001 }, 3), [3, 0, 'test']),
                 markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 2, 4), true, [9000, 0, 'test']),
+                ...years,
               ]
             : []),
         ]
@@ -122,5 +145,11 @@
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
-  <Library {link} {session} {route} active={true} />
+  <Library
+    {link}
+    {session}
+    {route}
+    active={true}
+    watchedYear={route.page === 'watchlist' ? route.year : undefined}
+  />
 </main>

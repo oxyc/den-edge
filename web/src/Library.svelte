@@ -59,7 +59,8 @@
   import { isHidden, readApiKey, readPrefs, readDetailPrefs } from './lib/prefs';
   import { readSyncedPrefs } from './settings/values';
   import { fetchSources, nativeHls, trailerCandidates } from './lib/reel';
-  import { titleHref, type Explore, type PeopleView, type Route } from './lib/route';
+  import { navigate } from './lib/navigation';
+  import { titleHref, watchlistHref, type Explore, type PeopleView, type Route } from './lib/route';
   import { warmOnIntent } from './lib/warmOnIntent';
   import {
     atlasCatalogs,
@@ -100,6 +101,7 @@
     query = '',
     explore = {},
     people = {},
+    watchedYear,
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
@@ -111,6 +113,8 @@
     explore?: Explore;
     /** What People is browsing, from the address as `explore` is. */
     people?: PeopleView;
+    /** The year Watched shows, from the address as `people` is. */
+    watchedYear?: string;
   } = $props();
 
   /** TMDB lookups at once while naming the library: quick for a big watchlist, and polite to TMDB. */
@@ -1202,6 +1206,8 @@
       resume={continueWatching(library)}
       saved={watchlist(library)}
       {history}
+      year={watchedYear}
+      onyear={(year) => navigate(watchlistHref(year))}
       shapes={session.shapes}
       seen={seenOfSeries}
       {failure}

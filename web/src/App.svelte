@@ -127,6 +127,11 @@
   $effect(() => {
     if (route.page === 'people') people = peopleOf(route);
   });
+  // And the year Watched shows.
+  let watchedYear = $state(untrack(() => (route.page === 'watchlist' ? route.year : undefined)));
+  $effect(() => {
+    if (route.page === 'watchlist') watchedYear = route.year;
+  });
   // A title's, a person's and a service's page name themselves once they know what they are showing
   // (`tabName`); until then, and on every other page, the tab says what the address can.
   $effect(() => {
@@ -159,13 +164,21 @@
         {query}
         {explore}
         {people}
+        {watchedYear}
         onchange={(next) => (route = next)}
       />
     {/key}
   {:else if links.browsing}
     <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
          absent case the components already model. -->
-    <RoutedLibrary link={null} {query} {explore} {people} onchange={(next) => (route = next)} />
+    <RoutedLibrary
+      link={null}
+      {query}
+      {explore}
+      {people}
+      {watchedYear}
+      onchange={(next) => (route = next)}
+    />
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {:else if LinkScreen.failed}

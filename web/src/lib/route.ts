@@ -14,7 +14,8 @@ export type Route =
   | { page: 'library' }
   | { page: 'movies' }
   | { page: 'series' }
-  | { page: 'watchlist' }
+  /** `year`: the year Watched is showing (`2019`, or `unknown` for watches with no time); absent for every year. */
+  | { page: 'watchlist'; year?: string }
   | { page: 'settings' }
   | ({ page: 'search'; query: string } & Explore)
   | ({ page: 'people' } & PeopleView)
@@ -156,6 +157,10 @@ export function parseRoute(url: string): Route {
       ...(namedOrder(order) ? { order } : {}),
     };
   }
+  if (first === 'watchlist' && !second) {
+    const year = params.get('year') ?? '';
+    return { page: 'watchlist', ...(/^(\d{4}|unknown)$/.test(year) ? { year } : {}) };
+  }
   for (const tab of TABS) if (first === tab && !second) return { page: tab };
   const id = identifier(second);
   if ((first === 'movie' || first === 'tv') && id)
@@ -185,6 +190,8 @@ export function routePath(route: Route): string {
       return `/person/${route.id}`;
     case 'service':
       return serviceHref(route.id, route.country);
+    case 'watchlist':
+      return watchlistHref(route.year);
     default:
       return `/${route.page}`;
   }
@@ -200,6 +207,9 @@ export const serviceHref = (id: number, country: string, name?: string) => {
   const named = slug(name);
   return `/service/${id}-${country.toLowerCase()}${named ? `-${named}` : ''}`;
 };
+
+/** The Watchlist page, with Watched showing one year: `/watchlist?year=2019`. */
+export const watchlistHref = (year?: string) => (year ? `/watchlist?year=${year}` : '/watchlist');
 
 /** A title's link, named where the name is known: `/movie/550-fight-club`. */
 export const titleHref = (title: { type: MediaType; id: number; title?: string }) => {

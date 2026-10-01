@@ -8,7 +8,15 @@ import {
   unwatch,
   updateEpisodeProgress,
 } from './actions';
-import { airedEpisodes, seenAired, seenEpisodes, watchedHistory } from './history';
+import {
+  UNKNOWN_YEAR,
+  airedEpisodes,
+  seenAired,
+  seenEpisodes,
+  watchedHistory,
+  watchedView,
+  type WatchedEntry,
+} from './history';
 import type { Title } from './library';
 import type { Row, Stamp } from './wire';
 
@@ -119,5 +127,52 @@ describe('watched history', () => {
       watchedAt: -1,
     };
     expect(watchedHistory([imported], named(movie(1)))[0]?.at).toBe(7000);
+  });
+});
+
+describe('watched years', () => {
+  // Mid-year in the viewer's own calendar, as the page files them, so no time zone moves one across New Year.
+  const inYear = (year: number) => new Date(year, 5, 15).getTime();
+  const entry = (title: Title, when: number): WatchedEntry => ({ title, at: when, episodes: 0 });
+  // Newest first, as `watchedHistory` gives them, with the undated last.
+  const history = [
+    entry(show(10), inYear(2024)),
+    entry(movie(1), inYear(2024)),
+    entry(movie(2), inYear(2019)),
+    entry(show(11), inYear(2012)),
+    entry(movie(3), 0),
+  ];
+
+  it('lists each year with a watch, newest first, its count, and the undated last', () => {
+    const { years, shown } = watchedView(history, null);
+    expect(years).toEqual([
+      { year: '2024', count: 2 },
+      { year: '2019', count: 1 },
+      { year: '2012', count: 1 },
+      { year: UNKNOWN_YEAR, count: 1 },
+    ]);
+    expect(shown).toEqual(history);
+  });
+
+  it('shows one year, and the undated under Unknown rather than nowhere', () => {
+    expect(watchedView(history, null, '2024').shown.map((e) => e.title.id)).toEqual([10, 1]);
+    expect(watchedView(history, null, UNKNOWN_YEAR).shown.map((e) => e.title.id)).toEqual([3]);
+  });
+
+  it('counts and shows within the type tab picked', () => {
+    const series = watchedView(history, 'tv');
+    expect(series.years).toEqual([
+      { year: '2024', count: 1 },
+      { year: '2012', count: 1 },
+    ]);
+    expect(watchedView(history, 'movie', '2024').shown.map((e) => e.title.id)).toEqual([1]);
+    // A year picked under All that this type has nothing in stays listed, at 0, and shows nothing.
+    const none = watchedView(history, 'tv', '2019');
+    expect(none.years.map((y) => [y.year, y.count])).toEqual([
+      ['2024', 1],
+      ['2019', 0],
+      ['2012', 1],
+    ]);
+    expect(none.shown).toEqual([]);
   });
 });

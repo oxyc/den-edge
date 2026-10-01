@@ -1,11 +1,19 @@
 <!-- The library as its own page — the TV's Watchlist tab (WatchlistView), taken further: Continue Watching as the TV
      row builds it, the watchlist under the same three tabs Watched uses, everything watched as one long list, newest first,
-     grouped by month and drawn a screenful at a time as you scroll. -->
+     grouped by month and drawn a screenful at a time as you scroll, or one year of it. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { airedEpisodes, seenAired, type SeenEpisode, type WatchedEntry } from '../lib/history';
+  import {
+    UNKNOWN_YEAR,
+    airedEpisodes,
+    seenAired,
+    watchedView,
+    type SeenEpisode,
+    type WatchedEntry,
+  } from '../lib/history';
   import type { ContinueEntry, MediaType, Shape, Title } from '../lib/library';
   import { titleHref } from '../lib/route';
+  import Select from '../settings/Select.svelte';
   import PosterCard from './PosterCard.svelte';
   import PosterRow from './PosterRow.svelte';
   import TypeFilter from './TypeFilter.svelte';
@@ -14,6 +22,8 @@
     resume,
     saved,
     history,
+    year,
+    onyear,
     shapes,
     seen,
     failure = null,
@@ -24,6 +34,10 @@
     resume: ContinueEntry[];
     saved: Title[];
     history: WatchedEntry[];
+    /** The year Watched shows (`watchedYear`), or undefined for every year. */
+    year?: string;
+    /** Another year picked; undefined for every year. */
+    onyear: (year: string | undefined) => void;
     /** Each series' season layout, by `type:id`, for how many of its episodes have aired. */
     shapes: ReadonlyMap<string, Shape>;
     /** Each series' seen episodes, by `type:id`. */
@@ -62,7 +76,15 @@
   // offer to mark it watched.
   const listed = $derived(saved.filter((t) => !seen.get(key(t))?.length));
   const savedShown = $derived(savedKind ? listed.filter((t) => t.type === savedKind) : listed);
-  const shown = $derived(kind ? history.filter((e) => e.title.type === kind) : history);
+  const view = $derived(watchedView(history, kind, year));
+  const shown = $derived(view.shown);
+  const yearOptions = $derived([
+    { value: '', label: 'All years' },
+    ...view.years.map((y) => ({
+      value: y.year,
+      label: `${y.year === UNKNOWN_YEAR ? 'Unknown' : y.year} (${y.count})`,
+    })),
+  ]);
 
   // Observed again after each step: one step that doesn't reach past the screen — a very wide one — fires nothing
   // more on its own, so the list would stop there.
@@ -277,15 +299,26 @@
   <section aria-label="Watched">
     <div class="heading">
       <h2>Watched <span class="count">{shown.length}</span></h2>
-      <TypeFilter
-        value={kind}
-        onchange={(value) => {
-          kind = value;
-          // A different filter starts the list from its top again.
-          count = STEP;
-        }}
-        label="Show in Watched"
-      />
+      <div class="filters">
+        <TypeFilter
+          value={kind}
+          onchange={(value) => {
+            kind = value;
+            // A different filter starts the list from its top again.
+            count = STEP;
+          }}
+          label="Show in Watched"
+        />
+        <Select
+          label="Year watched"
+          value={year ?? ''}
+          options={yearOptions}
+          onchange={(value) => {
+            count = STEP;
+            onyear(value || undefined);
+          }}
+        />
+      </div>
     </div>
     {#each months as month (month.key)}
       <h3>{month.label}</h3>
@@ -367,6 +400,13 @@
 
   .heading h2 {
     margin: 0;
+  }
+
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
   }
 
   /* Search's grid (SearchResults), so a page of posters looks the same wherever it is. */
