@@ -471,17 +471,41 @@
     color: var(--danger);
   }
 
-  /* A row of round glyphs beside the billboard's own buttons, and the line saying a press didn't save on a
-     row of its own beneath them, legible over the picture. */
+  /* Bare glyphs beside the billboard's own buttons: no ring and no fill, so they don't compete with Play and
+     More. The shadow keeps them legible over a bright frame; the state is the glyph filling in, and a pointer
+     or the keyboard lights up the round target around it. The line saying a press didn't save takes a row of
+     its own beneath them. */
   .compact {
     display: flex;
+    gap: 2px;
     margin-bottom: 0;
   }
 
-  .compact .pill {
+  .compact .pill,
+  .compact .pill.on {
     flex: 0 0 auto;
     width: 48px;
     padding: 0;
+    border-color: transparent;
+    background: none;
+    color: var(--fg);
+    filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
+    transition: background-color 0.15s ease;
+  }
+
+  .compact .pill.on .icon {
+    fill: currentcolor;
+  }
+
+  .compact .pill:focus-visible,
+  .compact .pill:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.16);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .compact .pill {
+      transition: none;
+    }
   }
 
   .compact + .failure {

@@ -130,6 +130,17 @@ test('the Watchlist billboard offers remove and seen, and moves on from either',
     await expect(
       page.getByRole('region', { name: 'Watched', exact: true }).getByText('Movie 1002'),
     ).toBeVisible();
+
+    // A billboard press that didn't save is said once, on its slide, and not again by the page.
+    const failing = await open(browser, '?populated&page=watchlist&failing', {
+      reducedMotion: 'reduce',
+      timezoneId: 'UTC',
+    });
+    const refused = failing.locator('.billboard');
+    await slideButton(refused, 'Remove from watchlist').click();
+    await expect(refused.getByRole('alert')).toHaveText('Couldn’t save that. Nothing changed.');
+    await expect(failing.getByRole('alert')).toHaveCount(1);
+    await expect(slideTitle(refused)).toHaveText('Series 2001');
   } finally {
     await browser.close();
   }

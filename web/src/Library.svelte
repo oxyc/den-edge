@@ -312,6 +312,13 @@
     return log?.title(title);
   };
 
+  /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
+  async function fromSlide(write: Promise<boolean | undefined>) {
+    const saved = await write;
+    failure = null;
+    return saved;
+  }
+
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
     if (!log) return;
@@ -1219,8 +1226,8 @@
         {routes}
         onplay={playHere && ((title) => playHere(title))}
         rowOf={log ? rowOf : undefined}
-        onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
-        onseen={setSeen}
+        onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+        onseen={(title, on) => fromSlide(setSeen(title, on))}
         watchlistPage
       />
     {/if}
@@ -1255,8 +1262,8 @@
       onready={() => (heroReady = true)}
       onplay={playHere && ((title) => playHere(title))}
       rowOf={log ? rowOf : undefined}
-      onwatchlist={(title, on) => act(title, on ? addToWatchlist : removeFromLibrary)}
-      onseen={setSeen}
+      onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+      onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
   {#if !shelvesReady}
