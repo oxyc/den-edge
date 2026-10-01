@@ -306,6 +306,19 @@
     }
   }
 
+  /** A title's row as last read, for the billboard's Watchlist and Seen. */
+  const rowOf = (title: Title) => {
+    void version;
+    return log?.title(title);
+  };
+
+  /** A press on a billboard slide: the slide says when it didn't save, so the page doesn't say it again. */
+  async function fromSlide(write: Promise<boolean | undefined>) {
+    const saved = await write;
+    failure = null;
+    return saved;
+  }
+
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
     if (!log) return;
@@ -376,7 +389,7 @@
           session.shapes.get(titleKey(title)) ?? (await fetchDetails(title, tmdbKey))?.shape;
         if (!shape) {
           failure = 'Couldn’t load the episodes. Nothing was marked Seen.';
-          return;
+          return false;
         }
         const journals: SettingsRow[] = [];
         clock.see(log.newestStamp());
@@ -412,9 +425,9 @@
         } finally {
           busy = false;
         }
-        return;
+        return failure === null;
       }
-      await act(title, seen ? markWatched : unwatch);
+      return await act(title, seen ? markWatched : unwatch);
     } catch {
       failure = SAVE_FAILED;
       return false;
@@ -923,8 +936,8 @@
    */
   const memberPost = memberPostOn();
   const fresh = freshOn();
-  /** The slide on screen, as an index into the titles the billboard draws. */
-  let slideShown = $state(0);
+  /** The title on the billboard's screen, which a new ranking leaves in place. */
+  let slideShown = $state<Title>();
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for atlas and TMDB, and the page shouldn't. With the member switch on, only atlas's ranking for this library
   // opens it, and only while it is under a day old; otherwise the shared billboard does.
@@ -1023,7 +1036,7 @@
         const known = new Map(featured.map((title) => [titleKey(title), title] as const));
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
-        featured = swapAfter(featured, featured.filter(featuredShown)[slideShown], picked);
+        featured = swapAfter(featured, slideShown, picked);
         void opened?.keep(keptPersonal(type), { at: Date.now(), titles: picked }).catch(warnKeep);
       })
       .catch(() => buildTrending(run));
@@ -1212,6 +1225,10 @@
         {reel}
         {routes}
         onplay={playHere && ((title) => playHere(title))}
+        rowOf={log ? rowOf : undefined}
+        onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+        onseen={(title, on) => fromSlide(setSeen(title, on))}
+        watchlistPage
       />
     {/if}
     <WatchlistScreen.current
@@ -1238,12 +1255,15 @@
     <Billboard
       active={active && !playing}
       titles={featured.filter(featuredShown)}
-      bind:index={slideShown}
+      bind:showing={slideShown}
       {tmdbKey}
       {reel}
       {routes}
       onready={() => (heroReady = true)}
       onplay={playHere && ((title) => playHere(title))}
+      rowOf={log ? rowOf : undefined}
+      onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}
+      onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
   {#if !shelvesReady}
