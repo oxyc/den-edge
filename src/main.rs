@@ -8,6 +8,7 @@ mod billboard;
 mod cache;
 mod grants;
 mod handler;
+mod hold;
 mod home;
 mod inbox;
 mod library;
@@ -41,6 +42,10 @@ pub struct AppState {
     /// A short-held registry of independently locked record logs. One household's batch remains atomic without
     /// making its disk I/O or snapshot selection block another household.
     pub libraries: library::Libraries,
+    /// `/changes?wait=` requests waiting for a write to their library.
+    pub library_holds: hold::Holds,
+    /// `POST /inbox/drain?wait=` requests waiting for a message in one of their queues.
+    pub inbox_holds: hold::Holds,
     /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
     /// migrates none, so startup work is independent of library history length.
     pub(crate) library_v3: Arc<library::v3::StoreManager>,
@@ -252,6 +257,8 @@ impl AppState {
             store,
             write_lock: tokio::sync::Mutex::new(()),
             libraries: library::Libraries::default(),
+            library_holds: hold::Holds::new(library::MAX_HELD, library::MAX_HELD_PER_LIBRARY),
+            inbox_holds: hold::Holds::new(inbox::MAX_HELD, inbox::MAX_HELD_PER_ADDRESS),
             library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),

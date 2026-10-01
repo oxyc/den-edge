@@ -57,6 +57,23 @@ generation. Concurrent hits clone immutable `Bytes` references rather than the b
 prepared-page lock across its transaction and invalidation, so a pre-commit read cannot publish stale bytes after a
 commit. This is per-library only; it creates no cross-library writer or cache lock.
 
+## Held reads
+
+`GET /lib/{id}/changes?since=N&wait=S` lets a client that is up to date hear of the next write at once instead of at
+its next poll (`src/hold.rs`). It is held only when nothing is after `since`: `since` equals the head and the
+`x-den-generation` the client sent, if any, is the current one. Otherwise — rows to read, a `since` past the head, a
+generation it did not read in — it is answered at once, exactly as without `wait`. A held request answers when a
+batch applies a row, a rewrite commits (new rows and a new generation) or the library is deleted, or after S seconds
+(at most 25) with the usual empty page. Only a GET is held.
+
+- The wait is registered before the head is read, so a write committing between that read and the wait still wakes
+  it. A write wakes only its own library's waiters; nothing polls or scans.
+- While it waits, a request holds neither the library's lock, its open database nor its admission slot
+  (`handler::AdmissionSlot`): writes, compaction and deletion go ahead, and the answer is read afresh. If no
+  admission slot is free when it wakes it is answered `503 server_busy`.
+- At most 4 held requests per library and 16 in all; past either a request is answered at once. Compaction changes
+  nothing a reader sees, so it wakes nobody.
+
 ## Wire minimum 4 (den-spec `wire/library-v4.md` §13)
 
 The store format is unchanged; v4 is a client wire format whose rows are whole documents. den-edge still interprets

@@ -90,7 +90,7 @@ impl PreparedPublicJson {
     }
 }
 
-pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
+pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
     let started = Instant::now();
     // In the answer and in the log line, so a device's report can be matched to this request.
     let rid = crate::hex(&crate::random_bytes::<8>());
@@ -99,20 +99,25 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     let library_request = req.uri().path().starts_with("/lib/");
     let origin = allowed_origin(&state, &req);
     let bulk = !is_control(route);
-    let admission = admit(&state, bulk).await;
+    let admission = admit(&state, bulk)
+        .await
+        .map(|admission| AdmissionSlot { admission: Arc::new(std::sync::Mutex::new(Some(admission))), bulk });
     if admission.is_err() {
         state.metrics.request_refused(bulk);
     }
     let mut resp = match admission.as_ref() {
-        Err(()) => retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("server_busy"), 1_000),
-        Ok(_) => match &origin {
+        Err(()) => busy(),
+        Ok(slot) => match &origin {
             Some(_)
                 if method == Method::OPTIONS
                     && req.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) =>
             {
                 preflight()
             }
-            _ => dispatch(&state, req, route, &rid).await,
+            _ => {
+                req.extensions_mut().insert(slot.clone());
+                dispatch(&state, req, route, &rid).await
+            }
         },
     };
     if method == Method::HEAD {
@@ -157,10 +162,51 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
         let ms = started.elapsed().as_millis();
         eprintln!("{}", log_line(&method, route, status, ms, &rid, &tags));
     }
-    if let Ok(admission) = admission {
-        resp = resp.map(|body| Body::new(Admitted { body, admission: Some(admission) }));
+    if let Ok(slot) = admission {
+        let admission = crate::lock(&slot.admission).take();
+        resp = resp.map(|body| Body::new(Admitted { body, admission }));
     }
     resp
+}
+
+pub(crate) fn busy() -> Response {
+    retry_after(StatusCode::SERVICE_UNAVAILABLE, &error("server_busy"), 1_000)
+}
+
+/// A request's admission, shared with its handler (a request extension) so a held request (`hold.rs`) gives it back
+/// while it only waits and takes it again before it answers: a waiting request holds no slot of `REQUESTS`.
+#[derive(Clone)]
+pub(crate) struct AdmissionSlot {
+    admission: Arc<std::sync::Mutex<Option<Admission>>>,
+    bulk: bool,
+}
+
+impl AdmissionSlot {
+    /// Run `wait` without this request's admission, then admit it again. False when no slot came free; the request
+    /// is then answered `server_busy`, as one that never got in is. Without a slot — a handler called directly —
+    /// it only waits.
+    pub(crate) async fn wait_out(
+        slot: Option<&Self>,
+        state: &AppState,
+        wait: impl std::future::Future<Output = ()>,
+    ) -> bool {
+        let Some(slot) = slot else {
+            wait.await;
+            return true;
+        };
+        drop(crate::lock(&slot.admission).take());
+        wait.await;
+        match admit(state, slot.bulk).await {
+            Ok(admission) => {
+                *crate::lock(&slot.admission) = Some(admission);
+                true
+            }
+            Err(()) => {
+                state.metrics.request_refused(slot.bulk);
+                false
+            }
+        }
+    }
 }
 
 struct Admission {
