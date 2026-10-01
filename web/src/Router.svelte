@@ -38,6 +38,8 @@
     ]);
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Frozen DOM cache is outside Svelte rendering and must not create reactive dependencies.
     const snapshots = new Map<string, PageSnapshot>();
+    /** The page just left, whose snapshot the next update takes (`follow`). */
+    let unsaved: string | null = null;
     let swiping = false;
     let stopLoading = () => {};
     function watchLoading(snapshot: PageSnapshot | null, ticket: number) {
@@ -179,13 +181,12 @@
         swiping = false;
       }
       // Loading covers may depict a different route. Never save that cover as this page's history.
-      const captured = capturePage();
-      const outgoing = loadingSnapshot ?? captured;
+      const cover = loadingSnapshot;
       stopLoading();
       loadingSnapshot = null;
       if (!restoring) {
         navigation.save(window.scrollX, window.scrollY);
-        if (captured) snapshots.set(current.key, captured);
+        unsaved = current.key;
       }
       restoring = true;
       if (push && address() !== path) {
@@ -208,7 +209,16 @@
       const ticket = ++revision;
       transition?.skipTransition();
       const update = async () => {
+        // The page being left is measured here rather than in the tap that left it, which it held up by tens
+        // of milliseconds on a phone. It is still the page on screen: no update has changed it yet, including
+        // one a quicker navigation has overtaken, which is why that one measures it too before giving way.
+        const captured = capturePage();
+        if (unsaved !== null) {
+          if (captured) snapshots.set(unsaved, captured);
+          unsaved = null;
+        }
         if (ticket !== revision) return;
+        const outgoing = cover ?? captured;
         current = navigation.visit(path, visitKey);
         // Selecting a detail is a new visit; history traversal restores the saved position.
         // Top-level tabs still retain their browsing position when selected explicitly.
