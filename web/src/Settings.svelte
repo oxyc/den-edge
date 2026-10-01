@@ -80,13 +80,16 @@
   const devices = $derived(readDevices(devicesRow));
   const disabled = $derived(!log || saving);
 
-  /** Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. */
-  async function removeLibraryDevice(id: string): Promise<void> {
-    if (!log) return;
+  /**
+   * Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. False when
+   * the device's entry wasn't removed.
+   */
+  async function removeLibraryDevice(id: string): Promise<boolean> {
+    if (!log) return false;
     console.info('den: removing device from the library list', { device: id });
     if (!(await write('devices', forgetDevice(id)))) {
       console.warn('den: device removal was not saved', { device: id });
-      return;
+      return false;
     }
     const suffix = `:${id}`;
     for (const row of log.rows()) {
@@ -98,11 +101,12 @@
           device: id,
           handoff: row.name,
         });
-        return;
+        return true;
       }
     }
     const removed = !readDevices(log.settings('devices')).some((device) => device.id === id);
     console.info('den: device removal completed', { device: id, removed });
+    return true;
   }
 
   // What Den's own addons credit, read from their manifests (den-spec attribution-v1). A browser asks only Den's own

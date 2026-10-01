@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Link, Shared } from '../lib/links.svelte';
 import type { DeviceEntry } from './values';
-import { linkedDeviceRows, syncedDeviceRows } from './linkedDevices';
+import { deviceStatus, libraryName, linkedDeviceRows, syncedDeviceRows } from './linkedDevices';
 
 const device = (id: string, name: string, kind: 'tv' | 'browser', seen = 10): DeviceEntry => ({
   id,
@@ -127,5 +127,53 @@ describe('linked device presentation', () => {
       'shared:first:phone-1',
       'shared:second:phone-1',
     ]);
+  });
+});
+
+describe('device status line', () => {
+  const day = (at: number) => `day ${at}`;
+  const statusOf = (
+    devices: DeviceEntry[],
+    records: Shared[] = [],
+    selfId = 'self',
+    current = 'current',
+  ) =>
+    syncedDeviceRows(devices, [], records, current).map((row) =>
+      deviceStatus(row, selfId, current, day),
+    );
+
+  it('says what a listed device is and when it was seen, this browser by name', () => {
+    expect(
+      statusOf([
+        device('self', 'Mac', 'browser', 9),
+        device('tv-1', 'Living Room', 'tv', 7),
+        device('phone-1', 'Phone', 'browser', 0),
+      ]),
+    ).toEqual(['This browser · seen day 9', 'Apple TV · seen day 7', 'Browser']);
+  });
+
+  it('says nothing of the record of giving it the library once the device lists itself', () => {
+    expect(
+      statusOf(
+        [device('phone-1', 'Phone', 'browser', 9)],
+        [shared('Phone', 'current', 5, 'phone-1')],
+      ),
+    ).toEqual(['Browser · seen day 9']);
+  });
+
+  it('dates a device given the library that has not listed itself, naming another library as such', () => {
+    expect(
+      statusOf(
+        [],
+        [shared('Phone', 'current', 5), shared('Laptop', 'other', 6), shared('Old', undefined, 7)],
+      ),
+    ).toEqual(['added day 5', 'added to another library day 6', 'added day 7']);
+  });
+});
+
+describe('saved library name', () => {
+  it('calls the open library "Your library" and any other "Another library", never the TV it came through', () => {
+    expect(libraryName(link('inbox-1', 'Apple TV', 'current'), 'current')).toBe('Your library');
+    expect(libraryName(link('inbox-2', 'Apple TV', 'other'), 'current')).toBe('Another library');
   });
 });

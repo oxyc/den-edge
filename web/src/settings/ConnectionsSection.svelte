@@ -9,7 +9,12 @@
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
-  import { syncedDeviceRows } from './linkedDevices';
+  import {
+    deviceStatus,
+    libraryName,
+    syncedDeviceRows,
+    type LinkedDeviceRow,
+  } from './linkedDevices';
   import { fetchSimklClientId, pollToken, requestPin, type SimklPin } from './simkl';
   import { parsePublicKey, type DeviceEntry } from './values';
   import { thisDevice } from '../lib/device.svelte';
@@ -57,7 +62,8 @@
     selfId: string;
     disabled: boolean;
     write: (group: string, changes: Changes) => Promise<boolean>;
-    removeDevice: (id: string) => Promise<void>;
+    /** False when the device's entry wasn't removed. */
+    removeDevice: (id: string) => Promise<boolean>;
     /**
      * For a browser using its own library: moves that library into the one `libraryKey` opens, before the browser
      * links to it, so what was saved here goes along. False when it couldn't.
@@ -492,34 +498,14 @@
     };
   });
 
-  const deviceStatus = (row: (typeof listedDevices)[number]): string => {
-    const status: string[] = [];
-    if (row.device) {
-      status.push(
-        row.device.id === selfId
-          ? 'This browser'
-          : row.device.kind === 'tv'
-            ? 'Apple TV'
-            : 'Browser',
-      );
-      if (row.device.seen) status.push(`seen ${day(row.device.seen)}`);
-    }
-    for (const shared of row.shared) {
-      const relation =
-        shared.libraryKey === link?.libraryKey
-          ? 'given this library'
-          : shared.libraryKey
-            ? 'given another library'
-            : 'library handed off';
-      status.push(`${relation} ${day(shared.at)}`);
-    }
-    return status.join(' · ');
-  };
-
-  const libraryLinkStatus = (linked: Link): string => {
-    const status = linked.inboxKey === link?.inboxKey ? 'Currently open' : 'Saved link';
-    return `${status}${linked.linkedAt ? ` · linked ${day(linked.linkedAt)}` : ''}`;
-  };
+  /**
+   * One step for the viewer: the device's entry in the library's list, then this browser's own record of giving it the
+   * library. Neither takes the library away from it; only a new library key does.
+   */
+  async function removeRow(row: LinkedDeviceRow) {
+    if (row.device && !(await removeDevice(row.device.id))) return;
+    for (const shared of row.shared) links.forgetShared(shared);
+  }
 </script>
 
 {#snippet icon(kind: string)}
@@ -796,6 +782,7 @@
   <SettingRow
     id="linked-devices"
     label="Linked devices"
+    detail="Your devices, your library, and joining another"
     value={listedDevices.length
       ? `${listedDevices.length} device${listedDevices.length === 1 ? '' : 's'}`
       : 'None'}
@@ -806,73 +793,110 @@
         {#each listedDevices as row (row.id)}
           <li class="line">
             {@render icon(deviceIcon(row))}
-            <span class="label">{row.name}<small>{deviceStatus(row)}</small></span>
-            {#if row.device && row.device.id !== selfId}
+            <span class="label"
+              >{row.name}<small>{deviceStatus(row, selfId, link?.libraryKey, day)}</small></span
+            >
+            {#if row.device?.id === selfId}
+              <button type="button" class="quiet" disabled>This device</button>
+            {:else}
               <Confirm
-                label="Remove from list"
-                ariaLabel="Remove {row.name} from list"
-                question="Remove {row.name} from the list?"
-                detail="It still holds your library’s key, and lists itself again the next time it opens your library. To shut it out, reset the library key on your Apple TV."
-                confirmLabel="Remove"
-                {disabled}
-                onconfirm={() => void removeDevice(row.device!.id)}
+                label="Remove"
+                ariaLabel="Remove {row.name}"
+                question="Remove {row.name} from this list?"
+                detail="It can still use your library, and shows up again the next time it opens it."
+                disabled={!!row.device && disabled}
+                onconfirm={() => void removeRow(row)}
               />
             {/if}
-            {#each row.shared as shared (shared.name + shared.at)}
-              <button
-                type="button"
-                class="quiet"
-                aria-label="Forget {row.name}"
-                onclick={() => links.forgetShared(shared)}>Forget</button
-              >
-            {/each}
           </li>
         {/each}
       </ul>
     {:else}
-      <p class="status">None listed yet: a device lists itself when it next opens your library.</p>
+      <p class="status">None yet: a device shows up here when it next opens your library.</p>
     {/if}
-    {#if listedDevices.some((row) => row.shared.length)}
-      <p class="foot">
-        Forgetting a handoff only stops listing it here — the device keeps the library key it was
-        given.
-      </p>
-    {/if}
+    <p class="foot">
+      To cut a device off, reset the library key on your Apple TV under Settings › Linked devices.
+    </p>
 
     {#if links.list.length}
-      <h3>Libraries this browser opens</h3>
+      <h3>Your library</h3>
       <ul class="list">
         {#each links.list as linked (linked.inboxKey)}
           {@const current = linked.inboxKey === link?.inboxKey}
           <li class="line">
-            {@render icon('tv')}
             <span class="label"
-              >{linked.name ?? 'Apple TV library'}<small>{libraryLinkStatus(linked)}</small></span
+              >{libraryName(linked, link?.libraryKey)}<small
+                >{current
+                  ? 'Open on this browser'
+                  : `Saved on this browser${linked.name ? ` · joined through ${linked.name}` : ''}`}</small
+              ></span
             >
-            <Confirm
-              label={current ? 'Stop using this library' : 'Forget link'}
-              ariaLabel={current
-                ? `Stop using ${linked.name ?? 'this Apple TV'}’s library`
-                : `Forget the link to ${linked.name ?? 'this Apple TV'}`}
-              question={current
-                ? `Stop using ${linked.name ?? 'this Apple TV'}’s library in this browser?`
-                : `Forget the link to ${linked.name ?? 'this Apple TV'}?`}
-              detail={current
-                ? 'This browser will no longer open this library. The Apple TV and its other linked devices keep running.'
-                : 'This browser forgets the saved link. The Apple TV and its other linked devices keep running.'}
-              confirmLabel={current ? 'Stop using library' : 'Forget link'}
-              onconfirm={() => unlink(linked)}
-            />
+            {#if current}
+              <Confirm
+                label="Sign out on this browser"
+                question="Sign out of your library on this browser?"
+                detail="Your other devices keep it, and you can join it again with a code."
+                confirmLabel="Sign out"
+                onconfirm={() => unlink(linked)}
+              />
+            {:else}
+              <Confirm
+                label="Remove"
+                ariaLabel="Remove the library joined through {linked.name ?? 'another device'}"
+                question="Remove this library from this browser?"
+                detail="Your other devices keep it."
+                onconfirm={() => unlink(linked)}
+              />
+            {/if}
           </li>
         {/each}
       </ul>
-      <p class="foot">
-        These are this browser’s saved ways into libraries. A linked date is when access was paired,
-        not when an Apple TV was last seen, and it does not affect Library v3 readiness.
-      </p>
+      <p class="foot">Signing out only affects this browser.</p>
     {/if}
 
-    <h3 id="this-device-label">This browser</h3>
+    <h3 id="join-library-label">{link ? 'Join another library' : 'Link your Apple TV'}</h3>
+    <form
+      class="form"
+      onsubmit={(event) => {
+        event.preventDefault();
+      }}
+    >
+      <input
+        id="join-library-code"
+        class="field mono"
+        autocomplete="off"
+        spellcheck="false"
+        autocapitalize="characters"
+        placeholder="ABCD-EFGH-JKLM"
+        aria-labelledby="join-library-label"
+        value={joinCode}
+        oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
+      />
+      <Confirm
+        label={joining ? 'Waiting…' : link ? 'Join' : 'Link'}
+        question={link ? 'Switch this browser to that library?' : 'Link this browser to that TV?'}
+        detail={link
+          ? 'Your current library stays listed under Your library.'
+          : 'What you’ve saved here moves into that TV’s library, and this browser uses that library from then on.'}
+        confirmLabel={link ? 'Join' : 'Link'}
+        tone="primary"
+        disabled={joining || !parseCode(joinCode)}
+        onconfirm={() => void joinLibrary()}
+      />
+    </form>
+    {#if joining}<p class="status" role="status">Waiting for the TV to allow this browser…</p>{/if}
+    {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
+    <p class="foot">
+      {#if link}
+        Get the code on a device already in that library: in Den under Settings › Linked devices ›
+        Get a code, or on its Apple TV under Settings › Linked devices.
+      {:else}
+        To keep what’s here in your TV’s library, get a code on your Apple TV under Settings ›
+        Linked devices and type it here.
+      {/if}
+    </p>
+
+    <h3 id="this-device-label">Name of this device</h3>
     <input
       id="this-device"
       class="field"
@@ -883,10 +907,7 @@
       maxlength="40"
       aria-labelledby="this-device-label"
     />
-    <p class="foot">
-      This device only · What another device asks to allow, and lists this one under. Two phones of
-      the same make guess the same name, so give this one its own.
-    </p>
+    <p class="foot">Your other devices show this name, so give it its own if two look alike.</p>
 
     <!-- A browser's own library is kept only here: another device given its key would find nothing on den-edge. -->
     {#if link}
@@ -931,50 +952,6 @@
         the TV.
       </p>
     {/if}
-
-    <h3 id="join-library-label">{link ? 'Join another TV’s library' : 'Link your Apple TV'}</h3>
-    <form
-      class="form"
-      onsubmit={(event) => {
-        event.preventDefault();
-      }}
-    >
-      <input
-        id="join-library-code"
-        class="field mono"
-        autocomplete="off"
-        spellcheck="false"
-        autocapitalize="characters"
-        placeholder="ABCD-EFGH-JKLM"
-        aria-labelledby="join-library-label"
-        value={joinCode}
-        oninput={(event) => (joinCode = formatCode(event.currentTarget.value).text)}
-      />
-      <Confirm
-        label={joining ? 'Waiting…' : link ? 'Join' : 'Link'}
-        question={link
-          ? 'Switch this browser to that TV’s library?'
-          : 'Link this browser to that TV?'}
-        detail={link
-          ? 'The TV you’re linked to now stays in your list until you unlink it.'
-          : 'What you’ve saved here moves into that TV’s library, and this browser uses that library from then on.'}
-        confirmLabel={link ? 'Join' : 'Link'}
-        tone="primary"
-        disabled={joining || !parseCode(joinCode)}
-        onconfirm={() => void joinLibrary()}
-      />
-    </form>
-    {#if joining}<p class="status" role="status">Waiting for the TV to allow this browser…</p>{/if}
-    {#if joinProblem}<p class="status bad" role="alert">{joinProblem}</p>{/if}
-    <p class="foot">
-      {#if link}
-        On the other Apple TV, open Settings › Linked devices and get a code, then type it here.
-        Resetting the library key is on your Apple TV, under Settings › Linked devices.
-      {:else}
-        Everything here is saved in this browser. On your Apple TV, open Settings › Linked devices
-        and get a code, then type it here to keep it in your TV’s library instead.
-      {/if}
-    </p>
   </SettingRow>
 </SettingsSection>
 
