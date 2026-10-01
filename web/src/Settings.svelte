@@ -317,7 +317,9 @@
       </p>
     {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
-    {#if log && devices.length && switchState}
+    <!-- Not for a library kept only in this browser (`session.local`): the switch rewrites a library on den-edge, and
+         this one has none there. Its rows take the form of the library they join when a TV is linked (`moveTo`). -->
+    {#if log && devices.length && switchState && !session.local}
       <section class="banner" aria-label="Library v3">
         <strong>Library v3</strong>
         {#if log.wireMinimum >= 3}
