@@ -1,8 +1,7 @@
 //! Transactional library-v3 storage: one independently writable redb database per library.
 
 use super::{
-    constant_time_eq, row_bytes, row_fragment, valid_hex_id, LIBRARY_OVERHEAD, MAX_LIMIT, MAX_ROWS,
-    MAX_VALUE, MAX_WRITES, PAGE_BYTES,
+    constant_time_eq, row_fragment, valid_hex_id, MAX_LIMIT, MAX_ROWS, MAX_VALUE, MAX_WRITES, PAGE_BYTES,
 };
 use axum::body::Bytes;
 use redb::backends::FileBackend;
@@ -17,10 +16,23 @@ use std::io;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::sync::{OnceLock, Weak};
 
 const FORMAT_VERSION: u64 = 3;
+/// `metadata-u64-v3["charge"]`: how `charges-v3` and `live-bytes` are counted. Absent (stores written before it
+/// existed) is v2's in-memory formula `2(k + v) + fragment + 192` plus a 512-byte base, which overstated a v3
+/// library about threefold; `CHARGE_STORED` is the stored bytes, `k + v`. Opening an older store recounts it once.
+const CHARGE_STORED: u64 = 2;
+/// How often one library's file is measured for compaction, and so the most often it is compacted.
+const COMPACT_INTERVAL_MS: u64 = 60 * 60 * 1000;
+/// Free space smaller than this is not worth rewriting the file for. A new store is ~1 MiB of file (redb's first
+/// region), nearly all of it free, so a ratio alone would compact every new library on its first write.
+const COMPACT_MIN_FREE: u64 = 2 << 20;
+/// Heap one compaction holds beyond its open database's charge. Measured with a counting allocator on redb 4.3.0 at
+/// this cache size: ~260 KB for a 13.7 MB household-sized file, ~1.04 MB for a 67 MB file with 34 MB of rows, which
+/// is the per-file cap. Compactions run one at a time in the process, so one reservation bounds them all.
+const COMPACTION_BYTES: usize = 1536 * 1024;
 pub(super) const DATABASE_CACHE_BYTES: usize = 64 * 1024;
 const DATABASE_HANDLE_BYTES: usize = 112 * 1024;
 const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
@@ -28,14 +40,25 @@ const PREPARED_PAGE_BYTES: usize = PAGE_BYTES + 64 * 1024;
 pub(crate) const OPEN_DATABASE_BYTES: usize = DATABASE_HANDLE_BYTES + PREPARED_PAGE_BYTES;
 const RETAINED_DATABASES: usize = 2;
 const KEYS: TableDefinition<&str, u64> = TableDefinition::new("keys-v3");
-/// The exact v2-compatible memory charge of each live row. Keeping this beside the key index lets a write enforce
-/// the library's semantic bound (`Limits::stored_bytes`) without parsing canonical JSON or confusing redb's cache
-/// with live data.
+/// Each live row's charge, `stored_charge`. Keeping this beside the key index lets a write enforce the library's
+/// bound (`Limits::stored_bytes`) without parsing canonical JSON or confusing redb's cache with live data.
 const CHARGES: TableDefinition<&str, u64> = TableDefinition::new("charges-v3");
 const SEQUENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("sequence-v3");
 const META_U64: TableDefinition<&str, u64> = TableDefinition::new("metadata-u64-v3");
 const META_BYTES: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata-bytes-v3");
 type Credentials = ([u8; 32], Option<[u8; 32]>);
+
+/// What one live row of a v3 library counts against `Limits::stored_bytes`: the bytes its client stored, key and
+/// sealed value. The canonical fragment and indexes around them are the store's overhead, not the library's.
+pub(super) fn stored_charge(key: &str, value: &str) -> u64 {
+    (key.len() + value.len()) as u64
+}
+
+/// One compaction at a time in the process: `COMPACTION_BYTES` is reserved once, not per library.
+fn compaction_turn() -> &'static Mutex<()> {
+    static TURN: OnceLock<Mutex<()>> = OnceLock::new();
+    TURN.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug)]
 pub(crate) enum StoreError {
@@ -151,6 +174,10 @@ pub(super) trait LibraryStore: Send + Sync {
         wire_min: u64,
         live_cap: usize,
     ) -> Result<Protocol, StoreError>;
+    /// Compact the file when more than half of it (and at least `COMPACT_MIN_FREE`) is free pages, measuring at
+    /// most once per `COMPACT_INTERVAL_MS` per open library. The caller holds the library's lock and has checked
+    /// that no rewrite is staged. Returns the file's length before and after when it compacted.
+    fn compact_if_sparse(&self, now: u64) -> Result<Option<(u64, u64)>, StoreError>;
 }
 
 /// Aggregate disk reservation shared by every v3 database. File growth is reserved atomically before redb may
@@ -264,17 +291,33 @@ struct RedbLibrary {
     // returns, which leaves a small window where the weak process registry says no owner remains but redb still
     // holds the file lock. A cold/high-cardinality workload can otherwise reopen in that window and spuriously
     // return an internal error.
-    database: Option<Database>,
+    //
+    // Every transaction runs under a read guard; `Database::compact` needs the database to itself, so compaction
+    // takes the write guard and no transaction is open while it runs.
+    database: RwLock<Option<Database>>,
     path: PathBuf,
     token_hash: [u8; 32],
     member_hash: Mutex<Option<[u8; 32]>>,
     prepared: Mutex<Option<PreparedPage>>,
+    /// When this handle last measured its file for compaction (`now` of the caller's clock); 0 is never.
+    compaction_checked: AtomicU64,
+}
+
+/// A read guard that derefs to the open database. Hold it for as long as any transaction begun from it lives.
+struct DatabaseRef<'a>(RwLockReadGuard<'a, Option<Database>>);
+
+impl std::ops::Deref for DatabaseRef<'_> {
+    type Target = Database;
+
+    fn deref(&self) -> &Database {
+        self.0.as_ref().expect("a live library owns its database")
+    }
 }
 
 impl Drop for RedbLibrary {
     fn drop(&mut self) {
         let _lifecycle = database_lifecycle().lock().unwrap();
-        drop(self.database.take());
+        drop(self.database.get_mut().unwrap().take());
         let mut databases = process_databases().lock().unwrap();
         if databases.get(&self.path).is_some_and(|database| database.strong_count() == 0) {
             databases.remove(&self.path);
@@ -323,6 +366,51 @@ fn shared_or_open(
         databases.insert(path.to_owned(), Arc::downgrade(&store));
         return Ok(store);
     }
+}
+
+/// Recount a store charged by an older formula as stored bytes, once, in the transaction that opens it. Each row's
+/// value is read back from its canonical fragment; the key index names every live row.
+fn recharge(transaction: &redb::WriteTransaction) -> Result<(), StoreError> {
+    #[derive(Deserialize)]
+    struct Fragment {
+        k: String,
+        v: String,
+    }
+
+    let charged = transaction
+        .open_table(META_U64)
+        .map_err(StoreError::redb)?
+        .get("charge")
+        .map_err(StoreError::redb)?
+        .map(|value| value.value());
+    if charged == Some(CHARGE_STORED) {
+        return Ok(());
+    }
+    let mut live_bytes = 0u64;
+    {
+        let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
+        let sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+        let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
+        for entry in keys.iter().map_err(StoreError::redb)? {
+            let (key, seq) = entry.map_err(StoreError::redb)?;
+            let fragment = sequence
+                .get(seq.value())
+                .map_err(StoreError::redb)?
+                .ok_or_else(|| StoreError::Invalid("v3 key points to no fragment".into()))?;
+            let row: Fragment = serde_json::from_slice(fragment.value())
+                .map_err(|error| StoreError::Invalid(format!("v3 fragment is not a row: {error}")))?;
+            if row.k != key.value() {
+                return Err(StoreError::Invalid("v3 key and fragment disagree".into()));
+            }
+            let charge = stored_charge(&row.k, &row.v);
+            charges.insert(key.value(), charge).map_err(StoreError::redb)?;
+            live_bytes += charge;
+        }
+    }
+    let mut numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
+    numbers.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
+    numbers.insert("charge", CHARGE_STORED).map_err(StoreError::redb)?;
+    Ok(())
 }
 
 impl RedbLibrary {
@@ -379,6 +467,7 @@ impl RedbLibrary {
                     bytes.insert("generation", generation.as_bytes()).map_err(StoreError::redb)?;
                 }
             }
+            recharge(&transaction)?;
             transaction.commit().map_err(StoreError::redb)?;
         } else {
             member_hash = initial_member_hash;
@@ -387,6 +476,8 @@ impl RedbLibrary {
                 numbers.insert("format", FORMAT_VERSION).map_err(StoreError::redb)?;
                 numbers.insert("head", 0).map_err(StoreError::redb)?;
                 numbers.insert("wire-min", 2).map_err(StoreError::redb)?;
+                numbers.insert("charge", CHARGE_STORED).map_err(StoreError::redb)?;
+                numbers.insert("live-bytes", 0).map_err(StoreError::redb)?;
                 let mut bytes = transaction.open_table(META_BYTES).map_err(StoreError::redb)?;
                 bytes.insert("token", token_hash.as_slice()).map_err(StoreError::redb)?;
                 let generation = crate::hex(&crate::random_bytes::<16>());
@@ -401,11 +492,12 @@ impl RedbLibrary {
             transaction.commit().map_err(StoreError::redb)?;
         }
         Ok(Self {
-            database: Some(database),
+            database: RwLock::new(Some(database)),
             path: path.to_owned(),
             token_hash,
             member_hash: Mutex::new(member_hash),
             prepared: Mutex::new(None),
+            compaction_checked: AtomicU64::new(0),
         })
     }
 
@@ -424,7 +516,8 @@ impl RedbLibrary {
         }
         let generation = if restored { crate::hex(&crate::random_bytes::<16>()) } else { current.generation };
         let wire_min = current.wire_min.max(remembered_min);
-        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
         transaction
             .open_table(META_U64)
             .map_err(StoreError::redb)?
@@ -448,8 +541,37 @@ impl RedbLibrary {
         constant_time_eq(&self.token_hash, token_hash)
     }
 
-    fn database(&self) -> &Database {
-        self.database.as_ref().expect("a live library owns its database")
+    fn database(&self) -> DatabaseRef<'_> {
+        DatabaseRef(self.database.read().unwrap())
+    }
+
+    /// Claim this handle's hourly measurement and report whether more than half the file, and at least
+    /// `COMPACT_MIN_FREE`, is free pages. redb's own page count is exact and cheap (measured 2–18 ms, under 60 KB,
+    /// from a 13.7 MB to a 67 MB file); the live-byte charge is not a usable proxy, because a freshly compacted file
+    /// is 1.5–1.9 times its stored bytes and would sit right at the threshold.
+    fn sparse(&self, now: u64) -> Result<bool, StoreError> {
+        let checked = self.compaction_checked.load(Ordering::Relaxed);
+        if checked != 0 && now.saturating_sub(checked) < COMPACT_INTERVAL_MS {
+            return Ok(false);
+        }
+        self.compaction_checked.store(now.max(1), Ordering::Relaxed);
+        let database = self.database();
+        let file = std::fs::metadata(&self.path).map_err(StoreError::io)?.len();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
+        let stats = transaction.stats().map_err(StoreError::redb)?;
+        transaction.abort().map_err(StoreError::redb)?;
+        let free = file.saturating_sub(stats.allocated_pages() * stats.page_size() as u64);
+        Ok(free > file / 2 && free >= COMPACT_MIN_FREE)
+    }
+
+    /// Rewrite the file without its free pages, holding the database to itself, and return its length before and
+    /// after. Content, head and generation are unchanged, so a prepared identity page stays valid.
+    fn compact(&self) -> Result<(u64, u64), StoreError> {
+        let mut database = self.database.write().unwrap();
+        let before = std::fs::metadata(&self.path).map_err(StoreError::io)?.len();
+        database.as_mut().expect("a live library owns its database").compact().map_err(StoreError::redb)?;
+        let after = std::fs::metadata(&self.path).map_err(StoreError::io)?.len();
+        Ok((before, after))
     }
 }
 
@@ -473,7 +595,8 @@ impl LibraryStore for RedbLibrary {
         // Keep prepared-page publication ordered with commits. Without this per-library lock, a read begun before
         // the commit could publish its stale page after the writer invalidated the old cache entry.
         let mut prepared = self.prepared.lock().unwrap();
-        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
         let mut head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -492,10 +615,8 @@ impl LibraryStore for RedbLibrary {
         let mut accepted_new_rows = 0u64;
         let mut live_bytes = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-            let bytes = metadata
-                .get("live-bytes")
-                .map_err(StoreError::redb)?
-                .map_or(LIBRARY_OVERHEAD as u64, |value| value.value());
+            let bytes =
+                metadata.get("live-bytes").map_err(StoreError::redb)?.map_or(0, |value| value.value());
             bytes
         };
         {
@@ -524,8 +645,7 @@ impl LibraryStore for RedbLibrary {
                     .get(write.key.as_str())
                     .map_err(StoreError::redb)?
                     .map_or(0, |value| value.value());
-                let charge = u64::try_from(row_bytes(&write.key, &write.value, fragment.len()))
-                    .map_err(|_| StoreError::Full)?;
+                let charge = stored_charge(&write.key, &write.value);
                 live_bytes = live_bytes
                     .checked_sub(old_charge)
                     .and_then(|bytes| bytes.checked_add(charge))
@@ -573,7 +693,8 @@ impl LibraryStore for RedbLibrary {
 
     #[cfg(test)]
     fn latest(&self, key: &str) -> Result<Option<StoredRow>, StoreError> {
-        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
         let keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
         let Some(sequence_number) = keys.get(key).map_err(StoreError::redb)?.map(|value| value.value())
         else {
@@ -588,7 +709,8 @@ impl LibraryStore for RedbLibrary {
     }
 
     fn range(&self, since: u64, limit: usize) -> Result<RangePage, StoreError> {
-        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
         let head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -648,7 +770,8 @@ impl LibraryStore for RedbLibrary {
                 return Ok(cached.page.clone());
             }
         }
-        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
         let head = {
             let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let value = metadata
@@ -698,12 +821,10 @@ impl LibraryStore for RedbLibrary {
 
     #[cfg(test)]
     fn live_bytes(&self) -> Result<usize, StoreError> {
-        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
         let metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
-        let bytes = metadata
-            .get("live-bytes")
-            .map_err(StoreError::redb)?
-            .map_or(LIBRARY_OVERHEAD as u64, |value| value.value());
+        let bytes = metadata.get("live-bytes").map_err(StoreError::redb)?.map_or(0, |value| value.value());
         usize::try_from(bytes).map_err(|_| StoreError::Full)
     }
 
@@ -720,7 +841,8 @@ impl LibraryStore for RedbLibrary {
                 Err(StoreError::Invalid("member_already_registered".into()))
             };
         }
-        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
         transaction
             .open_table(META_BYTES)
             .map_err(StoreError::redb)?
@@ -732,7 +854,8 @@ impl LibraryStore for RedbLibrary {
     }
 
     fn protocol(&self) -> Result<Protocol, StoreError> {
-        let transaction = self.database().begin_read().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_read().map_err(StoreError::redb)?;
         let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
         let head = numbers
             .get("head")
@@ -766,15 +889,14 @@ impl LibraryStore for RedbLibrary {
         {
             return Err(StoreError::Invalid("invalid rewrite rows".into()));
         }
-        let mut live_bytes = LIBRARY_OVERHEAD as u64;
+        let mut live_bytes = 0u64;
         let mut prepared_rows = Vec::with_capacity(rows.len());
         for (offset, row) in rows.iter().enumerate() {
             let sequence = base
                 .checked_add(offset as u64 + 1)
                 .ok_or_else(|| StoreError::Invalid("v3 head overflow".into()))?;
             let fragment = row_fragment(sequence, &row.key, &row.value);
-            let charge = u64::try_from(row_bytes(&row.key, &row.value, fragment.len()))
-                .map_err(|_| StoreError::Full)?;
+            let charge = stored_charge(&row.key, &row.value);
             live_bytes = live_bytes.checked_add(charge).ok_or(StoreError::Full)?;
             prepared_rows.push((row, sequence, fragment, charge));
         }
@@ -782,7 +904,8 @@ impl LibraryStore for RedbLibrary {
             return Err(StoreError::Full);
         }
         let mut prepared = self.prepared.lock().unwrap();
-        let transaction = self.database().begin_write().map_err(StoreError::redb)?;
+        let database = self.database();
+        let transaction = database.begin_write().map_err(StoreError::redb)?;
         let current = {
             let numbers = transaction.open_table(META_U64).map_err(StoreError::redb)?;
             let current = numbers
@@ -828,6 +951,15 @@ impl LibraryStore for RedbLibrary {
         transaction.commit().map_err(StoreError::redb)?;
         *prepared = None;
         Ok(Protocol { head, wire_min: effective_min, generation })
+    }
+
+    /// A handle outside a manager has no memory registry to reserve in; it still compacts only in its turn.
+    fn compact_if_sparse(&self, now: u64) -> Result<Option<(u64, u64)>, StoreError> {
+        if !self.sparse(now)? {
+            return Ok(None);
+        }
+        let _turn = compaction_turn().lock().unwrap();
+        self.compact().map(Some)
     }
 }
 
@@ -895,6 +1027,7 @@ struct StoreLease {
     store: Arc<RedbLibrary>,
     registry: Arc<Mutex<Registry>>,
     index: Arc<ProtocolIndex>,
+    memory_cap: usize,
 }
 
 impl Drop for StoreLease {
@@ -992,6 +1125,25 @@ impl LibraryStore for StoreLease {
         self.index.record(&self.id, &protocol)?;
         Ok(protocol)
     }
+
+    /// Compaction's transient heap is reserved in the same budget as open databases, so the manager's memory cap
+    /// (and the 64 MiB container it is sized for) holds while it runs. With no room it waits for a later hour.
+    fn compact_if_sparse(&self, now: u64) -> Result<Option<(u64, u64)>, StoreError> {
+        if !self.store.sparse(now)? {
+            return Ok(None);
+        }
+        let _turn = compaction_turn().lock().unwrap();
+        {
+            let mut registry = self.registry.lock().unwrap();
+            if registry.bytes + COMPACTION_BYTES > self.memory_cap {
+                return Ok(None);
+            }
+            registry.bytes += COMPACTION_BYTES;
+        }
+        let compacted = self.store.compact();
+        self.registry.lock().unwrap().bytes -= COMPACTION_BYTES;
+        compacted.map(Some)
+    }
 }
 
 /// Lazily opens independent databases and charges their measured fixed residency before opening. An active lease
@@ -1013,6 +1165,7 @@ impl StoreManager {
             store,
             registry: Arc::clone(&self.registry),
             index: Arc::clone(&self.index),
+            memory_cap: self.memory_cap,
         })
     }
 
@@ -1088,27 +1241,23 @@ impl StoreManager {
                 library.token_hash,
                 library.member_hash,
             )?;
-            let transaction = store.database().begin_write().map_err(StoreError::redb)?;
+            let database = store.database();
+            let transaction = database.begin_write().map_err(StoreError::redb)?;
             {
                 let mut keys = transaction.open_table(KEYS).map_err(StoreError::redb)?;
                 let mut charges = transaction.open_table(CHARGES).map_err(StoreError::redb)?;
                 let mut sequence = transaction.open_table(SEQUENCE).map_err(StoreError::redb)?;
+                let mut live_bytes = 0u64;
                 for (key, row) in &library.rows {
+                    let charge = stored_charge(key, &row.v);
                     keys.insert(key.as_str(), row.seq).map_err(StoreError::redb)?;
-                    charges
-                        .insert(
-                            key.as_str(),
-                            u64::try_from(row_bytes(key, &row.v, row.fragment.len()))
-                                .map_err(|_| StoreError::Full)?,
-                        )
-                        .map_err(StoreError::redb)?;
+                    charges.insert(key.as_str(), charge).map_err(StoreError::redb)?;
                     sequence.insert(row.seq, row.fragment.as_ref()).map_err(StoreError::redb)?;
+                    live_bytes += charge;
                 }
                 let mut metadata = transaction.open_table(META_U64).map_err(StoreError::redb)?;
                 metadata.insert("head", library.head).map_err(StoreError::redb)?;
-                metadata
-                    .insert("live-bytes", u64::try_from(library.bytes).map_err(|_| StoreError::Full)?)
-                    .map_err(StoreError::redb)?;
+                metadata.insert("live-bytes", live_bytes).map_err(StoreError::redb)?;
             }
             transaction.commit().map_err(StoreError::redb)?;
         }
@@ -1349,6 +1498,7 @@ mod tests {
     const TOKEN: [u8; 32] = [7; 32];
     const K1: &str = "aaaaaaaaaaaaaaaa";
     const K2: &str = "bbbbbbbbbbbbbbbb";
+    const K3: &str = "cccccccccccccccc";
 
     fn manager(root: &Path, open: usize, disk: u64, file: u64) -> StoreManager {
         StoreManager::open(root, open * OPEN_DATABASE_BYTES, disk, file).unwrap()
@@ -1398,7 +1548,8 @@ mod tests {
         let store = RedbLibrary::open(&path, Arc::clone(&quota), 8 << 20, TOKEN, None).unwrap();
         store.apply(&[Write { key: K1.into(), base: 0, value: "old".into() }]).unwrap();
         {
-            let transaction = store.database().begin_write().unwrap();
+            let database = store.database();
+            let transaction = database.begin_write().unwrap();
             transaction.open_table(META_U64).unwrap().insert("head", 2).unwrap();
             transaction.abort().unwrap();
         }
@@ -1430,7 +1581,8 @@ mod tests {
             let used = std::fs::metadata(&path).unwrap().len();
             let quota = Arc::new(DiskQuota(crate::store::Quota::standalone_with_used(32 << 20, used)));
             let store = RedbLibrary::open(&path, quota, 8 << 20, TOKEN, None).unwrap();
-            let transaction = store.database().begin_write().unwrap();
+            let database = store.database();
+            let transaction = database.begin_write().unwrap();
             transaction.open_table(META_U64).unwrap().insert("head", 2).unwrap();
             std::process::abort();
         }
@@ -1522,23 +1674,156 @@ mod tests {
     }
 
     #[test]
-    fn replacements_update_the_exact_live_payload_charge() {
+    fn replacements_update_the_exact_stored_charge() {
         let dir = temp_dir();
         let manager = manager(&dir, 1, 32 << 20, 8 << 20);
         let store = manager.library("1111111111111111", TOKEN).unwrap();
-        assert_eq!(store.live_bytes().unwrap(), LIBRARY_OVERHEAD);
+        assert_eq!(store.live_bytes().unwrap(), 0);
         store.apply(&[Write { key: K1.into(), base: 0, value: "short".into() }]).unwrap();
-        let first_fragment = row_fragment(1, K1, "short");
-        assert_eq!(
-            store.live_bytes().unwrap(),
-            LIBRARY_OVERHEAD + row_bytes(K1, "short", first_fragment.len())
-        );
+        assert_eq!(store.live_bytes().unwrap(), K1.len() + "short".len());
         store.apply(&[Write { key: K1.into(), base: 1, value: "a longer value".into() }]).unwrap();
-        let second_fragment = row_fragment(2, K1, "a longer value");
+        assert_eq!(store.live_bytes().unwrap(), K1.len() + "a longer value".len());
+    }
+
+    /// A store written while `charges-v3` held v2's in-memory formula is recounted as stored bytes when it opens,
+    /// and from then on is full exactly when its keys and values reach the cap.
+    #[test]
+    fn an_old_formula_store_is_recharged_by_stored_bytes_and_fills_at_the_cap() {
+        let dir = temp_dir();
+        let id = "1111111111111111";
+        let path = {
+            let first = manager(&dir, 2, 32 << 20, 8 << 20);
+            let store = first.library(id, TOKEN).unwrap();
+            store
+                .apply(&[
+                    Write { key: K1.into(), base: 0, value: "x".repeat(1000) },
+                    Write { key: K2.into(), base: 0, value: "y".repeat(500) },
+                ])
+                .unwrap();
+            first.path(id)
+        };
+        {
+            let quota = Arc::new(DiskQuota(crate::store::Quota::standalone(32 << 20)));
+            let old = RedbLibrary::open(&path, quota, 8 << 20, TOKEN, None).unwrap();
+            let database = old.database();
+            let transaction = database.begin_write().unwrap();
+            {
+                let mut charges = transaction.open_table(CHARGES).unwrap();
+                let mut live = super::super::LIBRARY_OVERHEAD as u64;
+                for (sequence, key, value) in [(1, K1, "x".repeat(1000)), (2, K2, "y".repeat(500))] {
+                    let fragment = row_fragment(sequence, key, &value);
+                    let charge = super::super::row_bytes(key, &value, fragment.len()) as u64;
+                    charges.insert(key, charge).unwrap();
+                    live += charge;
+                }
+                let mut numbers = transaction.open_table(META_U64).unwrap();
+                numbers.insert("live-bytes", live).unwrap();
+                numbers.remove("charge").unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        let reopened = manager(&dir, 2, 32 << 20, 8 << 20);
+        let store = reopened.library(id, TOKEN).unwrap();
+        let stored = K1.len() + 1000 + K2.len() + 500;
+        assert_eq!(store.live_bytes().unwrap(), stored, "recounted as k + v, not 2(k + v) + fragment + 192");
+
+        // Real data fills the cap to the byte: a third row that lands exactly on it is taken, one byte more is not.
+        let cap = stored + 2000;
+        let exact = "z".repeat(2000 - K3.len());
+        assert!(matches!(
+            store.apply_bounded(&[Write { key: K3.into(), base: 0, value: format!("{exact}z") }], cap, 2),
+            Err(StoreError::Full)
+        ));
+        store.apply_bounded(&[Write { key: K3.into(), base: 0, value: exact }], cap, 2).unwrap();
+        assert_eq!(store.live_bytes().unwrap(), cap);
+        assert!(matches!(
+            store.apply_bounded(&[Write { key: K1.into(), base: 1, value: "x".repeat(1001) }], cap, 2),
+            Err(StoreError::Full)
+        ));
+    }
+
+    /// A store imported with 2,000 rows of 4 KB: ~8 MB of live data, and its head.
+    fn grown(manager: &StoreManager, id: &str) -> (Arc<dyn LibraryStore>, u64) {
+        let mut library = super::super::Library {
+            token_hash: TOKEN,
+            member_hash: None,
+            head: 0,
+            rows: HashMap::new(),
+            sequence: std::collections::BTreeMap::new(),
+            lines: 0,
+            bytes: 0,
+        };
+        for number in 0..2000u64 {
+            let key = format!("{number:016x}");
+            let value: Arc<str> = Arc::from("s".repeat(4000));
+            library.head += 1;
+            let fragment = row_fragment(library.head, &key, &value);
+            library.rows.insert(key, super::super::Row { seq: library.head, v: value, fragment });
+        }
+        manager.import_v2(id, &library).unwrap();
+        (manager.library(id, TOKEN).unwrap(), library.head)
+    }
+
+    /// Rewrite a grown store down to four small rows, leaving most of its file free pages.
+    fn shrink(store: &dyn LibraryStore, head: u64) {
+        let rows: Vec<_> =
+            (0..4).map(|n| RewriteRow { key: format!("{n:016x}"), value: "kept".into() }).collect();
+        store.rewrite(head, &rows, 2, 32 << 20).unwrap();
+    }
+
+    #[test]
+    fn a_store_that_grew_then_shrank_is_compacted_below_the_threshold_at_most_hourly() {
+        let dir = temp_dir();
+        let first = manager(&dir, 4, 256 << 20, 64 << 20);
+        let id = "1111111111111111";
+        let (store, head) = grown(&first, id);
+        let start = 1_000_000;
+        assert_eq!(store.compact_if_sparse(start).unwrap(), None, "a full store is left alone");
+        assert!(store.disk_bytes().unwrap() > 8 << 20);
+
+        shrink(store.as_ref(), head);
+        let size = store.disk_bytes().unwrap();
+        assert_eq!(store.compact_if_sparse(start + COMPACT_INTERVAL_MS - 1).unwrap(), None);
+        assert_eq!(store.disk_bytes().unwrap(), size, "not measured again within the hour");
+
         assert_eq!(
-            store.live_bytes().unwrap(),
-            LIBRARY_OVERHEAD + row_bytes(K1, "a longer value", second_fragment.len())
+            store.compact_if_sparse(start + COMPACT_INTERVAL_MS).unwrap().map(|(before, _)| before),
+            Some(size)
         );
+        let compacted = store.disk_bytes().unwrap();
+        assert!(compacted < size / 4, "{size} -> {compacted}");
+        assert_eq!(first.cached().1, OPEN_DATABASE_BYTES, "the compaction reservation was given back");
+
+        // Nothing is lost, and a later write and a reopen see the same library.
+        assert_eq!(store.range(0, 10).unwrap().entries.len(), 4);
+        assert_eq!(value(&store.latest("0000000000000003").unwrap().unwrap())["v"], "kept");
+        store.apply(&[Write { key: K1.into(), base: 0, value: "after".into() }]).unwrap();
+
+        // Below the threshold now: the next hour measures it again and leaves it alone.
+        let written = store.disk_bytes().unwrap();
+        assert_eq!(store.compact_if_sparse(start + 2 * COMPACT_INTERVAL_MS).unwrap(), None);
+        assert_eq!(store.disk_bytes().unwrap(), written);
+        let head = store.protocol().unwrap().head;
+        drop(store);
+        drop(first);
+        let reopened = manager(&dir, 4, 256 << 20, 64 << 20);
+        let store = reopened.library(id, TOKEN).unwrap();
+        assert_eq!(store.protocol().unwrap().head, head);
+        assert_eq!(value(&store.latest(K1).unwrap().unwrap())["v"], "after");
+    }
+
+    #[test]
+    fn compaction_waits_when_the_open_database_budget_has_no_room_for_it() {
+        let dir = temp_dir();
+        let tight = manager(&dir, 2, 256 << 20, 64 << 20);
+        let (store, head) = grown(&tight, "1111111111111111");
+        shrink(store.as_ref(), head);
+        let _other = tight.library("2222222222222222", TOKEN).unwrap();
+        let size = store.disk_bytes().unwrap();
+        assert_eq!(store.compact_if_sparse(1_000_000).unwrap(), None);
+        assert_eq!(store.disk_bytes().unwrap(), size);
+        assert_eq!(tight.cached().1, 2 * OPEN_DATABASE_BYTES);
     }
 
     #[test]

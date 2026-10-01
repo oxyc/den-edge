@@ -59,8 +59,10 @@ one lock. So two messages arriving together are both kept, which Workers KV coul
 
 A library is one independently writable transactional database under `lib/`. Its current key/sequence indexes,
 canonical encrypted row fragments, credentials, and head commit atomically; replacing watched/progress state removes
-the superseded row in the same transaction, so startup needs no replay and normal operation needs no compaction.
-Old append logs migrate lazily on the first request with a crash-safe format marker. `/lib` requests carry
+the superseded row in the same transaction, so startup needs no replay. The file reuses freed pages but never shrinks
+on its own, so a write compacts it when more than half is free (at most hourly per library, never under a staged
+rewrite). A library may hold 32 MiB of keys and values. Old append logs migrate lazily on the first request with a
+crash-safe format marker, and are removed 30 days after it. `/lib` requests carry
 `x-den-library-token`; the first write sets it. Values remain ciphertext only the clients can open and merge.
 
 Guest grants live under `grants/` (mode 0700): one file per grant and an index, holding only SHA-256 hashes of the

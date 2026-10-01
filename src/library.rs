@@ -65,6 +65,8 @@ const GENERATION_HEADER: &str = "x-den-generation";
 const REWRITE_NS: &str = "lib-rewrite";
 const REWRITE_EXT: &str = "json";
 const REWRITE_IDLE_MS: u64 = 5 * 60 * 1000;
+/// How long a library's v2 log is kept after it switched to v3, as a copy to roll back to, before it is removed.
+const V2_LOG_GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// `<id>:<token>` of a library the caller already holds, when it starts another (`NewLibraries::Members`).
 pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 /// Libraries an address may start a minute. A household starts one per TV and another when it moves to a new key;
@@ -680,12 +682,10 @@ async fn rewrite_rows(
     if stage.rows.len() > MAX_ROWS {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
     }
-    let charged = stage.rows.iter().enumerate().try_fold(LIBRARY_OVERHEAD, |total, (offset, row)| {
-        let sequence = stage.base.checked_add(offset as u64 + 1)?;
-        let fragment = row_fragment(sequence, &row.k, &row.v);
-        total.checked_add(row_bytes(&row.k, &row.v, fragment.len()))
-    });
-    if charged.is_none_or(|bytes| bytes > state.library_limits.stored_bytes) {
+    // The same stored-byte charge the commit applies, so a staging that is accepted here also commits.
+    let charged =
+        stage.rows.iter().try_fold(0u64, |total, row| total.checked_add(v3::stored_charge(&row.k, &row.v)));
+    if charged.is_none_or(|bytes| bytes > state.library_limits.stored_bytes as u64) {
         return json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full"));
     }
     stage.touched = state.now();
@@ -736,7 +736,8 @@ async fn rewrite_commit(
     let rows: Vec<_> =
         stage.rows.iter().map(|row| v3::RewriteRow { key: row.k.clone(), value: row.v.clone() }).collect();
     let live_cap = state.library_limits.stored_bytes;
-    match tokio::task::spawn_blocking(move || store.rewrite(base, &rows, wire_min, live_cap)).await {
+    let write_store = Arc::clone(&store);
+    match tokio::task::spawn_blocking(move || write_store.rewrite(base, &rows, wire_min, live_cap)).await {
         Ok(Ok(protocol)) => {
             if let Err(reason) = state.store.delete_file(REWRITE_NS, id, REWRITE_EXT).await {
                 return internal("rewrite cleanup", reason);
@@ -744,6 +745,7 @@ async fn rewrite_commit(
             if let Err(reason) = state.store.sync_dir(REWRITE_NS).await {
                 return internal("rewrite cleanup publish", reason);
             }
+            maintain_v3(state, id, store).await;
             json_reply(StatusCode::OK, &json!({ "head": protocol.head }))
         }
         Ok(Err(v3::StoreError::Invalid(message))) if message.starts_with("head_moved:") => {
@@ -967,6 +969,50 @@ async fn publish_v3(state: &AppState, slot: &LibrarySlot, id: &str) -> io::Resul
     Ok(())
 }
 
+/// Upkeep after a committed v3 write, under the library's lock: drop a v2 log past its grace, then compact the
+/// database if it is mostly free pages. Neither changes what the library holds, so a failure is logged and the
+/// write's answer stands.
+async fn maintain_v3(state: &AppState, id: &str, store: Arc<dyn v3::LibraryStore>) {
+    let short = &id[..id.len().min(8)];
+    if let Err(reason) = retire_v2_log(state, id).await {
+        eprintln!("library v2 log retirement: library={short} {reason}");
+    }
+    // A staged rewrite is about to replace every row; compacting under it would rewrite the file twice.
+    match load_rewrite(state, id).await {
+        Ok(None) => {}
+        Ok(Some(_)) => return,
+        Err(reason) => {
+            eprintln!("library compaction: library={short} {reason}");
+            return;
+        }
+    }
+    let now = state.now();
+    match tokio::task::spawn_blocking(move || store.compact_if_sparse(now)).await {
+        Ok(Ok(Some((before, after)))) => {
+            eprintln!("library compacted: library={short} bytes={before}->{after}");
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(reason)) => eprintln!("library compaction: library={short} {}", v3_io(reason)),
+        Err(reason) => eprintln!("library compaction task: library={short} {reason}"),
+    }
+}
+
+/// Remove a v3 library's old v2 log once `V2_LOG_GRACE_MS` have passed since its switch. The switch time is the
+/// format marker's mtime: `publish_v3` writes the marker once (temporary file, sync, rename) and nothing rewrites it,
+/// and backups and restores keep mtimes; one that did not would only restart the grace. Without a v3 marker the log
+/// is the authority and stays.
+async fn retire_v2_log(state: &AppState, id: &str) -> io::Result<()> {
+    if state.store.modified_ms(NS, id, EXT).await?.is_none() {
+        return Ok(());
+    }
+    let Some(switched) = state.store.modified_ms(NS, id, FORMAT_EXT).await? else { return Ok(()) };
+    if !format_v3(state, id).await? || state.now().saturating_sub(switched) < V2_LOG_GRACE_MS {
+        return Ok(());
+    }
+    state.store.delete_file(NS, id, EXT).await?;
+    state.store.sync_dir(NS).await
+}
+
 /// Select one durable authority while holding this library's existing lock. Migration publishes a complete sibling
 /// database before the marker; every crash prefix therefore selects v2 or v3, never a mixture of their heads.
 async fn v3_store(
@@ -1122,11 +1168,15 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             Ok(Err(error)) => return internal("library write", v3_io(error)),
             Err(error) => return internal("library write task", io::Error::other(error)),
         };
-    let protocol = match tokio::task::spawn_blocking(move || store.protocol()).await {
+    let protocol_store = Arc::clone(&store);
+    let protocol = match tokio::task::spawn_blocking(move || protocol_store.protocol()).await {
         Ok(Ok(protocol)) => protocol,
         Ok(Err(error)) => return internal("library protocol", v3_io(error)),
         Err(error) => return internal("library protocol task", io::Error::other(error)),
     };
+    if !result.applied.is_empty() {
+        maintain_v3(state, id, store).await;
+    }
     let applied: Vec<Value> =
         result.applied.iter().map(|(key, seq)| json!({ "k": key, "seq": seq })).collect();
     let conflicts: Vec<Value> = result
@@ -1655,6 +1705,8 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{json, Value};
     use sha2::Digest;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     const LIB: &str = "0123456789abcdef0123456789abcdef";
     const LIB2: &str = "fedcba9876543210fedcba9876543210";
@@ -2305,6 +2357,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_v2_log_is_kept_for_thirty_days_after_the_switch_and_then_removed() {
+        let h = Harness::new();
+        write_legacy(&h, &[(1, K1, "old")]);
+        h.advance(super::V2_LOG_GRACE_MS + 1);
+        super::retire_v2_log(&h.state, LIB).await.unwrap();
+        assert!(log_path(&h).exists(), "without a v3 marker the log is the library");
+
+        // A write migrates the library and publishes the marker beside the old log.
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "two" }])).await.0, StatusCode::OK);
+        assert!(log_path(&h).exists());
+        let marker =
+            h.dir.join("lib").join(format!("{}.format", crate::hex(&sha2::Sha256::digest(LIB.as_bytes()))));
+        let switched = std::time::UNIX_EPOCH + std::time::Duration::from_millis(h.state.now());
+        std::fs::File::options().write(true).open(marker).unwrap().set_modified(switched).unwrap();
+
+        h.advance(super::V2_LOG_GRACE_MS - 1);
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 2, "v": "three" }])).await.0, StatusCode::OK);
+        assert!(log_path(&h).exists(), "kept for the whole grace period");
+        h.advance(1);
+        assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 3, "v": "four" }])).await.0, StatusCode::OK);
+        assert!(!log_path(&h).exists(), "removed once it has passed");
+
+        let restarted = Harness::in_dir(h.dir.clone());
+        assert_eq!(
+            changes(&restarted, TOKEN, "").await.1["entries"],
+            json!([{ "k": K1, "seq": 4, "v": "four" }])
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_waits_out_a_staged_rewrite_and_follows_the_next_write() {
+        let h = Harness::new();
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let mut library = super::Library {
+            token_hash,
+            member_hash: None,
+            head: 0,
+            rows: HashMap::new(),
+            sequence: std::collections::BTreeMap::new(),
+            lines: 0,
+            bytes: 0,
+        };
+        for number in 0..2000u64 {
+            let key = format!("{number:016x}");
+            let value: Arc<str> = Arc::from("s".repeat(4000));
+            library.head += 1;
+            let fragment = super::row_fragment(library.head, &key, &value);
+            library.rows.insert(key, super::Row { seq: library.head, v: value, fragment });
+        }
+        h.state.library_v3.import_v2(LIB, &library).unwrap();
+        h.state.store.replace_file(super::NS, LIB, super::FORMAT_EXT, super::FORMAT_V3).await.unwrap();
+        let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
+        let kept = [super::v3::RewriteRow { key: K1.to_owned(), value: "kept".to_owned() }];
+        store.rewrite(library.head, &kept, 2, h.state.library_limits.stored_bytes).unwrap();
+        let path = h.state.library_v3.path(LIB);
+        let sparse = std::fs::metadata(&path).unwrap().len();
+
+        let opened =
+            h.send("POST", &format!("/lib/{LIB}/rewrite"), None, &[("x-den-library-token", TOKEN)]).await;
+        let rewrite = body_json(opened).await["rewrite"].as_str().unwrap().to_owned();
+        super::maintain_v3(&h.state, LIB, Arc::clone(&store)).await;
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), sparse, "not under a staged rewrite");
+
+        let aborted = h
+            .send("DELETE", &format!("/lib/{LIB}/rewrite/{rewrite}"), None, &[("x-den-library-token", TOKEN)])
+            .await;
+        assert_eq!(aborted.status(), StatusCode::OK);
+        let head = library.head + 1;
+        assert_eq!(
+            batch(&h, TOKEN, json!([{ "k": K1, "base": head, "v": "after" }])).await.0,
+            StatusCode::OK
+        );
+        let compacted = std::fs::metadata(&path).unwrap().len();
+        assert!(compacted < sparse / 4, "{sparse} -> {compacted}");
+        assert_eq!(
+            changes(&h, TOKEN, "").await.1["entries"],
+            json!([{ "k": K1, "seq": head + 1, "v": "after" }])
+        );
+    }
+
     async fn start(h: &Harness, id: &str, token: &str, member: Option<&str>) -> StatusCode {
         let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "v" }] }).to_string();
         let mut headers = vec![("x-den-library-token", token)];
@@ -2506,26 +2639,26 @@ mod tests {
     async fn byte_limit_refuses_growth_atomically_but_allows_shrinking_and_reload() {
         let root = Harness::new();
         let h = bounded(&root, 1900, 3800);
-        let two = json!([{ "k": K1, "base": 0, "v": "x".repeat(100) },
-            { "k": K2, "base": 0, "v": "y".repeat(100) }]);
+        let two = json!([{ "k": K1, "base": 0, "v": "x".repeat(800) },
+            { "k": K2, "base": 0, "v": "y".repeat(800) }]);
         assert_eq!(batch(&h, TOKEN, two).await.0, StatusCode::OK);
         let third = "cccccccccccccccc";
-        let denied = batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(100) }])).await;
+        let denied = batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(800) }])).await;
         assert_eq!(denied, (StatusCode::PAYLOAD_TOO_LARGE, json!({"error":"library_full"})));
         assert_eq!(changes(&h, TOKEN, "").await.1["head"], 2);
         assert_eq!(batch(&h, TOKEN, json!([{ "k": K1, "base": 1, "v": "" }])).await.0, StatusCode::OK);
         assert_eq!(
-            batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(50) }])).await.0,
+            batch(&h, TOKEN, json!([{ "k": third, "base": 0, "v": "z".repeat(800) }])).await.0,
             StatusCode::OK
         );
         let reopened = bounded(&root, 1900, 3800);
         assert_eq!(changes(&reopened, TOKEN, "").await.1["head"], 4);
     }
 
-    /// A v3 library lives in its file: what it may hold is `stored_bytes`, not the legacy in-memory `library_bytes`,
-    /// which at 8 MiB was about 1,800 watched episodes.
+    /// A v3 library lives in its file: what it may hold is `stored_bytes` of keys and values, not the legacy
+    /// in-memory `library_bytes` or its `2(k + v) + fragment + 192` charge, which overstated a library ~3×.
     #[tokio::test]
-    async fn a_v3_library_is_bounded_by_stored_bytes_not_the_legacy_memory_charge() {
+    async fn a_v3_library_is_full_at_stored_bytes_of_its_keys_and_values() {
         let root = Harness::new();
         let h = Harness::in_dir_with(root.dir.clone(), |state| {
             state.library_limits =
@@ -2536,13 +2669,15 @@ mod tests {
                 { "k": K2, "base": 0, "v": v.to_string().repeat(100) },
                 { "k": "cccccccccccccccc", "base": 0, "v": v.to_string().repeat(100) }])
         };
-        // Three rows pass the 1,900-byte legacy charge that refused a third above, and fit in 5,000.
+        // Three rows of 116 stored bytes each; the legacy charge, ~560 each plus 512, was already past 1,900.
         assert_eq!(batch(&h, TOKEN, writes('x')).await.0, StatusCode::OK);
-        let more = json!([{ "k": "dddddddddddddddd", "base": 0, "v": "w".repeat(1000) }]);
+        let fourth = |length: usize| json!([{ "k": "dddddddddddddddd", "base": 0, "v": "w".repeat(length) }]);
+        let room = 5000 - 3 * 116 - 16;
         assert_eq!(
-            batch(&h, TOKEN, more).await,
+            batch(&h, TOKEN, fourth(room + 1)).await,
             (StatusCode::PAYLOAD_TOO_LARGE, json!({"error":"library_full"}))
         );
+        assert_eq!(batch(&h, TOKEN, fourth(room)).await.0, StatusCode::OK, "exactly at the cap");
     }
 
     #[tokio::test]
