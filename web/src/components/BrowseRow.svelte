@@ -10,7 +10,20 @@
   import { titleHref } from '../lib/route';
   import PosterRow from './PosterRow.svelte';
 
-  let { row, shown }: { row: RowDef; shown: (title: Title) => boolean } = $props();
+  let {
+    row,
+    shown,
+    prefetch = true,
+  }: {
+    row: RowDef;
+    shown: (title: Title) => boolean;
+    /**
+     * Whether the first page is asked for when the browser is next idle, ahead of the row nearing the screen. A
+     * title page's rows are not: a dozen of them, most far below its fold, each drawing its own posters, were
+     * most of the ~120 requests and ~1,000 nodes opening a title cost on a phone.
+     */
+    prefetch?: boolean;
+  } = $props();
 
   let wrapper: HTMLElement;
   let end: HTMLElement;
@@ -22,20 +35,22 @@
   const key = (t: Title) => `${t.type}:${t.id}`;
 
   // The first page loads when the browser is next idle, so a row is usually filled before it is scrolled to, and
-  // at the latest as it nears the screen.
+  // at the latest as it nears the screen. A row that does not prefetch also loads once it is anywhere above the
+  // screen: a jump to the foot of the page passes rows without their ever crossing it, and left unloaded they would
+  // fill or fold away later, above the viewer, moving the page under them — and a later row may wait on one.
   $effect(() => {
     let live = true;
     const first = () => {
       if (live && pager.page === 0) return pager.more();
     };
-    whenIdle(first);
+    if (prefetch) whenIdle(first);
     const near = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         near.disconnect();
         void first();
       },
-      { rootMargin: '400px 0px' },
+      { rootMargin: prefetch ? '400px 0px' : '100000px 0px 400px 0px' },
     );
     near.observe(wrapper);
     return () => {

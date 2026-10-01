@@ -7,6 +7,27 @@ const routePosters = (page) =>
     r.fulfill({ contentType: 'image/svg+xml', body: art }),
   );
 
+test('a title’s rows below the fold load only as they near the screen', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  let asked = 0;
+  await routeTmdb(page, (r) => {
+    asked++;
+    return r.fulfill({ json: { page: 2, results: [], total_pages: 1 } });
+  });
+  await page.goto('http://127.0.0.1:5198/test/related-titles.html');
+  const row = page.getByRole('region', { name: 'More like this' });
+  await expect(row).toBeAttached();
+  // Well past the browser's next idle moment, which is when every row used to ask for its first page.
+  await page.waitForTimeout(1500);
+  await expect(row.locator('a.card')).toHaveCount(0);
+  expect(asked).toBe(0);
+  await row.scrollIntoViewIfNeeded();
+  await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
+  await page.close();
+});
+
 test('a title’s rows rebuilt for a late atlas keep the page where the viewer scrolled it', async ({
   browser,
 }) => {
