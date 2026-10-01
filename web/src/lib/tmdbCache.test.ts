@@ -10,6 +10,7 @@ import {
   RETENTION,
   sharingFlights,
   TMDB_PROXY_KEY,
+  tmdbJson,
   type Entry,
   type Store,
 } from './tmdbCache';
@@ -220,6 +221,22 @@ describe('cachingFetch', () => {
     try {
       await cached(discover);
       expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('parses a fetched answer once, for the check and for every caller reading it', async () => {
+    const { store } = memory();
+    const net = network();
+    const shared = sharingFlights(cachingFetch(store, net.fetchImpl, () => 0));
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      const [a, b] = await Promise.all([shared(detail), shared(detail)]);
+      const [first, second] = await Promise.all([tmdbJson(a), tmdbJson(b)]);
+      expect(first).toEqual({ n: 1 });
+      expect(second).toBe(first);
+      expect(parse).toHaveBeenCalledOnce();
     } finally {
       parse.mockRestore();
     }

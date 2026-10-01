@@ -181,14 +181,27 @@ function keyOf(url: URL): string {
  * such answer stands for months — the page saying it cannot load a film that TMDB serves perfectly well, and
  * no amount of reloading asking again.
  */
-function keepable(body: string): boolean {
+function keepable(body: string): object | undefined {
   try {
     const parsed: unknown = JSON.parse(body);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-    return (parsed as { success?: unknown }).success !== false;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return (parsed as { success?: unknown }).success !== false ? parsed : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/**
+ * Answers already parsed on their way through here (`keepable`), so their reader does not parse them again: a
+ * title's details are tens of kilobytes, parsed on the main thread while its page waits for them. Every caller of a
+ * shared question is handed the same object, so it is read, never changed.
+ */
+const parsedAnswers = new WeakMap<Response, object>();
+
+/** A TMDB answer's JSON: the object it was checked as, where it was, or the body parsed now. */
+export function tmdbJson(res: Response): Promise<unknown> {
+  const parsed = parsedAnswers.get(res);
+  return parsed ? Promise.resolve(parsed) : res.json();
 }
 
 /**
@@ -201,8 +214,10 @@ function fetchedAtOf(res: Response, lent: boolean, now: number): number {
   return Number.isNaN(said) ? now : Math.min(said, now);
 }
 
-function answer(body: string): Response {
-  return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+function answer(body: string, parsed?: object): Response {
+  const res = new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+  if (parsed) parsedAnswers.set(res, parsed);
+  return res;
 }
 
 /** `fetch`, keeping TMDB's GET answers in `store`; everything else goes straight to the network. */
@@ -243,9 +258,9 @@ export function cachingFetch(
     // already has rather than asking again.
     const asked = proxied(url);
     const lent = url.searchParams.get('api_key') === TMDB_PROXY_KEY;
-    const entry = (res: Response, body: string): Entry | undefined => {
+    const entry = (res: Response, body: string, parsed: object | undefined): Entry | undefined => {
       const fetchedAt = fetchedAtOf(res, lent, now());
-      return keepable(body) && now() - fetchedAt < RETENTION
+      return parsed && now() - fetchedAt < RETENTION
         ? { body, fetchedAt, checked: true }
         : undefined;
     };
@@ -267,7 +282,8 @@ export function cachingFetch(
         void network(asked, { ...init, signal: AbortSignal.timeout(SHARED_MS) })
           .then(async (res) => {
             if (!res.ok) return;
-            const refreshed = entry(res, await res.text());
+            const body = await res.text();
+            const refreshed = entry(res, body, keepable(body));
             if (refreshed) await keep(key, refreshed);
           })
           .catch(() => undefined)
@@ -284,10 +300,11 @@ export function cachingFetch(
         return res;
       }
       const body = await res.text();
-      const fetched = entry(res, body);
+      const parsed = keepable(body);
+      const fetched = entry(res, body, parsed);
       // What it says about its titles den-edge kept as it fetched it (`src/title_metadata.rs`).
       if (fetched) void keep(key, fetched).catch(() => undefined);
-      return answer(body);
+      return answer(body, parsed);
     } catch (error) {
       if (kept) return answer(kept.body);
       throw error;
@@ -384,8 +401,14 @@ export function sharingFlights(inner: typeof fetch): typeof fetch {
       const done = () => flying.delete(key);
       flight.then(done, done);
     }
-    // Every caller reads its own copy of the body; the original is never read, so each clone can be.
-    return awaitedBy(flight, init?.signal).then((res) => res.clone());
+    // Every caller reads its own copy of the body; the original is never read, so each clone can be. The object it
+    // was already parsed as goes with each copy (`tmdbJson`).
+    return awaitedBy(flight, init?.signal).then((res) => {
+      const copy = res.clone();
+      const parsed = parsedAnswers.get(res);
+      if (parsed) parsedAnswers.set(copy, parsed);
+      return copy;
+    });
   };
 }
 

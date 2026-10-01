@@ -6,7 +6,7 @@ import type { MediaType, Title } from './library';
 import { strictest } from './parental';
 import { toTitle } from './tmdb';
 
-import { TMDB_PROXY_KEY, tmdbFetch } from './tmdbCache';
+import { TMDB_PROXY_KEY, tmdbFetch, tmdbJson } from './tmdbCache';
 
 const TMDB = 'https://api.themoviedb.org/3';
 
@@ -343,7 +343,7 @@ async function tmdb(
     url.searchParams.set(name, value);
   try {
     const res = await fetchImpl(url.toString());
-    return res.ok ? obj(await res.json()) : null;
+    return res.ok ? obj(await tmdbJson(res)) : null;
   } catch {
     return null;
   }
