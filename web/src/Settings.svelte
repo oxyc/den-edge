@@ -79,6 +79,10 @@
   const devicesRow = $derived(group('devices'));
   const devices = $derived(readDevices(devicesRow));
   const disabled = $derived(!log || saving);
+  const libraryFormat = $derived.by(() => {
+    void version;
+    return log ? log.wireMinimum : null;
+  });
 
   /**
    * Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. False when
@@ -306,7 +310,7 @@
       {edgeVersion}
       {write}
     />
-    <AboutSection {edgeVersion} credits={mergeCredits(addonCredits)} />
+    <AboutSection {edgeVersion} {libraryFormat} credits={mergeCredits(addonCredits)} />
   </div>
 </div>
 

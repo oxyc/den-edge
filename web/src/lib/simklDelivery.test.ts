@@ -49,11 +49,15 @@ it('a switched v2 Simkl library sends missing work once and keeps its receipt', 
       return rows.find((row): row is SettingsRow => row.kind === 'set' && row.name === name);
     },
     newestStamp: () => at,
+    seqOf: () => 0,
     async write(row: Row) {
       const index = rows.findIndex((old) => rowName(old) === rowName(row));
       if (index < 0) rows.push(row);
       else rows[index] = row;
       return row;
+    },
+    async writeAt(row: Row) {
+      return !!(await fake.write(row));
     },
   } as unknown as LibraryLog;
   let sends = 0;

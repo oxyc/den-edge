@@ -158,10 +158,28 @@ export interface ReceiptRow {
   [unknown: string]: unknown;
 }
 
-export type Row = TitleRow | EpisodeRow | SettingsRow | WatchRow | ReceiptRow;
+/**
+ * A library v4 document (den-spec wire/library-v4.md §3): a title, a season of a series, or one tracker account's
+ * receipts for either. Read, merged, written and named only by den-core; the fields are its business.
+ */
+export interface DocumentRow {
+  kind: 'title' | 'season' | 'delivery';
+  format: number;
+  title: { type: MediaType; id: number };
+  season?: number;
+  provider?: string;
+  account?: string;
+  [unknown: string]: unknown;
+}
+
+export type Row = TitleRow | EpisodeRow | SettingsRow | WatchRow | ReceiptRow | DocumentRow;
+
+export const isDocument = (row: Row): row is DocumentRow =>
+  row.kind === 'title' || row.kind === 'season' || row.kind === 'delivery';
 
 /** The name a row's key is the HMAC of. */
 export function rowName(row: Row): string {
+  if (isDocument(row)) return syncPolicy<string>({ op: 'doc_name', document: row });
   if (row.kind === 'set') return `set:${row.name}`;
   if (row.kind === 'wat') return `wat:${row.title.type}:${row.title.id}:${row.season}:${row.block}`;
   if (row.kind === 'snt') {
@@ -188,7 +206,8 @@ const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
 export function believe<T extends Row>(row: T, now = Date.now()): T {
   const fix = (stamp: Stamp): Stamp => (stamp[0] > now + FUTURE_TOLERANCE_MS ? ZERO_STAMP : stamp);
   const fixed = <V>(s: Stamped<V>): Stamped<V> => ({ ...s, at: fix(s.at) });
-  if (row.kind === 'wat' || row.kind === 'snt') return row;
+  // den-core reads a document's stamps the same way wherever it derives state from one (§5).
+  if (row.kind === 'wat' || row.kind === 'snt' || isDocument(row)) return row;
   if (row.kind === 'ep') return { ...row, progress: { ...row.progress, at: fix(row.progress.at) } };
   if (row.kind === 'set') {
     return {
@@ -213,17 +232,36 @@ async function rowMac(keys: LibraryKeys, name: string): Promise<Uint8Array<Array
   return new Uint8Array(await crypto.subtle.sign('HMAC', keys.mac, utf8.encode(name)));
 }
 
-/** A row as den-edge stores it: `k` names the record, `v` is its sealed JSON. */
+/**
+ * A row as den-edge stores it: `k` names the record, `v` is its sealed JSON — or, for a v4 document, den-core's
+ * compressed encoding of it (§4), at the cap a merge may use. A write that must fit the smaller cap of a new write
+ * encodes it itself (`encodeDocument`) and seals that.
+ */
 export async function seal(
   keys: LibraryKeys,
   row: Row,
   nonce: Uint8Array<ArrayBuffer> = crypto.getRandomValues(new Uint8Array(12)),
 ): Promise<{ k: string; v: string }> {
-  const mac = await rowMac(keys, rowName(row));
+  if (isDocument(row)) {
+    const encoded = encodeDocument(row, false);
+    if (!encoded) throw new Error(`den: ${rowName(row)} is too large to store`);
+    return sealPlaintext(keys, encoded.name, encoded.plaintext, nonce);
+  }
+  return sealPlaintext(keys, rowName(row), utf8.encode(JSON.stringify(row)), nonce);
+}
+
+/** `plaintext` sealed as the row `name`. */
+export async function sealPlaintext(
+  keys: LibraryKeys,
+  name: string,
+  plaintext: Uint8Array<ArrayBuffer>,
+  nonce: Uint8Array<ArrayBuffer> = crypto.getRandomValues(new Uint8Array(12)),
+): Promise<{ k: string; v: string }> {
+  const mac = await rowMac(keys, name);
   const sealed = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: nonce, additionalData: mac, tagLength: 128 },
     keys.enc,
-    utf8.encode(JSON.stringify(row)),
+    plaintext,
   );
   const out = new Uint8Array(nonce.length + sealed.byteLength);
   out.set(nonce);
@@ -232,38 +270,110 @@ export async function seal(
 }
 
 /**
+ * A document's plaintext (`doc_encode`), or null when it is over the cap: 224 KiB sealed for a new write (`write`),
+ * 256 KiB for a merge, a write-back or a receipt (§4 *Size*).
+ */
+export function encodeDocument(
+  document: DocumentRow,
+  write: boolean,
+): { name: string; plaintext: Uint8Array<ArrayBuffer> } | null {
+  const encoded = syncPolicy<{ name: string; plaintext: string } | { too_large: true }>({
+    op: 'doc_encode',
+    document,
+    write,
+  });
+  if ('too_large' in encoded) return null;
+  return { name: encoded.name, plaintext: fromBase64url(encoded.plaintext) };
+}
+
+/**
+ * What a stored row is, as a reader of library v4 tells (§4): a row it reads (`newer` when a later format holds it,
+ * read for the fields this build knows and never written); a row of a kind it doesn't know, or of a framing newer
+ * than it knows, kept unread; or a row that can't be attributed to a name at all, with the reason.
+ */
+export type Opened =
+  | { row: Row; newer?: true; dropped?: unknown[] }
+  | { unknown: Record<string, unknown> }
+  | { newerFraming: true }
+  | { unreadable: string; json?: Record<string, unknown> };
+
+const LEGACY_KINDS = new Set(['rec', 'ep', 'set', 'wat', 'snt']);
+
+export async function openEntry(keys: LibraryKeys, k: string, v: string): Promise<Opened> {
+  let plain: Uint8Array<ArrayBuffer>;
+  try {
+    const bytes = fromBase64url(v);
+    plain = new Uint8Array(
+      await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: fromHex(k), tagLength: 128 },
+        keys.enc,
+        bytes.slice(12),
+      ),
+    );
+  } catch {
+    return { unreadable: 'open' };
+  }
+  const named = async (name: string | null | undefined) =>
+    !!name && hex(await rowMac(keys, name)) === k;
+  if (plain[0] === 0x7b) {
+    let parsed: { kind?: unknown };
+    try {
+      parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plain)) as {
+        kind?: unknown;
+      };
+    } catch {
+      return { unreadable: 'invalid_json' };
+    }
+    if (typeof parsed.kind === 'string' && LEGACY_KINDS.has(parsed.kind)) {
+      const row = parsed as Row;
+      if (!(await named(rowName(row)))) return { unreadable: 'identity' };
+      // Not read as state (den-core refuses an episode of a film), but its JSON is what the switch is given, as the
+      // TV gives it, so whichever client switches stages the same rows.
+      return wellFormed(row) ? { row } : { unreadable: 'episode_of_film', json: parsed };
+    }
+  }
+  const decoded = syncPolicy<{
+    status: 'document' | 'newer' | 'row' | 'unreadable';
+    reason?: string;
+    name?: string | null;
+    document?: DocumentRow;
+    row?: Record<string, unknown>;
+    dropped?: unknown[];
+  }>({ op: 'doc_decode', plaintext: toBase64url(plain) });
+  if (decoded.status === 'unreadable') return { unreadable: decoded.reason ?? 'unreadable' };
+  if (decoded.status === 'newer' && !decoded.document) return { newerFraming: true };
+  if (decoded.status === 'row') return { unknown: decoded.row ?? {} };
+  if (!(await named(decoded.name))) return { unreadable: 'identity' };
+  if (decoded.dropped?.length)
+    console.warn(`den: ${decoded.name} read without its malformed parts`, decoded.dropped);
+  return decoded.status === 'newer'
+    ? { row: decoded.document!, newer: true }
+    : { row: decoded.document!, dropped: decoded.dropped };
+}
+
+/**
  * Only a series has episodes (library v2 §3). den-core refuses any other episode row, so one held anywhere would
  * stop every page that asks it about the library; such a row is left out wherever rows are read.
  */
 export const wellFormed = (row: Row): boolean => row.kind !== 'ep' || row.title?.type === 'tv';
 
-/** Open a stored row; rejects one that was tampered with, sealed under another key, or moved to another `k`. */
+/** Open a stored row; rejects one that was tampered with, sealed under another key, moved to another `k`, or that
+ * this build does not read. */
 export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row> {
-  const bytes = fromBase64url(v);
-  const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: fromHex(k), tagLength: 128 },
-    keys.enc,
-    bytes.slice(12),
+  const opened = await openEntry(keys, k, v);
+  if ('row' in opened) return opened.row;
+  throw new Error(
+    'unreadable' in opened
+      ? `an unreadable row (${opened.unreadable})`
+      : 'unknown' in opened
+        ? `unknown row kind ${String(opened.unknown.kind)}`
+        : 'a row of a newer framing',
   );
-  const parsed = JSON.parse(new TextDecoder().decode(plain)) as { kind?: unknown };
-  if (
-    parsed.kind !== 'rec' &&
-    parsed.kind !== 'ep' &&
-    parsed.kind !== 'set' &&
-    parsed.kind !== 'wat' &&
-    parsed.kind !== 'snt'
-  ) {
-    throw new Error(`unknown row kind ${String(parsed.kind)}`);
-  }
-  const row = parsed as Row;
-  if (!wellFormed(row)) throw new Error(`an episode row of a film: ${rowName(row)}`);
-  if (hex(await rowMac(keys, rowName(row))) !== k)
-    throw new Error('the row names a different record than its key');
-  return row;
 }
 
 /** The newest stamp in a row. */
 export function newest(row: Row): Stamp {
+  if (isDocument(row)) return documentNewest(row);
   if (row.kind === 'wat' || row.kind === 'snt') return syncPolicy<Stamp>({ op: 'newest', row });
   const stamps =
     row.kind === 'ep'
@@ -279,6 +389,31 @@ export function newest(row: Row): Stamp {
             row.episodesReset ?? ZERO_STAMP,
           ];
   return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP);
+}
+
+/**
+ * The newest stamp anywhere in a document, so this device's next stamp is issued after every one it has read. A
+ * stamp more than a day ahead is left out, as `believe` reads one.
+ */
+function documentNewest(document: DocumentRow, now = Date.now()): Stamp {
+  let latest = ZERO_STAMP;
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if (
+      Array.isArray(value) &&
+      value.length === 3 &&
+      Number.isInteger(value[0]) &&
+      Number.isInteger(value[1]) &&
+      typeof value[2] === 'string'
+    ) {
+      const stamp = value as Stamp;
+      if (stamp[0] <= now + FUTURE_TOLERANCE_MS && compareStamps(stamp, latest) > 0) latest = stamp;
+      return;
+    }
+    for (const inner of Object.values(value)) visit(inner);
+  };
+  visit(document);
+  return latest;
 }
 
 export function mergeTitle(a: TitleRow, b: TitleRow): TitleRow {
@@ -298,15 +433,21 @@ export function mergeV3<T extends WatchRow | ReceiptRow>(a: T, b: T): T {
   return syncPolicy<T>({ op: 'merge', a, b });
 }
 
+/** Two versions of one v4 document (§6, §9). */
+export function mergeDocument(a: DocumentRow, b: DocumentRow): DocumentRow {
+  return syncPolicy<DocumentRow>({ op: 'doc_merge', a, b });
+}
+
 export function fromHex(text: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(text.match(/../g) ?? [], (byte) => parseInt(byte, 16));
 }
 
 export function toBase64url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll('+', '-')
-    .replaceAll('/', '_')
-    .replace(/=+$/, '');
+  // In slices: a v4 value reaches 256 KiB, past what one spread call takes as arguments.
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
 export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {

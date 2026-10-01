@@ -2,7 +2,7 @@ import { LIVE_PULL_MS } from './livePosition';
 import { browserClock } from './clock';
 import { LibraryLog } from './log';
 import { deliverSimkl } from './simklDelivery';
-import { upgradeLibrary } from './libraryUpgrade';
+import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
@@ -18,6 +18,11 @@ export class LibrarySession {
   /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
   live = false;
   log = $state<LibraryLog | null | undefined>(undefined);
+  /** A passing message about the library ("Library updated to v4"), shown for a few seconds (`notify`). */
+  toast = $state<string | null>(null);
+  /** What keeps the library from being written, while it does (`libraryAlert`). */
+  alert = $state<string | null>(null);
+  private toastTimer?: ReturnType<typeof setTimeout>;
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
   private readonly device = browserClock().device;
@@ -81,12 +86,23 @@ export class LibrarySession {
         const before = settings();
         if (await this.log.refresh()) this.changed(before !== settings());
         if (await upgradeLibrary(this.log, false)) this.changed(true);
-        if (this.log.wireMinimum >= 3 && (await deliverSimkl(this.log, this.device)))
+        if (await switchLibraryToV4(this.log)) {
           this.changed(true);
-      } catch {
+          this.notify('Library updated to v4');
+        }
+        if (await this.log.compact()) this.changed(true);
+        if (
+          this.log.wireMinimum >= 3 &&
+          !this.log.readOnly &&
+          (await deliverSimkl(this.log, this.device))
+        )
+          this.changed(true);
+      } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
+        console.warn('den: the library could not be refreshed', error);
         if (!this.log) this.log = null;
       } finally {
+        this.alert = this.log ? libraryAlert(this.log) : null;
         this.refreshing = undefined;
       }
     })();
@@ -121,4 +137,21 @@ export class LibrarySession {
     this.revision++;
     if (settings) this.settingsRevision++;
   }
+
+  /** A passing message, cleared after a few seconds. */
+  notify(message: string) {
+    this.toast = message;
+    clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => (this.toast = null), TOAST_MS);
+  }
+}
+
+const TOAST_MS = 6000;
+
+/** What stops this browser writing the library, said the way the spec words it (library v4 §4, §10). */
+export function libraryAlert(log: LibraryLog): string | null {
+  if (log.upgradeRequired !== null) return 'Library update required';
+  if (log.predatesV3) return 'Library backup predates v3';
+  if (log.switchFailure) return `Library update failed: ${log.switchFailure}`;
+  return null;
 }

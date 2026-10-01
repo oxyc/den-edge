@@ -2,23 +2,33 @@
 // row at a time with compare-and-set. The TV writes it whenever the library changes. What den-edge last said is kept
 // in this browser (`localVault.ts`), so a return visit starts from it and asks only for what changed since.
 
+import { blankEpisode, blankTitle } from './actions';
 import { hkdf } from './crypto';
+import { applyOps, opsFor, projectDocument, projectEpisode, touched, type Op } from './libraryV4';
 import { libraryVault, type Vault } from './localVault';
 import { forgetLibraryCredential, hasLibraryCredential, useLibraryCredential } from './relayFetch';
 import {
   believe,
   compareStamps,
   deriveKeys,
+  encodeDocument,
+  fromBase64url,
+  isDocument,
+  mergeDocument,
   mergeEpisode,
   mergeSettings,
   mergeTitle,
   mergeV3,
   newest,
   open,
+  openEntry,
   rowName,
   seal,
+  sealPlaintext,
+  toBase64url,
   wellFormed,
   ZERO_STAMP,
+  type DocumentRow,
   type EpisodeRow,
   type LibraryKeys,
   type Row,
@@ -36,12 +46,43 @@ interface Entry {
   row: Row;
 }
 
+interface RawEntry {
+  k: string;
+  seq: number;
+  v: string;
+}
+
 interface Page {
   generation?: string;
-  entries: { k: string; seq: number; v: string }[];
+  entries: RawEntry[];
   head: number;
   more: boolean;
 }
+
+/** `v4_form`'s answer (§10): the documents of the switch, and the rows staged as they are stored. */
+interface V4Form {
+  documents: { name: string; plaintext: string }[];
+  keep: string[];
+}
+
+/** `v4_dry_run`'s answer (§10 step 2). */
+interface DryRun {
+  pass: boolean;
+  abort: { reason: string; title?: string; name?: string; field?: string; coordinate?: string }[];
+  pending_differences: { account: string; key: string }[];
+  counts: Record<string, unknown>;
+}
+
+/** The highest library format this build reads and writes. */
+export const WIRE = 4;
+
+/** Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). */
+const legacy = (row: Row): boolean =>
+  row.kind === 'rec' ||
+  row.kind === 'ep' ||
+  row.kind === 'wat' ||
+  row.kind === 'snt' ||
+  trackerEvent(row) !== null;
 
 /**
  * Filled in by a write: whether den-edge refused it for good (`failed`), rather than being out of reach, and whether
@@ -72,7 +113,8 @@ const RETRYABLE_REFUSALS = new Set([
 
 interface Batch {
   applied: { k: string; seq: number }[];
-  conflicts: { k: string; seq: number; v: string | null }[];
+  /** `omitted`: den-edge left the value out of a long answer (§13); it is read from `/changes`. */
+  conflicts: { k: string; seq: number; v: string | null; omitted?: boolean }[];
 }
 
 /** What a return visit starts from: the rows as den-edge last gave them, and where in its log that was. */
@@ -95,15 +137,21 @@ interface SwitchContext {
   simkl?: { account: string; credential: string; connectedAt: Stamp };
 }
 
-/** One piece of work kept in this browser (`pendingPrefix`), opened: a recovery, a bulk of actions, or one action. */
+/**
+ * One piece of work kept in this browser (`pendingPrefix`), opened: a recovery, a bulk of actions, one action, or a
+ * library v4 edit kept as its den-core writes (`ops`, §11: never as encoded rows).
+ */
 interface KeptWork {
   key: string;
   rows: Row[];
-  kind: 'restore' | 'bulk' | 'one' | 'rows';
+  kind: 'restore' | 'bulk' | 'one' | 'rows' | 'ops';
+  ops?: Op[];
 }
 
 /** Under what `LibraryLog.keep` holds the log itself; a new format takes a new name, so an old copy is never misread. */
 const SNAPSHOT = 'log.v1';
+/** The same for a library at v4, whose documents a build from before it would misread as rows. */
+const SNAPSHOT_V4 = 'log.v4';
 
 /**
  * Under what a first read of the log keeps the pages it has read so far, so a read cut off on a slow link goes on
@@ -152,10 +200,27 @@ export class LibraryLog {
   private writes: Promise<unknown> = Promise.resolve();
   private head = 0;
   private generation?: string;
+  /** A newer generation a refused write named, which writes use until a read takes it (`adoptGeneration`). */
+  private writeGeneration?: string;
   /** Highest wire minimum this browser has observed for this library; it never falls back. */
   private wireMin = 2;
-  /** A typed upgrade fence for the UI. This v3 build can satisfy minimum 3, but preserves future minima too. */
+  /**
+   * A typed upgrade fence for the UI: the library's minimum, or a row's format or framing, is newer than this build
+   * (`WIRE`), which then writes nothing (§4 *Newer rows*).
+   */
   upgradeRequired: number | null = null;
+  /** Rows that can't be attributed to a name (§4 *Unreadable rows*), by `k`, with why. None delivers while any is. */
+  readonly unreadable = new Map<string, string>();
+  /** Rows of a framing newer than this build, by `k`, kept unread. None delivers while any is. */
+  readonly newerFraming = new Set<string>();
+  /** Documents of a newer `format`, by name: read, never written, their targets held. */
+  private readonly newerDocuments = new Set<string>();
+  /** Why the switch to v4 last failed (§10 step 3); the library stays v3 and read-only meanwhile. */
+  switchFailure: string | null = null;
+  /** A backup from before Library v3, which this build does not convert and does not write (§10). */
+  predatesV3 = false;
+  /** When `compact` last tried, so a refused one is not tried on every refresh. */
+  private compactedAt = 0;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -186,6 +251,22 @@ export class LibraryLog {
     return this.wireMin;
   }
 
+  /** Nothing is written: the library needs a newer build, a switch to v4 failed, or it predates v3. */
+  get readOnly(): boolean {
+    return this.upgradeRequired !== null || this.switchFailure !== null || this.predatesV3;
+  }
+
+  /**
+   * The switch to v4 is this build's to run (§10): a v3 library on den-edge, or a v4 one in which v2 or v3 rows
+   * appear again (a restore, or an old build's write).
+   */
+  get needsV4(): boolean {
+    if (this.offline || this.moved || this.upgradeRequired !== null || this.predatesV3)
+      return false;
+    if (this.wireMin === 3) return true;
+    return this.wireMin === WIRE && [...this.acknowledged.values()].some(({ row }) => legacy(row));
+  }
+
   private constructor(
     private readonly keys: LibraryKeys,
     private readonly fetchImpl: typeof fetch,
@@ -196,7 +277,7 @@ export class LibraryLog {
   ) {
     const remembered = Number(this.storage?.getItem(`den.libraryWireMin.${this.keys.id}`));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
-    if (this.wireMin > 3) this.upgradeRequired = this.wireMin;
+    if (this.wireMin > WIRE) this.upgradeRequired = this.wireMin;
   }
 
   /**
@@ -239,7 +320,7 @@ export class LibraryLog {
     const form = saved?.wireMin;
     if (!Number.isInteger(form) || form! <= this.wireMin) return false;
     this.wireMin = form!;
-    if (this.wireMin > 3) this.upgradeRequired = this.wireMin;
+    if (this.wireMin > WIRE) this.upgradeRequired = this.wireMin;
     this.entries.clear();
     this.acknowledged.clear();
     return true;
@@ -280,6 +361,28 @@ export class LibraryLog {
   /** The rows, each merged over what the log already holds for it, written in batches. */
   async writeRows(rows: Row[]): Promise<boolean> {
     await this.followKeptForm();
+    if (this.readOnly) return false;
+    if (this.wireMin >= WIRE && !this.offline) {
+      // Title and episode rows (an import, or a library this browser kept) and actions are edits: den-core's writes.
+      // v3 watch and receipt rows go in as the documents its switch makes of them, merged with what is there.
+      const ops = rows.flatMap((row) => {
+        const event = trackerEvent(row);
+        if (event) return opsFor(event.before, event.after);
+        return row.kind === 'rec' || row.kind === 'ep' ? opsFor(this.before(row), row) : [];
+      });
+      let documents: DocumentRow[];
+      try {
+        documents = v3Documents(rows.filter((row) => row.kind === 'wat' || row.kind === 'snt'));
+      } catch (error) {
+        console.warn('den: these rows could not be written into a Library v4 library', error);
+        return false;
+      }
+      const rest = rows.filter((row) => isDocument(row) || (row.kind === 'set' && !legacy(row)));
+      return (
+        (await this.flushRows(`den.writeRows.${crypto.randomUUID()}`, [[...documents, ...rest]])) &&
+        this.writeOps(ops)
+      );
+    }
     if (this.wireMin >= 3) {
       rows = rows.flatMap((row): Row[] => {
         const projected = trackerEvent(row)?.after ?? row;
@@ -366,6 +469,7 @@ export class LibraryLog {
         return false;
       }
       this.generation = committed.headers.get('x-den-generation') ?? undefined;
+      this.writeGeneration = undefined;
       this.wireMin = Math.max(this.wireMin, 3);
       this.head = 0;
       this.entries.clear();
@@ -433,6 +537,203 @@ export class LibraryLog {
       console.warn('den: the library kept in this browser could not be switched', error);
       return false;
     }
+  }
+
+  /**
+   * Library v4 §10: convert this library to documents, checked before it is committed. Inside the fence the log is
+   * read through `base`; den-core's `v4_form` converts it and `v4_dry_run` checks the conversion against shipped v3.
+   * A difference in derived state aborts — nothing is written, the reason is kept (`switchFailure`) and the library
+   * stays read-only until a later try passes. A difference only in pending tracker commands is logged and the switch
+   * goes on. True when it committed.
+   */
+  async switchToV4(performer: string): Promise<boolean> {
+    if (!this.needsV4) return false;
+    await ensureSyncPolicy();
+    const switched = await this.fenced(async (base, raw) => {
+      const now = Date.now();
+      const rows = await Promise.all(
+        raw.map(async ({ k, seq, v }) => ({
+          k,
+          seq,
+          bytes: k.length + v.length,
+          row: await this.plainRow(k, v),
+        })),
+      );
+      let form: V4Form;
+      try {
+        form = syncPolicy<V4Form>({ op: 'v4_form', rows, base, performer, now });
+      } catch (error) {
+        const reason = (error as Error).message.replace(/^Sync policy rejected the action: /, '');
+        if (reason === 'pre_v3') {
+          this.predatesV3 = true;
+          console.warn('den: this library is a backup from before Library v3; it is left as it is');
+        } else {
+          this.switchFailure = reason;
+          console.error(`den: the switch to Library v4 could not convert the library (${reason})`);
+        }
+        return null;
+      }
+      const dry = syncPolicy<DryRun>({ op: 'v4_dry_run', rows, form, now });
+      console.info('den: Library v4 dry run', dry.counts);
+      if (dry.pending_differences.length)
+        console.warn(
+          `den: Library v4 decides ${dry.pending_differences.length} tracker commands differently from v3`,
+          dry.pending_differences,
+        );
+      if (!dry.pass) {
+        const reasons = [...new Set(dry.abort.map(({ reason }) => reason))];
+        this.switchFailure = reasons.join(', ');
+        console.error('den: the switch to Library v4 was aborted by its dry run', dry.abort);
+        return null;
+      }
+      const stored = new Map(raw.map((entry) => [entry.k, entry.v]));
+      const writes = [
+        ...(await Promise.all(
+          form.documents.map(({ name, plaintext }) =>
+            sealPlaintext(this.keys, name, fromBase64url(plaintext)),
+          ),
+        )),
+        ...form.keep.map((k) => ({ k, v: stored.get(k)! })),
+      ];
+      return { writes, wireMin: WIRE };
+    });
+    if (switched) {
+      this.switchFailure = null;
+      console.info('den: the library switched to Library v4');
+    }
+    return switched;
+  }
+
+  /**
+   * Library v4 §4 *Unreadable rows*: once the log is read to its head, a fenced rewrite at the same minimum that
+   * stages every other row as it is stored, leaving out each unreadable one — unless it reads at `base` after all.
+   * True when one was removed.
+   */
+  async compact(): Promise<boolean> {
+    if (this.offline || this.wireMin < WIRE || !this.unreadable.size || this.readOnly) return false;
+    if (Date.now() - this.compactedAt < RECHECK_MS) return false;
+    this.compactedAt = Date.now();
+    const removing = new Set(this.unreadable.keys());
+    return this.fenced(async (_, raw) => {
+      const writes: { k: string; v: string }[] = [];
+      let removed = 0;
+      for (const entry of raw) {
+        if (removing.has(entry.k)) {
+          const opened = await openEntry(this.keys, entry.k, entry.v);
+          if ('unreadable' in opened) {
+            console.warn(
+              `den: removing the unreadable library row ${entry.k} (${opened.unreadable})`,
+            );
+            removed++;
+            continue;
+          }
+          this.unreadable.delete(entry.k);
+        }
+        writes.push({ k: entry.k, v: entry.v });
+      }
+      return removed ? { writes, wireMin: this.wireMin } : null;
+    });
+  }
+
+  /**
+   * One fenced rewrite (v3 §9): open it, read every row through its `base`, stage what `build` makes of them, and
+   * commit. `build` answering null aborts it, and nothing changes. On a commit this browser reads the new log from
+   * the start; its kept work is sent again after.
+   */
+  private async fenced(
+    build: (
+      base: number,
+      raw: RawEntry[],
+    ) => Promise<{ writes: { k: string; v: string }[]; wireMin: number } | null>,
+  ): Promise<boolean> {
+    let rewrite: string | undefined;
+    try {
+      const opened = await this.send(`/lib/${this.keys.id}/rewrite`, {
+        method: 'POST',
+        headers: this.headers(),
+      });
+      if (!opened.ok) {
+        await this.failed(opened);
+        return false;
+      }
+      const offer = (await opened.json()) as { rewrite?: unknown; base?: unknown };
+      if (typeof offer.rewrite !== 'string' || typeof offer.base !== 'number') return false;
+      rewrite = offer.rewrite;
+      const raw = await this.readRaw(offer.base, opened.headers.get('x-den-generation'));
+      const plan = raw && (await build(offer.base, raw));
+      if (!plan) {
+        await this.abortRewrite(rewrite);
+        return false;
+      }
+      for (const writes of chunks(plan.writes)) {
+        const staged = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/rows`, {
+          method: 'POST',
+          headers: { ...this.headers(), 'content-type': 'application/json' },
+          body: JSON.stringify({ writes }),
+        });
+        if (!staged.ok) {
+          await this.failed(staged);
+          await this.abortRewrite(rewrite);
+          return false;
+        }
+      }
+      const committed = await this.send(`/lib/${this.keys.id}/rewrite/${rewrite}/commit`, {
+        method: 'POST',
+        headers: { ...this.headers(), 'content-type': 'application/json' },
+        body: JSON.stringify({ base: offer.base, wireMin: plan.wireMin }),
+      });
+      if (!committed.ok) {
+        await this.failed(committed);
+        await this.abortRewrite(rewrite);
+        return false;
+      }
+      this.generation = committed.headers.get('x-den-generation') ?? undefined;
+      this.writeGeneration = undefined;
+      this.wireMin = Math.max(this.wireMin, plan.wireMin);
+      this.head = 0;
+      this.entries.clear();
+      this.acknowledged.clear();
+      this.unreadable.clear();
+      this.dirty = true;
+      this.unreported = true;
+      await this.refresh();
+      return true;
+    } catch (error) {
+      console.warn('den: a rewrite of the library failed', error);
+      if (rewrite) await this.abortRewrite(rewrite);
+      return false;
+    }
+  }
+
+  /** Every row through `base` as den-edge stores it, read inside a rewrite's fence; null when it moved on. */
+  private async readRaw(base: number, generation: string | null): Promise<RawEntry[] | null> {
+    const rows: RawEntry[] = [];
+    let since = 0;
+    for (;;) {
+      const res = await this.send(`/lib/${this.keys.id}/changes?since=${since}&limit=1000`, {
+        headers: this.headers(),
+      });
+      if (!res.ok) return null;
+      if (generation && res.headers.get('x-den-generation') !== generation) return null;
+      const page = (await res.json()) as Page;
+      if (page.head !== base) return null;
+      rows.push(...page.entries.filter((entry) => entry.seq <= base));
+      if (!page.more || page.entries.length === 0) return rows;
+      since = page.entries.at(-1)!.seq;
+    }
+  }
+
+  /**
+   * A stored row's plaintext as den-core's `v4_form` reads it, the same as the TV gives it: the parsed JSON of every
+   * row that opens under its own name (an episode row of a film included, which den-core then drops), and null for
+   * one that doesn't.
+   */
+  private async plainRow(k: string, v: string): Promise<unknown> {
+    const opened = await openEntry(this.keys, k, v);
+    if ('row' in opened) return opened.row;
+    if ('unknown' in opened) return opened.unknown;
+    if ('json' in opened) return opened.json;
+    return null;
   }
 
   private async abortRewrite(rewrite: string): Promise<void> {
@@ -507,7 +808,7 @@ export class LibraryLog {
     // never skip valid rows.
     const policy = ensureSyncPolicy();
     void policy.catch(() => undefined);
-    const saved = await log.kept<Snapshot>(SNAPSHOT);
+    const saved = (await log.kept<Snapshot>(SNAPSHOT_V4)) ?? (await log.kept<Snapshot>(SNAPSHOT));
     if (saved) {
       await policy;
       log.memberRegistered = saved.memberRegistered ?? false;
@@ -515,6 +816,7 @@ export class LibraryLog {
       log.head = saved.head;
       for (const [name, seq, row] of saved.entries) {
         if (!wellFormed(row)) continue;
+        log.noteFormat(row);
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
       }
@@ -583,22 +885,22 @@ export class LibraryLog {
         log.generation = page.generation;
         log.head = since = 0;
         for (const entry of log.entries.values()) entry.seq = 0;
+        if (log.wireMin >= WIRE)
+          for (const [name, { row }] of log.entries) if (legacy(row)) log.entries.delete(name);
         log.acknowledged.clear();
         continue;
       }
       log.generation = page.generation;
       for (const entry of page.entries) {
-        try {
-          const row = believe(await open(log.keys, entry.k, entry.v));
-          const previous = log.entries.get(rowName(row));
-          log.entries.set(rowName(row), {
-            seq: entry.seq,
-            row: previous ? merge(previous.row, row) : row,
-          });
-          log.acknowledged.set(rowName(row), { seq: entry.seq, row });
-        } catch {
-          // Tampered with, or sealed under another library's key.
-        }
+        // Tampered with, sealed under another library's key, or newer than this build: not read as a row.
+        const row = await log.readEntry(entry);
+        if (!row) continue;
+        const previous = log.entries.get(rowName(row));
+        log.entries.set(rowName(row), {
+          seq: entry.seq,
+          row: previous ? merge(previous.row, row) : row,
+        });
+        log.acknowledged.set(rowName(row), { seq: entry.seq, row });
       }
       log.head = page.entries.at(-1)?.seq ?? page.head;
       if (!page.more || page.entries.length === 0) {
@@ -612,8 +914,55 @@ export class LibraryLog {
     }
   }
 
+  /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
   rows(): Row[] {
-    return [...this.entries.values()].map((e) => e.row);
+    return [...this.entries.values()].flatMap(({ row }) =>
+      isDocument(row) ? projectDocument(row) : [row],
+    );
+  }
+
+  /** Every v4 document as it is held, with the seq den-edge last gave it: what tracker delivery decides on (§9). */
+  documents(): { seq: number; document: DocumentRow }[] {
+    return [...this.entries.values()].flatMap(({ seq, row }) =>
+      isDocument(row) ? [{ seq, document: row }] : [],
+    );
+  }
+
+  private document(name: string): DocumentRow | undefined {
+    const row = this.entries.get(name)?.row;
+    return row && isDocument(row) ? row : undefined;
+  }
+
+  /**
+   * A stored row read as library v4 reads one (§4), keeping track of what can't be: an unreadable row by its `k`, to
+   * be removed (`compact`); a newer framing or format, which stops this build writing. Null for a row not read.
+   */
+  private async readEntry(entry: { k: string; v: string }): Promise<Row | null> {
+    const opened = await openEntry(this.keys, entry.k, entry.v);
+    this.unreadable.delete(entry.k);
+    this.newerFraming.delete(entry.k);
+    if ('unreadable' in opened) {
+      console.warn(`den: the library row ${entry.k} is unreadable (${opened.unreadable})`);
+      this.unreadable.set(entry.k, opened.unreadable);
+      return null;
+    }
+    if ('newerFraming' in opened) {
+      this.newerFraming.add(entry.k);
+      this.upgradeRequired ??= WIRE + 1;
+      return null;
+    }
+    if ('unknown' in opened) return null;
+    this.noteFormat(opened.row);
+    return believe(opened.row);
+  }
+
+  /** A document of a newer format is read, never written, and says this build needs updating (§4). */
+  private noteFormat(row: Row): void {
+    if (!isDocument(row)) return;
+    if (row.format > WIRE) {
+      this.newerDocuments.add(rowName(row));
+      this.upgradeRequired ??= row.format;
+    } else this.newerDocuments.delete(rowName(row));
   }
 
   /**
@@ -662,32 +1011,36 @@ export class LibraryLog {
             this.memberRegistered = false;
             await this.registerMember();
             this.generation = page.generation;
+            this.writeGeneration = undefined;
             this.head = 0;
             for (const entry of this.entries.values()) entry.seq = 0;
+            // Switched to v4 meanwhile: what was read of the v3 log is not drawn beside its documents.
+            if (this.wireMin >= WIRE)
+              for (const [name, { row }] of this.entries)
+                if (legacy(row)) this.entries.delete(name);
             this.acknowledged.clear();
             this.dirty = true;
             this.unreported = true;
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;
+          this.writeGeneration = undefined;
           for (const entry of page.entries) {
-            try {
-              const row = believe(await open(this.keys, entry.k, entry.v));
-              const previous = this.entries.get(rowName(row));
-              if (!previous || entry.seq > previous.seq) {
-                this.entries.set(rowName(row), {
-                  seq: entry.seq,
-                  row: previous ? merge(previous.row, row) : row,
-                });
-                this.unreported = true;
-              }
-              // Compared with den-edge's own copy, not `entries`: this browser's write already carries its seq there.
-              if (entry.seq > (this.acknowledged.get(rowName(row))?.seq ?? 0)) {
-                this.acknowledged.set(rowName(row), { seq: entry.seq, row });
-                this.dirty = true;
-              }
-            } catch {
-              /* Skip unreadable rows individually, as on initial open. */
+            // Unreadable rows are skipped individually, as on initial open.
+            const row = await this.readEntry(entry);
+            if (!row) continue;
+            const previous = this.entries.get(rowName(row));
+            if (!previous || entry.seq > previous.seq) {
+              this.entries.set(rowName(row), {
+                seq: entry.seq,
+                row: previous ? merge(previous.row, row) : row,
+              });
+              this.unreported = true;
+            }
+            // Compared with den-edge's own copy, not `entries`: this browser's write already carries its seq there.
+            if (entry.seq > (this.acknowledged.get(rowName(row))?.seq ?? 0)) {
+              this.acknowledged.set(rowName(row), { seq: entry.seq, row });
+              this.dirty = true;
             }
           }
           this.head = page.entries.at(-1)?.seq ?? page.head;
@@ -752,10 +1105,15 @@ export class LibraryLog {
     if (!this.dirty || !this.local) return;
     this.dirty = false;
     const snapshot = this.offline ? undefined : this.snapshot();
-    const save = (kept: Snapshot) =>
-      kept.entries.length
-        ? this.keep(SNAPSHOT, kept)
-        : this.local?.vault.remove(`${this.keys.id}:${SNAPSHOT}`);
+    // A library at v4 is kept under its own name, and the older copy goes, so neither is read for the other.
+    const [name, other] =
+      this.wireMin >= WIRE && !this.offline ? [SNAPSHOT_V4, SNAPSHOT] : [SNAPSHOT, SNAPSHOT_V4];
+    const save = async (kept: Snapshot) => {
+      await this.local?.vault.remove(`${this.keys.id}:${other}`);
+      return kept.entries.length
+        ? this.keep(name, kept)
+        : this.local?.vault.remove(`${this.keys.id}:${name}`);
+    };
     this.saving = this.saving
       .then(() =>
         snapshot
@@ -809,6 +1167,8 @@ export class LibraryLog {
   }
 
   title(ref: { type: string; id: number }): TitleRow | undefined {
+    const document = this.document(`title:${ref.type}:${ref.id}`);
+    if (document) return projectDocument(document)[0] as TitleRow;
     const row = this.entries.get(`rec:${ref.type}:${ref.id}`)?.row;
     return row?.kind === 'rec' ? row : undefined;
   }
@@ -818,6 +1178,9 @@ export class LibraryLog {
     season: number,
     episode: number,
   ): EpisodeRow | undefined {
+    const document = ref.type === 'tv' && this.document(`season:tv:${ref.id}:${season}`);
+    if (document)
+      return projectEpisode(this.document(`title:tv:${ref.id}`), document, ref, season, episode);
     const row = this.entries.get(`ep:${ref.type}:${ref.id}:${season}:${episode}`)?.row;
     if (row?.kind === 'ep') return row;
     if (ref.type !== 'tv') return undefined;
@@ -912,6 +1275,11 @@ export class LibraryLog {
    */
   async write(local: Row, outcome?: Outcome, durable = true): Promise<Row | null> {
     await this.followKeptForm();
+    if (this.readOnly) return null;
+    if (this.wireMin >= WIRE && !this.offline && local.kind !== 'set') {
+      if (local.kind !== 'rec' && local.kind !== 'ep') return null;
+      return this.writeEdit(this.before(local), local, outcome, durable);
+    }
     if (this.wireMin >= 3 && local.kind === 'ep') {
       const converted = this.v3EpisodeWrite(local);
       if (!converted) return local;
@@ -940,11 +1308,263 @@ export class LibraryLog {
     return saved ?? (kept ? this.project(local) : null);
   }
 
+  /** What a title or episode row stood at before an edit made from it: as read, or blank for one never held. */
+  private before(row: TitleRow | EpisodeRow): Row {
+    return row.kind === 'rec'
+      ? (this.title(row.title) ?? blankTitle(row.title, row.addedAt))
+      : (this.episode(row.title, row.season, row.episode) ??
+          blankEpisode(row.title, row.season, row.episode));
+  }
+
+  /**
+   * Library v4 §8: one edit, written as den-core's writes on the documents it touches. Resolves to the title or
+   * episode as it now reads, or null when it was not saved.
+   */
+  private async writeEdit(
+    before: Row,
+    after: Row,
+    outcome?: Outcome,
+    durable = true,
+  ): Promise<Row | null> {
+    if (!(await this.writeOps(opsFor(before, after), outcome, durable))) return null;
+    const now =
+      after.kind === 'rec'
+        ? this.title(after.title)
+        : after.kind === 'ep'
+          ? this.episode(after.title, after.season, after.episode)
+          : undefined;
+    return now ?? after;
+  }
+
+  /**
+   * Send `ops`, kept first in this browser as they are (§11), so a write den-edge refuses for now — a rewrite under
+   * way, a generation change, a library that needs a newer build — is sent again later and drawn meanwhile. True
+   * when sent or kept; false when it was not saved: refused for good, or nowhere to keep it. `key` is a piece of
+   * kept work already holding them.
+   */
+  private async writeOps(
+    ops: Op[],
+    outcome: Outcome = { refused: false },
+    durable = true,
+    key?: string,
+  ): Promise<boolean> {
+    if (!ops.length) return true;
+    let kept = key;
+    if (!kept && durable && this.storage) {
+      kept = this.pendingPrefix + 'ops:' + crypto.randomUUID();
+      try {
+        this.storage.setItem(kept, JSON.stringify({ ops: await this.sealKept(ops) }));
+      } catch {
+        return false;
+      }
+    }
+    if (kept) this.flushing.add(kept);
+    const run = this.writes.then(() => this.sendOps(ops, outcome));
+    this.writes = run.catch(() => false);
+    const sent = await run
+      .catch((error: unknown) => {
+        console.warn('den: a library write failed', error);
+        return false;
+      })
+      .finally(() => kept && this.flushing.delete(kept));
+    if (sent) {
+      this.persist();
+      await this.saving;
+      if (kept) {
+        this.discard(kept);
+        this.rejected.delete(kept);
+      }
+      return true;
+    }
+    if (outcome.refused) {
+      // A fresh edit refused for good is not kept to be refused again; one kept from before waits `RECHECK_MS`.
+      if (key) this.rejected.set(key, Date.now());
+      else if (kept) this.discard(kept);
+      return false;
+    }
+    if (!kept) return false;
+    this.projectOps(ops);
+    // Kept: saved, for a fresh edit; still waiting, for kept work sent again.
+    return !key;
+  }
+
+  /**
+   * `ops` sent as den-core writes them, compare-and-set, derived from den-edge's own version of each document — not
+   * from what this browser draws, which already shows kept writes. A conflict is read and the writes derived again
+   * (§8).
+   */
+  private async sendOps(ops: Op[], outcome: Outcome): Promise<boolean> {
+    const stored = (name: string) => {
+      const row = this.acknowledged.get(name)?.row;
+      return row && isDocument(row) ? row : undefined;
+    };
+    for (let round = 0; round < ROUNDS; round++) {
+      // A document of a newer format is never written: the write waits for this build to be updated (§4).
+      if (touched(ops).some((name) => this.newerDocuments.has(name))) return false;
+      const documents = applyOps(ops, stored);
+      if (!documents.length) return true;
+      const writes: { name: string; document: DocumentRow; base: number; k: string; v: string }[] =
+        [];
+      for (const document of documents) {
+        const name = rowName(document);
+        const encoded = encodeDocument(document, true);
+        if (!encoded) {
+          console.warn(`den: ${name} is full, so this change to it was not saved`);
+          this.refusal = 'document_full';
+          outcome.refused = true;
+          return false;
+        }
+        const sealed = await sealPlaintext(this.keys, name, encoded.plaintext);
+        writes.push({ name, document, base: this.acknowledged.get(name)?.seq ?? 0, ...sealed });
+      }
+      let batch: Batch;
+      try {
+        const res = await this.send(`/lib/${this.keys.id}/batch`, {
+          method: 'POST',
+          headers: { ...this.headers(), 'content-type': 'application/json' },
+          body: JSON.stringify({ writes: writes.map(({ k, base, v }) => ({ k, base, v })) }),
+        });
+        if (!res.ok) {
+          const code = await this.failed(res, outcome);
+          if (code === 'generation_changed' && this.adoptGeneration(res)) continue;
+          return false;
+        }
+        batch = (await res.json()) as Batch;
+      } catch {
+        return false;
+      }
+      for (const write of writes) {
+        const applied = batch.applied.find(({ k }) => k === write.k);
+        if (!applied) continue;
+        this.acknowledge(write.name, applied.seq, write.document);
+        outcome.applied = true;
+      }
+      if (!batch.conflicts.length) {
+        await this.registerMember();
+        return true;
+      }
+      for (const conflict of batch.conflicts) {
+        const write = writes.find(({ k }) => k === conflict.k);
+        if (!write) continue;
+        if (conflict.omitted) return false;
+        if (conflict.v === null) {
+          this.entries.delete(write.name);
+          this.acknowledged.delete(write.name);
+          continue;
+        }
+        const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
+        if (!theirs) return false;
+        this.entries.set(write.name, { seq: conflict.seq, row: theirs });
+        this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+        this.dirty = true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The generation a `generation_changed` refusal names, taken for writes: true when it was new, and a write may go
+   * again. What this browser has read stays under the old one, so the next `refresh` still sees the change, reads
+   * the new log from the start and writes back (§11) — a switch or a restore is never taken for the log it was.
+   */
+  private adoptGeneration(res: Response): boolean {
+    const current = res.headers.get('x-den-generation');
+    if (!current || current === (this.writeGeneration ?? this.generation)) return false;
+    console.warn(`den: library generation changed during a write; retrying with ${current}`);
+    this.writeGeneration = current;
+    return true;
+  }
+
+  /** What kept `ops` will do once sent, drawn now. */
+  private projectOps(ops: Op[]): void {
+    try {
+      for (const document of applyOps(ops, (name) => this.document(name))) {
+        const name = rowName(document);
+        this.entries.set(name, { seq: this.entries.get(name)?.seq ?? 0, row: document });
+        this.projected++;
+      }
+    } catch (error) {
+      console.warn('den: a kept library write could not be drawn', error);
+    }
+  }
+
+  /** The seq den-edge last gave the row `name`, 0 for none: the base a compare-and-set write of it is made on. */
+  seqOf(name: string): number {
+    return this.entries.get(name)?.seq ?? 0;
+  }
+
+  /**
+   * One row exactly as given, compare-and-set on `base`: a delivery document on the seq it was read at before the
+   * commands it settles were decided, or a delivery row's lease on the seq it was read at (§9). A conflict is not
+   * merged: the row is read again, and the caller decides again next pass.
+   */
+  async writeAt(row: DocumentRow | SettingsRow, base: number): Promise<boolean> {
+    if (this.readOnly || this.offline) return false;
+    const run = this.writes.then(async () => {
+      const name = rowName(row);
+      const { k, v } = await seal(this.keys, row);
+      const res = await this.send(`/lib/${this.keys.id}/batch`, {
+        method: 'POST',
+        headers: { ...this.headers(), 'content-type': 'application/json' },
+        body: JSON.stringify({ writes: [{ k, base, v }] }),
+      });
+      if (!res.ok) {
+        await this.failed(res);
+        return false;
+      }
+      const batch = (await res.json()) as Batch;
+      const applied = batch.applied.find((entry) => entry.k === k);
+      if (applied) {
+        this.acknowledge(name, applied.seq, row);
+        return true;
+      }
+      const conflict = batch.conflicts.find((entry) => entry.k === k);
+      const theirs = conflict?.v ? await this.readEntry({ k, v: conflict.v }) : null;
+      if (conflict && theirs) {
+        this.entries.set(name, { seq: conflict.seq, row: theirs });
+        this.acknowledged.set(name, { seq: conflict.seq, row: theirs });
+        this.dirty = true;
+      }
+      return false;
+    });
+    this.writes = run.catch(() => false);
+    const written = await run.catch(() => false);
+    if (written) this.persist();
+    return written;
+  }
+
+  /** Kept work's ops, sealed under the library's key: they say what was watched. */
+  private async sealKept(ops: Op[]): Promise<string> {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sealed = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: utf8.encode('den/kept-ops') },
+      this.keys.enc,
+      utf8.encode(JSON.stringify(ops)),
+    );
+    const bytes = new Uint8Array(iv.length + sealed.byteLength);
+    bytes.set(iv);
+    bytes.set(new Uint8Array(sealed), iv.length);
+    return toBase64url(bytes);
+  }
+
+  private async openKept(text: string): Promise<Op[]> {
+    const bytes = fromBase64url(text);
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode('den/kept-ops') },
+      this.keys.enc,
+      bytes.slice(12),
+    );
+    return JSON.parse(new TextDecoder().decode(plain)) as Op[];
+  }
+
   private async writeSerial(local: Row, outcome?: Outcome): Promise<Row | null> {
     if (this.offline) return this.keepLocally(local);
     const seen = this.entries.get(rowName(local))?.row;
     let target = seen ? merge(seen, local) : local;
     for (let round = 0; round < ROUNDS; round++) {
+      // The library went to v4 under this write (a generation change): a v2 or v3 row is never written into it.
+      // Its kept copy is sent again as the v4 writes it stands for (`v4Work`).
+      if (this.wireMin >= WIRE && !this.offline && legacy(target)) return null;
       const name = rowName(target);
       const base = this.entries.get(name)?.seq ?? 0;
       const { k, v } = await seal(this.keys, target);
@@ -957,17 +1577,7 @@ export class LibraryLog {
         });
         if (!res.ok) {
           const code = await this.failed(res, outcome);
-          if (code === 'generation_changed') {
-            const current = res.headers.get('x-den-generation');
-            if (current && current !== this.generation) {
-              console.warn(
-                `den: library generation changed during a write; retrying with ${current}`,
-              );
-              this.generation = current;
-              this.dirty = true;
-              continue;
-            }
-          }
+          if (code === 'generation_changed' && this.adoptGeneration(res)) continue;
           return null;
         }
         batch = (await res.json()) as Batch;
@@ -1079,8 +1689,8 @@ export class LibraryLog {
   private headers(): Record<string, string> {
     return {
       'x-den-library-token': this.keys.token,
-      'x-den-wire': '3',
-      'x-den-generation': this.generation ?? '0',
+      'x-den-wire': String(WIRE),
+      'x-den-generation': this.writeGeneration ?? this.generation ?? '0',
     };
   }
 
@@ -1088,7 +1698,12 @@ export class LibraryLog {
     const minimum = Number(res.headers.get('x-den-wire-min'));
     if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
     this.wireMin = minimum;
-    if (minimum > 3) this.upgradeRequired = minimum;
+    if (minimum > WIRE) this.upgradeRequired = minimum;
+    // Another device switched it: what kept this browser from writing a v3 library no longer applies.
+    if (minimum >= WIRE) {
+      this.switchFailure = null;
+      this.predatesV3 = false;
+    }
     try {
       this.storage?.setItem(`den.libraryWireMin.${this.keys.id}`, String(minimum));
     } catch {
@@ -1125,6 +1740,15 @@ export class LibraryLog {
   async writeActions(journals: SettingsRow[]): Promise<boolean> {
     if (!journals.length) return true;
     if (journals.some((row) => !trackerEvent(row))) return false;
+    if (this.readOnly) return false;
+    // v4 writes no history rows (§8): each action is the writes it makes, kept as one piece of work.
+    if (this.wireMin >= WIRE && !this.offline)
+      return this.writeOps(
+        journals.flatMap((row) => {
+          const event = trackerEvent(row)!;
+          return opsFor(event.before, event.after);
+        }),
+      );
     if (this.offline) {
       await this.followKeptForm();
       for (const row of journals) {
@@ -1215,30 +1839,39 @@ export class LibraryLog {
             const name = rowName(local),
               previous = this.entries.get(name);
             const row = previous ? merge(previous.row, local) : local;
-            return this.holds(name, row) ? [] : [{ row, name, base: previous?.seq ?? 0 }];
+            if (this.holds(name, row)) return [];
+            // A merge over the cap leaves the log's version as it stands, and this copy's extra state goes (§11).
+            if (isDocument(row) && !encodeDocument(row, false)) {
+              console.warn(`den: ${name} would be too large merged with this browser's copy`);
+              return [];
+            }
+            return [{ row, name, base: previous?.seq ?? 0 }];
           });
           if (!due.length) continue;
-          const chunk = await Promise.all(
+          const sealed = await Promise.all(
             due.map(async (entry) => ({ ...entry, ...(await seal(this.keys, entry.row)) })),
           );
-          const res = await this.send(`/lib/${this.keys.id}/batch`, {
-            method: 'POST',
-            headers: { ...this.headers(), 'content-type': 'application/json' },
-            body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
-          });
-          if (!res.ok) {
-            await this.failed(res, outcome);
-            return false;
-          }
-          const result = (await res.json()) as Batch;
-          for (const entry of chunk) {
-            const applied = result.applied.find(({ k }) => k === entry.k);
-            if (applied) {
-              this.acknowledge(entry.name, applied.seq, entry.row);
-              outcome.applied = true;
+          // Split by bytes too: 32 v4 documents can be far more than den-edge takes in one batch.
+          for (const chunk of chunks(sealed)) {
+            const res = await this.send(`/lib/${this.keys.id}/batch`, {
+              method: 'POST',
+              headers: { ...this.headers(), 'content-type': 'application/json' },
+              body: JSON.stringify({ writes: chunk.map(({ k, v, base }) => ({ k, v, base })) }),
+            });
+            if (!res.ok) {
+              await this.failed(res, outcome);
+              return false;
             }
-            // CAS merge/retry without leaving the lock.
-            else if (!(await this.writeSerial(entry.row, outcome))) return false;
+            const result = (await res.json()) as Batch;
+            for (const entry of chunk) {
+              const applied = result.applied.find(({ k }) => k === entry.k);
+              if (applied) {
+                this.acknowledge(entry.name, applied.seq, entry.row);
+                outcome.applied = true;
+              }
+              // CAS merge/retry without leaving the lock.
+              else if (!(await this.writeSerial(entry.row, outcome))) return false;
+            }
           }
         }
       }
@@ -1272,6 +1905,8 @@ export class LibraryLog {
   private async act(journal: SettingsRow, fresh: boolean): Promise<Row | null> {
     const event = trackerEvent(journal);
     if (!event) return null;
+    if (this.readOnly) return null;
+    if (this.wireMin >= WIRE && !this.offline) return this.writeEdit(event.before, event.after);
     if (this.offline) {
       await this.followKeptForm();
       this.keepLocally(journal);
@@ -1349,7 +1984,12 @@ export class LibraryLog {
           bulk?: { k: string; v: string }[];
           restore?: { k: string; v: string }[];
           rows?: { k: string; v: string }[];
+          ops?: string;
         };
+        if (pending.ops !== undefined) {
+          kept.push({ key, rows: [], kind: 'ops', ops: await this.openKept(pending.ops) });
+          continue;
+        }
         const sealed = pending.restore ?? pending.bulk ?? pending.rows ?? [pending];
         const rows = await Promise.all(sealed.map(({ k, v }) => open(this.keys, k, v)));
         kept.push({
@@ -1369,11 +2009,55 @@ export class LibraryLog {
     for (const work of await this.keptWork()) this.projectWork(work);
   }
 
-  private projectWork({ rows, kind }: KeptWork): void {
+  private projectWork(work: KeptWork): void {
+    if (this.wireMin >= WIRE && !this.offline) {
+      let converted: { restore: Row[]; ops: Op[] };
+      try {
+        converted = this.v4Work(work);
+      } catch (error) {
+        // Kept, and sent once it converts (`replay` keeps it too); only its drawing is missing meanwhile.
+        console.warn('den: kept library work could not be read as Library v4', error);
+        return;
+      }
+      for (const row of converted.restore) this.project(row);
+      this.projectOps(converted.ops);
+      return;
+    }
+    const { rows, kind } = work;
     for (const row of rows) {
       if (kind === 'restore') this.project(row);
       else if (row.kind === 'set' && trackerEvent(row)) this.project(trackerEvent(row)!.after);
     }
+  }
+
+  /**
+   * Kept work as a v4 library takes it (§11): rows written back as they are — documents, and settings less a
+   * delivery row's `lease` and switch-only facts — and edits as den-core writes. An edit this build kept before the
+   * switch is turned into those writes: an action or a title or episode row as ops, and episode progress kept on v3
+   * (a `wat` row, which `write` makes of it) as the season document den-core's switch makes of it, merged when sent.
+   * A recovery copy of the v3 log itself, and receipts, are discarded: the switch already converted that log.
+   */
+  private v4Work(work: KeptWork): { restore: Row[]; ops: Op[] } {
+    if (work.kind === 'ops') return { restore: [], ops: work.ops ?? [] };
+    const restore: Row[] = [];
+    const ops: Op[] = [];
+    if (work.kind !== 'restore')
+      restore.push(...v3Documents(work.rows.filter((row) => row.kind === 'wat')));
+    for (const row of work.rows) {
+      const event = trackerEvent(row);
+      if (event) {
+        if (work.kind !== 'restore') ops.push(...opsFor(event.before, event.after));
+      } else if (isDocument(row)) restore.push(row);
+      else if (row.kind === 'set')
+        restore.push(
+          row.name.startsWith('deliver:')
+            ? { ...row, values: row.values.since ? { since: row.values.since } : {} }
+            : row,
+        );
+      else if ((row.kind === 'rec' || row.kind === 'ep') && work.kind !== 'restore')
+        ops.push(...opsFor(this.before(row), row));
+    }
+    return { restore, ops };
   }
 
   private get pendingPrefix(): string {
@@ -1428,6 +2112,15 @@ export class LibraryLog {
       }
       this.flushing.add(key);
       try {
+        if (this.wireMin >= WIRE && !this.offline) {
+          const { restore, ops } = this.v4Work(work);
+          for (const row of restore) this.project(row);
+          if (ops.length && !(await this.writeOps(ops, undefined, false, key))) continue;
+          if (!restore.length) this.discard(key);
+          else if ((await this.flushRows(key, [restore])) && kind === 'restore')
+            this.recoveryRows = undefined;
+          continue;
+        }
         if (kind === 'restore') {
           for (const row of rows) this.project(row);
           if (
@@ -1468,12 +2161,11 @@ export class LibraryLog {
       Date.now() - (this.rejected.get(this.pendingPrefix + 'recovery') ?? 0) >= RECHECK_MS
     ) {
       const rows = this.recoveryRows;
-      if (
-        await this.flushRows(this.pendingPrefix + 'recovery', [
-          rows.filter(trackerEvent),
-          rows.filter((row) => !trackerEvent(row)),
-        ])
-      ) {
+      const groups =
+        this.wireMin >= WIRE
+          ? [this.v4Work({ key: '', rows, kind: 'restore' }).restore]
+          : [rows.filter(trackerEvent), rows.filter((row) => !trackerEvent(row))];
+      if (await this.flushRows(this.pendingPrefix + 'recovery', groups)) {
         delivered = true;
         this.recoveryRows = undefined;
       }
@@ -1514,7 +2206,7 @@ function canonical(value: unknown): string {
 }
 
 /** `work` under the lock `name` in every tab of this browser; with no `navigator.locks`, just `work`. */
-function exclusive<T>(name: string, work: () => Promise<T>): Promise<T> {
+export function exclusive<T>(name: string, work: () => Promise<T>): Promise<T> {
   const locks = globalThis.navigator?.locks;
   return locks ? locks.request(name, work) : work();
 }
@@ -1534,7 +2226,50 @@ function coalesce(rows: Row[]): Row[] {
   return [...byName.values()];
 }
 
+/**
+ * v3 `wat` and `snt` rows as the documents den-core's switch makes of them (`v4_form`), to be merged with what a v4
+ * log holds. Throws when den-core refuses them, so they are kept rather than lost.
+ */
+function v3Documents(rows: Row[]): DocumentRow[] {
+  if (!rows.length) return [];
+  return syncPolicy<{ documents: { document: DocumentRow }[] }>({
+    op: 'v4_form',
+    rows: rows.map((row, index) => ({ k: '', seq: index + 1, bytes: 0, row })),
+    base: rows.length,
+    performer: '',
+    now: Date.now(),
+  }).documents.map(({ document }) => document);
+}
+
+/** Writes in batches den-edge takes: at most `REWRITE_BATCH_MAX` of them, and `REWRITE_BATCH_MAX_BYTES` of body. */
+function chunks<T>(writes: T[]): T[][] {
+  const out: T[][] = [];
+  let chunk: T[] = [];
+  let bytes = 0;
+  for (const write of writes) {
+    const size = utf8.encode(JSON.stringify(write)).length + 1;
+    if (
+      chunk.length &&
+      (chunk.length >= REWRITE_BATCH_MAX || bytes + size > REWRITE_BATCH_MAX_BYTES - 16)
+    ) {
+      out.push(chunk);
+      chunk = [];
+      bytes = 0;
+    }
+    chunk.push(write);
+    bytes += size;
+  }
+  if (chunk.length) out.push(chunk);
+  return out;
+}
+
 function merge(theirs: Row, ours: Row): Row {
+  if (isDocument(theirs) && isDocument(ours)) {
+    // A document of a newer format is never merged by this build; the newer of the two stands (§4).
+    if (theirs.format > WIRE || ours.format > WIRE)
+      return ours.format > theirs.format ? ours : theirs;
+    return mergeDocument(theirs, ours);
+  }
   if (theirs.kind === 'rec' && ours.kind === 'rec') return mergeTitle(theirs, ours);
   if (theirs.kind === 'ep' && ours.kind === 'ep') return mergeEpisode(theirs, ours);
   if (theirs.kind === 'set' && ours.kind === 'set') return mergeSettings(theirs, ours);
