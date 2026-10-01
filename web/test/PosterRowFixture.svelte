@@ -9,12 +9,24 @@
     id: index + 1,
     title: `Coming title ${index + 1}`,
   }));
+  const far: Title[] = Array.from({ length: 10 }, (_, index) => ({
+    type: 'movie',
+    id: index + 100,
+    title: `Far title ${index + 1}`,
+    posterPath: `/far${index + 1}.jpg`,
+  }));
 </script>
 
 <main>
   <PosterRow heading="Coming Soon">
     {#each titles as title (title.id)}
       <PosterCard {title} caption="An Exceptional… · Sep 19" />
+    {/each}
+  </PosterRow>
+  <div style="height:4000px"></div>
+  <PosterRow heading="Far below">
+    {#each far as title (title.id)}
+      <PosterCard {title} />
     {/each}
   </PosterRow>
 </main>

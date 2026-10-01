@@ -1,7 +1,14 @@
 <!-- A titled, horizontally scrolling row of cards (the TV's PosterRow). Native scroll-snap; no glass here —
      backdrop-filter over moving content costs frames on a phone. -->
+<script module lang="ts">
+  /** The context a row's cards read to learn whether the row has come near the screen (`PosterCard`). */
+  export const ROW_NEAR = Symbol('row near');
+  /** About as far ahead as a browser starts loading a lazy image on a fast connection. */
+  const AHEAD = 1250;
+</script>
+
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { setContext, type Snippet } from 'svelte';
 
   let {
     heading,
@@ -15,9 +22,36 @@
     aside?: { label: string; href: string };
     children: Snippet;
   } = $props();
+
+  /**
+   * Whether the row has come within `AHEAD` of the screen, after which it stays so. Until then its cards draw no
+   * poster at all, rather than a lazy one: the browser watches every lazy image for the screen, and Home's few
+   * hundred, most of them rows below, cost 40-70 ms of a phone's main thread on every row swipe.
+   */
+  const row = $state({ near: false });
+  setContext(ROW_NEAR, row);
+  let section: HTMLElement;
+  $effect(() => {
+    const box = section.getBoundingClientRect();
+    // On screen already, or in a page that is not laid out (a hidden one), where nothing can be measured.
+    if (!box.height || (box.top < innerHeight + AHEAD && box.bottom > -AHEAD)) {
+      row.near = true;
+      return;
+    }
+    const near = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        row.near = true;
+        near.disconnect();
+      },
+      { rootMargin: `${AHEAD}px 0px` },
+    );
+    near.observe(section);
+    return () => near.disconnect();
+  });
 </script>
 
-<section class="row" aria-label={heading}>
+<section class="row" aria-label={heading} bind:this={section}>
   <div class="head">
     <h2>
       {#if headingLink}

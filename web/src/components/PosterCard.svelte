@@ -4,7 +4,9 @@
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
      faded, as on the TV. -->
 <script lang="ts">
+  import { getContext } from 'svelte';
   import { availability } from '../lib/availability.svelte';
+  import { ROW_NEAR } from './PosterRow.svelte';
   import { notePressed, warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
@@ -49,6 +51,8 @@
    */
   let failed = $state('');
   const art = $derived(poster && poster !== failed ? poster : undefined);
+  /** A card in a row far from the screen draws no poster yet (`PosterRow`); one in no row always does. */
+  const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
   const faded = $derived(availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   const standing = $derived(libraryStandings.of(title));
@@ -75,7 +79,15 @@
 {#snippet body()}
   <span class="art">
     {#if art}
-      <img src={art} alt="" loading="lazy" decoding="async" onerror={() => (failed = art ?? '')} />
+      {#if row?.near ?? true}
+        <img
+          src={art}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onerror={() => (failed = art ?? '')}
+        />
+      {/if}
     {:else}
       <span class="placeholder">{title.title}</span>
     {/if}
