@@ -28,6 +28,36 @@ export function swipeHistory(
   let fallback: ReturnType<typeof setTimeout> | undefined;
   let lastEnd: { x: number; y: number; until: number } | null = null;
   const edge = (x: number) => x <= 24 || x >= innerWidth - 24;
+  /**
+   * Each element's `overflow-x`, read once per window shape: whether something is a carousel does not change
+   * under a finger, and reading it on every touch walked the ancestry through `getComputedStyle`.
+   */
+  let overflow = new WeakMap<Element, string>();
+  const forgetOverflow = () => (overflow = new WeakMap());
+  const carousel = (node: Element) => {
+    if (node.scrollWidth <= node.clientWidth) return false;
+    let value = overflow.get(node);
+    if (value === undefined) overflow.set(node, (value = getComputedStyle(node).overflowX));
+    return /auto|scroll/.test(value);
+  };
+  /**
+   * Whether moves and the lift are listened to. Only while a gesture is being followed: a listener that may cancel
+   * makes the browser wait on this page's main thread before it scrolls, which WebKit does for every touch on the
+   * page when one is registered on the document. A carousel swiped, or a page scrolled, with nothing that could
+   * turn it into history, then scrolls without waiting on anything here.
+   */
+  let listening = false;
+  const listen = (on: boolean) => {
+    if (on === listening) return;
+    listening = on;
+    if (on) {
+      target.addEventListener('touchmove', move, { passive: false, capture: true });
+      target.addEventListener('touchend', end, { passive: false, capture: true });
+    } else {
+      target.removeEventListener('touchmove', move, true);
+      target.removeEventListener('touchend', end, true);
+    }
+  };
   const reset = () => {
     clearTimeout(fallback);
     start = null;
@@ -35,6 +65,7 @@ export function swipeHistory(
     visual?.dispose();
     visual = null;
     claimed = finishing = traversing = releasing = false;
+    listen(false);
   };
   const completed = () => {
     const held = visual;
@@ -76,13 +107,8 @@ export function swipeHistory(
     // Interior drags belong to carousels. At the screen edge, history owns the gesture,
     // even when a full-width carousel or one of its buttons is underneath the finger.
     if (!atEdge) {
-      for (let node: Element | null = element; node; node = node.parentElement) {
-        if (
-          node.scrollWidth > node.clientWidth &&
-          /auto|scroll/.test(getComputedStyle(node).overflowX)
-        )
-          return;
-      }
+      for (let node: Element | null = element; node; node = node.parentElement)
+        if (carousel(node)) return;
     }
     // Cancel native edge navigation immediately. Snapshot work waits until horizontal intent
     // is known, keeping touchstart fast and leaving ordinary interior taps/vertical scroll alone.
@@ -96,6 +122,7 @@ export function swipeHistory(
       element,
       blocked: atEdge,
     };
+    listen(true);
   };
   const move = (event: TouchEvent) => {
     if (finishing) {
@@ -190,22 +217,22 @@ export function swipeHistory(
   };
   target.addEventListener('den:swipe-restored', completed);
   target.addEventListener('den:swipe-cancel', reset);
+  // Not passive, so an edge touch can be claimed before the browser's own history gesture starts. Moves are
+  // listened to only once a touch could become a swipe (`listen`).
   target.addEventListener('touchstart', begin, { passive: false, capture: true });
-  target.addEventListener('touchmove', move, { passive: false, capture: true });
-  target.addEventListener('touchend', end, { passive: false, capture: true });
   target.addEventListener('touchcancel', reset, { passive: true });
   target.addEventListener('click', clicked, true);
   target.defaultView?.addEventListener('popstate', historyChanged);
+  target.defaultView?.addEventListener('resize', forgetOverflow);
   return () => {
     reset();
     target.removeEventListener('den:swipe-restored', completed);
     target.removeEventListener('den:swipe-cancel', reset);
     target.removeEventListener('touchstart', begin, true);
-    target.removeEventListener('touchmove', move, true);
-    target.removeEventListener('touchend', end, true);
     target.removeEventListener('touchcancel', reset);
     target.removeEventListener('click', clicked, true);
     target.defaultView?.removeEventListener('popstate', historyChanged);
+    target.defaultView?.removeEventListener('resize', forgetOverflow);
   };
 }
 

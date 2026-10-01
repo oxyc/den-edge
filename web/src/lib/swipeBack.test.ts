@@ -107,6 +107,35 @@ it('leaves vertical interior scrolling alone without cloning the page', () => {
   expect(back.preview).not.toHaveBeenCalled();
 });
 
+it('listens to moves only while a touch could become a swipe', () => {
+  const { send, document } = gestureHarness(true);
+  const added = vi.spyOn(document, 'addEventListener');
+  const removed = vi.spyOn(document, 'removeEventListener');
+  const moves = (spy: typeof added) => spy.mock.calls.filter(([type]) => type === 'touchmove');
+  // A carousel swiped from inside is the carousel's: nothing here may hold its scrolling up.
+  send('touchstart', 300);
+  send('touchmove', 200);
+  send('touchend', 150);
+  expect(moves(added)).toHaveLength(0);
+  // An edge touch is followed, and let go of once it turns out to be a scroll.
+  send('touchstart', 385);
+  expect(moves(added)).toEqual([
+    ['touchmove', expect.any(Function), { passive: false, capture: true }],
+  ]);
+  send('touchmove', 384, 360);
+  expect(moves(removed)).toHaveLength(1);
+});
+it('reads whether an element is a carousel once, not on every touch', () => {
+  const { send } = gestureHarness(true);
+  const style = vi.fn(() => ({ overflowX: 'auto' }));
+  vi.stubGlobal('getComputedStyle', style);
+  for (let i = 0; i < 3; i++) {
+    send('touchstart', 300);
+    send('touchend', 300);
+  }
+  expect(style).toHaveBeenCalledOnce();
+});
+
 it('does not traverse a changed history entry when navigation interrupts a finishing swipe', async () => {
   const { send, back, preview, document } = gestureHarness();
   let finish!: () => void;
