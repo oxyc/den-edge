@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initialize } from '../vendor/den-core/index.js';
-import { librarySwitchState, switchBlockerText } from './librarySwitch';
+import { librarySwitchState } from './librarySwitch';
 import type { DeviceEntry } from '../settings/values';
 
 const device = (overrides: Partial<DeviceEntry> = {}): DeviceEntry => ({
@@ -34,9 +34,7 @@ describe('Library v3 switch offer', () => {
     const devices = [device(), device({ id: 'tv', name: 'Living room', kind: 'tv', format: 2 })];
     const state = librarySwitchState(devices, 'web', 1000);
     expect(state.offered).toBe(false);
-    expect(switchBlockerText(state.blockers[0]!, devices)).toBe(
-      'Living room needs a Library v3 build.',
-    );
+    expect(state.blockers[0]).toMatchObject({ device: 'tv', reason: 'format' });
   });
 
   it('waits for a delivering TV to store its handoff', () => {

@@ -33,11 +33,6 @@
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { ensureSyncPolicy } from './lib/syncLoader';
-  import {
-    librarySwitchState,
-    switchBlockerText,
-    type LibrarySwitchState,
-  } from './lib/librarySwitch';
   import { tmdbKeyOf } from './lib/tmdb';
   import { fetchSimklClientId, simklAccountID } from './settings/simkl';
   import type { ConfigValue, SettingsRow, Stamp } from './lib/wire';
@@ -52,8 +47,6 @@
   const clock = browserClock();
   let failure = $state<string | null>(null);
   let saving = $state(false);
-  let switching = $state(false);
-  let switchState = $state<LibrarySwitchState | null>(null);
   /** Tells Den's own plugins apart, so they're listed by name rather than by a LAN address. */
   let routes = $state<Routes>({});
   void fetchRoutes().then((fetched) => (routes = fetched));
@@ -86,56 +79,6 @@
   const devicesRow = $derived(group('devices'));
   const devices = $derived(readDevices(devicesRow));
   const disabled = $derived(!log || saving);
-
-  $effect(() => {
-    const listed = devices;
-    void version;
-    let cancelled = false;
-    void ensureSyncPolicy()
-      .then(() => {
-        if (!cancelled) switchState = librarySwitchState(listed, clock.device, Date.now());
-      })
-      .catch(() => {
-        if (!cancelled) switchState = null;
-      });
-    return () => {
-      cancelled = true;
-    };
-  });
-
-  async function performWebSwitch(): Promise<void> {
-    if (!log || !switchState?.performable || !switchState.webOnly) return;
-    switching = true;
-    failure = null;
-    try {
-      const token = readApiKey(keys, 'simkl');
-      let simkl: { account: string; credential: string; connectedAt: Stamp } | undefined;
-      if (token) {
-        const clientId = await fetchSimklClientId();
-        const account = clientId && (await simklAccountID(clientId, token));
-        const connectedAt = keys?.values.simkl?.at;
-        if (!account || !connectedAt) {
-          failure =
-            'SIMKL must be reachable before the library can switch. Reconnect it or try again.';
-          return;
-        }
-        simkl = { account, credential: token, connectedAt };
-      }
-      if (!(await log.switchWebOnly({ performer: clock.device, stamp: clock.issue(), simkl }))) {
-        failure =
-          'The library changed while the switch was being prepared. Nothing was replaced; try again.';
-        return;
-      }
-      session.changed(true);
-      switchState = librarySwitchState(
-        readDevices(log.settings('devices')),
-        clock.device,
-        Date.now(),
-      );
-    } finally {
-      switching = false;
-    }
-  }
 
   /** Remove device settings first, then its per-account handoff rows, preserving §10's recoverable order. */
   async function removeLibraryDevice(id: string): Promise<void> {
@@ -317,33 +260,6 @@
       </p>
     {/if}
     {#if failure}<p class="banner bad" role="alert">{failure}</p>{/if}
-    {#if log && devices.length && switchState}
-      <section class="banner" aria-label="Library v3">
-        <strong>Library v3</strong>
-        {#if log.wireMinimum >= 3}
-          <p>This library uses Library v3.</p>
-        {:else if switchState.performable && switchState.webOnly}
-          <p>This browser can switch this web-only library without changing tracker accounts.</p>
-          <button class="primary" disabled={switching} onclick={() => void performWebSwitch()}>
-            {switching ? 'Switching…' : 'Switch library'}
-          </button>
-        {:else if switchState.offered}
-          <p>The switch is offered when these items finish:</p>
-          <ul>
-            {#each switchState.blockers as blocker, index (`${blocker.device ?? 'library'}:${blocker.reason}:${index}`)}
-              <li>{switchBlockerText(blocker, devices)}</li>
-            {/each}
-          </ul>
-        {:else}
-          <p>The switch is not offered yet:</p>
-          <ul>
-            {#each switchState.blockers as blocker, index (`${blocker.device ?? 'library'}:${blocker.reason}:${index}`)}
-              <li>{switchBlockerText(blocker, devices)}</li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
-    {/if}
 
     <ConnectionsSection
       {link}
