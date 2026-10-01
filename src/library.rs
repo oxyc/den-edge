@@ -6,6 +6,8 @@
 //! writes, and nothing expires.
 //!
 //!   POST /lib/{id}/batch  { writes: [{ k, base, v }] } → { head, applied: [{ k, seq }], conflicts: [{ k, seq, v }], generation }
+//!                                                       (from wire minimum 4, a conflict past 2 MiB of values is
+//!                                                       { k, seq, omitted: true })
 //!   GET  /lib/{id}/changes?since=N&limit=L            → { entries: [{ k, seq, v }], head, more, generation } (gzip when accepted)
 //!   DELETE /lib/{id}                                   → { deleted: true }
 //!
@@ -74,8 +76,16 @@ pub(crate) const MEMBER_HEADER: &str = "x-den-library-member";
 const NEW_PER_WINDOW: u32 = 5;
 /// Writes per batch: a client pushes a few at a time, and a first upload of a few thousand in batches.
 const MAX_WRITES: usize = 200;
-/// A sealed record is under a kilobyte; this is room for any, not a target.
+/// A sealed record is under a kilobyte; this is room for any, not a target. The cap below wire minimum 4, and so
+/// of every v2 log line.
 const MAX_VALUE: usize = 32 * 1024;
+/// The cap from wire minimum 4 (den-spec `wire/library-v4.md` §13), where a row is a whole title's or season's
+/// document. Staged rewrite rows may reach it at any minimum; the commit applies the minimum it leaves behind.
+const MAX_VALUE_V4: usize = 256 * 1024;
+/// Conflict values one v4 batch response carries; past it a conflict is `{k, seq, "omitted": true}` and the
+/// client reads the row from `/changes`. 200 conflicts at the v4 cap would otherwise be a 50 MiB response. Test
+/// builds halve it: their `MAX_ROWS` of 8 rows at the cap make exactly 2 MiB, which never exceeds it.
+const MAX_CONFLICT_BYTES: usize = if cfg!(test) { 1024 * 1024 } else { 2 * 1024 * 1024 };
 pub const BATCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1000;
@@ -112,6 +122,17 @@ impl Default for Limits {
     fn default() -> Self {
         Self { library_bytes: 8 * 1024 * 1024, cache_bytes: 16 * 1024 * 1024, stored_bytes: 32 * 1024 * 1024 }
     }
+}
+
+/// Whether a sealed value fits the cap of a library at `wire_min`. From minimum 4 the value is measured as it is
+/// stored, JSON-escaped in its row fragment: identical for base64url, and it keeps one row inside the `PAGE_BYTES`
+/// a `/changes` response reserves, which a 256 KiB value of six-byte escapes would not be.
+fn value_fits(value: &str, wire_min: u64) -> bool {
+    if wire_min < 4 {
+        return value.len() <= MAX_VALUE;
+    }
+    value.len() <= MAX_VALUE_V4
+        && serde_json::to_string(value).expect("a string always serialises").len() - 2 <= MAX_VALUE_V4
 }
 
 fn row_bytes(k: &str, v: &str, fragment_bytes: usize) -> usize {
@@ -665,7 +686,9 @@ async fn rewrite_rows(
         let Some(k) = write.get("k").and_then(Value::as_str).filter(|key| valid_hex_id(key)) else {
             return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
         };
-        let Some(v) = write.get("v").and_then(Value::as_str).filter(|value| value.len() <= MAX_VALUE) else {
+        // Staging precedes the commit that raises the minimum, so it takes the v4 cap at any minimum; a commit
+        // that leaves the library below 4 refuses a row over 32 KiB (`v3::RedbLibrary::rewrite`).
+        let Some(v) = write.get("v").and_then(Value::as_str).filter(|value| value_fits(value, 4)) else {
             return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
         };
         parsed.push(RewriteStageRow { k: k.to_owned(), v: v.to_owned() });
@@ -754,6 +777,7 @@ async fn rewrite_commit(
             json_reply(StatusCode::CONFLICT, &json!({ "head": head }))
         }
         Ok(Err(v3::StoreError::Full)) => json_reply(StatusCode::PAYLOAD_TOO_LARGE, &error("library_full")),
+        Ok(Err(v3::StoreError::TooLarge)) => json_reply(StatusCode::BAD_REQUEST, &error("value_too_large")),
         Ok(Err(reason)) => internal("rewrite commit", v3_io(reason)),
         Err(reason) => internal("rewrite commit task", io::Error::other(reason)),
     }
@@ -932,6 +956,7 @@ fn v3_io(error: v3::StoreError) -> io::Error {
     match error {
         v3::StoreError::Full => full(),
         v3::StoreError::Forbidden => io::Error::new(io::ErrorKind::PermissionDenied, "forbidden"),
+        v3::StoreError::TooLarge => io::Error::new(io::ErrorKind::InvalidInput, "value_too_large"),
         v3::StoreError::Invalid(message) | v3::StoreError::Failed(message) => io::Error::other(message),
     }
 }
@@ -1122,6 +1147,10 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
                 &json!({ "error": "upgrade_required", "min": first_min }),
             );
         }
+        // Before the store exists: a refused batch must not start a library. `apply_bounded` checks again.
+        if writes.iter().any(|write| !value_fits(&write.v, first_min)) {
+            return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+        }
     }
     if new_library {
         if state.new_libraries == NewLibraries::Members {
@@ -1165,6 +1194,10 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
             Ok(Err(v3::StoreError::Forbidden)) => {
                 return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
             }
+            // The answer a v3 client has always had for an oversized value, and one it refuses for good.
+            Ok(Err(v3::StoreError::TooLarge)) => {
+                return json_reply(StatusCode::BAD_REQUEST, &error("invalid_batch"));
+            }
             Ok(Err(error)) => return internal("library write", v3_io(error)),
             Err(error) => return internal("library write task", io::Error::other(error)),
         };
@@ -1179,6 +1212,8 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
     }
     let applied: Vec<Value> =
         result.applied.iter().map(|(key, seq)| json!({ "k": key, "seq": seq })).collect();
+    // Only a v4 library bounds its conflicts: a v3 client, whose values are at most 32 KiB, never learned `omitted`.
+    let mut conflict_budget = if protocol.wire_min >= 4 { MAX_CONFLICT_BYTES } else { usize::MAX };
     let conflicts: Vec<Value> = result
         .conflicts
         .iter()
@@ -1188,6 +1223,11 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
                     .expect("the v3 authority contains only canonical row fragments");
                 (row.sequence, decoded.get("v").cloned().unwrap_or(Value::Null))
             });
+            let bytes = value.as_str().map_or(0, str::len);
+            if bytes > conflict_budget {
+                return json!({ "k": conflict.key, "seq": sequence, "omitted": true });
+            }
+            conflict_budget -= bytes;
             json!({ "k": conflict.key, "seq": sequence, "v": value })
         })
         .collect();
@@ -1674,7 +1714,8 @@ fn parse_writes(body: &Value) -> Option<Vec<Write>> {
     for w in raw {
         let k = w.get("k")?.as_str().filter(|k| valid_hex_id(k))?;
         let base = w.get("base")?.as_u64()?;
-        let v = w.get("v")?.as_str().filter(|v| v.len() <= MAX_VALUE)?;
+        // The largest cap; the library's own minimum is applied with the write (`v3::RedbLibrary::apply_bounded`).
+        let v = w.get("v")?.as_str().filter(|v| value_fits(v, 4))?;
         if !seen.insert(k) {
             return None;
         }
@@ -2143,6 +2184,205 @@ mod tests {
             .await;
         assert_eq!(current.status(), StatusCode::OK);
         assert_eq!(current.headers()[super::WIRE_MIN_HEADER], "3");
+    }
+
+    /// A request from a client at `wire`, which starts a new library at minimum `wire`.
+    async fn wired(
+        h: &Harness,
+        path: &str,
+        wire: &str,
+        generation: &str,
+        body: Value,
+    ) -> axum::response::Response {
+        h.send(
+            "POST",
+            &format!("/lib/{path}"),
+            Some(body.to_string()),
+            &[
+                ("x-den-library-token", TOKEN),
+                (super::WIRE_HEADER, wire),
+                (super::GENERATION_HEADER, generation),
+                (super::WIRE_MIN_HEADER, wire),
+            ],
+        )
+        .await
+    }
+
+    fn generation_of(response: &axum::response::Response) -> String {
+        response.headers()[super::GENERATION_HEADER].to_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_batch_takes_256_kib_at_minimum_4_and_32_kib_below() {
+        let h = Harness::new();
+        let write = |k: &str, v: String| json!({ "writes": [{ "k": k, "base": 0, "v": v }] });
+        let v4 =
+            wired(&h, &format!("{LIB}/batch"), "4", "0", write(K1, "a".repeat(super::MAX_VALUE_V4))).await;
+        assert_eq!(v4.status(), StatusCode::OK);
+        assert_eq!(v4.headers()[super::WIRE_MIN_HEADER], "4");
+        let generation = generation_of(&v4);
+        let over = write(K2, "a".repeat(super::MAX_VALUE_V4 + 1));
+        assert_eq!(
+            wired(&h, &format!("{LIB}/batch"), "4", &generation, over).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        // Measured as stored: under 256 KiB of characters, but each a six-byte escape in the row.
+        let escaped = write(K2, "\u{0001}".repeat(super::MAX_VALUE_V4 / 6 + 1));
+        assert_eq!(
+            wired(&h, &format!("{LIB}/batch"), "4", &generation, escaped).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let v3 = wired(&h, &format!("{LIB2}/batch"), "3", "0", write(K1, "a".repeat(super::MAX_VALUE))).await;
+        assert_eq!(v3.status(), StatusCode::OK);
+        assert_eq!(v3.headers()[super::WIRE_MIN_HEADER], "3");
+        let generation = generation_of(&v3);
+        for (wire, size) in [("3", super::MAX_VALUE + 1), ("4", super::MAX_VALUE_V4)] {
+            let refused =
+                wired(&h, &format!("{LIB2}/batch"), wire, &generation, write(K2, "a".repeat(size))).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "wire {wire}");
+            assert_eq!(body_json(refused).await["error"], "invalid_batch", "wire {wire}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_store_applies_the_cap_of_the_minimum_a_write_leaves() {
+        let h = Harness::new();
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let cap = h.state.library_limits.stored_bytes;
+        let big = |key: &str| super::v3::Write {
+            key: key.to_owned(),
+            base: 0,
+            value: "a".repeat(super::MAX_VALUE_V4),
+        };
+        let v3 = h.state.library_v3.library(LIB, token_hash).unwrap();
+        assert!(matches!(v3.apply_bounded(&[big(K1)], cap, 3), Err(super::v3::StoreError::TooLarge)));
+        let small = super::v3::Write { key: K1.to_owned(), base: 0, value: "a".repeat(super::MAX_VALUE) };
+        assert_eq!(v3.apply_bounded(&[small], cap, 3).unwrap().applied.len(), 1);
+        // A minimum named by a later batch does not apply: only a library's first batch sets it.
+        assert!(matches!(v3.apply_bounded(&[big(K2)], cap, 4), Err(super::v3::StoreError::TooLarge)));
+
+        let v4 = h.state.library_v3.library(LIB2, token_hash).unwrap();
+        assert_eq!(v4.apply_bounded(&[big(K1)], cap, 4).unwrap().applied.len(), 1);
+        assert_eq!(v4.protocol().unwrap().wire_min, 4);
+        assert_eq!(v4.apply_bounded(&[big(K2)], cap, 2).unwrap().applied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_stages_256_kib_and_commits_it_only_to_minimum_4() {
+        let h = Harness::new();
+        let first = wired(
+            &h,
+            &format!("{LIB}/batch"),
+            "3",
+            "0",
+            json!({ "writes": [{ "k": K1, "base": 0, "v": "v3" }] }),
+        )
+        .await;
+        let generation = generation_of(&first);
+        let opened = wired(&h, &format!("{LIB}/rewrite"), "4", &generation, json!({})).await;
+        let opened = body_json(opened).await;
+        let rewrite = opened["rewrite"].as_str().unwrap().to_owned();
+        let base = opened["base"].as_u64().unwrap();
+        let rows = format!("{LIB}/rewrite/{rewrite}/rows");
+        let stage = |k: &str, size: usize| json!({ "writes": [{ "k": k, "v": "a".repeat(size) }] });
+        let over = wired(&h, &rows, "4", &generation, stage(K1, super::MAX_VALUE_V4 + 1)).await;
+        assert_eq!(over.status(), StatusCode::BAD_REQUEST);
+        let staged = wired(&h, &rows, "4", &generation, stage(K1, super::MAX_VALUE_V4)).await;
+        assert_eq!(staged.status(), StatusCode::OK, "staging takes the v4 cap while the library is at 3");
+        let commit = format!("{LIB}/rewrite/{rewrite}/commit");
+
+        // Below 4, even a 33 KiB staged row is refused, and the stage stays open to fix or abort.
+        assert_eq!(wired(&h, &rows, "4", &generation, stage(K1, 33 * 1024)).await.status(), StatusCode::OK);
+        let refused = wired(&h, &commit, "4", &generation, json!({ "base": base, "wireMin": 3 })).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(refused).await, json!({ "error": "value_too_large" }));
+
+        assert_eq!(
+            wired(&h, &rows, "4", &generation, stage(K1, super::MAX_VALUE_V4)).await.status(),
+            StatusCode::OK
+        );
+        let committed = wired(&h, &commit, "4", &generation, json!({ "base": base, "wireMin": 4 })).await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        assert_eq!(committed.headers()[super::WIRE_MIN_HEADER], "4");
+        let generation = generation_of(&committed);
+
+        let old = wired(
+            &h,
+            &format!("{LIB}/batch"),
+            "3",
+            &generation,
+            json!({ "writes": [{ "k": K2, "base": 0, "v": "x" }] }),
+        )
+        .await;
+        assert_eq!(old.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body_json(old).await, json!({ "error": "upgrade_required", "min": 4 }));
+        let (_, page) = changes_at(&h, "4", &generation).await;
+        assert_eq!(page["entries"][0]["v"].as_str().unwrap().len(), super::MAX_VALUE_V4);
+    }
+
+    #[tokio::test]
+    async fn the_store_rewrite_takes_the_cap_of_the_minimum_it_leaves() {
+        let h = Harness::new();
+        batch(&h, TOKEN, json!([{ "k": K1, "base": 0, "v": "v3" }])).await;
+        let token_hash: [u8; 32] = sha2::Sha256::digest(TOKEN.as_bytes()).into();
+        let store = h.state.library_v3.existing_library(LIB, token_hash).unwrap();
+        let cap = h.state.library_limits.stored_bytes;
+        let rows = [super::v3::RewriteRow { key: K2.to_owned(), value: "a".repeat(super::MAX_VALUE_V4) }];
+        let head = store.protocol().unwrap().head;
+        assert!(matches!(store.rewrite(head, &rows, 3, cap), Err(super::v3::StoreError::TooLarge)));
+        assert_eq!(store.rewrite(head, &rows, 4, cap).unwrap().wire_min, 4);
+        // At 4 already, a commit naming a lower minimum keeps 4, and its cap.
+        let head = store.protocol().unwrap().head;
+        assert_eq!(store.rewrite(head, &rows, 3, cap).unwrap().wire_min, 4);
+    }
+
+    async fn changes_at(h: &Harness, wire: &str, generation: &str) -> (StatusCode, Value) {
+        let response = h
+            .send(
+                "GET",
+                &format!("/lib/{LIB}/changes"),
+                None,
+                &[
+                    ("x-den-library-token", TOKEN),
+                    (super::WIRE_HEADER, wire),
+                    (super::GENERATION_HEADER, generation),
+                ],
+            )
+            .await;
+        (response.status(), body_json(response).await)
+    }
+
+    #[tokio::test]
+    async fn a_v4_batch_omits_conflict_values_past_its_budget() {
+        let h = Harness::new();
+        let keys: Vec<String> = (0..super::MAX_ROWS).map(|i| format!("{i:016x}")).collect();
+        let mut generation = "0".to_owned();
+        for chunk in keys.chunks(4) {
+            let writes: Vec<_> = chunk
+                .iter()
+                .map(|k| json!({ "k": k, "base": 0, "v": "a".repeat(super::MAX_VALUE_V4) }))
+                .collect();
+            let response =
+                wired(&h, &format!("{LIB}/batch"), "4", &generation, json!({ "writes": writes })).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            generation = generation_of(&response);
+        }
+        let stale: Vec<_> = keys.iter().map(|k| json!({ "k": k, "base": 0, "v": "rival" })).collect();
+        let response = wired(&h, &format!("{LIB}/batch"), "4", &generation, json!({ "writes": stale })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let conflicts = body_json(response).await["conflicts"].as_array().unwrap().clone();
+        let fits = super::MAX_CONFLICT_BYTES / super::MAX_VALUE_V4;
+        assert_eq!(conflicts.len(), keys.len());
+        for (i, conflict) in conflicts.iter().enumerate() {
+            assert_eq!(conflict["k"], keys[i]);
+            assert_eq!(conflict["seq"], i as u64 + 1);
+            if i < fits {
+                assert_eq!(conflict["v"].as_str().unwrap().len(), super::MAX_VALUE_V4);
+            } else {
+                assert_eq!(conflict, &json!({ "k": keys[i], "seq": i as u64 + 1, "omitted": true }));
+            }
+        }
     }
 
     /// A write based on a stale sequence gets the current row back; one based on the current one lands.

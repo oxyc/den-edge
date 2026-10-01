@@ -28,8 +28,8 @@ if its data model is otherwise correct.
 
 The backend reports, rather than estimates away, fixed database/cache/mapping cost per open library,
 response ownership, temporary migration memory, and copy-on-write slack. Existing limits remain
-hard: 8 MiB per library, 16 MiB aggregate library cache, 32 KiB value, 50,000 live rows, 512 KiB page, and the 64 MiB
-container target. Reservations precede allocation and roll back on cancellation.
+hard: 8 MiB per library, 16 MiB aggregate library cache, 32 KiB value (256 KiB at wire minimum 4, below), 50,000 live
+rows, 512 KiB page, and the 64 MiB container target. Reservations precede allocation and roll back on cancellation.
 
 V3 admits at most 16 simultaneously leased databases. Each is charged 688 KiB: 112 KiB for the measured handle,
 cache, and mapping residency, plus 576 KiB for one worst-case prepared identity page including allocation slack. It
@@ -56,6 +56,25 @@ An open library retains at most one exact identity representation keyed by `sinc
 generation. Concurrent hits clone immutable `Bytes` references rather than the body. A writer holds that library's
 prepared-page lock across its transaction and invalidation, so a pre-commit read cannot publish stale bytes after a
 commit. This is per-library only; it creates no cross-library writer or cache lock.
+
+## Wire minimum 4 (den-spec `wire/library-v4.md` §13)
+
+The store format is unchanged; v4 is a client wire format whose rows are whole documents. den-edge still interprets
+no row. What a library at minimum 4 changes:
+
+- **Value cap 256 KiB**, measured as the value is stored, JSON-escaped in its fragment (identical for base64url), so
+  one row still fits the 512 KiB page a `/changes` response reserves. Below 4 the cap stays 32 KiB of `v`.
+  `parse_writes` and `rewrite_rows` admit up to 256 KiB at any minimum; the cap of the library's minimum is applied
+  inside the write transaction by `apply_bounded` and the store-level `rewrite`, which read the minimum the write
+  leaves (a first batch's `x-den-wire-min`, a commit's `max(current, wireMin)`). A new library's batch is also
+  checked before its store is created, so a refused batch starts nothing.
+- **Refusals**: an oversized batch value is `400 invalid_batch`, as a v3 client has always been told; a rewrite
+  commit leaving the library below 4 with a staged row over 32 KiB is `400 value_too_large`, and the stage stays open.
+- **Conflict values**: a batch response carries at most 2 MiB of them. A conflict whose value would pass that is
+  `{k, seq, "omitted": true}` and the client reads the row from `/changes`; a smaller later one still carries its
+  value. Below minimum 4 nothing is omitted, since no v3 client knows the marker and 200 × 32 KiB is bounded anyway.
+- Unchanged: 200 writes and a 2 MiB body per batch, the 32 MiB stored-bytes charge (staging charged the same), 50,000
+  rows, and v3's `426`, generation and highest-minimum rules, which take minimum 4 with no new mechanism.
 
 ## Format selection and compatibility
 
