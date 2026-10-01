@@ -40,14 +40,6 @@
     const snapshots = new Map<string, PageSnapshot>();
     /** The page just left, whose snapshot the next update takes (`follow`). */
     let unsaved: string | null = null;
-    /** The link just pressed, whose poster or billboard picture may become the title's hero. */
-    let pressed: HTMLAnchorElement | null = null;
-    /** The last morph into a title: the link pressed, on which page, and the title page it opened. */
-    let morph: { href: string; from: string; to: string } | null = null;
-    const artOf = (anchor: Element) =>
-      anchor.querySelector<HTMLElement>('[data-morph-art]') ??
-      anchor.closest('[data-morph-scope]')?.querySelector<HTMLElement>('[data-morph-art]') ??
-      null;
     /**
      * Keep the page where it was just put until the viewer does something.
      *
@@ -88,12 +80,6 @@
         window.addEventListener(type, release, { capture: true, passive: true });
       releaseScroll = release;
     };
-    const inView = (box: DOMRect) =>
-      box.width > 0 &&
-      box.bottom > 0 &&
-      box.top < innerHeight &&
-      box.right > 0 &&
-      box.left < innerWidth;
     let swiping = false;
     let stopLoading = () => {};
     function watchLoading(snapshot: PageSnapshot | null, ticket: number) {
@@ -274,29 +260,6 @@
         matchMedia('(prefers-reduced-motion: reduce)').matches ||
         document.hidden
       );
-      const root = document.documentElement;
-      // The pressed poster becomes the title's hero, and Back returns it to the same card while that card is
-      // where the viewer left it. Only one element carries the shared name in each state (`denMorph`), so a
-      // page holding its own hero, or Home's billboard, never duplicates it.
-      const link = push ? pressed : null;
-      pressed = null;
-      let morphing = link && artOf(link);
-      if (
-        !animate ||
-        !key.startsWith('title/') ||
-        !morphing ||
-        !inView(morphing.getBoundingClientRect())
-      )
-        morphing = null;
-      // Back to the page the morph left from: its card is found, and checked to be on screen, once that page is.
-      const reverse =
-        animate && !push && !!morph && morph.to === current.key && morph.from === visitKey;
-      if (morphing && link) {
-        morph = { href: link.getAttribute('href') ?? '', from: current.key, to: visitKey };
-        morphing.dataset.morphing = '';
-        root.dataset.denMorph = 'card';
-      } else if (reverse) root.dataset.denMorph = 'hero';
-      else delete root.dataset.denMorph;
       const update = async () => {
         // The page being left is measured here rather than in the tap that left it, which it held up by tens
         // of milliseconds on a phone. It is still the page on screen: no update has changed it yet, including
@@ -327,23 +290,6 @@
         // Flush RoutePage's nested-scroll restoration before the new snapshot is captured.
         // Rendering is paused here, so waiting for an animation frame would stall the transition.
         await tick();
-        // The page being left has been captured with its end of the morph; the one arriving carries the other.
-        // Back lands on the card only where it is on screen; otherwise the hero leaves with the page.
-        if (ticket === revision && morphing) root.dataset.denMorph = 'hero';
-        if (ticket === revision && reverse) {
-          const href = CSS.escape(morph?.href ?? '');
-          const anchor = document.querySelector<HTMLAnchorElement>(
-            `[data-route-page][data-active="true"] a[href="${href}"]:not([inert] *)`,
-          );
-          morphing = anchor && artOf(anchor);
-          if (morphing && inView(morphing.getBoundingClientRect())) {
-            morphing.dataset.morphing = '';
-            root.dataset.denMorph = 'card';
-          } else {
-            morphing = null;
-            delete root.dataset.denMorph;
-          }
-        }
         if (ticket === revision) {
           watchLoading(outgoing, ticket);
           await tick();
@@ -365,12 +311,7 @@
       // A rapid second navigation or a native browser transition can skip the animation.
       // The update callback still runs, so routing never depends on animation support.
       void transition.ready.catch(() => {});
-      void transition.finished
-        .catch(() => {})
-        .finally(() => {
-          morphing?.removeAttribute('data-morphing');
-          if (ticket === revision) delete root.dataset.denMorph;
-        });
+      void transition.finished.catch(() => {});
     }
     const backRequested = () => {
       writeAddress();
@@ -417,7 +358,6 @@
       const path = appPath(anchor.href, location.href);
       if (path === null) return;
       event.preventDefault();
-      pressed = anchor;
       void follow(path, true);
     };
     document.addEventListener('click', clicked);
@@ -430,7 +370,6 @@
       writeAddress();
       window.removeEventListener('pagehide', writeAddress);
       transition?.skipTransition();
-      delete document.documentElement.dataset.denMorph;
       stopLoading();
       stopSwipe();
       revision++;
@@ -488,7 +427,8 @@
 
   /* Every page change, opening and Back alike, is one short cross-fade: the incoming page fades in over the
      outgoing one, which stays opaque underneath so the background never shows through. Opacity alone, on
-     the browser's own snapshots: sideways and upward slides dropped frames in desktop Chrome. */
+     the browser's own snapshots: sideways and upward slides dropped frames in desktop Chrome, and so did
+     morphing a pressed poster into the title's hero, whose box is resized on the main thread. */
   :global(::view-transition-group(root)) {
     animation-duration: 150ms;
   }
@@ -513,34 +453,9 @@
     }
   }
 
-  /* The pressed poster and the title's hero picture, one element in each state (`denMorph`). The box moves
-     and reshapes from the card to the hero; each picture keeps its own crop inside it (`object-fit`) rather
-     than stretching, and the two cross-fade on the way. */
-  :global(html[data-den-morph='card'] [data-morphing]),
-  :global(html[data-den-morph='hero'] [data-route-page][data-active='true'] [data-morph-hero]) {
-    view-transition-name: den-hero-media;
-  }
-
-  :global(::view-transition-group(den-hero-media)) {
-    animation-duration: 250ms;
-    animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
-  }
-
-  :global(::view-transition-old(den-hero-media)),
-  :global(::view-transition-new(den-hero-media)) {
-    width: 100%;
-    height: 100%;
-    overflow: clip;
-    object-fit: cover;
-    animation-duration: 250ms;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     :global(::view-transition-group(root)),
-    :global(::view-transition-new(root)),
-    :global(::view-transition-group(den-hero-media)),
-    :global(::view-transition-old(den-hero-media)),
-    :global(::view-transition-new(den-hero-media)) {
+    :global(::view-transition-new(root)) {
       animation: none;
     }
   }

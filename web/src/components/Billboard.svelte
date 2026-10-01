@@ -721,13 +721,12 @@
   aria-label={shown.length ? 'Featured' : undefined}
   aria-hidden={shown.length ? undefined : 'true'}
   bind:this={frame}
-  data-morph-scope
   onpointerenter={() => (held = true)}
   onpointerleave={() => (held = false)}
   onfocusin={() => (held = true)}
   onfocusout={() => (held = false)}
 >
-  <div class="picture" aria-hidden="true" data-morph-art>
+  <div class="picture" aria-hidden="true">
     {#each layers as layer (layer.id)}
       {#if layer.url}
         <img
@@ -956,10 +955,6 @@
     position: absolute;
     inset: 0;
     transform: scale(1.14);
-
-    /* Opening a slide's title morphs this picture into that title's hero, as a pressed poster does
-       (`data-morph-art`; the name is given by the router for that one navigation). What the browser
-       captures here is the trailer's last painted frame. */
     contain: layout;
   }
 

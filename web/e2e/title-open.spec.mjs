@@ -59,24 +59,14 @@ async function setup(page) {
       },
     });
   });
-  // Which named pictures each View Transition animated, and any it threw.
+  // The last View Transition, to wait for, and any it threw.
   await page.addInitScript(() => {
-    window.morphs = [];
     window.transitionErrors = [];
     const start = document.startViewTransition?.bind(document);
     if (start)
       document.startViewTransition = (update) => {
         const transition = start(update);
-        transition.ready
-          .then(() =>
-            window.morphs.push(
-              document
-                .getAnimations()
-                .map((a) => a.effect?.pseudoElement ?? '')
-                .some((p) => p === '::view-transition-group(den-hero-media)'),
-            ),
-          )
-          .catch((e) => window.transitionErrors.push(String(e)));
+        transition.ready.catch((e) => window.transitionErrors.push(String(e)));
         window.lastTransition = transition.finished.catch(() => {});
         return transition;
       };
@@ -123,24 +113,23 @@ test('a title opens on its own skeleton, with no cover of the page it was opened
   await page.close();
 });
 
-// The pressed poster flies into the hero; from then until the trailer, the hero's box and every picture in it keep
-// their size, place and scale — the backdrop only fades in over the placeholder. Back flies it home to the card.
-test('a pressed poster morphs into the hero, which then never resizes or rescales; Back reverses it', async ({
+// From the first frame of the open until the backdrop is in, the hero's box and every picture in it keep their size,
+// place and scale: the poster the card held stands in, blurred, and the backdrop only fades in over it. It used to
+// open on the poster sharp and cropped to the hero, and read as a zoom when the backdrop replaced it.
+test('a title’s hero never resizes or rescales as it opens and its backdrop arrives', async ({
   browser,
 }) => {
   const page = await browser.newPage({ viewport: { width: 390, height: 800 }, hasTouch: true });
   const { card, release } = await setup(page);
-  await card.tap();
-  await expect(page).toHaveURL(/\/movie\/43/);
-  await page.evaluate(() => window.lastTransition);
-  // Every frame from here: the hero's box, and each picture's box, transform and fit.
+  // Every frame of the title page: the hero's box, and each picture's box, transform and fit.
   await page.evaluate(() => {
     window.frames = [];
+    const selector = '[data-route-page][data-active="true"] header.hero .visual';
+    // The page left has a hero too: frames count from the new page's.
+    const left = document.querySelector(selector);
     const loop = () => {
-      const visual = document.querySelector(
-        '[data-route-page][data-active="true"] [data-morph-hero]',
-      );
-      if (visual) {
+      const visual = document.querySelector(selector);
+      if (visual && visual !== left) {
         const box = visual.getBoundingClientRect();
         window.frames.push({
           box: [box.x, box.y, box.width, box.height].map(Math.round).join(','),
@@ -161,6 +150,8 @@ test('a pressed poster morphs into the hero, which then never resizes or rescale
     };
     requestAnimationFrame(loop);
   });
+  await card.tap();
+  await expect(page).toHaveURL(/\/movie\/43/);
   await page.waitForTimeout(300);
   release();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
@@ -168,7 +159,7 @@ test('a pressed poster morphs into the hero, which then never resizes or rescale
   await page.waitForTimeout(400);
   const frames = await page.evaluate(() => window.frames);
   expect(frames.length).toBeGreaterThan(20);
-  expect(new Set(frames.map((f) => f.box)).size, 'the hero box never changes').toBe(1);
+  expect([...new Set(frames.map((f) => f.box))], 'the hero box never changes').toHaveLength(1);
   const looks = new Map();
   for (const f of frames)
     for (const p of f.pictures) {
@@ -183,7 +174,6 @@ test('a pressed poster morphs into the hero, which then never resizes or rescale
   await page.goBack();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
   await page.evaluate(() => window.lastTransition);
-  expect(await page.evaluate(() => window.morphs)).toEqual([true, true]);
   expect(await page.evaluate(() => window.transitionErrors)).toEqual([]);
   await page.close();
 });

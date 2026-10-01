@@ -376,15 +376,14 @@
   <button class="retry" onclick={() => retry++}>Try again</button>
 {:else}
   <!-- One hero, and one picture frame in it, from the moment the page opens until it is left: TMDB's answer fills
-       them in rather than replacing them. A pressed poster flies into this frame as the page opens (`Router`,
-       `data-morph-hero`), and the browser abandons that flight if the element it is landing on is replaced. -->
+       them in rather than replacing them, so the frame is never a different element, measured again. -->
   <header
     class="hero"
     use:stableViewportHeight
     aria-busy={detail ? undefined : 'true'}
     aria-label={detail ? undefined : 'Loading title'}
   >
-    <div class="visual" data-morph-hero aria-hidden={detail ? undefined : 'true'}>
+    <div class="visual" aria-hidden={detail ? undefined : 'true'}>
       {#if detail}
         <DetailMedia
           {placeholder}
