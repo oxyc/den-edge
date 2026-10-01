@@ -189,7 +189,7 @@ test('navigation regressions', async () => {
                 t.oldOpacity === '1' &&
                 t.newOpacity === '1'
               : t.oldAnimation === 'none' &&
-                ['den-page-reveal', 'den-detail-open'].includes(t.newAnimation),
+                ['den-page-reveal', 'den-detail-open', 'den-slide-in'].includes(t.newAnimation),
           ),
           'Back uses two opaque snapshots; forward opens gently: ' + JSON.stringify(transitions),
         );

@@ -721,12 +721,13 @@
   aria-label={shown.length ? 'Featured' : undefined}
   aria-hidden={shown.length ? undefined : 'true'}
   bind:this={frame}
+  data-morph-scope
   onpointerenter={() => (held = true)}
   onpointerleave={() => (held = false)}
   onfocusin={() => (held = true)}
   onfocusout={() => (held = false)}
 >
-  <div class="picture" aria-hidden="true">
+  <div class="picture" aria-hidden="true" data-morph-art>
     {#each layers as layer (layer.id)}
       {#if layer.url}
         <img
@@ -956,12 +957,9 @@
     inset: 0;
     transform: scale(1.14);
 
-    /* Named, and the detail page's hero carries the same name: opening a title then morphs this
-       picture into that one rather than cross-fading the whole page through the background. What the
-       browser captures here is the trailer's last painted frame, and what it morphs into is a hero
-       already showing the same backdrop, so the two ends of the movement match. Coming back needs
-       none of this — Home is never unmounted and its trailer never stopped. */
-    view-transition-name: den-hero-media;
+    /* Opening a slide's title morphs this picture into that title's hero, as a pressed poster does
+       (`data-morph-art`; the name is given by the router for that one navigation). What the browser
+       captures here is the trailer's last painted frame. */
     contain: layout;
   }
 

@@ -132,13 +132,20 @@
     still?: string;
   } = $props();
 
-  /** The still to stand in with: the backdrop it will end up using, or the poster as a last resort. */
+  /** The backdrop the hero will end up using, where the page that linked here knew it. */
   const seedStill = $derived(
-    seed?.backdropPath
-      ? `https://image.tmdb.org/t/p/w1280${seed.backdropPath}`
-      : seed?.posterPath && !still
-        ? `https://image.tmdb.org/t/p/w780${seed.posterPath}`
-        : null,
+    seed?.backdropPath ? `https://image.tmdb.org/t/p/w1280${seed.backdropPath}` : null,
+  );
+  /**
+   * Otherwise a poster, the pressed card's own first: drawn blurred and dimmed under the backdrop, the way a title
+   * with no backdrop shows its poster (`DetailMedia`). Sharp, a portrait picture cropped to the hero's frame read
+   * as a zoom when the backdrop replaced it.
+   */
+  const placeholder = $derived(
+    seedStill
+      ? undefined
+      : (still ??
+          (seed?.posterPath ? `https://image.tmdb.org/t/p/w780${seed.posterPath}` : undefined)),
   );
   const panel = $props.id();
 
@@ -247,10 +254,18 @@
     };
   });
 
+  // Forgotten only for another title or another atlas, and asked for while the page is in front and lacks them.
+  // Resetting them as the page was left as well handed the rows a new answer on every return, and the rows below
+  // the cast were rebuilt from nothing each time the viewer came back to the title.
+  $effect(() => {
+    void [atlas, ref.type, ref.id];
+    iconicStudios = atlas ? undefined : [];
+    titleFacts = atlas ? undefined : NO_FACTS;
+  });
+
   $effect(() => {
     const [base, type, id] = [atlas, ref.type, ref.id];
-    iconicStudios = base ? undefined : [];
-    if (!active || !base) return;
+    if (!active || !base || iconicStudios !== undefined) return;
     const controller = new AbortController();
     void fetchIconicStudios(base, { type, id }, controller.signal).then((loaded) => {
       if (!controller.signal.aborted) iconicStudios = loaded;
@@ -260,8 +275,7 @@
 
   $effect(() => {
     const [base, type, id] = [atlas, ref.type, ref.id];
-    titleFacts = base ? undefined : NO_FACTS;
-    if (!active || !base) return;
+    if (!active || !base || titleFacts !== undefined) return;
     const controller = new AbortController();
     void fetchTitleFacts(base, { type, id }, controller.signal).then((loaded) => {
       if (!controller.signal.aborted) titleFacts = loaded;
@@ -360,11 +374,13 @@
 {#if detail === undefined}
   <div aria-busy="true" aria-label="Loading title">
     <header class="hero" aria-hidden="true" use:stableViewportHeight>
-      <div class="visual">
-        {#if still}<img class="seed-still portrait" src={still} alt="" />{/if}
+      <!-- `data-morph-hero`: where a pressed poster lands as the page opens (`Router`), in both of its states. -->
+      <div class="visual" data-morph-hero>
         {#if seedStill}
-          <img class="seed-still" class:portrait={!seed?.backdropPath} src={seedStill} alt="" />
-        {:else if !still}
+          <img class="seed-still" src={seedStill} alt="" />
+        {:else if placeholder}
+          <img class="seed-still blurred" src={placeholder} alt="" />
+        {:else}
           <!-- A spinner only where there is nothing to look at, and only in the picture's own frame. Not
                `page`: that asks the router to hold the page the viewer just left over this one until TMDB
                answers, when this skeleton is already the page's own placeholder. -->
@@ -398,8 +414,9 @@
 {:else}
   {@const d = detail}
   <header class="hero" use:stableViewportHeight>
-    <div class="visual">
+    <div class="visual" data-morph-hero>
       <DetailMedia
+        {placeholder}
         autoplay={autoplay && !restricted}
         type={ref.type}
         tmdbId={ref.id}
@@ -702,9 +719,8 @@
     background: var(--bg);
   }
 
-  /* The same framing `DetailMedia` gives the real backdrop, so the picture does not shift when the
-     one takes over from the other. A poster standing in for a missing backdrop is portrait, and is
-     held to the top rather than centre-cropped through the middle of a face. */
+  /* The same framing `DetailMedia` gives the real backdrop, and the poster the same blur it gives a
+     title without one, so neither shifts, crops nor scales differently when that takes over. */
   .seed-still {
     position: absolute;
     inset: 0;
@@ -713,8 +729,10 @@
     object-fit: cover;
   }
 
-  .seed-still.portrait {
-    object-position: center top;
+  .seed-still.blurred {
+    filter: blur(24px);
+    transform: scale(1.12);
+    opacity: 0.65;
   }
 
   .still-loading {

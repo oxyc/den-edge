@@ -24,7 +24,10 @@
     routes = {},
     active = true,
     autoplay = true,
+    placeholder,
   }: {
+    /** A picture already loaded that stands in, blurred, until the backdrop has loaded and faded in over it. */
+    placeholder?: string;
     type: MediaType;
     /** What reel would rather be asked by, and what every title has — unlike the imdb id. */
     tmdbId?: number;
@@ -40,6 +43,15 @@
   let video = $state<HTMLVideoElement>();
   const artwork = $derived(backdrop ?? poster ?? '');
   let canResolveTrailer = $state(false);
+  /**
+   * The artwork that has loaded. Until it has, it is transparent rather than blank: it fades in over the
+   * placeholder (or the page's background) instead of arriving in one cut. One already in the cache is shown as
+   * it mounts (`loaded`), with no fade at all.
+   */
+  let painted = $state('');
+  function loaded(node: HTMLImageElement) {
+    if (node.complete && node.naturalWidth) painted = node.src;
+  }
   $effect(() => {
     void artwork;
     canResolveTrailer = !artwork;
@@ -616,12 +628,22 @@
 
 <div class="media" bind:this={frame} data-detail-media>
   {#if backdrop || poster}
+    {#if placeholder && backdrop}<img class="under" src={placeholder} alt="" />{/if}
     <img
       class="backdrop"
       class:portrait={!backdrop}
+      class:shown={painted === (backdrop ?? poster)}
       src={backdrop ?? poster}
       alt=""
-      onload={() => (canResolveTrailer = true)}
+      use:loaded
+      onload={(event) => {
+        const image = event.currentTarget as HTMLImageElement;
+        painted = image.src;
+        canResolveTrailer = true;
+        // A one-off animation rather than a standing `transition`, which kept the picture on a layer of its
+        // own for good and shifted the antialiasing of what is drawn beside it.
+        if (!reduced) image.animate([{ opacity: 0 }, {}], { duration: 150, easing: 'ease-out' });
+      }}
       onerror={() => (canResolveTrailer = true)}
     />
   {/if}
@@ -694,18 +716,11 @@
     height: 100%;
     overflow: hidden;
     background: var(--bg);
-
-    /* The same name the billboard's picture carries, so opening a title morphs one into the other
-       instead of cross-fading the whole page through it. Coming back is smooth because Home is never
-       unmounted and its trailer never stopped; going forward there is no page to reuse, and this is
-       the nearest thing — the browser animates the outgoing trailer's last painted frame into this
-       hero, which is already showing the same backdrop. Only one of the two is ever rendered at a
-       time (the inactive page is `hidden`), so the name cannot collide. */
-    view-transition-name: den-hero-media;
     contain: layout;
   }
 
   .backdrop,
+  .under,
   video {
     position: absolute;
     inset: 0;
@@ -714,7 +729,14 @@
     object-fit: cover;
   }
 
-  .portrait {
+  .backdrop:not(.shown) {
+    opacity: 0;
+  }
+
+  /* The same blur `Detail` gives the placeholder while the page loads, so nothing changes size as one
+     takes over from the other. */
+  .portrait,
+  .under {
     filter: blur(24px);
     transform: scale(1.12);
     opacity: 0.65;

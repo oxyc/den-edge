@@ -77,7 +77,8 @@
 </script>
 
 {#snippet body()}
-  <span class="art">
+  <!-- `data-morph-art`: the picture the router morphs into the title's hero when this card is opened. -->
+  <span class="art" data-morph-art>
     {#if art}
       {#if row?.near ?? true}
         <img

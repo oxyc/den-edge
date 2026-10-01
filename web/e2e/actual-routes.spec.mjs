@@ -82,7 +82,11 @@ test('actual-routes regressions', async () => {
       // document, and the title is the first history entry, exactly as opening its link would give.
       await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
       await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
-      await page.waitForSelector('[data-active="true"] .backdrop');
+      // Loaded, and through its fade in: a picture caught mid-fade is a different frame from the next one.
+      await page.waitForFunction(() => {
+        const backdrop = document.querySelector('[data-active="true"] .backdrop.shown');
+        return backdrop && getComputedStyle(backdrop).opacity === '1';
+      });
       // Offscreen lazy actor images need not load before capturing the visible page.
       await page.evaluate(async () => {
         const visible = Array.from(document.images).filter((image) => {
