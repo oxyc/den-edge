@@ -39,6 +39,7 @@ export function capturePage(
   if (!source) return null;
   const rect = source.getBoundingClientRect();
   const savedY = window.scrollY;
+  const viewport = `${innerWidth}x${innerHeight}`;
   // Reading every node's computed style is what this cost on the tap path: 1,500 nodes took ~55 ms
   // at 4x CPU throttling in headless Chromium, against 3-14 ms reading only these. A node that paints
   // nowhere in the viewport can't be seen in the copy, and one that isn't animated computes the same
@@ -169,6 +170,11 @@ export function capturePage(
   return {
     refresh() {
       if (!source.isConnected || !source.hidden) return capturePage(source) ?? this;
+      // A page that only received data while hidden needs nothing here: its copy is made, or made again, from
+      // the page as it is when shown. Measuring it afresh lays the whole page out offscreen — on Home at 4x CPU
+      // a frame of over 200 ms on the first move of a swipe — and is worth that only once the window it was measured in
+      // has changed shape, as a phone turned on its side does.
+      if (`${innerWidth}x${innerHeight}` === viewport) return this;
       const active = document.querySelector<HTMLElement>('[data-route-page][data-active="true"]');
       if (!active) return this;
       const activeRect = active.getBoundingClientRect();

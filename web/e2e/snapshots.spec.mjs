@@ -100,7 +100,11 @@ test('a snapshot copies the page only when shown, and again once the hidden page
     source.querySelector('h1').textContent = 'Changed while hidden';
     await new Promise((r) => setTimeout(r));
     const again = snapshot.show().textContent.includes('Changed while hidden');
-    return { measured, first, shown, reused, again, copies: clones };
+    // A swipe asks for the hidden page's current layout. In the same window that is the copy already in hand;
+    // laying the page out again offscreen was a long frame on the swipe's first move.
+    const kept = snapshot.refresh() === snapshot;
+    window.snapshot = snapshot;
+    return { measured, first, shown, reused, again, copies: clones, kept };
   });
   expect(result).toEqual({
     measured: 0,
@@ -109,5 +113,9 @@ test('a snapshot copies the page only when shown, and again once the hidden page
     reused: 1,
     again: true,
     copies: 2,
+    kept: true,
   });
+  // A turned phone is a different window, and the page is measured again in it.
+  await page.setViewportSize({ width: 600, height: 400 });
+  expect(await page.evaluate(() => window.snapshot.refresh() === window.snapshot)).toBe(false);
 });
