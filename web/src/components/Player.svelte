@@ -58,6 +58,7 @@
   import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
+  import { startupNotice } from '../lib/startupNotice';
   import {
     bytesBetween,
     DeliveryMeter,
@@ -278,7 +279,9 @@
    */
   let noHint = false;
   /** Whether anything of the playing session has arrived: its first frame here, or the cast page's metadata. */
-  let played = false;
+  // $state (den-edge#234): the startup notice's own derived reads this to clear itself once the first frame
+  // arrives, which needs it reactive — every other read here is a plain check inside a function body.
+  let played = $state(false);
   /** Releases of this title a switch moved away from (`switchAway`), not asked for again; the viewer's pick clears it. */
   let excluded: string[] = [];
   let switching = false;
@@ -309,6 +312,36 @@
   let startsIn = $state<string | null>(null);
   /** Said when a change asked for mid-film (another track, another release, casting) couldn't be made as a copy. */
   let unchanged = $state<string | null>(null);
+  /**
+   * The startup notice's own clock (den-edge#234): when the session now starting was asked for (`Date.now()`,
+   * reset at the top of every `begin()`), and the running time since, ticked while there is still nothing to
+   * show for the wait. `Date.now()` rather than `performance.now()` — a second's precision is all a human-facing
+   * clock needs, and it is what a test's fake clock (`page.clock`) can drive deterministically. Both reactive,
+   * and both read unconditionally by `elapsedMs`: a derived that only reads one of its signals down a branch —
+   * `now` behind an `if (askedAt !== undefined)`, say — never sees that branch taken on its first, pre-`begin()`
+   * run and so never tracks it, and then sits stuck at its first value however often the signal it missed ticks.
+   */
+  let startupAskedAt = $state(Date.now());
+  let now = $state(Date.now());
+  let noticeTimer: ReturnType<typeof setInterval> | undefined;
+  /** When each session was asked for and when it answered, by the session object: read once its first frame logs
+   * den-edge#234's "Findings" line, and never confused with a later `begin()` by being keyed to the attempt's own
+   * session rather than to a shared mutable field. */
+  const startupTimings = new WeakMap<Session, { askedAt: number; answeredAt: number }>();
+  /** How long this browser has waited for the session now starting, for the startup notice. */
+  const elapsedMs = $derived(now - startupAskedAt);
+  /**
+   * The line over the stage while there is still nothing to show for the wait (den-edge#234): den-remux's own
+   * `prebuffer` countdown (`startsIn`) and a dropped connection (`reconnecting`) already say their own piece, so
+   * this only covers finding a release and, once one is open, waiting on its first frame.
+   */
+  const notice = $derived(
+    !session
+      ? startupNotice(elapsedMs, 'session')
+      : !played && !startsIn && !reconnecting
+        ? startupNotice(elapsedMs, 'starting', session.release)
+        : null,
+  );
 
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
@@ -337,6 +370,14 @@
     replacing?: Session,
   ): Promise<boolean | Failure> {
     clearTimeout(retry);
+    // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
+    // shown, so a slow `fetchImdbId` or `playable()` below counts as part of the wait too. Stopped once this
+    // attempt's first frame arrives (the `loadeddata` listener below) or the player closes (`finish`), never by
+    // polling `played`, which a mid-film switch leaves true from the session this one is replacing.
+    now = Date.now();
+    startupAskedAt = now;
+    clearInterval(noticeTimer);
+    noticeTimer = setInterval(() => (now = Date.now()), 250);
     if (!replacing) {
       // A session a failure left standing (a browser key asked for mid-film, say) goes first: kept, its video would
       // come back and load it again, and den-remux would hold its slot until the player closed.
@@ -455,6 +496,9 @@
     struggling = false;
     hold = result.prebuffer ? new PrebufferHold(result.prebuffer, performance.now()) : null;
     startsIn = null;
+    // For the startup timing line (den-edge#234's "Findings"), logged once this session's first frame arrives.
+    // `Date.now()` throughout (`startupAskedAt`'s own clock), never mixed with `performance.now()`'s epoch.
+    startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     session = result;
     sessionRoute = on;
     // Another release is another encode, whose intro and credits sit at other times: its own are asked for.
@@ -670,7 +714,23 @@
     element.addEventListener(
       'loadeddata',
       () => {
-        if (session === current) played = true;
+        if (session !== current) return;
+        played = true;
+        clearInterval(noticeTimer);
+        // den-edge#234's step 0: how long this session took to open, hold and reach its first frame — read on a
+        // large release, on Safari and Chrome, to see which stretch the wait is really in.
+        const timing = startupTimings.get(current);
+        if (timing) {
+          const firstFrameAt = Date.now();
+          console.info('den: playback start', {
+            sessionMs: Math.round(timing.answeredAt - timing.askedAt),
+            holdMs: Math.round(firstFrameAt - timing.answeredAt),
+            holdTargetMs: current.prebuffer != null ? Math.round(current.prebuffer * 1000) : null,
+            firstFrameMs: Math.round(firstFrameAt - timing.askedAt),
+            size: current.release.size,
+            player: nativeHls(element) ? 'native' : 'hls.js',
+          });
+        }
       },
       { once: true },
     );
@@ -1399,6 +1459,7 @@
     ended = true;
     clearInterval(timer);
     clearInterval(countdown);
+    clearInterval(noticeTimer);
     clearTimeout(retry);
     report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
     watcher?.stop();
@@ -1552,7 +1613,13 @@
         <button class="primary" onclick={() => location.reload()}>Reload</button>
       {/if}
     {:else if !session}
-      <p class="note">Finding a release this browser can play…</p>
+      {#if notice}
+        <p class="note startup" role="status">
+          {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
+              >&nbsp;· {notice.clock}</span
+            >{/if}
+        </p>
+      {/if}
     {:else}
       {#if session.castOrigin && session.publicBase}
         <!-- `local-network-access`: at home the cast page plays from den-remux's home-network address (`lanBase`),
@@ -1588,6 +1655,12 @@
           <p class="countdown" role="status">Reconnecting…</p>
         {:else if startsIn}
           <p class="countdown" role="status">{startsIn}</p>
+        {:else if notice}
+          <p class="note startup" role="status">
+            {notice.text}{#if notice.clock}<span class="clock" aria-hidden="true"
+                >&nbsp;· {notice.clock}</span
+              >{/if}
+          </p>
         {/if}
       {/if}
     {/if}
@@ -1931,6 +2004,22 @@
     background: rgb(0 0 0 / 0.6);
     font-variant-numeric: tabular-nums;
     pointer-events: none;
+  }
+
+  /* The startup notice (den-edge#234): a line rather than `.countdown`'s pill, since it says more than a number. */
+  .startup {
+    position: relative;
+    padding: 10px 20px;
+    border-radius: 16px;
+    background: rgb(0 0 0 / 0.6);
+    color: rgb(255 255 255 / 0.85);
+    pointer-events: none;
+  }
+
+  /* `aria-hidden`: a screen reader is told the line, not a number ticking under it every quarter second. */
+  .startup .clock {
+    color: rgb(255 255 255 / 0.5);
+    font-variant-numeric: tabular-nums;
   }
 
   /* The line takes a phone's width to itself and shares a laptop's with the pickers. Its two parts are flex items,
