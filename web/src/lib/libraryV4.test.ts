@@ -841,16 +841,76 @@ describe('SIMKL delivery on Library v4', () => {
       const latch = opened.find(
         (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
       )!.values.removals?.value;
-      return { lists: lists(opened), latch, held: heldSimklRemovals(log).length };
+      return {
+        lists: lists(opened),
+        latch: latch && 'string' in latch ? (JSON.parse(latch.string) as object) : null,
+        held: heldSimklRemovals(log).length,
+      };
     };
     // More than 20 removals hold every one of them, pass after pass, and the holder closes the latch on the row.
     expect(await delivered()).toEqual({
       lists: Array(21).fill('in'),
-      latch: { string: '"held"' },
+      latch: { held: expect.any(Array) },
       held: 21,
     });
     // Approved after they were made: every one is decided.
     expect((await delivered({ approved: at(4000) })).lists).toEqual(Array(21).fill('gone'));
+  });
+
+  it('holds 21 more removals after an approval alone: the 21 approved still go out', async () => {
+    const batch = (from: number, removedAt: number) =>
+      Array.from({ length: 21 }, (_, i) =>
+        filmDocument(from + i, { deleted: { value: true, at: at(removedAt) } }),
+      );
+    const approvedBatch = batch(600, 3000);
+    const laterBatch = batch(700, 6000);
+    const titles = [...approvedBatch, ...laterBatch];
+    const receipts: DocumentRow[] = titles.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    const row = deliver(['', '1']);
+    row.values.removals = {
+      value: { string: JSON.stringify({ approved: at(4000) }) },
+      at: at(4000),
+    };
+    const { server, connection, sent } = await simkl([...titles, ...receipts, trackers, row]);
+    // SIMKL lists all 42, added long before, so a decided removal is a request; the first pass's requests fail.
+    let failing = true;
+    const listing: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes('/sync/all-items'))
+        return new Response(
+          JSON.stringify({
+            movies: titles.map((doc) => ({
+              movie: { ids: { tmdb: doc.title.id } },
+              status: 'plantowatch',
+              added_to_watchlist_at: '1970-01-01T00:00:01Z',
+            })),
+          }),
+        );
+      if (failing && url.includes('api.simkl.com') && init?.method === 'POST')
+        return new Response('{}', { status: 503 });
+      return connection(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    expect(await watched(log, listing)).toBe(true);
+    const latch = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.removals?.value as { string: string };
+    expect(Object.keys(JSON.parse(latch.string) as object).sort()).toEqual(['approved', 'held']);
+
+    failing = false;
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, listing, 600_000)).toBe(true);
+    expect(sent.count).toBe(21);
+    expect(heldSimklRemovals(log).map(({ id }) => id)).toEqual(
+      laterBatch.map((doc) => doc.title.id),
+    );
   });
 
   it('sends a removal SIMKL still lists, once it knows when SIMKL listed it', async () => {

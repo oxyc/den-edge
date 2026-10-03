@@ -531,8 +531,13 @@ async function writeAccountState(
   const at = (): Stamp =>
     syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
   let changed = false;
-  if (pending.removals === 'held' && jsonSetting(row, 'removals') !== 'held') {
-    values.removals = { value: { string: JSON.stringify('held') }, at: at() };
+  const removals = jsonSetting(row, 'removals');
+  const latch =
+    removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
+  if (pending.removals === 'held' && removals !== 'held' && !('held' in latch)) {
+    // Beside any approval, never over it: removals approved before this batch are still decided.
+    const stamp = at();
+    values.removals = { value: { string: JSON.stringify({ ...latch, held: stamp }) }, at: stamp };
     changed = true;
   }
   if (pending.unverified) {

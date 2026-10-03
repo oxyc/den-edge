@@ -62,7 +62,7 @@
     simklConnected: boolean;
     saveSimkl: (token: string | null) => Promise<boolean>;
     /** SIMKL watchlist removals held back until someone approves them (more than 20 at once). */
-    heldRemovals?: { type: 'movie' | 'tv'; id: number }[];
+    heldRemovals?: { type: 'movie' | 'tv'; id: number; name?: string }[];
     approveRemovals?: () => Promise<boolean>;
     plugins: string[];
     routes: Routes;
@@ -626,7 +626,7 @@
           Den held back these watchlist removals because there were so many at once:
           {#each heldRemovals as title, i (`${title.type}:${title.id}`)}<a
               href={routePath({ page: 'title', type: title.type, id: title.id })}
-              >{title.type === 'movie' ? 'Movie' : 'Series'} {title.id}</a
+              >{title.name ?? `${title.type === 'movie' ? 'Movie' : 'Series'} ${title.id}`}</a
             >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
           Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
         </p>

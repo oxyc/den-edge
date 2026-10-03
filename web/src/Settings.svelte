@@ -40,8 +40,10 @@
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
   import { heldSimklRemovals } from './lib/simklDelivery';
+  import { untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { ensureSyncPolicy } from './lib/syncLoader';
-  import { tmdbKeyOf } from './lib/tmdb';
+  import { fetchTitle, tmdbKeyOf } from './lib/tmdb';
   import { fetchSimklClientId, simklAccountID } from './settings/simkl';
   import type { ConfigValue, SettingsRow, Stamp } from './lib/wire';
 
@@ -243,6 +245,32 @@
     }
   });
 
+  /**
+   * Their names, from TMDB through den-edge's proxy as the library names any title it holds no display for: a
+   * removed title's display is gone with it. One that can't be looked up is shown by its id.
+   */
+  const heldNames = new SvelteMap<string, string>();
+  $effect(() => {
+    const key = tmdbKeyOf(keys);
+    const held = heldRemovals;
+    // The names untracked: one arriving must not re-run this and drop the lookups still on their way.
+    const wanted = untrack(() => held.filter((ref) => !heldNames.has(`${ref.type}:${ref.id}`)));
+    if (!key || !wanted.length) return;
+    let gone = false;
+    void Promise.all(
+      wanted.map(async (ref) => {
+        const found = await fetchTitle(ref, key);
+        if (!gone && found?.title) heldNames.set(`${ref.type}:${ref.id}`, found.title);
+      }),
+    );
+    return () => {
+      gone = true;
+    };
+  });
+  const namedRemovals = $derived(
+    heldRemovals.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
+  );
+
   /** Approve them: `{"approved": <fresh stamp>}` on the account's delivery row, which counts for every device. */
   async function approveRemovals(): Promise<boolean> {
     const account = simklConnection?.[0].slice('simkl:'.length);
@@ -348,7 +376,7 @@
       {keys}
       simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
       {saveSimkl}
-      {heldRemovals}
+      heldRemovals={namedRemovals}
       {approveRemovals}
       {plugins}
       {routes}
