@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // In an iOS browser tab the browser's own edge swipe goes Back, so Den claims no touch and draws no preview of its
 // own; added to the Home Screen there is no such gesture, and Den's swipe is the only way back.
@@ -19,7 +20,7 @@ for (const [name, standalone] of [
       Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 5 });
       if (standalone) Object.defineProperty(Navigator.prototype, 'standalone', { get: () => true });
     }, standalone);
-    await page.goto('http://127.0.0.1:5198/test/router.html');
+    await page.goto(`${E2E_ORIGIN}/test/router.html`);
     await page.waitForSelector('[data-active="true"]');
     await page.evaluate(() =>
       document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: '/movie/1' } })),

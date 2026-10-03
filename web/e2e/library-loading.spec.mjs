@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 for (const [width, failed] of [
   [393, false],
@@ -72,7 +73,7 @@ for (const [width, failed] of [
           ),
         ).observe({ type: 'layout-shift', buffered: true });
       });
-      await page.goto('http://127.0.0.1:5198/test/library.html?populated');
+      await page.goto(`${E2E_ORIGIN}/test/library.html?populated`);
       await expect.poll(() => requested.size).toBe(4);
       expect(requested.has(1003), 'older watched history should wait for visible shelves').toBe(
         false,

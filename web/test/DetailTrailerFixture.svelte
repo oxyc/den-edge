@@ -21,7 +21,7 @@
       ref={{ type: 'movie', id: 42 }}
       tmdbKey="fixture-key"
       reel="/reel/fixture"
-      routes={{ reel: [{ url: 'http://127.0.0.1:5198' }] }}
+      routes={{ reel: [{ url: location.origin }] }}
       row={undefined}
       episodes={new Map()}
       busy={false}

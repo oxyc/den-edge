@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('Coming Soon captions stay on one line in a horizontal-only shelf', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
-  await page.goto('http://127.0.0.1:5198/test/poster-row.html');
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
 
   const row = page.getByRole('region', { name: 'Coming Soon' });
   await expect(row.locator('.card')).toHaveCount(10);
@@ -62,7 +63,7 @@ test('a row far below the screen draws its posters only once it comes near', asy
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
     }),
   );
-  await page.goto('http://127.0.0.1:5198/test/poster-row.html');
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
   const far = page.getByRole('region', { name: 'Far below' });
   await expect(far.locator('a.card, figure.card')).toHaveCount(10);
   await page.waitForTimeout(300);

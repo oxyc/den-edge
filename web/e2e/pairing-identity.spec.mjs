@@ -1,4 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('two browsers pair and join their stable identities through encrypted link records', async () => {
   const browser = await chromium.launch({
@@ -12,7 +13,7 @@ test('two browsers pair and join their stable identities through encrypted link 
   const relay = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.origin !== 'http://127.0.0.1:5198') return route.abort('blockedbyclient');
+    if (url.origin !== E2E_ORIGIN) return route.abort('blockedbyclient');
     const body = request.postData() ? request.postDataJSON() : {};
     if (url.pathname === '/pair/new') {
       sid = body.sid;
@@ -82,14 +83,14 @@ test('two browsers pair and join their stable identities through encrypted link 
     await joiner.route('**/*', relay);
     const hostPage = await host.newPage();
     const joinerPage = await joiner.newPage();
-    await hostPage.goto('http://127.0.0.1:5198/test/settings.html');
+    await hostPage.goto(`${E2E_ORIGIN}/test/settings.html`);
     await hostPage.getByRole('button', { name: /Linked devices/ }).click();
     const devices = hostPage.getByRole('region', { name: 'Linked devices' });
     await devices.getByRole('button', { name: 'Get a code' }).click();
     const code = await devices.locator('.code').textContent();
     expect(code).toMatch(/^ABCD-/);
 
-    await joinerPage.goto('http://127.0.0.1:5198/');
+    await joinerPage.goto(`${E2E_ORIGIN}/`);
     await joinerPage.getByLabel('Link code, twelve characters').fill(code);
     await joinerPage.getByRole('button', { name: 'Link', exact: true }).click();
     await expect(devices.getByText('Allow “Joining Browser”?')).toBeVisible();

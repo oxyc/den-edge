@@ -25,7 +25,7 @@
     rows: () => stored,
     newestStamp: () => stamp,
     kept: async () => ({
-      routes: { reel: [{ url: 'http://127.0.0.1:5198' }] },
+      routes: { reel: [{ url: location.origin }] },
       scout: null,
       atlas: '/atlas',
       reel: '/reel',
@@ -68,7 +68,7 @@
   /** A library sync that brought rows; `settingsChanged` when it touched keys, plugins or prefs. */
   w.fixtureSync = (settingsChanged = false) => session.changed(settingsChanged);
   /** den-edge's routes table answering. */
-  w.fixtureRoutes = () => routesGate({ reel: [{ url: 'http://127.0.0.1:5198' }] });
+  w.fixtureRoutes = () => routesGate({ reel: [{ url: location.origin }] });
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">

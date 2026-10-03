@@ -1,6 +1,7 @@
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { test, chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // Every kept page stays mounted, and Svelte runs a child's effects before its parent's: a title page that set
 // `document.title` itself was renamed "Den" by App on coming back to it, and a kept page could rename the one
@@ -13,7 +14,7 @@ test('the tab names the page on screen, including a kept page returned to', asyn
   try {
     const page = await browser.newPage();
     await guardNetwork(page);
-    await page.goto('http://127.0.0.1:5198/test/router.html');
+    await page.goto(`${E2E_ORIGIN}/test/router.html`);
     await page.waitForSelector('[data-active="true"]');
     const go = (path) =>
       page.evaluate(
@@ -49,7 +50,7 @@ test('the tab keeps the title while its player is open', async () => {
     const page = await browser.newPage();
     await guardNetwork(page);
     await routeTmdb(page, (r) => r.fulfill({ status: 404, json: {} }));
-    await page.goto('http://127.0.0.1:5198/test/player.html');
+    await page.goto(`${E2E_ORIGIN}/test/player.html`);
     await page.waitForFunction(() => document.title === 'The Movie (2001) · Den');
     await page.getByRole('button', { name: 'Close' }).click();
     await page.waitForFunction(() => document.title === 'Den');

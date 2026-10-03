@@ -4,6 +4,7 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const film = {
@@ -121,7 +122,7 @@ test('a title’s trailer, playing with sound, stops and goes quiet when its pag
   await mock(page);
   // Home is the first entry, as opening the app gives.
   await page.addInitScript(() => history.replaceState(null, '', '/'));
-  await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+  await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
   await go(page, '/movie/42');
   const active = page.locator('[data-active="true"]');
   await expect(active.locator('h1')).toHaveText('The Movie');
@@ -162,7 +163,7 @@ test('a trailer left playing comes back on its last frame and carries on from th
   await page.setViewportSize({ width: 1280, height: 800 });
   await mock(page);
   await page.addInitScript(() => history.replaceState(null, '', '/'));
-  await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+  await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
   await go(page, '/movie/42');
   const active = page.locator('[data-active="true"]');
   await expect(active.locator('h1')).toHaveText('The Movie');
@@ -222,7 +223,7 @@ test('a trailer playing with sound on a phone stops when the page is swiped back
   const page = await context.newPage();
   await mock(page);
   await page.addInitScript(() => history.replaceState(null, '', '/'));
-  await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+  await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
   await go(page, '/movie/42');
   const active = page.locator('[data-active="true"]');
   await expect(active.locator('h1')).toHaveText('The Movie');
@@ -283,7 +284,7 @@ for (const [name, path] of [
     await page.setViewportSize({ width: 1280, height: 800 });
     await mock(page);
     await page.addInitScript(() => history.replaceState(null, '', '/'));
-    await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+    await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
     if (path !== '/') {
       await go(page, path);
       // The address moves before the page in front does.

@@ -1,4 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const CODE = 'a1b2c3d4.AAAAAAAAAAAAAAAAAAAAAA';
 
@@ -14,7 +15,7 @@ test('an invite link asks to accept where it lands, and a guest who accepts hold
     await context.route('**/*', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
-      if (url.origin !== 'http://127.0.0.1:5198') return route.abort('blockedbyclient');
+      if (url.origin !== E2E_ORIGIN) return route.abort('blockedbyclient');
       const json = (status, body) => route.fulfill({ status, json: body });
       if (url.pathname === '/grant/redeem') {
         redeemed.push(request.postDataJSON().code);
@@ -28,7 +29,7 @@ test('an invite link asks to accept where it lands, and a guest who accepts hold
       return route.continue();
     });
     const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:5198/#invite=${CODE}`);
+    await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
 
     const dialog = page.getByRole('dialog', { name: 'Accept this invite?' });
     await expect(dialog).toBeVisible();
@@ -59,7 +60,7 @@ test('Not now leaves the invite unredeemed', async () => {
     const context = await browser.newContext();
     await context.route('**/*', async (route) => {
       const url = new URL(route.request().url());
-      if (url.origin !== 'http://127.0.0.1:5198') return route.abort('blockedbyclient');
+      if (url.origin !== E2E_ORIGIN) return route.abort('blockedbyclient');
       if (url.pathname === '/grant/redeem') redeems++;
       if (url.pathname === '/routes' || url.pathname === '/config')
         return route.fulfill({ status: 200, json: {} });
@@ -68,7 +69,7 @@ test('Not now leaves the invite unredeemed', async () => {
       return route.continue();
     });
     const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:5198/#invite=${CODE}`);
+    await page.goto(`${E2E_ORIGIN}/#invite=${CODE}`);
     const dialog = page.getByRole('dialog', { name: 'Accept this invite?' });
     await dialog.getByRole('button', { name: 'Not now' }).click();
     await expect(dialog).toBeHidden();

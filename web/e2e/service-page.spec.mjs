@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
-const FIXTURE = 'http://127.0.0.1:5198/test/service-page.html';
+const FIXTURE = `${E2E_ORIGIN}/test/service-page.html`;
 
 /**
  * A service in one country, as TMDB and atlas describe it: Netflix carrying films, and atlas's "New on Netflix"

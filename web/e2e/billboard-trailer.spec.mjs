@@ -8,6 +8,7 @@
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const movie = {
@@ -66,7 +67,7 @@ async function mock(page, sources) {
 
 /** Titles arrive on an event, so the slide is not resolving while the page is still being set up. */
 const start = async (page) => {
-  await page.goto('http://127.0.0.1:5198/test/billboard.html?reel=1');
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html?reel=1`);
   await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
 };
 

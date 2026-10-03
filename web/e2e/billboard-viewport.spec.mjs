@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 for (const touch of [true, false])
   test(`billboard viewport stability: ${touch ? 'touch toolbar' : 'desktop resize'}`, async () => {
@@ -12,7 +13,7 @@ for (const touch of [true, false])
         hasTouch: touch,
       });
       await guardNetwork(page);
-      await page.goto('http://127.0.0.1:5198/test/billboard.html');
+      await page.goto(`${E2E_ORIGIN}/test/billboard.html`);
       const hero = page.locator('.billboard');
       await expect(hero).toBeVisible();
       const before = await hero.boundingBox();

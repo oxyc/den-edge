@@ -1,6 +1,7 @@
 import { guardNetwork } from './network.mjs';
 import { test, chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // A page that throws while rendering stays that page's problem: it says so and offers another try, and the rest of
 // the app — the pages kept behind it, and navigating away — keeps working.
@@ -14,7 +15,7 @@ test('a page that fails says so, offers another try, and leaves the other pages 
     await guardNetwork(page);
     const errors = [];
     page.on('pageerror', (error) => errors.push(String(error)));
-    await page.goto('http://127.0.0.1:5198/test/router.html');
+    await page.goto(`${E2E_ORIGIN}/test/router.html`);
     await page.waitForSelector('[data-active="true"] [data-page="library"]');
     const go = (path) =>
       page.evaluate(

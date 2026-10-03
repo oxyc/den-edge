@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { test, expect, webkit, devices } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // Chromium cannot see this class of bug. iOS sizes a native <select> to its widest option and lets the text spill out of
 // a narrower box; that overflow is not any element's own box, so the page scrolled sideways on an iPhone while
@@ -35,7 +36,7 @@ test('Settings never scrolls sideways on an iPhone, however long a region name i
         return route.fulfill({ json: { results: REGIONS } });
       return route.fulfill({ json: { results: [] } });
     });
-    await page.goto('http://127.0.0.1:5198/test/settings.html');
+    await page.goto(`${E2E_ORIGIN}/test/settings.html`);
     await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
 
     const widths = () =>

@@ -1,6 +1,7 @@
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const movie = {
@@ -57,7 +58,7 @@ for (const width of [390, 1280])
           json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } },
         });
       });
-      await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+      await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       await expect(page.locator('h1')).toHaveText('The Movie');
       const geometry = () =>
         page.evaluate(() =>
@@ -160,7 +161,7 @@ for (const reduced of [false, true])
         requests++;
         return r.fulfill({ json: { meta: { links: [] } } });
       });
-      await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+      await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       await expect(page.locator('h1')).toHaveText('The Movie');
       if (!reduced) await expect.poll(() => requests).toBe(1);
       await expect(page.locator('video')).not.toHaveClass(/\bplaying\b/);
@@ -199,7 +200,7 @@ for (const failure of ['media error', 'autoplay blocked'])
           };
         });
       }
-      await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+      await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       await expect(page.locator('h1')).toHaveText('The Movie');
       const video = page.locator('video');
       if (failure === 'media error')
@@ -231,7 +232,7 @@ test('detail trailer ignores a URL that resolves after leaving the page', async 
       responded();
     });
     const requested = page.waitForRequest('**/reel/fixture/meta/**');
-    await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     await requested;
     await page.evaluate(() =>
       document.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
@@ -267,7 +268,7 @@ test('mobile trailer reveals without a compositor callback or a tap', async () =
     await mock(page, (r) =>
       r.fulfill({ json: { meta: { links: [{ trailers: 'http://internal/play/trailer.webm' }] } } }),
     );
-    await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     const video = page.locator('video');
     await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0);
     await expect(video).toHaveCSS('opacity', '1');
@@ -300,7 +301,7 @@ test('wide mobile trailer and its swipe snapshot have opaque letterboxing', asyn
         }),
       wide,
     );
-    await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
     const video = page.locator('video');
     await expect(video).toHaveCSS('opacity', '1');
     const bounds = await page.locator('[data-detail-media]').boundingBox();
@@ -386,7 +387,7 @@ for (const width of [320, 1280])
           .route(/^https:\/\/www\.youtube(-nocookie)?\.com\//, (r) =>
             r.fulfill({ contentType: 'text/html', body: '<title>YouTube fixture</title>' }),
           );
-        await page.goto('http://127.0.0.1:5198/test/detail-trailer.html?browser-play');
+        await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html?browser-play`);
         // Named for what pressing it does: with a video id known, it plays here rather than leaving.
         const trailer = page.getByRole('link', { name: exact ? 'Trailer' : 'Trailer on YouTube' });
         await expect(trailer).toBeVisible();
@@ -470,7 +471,7 @@ for (const failed of ['missing', 'portrait'])
             : { contentType: 'video/webm', body: videoBytes },
         ),
       );
-      await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+      await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
       const video = page.locator('video');
       await expect(video).toHaveAttribute('src', /trailer.webm$/);
       await expect(video).toHaveClass(/playing/);

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const svg = (w, h, fill) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="${fill}"/></svg>`;
@@ -72,7 +73,7 @@ async function setup(page) {
       };
   });
   await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
-  await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+  await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
   await expect(page.locator('[data-active="true"] h1')).toHaveText('The Movie');
   const card = page
     .locator('[data-active="true"]')

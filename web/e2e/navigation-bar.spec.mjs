@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('desktop Back traverses nested details and direct links have a Home fallback', async () => {
   const browser = await chromium.launch({
@@ -11,7 +12,7 @@ test('desktop Back traverses nested details and direct links have a Home fallbac
       reducedMotion: 'reduce',
     });
     await guardNetwork(page);
-    await page.goto('http://127.0.0.1:5198/test/navigation-bar.html');
+    await page.goto(`${E2E_ORIGIN}/test/navigation-bar.html`);
     const back = page.getByRole('button', { name: 'Back', exact: true });
     await expect(back).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Den home' }).locator('img')).toBeVisible();

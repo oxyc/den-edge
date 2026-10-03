@@ -7,6 +7,7 @@
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
 const movie = {
@@ -64,7 +65,7 @@ async function mock(page, sources) {
   await page.route('**/play/trailer.webm', serveVideo);
 }
 
-const open = (page) => page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+const open = (page) => page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
 
 test('hero adopts reel’s source and crop', async () => {
   const browser = await chromium.launch({

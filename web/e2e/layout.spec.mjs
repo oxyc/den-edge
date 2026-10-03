@@ -2,6 +2,7 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 import { test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('layout regressions', async () => {
   const browser = await chromium.launch({
@@ -41,7 +42,7 @@ test('layout regressions', async () => {
         body: '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300"><rect width="200" height="300" fill="blue"/></svg>',
       }),
     );
-    await page.goto('http://127.0.0.1:5198/test/library.html');
+    await page.goto(`${E2E_ORIGIN}/test/library.html`);
     await page.waitForTimeout(2500);
     console.log(
       JSON.stringify({
@@ -84,7 +85,7 @@ test('layout regressions', async () => {
           body: '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300"><rect width="200" height="300" fill="blue"/></svg>',
         });
       });
-      await detailPage.goto('http://127.0.0.1:5198/test/detail.html');
+      await detailPage.goto(`${E2E_ORIGIN}/test/detail.html`);
       const before = await detailPage.locator('.hero').boundingBox();
       releaseMeta();
       await detailPage.waitForSelector('h1');

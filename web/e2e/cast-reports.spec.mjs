@@ -13,8 +13,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
-const ORIGIN = 'http://127.0.0.1:5198';
+const ORIGIN = E2E_ORIGIN;
 const CAST = 'https://cast.test';
 const MEDIA = 'https://media.test';
 const SID = 'AbCdEfGhIjKlMnOpQrStUv';

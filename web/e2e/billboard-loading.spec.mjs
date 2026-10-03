@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 for (const width of [320, 393, 844, 1280])
   test(`billboard reserves text and artwork before loading at ${width}px`, async () => {
@@ -42,7 +43,7 @@ for (const width of [320, 393, 844, 1280])
           body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="blue"/></svg>',
         });
       });
-      await page.goto('http://127.0.0.1:5198/test/billboard.html');
+      await page.goto(`${E2E_ORIGIN}/test/billboard.html`);
       const hero = page.locator('.billboard');
       await expect(hero).toHaveAttribute('aria-hidden', 'true');
       const empty = await hero.boundingBox();

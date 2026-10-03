@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 for (const scenario of [
   { name: 'late filmography in portrait', width: 390, height: 800, scrolled: false },
@@ -74,7 +75,7 @@ for (const scenario of [
       // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
       // document, and the title is the first history entry, exactly as opening its link would give.
       await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
-      await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+      await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
       await page
         .locator('[data-active="true"]')
         .getByRole('region', { name: 'Cast & Crew' })

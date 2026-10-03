@@ -1,5 +1,6 @@
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // Typing in the search field moves the query every page reads at each letter, so the results follow it, but the
 // browser's address only once typing pauses: rewriting it per keystroke hits Safari's `replaceState` throttle.
@@ -18,7 +19,7 @@ const film = (id) => ({
   popularity: 100,
 });
 const films = Array.from({ length: 30 }, (_, i) => film(100 + i));
-const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
+const FIXTURE = `${E2E_ORIGIN}/test/nav-search.html`;
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
 const input = (page) =>
   page.getByRole('searchbox', { name: 'Search titles, people, moods, languages…' });
