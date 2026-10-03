@@ -379,7 +379,8 @@ describe('resetting the library key (library v4 §12)', () => {
     const { fetchImpl, sent } = simkl(server);
     const old = await server.seed(OLD_KEY, household(['', '1']));
     const log = (await LibraryLog.open(OLD_KEY, fetchImpl, undefined, null))!;
-    // Delivered once on the old key: the film's watch, list and rating, and the episode.
+    // Delivered once on the old key, after watching it ten minutes: the film's watch, list and rating, and the episode.
+    expect(await deliverSimkl(log, DEVICE, fetchImpl, 0)).toBe(false);
     expect(await deliverSimkl(log, DEVICE, fetchImpl, 600_000)).toBe(true);
     const delivered = sent.count;
     expect(delivered).toBeGreaterThan(0);
@@ -410,7 +411,9 @@ describe('resetting the library key (library v4 §12)', () => {
     const next = (await LibraryLog.open(key, fetchImpl, undefined, null))!;
     expect(next.wireMinimum).toBe(4);
     expect(next.title({ type: 'movie', id: 550 })?.status.value).toBe('watched');
-    expect(await deliverSimkl(next, DEVICE, fetchImpl, 600_000)).toBe(true);
+    // The new library is watched afresh before its lease is taken.
+    expect(await deliverSimkl(next, DEVICE, fetchImpl, 600_000)).toBe(false);
+    expect(await deliverSimkl(next, DEVICE, fetchImpl, 1_200_000)).toBe(true);
     expect(sent.count).toBe(delivered);
   });
 
@@ -442,6 +445,7 @@ describe('resetting the library key (library v4 §12)', () => {
 
     // On the new key the cut-off holder's lease is waited out: not a minute short of ten.
     const next = (await LibraryLog.open(key, fetchImpl, undefined, null))!;
+    expect(await deliverSimkl(next, DEVICE, fetchImpl, 0)).toBe(false);
     expect(await deliverSimkl(next, DEVICE, fetchImpl, 599_999)).toBe(false);
     expect(sent.count).toBe(0);
     expect(await deliverSimkl(next, DEVICE, fetchImpl, 600_000)).toBe(true);

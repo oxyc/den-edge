@@ -49,6 +49,9 @@ it('a switched v2 Simkl library sends missing work once and keeps its receipt', 
       return rows.find((row): row is SettingsRow => row.kind === 'set' && row.name === name);
     },
     newestStamp: () => at,
+    // A generation this page has already watched, so its first pass may take an empty lease at once.
+    currentGeneration: 'g1',
+    observedGeneration: 'g1',
     seqOf: () => 0,
     async write(row: Row) {
       const index = rows.findIndex((old) => rowName(old) === rowName(row));

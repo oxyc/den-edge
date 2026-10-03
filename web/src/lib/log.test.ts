@@ -348,6 +348,8 @@ describe('LibraryLog', () => {
     expect(stagedBatchSizes.every((size) => size <= 200)).toBe(true);
     expect(requests.at(-1)?.init.headers).toMatchObject({ 'x-den-generation': 'new' });
 
+    // Its own commit is a generation change: it watches the new store for ten minutes before taking the lease.
+    expect(await deliverSimkl(log, device, connection, 0)).toBe(false);
     expect(await deliverSimkl(log, device, connection, 600_000)).toBe(true);
     expect(simklSends).toBeGreaterThan(0);
     const sentOnce = simklSends;

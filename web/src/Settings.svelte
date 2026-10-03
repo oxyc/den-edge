@@ -39,8 +39,11 @@
   import { relayFetch } from './lib/relayFetch';
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
+  import { approveSimklRemovals, heldSimklRemovals, type HeldRemovals } from './lib/simklDelivery';
+  import { untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { ensureSyncPolicy } from './lib/syncLoader';
-  import { tmdbKeyOf } from './lib/tmdb';
+  import { fetchTitle, tmdbKeyOf } from './lib/tmdb';
   import { fetchSimklClientId, simklAccountID } from './settings/simkl';
   import type { ConfigValue, SettingsRow, Stamp } from './lib/wire';
 
@@ -231,6 +234,54 @@
     return true;
   }
 
+  /** The SIMKL watchlist removals the removals latch holds, until someone approves them here or on a TV. */
+  const heldRemovals = $derived.by((): HeldRemovals => {
+    void version;
+    try {
+      return log ? heldSimklRemovals(log) : { titles: [], approval: null };
+    } catch (error) {
+      console.warn('den: the held SIMKL removals could not be read', error);
+      return { titles: [], approval: null };
+    }
+  });
+
+  /**
+   * Their names, from TMDB through den-edge's proxy as the library names any title it holds no display for: a
+   * removed title's display is gone with it. One that can't be looked up is shown by its id.
+   */
+  const heldNames = new SvelteMap<string, string>();
+  $effect(() => {
+    const key = tmdbKeyOf(keys);
+    const held = heldRemovals.titles;
+    // The names untracked: one arriving must not re-run this and drop the lookups still on their way.
+    const wanted = untrack(() => held.filter((ref) => !heldNames.has(`${ref.type}:${ref.id}`)));
+    if (!key || !wanted.length) return;
+    let gone = false;
+    void Promise.all(
+      wanted.map(async (ref) => {
+        const found = await fetchTitle(ref, key);
+        if (!gone && found?.title) heldNames.set(`${ref.type}:${ref.id}`, found.title);
+      }),
+    );
+    return () => {
+      gone = true;
+    };
+  });
+  const namedRemovals = $derived(
+    heldRemovals.titles.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
+  );
+
+  /**
+   * Approve exactly the removals shown: the latest stamp among them, by compare-and-set on the account's delivery
+   * row, which counts for every device. False when the row changed meanwhile; the list is read and shown again.
+   */
+  async function approveRemovals(): Promise<boolean> {
+    if (!log) return false;
+    const approved = await approveSimklRemovals(log, clock.device, heldRemovals);
+    session.changed(true);
+    return approved;
+  }
+
   /**
    * Linking a TV from a browser using its own library: every row goes into the TV's library, merged with what the TV
    * has, and only then is this browser's own library dropped.
@@ -323,6 +374,8 @@
       {keys}
       simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
       {saveSimkl}
+      heldRemovals={namedRemovals}
+      {approveRemovals}
       {plugins}
       {routes}
       {servers}

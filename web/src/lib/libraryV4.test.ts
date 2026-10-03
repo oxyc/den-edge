@@ -13,7 +13,7 @@ import { switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
-import { deliverSimkl } from './simklDelivery';
+import { approveSimklRemovals, deliverSimkl, heldSimklRemovals } from './simklDelivery';
 import { recordTrackerEvent } from './trackerEvents';
 import {
   deriveKeys,
@@ -351,23 +351,74 @@ describe('Library v4 documents', () => {
     expect(await log.write(react(before, 'love', at(4000)))).toBeNull();
   });
 
-  it('removes an unreadable row once read to the head, and delivers nothing until then', async () => {
+  /** A row sealed under `name` whose ciphertext was then damaged: it fails to open. */
+  const damaged = async (keys: LibraryKeys, name: string) => {
+    const sealed = await sealPlaintext(keys, name, new TextEncoder().encode('{}'));
+    const at = sealed.v.length - 6;
+    return {
+      k: sealed.k,
+      v: sealed.v.slice(0, at) + (sealed.v[at] === 'A' ? 'B' : 'A') + sealed.v.slice(at + 1),
+    };
+  };
+
+  it('removes a row that fails to open once read to the head, and delivers nothing until then', async () => {
     const server = await edge([filmDocument(550), prefs]);
-    // Sealed under the name of one document but holding another: it can't be attributed to a name (§4).
-    const keys = server.keys as LibraryKeys;
-    const bad = await sealPlaintext(
-      keys,
-      'title:movie:999',
-      new TextEncoder().encode('{"format":4,"kind":"title","title":{"type":"movie","id":1}}'),
-    );
+    const bad = await damaged(server.keys as LibraryKeys, 'title:movie:999');
     server.put(bad);
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
-    expect([...log.unreadable.values()]).toEqual(['identity']);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
+    expect([...log.unreadable.values()]).toEqual(['open']);
     expect(await log.compact()).toBe(true);
     expect(server.stored.has(bad.k)).toBe(false);
     expect(server.stored.size).toBe(2);
     expect(log.unreadable.size).toBe(0);
     expect(server.log.commits).toEqual([{ base: 3, wireMin: 4 }]);
+  });
+
+  it('removes nothing where storage is blocked, since it could not remember what it removed', async () => {
+    const server = await edge([filmDocument(550), prefs]);
+    const bad = await damaged(server.keys as LibraryKeys, 'title:movie:999');
+    server.put(bad);
+    const blocked = memoryStorage();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, blocked, null))!;
+    blocked.getItem = () => {
+      throw new DOMException('blocked', 'SecurityError');
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await log.compact()).toBe(false);
+    warn.mockRestore();
+    expect(server.stored.has(bad.k)).toBe(true);
+    expect(server.log.commits).toEqual([]);
+    expect(libraryAlert(log)).toBe('Delivery paused: library rows can’t be read');
+  });
+
+  it('never removes a row that opens: one this build reads as unreadable another may read', async () => {
+    const server = await edge([filmDocument(550), prefs]);
+    // Sealed under the name of one document but holding another: it opens, then fails identity (§4).
+    const keys = server.keys as LibraryKeys;
+    const kept = await sealPlaintext(
+      keys,
+      'title:movie:999',
+      new TextEncoder().encode('{"format":4,"kind":"title","title":{"type":"movie","id":1}}'),
+    );
+    server.put(kept);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
+    expect([...log.unreadable.values()]).toEqual(['identity']);
+    expect(await log.compact()).toBe(false);
+    expect(server.stored.get(kept.k)?.v).toBe(kept.v);
+    expect(server.log.commits).toEqual([]);
+    expect(libraryAlert(log)).toBe('Delivery paused: library rows can’t be read');
+  });
+
+  it('leaves too many rows that fail to open alone, and says delivery is paused', async () => {
+    const server = await edge([filmDocument(550), prefs]);
+    const keys = server.keys as LibraryKeys;
+    for (let id = 0; id < 11; id++) server.put(await damaged(keys, `title:movie:${9000 + id}`));
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
+    expect(log.unreadable.size).toBe(11);
+    expect(await log.compact()).toBe(false);
+    expect(server.log.commits).toEqual([]);
+    expect(server.stored.size).toBe(13);
+    expect(libraryAlert(log)).toBe('Delivery paused: library rows can’t be read');
   });
 });
 
@@ -573,6 +624,19 @@ describe('SIMKL delivery on Library v4', () => {
     return { server, connection, sent };
   }
 
+  /**
+   * A pass from a page that has watched the library for ten minutes: one at `elapsed` − 10 min starts the watch of
+   * its generation and delivers nothing, then the pass at `elapsed`.
+   */
+  async function watched(log: LibraryLog, connection: typeof fetch, elapsed = 600_000) {
+    expect(await deliverSimkl(log, DEVICE, connection, elapsed - 600_000)).toBe(false);
+    return deliverSimkl(log, DEVICE, connection, elapsed);
+  }
+
+  const leaseOf = (rows: Row[]) =>
+    rows.find((row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42')!
+      .values.lease?.value;
+
   /** The settle order of every receipt den-edge holds: a watch entry's fifth element, a list or rating's third. */
   const orders = (rows: Row[]) =>
     rows
@@ -586,7 +650,7 @@ describe('SIMKL delivery on Library v4', () => {
   it('never repeats a settle order within an epoch, pass after pass', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(await watched(log, connection)).toBe(true);
     await server.append(filmDocument(551));
     await log.refresh();
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
@@ -611,11 +675,8 @@ describe('SIMKL delivery on Library v4', () => {
       deliver(['bbbbbbbbbbbbbbbb', '2']),
     ]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
-    const lease = (await server.opened()).find(
-      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
-    )!.values.lease?.value;
-    expect(lease).toEqual({ strings: [DEVICE, '8'] });
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '8'] });
   });
 
   it('takes the lease compare-and-set: another device that renewed it since keeps it', async () => {
@@ -627,7 +688,7 @@ describe('SIMKL delivery on Library v4', () => {
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
     // The TV renews its lease after this browser read the row, with an older stamp than this browser would issue.
     await server.append(deliver(['cccccccccccccccc', '3'], 600));
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
+    expect(await watched(log, connection)).toBe(false);
     expect(sent.count).toBe(0);
     const lease = (await server.opened()).find(
       (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
@@ -642,7 +703,7 @@ describe('SIMKL delivery on Library v4', () => {
       deliver(['', '1']),
     ]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(await watched(log, connection)).toBe(true);
     expect(sent.count).toBe(1);
     const receipts = (await server.opened()).find((row) => row.kind === 'delivery') as DocumentRow;
     expect(receipts).toMatchObject({
@@ -694,7 +755,7 @@ describe('SIMKL delivery on Library v4', () => {
     expect(log.fromCache).toBe(true);
     await log.refresh();
     await switchLibraryToV4(log, Date.now(), recording);
-    await deliverSimkl(log, DEVICE, recording, 600_000);
+    await watched(log, recording);
 
     expect(asked.filter(({ action }) => action === 'rewrite')).toEqual([]);
     expect(server.log.commits).toHaveLength(generations);
@@ -722,15 +783,432 @@ describe('SIMKL delivery on Library v4', () => {
     expect(asked.filter(({ method }) => method !== 'GET')).toEqual([]);
   });
 
-  it('a lease refused by a generation change reads the new log, and the next pass takes it', async () => {
+  it('a lease refused by a generation change reads the new log, and a later pass takes it', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 0)).toBe(false);
     // The library is restored between this browser's read and its lease write: a new generation.
     await server.append(filmDocument(551));
     server.restore();
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
     expect(log.title({ type: 'movie', id: 551 })).toBeDefined();
+    expect(await watched(log, connection, 1_200_000)).toBe(true);
+  });
+
+  it('after a generation change, watches the new store before taking even its own lease, at a new epoch', async () => {
+    const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '2'] });
+    // A restore: a new generation whose lease row still names this browser.
+    server.restore();
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 610_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_209_999)).toBe(false);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '2'] });
+    expect(await deliverSimkl(log, DEVICE, connection, 1_210_000)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '3'] });
+  });
+
+  it("takes another device's lease only once its row has stayed unchanged for ten minutes", async () => {
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      trackers,
+      deliver(['cccccccccccccccc', '3']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    // A page open for ten minutes is no reason to take a lease the TV renewed a moment ago.
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '4'] });
+
+    // The TV takes it back, and renews it while this page watches: each renewal starts the ten minutes over. Its
+    // stamps are fresh, as a real TV's are.
+    await server.append(deliver(['cccccccccccccccc', '5'], Date.now() + 60_000));
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 700_000)).toBe(false);
+    await server.append(deliver(['cccccccccccccccc', '5'], Date.now() + 120_000));
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 1_200_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_799_999)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_800_000)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '6'] });
+    expect(sent.count).toBe(1);
+  });
+
+  it('a page that kept no generation watches before taking even an empty lease', async () => {
+    const { connection, sent } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 900_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_499_999)).toBe(false);
+    expect(sent.count).toBe(0);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_500_000)).toBe(true);
+    expect(sent.count).toBe(1);
+  });
+
+  it('decides a mass list removal once it is approved, where the latch held it before', async () => {
+    const removed = Array.from({ length: 21 }, (_, i) =>
+      filmDocument(600 + i, { deleted: { value: true, at: at(3000) } }),
+    );
+    const receipts: DocumentRow[] = removed.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    const lists = (rows: Row[]) =>
+      rows
+        .filter((row): row is DocumentRow => row.kind === 'delivery')
+        .map((row) => (row.entries as Record<string, unknown[]>).list?.[0]);
+    const delivered = async (removals?: unknown) => {
+      const row = deliver(['', '1']);
+      if (removals)
+        row.values.removals = { value: { string: JSON.stringify(removals) }, at: at(4000) };
+      // SIMKL's account no longer lists them, so each removal, once decided, settles as delivered.
+      const { server, connection } = await simkl([...removed, ...receipts, trackers, row]);
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+      expect(await watched(log, connection)).toBe(true);
+      const opened = await server.opened();
+      const latch = opened.find(
+        (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+      )!.values.removals?.value;
+      return {
+        lists: lists(opened),
+        latch: latch && 'string' in latch ? (JSON.parse(latch.string) as object) : null,
+        held: heldSimklRemovals(log).titles.length,
+      };
+    };
+    // More than 20 removals hold every one of them, pass after pass, and the holder closes the latch on the row.
+    expect(await delivered()).toEqual({
+      lists: Array(21).fill('in'),
+      latch: { held: expect.any(Array) },
+      held: 21,
+    });
+    // Approved after they were made: every one is decided.
+    expect((await delivered({ approved: at(4000) })).lists).toEqual(Array(21).fill('gone'));
+  });
+
+  it('holds 21 more removals after an approval alone: the 21 approved still go out', async () => {
+    const batch = (from: number, removedAt: number) =>
+      Array.from({ length: 21 }, (_, i) =>
+        filmDocument(from + i, { deleted: { value: true, at: at(removedAt) } }),
+      );
+    const approvedBatch = batch(600, 3000);
+    const laterBatch = batch(700, 6000);
+    const titles = [...approvedBatch, ...laterBatch];
+    const receipts: DocumentRow[] = titles.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    const row = deliver(['', '1']);
+    row.values.removals = {
+      value: { string: JSON.stringify({ approved: at(4000) }) },
+      at: at(4000),
+    };
+    const { server, connection, sent } = await simkl([...titles, ...receipts, trackers, row]);
+    // SIMKL lists all 42, added long before, so a decided removal is a request; the first pass's requests fail.
+    let failing = true;
+    const listing: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes('/sync/all-items'))
+        return new Response(
+          JSON.stringify({
+            movies: titles.map((doc) => ({
+              movie: { ids: { tmdb: doc.title.id } },
+              status: 'plantowatch',
+              added_to_watchlist_at: '1970-01-01T00:00:01Z',
+            })),
+          }),
+        );
+      if (failing && url.includes('api.simkl.com') && init?.method === 'POST')
+        return new Response('{}', { status: 503 });
+      return connection(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    expect(await watched(log, listing)).toBe(true);
+    const latch = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.removals?.value as { string: string };
+    expect(Object.keys(JSON.parse(latch.string) as object).sort()).toEqual(['approved', 'held']);
+
+    failing = false;
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, listing, 600_000)).toBe(true);
+    expect(sent.count).toBe(21);
+    expect(heldSimklRemovals(log).titles.map(({ id }) => id)).toEqual(
+      laterBatch.map((doc) => doc.title.id),
+    );
+  });
+
+  it('sends a removal SIMKL still lists, once it knows when SIMKL listed it', async () => {
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    };
+    const { connection, sent } = await simkl([
+      filmDocument(550, { deleted: { value: true, at: at(3000) } }),
+      receipts,
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const listing: typeof fetch = async (input, init) =>
+      String(input).includes('/sync/all-items')
+        ? new Response(
+            JSON.stringify({
+              movies: [
+                {
+                  movie: { ids: { tmdb: 550 } },
+                  status: 'plantowatch',
+                  added_to_watchlist_at: '1970-01-01T00:00:01Z',
+                },
+              ],
+            }),
+          )
+        : connection(input, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    expect(await watched(log, listing)).toBe(true);
+    expect(sent.count).toBe(1);
+  });
+
+  it('writes an epoch two devices settled under to unverified, and decides its receipts again', async () => {
+    const receipt = (id: number, device: string): DocumentRow => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id },
+      entries: { list: ['in', at(1000), [3, 1, device]] },
+    });
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      filmDocument(551),
+      receipt(550, 'bbbbbbbbbbbbbbbb'),
+      receipt(551, 'cccccccccccccccc'),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(sent.count).toBe(2);
+    const row = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!;
+    expect(row.values.unverified?.value).toEqual({ ints: [3] });
+  });
+
+  it('checks its hold on the lease before every request, and stops once it has lapsed', async () => {
+    const { connection, sent } = await simkl([
+      filmDocument(550),
+      filmDocument(551),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+    try {
+      // The first request takes longer than the two minutes a hold lasts.
+      const slow: typeof fetch = async (input, init) => {
+        const res = await connection(input, init);
+        if (String(input).includes('api.simkl.com') && init?.method === 'POST')
+          vi.advanceTimersByTime(121_000);
+        return res;
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, slow, undefined, null))!;
+      expect(await watched(log, slow)).toBe(true);
+      expect(sent.count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts Date.now stepping back as the hold lapsing, whatever performance.now says', async () => {
+    const { connection, sent } = await simkl([
+      filmDocument(550),
+      filmDocument(551),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // The wall clock steps back an hour during the first request; performance.now runs on.
+      let stepped = false;
+      const stepping: typeof fetch = async (input, init) => {
+        const res = await connection(input, init);
+        if (!stepped && String(input).includes('api.simkl.com') && init?.method === 'POST') {
+          stepped = true;
+          vi.setSystemTime(Date.now() - 3_600_000);
+        }
+        return res;
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, stepping, undefined, null))!;
+      expect(await watched(log, stepping)).toBe(true);
+      expect(sent.count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('watches on the lesser of its clocks: a wall clock that jumps ahead is no ten minutes', async () => {
+    const { connection, sent } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // The page's own clocks, as `deliverSimkl` reads them when given no `elapsed`.
+      expect(await deliverSimkl(log, DEVICE, connection)).toBe(false);
+      vi.setSystemTime(Date.now() + 660_000);
+      expect(await deliverSimkl(log, DEVICE, connection)).toBe(false);
+      expect(sent.count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('approves exactly what was shown, by compare-and-set; a hold written meanwhile shows the list again', async () => {
+    const removed = Array.from({ length: 21 }, (_, i) =>
+      filmDocument(600 + i, { deleted: { value: true, at: at(3000) } }),
+    );
+    const receipts: DocumentRow[] = removed.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    const { server, connection } = await simkl([
+      ...removed,
+      ...receipts,
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const shown = heldSimklRemovals(log);
+    expect(shown.titles).toHaveLength(21);
+    expect(shown.approval).toEqual(at(3000));
+
+    // The TV, holding the lease, closes the latch while the person looks at the list.
+    const closed = deliver(['bbbbbbbbbbbbbbbb', '2'], 5000);
+    closed.values.removals = {
+      value: { string: JSON.stringify({ held: at(3000) }) },
+      at: at(5000),
+    };
+    await server.append(closed);
+    const latch = async () =>
+      JSON.parse(
+        (
+          (await server.opened()).find(
+            (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+          )!.values.removals?.value as { string: string }
+        ).string,
+      ) as unknown;
+    expect(await approveSimklRemovals(log, DEVICE, shown)).toBe(false);
+    expect(await latch()).toEqual({ held: at(3000) });
+
+    await log.refresh();
+    const again = heldSimklRemovals(log);
+    expect(await approveSimklRemovals(log, DEVICE, again)).toBe(true);
+    expect(await latch()).toEqual({ approved: at(3000), held: at(3000) });
+    expect(heldSimklRemovals(log).titles).toEqual([]);
+  });
+
+  /** Films removed at `removedAt`, each with an `in` receipt from another device. */
+  const removedFilms = (from: number, count: number, removedAt: (i: number) => number) => {
+    const titles = Array.from({ length: count }, (_, i) =>
+      filmDocument(from + i, { deleted: { value: true, at: at(removedAt(i)) } }),
+    );
+    const receipts: DocumentRow[] = titles.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    return [...titles, ...receipts];
+  };
+
+  it('approves past the stored held when the removal that closed the latch was undone', async () => {
+    // 25 removals closed the latch at the 25th's stamp; that title is back, so 24 stay held.
+    const row = deliver(['', '1']);
+    row.values.removals = { value: { string: JSON.stringify({ held: at(3024) }) }, at: at(5000) };
+    const { server, connection } = await simkl([
+      ...removedFilms(600, 24, (i) => 3000 + i),
+      trackers,
+      row,
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const shown = heldSimklRemovals(log);
+    expect(shown.titles).toHaveLength(24);
+    expect(shown.approval).toEqual(at(3024));
+    expect(await approveSimklRemovals(log, DEVICE, shown)).toBe(true);
+    const latch = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.removals?.value as { string: string };
+    expect(JSON.parse(latch.string)).toEqual({ approved: at(3024), held: at(3024) });
+    expect(heldSimklRemovals(log).titles).toEqual([]);
+  });
+
+  it('shares the removals sent across tabs: a late batch after 21 sent is held in another tab', async () => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    try {
+      const approvedBatch = removedFilms(600, 21, () => 3000);
+      const row = deliver(['', '1']);
+      row.values.removals = {
+        value: { string: JSON.stringify({ approved: at(4000), held: at(4000) }) },
+        at: at(4000),
+      };
+      const { server, connection, sent } = await simkl([...approvedBatch, trackers, row]);
+      // SIMKL lists every title, added long before, so each approved removal is a request.
+      const listing: typeof fetch = async (input, init) =>
+        String(input).includes('/sync/all-items')
+          ? new Response(
+              JSON.stringify({
+                movies: Array.from({ length: 22 }, (_, i) => ({
+                  movie: { ids: { tmdb: 600 + i } },
+                  status: 'plantowatch',
+                  added_to_watchlist_at: '1970-01-01T00:00:01Z',
+                })),
+              }),
+            )
+          : connection(input, init);
+      const tab = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+      expect(await watched(tab, listing)).toBe(true);
+      expect(sent.count).toBe(21);
+
+      // An offline device's removal stamped before the approval arrives; another tab reads it.
+      for (const document of removedFilms(621, 1, () => 3000)) await server.append(document);
+      const other = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+      expect(heldSimklRemovals(other).titles).toEqual([{ type: 'movie', id: 621 }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('sends a list add again whose receipt is unverified', async () => {
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [3, 1, 'bbbbbbbbbbbbbbbb']] },
+    };
+    const unverified: SettingsRow = {
+      ...deliver(['', '1']),
+      values: { ...deliver(['', '1']).values, unverified: { value: { ints: [3] }, at: at(4000) } },
+    };
+    const { connection, sent } = await simkl([filmDocument(550), receipts, trackers, unverified]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(sent.count).toBe(1);
   });
 });
 
