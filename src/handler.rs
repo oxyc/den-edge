@@ -155,6 +155,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("scope", resp.extensions().get::<ListenerScope>().map(|s| s.0)),
             ("tmdb", resp.headers().get("x-den-tmdb").and_then(|v| v.to_str().ok())),
             ("file", resp.extensions().get::<crate::web::Served>().map(|s| s.0)),
+            ("startup", resp.extensions().get::<StartupTag>().map(|s| s.0.as_str())),
         ]
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
@@ -339,10 +340,16 @@ pub struct ErrorCode(pub String);
 #[derive(Clone, Copy)]
 pub struct ListenerScope(pub &'static str);
 
+/// A browser's playback-startup timing (`startup.rs`), carried on the response for the request log like
+/// `ErrorCode`. Already joined into `name:value,name:value` text by the typed, allowlisted fields it came
+/// from — never a title, a URL or a token, by construction rather than by scrubbing.
+#[derive(Clone)]
+pub struct StartupTag(pub String);
+
 /// The one line each request is logged as. Tags go on the end as `name=value`: an error answer's code, so a
 /// refusal can be told from another with the same status; a public session's listener scope; whether a TMDB
-/// answer came from the cache (`x-den-tmdb`); and which kind of web-app file was served. Nothing of the
-/// request's body or address does.
+/// answer came from the cache (`x-den-tmdb`); which kind of web-app file was served; and a browser's playback-
+/// startup timing (`startup.rs`). Nothing of the request's body or address does.
 fn log_line(method: &Method, route: &str, status: u16, ms: u128, rid: &str, tags: &[(&str, &str)]) -> String {
     let mut line = format!("{method} {route} {status} {ms}ms rid={rid}");
     for (name, value) in tags {
@@ -482,6 +489,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     // keeps its own answers on the device.
     if path.starts_with("/skipdb/") {
         return crate::skipdb::handle(state, req, rid).await;
+    }
+    // Fire-and-forget: a browser's own playback-startup timing, for the request log alone (den-edge#234).
+    if path == "/playback/startup" {
+        return crate::startup::handle(state, req).await;
     }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
@@ -634,6 +645,9 @@ impl Face {
             || path.starts_with("/ratings/")
             || path.starts_with("/metadata/")
             || path.starts_with("/skipdb/")
+            // The player's startup-timing beacon: wherever it plays from (home, the tailnet, away), not just
+            // this half.
+            || path == "/playback/startup"
             // An assistant's server asks for tokens and calls `/mcp` on whichever public name it was given, and its
             // person approves in the web app: the connector answers on every name, its own gate being the token.
             || crate::oauth::is_path(path);
@@ -727,6 +741,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/metadata/title/query" => "/metadata/title/query",
         p if p.starts_with("/ratings/") => "/ratings",
         p if p.starts_with("/skipdb/") => "/skipdb",
+        "/playback/startup" => "/playback/startup",
         // One label each: what happens inside them is their own repo's log to keep.
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
@@ -768,7 +783,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/rewrite/:rid/commit"
         | "/pair/new"
         | "/pair/open" => Some(POST),
-        "/metadata/title/query" | "/tmdb/warm" => Some(POST),
+        "/metadata/title/query" | "/tmdb/warm" | "/playback/startup" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -783,6 +798,8 @@ fn body_cap(route: &str) -> usize {
         // The relay holds each atlas path to its own cap (`relay::is_recommend`); this only refuses what no atlas
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
+        // A dozen durations and a few short labels: a few hundred bytes, generously.
+        "/playback/startup" => 2048,
         _ => MAX_BODY_BYTES,
     }
 }
@@ -1014,6 +1031,25 @@ pub mod tests {
         assert_eq!(route_label(&format!("{action}/commit")), "/lib/:id/rewrite/:rid/commit");
         assert_eq!(route_label(&action), "/lib/:id/rewrite/:rid");
         assert_eq!(body_cap("/lib/:id/rewrite/:rid/rows"), crate::library::BATCH_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn playback_startup_is_a_small_post_only_route_on_every_face() {
+        assert_eq!(route_label("/playback/startup"), "/playback/startup");
+        assert_eq!(allowed_methods("/playback/startup"), Some(&[Method::POST][..]));
+        assert_eq!(body_cap("/playback/startup"), 2048);
+        for face in [Face::Web, Face::Api, Face::Both] {
+            assert!(face.serves("/playback/startup"), "{face:?} must answer the startup beacon");
+        }
+        assert!(!Face::Invalid.serves("/playback/startup"));
+    }
+
+    #[test]
+    fn a_startup_tag_goes_on_its_log_line_and_nowhere_else() {
+        assert_eq!(
+            log_line(&Method::POST, "/playback/startup", 204, 3, "ab12", &[("startup", "session:1234")]),
+            "POST /playback/startup 204 3ms rid=ab12 startup=session:1234"
+        );
     }
 
     /// A 503 is refused for several reasons, and the request log is where the box's operator has to tell them

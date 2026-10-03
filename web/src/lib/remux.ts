@@ -66,6 +66,11 @@ export interface Session {
   prebuffer?: number | null;
   /** Each segment's `[start, bytes]` of a copy: the demand the player weighs its live rate against (`switchPolicy`). */
   segments?: [number, number][] | null;
+  /**
+   * Not den-remux's: this page's own read of the 201's `Server-Timing` header (`resolve;dur=…,open;dur=…,…`),
+   * for den-edge#234's startup-timing report. Absent from older den-remux builds, and never serialized back.
+   */
+  startupTiming?: string;
 }
 
 export interface AudioTrack {
@@ -353,6 +358,23 @@ export function onLan(
 }
 
 /**
+ * Which kind of address `base` is, for den-edge#234's startup-timing report: never the address itself, only
+ * which of the three this is — `onLan`'s private ranges, a `.ts.net` tailnet name (`privateAddresses.ts`'s own
+ * check), or public (the relay included: a public deployment's own origin).
+ */
+export function routeKind(
+  base: string,
+  page = globalThis.location?.href ?? 'https://den.invalid/',
+): 'lan' | 'public' | 'tailnet' {
+  if (onLan(base, page)) return 'lan';
+  try {
+    return new URL(base, page).hostname.toLowerCase().endsWith('.ts.net') ? 'tailnet' : 'public';
+  } catch {
+    return 'public';
+  }
+}
+
+/**
  * The bits a second den-remux at `base` gets to this browser: its `/speed` timed by `linkRate`, until the end or
  * SPEED_READ_MS. Asked once per LINK_TTL_MS, sessions in between sharing the answer; null when it couldn't be timed.
  */
@@ -549,6 +571,8 @@ export async function startSession(
         // A body cut off, or past the deadline: nothing to play, and the same answer as no answer.
         return { failure: 'unreachable' };
       }
+      // den-edge#234's step 0: den-remux's own resolve/open/init timing, read back for the startup-timing report.
+      session.startupTiming = res.headers.get('server-timing') ?? undefined;
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const mediaBase = session.publicBase ?? (/^https?:/.test(base) ? base : undefined);
