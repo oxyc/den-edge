@@ -21,11 +21,14 @@
   import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
+    abandonDirect,
     cropStyle,
     fetchSources,
     nativeHls,
+    nextRung,
     progressiveURL,
     trailerCandidates,
+    watchDirect,
   } from '../lib/reel';
   import type { Crop, Source } from '../lib/reel';
   import { titleHref } from '../lib/route';
@@ -257,9 +260,12 @@
   /** This source will not play: reel's next offer, then its own copy, then the still picture. */
   function ambientFailedOver() {
     playing = false;
-    const next = rungs[rung + 1];
+    // A direct copy that will not play means its origin is out of reach from here: the relay copy is next.
+    if (rungs[rung]?.direct && ambient === rungs[rung]?.url) abandonDirect();
+    const at = nextRung(rungs, rung);
+    const next = rungs[at];
     if (next) {
-      rung += 1;
+      rung = at;
       ambient = next.url;
       return;
     }
@@ -463,6 +469,16 @@
       // is why a slide left behind on Home could still be heard from the page opened on top of it.
       hush(video);
     }
+  });
+
+  // A direct copy has DIRECT_FIRST_FRAME_MS to show a frame, or its relay copy plays instead: iOS's native player
+  // waits on an unreachable origin without raising the `error` the ladder steps on.
+  $effect(() => {
+    const video = ambientPlayer;
+    const mounted = rungs[rung];
+    if (!video || !mounted || ambient !== mounted.url || !active || !onScreen || !foreground)
+      return;
+    return watchDirect(video, mounted, ambientFailedOver);
   });
 
   // --- The rail ---

@@ -3,12 +3,15 @@
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
   import {
+    abandonDirect,
     cropStyle,
     fetchSources,
     hlsURL,
     isPlaylist,
     nativeHls,
+    nextRung,
     trailerCandidates,
+    watchDirect,
   } from '../lib/reel';
   import type { Crop, Source, TrailerCandidate } from '../lib/reel';
   import { memberXhrSetup } from '../lib/relayFetch';
@@ -531,6 +534,14 @@
     };
   });
 
+  // A direct copy has DIRECT_FIRST_FRAME_MS to show a frame, or its relay copy plays instead. The element's
+  // own `error` cannot be waited for: iOS's native player sits on an unreachable origin without raising one.
+  $effect(() => {
+    const player = video;
+    if (!player || !allowed || upgraded !== mounted?.url) return;
+    return watchDirect(player, mounted, nextTrailer);
+  });
+
   // Reads `source`, not `url`, and that is the whole point: swapping `src` to the direct stream
   // pauses the element, so an effect watching only `url` never runs again and the trailer sits there
   // loaded and still. It has to re-run for whichever source is actually mounted.
@@ -626,11 +637,15 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
+    // A direct copy that will not play here says the origin is unreachable from this browser, not that the
+    // trailer is broken: its relay copy is next, and later trailers skip the direct origin for a while.
+    if (mounted?.direct && upgraded === mounted.url) abandonDirect();
     // reel offered these in order and guarantees them distinct, so a step always changes the source.
     // A step that did not would fire no load and no error, and the hero would stop here silently.
-    const next = rungs[rung + 1];
+    const at = nextRung(rungs, rung);
+    const next = rungs[at];
     if (next) {
-      rung += 1;
+      rung = at;
       upgraded = next.url;
       return;
     }

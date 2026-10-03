@@ -434,6 +434,8 @@ export interface Source {
   audio: boolean;
   height: number | null;
   width: number | null;
+  /** The copy on the direct origin (`directSources`), with the same bytes on the relay as the next entry. */
+  direct?: boolean;
 }
 
 /** reel's answer for one trailer on one surface: ordered best-first, and what it knows about the picture. */
@@ -458,7 +460,9 @@ const ACTIVATION_PAUSE_MS = 5 * 60_000;
 let activationPausedUntil = 0;
 
 function pauseActivation(response: Response, now = Date.now()): void {
-  if (response.status === 503) activationPausedUntil = now + ACTIVATION_PAUSE_MS;
+  // 409 is `at_home`: behind the home's router, where the direct origin does not loop back (oxyc/den#197).
+  if (response.status === 503 || response.status === 409)
+    activationPausedUntil = now + ACTIVATION_PAUSE_MS;
   else if (response.status === 429) {
     const seconds = Number(response.headers.get('retry-after'));
     activationPausedUntil =
@@ -469,6 +473,58 @@ function pauseActivation(response: Response, now = Date.now()): void {
 /** For tests: forget a pause. */
 export function resetActivationPause(): void {
   activationPausedUntil = 0;
+}
+
+/**
+ * How long a direct source gets to produce its first frame before the relay copy behind it is played.
+ *
+ * An activation answering 200 says the gate opened, not that this browser can reach the origin: at home the
+ * router may not loop its own public address back in, and iOS's native player then waits on the connection
+ * with no error to fall back on (oxyc/den#197). The relay copy is the next entry, so giving up costs this.
+ */
+export const DIRECT_FIRST_FRAME_MS = 2_000;
+
+/** `HTMLMediaElement.HAVE_CURRENT_DATA`: a frame is decoded. Spelled out so this runs where the DOM does not. */
+const HAVE_CURRENT_DATA = 2;
+
+/**
+ * Give up on a mounted direct source that has no frame within `ms`: `giveUp` steps to the next entry, and
+ * activation pauses so the next trailers go straight to the relay. Nothing for any other source. Returns the
+ * cancel, for when the source changes or playback is no longer wanted.
+ */
+export function watchDirect(
+  player: HTMLMediaElement,
+  source: Source | null | undefined,
+  giveUp: () => void,
+  ms = DIRECT_FIRST_FRAME_MS,
+): () => void {
+  if (!source?.direct || player.readyState >= HAVE_CURRENT_DATA) return () => {};
+  const timer = setTimeout(() => {
+    if (player.readyState >= HAVE_CURRENT_DATA) return;
+    abandonDirect();
+    giveUp();
+  }, ms);
+  const arrived = () => clearTimeout(timer);
+  player.addEventListener('loadeddata', arrived, { once: true });
+  return () => {
+    clearTimeout(timer);
+    player.removeEventListener('loadeddata', arrived);
+  };
+}
+
+/** A direct source did not play from here: the relay carries trailers for a while, as after a 503. */
+export function abandonDirect(now = Date.now()): void {
+  activationPausedUntil = Math.max(activationPausedUntil, now + ACTIVATION_PAUSE_MS);
+}
+
+/**
+ * The entry after `from` to try next. Once a direct source has been given up on, the rest of this list's direct
+ * copies are passed over too: they are on the same unreachable origin, each another deadline to sit out.
+ */
+export function nextRung(rungs: Source[], from: number, now = Date.now()): number {
+  let at = from + 1;
+  while (rungs[at]?.direct && now < activationPausedUntil) at += 1;
+  return at;
 }
 
 /** A signed carried source on this origin, as the edge activation endpoint accepts it. */
@@ -556,7 +612,7 @@ async function directSources(
   const result: Source[] = [];
   for (const source of sources) {
     const path = carriedPath(source.url);
-    if (path) result.push({ ...source, url: new URL(path, direct).href });
+    if (path) result.push({ ...source, url: new URL(path, direct).href, direct: true });
     result.push(source);
   }
   return result;

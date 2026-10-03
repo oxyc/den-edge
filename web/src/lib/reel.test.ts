@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DIRECT_FIRST_FRAME_MS,
   forgetWarmedTrailers,
   cropStyle,
   fetchSources,
@@ -7,9 +8,12 @@ import {
   progressiveURL,
   isPlaylist,
   nativeHls,
+  nextRung,
   resetActivationPause,
   trailerCandidates,
+  watchDirect,
 } from './reel';
+import type { Source } from './reel';
 import type { Routes } from './routes';
 
 const ROUTES: Routes = {
@@ -380,6 +384,50 @@ describe('fetchSources', () => {
     expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
   });
 
+  // oxyc/den#197: at home the direct origin is the household's own public address, which its router does not loop
+  // back, so den-edge refuses the activation and the page stays on the relay without asking again for each trailer.
+  it('plays through the relay at home, and stops asking there', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    let activations = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).includes('/sources/')) {
+        return new Response(
+          JSON.stringify({
+            sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true }],
+          }),
+        );
+      }
+      activations++;
+      return new Response(JSON.stringify({ error: 'at_home' }), { status: 409 });
+    };
+    for (let i = 0; i < 3; i++) {
+      const got = await fetchSources(SOURCES, { surface: 'audible', player: 'native', fetchImpl });
+      expect(got?.sources.map(({ url, direct }) => ({ url, direct }))).toEqual([
+        { url: `/reel/cfg/m/s/${blob}?s=${tag}`, direct: undefined },
+      ]);
+    }
+    expect(activations).toBe(1);
+  });
+
+  it('marks the direct copies, and only those', async () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    const fetchImpl: typeof fetch = async (input) =>
+      String(input).includes('/sources/')
+        ? new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+          )
+        : new Response(
+            JSON.stringify({
+              publicBase: 'https://media.example',
+              media: `https://media.example/reel/m/s/${blob}?s=${tag}`,
+            }),
+          );
+    const got = await fetchSources(SOURCES, { surface: 'silent', player: 'native', fetchImpl });
+    expect(got?.sources.map((source) => source.direct)).toEqual([true, undefined]);
+  });
+
   it('names the surface and the player, and keeps reel’s order', async () => {
     const got = await fetchSources(SOURCES, {
       surface: 'audible',
@@ -528,6 +576,80 @@ describe('fetchSources', () => {
     });
     expect(unmeasured?.crop).toBeNull();
     expect(unmeasured?.sources.length).toBe(2);
+  });
+});
+
+describe('a direct source that does not play', () => {
+  const direct: Source = {
+    kind: 'hls',
+    url: 'https://media.example/reel/m/s/x',
+    audio: true,
+    height: null,
+    width: null,
+    direct: true,
+  };
+  const relay: Source = { ...direct, url: '/reel/m/s/x', direct: undefined };
+  /** The two things `watchDirect` reads of an element, and a way to say a frame arrived. */
+  const element = () => {
+    const listeners = new Set<() => void>();
+    return {
+      readyState: 0,
+      addEventListener: (_: string, run: () => void) => listeners.add(run),
+      removeEventListener: (_: string, run: () => void) => listeners.delete(run),
+      frame() {
+        this.readyState = 2;
+        for (const run of listeners) run();
+      },
+    };
+  };
+
+  it('is given up for the relay copy when no frame arrives in time, as iOS raises no error', () => {
+    vi.useFakeTimers();
+    try {
+      const player = element();
+      const giveUp = vi.fn();
+      watchDirect(player as unknown as HTMLMediaElement, direct, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS - 1);
+      expect(giveUp).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(giveUp).toHaveBeenCalledOnce();
+      // The rest of the list's direct copies are on the same origin: the next step is the relay.
+      expect(
+        nextRung([direct, relay, { ...direct, url: 'https://media.example/y' }, relay], 1),
+      ).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is kept once it shows a frame, and a relay source is never timed', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      const player = element();
+      watchDirect(player as unknown as HTMLMediaElement, direct, giveUp);
+      player.frame();
+      watchDirect(element() as unknown as HTMLMediaElement, relay, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS * 2);
+      expect(giveUp).not.toHaveBeenCalled();
+      // Nothing was abandoned, so a later direct copy is still tried in its turn.
+      expect(nextRung([relay, direct], 0)).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops being timed when the source changes first', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      const stop = watchDirect(element() as unknown as HTMLMediaElement, direct, giveUp);
+      stop();
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS);
+      expect(giveUp).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

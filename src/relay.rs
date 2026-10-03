@@ -1644,6 +1644,13 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
         },
     };
 
+    // A browser behind the home's own router reaches the direct origin only if the router loops its own public
+    // address back in, and the one at home does not: iOS then waits on a source that never answers. The relay is
+    // the right path from there, so the page is told before anything is validated or leased (oxyc/den#197).
+    if state.home_address.is_behind_home_router(base, source).await {
+        return direct_json(StatusCode::CONFLICT, &error("at_home"));
+    }
+
     // The relay semaphore bounds validator sockets together with every other addon call. Admission
     // is fail-fast here: activation is an optimization and the same response already has a relay URL.
     let Ok(_slot) = Arc::clone(&state.relay_slots).try_acquire_owned() else {
@@ -2208,6 +2215,37 @@ mod tests {
             .await;
         assert_eq!(answer.status(), StatusCode::PRECONDITION_REQUIRED);
         assert_eq!(crate::handler::tests::body_json(answer).await["error"], "ipv4_hint_wanted");
+    }
+
+    /// At home the direct origin is the household's own public address, which its router does not loop back, so a
+    /// browser there is refused before validation or a lease (reel at port 9 answers nothing) and plays the relay.
+    #[tokio::test]
+    async fn a_reel_activation_from_behind_the_home_router_is_refused() {
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays("/reel=http://127.0.0.1:9");
+        // A routable address: activation refuses documentation and private ranges before it asks where the home is.
+        state.public_media_base = Some("https://8.8.4.4".into());
+        state.public_media_socket = Some(h.dir.join("unused.sock"));
+        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let media = format!("/reel/m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
+        // Seen as the home address itself, and as an IPv6 browser whose IPv4 hint is the home address.
+        for (visitor, body) in [
+            ("8.8.4.4", json!({ "media": media })),
+            ("2001:4860:4860::8888", json!({ "media": media, "ipv4Hint": "8.8.4.4" })),
+        ] {
+            let answer = h
+                .send(
+                    "POST",
+                    super::REEL_ACTIVATE,
+                    Some(body.to_string()),
+                    &[("x-forwarded-for", visitor), ("content-type", "application/json")],
+                )
+                .await;
+            assert_eq!(answer.status(), StatusCode::CONFLICT, "{visitor}");
+            assert_eq!(crate::handler::tests::body_json(answer).await["error"], "at_home");
+        }
+        assert!(crate::lock(&h.state.reel_hints).is_empty(), "no hint was spent");
     }
 
     #[tokio::test]
