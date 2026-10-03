@@ -395,16 +395,61 @@ function heldEpoch(log: LibraryLog, account: string): number {
   return greatest;
 }
 
-/** When this page sent list removals, per library and account: the latch's 120-second window (v3 §6). */
-const removalsSent = new WeakMap<LibraryLog, Map<string, number[]>>();
+/** When this page sent list removals, per library and account, on both clocks. */
+const removalsSentHere = new WeakMap<LibraryLog, Map<string, { at: number; mono: number }[]>>();
 
+/**
+ * The list removals sent for an account in the last 120 s, as den-core takes them (`removals_sent`, v4 §9). Kept in
+ * this browser's storage, which every tab and every reload shares, so a second tab or a reload sees the same window.
+ * This page's own sends also carry `performance.now`, so a `Date` step forward doesn't drop them from the count, and
+ * a send after `now` (`Date` stepped back) still counts, passed as `now`: den-core counts none later than `now`.
+ */
 function recentRemovals(log: LibraryLog, account: string, sentNow = false): number[] {
-  let sent = removalsSent.get(log);
-  if (!sent) removalsSent.set(log, (sent = new Map()));
-  const recent = (sent.get(account) ?? []).filter((at) => at > Date.now() - 120_000);
-  if (sentNow) recent.push(Date.now());
-  sent.set(account, recent);
-  return recent;
+  const now = Date.now();
+  const mono = monoNow();
+  const byWall = (at: number) => now - at < 120_000;
+  let here = removalsSentHere.get(log);
+  if (!here) removalsSentHere.set(log, (here = new Map()));
+  const mine = (here.get(account) ?? []).filter((s) => byWall(s.at) || mono - s.mono < 120_000);
+  if (sentNow) mine.push({ at: now, mono });
+  here.set(account, mine);
+  let stored: number[] | null = null;
+  try {
+    const storage = globalThis.localStorage;
+    if (storage) {
+      const key = `den.simklRemovalsSent.${account}`;
+      const kept: unknown = JSON.parse(storage.getItem(key) ?? '[]');
+      stored = (Array.isArray(kept) ? kept : []).filter(
+        (at): at is number => typeof at === 'number' && byWall(at),
+      );
+      if (sentNow) stored.push(now);
+      storage.setItem(key, JSON.stringify(stored));
+    }
+  } catch (error) {
+    console.warn(`den: the SIMKL removals sent can't be kept in this browser: ${error}`);
+    stored = null;
+  }
+  // Storage holds every tab's sends that `Date` counts; this page adds its own that only `performance.now` still does.
+  const recent =
+    stored === null
+      ? mine.map((s) => s.at)
+      : [...stored, ...mine.filter((s) => !byWall(s.at)).map((s) => s.at)];
+  return recent.map((at) => Math.min(at, now));
+}
+
+/**
+ * The account's removals latch (v4 §9), parsed. A value that isn't JSON goes to den-core as the bare string, which it
+ * reads as a closed latch with no approval: the safety latch fails closed.
+ */
+function latchSetting(row: SettingsRow): unknown {
+  const value = row.values.removals?.value;
+  if (!value || !('string' in value)) return undefined;
+  try {
+    return JSON.parse(value.string);
+  } catch (error) {
+    console.warn(`den: ${row.name}'s removals latch is malformed; read as closed: ${error}`);
+    return value.string;
+  }
 }
 
 /** A stamp's order (v2 §4): time, then counter, then device. */
@@ -426,7 +471,7 @@ function deliverFacts(log: LibraryLog, row: SettingsRow, account: string, since:
     provider: 'simkl',
     account,
     since,
-    removals: jsonSetting(row, 'removals') ?? null,
+    removals: latchSetting(row) ?? null,
     unverified: unverified && 'ints' in unverified ? unverified.ints : [],
     removals_sent: recentRemovals(log, account),
   };
@@ -601,7 +646,7 @@ async function writeAccountState(
   const at = (): Stamp =>
     syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
   let changed = false;
-  const removals = jsonSetting(row, 'removals');
+  const removals = latchSetting(row);
   const latch =
     removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
   const closing = pending.removals?.held;
@@ -677,7 +722,7 @@ export async function approveSimklRemovals(
   const account = simklAccountOf(log);
   const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
   if (!row || !shown.approval) return false;
-  const removals = jsonSetting(row, 'removals');
+  const removals = latchSetting(row);
   const latch =
     removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
   const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });

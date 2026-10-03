@@ -682,13 +682,18 @@ export class LibraryLog {
     return switched;
   }
 
-  /** Every `k` this browser has removed by compaction, kept with the library: none is removed twice (§4). */
-  private get compactedKeys(): Set<string> {
+  /**
+   * Every `k` this browser has removed by compaction, kept with the library: none is removed twice (§4). Null when
+   * storage is blocked or absent (a private window): a new page there couldn't know what an earlier one removed.
+   */
+  private get compactedKeys(): Set<string> | null {
+    if (!this.storage) return null;
     try {
-      const kept = this.storage?.getItem(`den.libraryCompacted.${this.keys.id}`);
+      const kept = this.storage.getItem(`den.libraryCompacted.${this.keys.id}`);
       return new Set([...this.compacted, ...(kept ? (JSON.parse(kept) as string[]) : [])]);
-    } catch {
-      return new Set(this.compacted);
+    } catch (error) {
+      console.warn(`den: the library rows removed by compaction can't be read here: ${error}`);
+      return null;
     }
   }
 
@@ -697,10 +702,11 @@ export class LibraryLog {
     try {
       this.storage?.setItem(
         `den.libraryCompacted.${this.keys.id}`,
-        JSON.stringify([...this.compactedKeys]),
+        JSON.stringify([...(this.compactedKeys ?? this.compacted)]),
       );
-    } catch {
-      // Storage blocked: this page remembers them.
+    } catch (error) {
+      // Storage failed after the compaction: this page still remembers them.
+      console.warn(`den: the library rows removed by compaction couldn't be kept: ${error}`);
     }
   }
 
@@ -717,6 +723,15 @@ export class LibraryLog {
     if (Date.now() - this.compactedAt < RECHECK_MS) return false;
     this.compactedAt = Date.now();
     const compacted = this.compactedKeys;
+    // Without storage this page can't know what an earlier page removed, so it removes nothing: compacting again
+    // there would bring back the loop compacting each `k` once exists to stop.
+    if (!compacted) {
+      this.compactionRefused = 'storage_blocked';
+      console.warn(
+        `den: ${this.unreadable.size} library rows can't be read, and this browser can't remember compactions; not removing them, delivery stays paused`,
+      );
+      return false;
+    }
     const removing = new Set(
       [...this.unreadable]
         .filter(([k, why]) => why === 'open' && !compacted.has(k))

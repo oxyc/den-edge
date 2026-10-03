@@ -365,13 +365,30 @@ describe('Library v4 documents', () => {
     const server = await edge([filmDocument(550), prefs]);
     const bad = await damaged(server.keys as LibraryKeys, 'title:movie:999');
     server.put(bad);
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
     expect([...log.unreadable.values()]).toEqual(['open']);
     expect(await log.compact()).toBe(true);
     expect(server.stored.has(bad.k)).toBe(false);
     expect(server.stored.size).toBe(2);
     expect(log.unreadable.size).toBe(0);
     expect(server.log.commits).toEqual([{ base: 3, wireMin: 4 }]);
+  });
+
+  it('removes nothing where storage is blocked, since it could not remember what it removed', async () => {
+    const server = await edge([filmDocument(550), prefs]);
+    const bad = await damaged(server.keys as LibraryKeys, 'title:movie:999');
+    server.put(bad);
+    const blocked = memoryStorage();
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, blocked, null))!;
+    blocked.getItem = () => {
+      throw new DOMException('blocked', 'SecurityError');
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await log.compact()).toBe(false);
+    warn.mockRestore();
+    expect(server.stored.has(bad.k)).toBe(true);
+    expect(server.log.commits).toEqual([]);
+    expect(libraryAlert(log)).toBe('Delivery paused: library rows can’t be read');
   });
 
   it('never removes a row that opens: one this build reads as unreadable another may read', async () => {
@@ -384,7 +401,7 @@ describe('Library v4 documents', () => {
       new TextEncoder().encode('{"format":4,"kind":"title","title":{"type":"movie","id":1}}'),
     );
     server.put(kept);
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
     expect([...log.unreadable.values()]).toEqual(['identity']);
     expect(await log.compact()).toBe(false);
     expect(server.stored.get(kept.k)?.v).toBe(kept.v);
@@ -396,7 +413,7 @@ describe('Library v4 documents', () => {
     const server = await edge([filmDocument(550), prefs]);
     const keys = server.keys as LibraryKeys;
     for (let id = 0; id < 11; id++) server.put(await damaged(keys, `title:movie:${9000 + id}`));
-    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, memoryStorage(), null))!;
     expect(log.unreadable.size).toBe(11);
     expect(await log.compact()).toBe(false);
     expect(server.log.commits).toEqual([]);
@@ -1100,6 +1117,79 @@ describe('SIMKL delivery on Library v4', () => {
     expect(await approveSimklRemovals(log, DEVICE, again)).toBe(true);
     expect(await latch()).toEqual({ approved: at(3000), held: at(3000) });
     expect(heldSimklRemovals(log).titles).toEqual([]);
+  });
+
+  /** Films removed at `removedAt`, each with an `in` receipt from another device. */
+  const removedFilms = (from: number, count: number, removedAt: (i: number) => number) => {
+    const titles = Array.from({ length: count }, (_, i) =>
+      filmDocument(from + i, { deleted: { value: true, at: at(removedAt(i)) } }),
+    );
+    const receipts: DocumentRow[] = titles.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    return [...titles, ...receipts];
+  };
+
+  it('approves past the stored held when the removal that closed the latch was undone', async () => {
+    // 25 removals closed the latch at the 25th's stamp; that title is back, so 24 stay held.
+    const row = deliver(['', '1']);
+    row.values.removals = { value: { string: JSON.stringify({ held: at(3024) }) }, at: at(5000) };
+    const { server, connection } = await simkl([
+      ...removedFilms(600, 24, (i) => 3000 + i),
+      trackers,
+      row,
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    const shown = heldSimklRemovals(log);
+    expect(shown.titles).toHaveLength(24);
+    expect(shown.approval).toEqual(at(3024));
+    expect(await approveSimklRemovals(log, DEVICE, shown)).toBe(true);
+    const latch = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!.values.removals?.value as { string: string };
+    expect(JSON.parse(latch.string)).toEqual({ approved: at(3024), held: at(3024) });
+    expect(heldSimklRemovals(log).titles).toEqual([]);
+  });
+
+  it('shares the removals sent across tabs: a late batch after 21 sent is held in another tab', async () => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    try {
+      const approvedBatch = removedFilms(600, 21, () => 3000);
+      const row = deliver(['', '1']);
+      row.values.removals = {
+        value: { string: JSON.stringify({ approved: at(4000), held: at(4000) }) },
+        at: at(4000),
+      };
+      const { server, connection, sent } = await simkl([...approvedBatch, trackers, row]);
+      // SIMKL lists every title, added long before, so each approved removal is a request.
+      const listing: typeof fetch = async (input, init) =>
+        String(input).includes('/sync/all-items')
+          ? new Response(
+              JSON.stringify({
+                movies: Array.from({ length: 22 }, (_, i) => ({
+                  movie: { ids: { tmdb: 600 + i } },
+                  status: 'plantowatch',
+                  added_to_watchlist_at: '1970-01-01T00:00:01Z',
+                })),
+              }),
+            )
+          : connection(input, init);
+      const tab = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+      expect(await watched(tab, listing)).toBe(true);
+      expect(sent.count).toBe(21);
+
+      // An offline device's removal stamped before the approval arrives; another tab reads it.
+      for (const document of removedFilms(621, 1, () => 3000)) await server.append(document);
+      const other = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+      expect(heldSimklRemovals(other).titles).toEqual([{ type: 'movie', id: 621 }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('sends a list add again whose receipt is unverified', async () => {
