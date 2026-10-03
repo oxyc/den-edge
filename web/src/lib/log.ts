@@ -244,6 +244,8 @@ export class LibraryLog {
   private writes: Promise<unknown> = Promise.resolve();
   private head = 0;
   private generation?: string;
+  /** `observedGeneration` as this page set it. */
+  private observed?: string;
   /** A newer generation a refused write named, which writes use until a read takes it (`adoptGeneration`). */
   private writeGeneration?: string;
   /** Highest wire minimum this browser has observed for this library; it never falls back. */
@@ -293,6 +295,34 @@ export class LibraryLog {
 
   get wireMinimum(): number {
     return this.wireMin;
+  }
+
+  /** den-edge's store generation as this browser last read it. */
+  get currentGeneration(): string | undefined {
+    return this.generation;
+  }
+
+  /**
+   * The generation this browser last watched for ten minutes and then took a lease under (v3 §6 *Taking*), kept with
+   * the library so a reload under it may take again at once. Any other generation is watched first.
+   */
+  get observedGeneration(): string | undefined {
+    if (this.observed !== undefined) return this.observed;
+    try {
+      return this.storage?.getItem(`den.libraryObservedGeneration.${this.keys.id}`) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  set observedGeneration(generation: string | undefined) {
+    this.observed = generation;
+    try {
+      if (generation)
+        this.storage?.setItem(`den.libraryObservedGeneration.${this.keys.id}`, generation);
+    } catch {
+      // Storage blocked: this page remembers it, and the next one watches again.
+    }
   }
 
   /** Nothing is written: the library needs a newer build, a switch to v4 failed, or it predates v3. */

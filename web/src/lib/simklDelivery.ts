@@ -15,6 +15,46 @@ const pageStartedMono = globalThis.performance?.now() ?? 0;
 const TEN_MINUTES = 10 * 60_000;
 const heldLeases = new WeakMap<LibraryLog, { account: string; epoch: number; at: number }>();
 
+/**
+ * What this page has watched of a library (v3 §6 *Taking*): the generation it reads, since when, and each account's
+ * lease row at the seq it was first seen at, since when. Times are `pageElapsed` readings.
+ */
+const watching = new WeakMap<
+  LibraryLog,
+  {
+    generation: string | undefined;
+    since: number;
+    leases: Map<string, { seq: number; since: number }>;
+  }
+>();
+
+/** Milliseconds since this page started, on the lesser of its clocks (v3 §6 *Taking*). */
+function pageElapsed(): number {
+  return Math.min(
+    Date.now() - pageStartedAt,
+    (globalThis.performance?.now() ?? 0) - pageStartedMono,
+  );
+}
+
+/**
+ * How long this page has watched the library's current generation, and the account's lease row unchanged at `seq`.
+ * A new generation starts both over, and forgets a lease held under the old one.
+ */
+function observe(log: LibraryLog, account: string, seq: number, elapsed: number) {
+  let watch = watching.get(log);
+  if (!watch || watch.generation !== log.currentGeneration) {
+    watch = { generation: log.currentGeneration, since: elapsed, leases: new Map() };
+    watching.set(log, watch);
+    heldLeases.delete(log);
+  }
+  let lease = watch.leases.get(account);
+  if (lease?.seq !== seq) {
+    lease = { seq, since: elapsed };
+    watch.leases.set(account, lease);
+  }
+  return { generation: elapsed - watch.since, lease: elapsed - lease.since };
+}
+
 interface Target extends Record<string, unknown> {
   key: string;
   receipt_target: string;
@@ -399,15 +439,15 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
   }
 }
 
-/** One bounded Library v3 delivery pass. False means observation, lease or provider facts were not ready. */
+/**
+ * One bounded delivery pass. False means observation, lease or provider facts were not ready. `elapsed` is this
+ * page's age on the lesser of its clocks; the lease and generation observations are measured on it.
+ */
 export async function deliverSimkl(
   log: LibraryLog,
   device: string,
   fetchImpl: typeof fetch = fetch,
-  observedFor = Math.max(
-    Date.now() - pageStartedAt,
-    (globalThis.performance?.now() ?? 0) - pageStartedMono,
-  ),
+  elapsed = pageElapsed(),
 ): Promise<boolean> {
   const tracker = log.settings('trackers');
   const connection = Object.entries(tracker?.values ?? {}).find(
@@ -431,35 +471,67 @@ export async function deliverSimkl(
   }
   // One pass at a time per account in this browser: its tabs share the device id, and so the lease and the orders.
   return exclusive(`den.simkl.${account}`, () =>
-    deliverAccount(log, device, fetchImpl, observedFor, account, token),
+    deliverAccount(log, device, fetchImpl, elapsed, account, token),
   );
+}
+
+/** A `set:deliver` setting holding JSON in a string (`since`, `removals`), parsed; undefined when absent. */
+function jsonSetting(row: SettingsRow, name: string): unknown {
+  const value = row.values[name]?.value;
+  return value && 'string' in value ? JSON.parse(value.string) : undefined;
 }
 
 async function deliverAccount(
   log: LibraryLog,
   device: string,
   fetchImpl: typeof fetch,
-  observedFor: number,
+  elapsed: number,
   account: string,
   token: string,
 ): Promise<boolean> {
   const name = `deliver:simkl:${account}`;
   const deliver = log.settings(name);
+  const base: SettingsRow = deliver ?? { kind: 'set', schema: 2, name, values: {} };
   const leaseValue = deliver?.values.lease?.value;
   const lease = leaseValue && 'strings' in leaseValue ? leaseValue.strings : ['', '0'];
-  if (lease[0] !== device && observedFor < TEN_MINUTES) return false;
+  // v3 §6 *Taking*, which v4 §11 keeps: a generation this browser has not yet watched for ten minutes — a new page
+  // that kept none, or one that changed under it — is watched that long before any take, and the take is fresh even
+  // where the row names this device. Another device's lease is taken only once its row has stayed unchanged that long.
+  const observed = observe(log, account, log.seqOf(rowName(base)), elapsed);
+  const fresh = log.observedGeneration !== log.currentGeneration;
+  if (fresh && observed.generation < TEN_MINUTES) return false;
+  if (lease[0] !== device) {
+    const decision = syncPolicy<{ action: string }>({
+      op: 'lease',
+      input: {
+        device,
+        holder: lease[0],
+        epoch: Number(lease[1] ?? 0),
+        elapsed: 0,
+        observed: observed.lease,
+        fresh_generation: false,
+      },
+    });
+    if (decision.action !== 'take') return false;
+  }
   const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
-  const base: SettingsRow = deliver ?? { kind: 'set', schema: 2, name, values: {} };
-  const sinceText = base.values.since?.value;
-  const since = sinceText && 'string' in sinceText ? (JSON.parse(sinceText.string) as Stamp) : at;
+  const since = (jsonSetting(base, 'since') as Stamp | undefined) ?? at;
   // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
   const held = log.wireMinimum >= 4 ? log.documents() : [];
+  const unverified = base.values.unverified?.value;
   const pendingV4 =
     log.wireMinimum >= 4
       ? syncPolicy<V4Pending>({
           op: 'pending_targets_v4',
           documents: held.map(({ document }) => document),
-          deliver: { provider: 'simkl', account, since },
+          deliver: {
+            provider: 'simkl',
+            account,
+            since,
+            // The removals latch and its approval, and the epochs whose receipts are unverified (v3 §6).
+            removals: jsonSetting(base, 'removals') ?? null,
+            unverified: unverified && 'ints' in unverified ? unverified.ints : [],
+          },
           now: Date.now(),
         })
       : null;
@@ -468,7 +540,7 @@ async function deliverAccount(
     lease[0] === device && kept?.account === account && Date.now() - kept.at < 120_000;
   const epoch = locallyHeld
     ? kept.epoch
-    : lease[0] === device
+    : lease[0] === device && !fresh
       ? Number(lease[1] ?? 0)
       : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0) + 1;
   if (!locallyHeld || Date.now() - kept!.at >= 60_000) {
@@ -479,6 +551,7 @@ async function deliverAccount(
     };
     if (!(await log.writeAt(leased, log.seqOf(rowName(leased))))) return false;
     heldLeases.set(log, { account, epoch, at: Date.now() });
+    if (fresh) log.observedGeneration = log.currentGeneration;
   }
   const order = orderCounter(account, epoch);
 

@@ -573,6 +573,19 @@ describe('SIMKL delivery on Library v4', () => {
     return { server, connection, sent };
   }
 
+  /**
+   * A pass from a page that has watched the library for ten minutes: one at `elapsed` − 10 min starts the watch of
+   * its generation and delivers nothing, then the pass at `elapsed`.
+   */
+  async function watched(log: LibraryLog, connection: typeof fetch, elapsed = 600_000) {
+    expect(await deliverSimkl(log, DEVICE, connection, elapsed - 600_000)).toBe(false);
+    return deliverSimkl(log, DEVICE, connection, elapsed);
+  }
+
+  const leaseOf = (rows: Row[]) =>
+    rows.find((row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42')!
+      .values.lease?.value;
+
   /** The settle order of every receipt den-edge holds: a watch entry's fifth element, a list or rating's third. */
   const orders = (rows: Row[]) =>
     rows
@@ -586,7 +599,7 @@ describe('SIMKL delivery on Library v4', () => {
   it('never repeats a settle order within an epoch, pass after pass', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(await watched(log, connection)).toBe(true);
     await server.append(filmDocument(551));
     await log.refresh();
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
@@ -611,11 +624,8 @@ describe('SIMKL delivery on Library v4', () => {
       deliver(['bbbbbbbbbbbbbbbb', '2']),
     ]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
-    const lease = (await server.opened()).find(
-      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
-    )!.values.lease?.value;
-    expect(lease).toEqual({ strings: [DEVICE, '8'] });
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '8'] });
   });
 
   it('takes the lease compare-and-set: another device that renewed it since keeps it', async () => {
@@ -627,7 +637,7 @@ describe('SIMKL delivery on Library v4', () => {
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
     // The TV renews its lease after this browser read the row, with an older stamp than this browser would issue.
     await server.append(deliver(['cccccccccccccccc', '3'], 600));
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
+    expect(await watched(log, connection)).toBe(false);
     expect(sent.count).toBe(0);
     const lease = (await server.opened()).find(
       (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
@@ -642,7 +652,7 @@ describe('SIMKL delivery on Library v4', () => {
       deliver(['', '1']),
     ]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
+    expect(await watched(log, connection)).toBe(true);
     expect(sent.count).toBe(1);
     const receipts = (await server.opened()).find((row) => row.kind === 'delivery') as DocumentRow;
     expect(receipts).toMatchObject({
@@ -694,7 +704,7 @@ describe('SIMKL delivery on Library v4', () => {
     expect(log.fromCache).toBe(true);
     await log.refresh();
     await switchLibraryToV4(log, Date.now(), recording);
-    await deliverSimkl(log, DEVICE, recording, 600_000);
+    await watched(log, recording);
 
     expect(asked.filter(({ action }) => action === 'rewrite')).toEqual([]);
     expect(server.log.commits).toHaveLength(generations);
@@ -722,15 +732,117 @@ describe('SIMKL delivery on Library v4', () => {
     expect(asked.filter(({ method }) => method !== 'GET')).toEqual([]);
   });
 
-  it('a lease refused by a generation change reads the new log, and the next pass takes it', async () => {
+  it('a lease refused by a generation change reads the new log, and a later pass takes it', async () => {
     const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
     const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 0)).toBe(false);
     // The library is restored between this browser's read and its lease write: a new generation.
     await server.append(filmDocument(551));
     server.restore();
     expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(false);
-    expect(await deliverSimkl(log, DEVICE, connection, 600_000)).toBe(true);
     expect(log.title({ type: 'movie', id: 551 })).toBeDefined();
+    expect(await watched(log, connection, 1_200_000)).toBe(true);
+  });
+
+  it('after a generation change, watches the new store before taking even its own lease, at a new epoch', async () => {
+    const { server, connection } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '2'] });
+    // A restore: a new generation whose lease row still names this browser.
+    server.restore();
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 610_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_209_999)).toBe(false);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '2'] });
+    expect(await deliverSimkl(log, DEVICE, connection, 1_210_000)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '3'] });
+  });
+
+  it("takes another device's lease only once its row has stayed unchanged for ten minutes", async () => {
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      trackers,
+      deliver(['cccccccccccccccc', '3']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    // A page open for ten minutes is no reason to take a lease the TV renewed a moment ago.
+    expect(await watched(log, connection)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '4'] });
+
+    // The TV takes it back, and renews it while this page watches: each renewal starts the ten minutes over. Its
+    // stamps are fresh, as a real TV's are.
+    await server.append(deliver(['cccccccccccccccc', '5'], Date.now() + 60_000));
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 700_000)).toBe(false);
+    await server.append(deliver(['cccccccccccccccc', '5'], Date.now() + 120_000));
+    await log.refresh();
+    expect(await deliverSimkl(log, DEVICE, connection, 1_200_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_799_999)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_800_000)).toBe(true);
+    expect(leaseOf(await server.opened())).toEqual({ strings: [DEVICE, '6'] });
+    expect(sent.count).toBe(1);
+  });
+
+  it('a page that kept no generation watches before taking even an empty lease', async () => {
+    const { connection, sent } = await simkl([filmDocument(550), trackers, deliver(['', '1'])]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await deliverSimkl(log, DEVICE, connection, 900_000)).toBe(false);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_499_999)).toBe(false);
+    expect(sent.count).toBe(0);
+    expect(await deliverSimkl(log, DEVICE, connection, 1_500_000)).toBe(true);
+    expect(sent.count).toBe(1);
+  });
+
+  it('decides a mass list removal once it is approved, where the latch held it before', async () => {
+    const removed = Array.from({ length: 21 }, (_, i) =>
+      filmDocument(600 + i, { deleted: { value: true, at: at(3000) } }),
+    );
+    const receipts: DocumentRow[] = removed.map((doc) => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: doc.title,
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    }));
+    const lists = (rows: Row[]) =>
+      rows
+        .filter((row): row is DocumentRow => row.kind === 'delivery')
+        .map((row) => (row.entries as Record<string, unknown[]>).list?.[0]);
+    const delivered = async (removals?: unknown) => {
+      const row = deliver(['', '1']);
+      if (removals)
+        row.values.removals = { value: { string: JSON.stringify(removals) }, at: at(4000) };
+      // SIMKL's account no longer lists them, so each removal, once decided, settles as delivered.
+      const { server, connection } = await simkl([...removed, ...receipts, trackers, row]);
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+      expect(await watched(log, connection)).toBe(true);
+      return lists(await server.opened());
+    };
+    // More than 20 removals hold every one of them, pass after pass.
+    expect(await delivered()).toEqual(Array(21).fill('in'));
+    // Approved after they were made: every one is decided.
+    expect(await delivered({ approved: at(4000) })).toEqual(Array(21).fill('gone'));
+  });
+
+  it('sends a list add again whose receipt is unverified', async () => {
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [3, 1, 'bbbbbbbbbbbbbbbb']] },
+    };
+    const unverified: SettingsRow = {
+      ...deliver(['', '1']),
+      values: { ...deliver(['', '1']).values, unverified: { value: { ints: [3] }, at: at(4000) } },
+    };
+    const { connection, sent } = await simkl([filmDocument(550), receipts, trackers, unverified]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(sent.count).toBe(1);
   });
 });
 
