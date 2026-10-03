@@ -27,7 +27,7 @@ use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io;
 
 const NS: &str = "recovery";
@@ -48,10 +48,9 @@ const OWNER: (u32, u64) = (60, 60 * MINUTE_MS);
 const TIMING: (u32, u64) = (10, 60 * MINUTE_MS);
 /// Recovery's own budget table (`Limiter`): two per visitor that opens, one per member, one per timing reporter.
 const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
-/// The entries one IPv6 /56 — the usual delegation to one customer — may hold in it. A household holds a few per /64
-/// (two for opening, one as a member, one for timings). Where a carrier hands out /64s, a /56 is shared by many
-/// customers, and one of them at the cap refuses its neighbours' new buckets here: acceptable for recovery's rare routes.
-const MAX_PER_PREFIX: usize = if cfg!(test) { 8 } else { 64 };
+/// `open` and `timing` across every visitor, each its own token bucket: `(per second, burst)`. This is what bounds
+/// den-edge's load, and the time `open` holds `recovery_lock`, whatever addresses a flood comes from.
+const GLOBAL: (u64, u64) = (10, 20);
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -118,17 +117,29 @@ async fn owner_of(state: &AppState, locator: &str) -> io::Result<Option<String>>
     Ok(state.store.get(NS, &loc_key(locator)).await?.and_then(|bytes| String::from_utf8(bytes).ok()))
 }
 
-/// Counts one request against `bucket` in fixed windows, in recovery's own table; the refusal once it is over.
+fn too_many(wait: u64) -> Response {
+    retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait)
+}
+
+/// Counts one request against `bucket` for the visitor `ip` in fixed windows, in recovery's own table; the refusal
+/// once it is over.
 fn limited(state: &AppState, bucket: &str, ip: &str, (limit, window): (u32, u64)) -> Option<Response> {
     let now = state.now();
     crate::lock(&state.recovery_claims)
-        .count(&format!("{bucket}:{ip}"), ip, limit, window, now)
-        .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+        .count(&format!("{bucket}:{}", visitor(ip)), limit, window, now)
+        .map(too_many)
 }
 
-/// The prefix a visitor is capped by: an IPv6 /64 (as `client_ip` writes it) by its /56; anything else by itself,
-/// which leaves IPv4 ungrouped — a /24 is often many households behind one carrier.
-fn prefix_of(ip: &str) -> String {
+/// Takes one of `route`'s global tokens (`GLOBAL`); the refusal when there is none.
+fn limited_globally(state: &AppState, route: Route) -> Option<Response> {
+    let now = state.now();
+    crate::lock(&state.recovery_claims).take(route, now).map(too_many)
+}
+
+/// Who a budget counts: an IPv6 /64 (as `client_ip` writes it) by its /56, the usual delegation to one customer, so
+/// a customer's /64s share one budget; anything else by itself, which leaves IPv4 ungrouped — a /24 is often many
+/// households behind one carrier.
+fn visitor(ip: &str) -> String {
     match ip.strip_suffix("/64").and_then(|a| a.parse::<std::net::Ipv6Addr>().ok()) {
         Some(addr) => {
             let s = addr.segments();
@@ -141,38 +152,38 @@ fn prefix_of(ip: &str) -> String {
 struct Slot {
     count: u32,
     until: u64,
-    prefix: String,
-    /// When it was admitted: of two entries with the same count, the older goes first.
-    seq: u64,
-    /// At its limit: the next request in this window is refused.
-    refusing: bool,
 }
 
-/// Recovery's budgets (`AppState::recovery_claims`), apart from the shared `link::Throttles`: a full table here never
-/// refuses a newcomer for being full, or filling it from many addresses would be a store-wide limit on `open` by
-/// another name (den-spec recovery §5). Instead:
-/// - expired entries are swept first;
-/// - one IPv6 /56 holds at most `MAX_PER_PREFIX` entries, and a newcomer from a /56 at its share is refused — that /56
-///   alone, which bounds a round-robin over its /64s;
-/// - past that, a newcomer evicts an entry of another /56 — never its own, so an address cannot reset its own buckets
-///   by taking turns between them or between its /64s — with the lowest count, the oldest of those first, and never
-///   one that is refusing while one that is not exists, so a flood cannot free a bucket that is holding its caller
-///   back. Evicting a bucket that is not refusing only gives that caller its budget back.
+/// A route counted across every visitor (`GLOBAL`).
+#[derive(Clone, Copy)]
+enum Route {
+    Open,
+    Timing,
+}
+
+/// A token bucket, in thousandths of a token so it refills by whole milliseconds.
+#[derive(Default)]
+struct Tokens {
+    milli: u64,
+    at: u64,
+}
+
+/// Recovery's budgets (`AppState::recovery_claims`), apart from the shared `link::Throttles`, so neither fills the
+/// other: per visitor (`visitor`) in fixed windows, and per route across everyone (`GLOBAL`).
 ///
-/// Each victim is near the front of an ordered set (past at most `MAX_PER_PREFIX` entries of the newcomer's own /56),
-/// so a newcomer costs O(log n), not a scan of the table. Residual: an attacker cycling through more than the table's
-/// capacity — with the /56 cap, more than a /48 — reaches its own oldest entries again.
+/// The table never evicts. Expired entries are swept, at most once a second; when it is still full, a new budget is
+/// refused, as the shared table refuses one (den-spec recovery §5): an evicting table lets a caller who can get its
+/// own budgets evicted start them over. A flood that fills the table refuses recovery's newcomers until its entries
+/// expire, and only them: no other route counts here, and an existing budget keeps counting. That trade is acceptable
+/// because the 110-bit code is what keeps a guess from working; these limits are for load, which the global buckets
+/// bound whatever a flood does.
 #[derive(Default)]
 pub struct Limiter {
     slots: HashMap<String, Slot>,
-    /// How many entries each prefix holds.
-    held: HashMap<String, usize>,
-    /// (count, admitted, key) of the entries not refusing; (until, key) of those refusing.
-    evictable: BTreeSet<(u32, u64, String)>,
-    refusing: BTreeSet<(u64, String)>,
-    admitted: u64,
     /// A sweep scans the table: at most once a second, however many newcomers arrive.
     sweep_after: u64,
+    open: Tokens,
+    timing: Tokens,
 }
 
 impl Limiter {
@@ -181,110 +192,47 @@ impl Limiter {
         self.slots.len()
     }
 
-    fn held(&self, prefix: &str) -> usize {
-        self.held.get(prefix).copied().unwrap_or(0)
-    }
-
-    /// Takes `key` out of the victim order, before its count, window or refusal changes.
-    fn unfile(&mut self, key: &str) {
-        if let Some(s) = self.slots.get(key) {
-            if s.refusing {
-                self.refusing.remove(&(s.until, key.to_owned()));
-            } else {
-                self.evictable.remove(&(s.count, s.seq, key.to_owned()));
-            }
-        }
-    }
-
-    /// Puts `key` back in the victim order, as it now stands.
-    fn file(&mut self, key: &str) {
-        if let Some(s) = self.slots.get(key) {
-            if s.refusing {
-                self.refusing.insert((s.until, key.to_owned()));
-            } else {
-                self.evictable.insert((s.count, s.seq, key.to_owned()));
-            }
-        }
-    }
-
-    fn insert(&mut self, key: &str, prefix: String) {
-        *self.held.entry(prefix.clone()).or_default() += 1;
-        self.admitted += 1;
-        let slot = Slot { count: 0, until: 0, prefix, seq: self.admitted, refusing: false };
-        self.slots.insert(key.to_owned(), slot);
-        self.file(key);
-    }
-
-    fn remove(&mut self, key: &str) {
-        self.unfile(key);
-        let Some(slot) = self.slots.remove(key) else { return };
-        if let Some(n) = self.held.get_mut(&slot.prefix) {
-            *n -= 1;
-            if *n == 0 {
-                self.held.remove(&slot.prefix);
-            }
-        }
-    }
-
-    fn sweep(&mut self, now: u64) {
-        if now < self.sweep_after {
-            return;
-        }
-        self.sweep_after = now.saturating_add(1_000);
-        let expired: Vec<String> =
-            self.slots.iter().filter(|(_, s)| s.until <= now).map(|(k, _)| k.clone()).collect();
-        for key in expired {
-            self.remove(&key);
-        }
-    }
-
-    /// The entry a full table gives up for a newcomer from `prefix` (see `Limiter`): of another /56, the lowest count,
-    /// oldest first; only when every such entry is refusing, the one nearest its expiry. Skips at most the newcomer's
-    /// own /56's entries.
-    fn victim(&self, prefix: &str) -> Option<String> {
-        let other = |key: &&String| self.slots[*key].prefix != prefix;
-        self.evictable
-            .iter()
-            .map(|(_, _, key)| key)
-            .find(other)
-            .or_else(|| self.refusing.iter().map(|(_, key)| key).find(other))
-            .cloned()
-    }
-
-    /// Counts one request against `key`, whose visitor is `ip`, in fixed windows of `window` ms: a window opens at its
-    /// first request. How long until it clears, once it is over `limit` — or, for a newcomer whose /56 is at its
-    /// share, a whole window.
-    fn count(&mut self, key: &str, ip: &str, limit: u32, window: u64, now: u64) -> Option<u64> {
-        if !self.slots.contains_key(key) {
-            let prefix = prefix_of(ip);
-            if self.held(&prefix) >= MAX_PER_PREFIX || self.slots.len() >= LIMIT_BUCKETS {
-                self.sweep(now);
-            }
-            if self.held(&prefix) >= MAX_PER_PREFIX {
-                return Some(window);
+    /// Counts one request against `key` in fixed windows of `window` ms: a window opens at its first request. How
+    /// long until it clears, once it is over `limit` — or, for a new key in a table still full after a sweep, a
+    /// second, when the next sweep may have made room.
+    fn count(&mut self, key: &str, limit: u32, window: u64, now: u64) -> Option<u64> {
+        if !self.slots.contains_key(key) && self.slots.len() >= LIMIT_BUCKETS {
+            if now >= self.sweep_after {
+                self.sweep_after = now.saturating_add(1_000);
+                self.slots.retain(|_, s| s.until > now);
             }
             if self.slots.len() >= LIMIT_BUCKETS {
-                if let Some(victim) = self.victim(&prefix) {
-                    self.remove(&victim);
-                }
+                return Some(self.sweep_after.saturating_sub(now).max(1));
             }
-            self.insert(key, prefix);
         }
-        self.unfile(key);
-        let slot = self.slots.get_mut(key).expect("filed above");
+        let slot = self.slots.entry(key.to_owned()).or_insert(Slot { count: 0, until: 0 });
         if slot.until <= now {
             slot.count = 0;
             slot.until = now.saturating_add(window);
         }
-        let wait = if slot.count >= limit {
-            Some(slot.until - now)
-        } else {
-            slot.count += 1;
-            None
+        if slot.count >= limit {
+            return Some(slot.until - now);
+        }
+        slot.count += 1;
+        None
+    }
+
+    /// Takes one of `route`'s tokens, which refill at `GLOBAL`'s rate up to its burst; how long until the next one,
+    /// when there is none.
+    fn take(&mut self, route: Route, now: u64) -> Option<u64> {
+        let (per_second, burst) = GLOBAL;
+        let tokens = match route {
+            Route::Open => &mut self.open,
+            Route::Timing => &mut self.timing,
         };
-        slot.refusing = slot.count >= limit;
-        self.file(key);
-        wait
+        let refilled = now.saturating_sub(tokens.at).saturating_mul(per_second);
+        tokens.milli = tokens.milli.saturating_add(refilled).min(burst * 1000);
+        tokens.at = now;
+        if tokens.milli < 1000 {
+            return Some((1000 - tokens.milli).div_ceil(per_second));
+        }
+        tokens.milli -= 1000;
+        None
     }
 }
 
@@ -325,14 +273,17 @@ async fn timing(req: Request) -> Response {
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
     if req.uri().path() == "/recovery/timing" {
-        if let Some(refused) = limited(state, "recovery-timing", &ip, TIMING) {
+        if let Some(refused) =
+            limited_globally(state, Route::Timing).or_else(|| limited(state, "recovery-timing", &ip, TIMING))
+        {
             return refused;
         }
         return timing(req).await;
     }
     // `/recovery/open` takes only a POST: `handler::allowed_methods` refuses anything else before this.
     if req.uri().path() == "/recovery/open" {
-        if let Some(refused) = limited(state, "recovery-open", &ip, OPEN_SHORT)
+        if let Some(refused) = limited_globally(state, Route::Open)
+            .or_else(|| limited(state, "recovery-open", &ip, OPEN_SHORT))
             .or_else(|| limited(state, "recovery-open-day", &ip, OPEN_DAY))
         {
             return refused;
@@ -713,25 +664,32 @@ mod tests {
         assert_eq!(owner(&restored, "GET", &member(), None).await.1["entries"][0]["opens"], 2);
     }
 
-    /// Visitors from four tables' worth of /56s filling recovery's table with day-long buckets lock nobody out: not a
-    /// new visitor's `open`, and not another route, which counts in the shared table recovery never touches (§5).
-    #[tokio::test]
-    async fn filling_the_limit_table_locks_no_one_out() {
-        let mut h = harness().await;
+    fn behind_proxy(h: &mut Harness) {
         Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec![IpAddr::from([192, 168, 1, 9])];
-        for n in 0..4 * LIMIT_BUCKETS {
-            let visitor = format!("2001:db8:{n:x}::1");
-            assert_eq!(
-                open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status(),
-                StatusCode::NOT_FOUND
-            );
+    }
+
+    /// A full table refuses a new visitor until its entries expire, and then admits again. Only recovery: another
+    /// route counts in the shared table, which recovery never touches, and an existing budget keeps counting.
+    #[tokio::test]
+    async fn a_full_table_refuses_recovery_newcomers_until_it_expires() {
+        let mut h = harness().await;
+        behind_proxy(&mut h);
+        let known = [("x-forwarded-for", "198.51.100.4")];
+        assert_eq!(open_from(&h, LOC, &known).await.status(), StatusCode::NOT_FOUND);
+        {
+            let mut limiter = crate::lock(&h.state.recovery_claims);
+            let now = h.state.now();
+            for n in 0..LIMIT_BUCKETS {
+                limiter.count(&format!("flood:{n}"), 1, OPEN_SHORT.1, now);
+            }
+            assert_eq!(limiter.len(), LIMIT_BUCKETS, "full: nothing was evicted");
         }
-        assert_eq!(crate::lock(&h.state.recovery_claims).len(), LIMIT_BUCKETS, "full");
-        let fresh = [("x-forwarded-for", "2001:db9::1")];
+        let fresh = [("x-forwarded-for", "203.0.113.7")];
+        assert_eq!(open_from(&h, LOC, &fresh).await.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            open_from(&h, LOC, &fresh).await.status(),
+            open_from(&h, LOC, &known).await.status(),
             StatusCode::NOT_FOUND,
-            "a new visitor still opens"
+            "an existing budget counts"
         );
         let pair = h
             .send(
@@ -741,129 +699,72 @@ mod tests {
                 &fresh,
             )
             .await;
-        assert_eq!(pair.status(), StatusCode::OK, "and pairing is untouched");
+        assert_eq!(pair.status(), StatusCode::OK, "another route is untouched");
+        h.advance(OPEN_SHORT.1);
+        assert_eq!(
+            open_from(&h, LOC, &fresh).await.status(),
+            StatusCode::NOT_FOUND,
+            "expired, swept, admitted"
+        );
     }
 
-    fn v6(slash56: usize, slash64: usize) -> String {
-        format!("2001:db8:{slash56:x}:{:x}::/64", slash64 & 0xff)
-    }
-
-    /// Fills the table from `slash56s`, each /56 at its share, one bucket per /64.
-    fn flood(limiter: &mut Limiter, slash56s: std::ops::Range<usize>, now: u64) {
-        for p in slash56s {
-            for s in 0..MAX_PER_PREFIX {
-                let ip = v6(p, s);
-                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, now);
+    /// The global bucket caps `open` across every address: its burst at once, then its rate. So does `timing`'s.
+    #[tokio::test]
+    async fn the_global_bucket_caps_opens_and_timings_across_addresses() {
+        let (per_second, burst) = GLOBAL;
+        let mut h = harness().await;
+        behind_proxy(&mut h);
+        let mut statuses = Vec::new();
+        for n in 0..burst + 5 {
+            let visitor = format!("203.0.113.{n}");
+            statuses.push(open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status());
+        }
+        let allowed = statuses.iter().filter(|s| **s == StatusCode::NOT_FOUND).count() as u64;
+        assert_eq!(allowed, burst);
+        assert!(statuses[burst as usize..].iter().all(|s| *s == StatusCode::TOO_MANY_REQUESTS));
+        h.advance(1000);
+        let mut allowed = 0;
+        for n in 100..100 + per_second + 5 {
+            let visitor = format!("203.0.113.{n}");
+            if open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status() == StatusCode::NOT_FOUND {
+                allowed += 1;
             }
         }
-    }
+        assert_eq!(allowed, per_second, "a second later, a second's worth");
 
-    /// One `open`, counted as `handle` counts it: the 10-minute bucket, then the day's. Whether it was refused.
-    fn open_refused(limiter: &mut Limiter, ip: &str, now: u64) -> bool {
-        let count = |limiter: &mut Limiter, bucket: &str, (limit, window): (u32, u64)| {
-            limiter.count(&format!("{bucket}:{ip}"), ip, limit, window, now)
-        };
-        count(limiter, "recovery-open", OPEN_SHORT)
-            .or_else(|| count(limiter, "recovery-open-day", OPEN_DAY))
-            .is_some()
-    }
-
-    fn timing_refused(limiter: &mut Limiter, ip: &str, now: u64) -> bool {
-        limiter.count(&format!("recovery-timing:{ip}"), ip, TIMING.0, TIMING.1, now).is_some()
-    }
-
-    /// A full table: every /56 of a /48 at its share.
-    fn full() -> Limiter {
-        let mut limiter = Limiter::default();
-        flood(&mut limiter, 0..LIMIT_BUCKETS / MAX_PER_PREFIX, 0);
-        assert_eq!(limiter.len(), LIMIT_BUCKETS);
-        limiter
-    }
-
-    /// Over a full table, each of `ips` taking turns is allowed exactly `limit` calls, then refused for good: a
-    /// newcomer never evicts its own /56's buckets, so neither sibling keys nor sibling /64s reset each other.
-    fn limited_over_a_full_table(ips: &[String], limit: u32, refused: fn(&mut Limiter, &str, u64) -> bool) {
-        let mut limiter = full();
-        for round in 0..4 * limit {
-            for ip in ips {
-                assert_eq!(refused(&mut limiter, ip, 1), round >= limit, "{ip}, call {}", round + 1);
+        let mut h = harness().await;
+        behind_proxy(&mut h);
+        let report =
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "mac-safari" }).to_string();
+        let mut allowed = 0;
+        for n in 0..burst + 5 {
+            let visitor = format!("203.0.113.{n}");
+            let resp = h
+                .send("POST", "/recovery/timing", Some(report.clone()), &[("x-forwarded-for", &visitor)])
+                .await;
+            if resp.status() == StatusCode::NO_CONTENT {
+                allowed += 1;
             }
         }
-        assert_eq!(limiter.len(), LIMIT_BUCKETS, "bounded");
+        assert_eq!(allowed, burst);
     }
 
+    /// A budget counts an IPv6 /56 — its /64s take turns on one budget — and a single IPv4 address.
     #[test]
-    fn open_is_limited_over_a_full_table() {
-        limited_over_a_full_table(&[v6(0x1000, 0)], OPEN_SHORT.0, open_refused);
-        limited_over_a_full_table(&[v6(0x1000, 0), v6(0x1000, 1)], OPEN_SHORT.0, open_refused);
-        limited_over_a_full_table(&["203.0.113.7".to_owned()], OPEN_SHORT.0, open_refused);
-    }
-
-    #[test]
-    fn timing_is_limited_over_a_full_table() {
-        limited_over_a_full_table(&[v6(0x1000, 0)], TIMING.0, timing_refused);
-        limited_over_a_full_table(&[v6(0x1000, 0), v6(0x1000, 1)], TIMING.0, timing_refused);
-    }
-
-    /// A bucket holding its caller back is never evicted while one that is not exists, however large the flood.
-    #[test]
-    fn a_flood_cannot_free_a_refusing_bucket() {
+    fn a_budget_counts_a_56_or_one_ipv4_address() {
+        assert_eq!(visitor("2001:db8:1:2ff::/64"), "2001:db8:1:200::/56");
+        assert_eq!(visitor("203.0.113.7"), "203.0.113.7");
         let mut limiter = Limiter::default();
-        let ip = v6(0xffff, 0);
-        let guessing = format!("recovery-open:{ip}");
+        let mut open =
+            |ip: &str| limiter.count(&format!("recovery-open:{}", visitor(ip)), 5, 60_000, 0).is_none();
+        let turns: Vec<bool> = (0..6).map(|n| open(&format!("2001:db8:1:2{n:02x}::/64"))).collect();
+        assert_eq!(turns, [true, true, true, true, true, false], "one /56's /64s share five");
+        assert!(open("2001:db8:1:300::/64"), "the next /56 is its own");
         for _ in 0..5 {
-            assert!(limiter.count(&guessing, &ip, 5, 60_000, 0).is_none());
+            assert!(open("203.0.113.7"));
         }
-        assert!(limiter.count(&guessing, &ip, 5, 60_000, 0).is_some(), "refused");
-        flood(&mut limiter, 0..4 * LIMIT_BUCKETS / MAX_PER_PREFIX, 1);
-        assert!(limiter.count(&guessing, &ip, 5, 60_000, 2).is_some(), "still refused");
-    }
-
-    /// Cycling the /64s of one /56 over a full table never holds more than its share, so it never resets its own
-    /// budgets.
-    #[test]
-    fn cycling_the_64s_of_one_56_stays_bounded() {
-        let mut limiter = full();
-        let admitted = (0..4 * LIMIT_BUCKETS)
-            .filter(|s| {
-                let ip = v6(0x2000, *s);
-                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 1).is_none()
-            })
-            .count();
-        assert_eq!(admitted, MAX_PER_PREFIX);
-        assert_eq!(limiter.len(), LIMIT_BUCKETS);
-        assert_eq!(prefix_of("2001:db8:1:2ff::/64"), "2001:db8:1:200::/56");
-        assert_eq!(prefix_of("203.0.113.7"), "203.0.113.7", "IPv4 is not grouped");
-    }
-
-    /// The index the victim is found by stays in step with the table through evictions, refusals and sweeps.
-    #[test]
-    fn the_victim_index_matches_the_table() {
-        let mut limiter = Limiter::default();
-        flood(&mut limiter, 0..2 * LIMIT_BUCKETS / MAX_PER_PREFIX, 0);
-        for s in 0..3 {
-            let ip = v6(0xfffe, s);
-            for _ in 0..6 {
-                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 0);
-            }
-        }
-        let check = |limiter: &Limiter| {
-            assert_eq!(limiter.held.values().sum::<usize>(), limiter.len());
-            assert_eq!(limiter.evictable.len() + limiter.refusing.len(), limiter.len());
-            for (key, s) in &limiter.slots {
-                let filed = if s.refusing {
-                    limiter.refusing.contains(&(s.until, key.clone()))
-                } else {
-                    limiter.evictable.contains(&(s.count, s.seq, key.clone()))
-                };
-                assert!(filed, "{key}");
-            }
-        };
-        check(&limiter);
-        assert_eq!(limiter.refusing.len(), 3);
-        limiter.count("late:203.0.113.9", "203.0.113.9", 5, 60_000, 120_000);
-        check(&limiter);
-        assert_eq!(limiter.len(), 1, "everything else expired and swept");
+        assert!(!open("203.0.113.7"));
+        assert!(open("203.0.113.8"), "the next IPv4 address is its own");
     }
 
     /// A browser's Argon2id timing is one log line of the operation, outcome, time and a short device label; anything
