@@ -272,9 +272,11 @@ async fn timing(req: Request) -> Response {
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
+    // On `timing` and `open`, the visitor's own budget is counted first, and a global token is taken only for a
+    // request it admits: otherwise one address could drain the global bucket for everyone.
     if req.uri().path() == "/recovery/timing" {
         if let Some(refused) =
-            limited_globally(state, Route::Timing).or_else(|| limited(state, "recovery-timing", &ip, TIMING))
+            limited(state, "recovery-timing", &ip, TIMING).or_else(|| limited_globally(state, Route::Timing))
         {
             return refused;
         }
@@ -282,9 +284,9 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     }
     // `/recovery/open` takes only a POST: `handler::allowed_methods` refuses anything else before this.
     if req.uri().path() == "/recovery/open" {
-        if let Some(refused) = limited_globally(state, Route::Open)
-            .or_else(|| limited(state, "recovery-open", &ip, OPEN_SHORT))
+        if let Some(refused) = limited(state, "recovery-open", &ip, OPEN_SHORT)
             .or_else(|| limited(state, "recovery-open-day", &ip, OPEN_DAY))
+            .or_else(|| limited_globally(state, Route::Open))
         {
             return refused;
         }
@@ -724,7 +726,8 @@ mod tests {
         assert!(statuses[burst as usize..].iter().all(|s| *s == StatusCode::TOO_MANY_REQUESTS));
         h.advance(1000);
         let mut allowed = 0;
-        for n in 100..100 + per_second + 5 {
+        // The same visitors, each with budget left: new ones would fill the test's 64-entry table first.
+        for n in 0..per_second + 5 {
             let visitor = format!("203.0.113.{n}");
             if open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status() == StatusCode::NOT_FOUND {
                 allowed += 1;
@@ -747,6 +750,19 @@ mod tests {
             }
         }
         assert_eq!(allowed, burst);
+    }
+
+    /// One address past its own budget takes no global tokens: a second address still opens.
+    #[tokio::test]
+    async fn one_address_cannot_drain_the_global_bucket() {
+        let mut h = harness().await;
+        behind_proxy(&mut h);
+        let greedy = [("x-forwarded-for", "203.0.113.7")];
+        for _ in 0..30 {
+            open_from(&h, LOC, &greedy).await;
+        }
+        let other = [("x-forwarded-for", "198.51.100.4")];
+        assert_eq!(open_from(&h, LOC, &other).await.status(), StatusCode::NOT_FOUND);
     }
 
     /// A budget counts an IPv6 /56 — its /64s take turns on one budget — and a single IPv4 address.
