@@ -11,6 +11,9 @@
   import { posterReleaseBadge } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import { libraryStandings } from '../lib/standing.svelte';
+  import ActionMenu from './ActionMenu.svelte';
+  import { titleActionsContext, titleMenuItems } from '../lib/titleActions';
+  import { toastContext } from '../lib/toast';
 
   let {
     title,
@@ -18,7 +21,8 @@
     progress,
     live,
     href,
-    action,
+    continueWatching = false,
+    menu = true,
     onopen,
   }: {
     title: Title;
@@ -28,14 +32,24 @@
     live?: string;
     /** Where the card leads. Without one it is not a link: a card that shows a title and opens nothing. */
     href?: string;
+    /** This card is on the Continue Watching row: its ⋯ offers "Remove from Continue Watching". */
+    continueWatching?: boolean;
     /**
-     * A small button in the poster's corner, beside the link rather than in it, so it never opens the title: Search's
-     * "More like this". Shown under the pointer and on focus; always, but quiet, where there is no pointer to hover.
+     * False where a caller already draws its own per-card controls over the same corner, with their own
+     * contract the shared menu doesn't replicate (`WatchlistPage`'s confirm-before-unmarking-a-series) — never
+     * for a look-alike variant of this control, only to avoid two of them fighting over one corner.
      */
-    action?: { label: string; icon: string; onclick: () => void };
+    menu?: boolean;
     /** Called when this card's link is followed. */
     onopen?: () => void;
   } = $props();
+
+  const titleActions = titleActionsContext();
+  const notify = toastContext();
+  let actionMenu = $state<ActionMenu>();
+  const menuItems = $derived(
+    menu && href ? titleMenuItems(title, titleActions, { continueWatching, href, notify }) : [],
+  );
   // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
   // title TMDB's own path is missing here, so a row is not half placeholder.
   const poster = $derived(
@@ -73,6 +87,60 @@
   function drop(event: PointerEvent) {
     if (event.type === 'pointerleave' && event.pointerType !== 'mouse') return;
     clearTimeout(warming);
+  }
+
+  /**
+   * A 500ms touch hold opens the ⋯ menu where the finger is — a shortcut for the button beside it, never the
+   * only way there. Cancelled by more than 10px of movement or by `pointercancel`, so a swipe across the row
+   * opens nothing; the click that follows a real long-press is swallowed below, so the card doesn't also navigate.
+   */
+  const LONG_PRESS_MS = 500;
+  const LONG_PRESS_SLOP = 10;
+  let longPressTimer: ReturnType<typeof setTimeout> | undefined;
+  let longPressAt: { x: number; y: number } | null = null;
+  let longPressFired = false;
+
+  function pressStart(event: PointerEvent) {
+    if (event.pointerType !== 'touch' || !menuItems.length) return;
+    longPressAt = { x: event.clientX, y: event.clientY };
+    clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(() => {
+      longPressFired = true;
+      longPressAt = null;
+      actionMenu?.openAt(event.clientX, event.clientY);
+    }, LONG_PRESS_MS);
+  }
+  function pressMove(event: PointerEvent) {
+    if (!longPressAt) return;
+    if (Math.hypot(event.clientX - longPressAt.x, event.clientY - longPressAt.y) > LONG_PRESS_SLOP)
+      cancelLongPress();
+  }
+  function cancelLongPress() {
+    clearTimeout(longPressTimer);
+    longPressAt = null;
+  }
+  function cardClick(event: MouseEvent) {
+    if (longPressFired) {
+      longPressFired = false;
+      event.preventDefault();
+      return;
+    }
+    notePressed(title, art);
+    onopen?.();
+  }
+  /** The ContextMenu key or Shift+F10 on the focused card, same as a right-click on it. */
+  function cardKeydown(event: KeyboardEvent) {
+    if (!menuItems.length) return;
+    if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    actionMenu?.openAt(rect.right, rect.top);
+  }
+  /** A right-click opens the same menu; Shift+right-click is left to the browser's own. */
+  function cardContextMenu(event: MouseEvent) {
+    if (event.shiftKey || !menuItems.length) return;
+    event.preventDefault();
+    actionMenu?.openAt(event.clientX, event.clientY);
   }
 </script>
 
@@ -143,31 +211,45 @@
       class="card pick"
       class:faded
       {href}
-      onclick={() => {
-        notePressed(title, art);
-        onopen?.();
-      }}
+      onclick={cardClick}
+      onkeydown={cardKeydown}
+      oncontextmenu={cardContextMenu}
       onpointerenter={(event) => intend(event, 100)}
-      onpointerdown={(event) => intend(event, 60)}
-      onpointerleave={drop}
-      onpointercancel={drop}>{@render body()}</a
+      onpointerdown={(event) => {
+        intend(event, 60);
+        pressStart(event);
+      }}
+      onpointermove={pressMove}
+      onpointerup={cancelLongPress}
+      onpointerleave={(event) => {
+        drop(event);
+        cancelLongPress();
+      }}
+      onpointercancel={(event) => {
+        drop(event);
+        cancelLongPress();
+      }}>{@render body()}</a
     >
   {:else}
     <figure class="card" class:faded>{@render body()}</figure>
   {/if}
 {/snippet}
 
-{#if action}
+{#snippet ellipsis()}
+  <span aria-hidden="true">⋯</span>
+{/snippet}
+
+{#if menuItems.length}
   <div class="holder">
     {@render card()}
-    <button
-      type="button"
-      class="action"
-      class:below={release}
-      aria-label={action.label}
-      title={action.label}
-      onclick={action.onclick}>{action.icon}</button
-    >
+    <ActionMenu
+      bind:this={actionMenu}
+      items={menuItems}
+      label={`Actions for ${title.title}`}
+      heading={title.title}
+      triggerClass={release ? 'action below' : 'action'}
+      glyph={ellipsis}
+    />
   </div>
 {:else}
   {@render card()}
@@ -226,6 +308,9 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+
+    /* iOS's own "save image" sheet would otherwise race the long-press that opens the ⋯ menu. */
+    -webkit-touch-callout: none;
   }
 
   .placeholder {
@@ -331,49 +416,45 @@
     width: auto;
   }
 
-  .action {
+  /* The ⋯ trigger renders inside `ActionMenu`, a child component, so these reach it the same way `Detail`
+     reaches `DetailMedia`'s `.expand` — a plain class name is scoped to its own component, `:global` isn't. */
+  :global(.holder .action) {
     position: absolute;
     top: 8px;
     right: 8px;
-    display: grid;
     width: 32px;
     height: 32px;
-    place-items: center;
-    padding: 0;
     border: 1px solid rgb(255 255 255 / 0.25);
     border-radius: 999px;
     background: rgb(0 0 0 / 0.72);
-    color: var(--fg);
-    font: inherit;
     font-size: 16px;
     line-height: 1;
-    cursor: pointer;
     opacity: 0;
     transition: opacity 120ms;
   }
 
   /* Under the release badge, which has the corner. */
-  .action.below {
+  :global(.holder .action.below) {
     top: 38px;
   }
 
-  .action:hover {
+  :global(.holder .action:hover) {
     background: rgb(0 0 0 / 0.9);
   }
 
-  .action:focus-visible {
+  :global(.holder .action:focus-visible) {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
     opacity: 1;
   }
 
-  .holder:hover .action {
+  .holder:hover :global(.action) {
     opacity: 1;
   }
 
   /* Touch: nothing to hover, so it is always there — smaller, and quiet enough not to cover the art. */
   @media (hover: none) {
-    .action {
+    :global(.holder .action) {
       width: 28px;
       height: 28px;
       font-size: 14px;

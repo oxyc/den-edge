@@ -244,6 +244,7 @@
           {title}
           caption={title.year ? String(title.year) : undefined}
           href={titleHref(title)}
+          menu={false}
         />
       {/snippet}
       {@render framed(title, savedControls, card)}
@@ -271,6 +272,7 @@
           caption={resumeCaption(entry)}
           progress={entry.fraction}
           href={titleHref(entry.title)}
+          menu={false}
         />
       {/snippet}
       {@render framed(entry.title, resumeControls, card)}
@@ -330,6 +332,7 @@
               caption={watchedCaption(entry)}
               progress={progressOf(entry.title)?.fraction}
               href={titleHref(entry.title)}
+              menu={false}
             />
           {/snippet}
           {@render framed(entry.title, watchedControls(entry), card)}

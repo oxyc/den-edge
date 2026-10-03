@@ -47,7 +47,7 @@
 </script>
 
 {#key session}
-  <LibraryStatus toast={session.toast} alert={session.alert} />
+  <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   <Router
     onchange={(route) => {
       // With no library at all — a browser that keeps nothing — there are no keys or plugins to show, so Settings is

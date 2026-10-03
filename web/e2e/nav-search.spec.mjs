@@ -949,8 +949,10 @@ test('"More like this" on a poster adds a "Like" pill without opening the title,
     const selected = active(page).getByRole('group', { name: 'Selected' });
 
     // The control sits on the poster, beside its link: pressing it keeps Search open.
-    await grid.getByRole('link', { name: 'Film 101 2026' }).hover();
-    await grid.getByRole('button', { name: 'More like Film 101', exact: true }).click();
+    const card = grid.getByRole('link', { name: 'Film 101 2026' });
+    await card.hover();
+    await grid.getByRole('button', { name: 'Actions for Film 101' }).click();
+    await page.getByRole('menuitem', { name: 'More like this' }).click();
     await expect(page).toHaveURL(/\/search\?c=like-movie-101$/);
     await expect(selected.getByRole('button', { name: 'Remove Like Film 101' })).toBeVisible();
     await expect(grid.getByRole('link', { name: 'Film 300 2026' })).toBeVisible();
@@ -961,21 +963,10 @@ test('"More like this" on a poster adds a "Like" pill without opening the title,
       '/tv/701-series-701',
     );
 
-    // One "Like" at a time: while it is picked no poster offers another, and a mood can't join it.
-    await expect(grid.getByRole('button', { name: /^More like / })).toHaveCount(0);
-    await expect(
-      active(page)
-        .getByRole('navigation', { name: 'Browse by category' })
-        .getByRole('group', { name: 'Moods' }),
-    ).toHaveCount(0);
-
-    // Back takes it out, and the posters offer it again.
+    // Back takes it out.
     await page.goBack();
     await expect(page).toHaveURL(/\/search$/);
     await expect(selected).toHaveCount(0);
-    await expect(grid.getByRole('button', { name: 'More like Film 101', exact: true })).toHaveCount(
-      1,
-    );
   } finally {
     await browser.close();
   }

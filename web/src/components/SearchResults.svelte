@@ -6,19 +6,16 @@
   import PosterCard from './PosterCard.svelte';
   import { titleHref } from '../lib/route';
 
-  import { titleCaption, type Title } from '../lib/library';
+  import { titleCaption } from '../lib/library';
 
   let {
     hits,
     onend,
-    onlike,
     onopen,
     onpersonvisible,
   }: {
     hits: Hit[];
     onend?: () => void;
-    /** Given, each poster offers "More like <title>", which calls it instead of opening the title. */
-    onlike?: (title: Title) => void;
     /** A typed result was opened, so its query is worth keeping in this browser's recent searches. */
     onopen?: () => void;
     /** A person card is close enough to need metadata that was not part of the result. */
@@ -54,11 +51,6 @@
         caption={titleCaption(hit.title)}
         href={titleHref(hit.title)}
         {onopen}
-        action={onlike && {
-          label: `More like ${hit.title.title}`,
-          icon: '≈',
-          onclick: () => onlike(hit.title),
-        }}
       />
     {:else}
       <PersonCard

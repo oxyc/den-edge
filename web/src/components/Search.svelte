@@ -45,15 +45,7 @@
   import { Pager } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
-  import {
-    FACET,
-    fansOf,
-    likeId,
-    likeOf,
-    peopleHref,
-    searchHref,
-    type Explore,
-  } from '../lib/route';
+  import { FACET, fansOf, likeOf, peopleHref, searchHref, type Explore } from '../lib/route';
   import { awaitingPicture, searchStream, type Hit } from '../lib/search';
   import { searchSources } from '../lib/searchSources';
   import { rememberSearch } from '../lib/recentSearches';
@@ -338,22 +330,6 @@
     go({ type: explore.type, chips: set }, keepQuery ? query : '');
   }
 
-  /**
-   * "More like" a poster's title: its "Like" joins the selection, in the query's place. Under All it stays All, its
-   * similar titles of both types; a title of the other type than the one browsed (a typed result) takes Explore to its
-   * type, the other picks moving with it as `chooseType` moves them.
-   */
-  function likeTitle(title: Title) {
-    const id = likeId(title);
-    likeNames[id] = title.title;
-    const to: ExploreType = exploreType === 'all' ? 'all' : title.type;
-    const moved = remapSet(selection, exploreType, to, chipsFor(to));
-    const { set, removed } = applyPick(moved.set, id, to, filtered);
-    const gone = [...moved.dropped, ...removed];
-    status = gone.length ? `Like ${title.title} replaced ${names(gone)}.` : '';
-    go({ type: to === 'all' ? undefined : to, chips: set }, '');
-  }
-
   /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
   const shownSelection = $derived(
     typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
@@ -546,8 +522,6 @@
    * and asking TMDB once per pick to find out is more than an empty page is worth.)
    */
   const culprit = $derived(chipsOf(selection.slice(-1), known)[0]);
-  /** "More like this" on the posters, while no "Like" is picked: one at a time, removed before another. */
-  const onlike = $derived(like ? undefined : likeTitle);
 
   /**
    * The ways to browse the typed text points at, offered above its results: the categories it names, local, instant
@@ -622,7 +596,7 @@
           <Loading label="Searching" />
         {:else if typedHits.length}
           <div class:stale={pending}>
-            <SearchResults hits={typedHits} {onlike} onopen={() => rememberSearch(query)} />
+            <SearchResults hits={typedHits} onopen={() => rememberSearch(query)} />
           </div>
         {:else if !pending}
           <p class="note" role="status">
@@ -641,7 +615,7 @@
           </div>
         {/if}
         {#if feedHits.length}
-          <SearchResults hits={feedHits} onend={() => void feed.pager.more()} {onlike} />
+          <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
         {:else if feed.pager.done && !feed.pager.failed && culprit}
           <p class="note empty" role="status">
             No results with {culprit.label}.

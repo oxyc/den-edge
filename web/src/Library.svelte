@@ -26,6 +26,7 @@
     markWatched,
     react,
     removeFromLibrary,
+    restoreToContinueWatching,
     unwatch,
     unwatchSeries,
     updateEpisodeProgress,
@@ -76,6 +77,8 @@
   } from './lib/services';
   import { fetchServices, type Service } from './settings/services';
   import ServicesRow from './components/ServicesRow.svelte';
+  import { setTitleActionsContext } from './lib/titleActions';
+  import { setToastContext } from './lib/toast';
   import { guestGrants } from './lib/grants.svelte';
   import { sharedInstallOf } from './lib/grants';
   import { installsOf } from './lib/scout';
@@ -372,6 +375,21 @@
     }
   }
 
+  /** Undoes `dismiss` — the poster menu's "Remove from Continue Watching" offers this in its toast. */
+  async function restore(title: Title) {
+    if (!log) return;
+    try {
+      await ensureSyncPolicy();
+      remember(title);
+      const before = log.title(title) ?? blankTitle(title, Date.now());
+      clock.see(log.newestStamp());
+      return await save(restoreToContinueWatching(before, clock.issue()));
+    } catch (error) {
+      console.warn('den: restoring to Continue Watching failed', error);
+      return false;
+    }
+  }
+
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
     if (!log) return;
     try {
@@ -536,6 +554,78 @@
         }
       : undefined,
   );
+
+  // The poster ⋯ menu (den-edge#236): the same handlers above, reached by context rather than threaded as
+  // props through every row and page that draws a `PosterCard`. A write it makes announces its result through
+  // the page toast, the one `LibrarySession.notify` already shows for other library news.
+  setToastContext((message, undo) => session.notify(message, { undo }));
+  function menuToast(
+    ok: boolean | undefined,
+    success: string,
+    undo?: { label: string; run: () => void },
+  ) {
+    if (ok) session.notify(success, { undo });
+    else if (ok === false) session.notify(SAVE_FAILED);
+  }
+  setTitleActionsContext({
+    get libraryOpen() {
+      return !!log;
+    },
+    get busy() {
+      return busy;
+    },
+    rowOf,
+    resumeOf: (title) =>
+      title.type === 'tv' && library
+        ? continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode
+        : undefined,
+    toggleWatchlist: (title, on) => {
+      void act(title, on ? addToWatchlist : removeFromLibrary).then((ok) =>
+        menuToast(
+          ok,
+          on
+            ? `Added “${title.title}” to your watchlist`
+            : `Removed “${title.title}” from your watchlist`,
+          on ? undefined : { label: 'Undo', run: () => void act(title, addToWatchlist) },
+        ),
+      );
+    },
+    toggleSeen: (title, seen) => {
+      void setSeen(title, seen).then((ok) =>
+        menuToast(
+          ok,
+          seen ? `Marked “${title.title}” as seen` : `Marked “${title.title}” as unseen`,
+        ),
+      );
+    },
+    setReaction: (title, reaction) => {
+      const label =
+        reaction === 'like'
+          ? 'Like'
+          : reaction === 'love'
+            ? 'Love'
+            : reaction === 'dislike'
+              ? 'Not for me'
+              : 'No rating';
+      void act(title, (row, at) => react(row, reaction, at)).then((ok) =>
+        menuToast(ok, `Set “${title.title}” to ${label}`),
+      );
+    },
+    dismissContinueWatching: (title) => {
+      void dismiss(title).then((ok) =>
+        menuToast(ok, `Removed “${title.title}” from Continue Watching`, {
+          label: 'Undo',
+          run: () => void restore(title),
+        }),
+      );
+    },
+    get play() {
+      return play;
+    },
+    get playHere() {
+      return playHere;
+    },
+  });
 
   /** The aired episode after the one playing, from the series' season layout; none after a movie or the last. */
   let following = $state<Target | null>(null);
@@ -1294,6 +1384,7 @@
             progress={entry.fraction}
             live={liveClock(entry)}
             href={titleHref(entry.title)}
+            continueWatching
           />
         {/each}
       </PosterRow>
