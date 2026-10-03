@@ -912,52 +912,22 @@ async fn forget(
     successor: Option<&str>,
 ) -> Response {
     let slot = state.libraries.slot(id, state.now());
+    // The owner first, without `recovery_lock`: a flood of deletes with wrong tokens must not stall recovery.
+    {
+        let library = slot.library.lock().await;
+        if let Err(refused) = owned(state, &slot, &library, id, token_hash).await {
+            return *refused;
+        }
+    }
+    // Then again under `recovery_lock`, taken before the library's lock as `recovery::create` takes them (it checks
+    // membership under it), and held across the recovery cascade and the retirement only, so no recovery entry is
+    // written for a library being retired.
+    let recovery = state.recovery_lock.lock().await;
     let mut library = slot.library.lock().await;
-    match load_rewrite(state, id).await {
-        Ok(Some(_)) => {
-            return crate::handler::retry_after(
-                StatusCode::CONFLICT,
-                &error("rewrite_in_progress"),
-                REWRITE_IDLE_MS,
-            );
-        }
-        Ok(None) => {}
-        Err(reason) => return read_error(reason),
-    }
-    let selected_v3 = match authority(state, &slot, id).await {
-        // A retried or replayed DELETE learns that it landed, and for which successor.
-        Ok(AUTHORITY_MOVED) => return moved(state, id).await,
-        Ok(selected) => selected == AUTHORITY_V3,
-        Err(reason) => return read_error(reason),
+    let (selected_v3, stored_token) = match owned(state, &slot, &library, id, token_hash).await {
+        Ok(owner) => owner,
+        Err(refused) => return *refused,
     };
-    // An oversized legacy log can still be deleted by its owner without replaying it. V3 reads only its fixed
-    // metadata and never reconstructs rows for deletion.
-    let stored_token = if selected_v3 {
-        let manager = Arc::clone(&state.library_v3);
-        let owned_id = id.to_owned();
-        match tokio::task::spawn_blocking(move || manager.credentials(&owned_id)).await {
-            Ok(Ok(Some((token, _)))) => token,
-            Ok(Ok(None)) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-            Ok(Err(reason)) => return internal("library credentials", v3_io(reason)),
-            Err(reason) => return internal("library credentials task", io::Error::other(reason)),
-        }
-    } else if let Some(lib) = library.as_ref() {
-        lib.token_hash
-    } else {
-        let file = match state.store.open_file(NS, id, EXT).await {
-            Ok(Some(file)) => file,
-            Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-            Err(e) => return read_error(e),
-        };
-        match read_header(&mut BufReader::new(file)).await {
-            Ok(Some((hash, _))) => hash,
-            Ok(None) => return json_reply(StatusCode::NOT_FOUND, &error("not_found")),
-            Err(e) => return read_error(e),
-        }
-    };
-    if !constant_time_eq(&stored_token, &token_hash) {
-        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
-    }
     // A key reset copied the library through `base` (den-spec library-v4 §12): a write since then would be lost with
     // it, so the copy is made again first. Checked under the library's lock, so no write lands between this and the
     // retirement. A head that can't be read (an unloaded v2 log, never the source of a reset) refuses it.
@@ -986,12 +956,19 @@ async fn forget(
         Ok(gids) => gids,
         Err(e) => return internal("library grants revoke", e),
     };
+    // Its recovery codes go with it, before the id is retired: a code made for the old key opens nothing after a
+    // key reset (den-spec `wire/recovery-code.md` §5 *Cascade*).
+    if let Err(e) = crate::recovery::delete_library(state, id).await {
+        return internal("library recovery delete", e);
+    }
     if let Err(e) = state.store.replace_file(NS, id, MOVED, successor.unwrap_or_default().as_bytes()).await {
         return internal("library retire", e);
     }
     // The marker is written: the library is retired, and the answer is 200 from here on. A client told anything else
     // would take its move as failed and delete the only copy left; cleanup that fails is logged and left behind.
     slot.authority.store(AUTHORITY_MOVED, Ordering::Release);
+    // Retired: a member check now fails, so recovery may go on while the database is removed.
+    drop(recovery);
     // A held reader is told now that the library moved, rather than at the end of its wait.
     state.library_holds.wake(id);
     if let Err(e) = state.store.sync_dir(NS).await {
@@ -1027,6 +1004,64 @@ async fn forget(
         crate::grants::end_sessions(state, &gid).await;
     }
     json_reply(StatusCode::OK, &json!({ "deleted": true }))
+}
+
+/// Whether `token_hash` owns library `id`, read under its lock: whether it is v3 and its stored token, or the refusal
+/// to answer. An oversized legacy log is checked without replaying it; v3 reads only its fixed metadata.
+async fn owned(
+    state: &AppState,
+    slot: &LibrarySlot,
+    library: &Option<Library>,
+    id: &str,
+    token_hash: [u8; 32],
+) -> Result<(bool, [u8; 32]), Box<Response>> {
+    match load_rewrite(state, id).await {
+        Ok(Some(_)) => {
+            return Err(Box::new(crate::handler::retry_after(
+                StatusCode::CONFLICT,
+                &error("rewrite_in_progress"),
+                REWRITE_IDLE_MS,
+            )));
+        }
+        Ok(None) => {}
+        Err(reason) => return Err(Box::new(read_error(reason))),
+    }
+    let not_found = || Box::new(json_reply(StatusCode::NOT_FOUND, &error("not_found")));
+    let selected_v3 = match authority(state, slot, id).await {
+        // A retried or replayed DELETE learns that it landed, and for which successor.
+        Ok(AUTHORITY_MOVED) => return Err(Box::new(moved(state, id).await)),
+        Ok(selected) => selected == AUTHORITY_V3,
+        Err(reason) => return Err(Box::new(read_error(reason))),
+    };
+    let stored_token = if selected_v3 {
+        let manager = Arc::clone(&state.library_v3);
+        let owned_id = id.to_owned();
+        match tokio::task::spawn_blocking(move || manager.credentials(&owned_id)).await {
+            Ok(Ok(Some((token, _)))) => token,
+            Ok(Ok(None)) => return Err(not_found()),
+            Ok(Err(reason)) => return Err(Box::new(internal("library credentials", v3_io(reason)))),
+            Err(reason) => {
+                return Err(Box::new(internal("library credentials task", io::Error::other(reason))))
+            }
+        }
+    } else if let Some(lib) = library.as_ref() {
+        lib.token_hash
+    } else {
+        let file = match state.store.open_file(NS, id, EXT).await {
+            Ok(Some(file)) => file,
+            Ok(None) => return Err(not_found()),
+            Err(e) => return Err(Box::new(read_error(e))),
+        };
+        match read_header(&mut BufReader::new(file)).await {
+            Ok(Some((hash, _))) => hash,
+            Ok(None) => return Err(not_found()),
+            Err(e) => return Err(Box::new(read_error(e))),
+        }
+    };
+    if !constant_time_eq(&stored_token, &token_hash) {
+        return Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("forbidden"))));
+    }
+    Ok((selected_v3, stored_token))
 }
 
 /// Whether `id` belonged to a library its owner deleted. Asked only when no library is loaded under it.

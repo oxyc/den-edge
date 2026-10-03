@@ -19,6 +19,7 @@ mod mmap;
 mod oauth;
 mod pair;
 mod ratings;
+mod recovery;
 mod relay;
 mod routes;
 mod skipdb;
@@ -61,6 +62,9 @@ pub struct AppState {
     /// Every per-address budget's count (`link::throttled_at`, `link::throttled_per_minute`): a pairing's guesses,
     /// the relay's and the proxies' questions.
     pub claims: Mutex<link::Throttles>,
+    /// Recovery's per-visitor budgets (`recovery::Limiter`), apart from `claims`: their windows last up to a day, and
+    /// must never crowd out the minute-long budgets every other route counts in.
+    pub recovery_claims: Mutex<recovery::Limiter>,
     /// Pairing sessions by `sid`. Ten minutes long at most, so memory is enough: a restart costs a pairing in
     /// progress, which the TV simply starts again.
     pub pairs: Mutex<HashMap<String, pair::Session>>,
@@ -226,6 +230,8 @@ pub struct AppState {
     pub media_leases: Mutex<HashMap<String, relay::Lease>>,
     /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
     pub grants: grants::Grants,
+    /// Held across every read-modify-write of recovery entries (`recovery.rs`).
+    pub recovery_lock: tokio::sync::Mutex<()>,
     /// Distinct `ipv4Hint` addresses each member rate-limit bucket (an IPv6 /64) had a media listener opened for,
     /// and when (`relay::MEMBER_HINTS`). A guest's are counted with its grant's sources instead.
     pub member_hints: Mutex<HashMap<String, Vec<(std::net::IpAddr, u64)>>>,
@@ -265,6 +271,7 @@ impl AppState {
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),
             library_limits,
             claims: Mutex::new(link::Throttles::default()),
+            recovery_claims: Mutex::new(recovery::Limiter::default()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_nameplate: Box::new(pair::gen_nameplate),
@@ -328,6 +335,7 @@ impl AppState {
             media_spent: Arc::new(Mutex::new((0, 0))),
             media_leases: Mutex::new(HashMap::new()),
             grants: grants::Grants::default(),
+            recovery_lock: tokio::sync::Mutex::new(()),
             member_hints: Mutex::new(HashMap::new()),
             reel_hints: Mutex::new(HashMap::new()),
             remux_edge_secret: None,
