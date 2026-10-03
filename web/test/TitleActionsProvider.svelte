@@ -42,10 +42,14 @@
     version += 1;
   }
 
-  setToastContext((message, undoAction) => {
+  // What `Library.svelte`'s own `menuToast` does: announce the result through the toast, same as the real
+  // context's handlers do, so a test of the toast/Undo is a test of the real wiring, not a fixture that skips it.
+  function notify(message: string, undoAction?: { label: string; run: () => void } | null) {
     toast = message;
     undo = undoAction ?? null;
-  });
+  }
+
+  setToastContext(notify);
 
   setTitleActionsContext({
     get libraryOpen() {
@@ -62,17 +66,29 @@
     toggleWatchlist: (title, on) => {
       calls.toggleWatchlist += 1;
       change(title, on ? addToWatchlist : removeFromLibrary);
+      notify(
+        on
+          ? `Added “${title.title}” to your watchlist`
+          : `Removed “${title.title}” from your watchlist`,
+        on ? null : { label: 'Undo', run: () => change(title, addToWatchlist) },
+      );
     },
     toggleSeen: (title, on) => {
       calls.toggleSeen += 1;
       change(title, on ? markWatched : unwatch);
+      notify(on ? `Marked “${title.title}” as seen` : `Marked “${title.title}” as unseen`);
     },
     setReaction: (title, reaction) => {
       calls.setReaction += 1;
       change(title, (row, at) => react(row, reaction, at));
+      notify(`Set “${title.title}” to ${reaction ?? 'No rating'}`);
     },
-    dismissContinueWatching: () => {
+    dismissContinueWatching: (title) => {
       calls.dismissContinueWatching += 1;
+      notify(`Removed “${title.title}” from Continue Watching`, {
+        label: 'Undo',
+        run: () => calls.dismissContinueWatching--,
+      });
     },
     play: () => {
       calls.play += 1;

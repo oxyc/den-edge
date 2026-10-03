@@ -4,6 +4,9 @@ import { guardNetwork } from './network.mjs';
 async function open(browser, { width = 1280, hasTouch = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch });
   await guardNetwork(page);
+  // A hover or a press warms the card's own title detail (`warmDetail`), same as any other poster row; none of
+  // these fixture titles are real TMDB ids, so this just has to answer something rather than go unmocked.
+  await page.route('**/tmdb/3/**', (r) => r.fulfill({ status: 404, json: {} }));
   await page.goto('http://127.0.0.1:5198/test/poster-menu.html');
   return page;
 }
@@ -60,7 +63,7 @@ test('keyboard: Arrow/Home/End move between items, and Tab moves on', async () =
     const trigger = library.getByRole('button', { name: 'Actions for Movie 101' });
     await trigger.click();
     const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
-    const items = menu.getByRole(/menuitem/);
+    const items = menu.locator('[role^="menuitem"]');
     await expect(items.first()).toBeFocused();
     await page.keyboard.press('End');
     await expect(items.last()).toBeFocused();
@@ -102,7 +105,7 @@ test('a guest poster offers only More like this and Share', async () => {
     const guest = page.getByRole('region', { name: 'Guest' });
     await guest.getByRole('button', { name: 'Actions for Guest Movie' }).click();
     const menu = page.getByRole('menu', { name: 'Actions for Guest Movie' });
-    await expect(menu.getByRole(/menuitem/)).toHaveCount(2);
+    await expect(menu.locator('[role^="menuitem"]')).toHaveCount(2);
     await expect(menu.getByRole('menuitem', { name: 'More like this' })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: 'Share' })).toBeVisible();
   } finally {
@@ -143,7 +146,11 @@ test('a write in flight shows aria-disabled items that do not run, never a lost 
     const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
     const watchlist = menu.getByRole('menuitemcheckbox', { name: 'Add to watchlist' });
     await expect(watchlist).toHaveAttribute('aria-disabled', 'true');
-    await watchlist.click();
+    // Playwright's own actionability refuses a plain click on an aria-disabled widget (it waits for "enabled"
+    // forever) and a geometric `force` click risks landing somewhere else entirely while the popover is still
+    // being positioned; dispatching the event straight at the node proves the deliberate guard in `run()` —
+    // not Playwright's own refusal, and not where the click happened to land — is what stops it from running.
+    await watchlist.dispatchEvent('click');
     expect(await page.evaluate(() => window.fixture.calls().toggleWatchlist)).toBe(0);
     await expect(menu).toBeVisible();
   } finally {
@@ -164,7 +171,6 @@ test('mobile: a long-press opens the sheet and the card does not navigate; a swi
 
     // A long press: down, held past 500ms with no real movement, then released.
     await page.mouse.move(center.x, center.y);
-    await page.touchscreen.tap(center.x, center.y).catch(() => {});
     await page.evaluate(({ x, y }) => {
       const target = document.elementFromPoint(x, y);
       target?.dispatchEvent(

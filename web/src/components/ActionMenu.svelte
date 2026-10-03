@@ -67,12 +67,21 @@
     return menuItemEls().filter((el) => el.getAttribute('aria-disabled') !== 'true');
   }
 
-  /** Measured before the popover is actually shown (`beforetoggle`), so it never flashes into the wrong place. */
+  /**
+   * Measured before the popover is actually shown (`beforetoggle`), so it never flashes into the wrong place.
+   *
+   * The write is deferred one frame (`requestAnimationFrame`), still ahead of the next paint: writing
+   * `menu.style` synchronously inside `beforetoggle` — after any prior pointer move had already queued a style
+   * recalc of its own (a hover, even an unrelated one) — silently drops the browser's own `toggle` event, which
+   * is what actually flips `open`/`aria-expanded`. The read stays synchronous; only the write moves.
+   */
   function position() {
     if (!menu) return;
     if (mobile) {
-      menu.style.removeProperty('left');
-      menu.style.removeProperty('top');
+      requestAnimationFrame(() => {
+        menu.style.removeProperty('left');
+        menu.style.removeProperty('top');
+      });
       return;
     }
     const vw = window.innerWidth,
@@ -93,8 +102,10 @@
     }
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
+    requestAnimationFrame(() => {
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+    });
   }
 
   function beforeToggle(event: ToggleEvent) {
