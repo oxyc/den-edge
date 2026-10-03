@@ -6,7 +6,13 @@ afterEach(() => {
 });
 
 describe('playOnTvStatus (pure)', () => {
-  const base = { now: 0, sentAt: 0, tvName: 'Living Room TV', queued: null as boolean | null, playing: false };
+  const base = {
+    now: 0,
+    sentAt: 0,
+    tvName: 'Living Room TV',
+    queued: null as boolean | null,
+    playing: false,
+  };
 
   it('says it was sent, and nothing more, before the hint is due', () => {
     expect(playOnTvStatus({ ...base, now: HINT_MS - 1 })).toEqual({
