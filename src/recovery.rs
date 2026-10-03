@@ -39,8 +39,11 @@ const MINUTE_MS: u64 = 60 * 1000;
 /// den-edge from being a cheap existence oracle or load target.
 const OPEN_SHORT: (u32, u64) = (5, 10 * MINUTE_MS);
 const OPEN_DAY: (u32, u64) = (20, 24 * 60 * MINUTE_MS);
-/// `POST`, `GET` and `DELETE /recovery` per visitor.
+/// `POST`, `GET` and `DELETE /recovery` per visitor, counted only once the member proof holds.
 const OWNER: (u32, u64) = (60, 60 * MINUTE_MS);
+/// Recovery's own budget table (`AppState::recovery_claims`): two per visitor that opens, one per member. Full, it
+/// evicts rather than refuses (`link::Throttles`), so filling it locks nobody out (§5).
+pub const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -107,10 +110,16 @@ async fn owner_of(state: &AppState, locator: &str) -> io::Result<Option<String>>
     Ok(state.store.get(NS, &loc_key(locator)).await?.and_then(|bytes| String::from_utf8(bytes).ok()))
 }
 
-/// Counts one request against `bucket` in fixed windows; the refusal once it is over.
+/// Counts one request against `bucket` in fixed windows, in recovery's own table; the refusal once it is over.
 fn limited(state: &AppState, bucket: &str, ip: &str, (limit, window): (u32, u64)) -> Option<Response> {
-    crate::link::throttled_in_window(state, &format!("{bucket}:{ip}"), limit, window)
-        .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+    crate::link::throttled_in_window(
+        &state.recovery_claims,
+        state.now(),
+        &format!("{bucket}:{ip}"),
+        limit,
+        window,
+    )
+    .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
 }
 
 pub fn is_path(path: &str) -> bool {
@@ -128,20 +137,22 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
         }
         return open(state, req).await;
     }
-    if let Some(refused) = limited(state, "recovery", &ip, OWNER) {
-        return refused;
-    }
     let claim =
         req.headers().get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let Some(id) = claim.as_deref().and_then(|c| c.split_once(':')).map(|(id, _)| id.to_owned()) else {
+    let Some((id, _)) = claim.as_deref().and_then(|c| c.split_once(':')) else {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     };
+    let id = id.to_owned();
     if !crate::library::is_member(state, claim.as_deref()).await {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    // Counted after the proof: an anonymous request makes no bucket.
+    if let Some(refused) = limited(state, "recovery", &ip, OWNER) {
+        return refused;
+    }
     match req.method().clone() {
-        Method::POST => create(state, &id, req).await,
-        Method::GET | Method::HEAD => list(state, &id).await,
+        Method::POST => create(state, &id, claim.as_deref().unwrap_or_default(), req).await,
+        Method::GET => list(state, &id).await,
         Method::DELETE => remove(state, &id, req).await,
         _ => method_not_allowed(),
     }
@@ -166,13 +177,18 @@ async fn body(req: Request, with_sealed: bool) -> Result<(String, Option<String>
     Ok((locator.to_owned(), sealed))
 }
 
-async fn create(state: &AppState, id: &str, req: Request) -> Response {
+async fn create(state: &AppState, id: &str, claim: &str, req: Request) -> Response {
     let (locator, sealed) = match body(req, true).await {
         Ok(parsed) => parsed,
         Err(resp) => return *resp,
     };
     let now = state.now();
     let _lock = state.recovery_lock.lock().await;
+    // Again under the lock `DELETE /lib/{id}` holds across its cascade and the retirement: an entry written after the
+    // library was retired would open, and no proof could list or delete it (§5 *Cascade*).
+    if !crate::library::is_member(state, Some(claim)).await {
+        return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
+    }
     match owner_of(state, &locator).await {
         Ok(Some(_)) => return json_reply(StatusCode::CONFLICT, &error("locator_taken")),
         Ok(None) => {}
@@ -273,16 +289,23 @@ async fn open(state: &AppState, req: Request) -> Response {
     entry.opens += 1;
     entry.last_opened_at = Some(now);
     let sealed = entry.sealed.clone();
-    // The count is advisory (§5): a failure to record it does not keep the person out of their library.
-    if let Err(e) = save(state, &id, &entries).await {
+    // The count is advisory (§5): a failure to record it does not keep the person out of their library. Synced like
+    // every other write here, so a crash loses no count the person was shown: "opened 0 times" after a crash must not
+    // hide a stolen code.
+    let counted = async {
+        save(state, &id, &entries).await?;
+        state.store.sync_dir(NS).await
+    };
+    if let Err(e) = counted.await {
         eprintln!("recovery open count: {e}");
     }
     json_reply(StatusCode::OK, &json!({ "sealed": sealed }))
 }
 
-/// Deletes every entry of library `id`: `DELETE /lib/{id}` calls it before the library is retired (§5 *Cascade*).
+/// Deletes every entry of library `id`. `DELETE /lib/{id}` calls it before the library is retired, holding
+/// `recovery_lock` (taken before the library's own lock) across both, so `create` cannot slip an entry in between
+/// (§5 *Cascade*).
 pub async fn delete_library(state: &AppState, id: &str) -> io::Result<()> {
-    let _lock = state.recovery_lock.lock().await;
     let entries = load(state, id).await?;
     for entry in &entries.entries {
         state.store.delete(NS, &loc_key(&entry.locator)).await?;
@@ -469,6 +492,76 @@ mod tests {
         let restored = Harness::in_dir(restored_dir);
         assert_eq!(body_json(open_from(&restored, LOC, &[]).await).await, json!({ "sealed": SEALED }));
         assert_eq!(owner(&restored, "GET", &member(), None).await.1["entries"][0]["opens"], 2);
+    }
+
+    /// One visitor per /64 filling recovery's table with day-long buckets locks nobody out: not a new visitor's
+    /// `open`, and not another route, which counts in a table recovery never touches (§5).
+    #[tokio::test]
+    async fn filling_the_limit_table_locks_no_one_out() {
+        let mut h = harness().await;
+        Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec![IpAddr::from([192, 168, 1, 9])];
+        for n in 0..LIMIT_BUCKETS {
+            let visitor = format!("2001:db8:0:{n:x}::1");
+            assert_eq!(
+                open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(crate::lock(&h.state.recovery_claims).len(), LIMIT_BUCKETS, "full");
+        let fresh = [("x-forwarded-for", "2001:db8:ffff::1")];
+        assert_eq!(
+            open_from(&h, LOC, &fresh).await.status(),
+            StatusCode::NOT_FOUND,
+            "a new visitor still opens"
+        );
+        let pair = h
+            .send(
+                "POST",
+                "/pair/new",
+                Some(json!({ "sid": "000102030405060708090a0b0c0d0e0f" }).to_string()),
+                &fresh,
+            )
+            .await;
+        assert_eq!(pair.status(), StatusCode::OK, "and pairing is untouched");
+        assert!(crate::lock(&h.state.claims).len() < 4, "recovery never counted in the shared table");
+    }
+
+    /// The owner routes count a visitor only once the member proof holds: anonymous calls make no bucket.
+    #[tokio::test]
+    async fn anonymous_owner_calls_make_no_bucket() {
+        let h = harness().await;
+        for _ in 0..100 {
+            assert_eq!(owner(&h, "GET", "", None).await.0, StatusCode::FORBIDDEN);
+        }
+        assert_eq!(crate::lock(&h.state.recovery_claims).len(), 0);
+        assert_eq!(owner(&h, "GET", &member(), None).await.0, StatusCode::OK);
+    }
+
+    /// A `POST` that passed the member check before a `DELETE /lib/{id}` retired the library writes nothing: it checks
+    /// again under the lock the cascade and the retirement hold (§5 *Cascade*).
+    #[tokio::test]
+    async fn a_post_racing_the_library_delete_writes_no_entry() {
+        let h = Arc::new(harness().await);
+        let held = h.state.recovery_lock.lock().await;
+        let deleting = tokio::spawn({
+            let h = Arc::clone(&h);
+            async move {
+                h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", TOKEN)])
+                    .await
+                    .status()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The delete waits on the lock; the library still stands, so this post passes its first check and waits too.
+        let posting = tokio::spawn({
+            let h = Arc::clone(&h);
+            async move { make(&h, LOC).await.0 }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(held);
+        assert_eq!(deleting.await.unwrap(), StatusCode::OK);
+        assert_eq!(posting.await.unwrap(), StatusCode::FORBIDDEN);
+        assert_eq!(open_from(&h, LOC, &[]).await.status(), StatusCode::NOT_FOUND, "no orphan opens");
     }
 
     fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

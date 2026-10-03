@@ -911,6 +911,9 @@ async fn forget(
     base: Option<u64>,
     successor: Option<&str>,
 ) -> Response {
+    // Held across the recovery cascade and the retirement, and taken before the library's lock as `recovery::create`
+    // takes them (it checks membership under it), so no recovery entry is written for a library being retired.
+    let _recovery = state.recovery_lock.lock().await;
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
     match load_rewrite(state, id).await {

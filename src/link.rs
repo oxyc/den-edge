@@ -14,8 +14,8 @@ pub(crate) const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Guesses per client address per minute: a pairing's nameplate is only four characters.
 pub(crate) const CLAIMS_PER_WINDOW: u32 = 20;
 const CLAIM_WINDOW_MS: u64 = 60 * 1000;
-/// All live rate-limit identities together. Public callers can present many legitimate source addresses; sweeping
-/// expired entries is not a hard bound while those windows overlap, so new identities fail closed at this ceiling.
+/// All live rate-limit identities together, a bound on the map's memory. Public callers can present many legitimate
+/// source addresses, and sweeping expired entries is not a bound while their windows overlap.
 const MAX_THROTTLE_BUCKETS: usize = 8 * 1024;
 
 pub struct Throttle {
@@ -23,21 +23,42 @@ pub struct Throttle {
     until: u64,
 }
 
-/// Every budget's count, one map for all of them.
-#[derive(Default)]
+/// Every budget's count in one map: the shared one (`AppState::claims`), or recovery's own
+/// (`AppState::recovery_claims`).
+///
+/// At capacity a new identity evicts a live one rather than being refused. Refusing made a full table a limit on
+/// everyone: anyone holding a few thousand IPv6 /64s could keep it full and lock every new visitor out of every
+/// throttled route at once (recovery's day-long buckets made that last a day). Eviction concedes little: the evicted
+/// budget starts over, and a caller who can fill the table already holds that many budgets of their own.
 pub struct Throttles {
     map: std::collections::HashMap<String, Throttle>,
+    capacity: usize,
     /// The size past which the next count sweeps out the expired entries: twice what the last sweep left. Swept at
     /// every count once past a fixed 1024, a map holding that many live budgets was scanned whole on every request.
     sweep_above: usize,
-    /// A full table is attacker-reachable. Do not turn each refused novel address into an O(table) expiry scan.
+    /// A full table is attacker-reachable. Do not turn each novel address into an O(table) expiry scan.
     capacity_sweep_after: u64,
 }
 
+impl Default for Throttles {
+    fn default() -> Self {
+        Self::with_capacity(MAX_THROTTLE_BUCKETS)
+    }
+}
+
 impl Throttles {
-    fn entry(&mut self, bucket: &str, now: u64) -> Option<&mut Throttle> {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self { map: Default::default(), capacity, sweep_above: 0, capacity_sweep_after: 0 }
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn entry(&mut self, bucket: &str, now: u64) -> &mut Throttle {
         let new = !self.map.contains_key(bucket);
-        let at_capacity = new && self.map.len() >= MAX_THROTTLE_BUCKETS;
+        let at_capacity = new && self.map.len() >= self.capacity;
         if self.map.len() > self.sweep_above.max(1024) || (at_capacity && now >= self.capacity_sweep_after) {
             self.map.retain(|_, t| t.until > now);
             self.sweep_above = self.map.len() * 2;
@@ -45,10 +66,13 @@ impl Throttles {
                 self.capacity_sweep_after = now.saturating_add(1_000);
             }
         }
-        if new && self.map.len() >= MAX_THROTTLE_BUCKETS {
-            return None;
+        if new && self.map.len() >= self.capacity {
+            // Whichever entry the map yields first: no scan, and nothing a caller can aim at another's budget.
+            if let Some(evicted) = self.map.keys().next().cloned() {
+                self.map.remove(&evicted);
+            }
         }
-        Some(self.map.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 }))
+        self.map.entry(bucket.to_owned()).or_insert(Throttle { count: 0, until: 0 })
     }
 }
 
@@ -106,7 +130,7 @@ pub(crate) fn throttled_at(state: &AppState, bucket: &str, limit: u32) -> Option
 pub(crate) fn throttled_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
     let now = state.now();
     let mut claims = lock(&state.claims);
-    let Some(t) = claims.entry(bucket, now) else { return Some(CLAIM_WINDOW_MS) };
+    let t = claims.entry(bucket, now);
     if t.until <= now {
         t.count = 0;
     }
@@ -129,18 +153,31 @@ pub(crate) fn throttled_per_minute(state: &AppState, bucket: &str, limit: u32) -
 /// `throttled_per_minute` for an act that costs `cost` of the budget at once. Refused whole when it does not fit,
 /// and then it spends nothing.
 pub(crate) fn throttled_per_minute_by(state: &AppState, bucket: &str, limit: u32, cost: u32) -> Option<u64> {
-    throttled_window(state, bucket, limit, cost, CLAIM_WINDOW_MS)
+    throttled_window(&state.claims, state.now(), bucket, limit, cost, CLAIM_WINDOW_MS)
 }
 
-/// `throttled_per_minute` with a window of `window_ms`: recovery's opens are counted per ten minutes and per day.
-pub(crate) fn throttled_in_window(state: &AppState, bucket: &str, limit: u32, window_ms: u64) -> Option<u64> {
-    throttled_window(state, bucket, limit, 1, window_ms)
+/// `throttled_per_minute` in `table`, with a window of `window_ms`: recovery counts in its own table, its opens per
+/// ten minutes and per day.
+pub(crate) fn throttled_in_window(
+    table: &std::sync::Mutex<Throttles>,
+    now: u64,
+    bucket: &str,
+    limit: u32,
+    window_ms: u64,
+) -> Option<u64> {
+    throttled_window(table, now, bucket, limit, 1, window_ms)
 }
 
-fn throttled_window(state: &AppState, bucket: &str, limit: u32, cost: u32, window_ms: u64) -> Option<u64> {
-    let now = state.now();
-    let mut claims = lock(&state.claims);
-    let Some(t) = claims.entry(bucket, now) else { return Some(window_ms) };
+fn throttled_window(
+    table: &std::sync::Mutex<Throttles>,
+    now: u64,
+    bucket: &str,
+    limit: u32,
+    cost: u32,
+    window_ms: u64,
+) -> Option<u64> {
+    let mut claims = lock(table);
+    let t = claims.entry(bucket, now);
     if t.until <= now {
         t.count = 0;
         t.until = now + window_ms;
@@ -197,19 +234,20 @@ mod tests {
         assert_eq!(crate::lock(&h.state.claims).map.len(), 552, "the 1500 expired ones gone at the next");
     }
 
+    /// The map stays bounded, and a full one evicts rather than refuses: filling it must not lock new visitors out.
     #[test]
-    fn simultaneous_live_budget_identities_are_hard_bounded() {
+    fn simultaneous_live_budget_identities_are_hard_bounded_and_a_full_table_admits_newcomers() {
         let h = Harness::new();
         for i in 0..super::MAX_THROTTLE_BUCKETS {
             assert!(super::throttled_per_minute(&h.state, &format!("public:{i}"), 2).is_none());
         }
         assert_eq!(crate::lock(&h.state.claims).map.len(), super::MAX_THROTTLE_BUCKETS);
-        assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_some());
-        assert_eq!(crate::lock(&h.state.claims).map.len(), super::MAX_THROTTLE_BUCKETS);
-        // Existing callers are not displaced merely because the global identity table is full.
-        assert!(super::throttled_per_minute(&h.state, "public:0", 2).is_none());
-        h.advance(super::CLAIM_WINDOW_MS);
+        assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_none(), "admitted, not refused");
         assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_none());
+        assert!(super::throttled_per_minute(&h.state, "public:new", 2).is_some(), "and still counted");
+        assert_eq!(crate::lock(&h.state.claims).map.len(), super::MAX_THROTTLE_BUCKETS);
+        h.advance(super::CLAIM_WINDOW_MS);
+        assert!(super::throttled_per_minute(&h.state, "public:other", 2).is_none());
         assert_eq!(crate::lock(&h.state.claims).map.len(), 1);
     }
 
