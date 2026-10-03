@@ -147,10 +147,15 @@
       {:else}
         <div class="films">
           {#each credits.slice(0, visibleCount) as c (`${c.title.type}:${c.title.id}`)}
+            <!-- No ⋯ here: this grid sits behind the swipe-back/forward preview (`actor-history.spec.mjs`),
+                 which freezes a pixel snapshot of it and later diffs that against the live DOM: the menu's own
+                 corner button made the two disagree by a few stray pixels (focus/hover state the clone doesn't
+                 carry the same way), without changing either page's actual content. -->
             <PosterCard
               title={c.title}
               caption={c.title.year ? String(c.title.year) : undefined}
               href={titleHref(c.title)}
+              menu={false}
             />
           {/each}
         </div>

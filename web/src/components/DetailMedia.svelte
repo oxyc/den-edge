@@ -154,10 +154,14 @@
    * The tap is a gesture, and a gesture is the only thing that may unmute anything — so the moment a
    * viewer reaches for this trailer is the one moment we are allowed to give them its audio.
    */
-  function tap() {
+  function tap(event?: MouseEvent) {
     const player = video;
     if (!player) return;
-    if (!pressed) return;
+    // A real press sets `pressed` on `pointerdown`, which proves this click began on THIS page rather than
+    // being inherited from the one just left (see `press`). A keyboard activation (Enter/Space on a focused
+    // button) never fires `pointerdown` at all, but the browser's synthetic click for one always carries
+    // `detail: 0` — unlike any click a pointer makes — so it is let through on that alone.
+    if (!pressed && event?.detail !== 0) return;
     pressed = false;
     // Once, and only once. After the first tap the native controls are showing, and they sit INSIDE the
     // element — so a tap on their pause button is also a click on the video, and calling play() here
@@ -248,10 +252,11 @@
   }
 
   /** Take over the screen, with the audio on. */
-  async function expand() {
+  async function expand(event?: MouseEvent) {
     const player = video;
     if (!player) return;
-    if (!pressed) return;
+    // See `tap`: a keyboard activation never sets `pressed`, but is let through on `detail: 0` alone.
+    if (!pressed && event?.detail !== 0) return;
     pressed = false;
     sound = true;
     // iOS treats volume as read-only, so unmuting is what carries the sound there; everywhere else both go.
@@ -297,10 +302,11 @@
    * Guarded by `pressed` for the same reason `expand` is: a click inherited from the page just left
    * would otherwise land here and start a trailer talking on a page nobody pressed anything on.
    */
-  function toggleSound() {
+  function toggleSound(event?: MouseEvent) {
     const player = video;
     if (!player) return;
-    if (!pressed) return;
+    // See `tap`: a keyboard activation never sets `pressed`, but is let through on `detail: 0` alone.
+    if (!pressed && event?.detail !== 0) return;
     pressed = false;
     sound = !sound;
     quieten(player);
@@ -770,8 +776,10 @@
     ></canvas>
   {/if}
   <div class="scrim" aria-hidden="true"></div>
-  <!-- Glass, because this is a control over media — the one place the look is for. Desktop only:
-       a phone already gets the video's own controls, and its full-screen is a tap on those. -->
+  <!-- Glass, because this is a control over media — the one place the look is for. Full screen is desktop
+       only: a phone's is a tap on its own native controls instead. Sound stays until `touched` on a phone
+       too — until then there is no keyboard route to the native controls that replace it (they only show up
+       after the same gesture this grants), so a keyboard or switch user had no way to hear this at all. -->
   {#if !mobile && !!source && !failed && !ended}
     <button
       class="control expand glass"
@@ -781,10 +789,13 @@
     >
       <DetailIcon name="expand" />
     </button>
+  {/if}
+  {#if (!mobile || !touched) && !!source && !failed && !ended}
     <button
       class="control sound glass"
+      class:alone={mobile}
       onpointerdown={press}
-      onclick={toggleSound}
+      onclick={mobile ? tap : toggleSound}
       aria-label={sound ? 'Mute trailer' : 'Play trailer with sound'}
     >
       <DetailIcon name={sound ? 'sound' : 'mute'} />
@@ -921,6 +932,13 @@
 
     .scrim {
       display: none;
+    }
+
+    /* Nothing to hover on a phone, and no `.expand` above it to clear: shown plainly, at the top position, so
+       there is a visible, keyboard-reachable way to this trailer's sound before the first tap. */
+    .sound.alone {
+      top: calc(var(--bar-space) + 12px);
+      opacity: 1;
     }
   }
 

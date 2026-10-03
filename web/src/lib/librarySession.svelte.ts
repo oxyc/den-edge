@@ -20,6 +20,9 @@ export class LibrarySession {
   log = $state<LibraryLog | null | undefined>(undefined);
   /** A passing message about the library ("Library updated to v4"), shown for a few seconds (`notify`). */
   toast = $state<string | null>(null);
+  /** Undoes whatever the toast just reported — "Removed from watchlist" and "Removed from Continue Watching"
+      only, the two the poster menu can take back. Cleared with the toast. */
+  undo = $state<{ label: string; run: () => void } | null>(null);
   /** What keeps the library from being written, while it does (`libraryAlert`). */
   alert = $state<string | null>(null);
   private toastTimer?: ReturnType<typeof setTimeout>;
@@ -141,12 +144,24 @@ export class LibrarySession {
   /**
    * A passing message. Cleared after `TOAST_MS` by default; `holdMs` overrides that, and `Infinity` holds it up
    * until the next `notify` (or page navigation resets it) — for a toast that updates in place while something is
-   * still pending, such as "Play on TV"'s (`playOnTv.svelte.ts`).
+   * still pending, such as "Play on TV"'s (`playOnTv.svelte.ts`). `undo`, where the action it reports can be
+   * taken back, is offered until the toast itself clears.
    */
-  notify(message: string, { holdMs = TOAST_MS }: { holdMs?: number } = {}) {
+  notify(
+    message: string,
+    {
+      holdMs = TOAST_MS,
+      undo = null,
+    }: { holdMs?: number; undo?: { label: string; run: () => void } | null } = {},
+  ) {
     this.toast = message;
+    this.undo = undo;
     clearTimeout(this.toastTimer);
-    if (Number.isFinite(holdMs)) this.toastTimer = setTimeout(() => (this.toast = null), holdMs);
+    if (Number.isFinite(holdMs))
+      this.toastTimer = setTimeout(() => {
+        this.toast = null;
+        this.undo = null;
+      }, holdMs);
   }
 }
 

@@ -1,7 +1,9 @@
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
+  import ActionMenu from './ActionMenu.svelte';
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
   import { airDate, cleanedOverview, futureDate } from '../lib/detailPresentation';
+  import type { MenuItem } from '../lib/titleActions';
   import type { Episode } from '../lib/detail';
   let {
     episode,
@@ -29,23 +31,21 @@
   const seen = $derived(progress >= WATCHED);
   const upcoming = $derived(futureDate(episode.airDate));
   const date = $derived(airDate(episode.airDate));
-  let menu: HTMLDetailsElement;
-  function act(action: () => void) {
-    menu.open = false;
-    action();
-  }
-  function dismiss(event: PointerEvent) {
-    if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
-  }
-  function escape(event: KeyboardEvent) {
-    if (event.key === 'Escape' && menu?.open) {
-      menu.open = false;
-      menu.querySelector('summary')?.focus();
-    }
-  }
+  const menuItems = $derived<MenuItem[]>([
+    ...(onplaytv && !upcoming
+      ? [{ kind: 'item' as const, label: 'Play on TV', onselect: onplaytv }]
+      : []),
+    ...(onsources && !upcoming
+      ? [{ kind: 'item' as const, label: 'Sources', onselect: onsources }]
+      : []),
+    {
+      kind: 'item',
+      label: seen ? 'Mark unwatched' : 'Mark watched',
+      disabled: busy,
+      onselect: () => onseen(!seen),
+    },
+  ]);
 </script>
-
-<svelte:window onpointerdown={dismiss} onkeydown={escape} />
 
 <li class="episode" class:seen class:upcoming>
   <button
@@ -89,25 +89,19 @@
       {:else if episode.overview}<span class="overview">{cleanedOverview(episode)}</span>{/if}
     </span>
   </button>
-  <details class="episode-menu" bind:this={menu}>
-    <summary aria-label={`Options for episode ${episode.number}`}
-      ><DetailIcon name="more" /></summary
-    >
-    <div class="menu">
-      {#if onplaytv && !upcoming}<button onclick={() => act(onplaytv)}
-          ><DetailIcon name="play" />Play on TV</button
-        >{/if}
-      {#if onsources && !upcoming}<button onclick={() => act(onsources)}
-          ><DetailIcon name="sources" />Sources</button
-        >{/if}
-      <button disabled={busy} onclick={() => act(() => onseen(!seen))}
-        ><DetailIcon name={seen ? 'eye' : 'check'} />{seen
-          ? 'Mark unwatched'
-          : 'Mark watched'}</button
-      >
-    </div>
-  </details>
+  <div class="episode-menu">
+    <ActionMenu
+      items={menuItems}
+      label={`Options for episode ${episode.number}`}
+      triggerClass="episode-trigger"
+      glyph={more}
+    />
+  </div>
 </li>
+
+{#snippet more()}
+  <DetailIcon name="more" />
+{/snippet}
 
 <style>
   .episode {
@@ -268,63 +262,25 @@
     align-self: center;
   }
 
-  summary {
+  /* The trigger renders inside `ActionMenu`, a child component — reached the same way `Detail` reaches
+     `DetailMedia`'s `.expand`, since a plain class name is scoped to its own component and `:global` isn't. */
+  :global(.episode-trigger) {
     display: grid;
     place-items: center;
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    cursor: pointer;
-    list-style: none;
     color: var(--muted);
   }
 
-  summary::-webkit-details-marker {
-    display: none;
+  :global(.episode-trigger:hover),
+  :global(.episode-trigger[aria-expanded='true']) {
+    background: #fff2;
+    color: var(--fg);
   }
 
-  summary:focus-visible {
+  :global(.episode-trigger:focus-visible) {
     outline: 2px solid var(--accent);
-  }
-
-  summary:hover,
-  details[open] summary {
-    background: #fff2;
-    color: var(--fg);
-  }
-
-  .menu {
-    position: absolute;
-    z-index: 5;
-    top: 48px;
-    right: 0;
-    width: max-content;
-    min-width: 200px;
-    padding: 6px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: #222228;
-    box-shadow: 0 12px 40px #0008;
-  }
-
-  .menu button {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    width: 100%;
-    min-height: 44px;
-    border: 0;
-    border-radius: 8px;
-    padding: 8px 12px;
-    background: none;
-    color: var(--fg);
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .menu button:hover,
-  .menu button:focus-visible {
-    background: #fff2;
   }
 
   @media (width <= 759px) {

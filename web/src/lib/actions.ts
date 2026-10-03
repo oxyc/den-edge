@@ -116,6 +116,11 @@ export function dismissFromContinueWatching(row: TitleRow, at: Stamp): TitleRow 
   return { ...row, dismissed: { value: true, at } };
 }
 
+/** Undoes `dismissFromContinueWatching` — the poster menu's toast offers this for a few seconds. */
+export function restoreToContinueWatching(row: TitleRow, at: Stamp): TitleRow {
+  return { ...row, dismissed: { value: false, at } };
+}
+
 export function react(row: TitleRow, reaction: Reaction | null, at: Stamp): TitleRow {
   return { ...row, reaction: { value: reaction, at } };
 }

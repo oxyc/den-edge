@@ -14,15 +14,15 @@
   ] as const;
 </script>
 
-<div class="reactions" aria-label="Your opinion">
+<div class="reactions" role="group" aria-label="Your opinion">
   {#each options as option (option.value)}
     <button
       class={option.value}
       class:on={value === option.value}
       aria-label={option.label}
       aria-pressed={value === option.value}
-      disabled={busy}
-      onclick={() => onchange(value === option.value ? null : option.value)}
+      aria-disabled={busy}
+      onclick={() => !busy && onchange(value === option.value ? null : option.value)}
     >
       <span class="glyph"><DetailIcon name={option.value} filled={value === option.value} /></span
       ><span class="label">{option.label}</span>

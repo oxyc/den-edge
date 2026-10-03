@@ -28,6 +28,7 @@
   import RelatedTitles from './RelatedTitles.svelte';
   import TitleSources from './TitleSources.svelte';
   import { isBlocked } from '../lib/parental';
+  import { blockedTitles } from '../lib/blockedTitles.svelte';
   import Trailer from './Trailer.svelte';
   import { sharedInstallOf } from '../lib/grants';
   import { premeasureLink } from '../lib/remux';
@@ -225,6 +226,11 @@
    * trailer. Unknown ratings are not blocked (`parental.isBlocked`), so an unrated title reads as it always did.
    */
   const restricted = $derived(!!detail && isBlocked(detail.certifications, region, ceiling));
+  // Shared with the poster's own ⋯ menu (`blockedTitles.ts`), so it can hide Play for a title this browser
+  // already knows the household's ceiling refuses, without a certification fetch of its own.
+  $effect(() => {
+    if (detail) blockedTitles.mark(ref, restricted);
+  });
   let season = $state<number | null>(null);
   let seasonEpisodes = $state<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
@@ -591,13 +597,13 @@
           {#if onseason && seasonMarkable.length}
             <button
               class="season-seen"
-              aria-pressed={seasonSeen}
+              class:on={seasonSeen}
               aria-label={seasonSeen
                 ? `Mark season ${displayedSeason} unwatched`
                 : `Mark season ${displayedSeason} watched`}
               title={seasonSeen ? 'Mark season unwatched' : 'Mark season watched'}
-              disabled={busy || seasonLoading}
-              onclick={() => markSeason(!seasonSeen)}
+              aria-disabled={busy || seasonLoading}
+              onclick={() => !(busy || seasonLoading) && markSeason(!seasonSeen)}
             >
               <DetailIcon name={seasonSeen ? 'eye' : 'check'} />
             </button>
@@ -927,12 +933,12 @@
     outline-offset: 3px;
   }
 
-  .season-seen:disabled {
+  .season-seen[aria-disabled='true'] {
     opacity: 0.5;
     cursor: default;
   }
 
-  .season-seen[aria-pressed='true'] {
+  .season-seen.on {
     color: var(--fg);
   }
 

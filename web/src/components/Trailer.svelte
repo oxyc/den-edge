@@ -1,7 +1,30 @@
 <!-- A title's trailer, in YouTube's embed (youtube-nocookie.com): the web's trailers, from the YouTube id TMDB lists —
      the one the TV falls back to when it can't reach den-reel. -->
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
+
   let { key, title, onclose }: { key: string; title: string; onclose: () => void } = $props();
+
+  let out: HTMLAnchorElement;
+  let close: HTMLButtonElement;
+  /** Whatever had focus when this opened — the Trailer button, almost always — so it gets focus back on close,
+      whatever closes it: the Close button, Escape, or the page unmounting this some other way. */
+  let opener: HTMLElement | null = null;
+
+  onMount(() => {
+    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    close?.focus();
+  });
+  onDestroy(() => opener?.focus());
+
+  /** Tab stays inside the dialog's two controls, rather than walking off into the page behind the overlay. */
+  function trapTab(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    if (event.shiftKey ? document.activeElement === out : document.activeElement === close) {
+      event.preventDefault();
+      (event.shiftKey ? close : out)?.focus();
+    }
+  }
 
   // The page behind stays put: it would otherwise scroll under the overlay.
   $effect(() => {
@@ -19,20 +42,28 @@
   onkeydown={(event) => event.key === 'Escape' && !document.fullscreenElement && onclose()}
 />
 
-<div class="trailer" role="dialog" aria-modal="true" aria-label={`${title}: trailer`}>
+<div
+  class="trailer"
+  role="dialog"
+  aria-modal="true"
+  aria-label={`${title}: trailer`}
+  tabindex="-1"
+  onkeydown={trapTab}
+>
   <header>
     <b>{title}</b>
     <!-- The way out of an embed that won't play: a trailer whose owner disabled embedding shows only "Watch on
          YouTube" here, and nothing in the page can be told that happened. On a phone the link opens the app. -->
     <a
+      bind:this={out}
       class="out"
       href={`https://www.youtube.com/watch?v=${encodeURIComponent(key)}`}
       target="_blank"
       rel="noopener noreferrer"
     >
-      {@render out()}<span class="label">YouTube, in a new tab</span>
+      {@render outIcon()}<span class="label">YouTube, in a new tab</span>
     </a>
-    <button class="close" onclick={onclose}>
+    <button bind:this={close} class="close" onclick={onclose}>
       {@render cross()}<span class="label">Close</span>
     </button>
   </header>
@@ -46,7 +77,7 @@
   ></iframe>
 </div>
 
-{#snippet out()}
+{#snippet outIcon()}
   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M14 4.5h5.5V10" />
     <path d="M19.5 4.5 12 12" />
