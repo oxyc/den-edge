@@ -5,6 +5,8 @@
 //!   GET    /recovery        (member proof)                        → { entries: [{ locator, createdAt, opens, lastOpenedAt }] }
 //!   DELETE /recovery        { locator }          (member proof) → { deleted }
 //!   POST   /recovery/open   { locator }          (no credential)  → { sealed } | 404 unknown_code
+//!   POST   /recovery/timing { op, outcome, ms, device } (no credential) → 204: how long a browser's Argon2id took,
+//!                           logged as one line, so real devices' numbers arrive in use (§3)
 //!
 //! The member proof is `x-den-library-member: <id>:<member>`, as `library::is_member` checks it; an entry belongs to
 //! the library that proof names, and a locator under another library reads as absent. Locators travel in bodies,
@@ -41,6 +43,8 @@ const OPEN_SHORT: (u32, u64) = (5, 10 * MINUTE_MS);
 const OPEN_DAY: (u32, u64) = (20, 24 * 60 * MINUTE_MS);
 /// `POST`, `GET` and `DELETE /recovery` per visitor, counted only once the member proof holds.
 const OWNER: (u32, u64) = (60, 60 * MINUTE_MS);
+/// `POST /recovery/timing` per visitor: a person makes or redeems a code a handful of times.
+const TIMING: (u32, u64) = (10, 60 * MINUTE_MS);
 /// Recovery's own budget table (`AppState::recovery_claims`): two per visitor that opens, one per member. Full, it
 /// evicts rather than refuses (`link::Throttles`), so filling it locks nobody out (§5).
 pub const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
@@ -123,11 +127,47 @@ fn limited(state: &AppState, bucket: &str, ip: &str, (limit, window): (u32, u64)
 }
 
 pub fn is_path(path: &str) -> bool {
-    path == "/recovery" || path == "/recovery/open"
+    matches!(path, "/recovery" | "/recovery/open" | "/recovery/timing")
+}
+
+/// One Argon2id timing a browser reported, as the line den-edge logs: nothing but the operation, its outcome, its
+/// time and a short device label the page chose ("iPhone · Safari"). No locator, code or library.
+fn timing_line(body: &Value) -> Option<String> {
+    let op = body.get("op").and_then(Value::as_str).filter(|op| matches!(*op, "make" | "redeem"))?;
+    let outcome = body
+        .get("outcome")
+        .and_then(Value::as_str)
+        .filter(|o| matches!(*o, "ok" | "timeout" | "memory" | "error"))?;
+    let ms = body.get("ms").and_then(Value::as_u64).filter(|ms| *ms <= 10 * 60 * 1000)?;
+    let device = body.get("device").and_then(Value::as_str).filter(|d| {
+        (1..=40).contains(&d.chars().count())
+            && d.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '·' | '/'))
+    })?;
+    Some(format!("recovery timing: op={op} outcome={outcome} ms={ms} device=\"{device}\""))
+}
+
+async fn timing(req: Request) -> Response {
+    let body = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let Some(line) = timing_line(&body) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("bad_request"));
+    };
+    eprintln!("{line}");
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::NO_CONTENT;
+    resp
 }
 
 pub async fn handle(state: &AppState, req: Request) -> Response {
     let ip = crate::handler::client_ip(state, &req);
+    if req.uri().path() == "/recovery/timing" {
+        if let Some(refused) = limited(state, "recovery-timing", &ip, TIMING) {
+            return refused;
+        }
+        return timing(req).await;
+    }
     // `/recovery/open` takes only a POST: `handler::allowed_methods` refuses anything else before this.
     if req.uri().path() == "/recovery/open" {
         if let Some(refused) = limited(state, "recovery-open", &ip, OPEN_SHORT)
@@ -524,6 +564,33 @@ mod tests {
             .await;
         assert_eq!(pair.status(), StatusCode::OK, "and pairing is untouched");
         assert!(crate::lock(&h.state.claims).len() < 4, "recovery never counted in the shared table");
+    }
+
+    /// A browser's Argon2id timing is one log line of the operation, outcome, time and a short device label; anything
+    /// else in the body is refused rather than logged, and the route is limited per visitor.
+    #[tokio::test]
+    async fn a_timing_report_is_one_bounded_line() {
+        let ok = json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "iPhone · Safari" });
+        assert_eq!(
+            timing_line(&ok).as_deref(),
+            Some("recovery timing: op=redeem outcome=ok ms=141 device=\"iPhone · Safari\"")
+        );
+        for bad in [
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "x\ny" }),
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": LOC.repeat(2) }),
+            json!({ "op": "steal", "outcome": "ok", "ms": 141, "device": "Mac" }),
+            json!({ "op": "make", "outcome": "fine", "ms": 141, "device": "Mac" }),
+            json!({ "op": "make", "outcome": "ok", "ms": -1, "device": "Mac" }),
+        ] {
+            assert_eq!(timing_line(&bad), None, "{bad}");
+        }
+        let h = Harness::new();
+        let post = |body: Value| h.send("POST", "/recovery/timing", Some(body.to_string()), &[]);
+        for _ in 0..TIMING.0 {
+            assert_eq!(post(ok.clone()).await.status(), StatusCode::NO_CONTENT);
+        }
+        assert_eq!(post(ok.clone()).await.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(crate::handler::route_label("/recovery/timing"), "/recovery/timing");
     }
 
     /// The owner routes count a visitor only once the member proof holds: anonymous calls make no bucket.

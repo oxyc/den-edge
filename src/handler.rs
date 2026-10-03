@@ -744,6 +744,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
         "/recovery" => "/recovery",
         "/recovery/open" => "/recovery/open",
+        "/recovery/timing" => "/recovery/timing",
         "/tmdb/warm" => "/tmdb/warm",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
@@ -781,7 +782,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const GET_POST_DELETE: &[Method] = &[Method::GET, Method::POST, Method::DELETE];
     match route {
         "/recovery" => Some(GET_POST_DELETE),
-        "/recovery/open" => Some(POST),
+        "/recovery/open" | "/recovery/timing" => Some(POST),
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
