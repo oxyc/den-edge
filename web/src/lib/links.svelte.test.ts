@@ -118,3 +118,21 @@ it('keeps a link removed while storage was full removed, through the next change
   tab.makeCurrent('a'.repeat(16));
   expect(tab.list.map((link) => link.name)).toEqual(['Living room']);
 });
+
+it("a key reset moves every link to the library onto the new key, and the old library's 410 drops none", () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  tab.add('b'.repeat(16), { ...KEYS, name: 'Bedroom' });
+  tab.add('c'.repeat(16), { libraryKey: 'b3RoZXI=', linkKey: 'x', name: 'Cabin' });
+  const before = tab.list[0]!;
+  tab.rekey(KEYS.libraryKey, 'bmV3');
+  expect(readLinks().map((link) => link.libraryKey)).toEqual(['bmV3', 'bmV3', 'b3RoZXI=']);
+  expect(tab.keyReset).toBe(true);
+  // The session still open on the old key hears `410 library_moved`: its own reset, not another device's.
+  tab.forgetMoved(before);
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room', 'Bedroom', 'Cabin']);
+  expect(tab.moved).toBeNull();
+  // A link another device's reset cut off is still forgotten.
+  tab.forgetMoved(tab.list[2]!);
+  expect(tab.list.map((link) => link.name)).toEqual(['Living room', 'Bedroom']);
+});

@@ -167,6 +167,56 @@ function writeBrowsing(storage: Storage | undefined = globalThis.localStorage): 
   }
 }
 
+const PENDING_RESET_KEY = 'den.keyReset';
+
+/**
+ * A key reset under way, or cut short (`keyReset.ts`): the library key it moves from, and the one it moves to. Kept
+ * before the new library gets its first row, so a reset that deleted the old library and then lost the tab doesn't
+ * lose the library for every device; `settlePendingReset` finishes or undoes it.
+ */
+export interface PendingReset {
+  from: string;
+  to: string;
+  /** The device that started it: settling may stamp its `set:devices` entry (`LibraryLog.fence`). */
+  device: string;
+  /**
+   * The old library is gone but den-edge didn't say which reset retired it (a `410` naming no successor, from a
+   * den-edge before successor tags). Never adopted on its own: `to` is kept, as it may be the only key to the
+   * library, until a standing check proves the reset was this one or the person chooses to use it.
+   */
+  held?: boolean;
+}
+
+export function readPendingReset(
+  storage: Storage | undefined = globalThis.localStorage,
+): PendingReset | null {
+  try {
+    const value = JSON.parse(storage?.getItem(PENDING_RESET_KEY) ?? 'null') as unknown;
+    if (value && typeof value === 'object') {
+      const { from, to, device, held } = value as Record<string, unknown>;
+      if (typeof from === 'string' && typeof to === 'string' && typeof device === 'string')
+        return { from, to, device, ...(held === true ? { held: true } : {}) };
+    }
+  } catch {
+    /* Nothing readable is kept: no reset is pending. */
+  }
+  return null;
+}
+
+/** Keep `pending`, or clear it with null. False when it couldn't be kept, and a reset must then not start. */
+export function writePendingReset(
+  pending: PendingReset | null,
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  try {
+    if (pending) storage!.setItem(PENDING_RESET_KEY, JSON.stringify(pending));
+    else storage?.removeItem(PENDING_RESET_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The links and shared devices, as every tab of this browser keeps them. Each change starts from what storage holds
  * now, and a change made in another tab is taken up as it lands (`storage`). Each tab used to write its own copy from
@@ -183,6 +233,8 @@ export class Links {
   browsing = $state<boolean>(readBrowsing());
   /** The TV a link was forgotten for because it reset its library key, until this browser links again. */
   moved = $state<string | null>(null);
+  /** This tab reset the library key (`rekey`), so Settings can say what that means once the library reopens. */
+  keyReset = $state(false);
   /**
    * The link this tab has open (`current`), by its inbox key. Another tab making a different link current changes
    * what the next load opens, not this tab: the app is keyed on the current link, so pairing a TV in one tab
@@ -351,10 +403,36 @@ export class Links {
       );
   }
 
-  /** The TV reset its library key and dropped this browser: its keys reach nothing, so it pairs again. */
+  /**
+   * The TV reset its library key and dropped this browser: its keys reach nothing, so it pairs again. Not a link this
+   * browser is moving, or has moved, to a new key itself (`rekey`, `PendingReset`): the old library's `410` is then
+   * its own reset.
+   */
   forgetMoved(link: Link): void {
+    this.reread();
+    const kept = this.list.find((l) => l.inboxKey === link.inboxKey);
+    if (kept && kept.libraryKey !== link.libraryKey) return;
+    if (readPendingReset()?.from === link.libraryKey) return;
     this.remove(link.inboxKey);
     this.moved = link.name ?? 'Your Apple TV';
+  }
+
+  /**
+   * A key reset finished: every link to the library opens it under `to` from now on, and the reset is no longer
+   * pending. What this browser kept of it under `from` goes, and so do its records of the devices it gave `from` to:
+   * the reset cut them off. The app reopens the library under the new key.
+   */
+  rekey(from: string, to: string): void {
+    this.reread();
+    this.list = this.list.map((l) => (l.libraryKey === from ? { ...l, libraryKey: to } : l));
+    this.shared = this.shared.filter((s) => s.libraryKey !== from);
+    this.keyReset = true;
+    this.saveLinks();
+    this.saveShared();
+    writePendingReset(null);
+    void forgetLibrary(from).catch((error: unknown) =>
+      console.warn('den: the kept library could not be dropped', error),
+    );
   }
 }
 

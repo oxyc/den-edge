@@ -1,7 +1,7 @@
 <!-- Settings › Connections, as on the TV: media servers, trackers, the user's own keys, plugins and linked devices.
      Everything here is the library's (`set:keys`, `set:servers`, `set:plugins`, `set:trust`, `set:devices`), sealed,
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
-     server on its own network, reset the library key — says where to do it. -->
+     server on its own network — says where to do it. -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -22,6 +22,7 @@
   import { guestGrants } from '../lib/grants.svelte';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
+  import type { KeyResetRefusal } from '../lib/keyReset';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
@@ -47,6 +48,10 @@
     write,
     removeDevice,
     onjoin,
+    onresetkey,
+    hasRecoveryCode = false,
+    heldReset = false,
+    onadoptheld,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -69,6 +74,17 @@
      * links to it, so what was saved here goes along. False when it couldn't.
      */
     onjoin?: (libraryKey: string) => Promise<boolean>;
+    /**
+     * Moves the library to a new key, cutting off every other device (library v4 §12). Null when it moved, else why it
+     * didn't. Absent where this browser can't: no linked library, or one not on v4 yet.
+     */
+    onresetkey?: () => Promise<KeyResetRefusal | null>;
+    /** The library has a recovery code, which a reset ends. */
+    hasRecoveryCode?: boolean;
+    /** A reset whose outcome den-edge couldn't prove is held, its new key kept (`PendingReset.held`). */
+    heldReset?: boolean;
+    /** Use the held reset's new key: the person says this browser made it. */
+    onadoptheld?: () => Promise<void>;
   } = $props();
 
   const hostOf = (url: string) => {
@@ -498,6 +514,30 @@
     };
   });
 
+  // Resetting the library key: every other device is cut off and pairs again; this browser keeps the library.
+  let resetting = $state(false);
+  let resetProblem = $state<string | null>(null);
+  const resetFailures: Record<KeyResetRefusal, string> = {
+    update_required:
+      'Your library holds something only a newer version of Den can move. Update Den on your devices, then try again.',
+    unavailable:
+      'Couldn’t move your library to a new key, so nothing changed. Check that this device is on your network and try again.',
+    unknown:
+      'Den lost the connection at the last step, so it can’t tell yet whether your library has its new key. Nothing is lost either way. Den checks again by itself while Settings is open; you can also press Reset library key again to check now.',
+    moved:
+      'Another device reset your library’s key first, so this browser no longer has it. Pair it again with a code from that device.',
+    held: 'Reset outcome unknown: the new key is kept.',
+  };
+  async function resetKey() {
+    if (!onresetkey) return;
+    resetting = true;
+    resetProblem = null;
+    const refused = await onresetkey();
+    resetting = false;
+    // A held reset has its own panel, with the way out.
+    if (refused && refused !== 'held') resetProblem = resetFailures[refused];
+  }
+
   /**
    * One step for the viewer: the device's entry in the library's list, then this browser's own record of giving it the
    * library. Neither takes the library away from it; only a new library key does.
@@ -814,9 +854,47 @@
     {:else}
       <p class="status">None yet: a device shows up here when it next opens your library.</p>
     {/if}
-    <p class="foot">
-      To cut a device off, reset the library key on your Apple TV under Settings › Linked devices.
-    </p>
+    {#if heldReset}
+      <div class="pair" role="alert">
+        <p>
+          <b>Reset outcome unknown.</b> Your library’s old key no longer works, but Den can’t tell whether
+          this browser’s reset retired it. The new key is kept here, so nothing is lost. If you reset
+          the key on this browser just now, use the new key. If another device also reset the key, pair
+          again with a code from it instead.
+        </p>
+        <button type="button" class="primary" onclick={() => void onadoptheld?.()}
+          >Use the new key</button
+        >
+      </div>
+    {/if}
+    {#if onresetkey}
+      <div class="form">
+        <Confirm
+          label={resetting ? 'Resetting…' : 'Reset library key…'}
+          question="Reset your library key?"
+          detail={`Your library moves to a new key, with everything in it. Every other device — your Apple TV too — loses it and must pair again with a code; this browser keeps it.${hasRecoveryCode ? ' Your recovery code stops working.' : ''}`}
+          confirmLabel="Reset key"
+          disabled={disabled || resetting}
+          onconfirm={() => void resetKey()}
+        />
+      </div>
+      {#if resetting}<p class="status" role="status">Moving your library to a new key…</p>{/if}
+      {#if resetProblem}<p class="status bad" role="alert">{resetProblem}</p>{/if}
+      {#if links.keyReset}
+        <p class="status" role="status">
+          Your library has a new key. Pair your other devices again: get a code below, or on the
+          Apple TV under Settings › Linked devices.
+        </p>
+      {/if}
+      <p class="foot">
+        To cut a device off, reset the library key. Removing it from the list doesn’t: it still
+        holds the key.
+      </p>
+    {:else}
+      <p class="foot">
+        To cut a device off, reset the library key on your Apple TV under Settings › Linked devices.
+      </p>
+    {/if}
 
     {#if links.list.length}
       <h3>Your library</h3>

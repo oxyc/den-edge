@@ -22,6 +22,7 @@ import {
   newest,
   open,
   openEntry,
+  openPlaintext,
   rowName,
   seal,
   sealPlaintext,
@@ -75,6 +76,49 @@ interface DryRun {
 
 /** The highest library format this build reads and writes. */
 export const WIRE = 4;
+
+/**
+ * What a move to another key carries (library v4 §12, `LibraryLog.moving`): the decoded rows, the plaintext of each
+ * newer-format document, and the head and generation they were read at.
+ */
+export interface Moving {
+  rows: Row[];
+  kept: { name: string; plaintext: Uint8Array<ArrayBuffer> }[];
+  head: number;
+  generation: string | null;
+  /** The device moving it. */
+  device: string;
+}
+
+/** Why a move did not start: a row only a newer build can carry, or a library that can't be read or moved now. */
+export type MoveRefusal = 'update_required' | 'unavailable';
+
+/**
+ * How the end of a move went for the library it left (`endMoved`):
+ * - `deleted`: by this move.
+ * - `changed`: written to after the move read it; copy again first.
+ * - `failed`: still there, and fenced against a late `DELETE`, so the new library can go.
+ * - `lost`: another device's reset deleted it, naming its own successor; the new library is a copy nobody needs.
+ * - `lost_unnamed`: deleted, naming no successor, so whose move it was can't be told; the new library stays.
+ * - `unknown`: den-edge can't say yet; the new library, and the pending reset, stay.
+ */
+export type MoveEnd = 'deleted' | 'changed' | 'failed' | 'lost' | 'lost_unnamed' | 'unknown';
+
+/**
+ * What a key reset's `DELETE` names as its successor (`x-den-successor`), and den-edge's `410` names back: the
+ * lowercase hex SHA-256 of the new library's id. The device that reset knows that id and can match it; nobody else
+ * who reads the `410` learns the new id.
+ */
+export async function successorTag(id: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', utf8.encode(id));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** A `410`'s successor read against `tag`: no successor is never ours (it may be a marker den-edge couldn't read). */
+function movedTo(moved: { successor?: string }, tag: string): MoveEnd {
+  if (moved.successor === undefined) return 'lost_unnamed';
+  return moved.successor === tag ? 'deleted' : 'lost';
+}
 
 /** Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). */
 const legacy = (row: Row): boolean =>
@@ -760,6 +804,12 @@ export class LibraryLog {
       return true;
     }
     try {
+      // A library this tab never read (one a key reset started) is deleted under the generation den-edge gives it.
+      if (!this.generation) {
+        const standing = await this.standing();
+        if (standing && 'head' in standing && standing.generation)
+          this.generation = standing.generation;
+      }
       const res = await this.send(`/lib/${this.keys.id}`, {
         method: 'DELETE',
         headers: this.headers(),
@@ -767,6 +817,325 @@ export class LibraryLog {
       return res.ok || res.status === 404;
     } catch {
       return false;
+    }
+  }
+
+  /** The `{id}` in `/lib/{id}/…`: not secret, and what a `410 library_moved` names as a successor. */
+  get libraryId(): string {
+    return this.keys.id;
+  }
+
+  /** `x-den-library-member` for this library: a new library's first write names it (`NEW_LIBRARIES=members`). */
+  get memberProof(): string {
+    return `${this.keys.id}:${this.keys.member}`;
+  }
+
+  /**
+   * Library v4 §12: what a move of this library to another key carries, read from den-edge to its head. Every
+   * document and settings row, decoded, to be sealed again under the destination's names; a document of a newer
+   * `format` as its plaintext, unchanged. A row whose name this build can't rebuild — a newer framing, or a kind it
+   * doesn't know — refuses the move (`update_required`), and so do v2 or v3 rows the switch has yet to convert. An
+   * unreadable row is left behind: it can't be attributed to a name, and §4 removes it anyway. `set:recovery` stays
+   * too: a recovery code wraps the old key, and a reset ends it (recovery-code §9). `set:devices` keeps only `device`
+   * (the one moving it): every other device is cut off, and lists itself again once it pairs back in.
+   */
+  async moving(device: string): Promise<Moving | { refused: MoveRefusal }> {
+    if (this.offline || this.moved || this.wireMin < WIRE) return { refused: 'unavailable' };
+    if (this.wireMin > WIRE || this.switchFailure !== null || this.predatesV3)
+      return { refused: 'update_required' };
+    await ensureSyncPolicy();
+    // Writes queued before the move land in the log it reads.
+    await this.writes;
+    let read: { entries: RawEntry[]; head: number; generation: string | null } | null;
+    try {
+      read = await this.readAll();
+    } catch {
+      read = null;
+    }
+    if (!read) return { refused: 'unavailable' };
+    const rows: Row[] = [];
+    const kept: Moving['kept'] = [];
+    for (const { k, v } of read.entries) {
+      const opened = await openEntry(this.keys, k, v);
+      if ('unknown' in opened || 'newerFraming' in opened) {
+        console.warn(`den: the library row ${k} can't be moved by this build`);
+        return { refused: 'update_required' };
+      }
+      if ('unreadable' in opened) {
+        // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
+        console.warn(`den: the unreadable library row ${k} stays behind (${opened.unreadable})`);
+        continue;
+      }
+      const row = opened.row;
+      if (legacy(row)) return { refused: 'unavailable' };
+      if (row.kind === 'set' && row.name === 'recovery') continue;
+      if (row.kind === 'set' && row.name === 'devices') {
+        rows.push({
+          ...row,
+          values: Object.fromEntries(
+            Object.entries(row.values).filter(([name]) => name.startsWith(`${device}.`)),
+          ),
+        });
+        continue;
+      }
+      if (opened.newer)
+        kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
+      else rows.push(row);
+    }
+    return { rows, kept, head: read.head, generation: read.generation, device };
+  }
+
+  /** Every row in the log to its head, as den-edge stores it; null when a page couldn't be read. */
+  private async readAll(): Promise<{
+    entries: RawEntry[];
+    head: number;
+    generation: string | null;
+  } | null> {
+    const entries: RawEntry[] = [];
+    let since = 0;
+    let generation: string | null = null;
+    for (;;) {
+      const res = await this.send(`/lib/${this.keys.id}/changes?since=${since}&limit=1000`, {
+        headers: this.headers(),
+      });
+      if (!res.ok) return null;
+      const page = (await res.json()) as Page;
+      generation ??= page.generation ?? res.headers.get('x-den-generation');
+      if ((page.generation ?? generation) !== generation) return null;
+      entries.push(...page.entries);
+      if (!page.more || page.entries.length === 0) return { entries, head: page.head, generation };
+      since = page.entries.at(-1)!.seq;
+    }
+  }
+
+  /**
+   * A library to move another into (§12), by its key: nothing is read or asked of den-edge until `takeMoved`, and the
+   * relayed services' credential stays the current library's.
+   */
+  static async destination(
+    libraryKey: string,
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+  ): Promise<LibraryLog> {
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    return new LibraryLog(await deriveKeys(raw), fetchImpl, storage);
+  }
+
+  /**
+   * Work this browser kept for this library and hasn't sent (`pendingPrefix`), sealed again under `to`'s key and
+   * kept for it: after a key reset, an edit another tab saved here reaches the library under its new key. A piece
+   * that doesn't open is left where it was.
+   */
+  async rekeyKept(to: LibraryLog): Promise<void> {
+    if (!this.storage) return;
+    const reseal = (sealed: { k: string; v: string }[]) =>
+      Promise.all(sealed.map(async ({ k, v }) => seal(to.keys, await open(this.keys, k, v))));
+    for (const key of this.keptKeys()) {
+      try {
+        const pending = JSON.parse(this.storage.getItem(key)!) as {
+          k?: string;
+          v?: string;
+          ops?: string;
+          bulk?: { k: string; v: string }[];
+          restore?: { k: string; v: string }[];
+          rows?: { k: string; v: string }[];
+        };
+        let moved: unknown;
+        if (pending.ops !== undefined)
+          moved = { ops: await to.sealKept(await this.openKept(pending.ops)) };
+        else if (pending.bulk) moved = { bulk: await reseal(pending.bulk) };
+        else if (pending.restore) moved = { restore: await reseal(pending.restore) };
+        else if (pending.rows) moved = { rows: await reseal(pending.rows) };
+        else moved = (await reseal([{ k: pending.k!, v: pending.v! }]))[0];
+        this.storage.setItem(
+          to.pendingPrefix + key.slice(this.pendingPrefix.length),
+          JSON.stringify(moved),
+        );
+        this.storage.removeItem(key);
+      } catch (error) {
+        console.warn('den: an unsent edit could not be moved to the new library key', error);
+      }
+    }
+  }
+
+  /** The storage keys of the work this browser kept for this library (`pendingPrefix`). */
+  private keptKeys(): string[] {
+    const keys: string[] = [];
+    for (let i = 0; i < (this.storage?.length ?? 0); i++) {
+      const key = this.storage!.key(i);
+      if (key?.startsWith(this.pendingPrefix)) keys.push(key);
+    }
+    return keys;
+  }
+
+  /**
+   * The rows of a move (§12) written here: each re-sealed under this library's name for it and merged with this
+   * library's version of that name; over 256 KiB merged, this library's version stands (§11). A newer-format document
+   * goes as its plaintext and never over a version already here. The first write starts the library at minimum 4,
+   * named by `member` — the library it moves from. True when every row is here.
+   */
+  async takeMoved(moving: Moving, member: string): Promise<boolean> {
+    await ensureSyncPolicy();
+    const rows = new Map(moving.rows.map((row) => [rowName(row), row]));
+    const kept = new Map(moving.kept.map((entry) => [entry.name, entry.plaintext]));
+    for (let round = 0; round < ROUNDS && (rows.size || kept.size); round++) {
+      const writes: { name: string; row?: Row; base: number; k: string; v: string }[] = [];
+      for (const [name, ours] of rows) {
+        const held = this.acknowledged.get(name);
+        if (held && isDocument(held.row) && held.row.format > WIRE) {
+          rows.delete(name);
+          continue;
+        }
+        const row = held ? merge(held.row, ours) : ours;
+        if (held && canonical(held.row) === canonical(row)) {
+          rows.delete(name);
+          continue;
+        }
+        if (isDocument(row) && !encodeDocument(row, false)) {
+          console.warn(`den: ${name} would be too large merged with the library it moves into`);
+          rows.delete(name);
+          continue;
+        }
+        writes.push({ name, row, base: held?.seq ?? 0, ...(await seal(this.keys, row)) });
+      }
+      for (const [name, plaintext] of kept) {
+        if (this.acknowledged.has(name)) {
+          kept.delete(name);
+          continue;
+        }
+        writes.push({ name, base: 0, ...(await sealPlaintext(this.keys, name, plaintext)) });
+      }
+      for (const chunk of chunks(writes)) {
+        const res = await this.send(`/lib/${this.keys.id}/batch`, {
+          method: 'POST',
+          headers: {
+            ...this.headers(),
+            'content-type': 'application/json',
+            'x-den-library-member': member,
+            'x-den-wire-min': String(WIRE),
+          },
+          body: JSON.stringify({ writes: chunk.map(({ k, base, v }) => ({ k, base, v })) }),
+        });
+        if (!res.ok) {
+          await this.failed(res);
+          return false;
+        }
+        this.generation = res.headers.get('x-den-generation') ?? this.generation;
+        const batch = (await res.json()) as Batch;
+        for (const write of chunk) {
+          const applied = batch.applied.find(({ k }) => k === write.k);
+          if (applied) {
+            // Held as written, so copying again after a write to the old library sends only what changed.
+            if (write.row) this.acknowledge(write.name, applied.seq, write.row);
+            rows.delete(write.name);
+            kept.delete(write.name);
+            continue;
+          }
+          const conflict = batch.conflicts.find(({ k }) => k === write.k);
+          if (!conflict || conflict.omitted || conflict.v === null) return false;
+          // Another version is here: the next round merges onto it.
+          const theirs = await this.readEntry({ k: conflict.k, v: conflict.v });
+          if (!theirs) return false;
+          this.acknowledged.set(write.name, { seq: conflict.seq, row: theirs });
+        }
+      }
+    }
+    return rows.size === 0 && kept.size === 0;
+  }
+
+  /**
+   * The end of a move away from this library to `successor` (§12, v2 §1 step 3): deleted on den-edge, which retires
+   * its id, so a device still holding its key gets `410 library_moved`. The `DELETE` names the head the move copied
+   * through and the successor's tag; a den-edge that knows them refuses a write since (`409 head_changed`) and names
+   * the tag in its `410`. Only a `200`, or den-edge naming this move's tag, is `deleted`; an answer that might have
+   * come after the library was retired is never taken as a failure without asking den-edge where it stands (`MoveEnd`).
+   */
+  async endMoved(moving: Moving, successor: LibraryLog): Promise<MoveEnd> {
+    const tag = await successorTag(successor.keys.id);
+    const check = await this.standing();
+    if (check === null) return 'failed';
+    if ('moved' in check) return movedTo(check, tag);
+    if (check.head !== moving.head || check.generation !== moving.generation) return 'changed';
+    let res: Response | null = null;
+    try {
+      res = await this.send(`/lib/${this.keys.id}`, {
+        method: 'DELETE',
+        headers: {
+          ...this.headers(),
+          'x-den-generation': moving.generation ?? '0',
+          'x-den-base': String(moving.head),
+          'x-den-successor': tag,
+        },
+      });
+    } catch {
+      /* Whether it landed is read from den-edge below. */
+    }
+    if (res?.ok) return 'deleted';
+    if (res?.status === 409) {
+      const code = await errorCode(res);
+      // Refused before anything changed: the copy goes again.
+      if (code === 'head_changed' || code === 'generation_changed') return 'changed';
+    }
+    // Any other answer, or none, may have come after den-edge retired the library: what it says now decides.
+    const after = await this.standing();
+    if (after === null) return 'unknown';
+    if ('moved' in after) return movedTo(after, tag);
+    // Still here — but a DELETE held somewhere on the way could land later. Moving the head past `base` first means
+    // it would be refused (`head_changed`), so the new library can go.
+    return (await this.fence(moving.device)) ? 'failed' : 'unknown';
+  }
+
+  /**
+   * A write that moves this library's head on — this device's `set:devices` entry stamped again — so that a key
+   * reset's `DELETE` still on its way is refused. False when it couldn't be written.
+   */
+  async fence(device: string): Promise<boolean> {
+    for (let round = 0; round < ROUNDS; round++) {
+      const now = Date.now();
+      const base: SettingsRow = this.settings('devices') ?? {
+        kind: 'set',
+        schema: 2,
+        name: 'devices',
+        values: {},
+      };
+      const row: SettingsRow = {
+        ...base,
+        values: {
+          ...base.values,
+          [`${device}.seen`]: { value: { int: now }, at: [now, 0, device] },
+        },
+      };
+      if (await this.writeAt(row, this.seqOf('set:devices'))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Where this library stands on den-edge: its head and generation, `moved` with the successor its `410` names
+   * (when den-edge records one), or null when den-edge can't be read.
+   */
+  async standing(): Promise<
+    { head: number; generation: string | null } | { moved: true; successor?: string } | null
+  > {
+    try {
+      const res = await this.send(`/lib/${this.keys.id}/changes?since=0&limit=1`, {
+        headers: this.headers(),
+      });
+      if (res.status === 410) {
+        const body = (await res.json().catch(() => ({}))) as { successor?: unknown };
+        return {
+          moved: true,
+          successor: typeof body.successor === 'string' ? body.successor : undefined,
+        };
+      }
+      if (!res.ok) return null;
+      const page = (await res.json()) as Page;
+      return {
+        head: page.head,
+        generation: page.generation ?? res.headers.get('x-den-generation'),
+      };
+    } catch {
+      return null;
     }
   }
 

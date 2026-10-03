@@ -81,7 +81,7 @@
   {#if !embedded}<h1>Link your Apple TV</h1>{/if}
   {#if links.moved}
     <p class="sub" role="status">
-      {links.moved} reset its library key, so this device needs to link again.
+      The library linked through {links.moved} got a new key, so this device needs to link again.
     </p>
   {/if}
   {#if !embedded}
