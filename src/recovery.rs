@@ -680,6 +680,23 @@ mod tests {
         assert_eq!(open_from(&h, &loc(9), &[]).await.status(), StatusCode::OK, "another library's stays");
     }
 
+    /// A key reset's DELETE (`x-den-base`, `x-den-successor`) deletes the entries only when it lands: refused for a
+    /// head that moved on, the code still opens; landed, it opens nothing, and a repeat learns the move with a `410`.
+    #[tokio::test]
+    async fn a_key_reset_deletes_the_entries_only_when_it_lands() {
+        let h = harness().await;
+        make(&h, LOC).await;
+        let path = format!("/lib/{LIB}");
+        let headers =
+            |base| [("x-den-library-token", TOKEN), ("x-den-base", base), ("x-den-successor", LIB2)];
+        let stale = h.send("DELETE", &path, None, &headers("0")).await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT, "the head moved on");
+        assert_eq!(open_from(&h, LOC, &[]).await.status(), StatusCode::OK, "kept");
+        assert_eq!(h.send("DELETE", &path, None, &headers("1")).await.status(), StatusCode::OK);
+        assert_eq!(open_from(&h, LOC, &[]).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(h.send("DELETE", &path, None, &headers("1")).await.status(), StatusCode::GONE);
+    }
+
     #[tokio::test]
     async fn an_entry_survives_a_restart_and_a_backup_restored_elsewhere() {
         let h = harness().await;
