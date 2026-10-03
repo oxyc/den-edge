@@ -10,8 +10,10 @@ import { exclusive, LibraryLog, successorTag, type MoveRefusal } from './log';
  * - `update_required`, `unavailable`: it didn't start, or was undone; the library is where it was.
  * - `unknown`: den-edge couldn't say whether the old library went. Both are kept, and it settles later.
  * - `moved`: another device's reset moved the library first; this browser is cut off and pairs again.
+ * - `held`: the old library is gone, but den-edge didn't say which reset retired it. The new key is kept, and used
+ *   only when a later check proves the reset was this one, or the person chooses to (`adoptHeldReset`).
  */
-export type KeyResetRefusal = MoveRefusal | 'unknown' | 'moved';
+export type KeyResetRefusal = MoveRefusal | 'unknown' | 'moved' | 'held';
 
 /** The new key, or why the library isn't on one. */
 export type KeyReset = { key: string } | { refused: KeyResetRefusal };
@@ -68,8 +70,10 @@ export function resetLibraryKey(
           await abandon(next, 'moved');
           return cutOff(from);
         case 'lost_unnamed':
-          writePendingReset(null);
-          return cutOff(from);
+          // Gone, but den-edge doesn't say whose reset it was. The new key may be the only key to the library: it is
+          // kept, held from adopting itself, until a standing check proves the reset or the person chooses.
+          hold({ from, to: key, device });
+          return { refused: 'held' };
         case 'unknown':
           return { refused: 'unknown' };
       }
@@ -83,21 +87,35 @@ export function resetLibraryKey(
  * - `adopted`: the old library is gone, its `410` naming the new one; every link moves to it.
  * - `undone`: the old library is still there; it is fenced against a late `DELETE`, and the new one deleted.
  * - `moved`: another device's reset moved it elsewhere; this browser is cut off.
+ * - `held`: it is gone, naming no reset; the new key is kept, and nothing adopts it on its own (`adoptHeldReset`).
  * - `unknown`: den-edge can't say yet; everything stays, for the next try.
  */
 export function settlePendingReset(
   destination: Destination = destinationOf,
-): Promise<'adopted' | 'undone' | 'moved' | 'unknown' | null> {
+): Promise<'adopted' | 'undone' | 'moved' | 'held' | 'unknown' | null> {
   return exclusive(LOCK, async () => {
     const pending = readPendingReset();
     return pending ? settle(pending, destination) : null;
   });
 }
 
+/**
+ * A held reset (`PendingReset.held`) taken up because the person says this browser made it: every link moves to the
+ * new key. Den never decides that on its own, since den-edge can't prove it. False when no reset is held.
+ */
+export function adoptHeldReset(): Promise<boolean> {
+  return exclusive(LOCK, async () => {
+    const pending = readPendingReset();
+    if (!pending?.held) return false;
+    links.rekey(pending.from, pending.to);
+    return true;
+  });
+}
+
 async function settle(
   pending: PendingReset,
   destination: Destination,
-): Promise<'adopted' | 'undone' | 'moved' | 'unknown'> {
+): Promise<'adopted' | 'undone' | 'moved' | 'held' | 'unknown'> {
   const [old, next] = await Promise.all([destination(pending.from), destination(pending.to)]);
   const standing = await old.standing();
   if (standing === null) return 'unknown';
@@ -107,9 +125,13 @@ async function settle(
       links.rekey(pending.from, pending.to);
       return 'adopted';
     }
-    // Another device's library, or one den-edge didn't name: either way not this reset's.
-    if (standing.successor !== undefined) await abandon(next, 'moved');
-    else writePendingReset(null);
+    if (standing.successor === undefined) {
+      // Not proven either way: the new key stays, held.
+      hold(pending);
+      return 'held';
+    }
+    // Another device's library: this reset's copy is one nobody needs.
+    await abandon(next, 'moved');
     cutOff(pending.from);
     return 'moved';
   }
@@ -117,6 +139,12 @@ async function settle(
   if (!(await old.fence(pending.device))) return 'unknown';
   await abandon(next, 'unavailable');
   return 'undone';
+}
+
+/** Keep the reset pending, held from adopting itself. A key that couldn't be kept is said loudly: it may be the only one. */
+function hold(pending: PendingReset): void {
+  if (!writePendingReset({ ...pending, held: true }))
+    console.error('den: the new library key of an unresolved reset could not be kept');
 }
 
 /** Another device's reset moved the library: the link to it goes, and the link screen says why. */

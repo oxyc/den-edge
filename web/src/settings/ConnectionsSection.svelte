@@ -50,6 +50,8 @@
     onjoin,
     onresetkey,
     hasRecoveryCode = false,
+    heldReset = false,
+    onadoptheld,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -79,6 +81,10 @@
     onresetkey?: () => Promise<KeyResetRefusal | null>;
     /** The library has a recovery code, which a reset ends. */
     hasRecoveryCode?: boolean;
+    /** A reset whose outcome den-edge couldn't prove is held, its new key kept (`PendingReset.held`). */
+    heldReset?: boolean;
+    /** Use the held reset's new key: the person says this browser made it. */
+    onadoptheld?: () => Promise<void>;
   } = $props();
 
   const hostOf = (url: string) => {
@@ -520,6 +526,7 @@
       'Den lost the connection at the last step, so it can’t tell yet whether your library has its new key. Nothing is lost either way. Den checks again by itself while Settings is open; you can also press Reset library key again to check now.',
     moved:
       'Another device reset your library’s key first, so this browser no longer has it. Pair it again with a code from that device.',
+    held: 'Reset outcome unknown: the new key is kept.',
   };
   async function resetKey() {
     if (!onresetkey) return;
@@ -527,7 +534,8 @@
     resetProblem = null;
     const refused = await onresetkey();
     resetting = false;
-    if (refused) resetProblem = resetFailures[refused];
+    // A held reset has its own panel, with the way out.
+    if (refused && refused !== 'held') resetProblem = resetFailures[refused];
   }
 
   /**
@@ -845,6 +853,18 @@
       </ul>
     {:else}
       <p class="status">None yet: a device shows up here when it next opens your library.</p>
+    {/if}
+    {#if heldReset}
+      <div class="pair" role="alert">
+        <p>
+          <b>Reset outcome unknown.</b> Your library’s old key no longer works, but Den can’t tell whether
+          this browser’s reset retired it. The new key is kept here, so nothing is lost. If you reset
+          the key on this browser just now, use the new key.
+        </p>
+        <button type="button" class="primary" onclick={() => void onadoptheld?.()}
+          >Use the new key</button
+        >
+      </div>
     {/if}
     {#if onresetkey}
       <div class="form">

@@ -179,6 +179,12 @@ export interface PendingReset {
   to: string;
   /** The device that started it: settling may stamp its `set:devices` entry (`LibraryLog.fence`). */
   device: string;
+  /**
+   * The old library is gone but den-edge didn't say which reset retired it (a `410` naming no successor, from a
+   * den-edge before successor tags). Never adopted on its own: `to` is kept, as it may be the only key to the
+   * library, until a standing check proves the reset was this one or the person chooses to use it.
+   */
+  held?: boolean;
 }
 
 export function readPendingReset(
@@ -187,9 +193,9 @@ export function readPendingReset(
   try {
     const value = JSON.parse(storage?.getItem(PENDING_RESET_KEY) ?? 'null') as unknown;
     if (value && typeof value === 'object') {
-      const { from, to, device } = value as Record<string, unknown>;
+      const { from, to, device, held } = value as Record<string, unknown>;
       if (typeof from === 'string' && typeof to === 'string' && typeof device === 'string')
-        return { from, to, device };
+        return { from, to, device, ...(held === true ? { held: true } : {}) };
     }
   } catch {
     /* Nothing readable is kept: no reset is pending. */

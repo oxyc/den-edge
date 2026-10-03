@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { react } from './actions';
-import { resetLibraryKey, settlePendingReset } from './keyReset';
+import { adoptHeldReset, resetLibraryKey, settlePendingReset } from './keyReset';
 import { links, readLinks, readPendingReset, writePendingReset } from './links.svelte';
 import { LibraryLog, successorTag } from './log';
 import { deliverSimkl } from './simklDelivery';
@@ -592,15 +592,30 @@ describe('resetting the library key (library v4 §12)', () => {
     expect(readPendingReset()).toBeNull();
   });
 
-  it('a 410 naming no successor is not this reset: it keeps the new library and adopts nothing', async () => {
+  it('a 410 naming no successor (a den-edge before tags) is never adopted on its own, and the new key stays readable', async () => {
     const server = edge({ legacy: true });
     const old = await server.seed(OLD_KEY, household(['', '1']));
     const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
     server.hooks.loseDeleteAnswer = true;
 
-    expect(await reset(log, server)).toEqual({ refused: 'moved' });
+    expect(await reset(log, server)).toEqual({ refused: 'held' });
     expect(server.retired.has(old.id)).toBe(true);
-    expect(server.libraries.size).toBe(1);
+    const pending = readPendingReset()!;
+    expect(pending).toMatchObject({ from: OLD_KEY, held: true });
+    // The only key to the library is kept, and opens it.
+    const kept = (await LibraryLog.open(pending.to, server.fetchImpl, undefined, null))!;
+    expect(kept.title({ type: 'movie', id: 550 })?.status.value).toBe('watched');
+    expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
+
+    // A later check still can't prove it: nothing changes on its own, and Reset reports the same.
+    expect(await settlePendingReset(destination(server))).toBe('held');
+    expect(await reset(log, server)).toEqual({ refused: 'held' });
+    expect(readPendingReset()?.to).toBe(pending.to);
+    expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
+
+    // The person says this browser made it: the links move to the kept key.
+    expect(await adoptHeldReset()).toBe(true);
+    expect(readLinks().map((link) => link.libraryKey)).toEqual([pending.to]);
     expect(readPendingReset()).toBeNull();
   });
 

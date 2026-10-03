@@ -26,7 +26,12 @@
   import { thisDevice } from './lib/device.svelte';
   import { onMount } from 'svelte';
   import { links, readPendingReset, type Link } from './lib/links.svelte';
-  import { resetLibraryKey, settlePendingReset, type KeyResetRefusal } from './lib/keyReset';
+  import {
+    adoptHeldReset,
+    resetLibraryKey,
+    settlePendingReset,
+    type KeyResetRefusal,
+  } from './lib/keyReset';
   import { dropLocalLibrary } from './lib/localLibrary';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
@@ -246,14 +251,23 @@
   async function resetKey(): Promise<KeyResetRefusal | null> {
     if (!log || !link) return 'unavailable';
     const reset = await resetLibraryKey(log, clock.device, link.libraryKey);
+    readHeld();
     return 'refused' in reset ? reset.refused : null;
+  }
+
+  /** A reset held because den-edge couldn't say whose it was (`PendingReset.held`): Settings offers to use its key. */
+  let heldReset = $state(readPendingReset()?.held === true);
+  const readHeld = () => (heldReset = readPendingReset()?.held === true);
+  async function adoptHeld() {
+    await adoptHeldReset();
+    readHeld();
   }
 
   // A reset this browser didn't see through is settled when Settings opens, and again every 30 seconds while it stays
   // pending (wire/library-v4 §12, den#192 spec §6): finished, the app reopens on the new key; undone, nothing changed.
   onMount(() => {
     const settle = () => {
-      if (readPendingReset()) void settlePendingReset();
+      if (readPendingReset()) void settlePendingReset().then(readHeld);
     };
     settle();
     const timer = window.setInterval(settle, 30_000);
@@ -304,6 +318,8 @@
       onjoin={session.local ? moveOwnLibrary : undefined}
       onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? resetKey : undefined}
       {hasRecoveryCode}
+      {heldReset}
+      onadoptheld={adoptHeld}
       {keys}
       simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
       {saveSimkl}
