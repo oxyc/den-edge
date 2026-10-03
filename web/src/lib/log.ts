@@ -269,6 +269,8 @@ export class LibraryLog {
   private compactedAt = 0;
   /** Why den-core's compaction guard last refused to remove the unreadable rows (§4); delivery stays paused. */
   compactionRefused: string | null = null;
+  /** `compactedKeys` as this page added to it. */
+  private readonly compacted = new Set<string>();
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -680,31 +682,67 @@ export class LibraryLog {
     return switched;
   }
 
+  /** Every `k` this browser has removed by compaction, kept with the library: none is removed twice (§4). */
+  private get compactedKeys(): Set<string> {
+    try {
+      const kept = this.storage?.getItem(`den.libraryCompacted.${this.keys.id}`);
+      return new Set([...this.compacted, ...(kept ? (JSON.parse(kept) as string[]) : [])]);
+    } catch {
+      return new Set(this.compacted);
+    }
+  }
+
+  private rememberCompacted(keys: string[]) {
+    for (const k of keys) this.compacted.add(k);
+    try {
+      this.storage?.setItem(
+        `den.libraryCompacted.${this.keys.id}`,
+        JSON.stringify([...this.compactedKeys]),
+      );
+    } catch {
+      // Storage blocked: this page remembers them.
+    }
+  }
+
   /**
    * Library v4 §4 *Unreadable rows*: once the log is read to its head, a fenced rewrite at the same minimum that
-   * stages every other row as it is stored, leaving out each unreadable one — unless it reads at `base` after all,
-   * and only when den-core's `compaction_guard` allows that many (many unreadable rows at once is a wrong key or a
-   * reader bug, not corruption). True when one was removed.
+   * stages every other row as it is stored, leaving out each row that **fails to open** at `base` — and only when
+   * den-core's `compaction_guard` allows that many. A row that opens is exactly what some writer sealed: if this
+   * build can't read it (`invalid_json`, `identity`, a den-core shape check), another may, so it is never removed and
+   * delivery stays paused. Nor is a `k` this browser compacted before, so two builds can't remove and restore one row
+   * in a loop. True when one was removed.
    */
   async compact(): Promise<boolean> {
     if (this.offline || this.wireMin < WIRE || !this.unreadable.size || this.readOnly) return false;
     if (Date.now() - this.compactedAt < RECHECK_MS) return false;
     this.compactedAt = Date.now();
-    const removing = new Set(this.unreadable.keys());
-    return this.fenced(async (_, raw) => {
+    const compacted = this.compactedKeys;
+    const removing = new Set(
+      [...this.unreadable]
+        .filter(([k, why]) => why === 'open' && !compacted.has(k))
+        .map(([k]) => k),
+    );
+    if (!removing.size) {
+      this.compactionRefused = 'rows_open';
+      console.warn(
+        `den: ${this.unreadable.size} library rows can't be read here but open, or were removed once already; not removing them, delivery stays paused`,
+      );
+      return false;
+    }
+    const removedKeys: string[] = [];
+    const done = await this.fenced(async (_, raw) => {
       const writes: { k: string; v: string }[] = [];
       let removed = 0;
       for (const entry of raw) {
         if (removing.has(entry.k)) {
           const opened = await openEntry(this.keys, entry.k, entry.v);
-          if ('unreadable' in opened) {
-            console.warn(
-              `den: removing the unreadable library row ${entry.k} (${opened.unreadable})`,
-            );
+          if ('unreadable' in opened && opened.unreadable === 'open') {
+            console.warn(`den: removing the library row ${entry.k}, which fails to open`);
+            removedKeys.push(entry.k);
             removed++;
             continue;
           }
-          this.unreadable.delete(entry.k);
+          if (!('unreadable' in opened)) this.unreadable.delete(entry.k);
         }
         writes.push({ k: entry.k, v: entry.v });
       }
@@ -724,6 +762,8 @@ export class LibraryLog {
       this.compactionRefused = null;
       return { writes, wireMin: this.wireMin };
     });
+    if (done) this.rememberCompacted(removedKeys);
+    return done;
   }
 
   /**

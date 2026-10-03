@@ -227,6 +227,8 @@
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
   let simklNote = $state<{ text: string; bad: boolean } | null>(null);
+  /** Said when an approval found the held list changed under it. */
+  let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
   $effect(() => () => {
     simklAttempt++;
@@ -630,9 +632,20 @@
             >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
           Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
         </p>
-        <button type="button" class="primary" {disabled} onclick={() => void approveRemovals()}
-          >Remove {heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL</button
-        >
+        <Confirm
+          label={`Remove ${heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL`}
+          question={`Remove ${heldRemovals.length === 1 ? 'this title' : `these ${heldRemovals.length} titles`} from your SIMKL watchlist?`}
+          detail="This can't be undone."
+          {disabled}
+          onconfirm={() =>
+            void approveRemovals().then(
+              (approved) =>
+                (removalsNote = approved
+                  ? null
+                  : 'The list changed while you were looking at it. Check it again before approving.'),
+            )}
+        />
+        {#if removalsNote}<p class="status bad" role="status">{removalsNote}</p>{/if}
       </div>
     {/if}
     {#if simkl}

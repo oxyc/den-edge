@@ -39,7 +39,7 @@
   import { relayFetch } from './lib/relayFetch';
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
-  import { heldSimklRemovals } from './lib/simklDelivery';
+  import { approveSimklRemovals, heldSimklRemovals, type HeldRemovals } from './lib/simklDelivery';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { ensureSyncPolicy } from './lib/syncLoader';
@@ -235,13 +235,13 @@
   }
 
   /** The SIMKL watchlist removals the removals latch holds, until someone approves them here or on a TV. */
-  const heldRemovals = $derived.by(() => {
+  const heldRemovals = $derived.by((): HeldRemovals => {
     void version;
     try {
-      return log ? heldSimklRemovals(log) : [];
+      return log ? heldSimklRemovals(log) : { titles: [], approval: null };
     } catch (error) {
       console.warn('den: the held SIMKL removals could not be read', error);
-      return [];
+      return { titles: [], approval: null };
     }
   });
 
@@ -252,7 +252,7 @@
   const heldNames = new SvelteMap<string, string>();
   $effect(() => {
     const key = tmdbKeyOf(keys);
-    const held = heldRemovals;
+    const held = heldRemovals.titles;
     // The names untracked: one arriving must not re-run this and drop the lookups still on their way.
     const wanted = untrack(() => held.filter((ref) => !heldNames.has(`${ref.type}:${ref.id}`)));
     if (!key || !wanted.length) return;
@@ -268,20 +268,18 @@
     };
   });
   const namedRemovals = $derived(
-    heldRemovals.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
+    heldRemovals.titles.map((ref) => ({ ...ref, name: heldNames.get(`${ref.type}:${ref.id}`) })),
   );
 
-  /** Approve them: `{"approved": <fresh stamp>}` on the account's delivery row, which counts for every device. */
+  /**
+   * Approve exactly the removals shown: the latest stamp among them, by compare-and-set on the account's delivery
+   * row, which counts for every device. False when the row changed meanwhile; the list is read and shown again.
+   */
   async function approveRemovals(): Promise<boolean> {
-    const account = simklConnection?.[0].slice('simkl:'.length);
-    if (!account) return false;
-    const at = clock.issue();
-    return write(
-      `deliver:simkl:${account}`,
-      { removals: { string: JSON.stringify({ approved: at }) } },
-      false,
-      at,
-    );
+    if (!log) return false;
+    const approved = await approveSimklRemovals(log, clock.device, heldRemovals);
+    session.changed(true);
+    return approved;
   }
 
   /**

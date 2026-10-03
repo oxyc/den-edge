@@ -316,8 +316,10 @@ interface V4Pending {
   commands: (V4Target & Record<string, unknown>)[];
   settle: V4Target[];
   greatest_epoch: number;
-  /** `"held"` when the removals latch closes in this pass (v3 §6). */
-  removals?: unknown;
+  /** `{held}` when the removals latch closes in this pass (v4 §9). */
+  removals?: { held: Stamp } | null;
+  /** The stamp an approval of the removals held now writes (v4 §9). */
+  approval?: Stamp | null;
   /** The account's unverified epochs after this read. */
   unverified?: number[];
 }
@@ -336,7 +338,14 @@ interface V4Pass {
   fetchImpl: typeof fetch;
 }
 
-const ordersHere = new Map<string, number>();
+/** This page's own order counters, per library: what it used where storage is blocked. */
+const ordersHere = new WeakMap<LibraryLog, Map<string, number>>();
+
+function ordersOf(log: LibraryLog): Map<string, number> {
+  let orders = ordersHere.get(log);
+  if (!orders) ordersHere.set(log, (orders = new Map()));
+  return orders;
+}
 
 /**
  * Settle orders that never repeat within an epoch (v3 §6): the last one this device used is kept in this browser,
@@ -344,8 +353,9 @@ const ordersHere = new Map<string, number>();
  * at 0 on every pass reused `[E, 1, device]` across passes and tabs, and a merge of two equal orders falls back to
  * byte order, which could bring back an older receipt.
  */
-function orderCounter(account: string, epoch: number): () => number {
+function orderCounter(log: LibraryLog, account: string, epoch: number): () => number {
   const key = `den.simklOrder.${account}.${epoch}`;
+  const ordersHere = ordersOf(log);
   let last = ordersHere.get(key) ?? 0;
   try {
     last = Math.max(last, Number(globalThis.localStorage?.getItem(key)) || 0);
@@ -361,6 +371,64 @@ function orderCounter(account: string, epoch: number): () => number {
       // As above.
     }
     return last;
+  };
+}
+
+/**
+ * The greatest epoch this browser has settled under for an account: every epoch it used keeps an order counter
+ * (`orderCounter`), so a take never reuses one, even after a restore rolls the row and the receipts back (v3 §6).
+ */
+function heldEpoch(log: LibraryLog, account: string): number {
+  const prefix = `den.simklOrder.${account}.`;
+  let greatest = 0;
+  const consider = (key: string | null) => {
+    if (key?.startsWith(prefix))
+      greatest = Math.max(greatest, Number(key.slice(prefix.length)) || 0);
+  };
+  for (const key of ordersOf(log).keys()) consider(key);
+  try {
+    const storage = globalThis.localStorage;
+    for (let i = 0; i < (storage?.length ?? 0); i++) consider(storage!.key(i));
+  } catch {
+    // Storage blocked: this page's own epochs still count.
+  }
+  return greatest;
+}
+
+/** When this page sent list removals, per library and account: the latch's 120-second window (v3 §6). */
+const removalsSent = new WeakMap<LibraryLog, Map<string, number[]>>();
+
+function recentRemovals(log: LibraryLog, account: string, sentNow = false): number[] {
+  let sent = removalsSent.get(log);
+  if (!sent) removalsSent.set(log, (sent = new Map()));
+  const recent = (sent.get(account) ?? []).filter((at) => at > Date.now() - 120_000);
+  if (sentNow) recent.push(Date.now());
+  sent.set(account, recent);
+  return recent;
+}
+
+/** A stamp's order (v2 §4): time, then counter, then device. */
+function stampOrder(a: Stamp, b: Stamp): number {
+  return a[0] - b[0] || a[1] - b[1] || (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0);
+}
+
+/** The removals latch as its setting stores it: JSON with sorted keys, as den-core's merge writes it. */
+function latchText(latch: Record<string, unknown>): string {
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(latch).sort(([a], [b]) => (a < b ? -1 : 1))),
+  );
+}
+
+/** The account's `set:deliver` facts `pending_targets_v4` reads (v4 §9). */
+function deliverFacts(log: LibraryLog, row: SettingsRow, account: string, since: Stamp) {
+  const unverified = row.values.unverified?.value;
+  return {
+    provider: 'simkl',
+    account,
+    since,
+    removals: jsonSetting(row, 'removals') ?? null,
+    unverified: unverified && 'ints' in unverified ? unverified.ints : [],
+    removals_sent: recentRemovals(log, account),
   };
 }
 
@@ -462,6 +530,8 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
       !(await send(command, target, pass.clientId, pass.token, pass.fetchImpl))
     )
       continue;
+    if (outcome.action === 'send' && command.kind === 'list' && command.added === false)
+      recentRemovals(log, account, true);
     add(command, settle(outcome, command, at));
   }
 
@@ -516,8 +586,8 @@ export async function deliverSimkl(
 
 /**
  * The lease holder keeps what den-core answered about the account on its `set:deliver` row (v4 §9 *Account
- * settings*): `removals` closed to `"held"`, and the `unverified` epochs when they changed. By compare-and-set; one
- * that loses is decided again next pass.
+ * settings*): the removals latch closed at den-core's `held`, beside the stored approval, and the `unverified`
+ * epochs when they changed, replacing the setting. By compare-and-set; one that loses is decided again next pass.
  */
 async function writeAccountState(
   log: LibraryLog,
@@ -534,10 +604,11 @@ async function writeAccountState(
   const removals = jsonSetting(row, 'removals');
   const latch =
     removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
-  if (pending.removals === 'held' && removals !== 'held' && !('held' in latch)) {
-    // Beside any approval, never over it: removals approved before this batch are still decided.
-    const stamp = at();
-    values.removals = { value: { string: JSON.stringify({ ...latch, held: stamp }) }, at: stamp };
+  const closing = pending.removals?.held;
+  const stored = Array.isArray(latch.held) ? (latch.held as Stamp) : null;
+  if (closing && (!stored || stampOrder(stored, closing) < 0)) {
+    // Beside the stored approval, never over it: removals approved before this batch are still decided.
+    values.removals = { value: { string: latchText({ ...latch, held: closing }) }, at: at() };
     changed = true;
   }
   if (pending.unverified) {
@@ -555,35 +626,66 @@ async function writeAccountState(
     );
 }
 
-/** The SIMKL list removals the removals latch holds (v3 §6), by title: what a person sees before approving them. */
-export function heldSimklRemovals(log: LibraryLog): { type: 'movie' | 'tv'; id: number }[] {
-  if (log.wireMinimum < 4) return [];
-  const connection = Object.keys(log.settings('trackers')?.values ?? {}).find(
-    (key) => key.startsWith('simkl:') && !key.endsWith('.token'),
-  );
-  const account = connection?.slice('simkl:'.length);
+/** The SIMKL list removals the removals latch holds, and the stamp approving exactly them writes (v4 §9). */
+export interface HeldRemovals {
+  titles: { type: 'movie' | 'tv'; id: number }[];
+  /** The latest value stamp among them: never a fresh one, so nothing made after the list was shown is approved. */
+  approval: Stamp | null;
+}
+
+function simklAccountOf(log: LibraryLog): string | undefined {
+  return Object.keys(log.settings('trackers')?.values ?? {})
+    .find((key) => key.startsWith('simkl:') && !key.endsWith('.token'))
+    ?.slice('simkl:'.length);
+}
+
+/** The SIMKL list removals the removals latch holds, by title: what a person sees, every one, before approving. */
+export function heldSimklRemovals(log: LibraryLog): HeldRemovals {
+  const none: HeldRemovals = { titles: [], approval: null };
+  if (log.wireMinimum < 4) return none;
+  const account = simklAccountOf(log);
   const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
   const since = row && (jsonSetting(row, 'since') as Stamp | undefined);
-  if (!row || !since) return [];
-  const listed = row.values.unverified?.value;
+  if (!account || !row || !since) return none;
   const pending = syncPolicy<V4Pending>({
     op: 'pending_targets_v4',
     documents: log.documents().map(({ document }) => document),
-    deliver: {
-      provider: 'simkl',
-      account,
-      since,
-      removals: jsonSetting(row, 'removals') ?? null,
-      unverified: listed && 'ints' in listed ? listed.ints : [],
-    },
+    deliver: deliverFacts(log, row, account, since),
     now: Date.now(),
   });
-  return pending.commands
-    .filter((command) => command.removals_held === true && typeof command.title === 'string')
-    .map((command) => {
-      const [, type, id] = (command.title as string).split(':');
-      return { type: type === 'tv' ? 'tv' : 'movie', id: Number(id) };
-    });
+  return {
+    titles: pending.commands
+      .filter((command) => command.removals_held === true && typeof command.title === 'string')
+      .map((command) => {
+        const [, type, id] = (command.title as string).split(':');
+        return { type: type === 'tv' ? 'tv' : 'movie', id: Number(id) };
+      }),
+    approval: pending.approval ?? null,
+  };
+}
+
+/**
+ * A person approved the held removals they were shown (v4 §9): `approved` set to `shown.approval` beside the stored
+ * `held`, on the account's `set:deliver` row by compare-and-set — never merged, which could lose it to a concurrent
+ * hold. False when the row changed since it was read: the list is read again and shown again.
+ */
+export async function approveSimklRemovals(
+  log: LibraryLog,
+  device: string,
+  shown: HeldRemovals,
+): Promise<boolean> {
+  const account = simklAccountOf(log);
+  const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
+  if (!row || !shown.approval) return false;
+  const removals = jsonSetting(row, 'removals');
+  const latch =
+    removals && typeof removals === 'object' ? (removals as Record<string, unknown>) : {};
+  const at = syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  const values = {
+    ...row.values,
+    removals: { value: { string: latchText({ ...latch, approved: shown.approval }) }, at },
+  };
+  return log.writeAt({ ...row, values }, log.seqOf(rowName(row)));
 }
 
 /** A `set:deliver` setting holding JSON in a string (`since`, `removals`), parsed; undefined when absent. */
@@ -609,7 +711,9 @@ async function deliverAccount(
   // that kept none, or one that changed under it — is watched that long before any take, and the take is fresh even
   // where the row names this device. Another device's lease is taken only once its row has stayed unchanged that long.
   const observed = observe(log, account, log.seqOf(rowName(base)), elapsed);
-  const fresh = log.observedGeneration !== log.currentGeneration;
+  // An unknown generation (a commit whose answer named none) is never one this browser watched.
+  const fresh =
+    log.currentGeneration === undefined || log.observedGeneration !== log.currentGeneration;
   if (fresh && observed.generation < TEN_MINUTES) return false;
   if (lease[0] !== device) {
     const decision = syncPolicy<{ action: string }>({
@@ -629,31 +733,27 @@ async function deliverAccount(
   const since = (jsonSetting(base, 'since') as Stamp | undefined) ?? at;
   // On v4 the pass is decided before the take, which needs the greatest settle epoch any receipt holds.
   const held = log.wireMinimum >= 4 ? log.documents() : [];
-  const unverified = base.values.unverified?.value;
   const pendingV4 =
     log.wireMinimum >= 4
       ? syncPolicy<V4Pending>({
           op: 'pending_targets_v4',
           documents: held.map(({ document }) => document),
-          deliver: {
-            provider: 'simkl',
-            account,
-            since,
-            // The removals latch and its approval, and the epochs whose receipts are unverified (v3 §6).
-            removals: jsonSetting(base, 'removals') ?? null,
-            unverified: unverified && 'ints' in unverified ? unverified.ints : [],
-          },
+          // The removals latch and its approval, the epochs whose receipts are unverified, and this page's recent
+          // removal sends (v4 §9).
+          deliver: deliverFacts(log, base, account, since),
           now: Date.now(),
         })
       : null;
   const kept = heldLeases.get(log);
   const locallyHeld = lease[0] === device && holding(log, account);
+  // A take exceeds the row's epoch, every settle epoch read, and every epoch this browser held (v3 §6).
   const epoch =
     locallyHeld && kept
       ? kept.epoch
       : lease[0] === device && !fresh
         ? Number(lease[1] ?? 0)
-        : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0) + 1;
+        : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0, heldEpoch(log, account)) +
+          1;
   if (!locallyHeld || !kept || Math.max(Date.now() - kept.at, monoNow() - kept.mono) >= HOLD / 2) {
     // Compare-and-set on the lease as read: another device that took or renewed it since wins, and this pass stops.
     // The hold counts from when the request was sent.
@@ -667,7 +767,7 @@ async function deliverAccount(
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
   if (pendingV4) await writeAccountState(log, name, pendingV4, device);
-  const order = orderCounter(account, epoch);
+  const order = orderCounter(log, account, epoch);
 
   const clientId = await fetchSimklClientId(fetchImpl);
   if (!clientId) return false;
