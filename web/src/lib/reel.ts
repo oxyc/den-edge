@@ -641,6 +641,10 @@ async function activateDirect(
  * only where the page may carry video through it (`relaysMedia`): on the public web name a trailer neither listener
  * can serve is not played at all, as remux plays nothing when neither of its listeners answers. Native and external
  * URLs stay as they are.
+ *
+ * The home-network copy goes only to a bare `<video>`: an MP4, or a playlist where the element plays HLS itself. The
+ * page's policy lets media load from any https origin but names no home-network one for fetching, so hls.js, which
+ * fetches its playlist and segments, could not use it; its first copy is the public one.
  */
 async function directSources(
   sources: Source[],
@@ -649,6 +653,7 @@ async function directSources(
   signal: AbortSignal | undefined,
   lookup: () => Promise<string | undefined>,
   relay: boolean,
+  player: Player,
 ): Promise<Source[]> {
   // A page already speaking to Reel directly (LAN/tailnet) should keep doing so. Activation is an
   // edge-owned control route and exists only beside the same-origin `/reel` relay mount.
@@ -665,7 +670,8 @@ async function directSources(
       result.push(source);
       continue;
     }
-    if (lan) result.push({ ...source, url: new URL(path, lan).href, direct: 'lan' });
+    if (lan && (source.kind === 'mp4' || player === 'native'))
+      result.push({ ...source, url: new URL(path, lan).href, direct: 'lan' });
     if (direct)
       result.push({ ...source, url: new URL(path, direct.public).href, direct: 'public' });
     if (relay) result.push(source);
@@ -758,7 +764,15 @@ export async function fetchSources(
       });
     }
     if (!list.length) return null;
-    const activated = await directSources(list, mount, fetchImpl, signal, lookupIpv4, relay);
+    const activated = await directSources(
+      list,
+      mount,
+      fetchImpl,
+      signal,
+      lookupIpv4,
+      relay,
+      player,
+    );
     if (!activated.length) return null;
     return { sources: activated, crop: crop(body.crop), expires: body.expires };
   } catch {

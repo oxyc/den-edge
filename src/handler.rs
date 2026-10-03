@@ -546,8 +546,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
         p => match &state.web_dir {
             Some(_) if matches!(*req.method(), Method::GET | Method::HEAD) => {
                 let query = req.uri().query().map(str::to_owned);
-                let client = client_addr(state, &req);
-                crate::web::serve(state, p, query.as_deref(), req.headers(), face, client).await
+                crate::web::serve(state, p, query.as_deref(), req.headers(), face).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
@@ -1271,9 +1270,10 @@ pub mod tests {
         // The tailnet wildcard stands ahead of the table's own entries and does not replace them: a household
         // on its LAN still reaches den-remux by the address the table names, and the wildcard is only what
         // lets a page use the tailnet address it stored for itself when the table withholds one.
+        // `https:` is the home-network trailer listener, allowed without being named (oxyc/den#197).
         assert!(
             csp.contains(
-                "media-src 'self' blob: data: https://*.googlevideo.com \
+                "media-src 'self' blob: data: https: https://*.googlevideo.com \
                  https://video-ssl.itunes.apple.com https://*.ts.net:8443 https://pve.example:8443;"
             ),
             "{csp}"

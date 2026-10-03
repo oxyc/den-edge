@@ -63,6 +63,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 /// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
 /// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
 /// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
+///
+/// `media-src` also takes any `https:` source. At home a trailer plays from the home-network listener
+/// (`lanBase`, oxyc/den#197), whose name is the household's own: naming it would publish it to every visitor, and
+/// naming it only to a browser at home would miss one seen over IPv6 and one whose kept shell came from away. A
+/// media load cannot run script, so the widening is negligible. `connect-src` stays exact: the page never
+/// fetches from the home-network listener (`reel.ts` offers it only to a bare `<video>`).
 fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     let cast = cast_origin.map_or(String::new(), |origin| format!(" {origin}"));
@@ -70,7 +76,7 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
          https://live.metahub.space; \
-         media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
+         media-src 'self' blob: data: https: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 https://1.1.1.1 \
          https://api.ipify.org https://api.simkl.com{media}; \
@@ -106,21 +112,10 @@ pub async fn serve(
     query: Option<&str>,
     headers: &HeaderMap,
     face: crate::handler::Face,
-    client: Option<std::net::IpAddr>,
 ) -> Response {
-    let (kind, mut resp) = serve_file(state, path, query, headers, face, client).await;
+    let (kind, mut resp) = serve_file(state, path, query, headers, face).await;
     resp.extensions_mut().insert(Served(kind));
     resp
-}
-
-/// Whether this request comes from behind the home's own router: the test that decides who is handed `lanBase`.
-/// Only a page (the files carrying a policy) asks; a hashed asset never names the home-network origin.
-async fn at_home(state: &crate::AppState, path: &str, client: Option<std::net::IpAddr>) -> bool {
-    let (Some(base), Some(client), Some(_)) = (&state.public_media_base, client, &state.lan_media_base)
-    else {
-        return false;
-    };
-    !path.starts_with("/assets/") && state.home_address.is_behind_home_router(base, client).await
 }
 
 async fn serve_file(
@@ -129,7 +124,6 @@ async fn serve_file(
     query: Option<&str>,
     headers: &HeaderMap,
     face: crate::handler::Face,
-    client: Option<std::net::IpAddr>,
 ) -> (&'static str, Response) {
     let Some(dir) = state.web_dir.as_deref() else { return ("404", not_found()) };
     let mut kept: Vec<String>;
@@ -142,15 +136,6 @@ async fn serve_file(
             // native MP4/HLS request is browser-blocked and silently falls back through the edge relay.
             if let Some(origin) = state.public_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
                 kept.push(origin.clone());
-            }
-            // The home-network origin, which `/reel/activate` hands a browser behind the home's router: trailers
-            // play there from this page itself, unlike remux, whose home-network playback lives in the Cast origin.
-            // Named only to that same browser, by the same test, so nobody else is told the household's internal
-            // name. A page carrying it is `private` (`respond`): no shared cache may hand it to someone else.
-            if at_home(state, path, client).await {
-                if let Some(origin) = state.lan_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
-                    kept.push(origin.clone());
-                }
             }
             &kept
         }
@@ -671,16 +656,9 @@ fn respond(
     // The shell and the service worker name every other file of a release, so they are asked again on every load.
     // What else sits unhashed beside them — the icons, the share image, the manifest — changes perhaps once a year,
     // and a day's wait for a new one is no loss.
-    //
-    // A page is also `private`: its policy names the home-network origin for a browser at home and not for anyone
-    // else (`at_home`), and that difference is the client's address, which no `Vary` can express — Cloudflare keys
-    // only on the URL and the encoding. So no shared cache keeps a page at all; the browser's own still revalidates
-    // it, and the ETag covers the policy.
     let policy = if immutable {
         "public, max-age=31536000, immutable"
-    } else if content_type.starts_with("text/html") {
-        "private, no-cache"
-    } else if file.file_name().is_some_and(|name| name == "sw.js") {
+    } else if content_type.starts_with("text/html") || file.file_name().is_some_and(|name| name == "sw.js") {
         "no-cache"
     } else {
         "public, max-age=86400, stale-while-revalidate=604800"
@@ -797,6 +775,40 @@ mod tests {
         assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
         // Bounded: https, and the one port `tailscale serve` publishes.
         assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
+    }
+
+    /// At home a trailer plays from the home-network listener, whose name is the household's own: `media-src` allows
+    /// any https source rather than naming it, and `connect-src` stays exact (oxyc/den#197).
+    #[test]
+    fn policy_plays_media_from_any_https_origin_and_fetches_from_named_ones() {
+        let policy = super::csp(&[], None);
+        let directive = |name: &str| policy.split(name).nth(1).unwrap().split(';').next().unwrap().to_owned();
+        assert!(directive("media-src").split_whitespace().any(|source| source == "https:"), "{policy}");
+        assert!(!directive("connect-src").split_whitespace().any(|source| source == "https:"), "{policy}");
+    }
+
+    /// No page names the home-network origin, at home or away: the policy's `https:` covers it without publishing it.
+    #[tokio::test]
+    async fn no_page_names_the_home_network_origin() {
+        let lan = "lan.media.example";
+        let mut h = with_app();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        // An address literal names the home without a lookup, so a request from it is "at home".
+        state.public_media_base = Some("https://8.8.4.4".into());
+        state.lan_media_base = Some(format!("https://{lan}:8449"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        for client in ["8.8.4.4", "8.8.8.8"] {
+            for path in ["/", "/movie/603", "/index.html", "/assets/index-abc123.js"] {
+                let response =
+                    h.send("GET", path, None, &[("host", "d.oxy.fi"), ("x-forwarded-for", client)]).await;
+                assert_eq!(response.status(), StatusCode::OK, "{client}{path}");
+                for (name, value) in response.headers() {
+                    assert!(!value.to_str().unwrap_or("").contains(lan), "{client}{path}: {name} names it");
+                }
+                assert!(!body_text(response).await.contains(lan), "{client}{path}: the body names it");
+            }
+        }
     }
 
     /// The page asks these for its own IPv4 address; it only ever reads from them, never loads media.
@@ -938,7 +950,7 @@ mod tests {
             for condition in [etag.clone(), format!("\"old\", W/{etag}"), "*".into()] {
                 let response = h.send(method, "/", None, &[("if-none-match", &condition)]).await;
                 assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
-                assert_eq!(response.headers()[header::CACHE_CONTROL], "private, no-cache");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
                 assert_eq!(response.headers()[header::VARY], "accept-encoding");
                 assert_eq!(response.headers()[header::ETAG], etag);
                 assert!(response.headers().contains_key(header::CONTENT_SECURITY_POLICY));
@@ -1054,8 +1066,7 @@ mod tests {
         // arrives at, which is a blank card rather than a visible error.
         assert!(csp.contains("https://live.metahub.space"));
         assert_eq!(root.headers()[super::ROBOTS], "noindex, nofollow, noarchive, noimageindex");
-        // Never kept by a shared cache: a page's policy can depend on who asked (`at_home`).
-        assert_eq!(root.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
         let link = root.headers()[header::LINK].to_str().unwrap();
         assert!(link.starts_with("</atlas/recommend/home.json?day="));
         // Without `crossorigin` the browser refuses the preload for `main.ts`'s fetch and asks twice (#192).
@@ -1077,7 +1088,7 @@ mod tests {
         assert_eq!(h.send("GET", "/sw.js", None, &[]).await.headers()[header::CACHE_CONTROL], "no-cache");
         assert_eq!(
             h.send("GET", "/index.html", None, &[]).await.headers()[header::CACHE_CONTROL],
-            "private, no-cache"
+            "no-cache"
         );
 
         let route = h.send("GET", "/movies/603", None, &[]).await;
@@ -1105,60 +1116,6 @@ mod tests {
         for directive in ["media-src", "connect-src"] {
             let values = policy.split(directive).nth(1).unwrap().split(';').next().unwrap();
             assert!(values.contains("https://media.example"), "{directive} omitted direct media: {policy}");
-        }
-    }
-
-    /// The home-network origin is named in a page's policy only for a browser behind the home's router, by the
-    /// same test that hands it `lanBase`. Anyone else is told nothing of it: not in the policy, the page or a script.
-    #[tokio::test]
-    async fn only_a_browser_at_home_is_told_the_home_network_origin() {
-        let lan = "lan.media.example";
-        let mut h = with_app();
-        let state = Arc::get_mut(&mut h.state).unwrap();
-        // An address literal names the home without a lookup.
-        state.public_media_base = Some("https://8.8.4.4".into());
-        state.lan_media_base = Some(format!("https://{lan}:8449"));
-        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
-        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
-        let policy = |response: &axum::response::Response, directive: &str| {
-            let policy = response.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().to_owned();
-            policy.split(directive).nth(1).unwrap().split(';').next().unwrap().to_owned()
-        };
-
-        for path in ["/", "/movie/603", "/index.html"] {
-            let home =
-                h.send("GET", path, None, &[("host", "d.oxy.fi"), ("x-forwarded-for", "8.8.4.4")]).await;
-            for directive in ["media-src", "connect-src"] {
-                assert!(
-                    policy(&home, directive).contains(&format!("https://{lan}:8449")),
-                    "{path} {directive}"
-                );
-            }
-            assert_eq!(home.headers()[header::CACHE_CONTROL], "private, no-cache", "{path}");
-
-            let away =
-                h.send("GET", path, None, &[("host", "d.oxy.fi"), ("x-forwarded-for", "8.8.8.8")]).await;
-            assert_eq!(away.headers()[header::CACHE_CONTROL], "private, no-cache", "{path}");
-            for (name, value) in away.headers() {
-                assert!(!value.to_str().unwrap_or("").contains(lan), "{path}: {name} names it");
-            }
-            assert!(!body_text(away).await.contains(lan), "{path}: the page names it");
-        }
-        // Nor a script, at home or away: only a page's policy ever names it.
-        for client in ["8.8.4.4", "8.8.8.8"] {
-            let script = h
-                .send(
-                    "GET",
-                    "/assets/index-abc123.js",
-                    None,
-                    &[("host", "d.oxy.fi"), ("x-forwarded-for", client)],
-                )
-                .await;
-            assert_eq!(script.status(), StatusCode::OK);
-            for (name, value) in script.headers() {
-                assert!(!value.to_str().unwrap_or("").contains(lan), "{client}: {name} names it");
-            }
-            assert!(!body_text(script).await.contains(lan), "{client}: the script names it");
         }
     }
 

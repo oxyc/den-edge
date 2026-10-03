@@ -505,6 +505,34 @@ describe('fetchSources', () => {
       ]);
     });
 
+    it('offers the home-network copy of a playlist only where the element plays it, never to hls.js', async () => {
+      const playlist: typeof fetch = async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({ sources: [{ kind: 'hls', url: `../m/s/${blob}?s=${tag}` }] }),
+            )
+          : activated('https://lan.media.example:8449');
+      // hls.js fetches, and the policy names no home-network origin to fetch from: public first.
+      const engine = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'hls.js',
+        fetchImpl: playlist,
+        relay: false,
+      });
+      expect(order(engine?.sources)).toEqual([`public https://media.example${media}`]);
+      // A bare element loads it as media, which the policy allows from any https origin.
+      const element = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: playlist,
+        relay: false,
+      });
+      expect(order(element?.sources)).toEqual([
+        `lan https://lan.media.example:8449${media}`,
+        `public https://media.example${media}`,
+      ]);
+    });
+
     it('refuses a home-network origin that is not a bare https origin', async () => {
       const got = await fetchSources(SOURCES, {
         surface: 'audible',

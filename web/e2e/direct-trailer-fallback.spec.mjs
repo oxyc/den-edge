@@ -54,12 +54,32 @@ const serveVideo = (route) => {
 };
 
 /**
+ * The media and fetch parts of den-edge's page policy (`web.rs` `csp`): media from any https origin, fetches only
+ * from the origins it names — the public listener, never the home-network one.
+ */
+const POLICY = `media-src 'self' blob: data: https:; connect-src 'self' ${DIRECT}`;
+/** The same with media named origin by origin, as before: what the home-network copy would meet without `https:`. */
+const NAMED_ONLY = `media-src 'self' blob: data: ${DIRECT}; connect-src 'self' ${DIRECT}`;
+
+/**
  * reel offering one signed carried source, and den-edge activating with `lanBase` when `home`. `reach` says which
  * listeners answer: the others never do. The relay answers too, so a page that used it would be seen playing.
+ * `csp` is the policy the page is served with; the dev server sends none of its own.
  */
-async function mock(page, origin, { home, reach }) {
+async function mock(page, origin, { home, reach, csp = POLICY }) {
   const seen = { activations: 0, lan: 0, direct: 0, relay: 0 };
   await guardNetwork(page, origin);
+  // A request the policy refuses never leaves the browser, so it never reaches the routes below.
+  await page.route(
+    (url) => url.origin === origin && /^\/test\/[^/]+\.html$/.test(url.pathname),
+    async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        headers: { ...response.headers(), 'content-security-policy': csp },
+      });
+    },
+  );
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
@@ -170,9 +190,19 @@ for (const [engine, launch, available = () => true] of engines) {
 
     test(`${name}: at home plays from the home-network listener, never the relay`, async () => {
       test.skip(!available(), `${engine} is not installed here`);
+      // Under den-edge's policy, which names no home-network origin: `media-src https:` alone lets it play.
       const home = await play(launch, surface, PUBLIC, { home: true, reach: ['lan'] });
       expect(home.src).toBe(`${LAN}${MEDIA}`);
-      expect(home.seen).toMatchObject({ direct: 0, relay: 0 });
+      expect(home.seen).toMatchObject({ lan: expect.any(Number), direct: 0, relay: 0 });
+      expect(home.seen.lan).toBeGreaterThan(0);
+      // The control: without `https:` the same copy is refused before it is asked for, so the policy is in force.
+      const named = await play(launch, surface, PUBLIC, {
+        home: true,
+        reach: ['lan', 'public'],
+        csp: NAMED_ONLY,
+      });
+      expect(named.seen.lan, 'refused by the policy, never requested').toBe(0);
+      expect(named.src).toBe(`${DIRECT}${MEDIA}`);
       // The home-network listener unreachable: the public one comes after it, one deadline later, no relay.
       const lanDown = await play(launch, surface, PUBLIC, { home: true, reach: ['public'] });
       expect(lanDown.src).toBe(`${DIRECT}${MEDIA}`);
