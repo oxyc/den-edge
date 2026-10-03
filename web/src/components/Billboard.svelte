@@ -21,11 +21,15 @@
   import { billboardFacts } from '../lib/detailPresentation';
   import type { Title } from '../lib/library';
   import {
+    abandonDirect,
     cropStyle,
     fetchSources,
     nativeHls,
+    nextRung,
     progressiveURL,
+    relaysMedia,
     trailerCandidates,
+    watchDirect,
   } from '../lib/reel';
   import type { Crop, Source } from '../lib/reel';
   import { titleHref } from '../lib/route';
@@ -254,12 +258,22 @@
   let ambientCrop = $state<Crop | null>(null);
   /** Whether a bare element plays a playlist here, which decides what reel is worth offering. */
   const PLAYS_HLS = nativeHls();
+  /**
+   * Whether this page may play a trailer's bytes through its own `/reel` relay. Not on the public web name, which
+   * is served through Cloudflare (`relaysMedia`): there reel's own copy is never mounted, and a slide neither direct
+   * listener can serve keeps its still picture.
+   */
+  const RELAY = relaysMedia();
   /** This source will not play: reel's next offer, then its own copy, then the still picture. */
   function ambientFailedOver() {
     playing = false;
-    const next = rungs[rung + 1];
+    // A direct copy that will not play means its listener is out of reach from here: the next copy is tried.
+    const mounted = rungs[rung];
+    if (mounted?.direct && ambient === mounted.url) abandonDirect(mounted);
+    const at = nextRung(rungs, rung);
+    const next = rungs[at];
     if (next) {
-      rung += 1;
+      rung = at;
       ambient = next.url;
       return;
     }
@@ -367,13 +381,19 @@
             ) ?? [];
           const top = playable[0];
           if (top) {
-            proxied = url;
+            proxied = RELAY ? url : null;
             rungs = playable;
             rung = 0;
             ambientCrop = offered?.crop ?? null;
             ambient = top.url;
             return;
           }
+        }
+        // Nothing either direct listener can serve, on a page that may not carry video through the relay: the
+        // still picture stays.
+        if (!RELAY) {
+          ambientFailed = true;
+          return;
         }
         // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
         proxied = url;
@@ -463,6 +483,16 @@
       // is why a slide left behind on Home could still be heard from the page opened on top of it.
       hush(video);
     }
+  });
+
+  // A direct copy has DIRECT_FIRST_FRAME_MS to show a frame, or its relay copy plays instead: iOS's native player
+  // waits on an unreachable origin without raising the `error` the ladder steps on.
+  $effect(() => {
+    const video = ambientPlayer;
+    const mounted = rungs[rung];
+    if (!video || !mounted || ambient !== mounted.url || !active || !onScreen || !foreground)
+      return;
+    return watchDirect(video, mounted, ambientFailedOver);
   });
 
   // --- The rail ---

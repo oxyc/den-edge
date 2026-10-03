@@ -63,6 +63,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 /// metahub needs BOTH of its hosts named. A chart's art is asked for at `images.metahub.space`, which answers
 /// with a redirect to `live.metahub.space` — and a policy is checked against what a redirect arrives at, not
 /// only what was asked for, so naming the first alone blocks the picture and the card draws an empty frame.
+///
+/// `media-src` also takes any `https:` source. At home a trailer plays from the home-network listener
+/// (`lanBase`, oxyc/den#197), whose name is the household's own: naming it would publish it to every visitor, and
+/// naming it only to a browser at home would miss one seen over IPv6 and one whose kept shell came from away. A
+/// media load cannot run script, so the widening is negligible. `connect-src` stays exact: the page never
+/// fetches from the home-network listener (`reel.ts` offers it only to a bare `<video>`).
 fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     let cast = cast_origin.map_or(String::new(), |origin| format!(" {origin}"));
@@ -70,7 +76,7 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
          https://live.metahub.space; \
-         media-src 'self' blob: data: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
+         media-src 'self' blob: data: https: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
          https://*.ts.net:8443{media}; \
          connect-src 'self' https://api.themoviedb.org https://*.ts.net:8443 https://1.1.1.1 \
          https://api.ipify.org https://api.simkl.com{media}; \
@@ -769,6 +775,40 @@ mod tests {
         assert!(connect.contains("https://*.ts.net:8443"), "{policy}");
         // Bounded: https, and the one port `tailscale serve` publishes.
         assert!(!policy.contains("*.ts.net "), "the port is part of it: {policy}");
+    }
+
+    /// At home a trailer plays from the home-network listener, whose name is the household's own: `media-src` allows
+    /// any https source rather than naming it, and `connect-src` stays exact (oxyc/den#197).
+    #[test]
+    fn policy_plays_media_from_any_https_origin_and_fetches_from_named_ones() {
+        let policy = super::csp(&[], None);
+        let directive = |name: &str| policy.split(name).nth(1).unwrap().split(';').next().unwrap().to_owned();
+        assert!(directive("media-src").split_whitespace().any(|source| source == "https:"), "{policy}");
+        assert!(!directive("connect-src").split_whitespace().any(|source| source == "https:"), "{policy}");
+    }
+
+    /// No page names the home-network origin, at home or away: the policy's `https:` covers it without publishing it.
+    #[tokio::test]
+    async fn no_page_names_the_home_network_origin() {
+        let lan = "lan.media.example";
+        let mut h = with_app();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        // An address literal names the home without a lookup, so a request from it is "at home".
+        state.public_media_base = Some("https://8.8.4.4".into());
+        state.lan_media_base = Some(format!("https://{lan}:8449"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        for client in ["8.8.4.4", "8.8.8.8"] {
+            for path in ["/", "/movie/603", "/index.html", "/assets/index-abc123.js"] {
+                let response =
+                    h.send("GET", path, None, &[("host", "d.oxy.fi"), ("x-forwarded-for", client)]).await;
+                assert_eq!(response.status(), StatusCode::OK, "{client}{path}");
+                for (name, value) in response.headers() {
+                    assert!(!value.to_str().unwrap_or("").contains(lan), "{client}{path}: {name} names it");
+                }
+                assert!(!body_text(response).await.contains(lan), "{client}{path}: the body names it");
+            }
+        }
     }
 
     /// The page asks these for its own IPv4 address; it only ever reads from them, never loads media.

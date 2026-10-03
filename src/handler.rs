@@ -1270,9 +1270,10 @@ pub mod tests {
         // The tailnet wildcard stands ahead of the table's own entries and does not replace them: a household
         // on its LAN still reaches den-remux by the address the table names, and the wildcard is only what
         // lets a page use the tailnet address it stored for itself when the table withholds one.
+        // `https:` is the home-network trailer listener, allowed without being named (oxyc/den#197).
         assert!(
             csp.contains(
-                "media-src 'self' blob: data: https://*.googlevideo.com \
+                "media-src 'self' blob: data: https: https://*.googlevideo.com \
                  https://video-ssl.itunes.apple.com https://*.ts.net:8443 https://pve.example:8443;"
             ),
             "{csp}"

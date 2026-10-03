@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DIRECT_FIRST_FRAME_MS,
   forgetWarmedTrailers,
   cropStyle,
   fetchSources,
@@ -7,9 +8,14 @@ import {
   progressiveURL,
   isPlaylist,
   nativeHls,
+  nextRung,
+  abandonDirect,
+  relaysMedia,
   resetActivationPause,
   trailerCandidates,
+  watchDirect,
 } from './reel';
+import type { Source } from './reel';
 import type { Routes } from './routes';
 
 const ROUTES: Routes = {
@@ -380,6 +386,171 @@ describe('fetchSources', () => {
     expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
   });
 
+  describe('as remux plays a session (oxyc/den#197)', () => {
+    const blob = 'A'.repeat(40);
+    const tag = 'b'.repeat(24);
+    const media = `/reel/m/s/${blob}?s=${tag}`;
+    const relayed = `/reel/cfg/m/s/${blob}?s=${tag}`;
+    /** reel offering one carried source and one of Google's own, and den-edge answering activation with `answer`. */
+    const answering =
+      (answer: Response | (() => Response)): typeof fetch =>
+      async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({
+                sources: [
+                  { kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true },
+                  { kind: 'mp4', url: 'https://rr3---sn-x.googlevideo.com/file', audio: true },
+                ],
+              }),
+            )
+          : typeof answer === 'function'
+            ? answer()
+            : answer.clone();
+    const activated = (lanBase?: string) =>
+      new Response(
+        JSON.stringify({
+          publicBase: 'https://media.example',
+          media: `https://media.example${media}`,
+          ...(lanBase ? { lanBase } : {}),
+        }),
+      );
+    const order = (sources: Source[] | undefined) =>
+      sources?.map(({ url, direct }) => (direct ? `${direct} ${url}` : url));
+
+    it('at home plays the home-network listener first, then the public one, then the relay where it may', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('https://lan.media.example:8449')),
+        relay: true,
+      });
+      expect(order(got?.sources)).toEqual([
+        `lan https://lan.media.example:8449${media}`,
+        `public https://media.example${media}`,
+        relayed,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('away plays the public listener, and on the public web name never the relay', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated()),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual([
+        `public https://media.example${media}`,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('with no direct listener, the public web name plays only what does not cross the relay', async () => {
+      const refused = () =>
+        new Response(JSON.stringify({ error: 'public_listener_unavailable' }), { status: 503 });
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(refused),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual(['https://rr3---sn-x.googlevideo.com/file']);
+      // A page on the LAN or the tailnet is not Cloudflare, and keeps the relay.
+      resetActivationPause();
+      const local = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(refused),
+        relay: true,
+      });
+      expect(order(local?.sources)).toEqual([relayed, 'https://rr3---sn-x.googlevideo.com/file']);
+    });
+
+    it('is no trailer at all when every source would cross the relay', async () => {
+      const onlyCarried: typeof fetch = async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+            )
+          : new Response('{}', { status: 503 });
+      expect(
+        await fetchSources(SOURCES, {
+          surface: 'silent',
+          player: 'native',
+          fetchImpl: onlyCarried,
+          relay: false,
+        }),
+      ).toBeNull();
+    });
+
+    it('leaves the home-network listener out once a copy on it showed nothing', async () => {
+      abandonDirect({
+        kind: 'mp4',
+        url: `https://lan.media.example:8449${media}`,
+        audio: true,
+        height: null,
+        width: null,
+        direct: 'lan',
+      });
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('https://lan.media.example:8449')),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual([
+        `public https://media.example${media}`,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('offers the home-network copy of a playlist only where the element plays it, never to hls.js', async () => {
+      const playlist: typeof fetch = async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({ sources: [{ kind: 'hls', url: `../m/s/${blob}?s=${tag}` }] }),
+            )
+          : activated('https://lan.media.example:8449');
+      // hls.js fetches, and the policy names no home-network origin to fetch from: public first.
+      const engine = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'hls.js',
+        fetchImpl: playlist,
+        relay: false,
+      });
+      expect(order(engine?.sources)).toEqual([`public https://media.example${media}`]);
+      // A bare element loads it as media, which the policy allows from any https origin.
+      const element = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: playlist,
+        relay: false,
+      });
+      expect(order(element?.sources)).toEqual([
+        `lan https://lan.media.example:8449${media}`,
+        `public https://media.example${media}`,
+      ]);
+    });
+
+    it('refuses a home-network origin that is not a bare https origin', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('http://lan.media.example:8449')),
+        relay: false,
+      });
+      expect(got?.sources.some((source) => source.direct === 'lan')).toBe(false);
+    });
+  });
+
+  it('knows which pages may carry video through the relay', () => {
+    expect(relaysMedia('d.example'), 'the public web name, behind Cloudflare').toBe(false);
+    expect(relaysMedia('192.168.1.20'), 'the LAN address').toBe(true);
+    expect(relaysMedia('box.tail0000.ts.net'), 'the tailnet').toBe(true);
+    expect(relaysMedia('127.0.0.1')).toBe(true);
+  });
+
   it('names the surface and the player, and keeps reel’s order', async () => {
     const got = await fetchSources(SOURCES, {
       surface: 'audible',
@@ -528,6 +699,101 @@ describe('fetchSources', () => {
     });
     expect(unmeasured?.crop).toBeNull();
     expect(unmeasured?.sources.length).toBe(2);
+  });
+});
+
+describe('a direct source that does not play', () => {
+  const direct: Source = {
+    kind: 'hls',
+    url: 'https://media.example/reel/m/s/x',
+    audio: true,
+    height: null,
+    width: null,
+    direct: 'public',
+  };
+  const lan: Source = {
+    ...direct,
+    url: 'https://lan.media.example:8449/reel/m/s/x',
+    direct: 'lan',
+  };
+  const relay: Source = { ...direct, url: '/reel/m/s/x', direct: undefined };
+  /** The two things `watchDirect` reads of an element, and a way to say a frame arrived. */
+  const element = () => {
+    const listeners = new Set<() => void>();
+    return {
+      readyState: 0,
+      addEventListener: (_: string, run: () => void) => listeners.add(run),
+      removeEventListener: (_: string, run: () => void) => listeners.delete(run),
+      frame() {
+        this.readyState = 2;
+        for (const run of listeners) run();
+      },
+    };
+  };
+
+  it('is given up for the next copy when no frame arrives in time, as iOS raises no error', () => {
+    vi.useFakeTimers();
+    try {
+      const player = element();
+      const giveUp = vi.fn();
+      watchDirect(player as unknown as HTMLMediaElement, direct, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS - 1);
+      expect(giveUp).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(giveUp).toHaveBeenCalledOnce();
+      // The rest of the list's copies on that listener are passed over; the home-network ones still get a turn.
+      expect(
+        nextRung([direct, relay, { ...direct, url: 'https://media.example/y' }, relay], 1),
+      ).toBe(3);
+      expect(nextRung([relay, direct, lan], 0)).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('at home steps from the home-network listener to the public one, not past it', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      watchDirect(element() as unknown as HTMLMediaElement, lan, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS);
+      expect(giveUp).toHaveBeenCalledOnce();
+      expect(nextRung([lan, direct, relay], 0)).toBe(1);
+      // And a later list's home-network copy is passed over too.
+      expect(nextRung([relay, lan, direct], 0)).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is kept once it shows a frame, and a relay source is never timed', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      const player = element();
+      watchDirect(player as unknown as HTMLMediaElement, direct, giveUp);
+      player.frame();
+      watchDirect(element() as unknown as HTMLMediaElement, relay, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS * 2);
+      expect(giveUp).not.toHaveBeenCalled();
+      // Nothing was abandoned, so a later direct copy is still tried in its turn.
+      expect(nextRung([relay, direct], 0)).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops being timed when the source changes first', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      const stop = watchDirect(element() as unknown as HTMLMediaElement, direct, giveUp);
+      stop();
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS);
+      expect(giveUp).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

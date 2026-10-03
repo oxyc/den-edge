@@ -434,6 +434,11 @@ export interface Source {
   audio: boolean;
   height: number | null;
   width: number | null;
+  /**
+   * A copy on one of the direct listeners (`directSources`): `lan` the home-network one, `public` the public one.
+   * Each is given DIRECT_FIRST_FRAME_MS before the next entry plays.
+   */
+  direct?: 'lan' | 'public';
 }
 
 /** reel's answer for one trailer on one surface: ordered best-first, and what it knows about the picture. */
@@ -446,16 +451,18 @@ export interface Sources {
 
 // One cold IPv6 activation may include the 1.5-second IPv4 lookup, edge's bounded two-second validation, and a
 // ten-second listener lease while the host starts/proves Caddy. Keep one shared deadline across both activation asks
-// and the lookup; on expiry, preserve the already-present relay rather than delaying playback without bound.
+// and the lookup; on expiry, go on without a direct origin rather than delaying playback without bound.
 const DIRECT_ACTIVATION_MS = 15_000;
 
 /**
- * When a refusal says the direct origin is down (503) or this page asks too often (429), the relay carries every
- * trailer until then. Without it, a page asked once per trailer: with den-edge's public listener down, a phone sent
+ * When a refusal says the direct origin is down (503) or this page asks too often (429), activation is not asked
+ * again until then. Without it, a page asked once per trailer: with den-edge's public listener down, a phone sent
  * dozens of refused activations in a minute until den-edge rate-limited it.
  */
 const ACTIVATION_PAUSE_MS = 5 * 60_000;
 let activationPausedUntil = 0;
+/** Until when the home-network origin is passed over, once a copy on it showed nothing from here. */
+let lanPausedUntil = 0;
 
 function pauseActivation(response: Response, now = Date.now()): void {
   if (response.status === 503) activationPausedUntil = now + ACTIVATION_PAUSE_MS;
@@ -469,6 +476,80 @@ function pauseActivation(response: Response, now = Date.now()): void {
 /** For tests: forget a pause. */
 export function resetActivationPause(): void {
   activationPausedUntil = 0;
+  lanPausedUntil = 0;
+}
+
+/**
+ * How long a direct copy gets to produce its first frame before the next entry is played.
+ *
+ * An activation answering 200 says the gate opened, not that this browser can reach the origin: at home the
+ * router does not loop its own public address back in, and iOS's native player then waits on the connection
+ * with no error to fall back on (oxyc/den#197).
+ */
+export const DIRECT_FIRST_FRAME_MS = 2_000;
+
+/** `HTMLMediaElement.HAVE_CURRENT_DATA`: a frame is decoded. Spelled out so this runs where the DOM does not. */
+const HAVE_CURRENT_DATA = 2;
+
+/**
+ * Give up on a mounted direct copy that has no frame within `ms`: `giveUp` steps to the next entry, and that
+ * origin is passed over for a while (`abandonDirect`). Nothing for any other source. Returns the cancel, for when
+ * the source changes or playback is no longer wanted.
+ */
+export function watchDirect(
+  player: HTMLMediaElement,
+  source: Source | null | undefined,
+  giveUp: () => void,
+  ms = DIRECT_FIRST_FRAME_MS,
+): () => void {
+  if (!source?.direct || player.readyState >= HAVE_CURRENT_DATA) return () => {};
+  const timer = setTimeout(() => {
+    if (player.readyState >= HAVE_CURRENT_DATA) return;
+    abandonDirect(source);
+    giveUp();
+  }, ms);
+  const arrived = () => clearTimeout(timer);
+  player.addEventListener('loadeddata', arrived, { once: true });
+  return () => {
+    clearTimeout(timer);
+    player.removeEventListener('loadeddata', arrived);
+  };
+}
+
+/**
+ * A direct copy did not play from here: its origin is passed over for a while. The public one by not activating at
+ * all, as after a 503; the home-network one by leaving it out of the lists built meanwhile.
+ */
+export function abandonDirect(source: Source, now = Date.now()): void {
+  if (source.direct === 'public')
+    activationPausedUntil = Math.max(activationPausedUntil, now + ACTIVATION_PAUSE_MS);
+  else if (source.direct === 'lan')
+    lanPausedUntil = Math.max(lanPausedUntil, now + ACTIVATION_PAUSE_MS);
+}
+
+/**
+ * The entry after `from` to try next. Copies on an origin just given up on are passed over: they are on the same
+ * unreachable listener, each another deadline to sit out.
+ */
+export function nextRung(rungs: Source[], from: number, now = Date.now()): number {
+  let at = from + 1;
+  for (;;) {
+    const direct = rungs[at]?.direct;
+    if (direct === 'public' && now < activationPausedUntil) at += 1;
+    else if (direct === 'lan' && now < lanPausedUntil) at += 1;
+    else return at;
+  }
+}
+
+/**
+ * Whether this page may carry a trailer's bytes through its own origin's `/reel` relay.
+ *
+ * Not on the public web name: it is served through Cloudflare, whose terms do not allow serving video, and
+ * den-edge refuses those paths there. A page on the LAN address or the tailnet reaches den-edge directly, so it
+ * keeps the relay. Where there is no page (tests, a worker) nothing is played, and nothing is refused.
+ */
+export function relaysMedia(here = globalThis.location?.hostname ?? ''): boolean {
+  return here === '' || localHost(here);
 }
 
 /** A signed carried source on this origin, as the edge activation endpoint accepts it. */
@@ -486,9 +567,28 @@ function carriedPath(url: string): string | null {
   }
 }
 
+/** A bare https origin from an activation answer, or null for anything else. */
+function bareOrigin(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const base = new URL(raw);
+    if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash)
+      return null;
+    return base.origin;
+  } catch {
+    return null;
+  }
+}
+
+/** Where activation said this browser may fetch the media: the public listener, and the home-network one at home. */
+interface Direct {
+  public: string;
+  lan: string | null;
+}
+
 /**
- * Lease Reel's DNS-only direct origin for this browser. The signed media path is the authority;
- * failure returns null so the already-built same-origin relay list remains untouched.
+ * Lease Reel's DNS-only direct origin for this browser. The signed media path is the authority. At home den-edge
+ * also names the home-network origin (`lanBase`), as it does for a remux session. Null on any failure.
  */
 async function activateDirect(
   media: string,
@@ -496,7 +596,7 @@ async function activateDirect(
   fetchImpl: typeof fetch,
   signal: AbortSignal | undefined,
   lookup: () => Promise<string | undefined>,
-): Promise<string | null> {
+): Promise<Direct | null> {
   const deadline = AbortSignal.timeout(DIRECT_ACTIVATION_MS);
   const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const ask = async (ipv4Hint?: string): Promise<Response> => {
@@ -526,24 +626,34 @@ async function activateDirect(
       return null;
     }
     const answer = await response.json();
-    if (typeof answer?.publicBase !== 'string' || typeof answer?.media !== 'string') return null;
-    const base = new URL(answer.publicBase);
-    if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash)
-      return null;
-    const expected = new URL(media, base).href;
-    return answer.media === expected ? base.origin : null;
+    const base = bareOrigin(answer?.publicBase);
+    if (!base || typeof answer?.media !== 'string') return null;
+    if (answer.media !== new URL(media, base).href) return null;
+    return { public: base, lan: bareOrigin(answer.lanBase) };
   } catch {
     return null;
   }
 }
 
-/** Direct first, then the byte-identical bounded relay fallback; native/external URLs stay unchanged. */
+/**
+ * Where each carried source plays from, in the order remux plays a session: the home-network listener where
+ * den-edge named one, then the public listener, each given DIRECT_FIRST_FRAME_MS. Then this origin's relay, but
+ * only where the page may carry video through it (`relaysMedia`): on the public web name a trailer neither listener
+ * can serve is not played at all, as remux plays nothing when neither of its listeners answers. Native and external
+ * URLs stay as they are.
+ *
+ * The home-network copy goes only to a bare `<video>`: an MP4, or a playlist where the element plays HLS itself. The
+ * page's policy lets media load from any https origin but names no home-network one for fetching, so hls.js, which
+ * fetches its playlist and segments, could not use it; its first copy is the public one.
+ */
 async function directSources(
   sources: Source[],
   mount: string,
   fetchImpl: typeof fetch,
   signal: AbortSignal | undefined,
   lookup: () => Promise<string | undefined>,
+  relay: boolean,
+  player: Player,
 ): Promise<Source[]> {
   // A page already speaking to Reel directly (LAN/tailnet) should keep doing so. Activation is an
   // edge-owned control route and exists only beside the same-origin `/reel` relay mount.
@@ -552,12 +662,19 @@ async function directSources(
   const first = sources.map((source) => carriedPath(source.url)).find((path) => path !== null);
   if (!first) return sources;
   const direct = await activateDirect(first, edgeMount, fetchImpl, signal, lookup);
-  if (!direct) return sources;
+  const lan = direct?.lan && Date.now() >= lanPausedUntil ? direct.lan : null;
   const result: Source[] = [];
   for (const source of sources) {
     const path = carriedPath(source.url);
-    if (path) result.push({ ...source, url: new URL(path, direct).href });
-    result.push(source);
+    if (!path) {
+      result.push(source);
+      continue;
+    }
+    if (lan && (source.kind === 'mp4' || player === 'native'))
+      result.push({ ...source, url: new URL(path, lan).href, direct: 'lan' });
+    if (direct)
+      result.push({ ...source, url: new URL(path, direct.public).href, direct: 'public' });
+    if (relay) result.push(source);
   }
   return result;
 }
@@ -581,6 +698,7 @@ export async function fetchSources(
     fetchImpl = relayFetch,
     signal,
     lookupIpv4 = () => ipv4Hint(),
+    relay = relaysMedia(),
   }: {
     surface: Surface;
     player: Player;
@@ -599,6 +717,8 @@ export async function fetchSources(
     signal?: AbortSignal;
     /** The browser's public IPv4 lookup, injected by tests and called only after edge asks for it. */
     lookupIpv4?: () => Promise<string | undefined>;
+    /** Whether a carried source may play through this origin's relay (`relaysMedia`); tests name it. */
+    relay?: boolean;
   },
 ): Promise<Sources | null> {
   try {
@@ -644,7 +764,16 @@ export async function fetchSources(
       });
     }
     if (!list.length) return null;
-    const activated = await directSources(list, mount, fetchImpl, signal, lookupIpv4);
+    const activated = await directSources(
+      list,
+      mount,
+      fetchImpl,
+      signal,
+      lookupIpv4,
+      relay,
+      player,
+    );
+    if (!activated.length) return null;
     return { sources: activated, crop: crop(body.crop), expires: body.expires };
   } catch {
     return null;

@@ -666,6 +666,16 @@ async fn relay_with(
     // every relayed request do a library lookup, which is the work this limit exists to protect.
     let address = crate::handler::client_addr(state, &req);
     let ip = crate::handler::client_ip(state, &req);
+    // Never a trailer's bytes on a public name: those names are served through Cloudflare, whose terms do not
+    // allow serving video. There the page plays from the direct listeners (`activate_reel`), and with neither in
+    // reach it shows no trailer, as remux shows no playback. A native master is a playlist whose segments come
+    // from Google, so it still passes. The LAN and tailnet faces relay as before (oxyc/den#197).
+    if matches!(face, crate::handler::Face::Web | crate::handler::Face::Api)
+        && media(req.uri().path())
+        && !native_master(req.uri().path(), req.uri().query())
+    {
+        return json(StatusCode::NOT_FOUND, "not_found");
+    }
     // A trailer's bytes come through here or not at all. On the public name a browser cannot reach reel
     // directly — its only https address there is the tailnet's, which does not resolve for anyone off it — so
     // the video has to be served from this origin. Streamed rather than collected, and on its own budget.
@@ -1695,16 +1705,22 @@ pub async fn activate_reel(state: &Arc<AppState>, req: Request, rid: &str) -> Re
         state.metrics.record_public_media_hinted("reel");
     }
     let media = format!("{base}{}", activation.media);
-    direct_json(
-        StatusCode::OK,
-        &serde_json::json!({
-            "publicBase": base,
-            "media": media,
-            "hinted": hinted,
-            "form": form,
-            "expires": expires,
-        }),
-    )
+    let mut answer = serde_json::json!({
+        "publicBase": base,
+        "media": media,
+        "hinted": hinted,
+        "form": form,
+        "expires": expires,
+    });
+    // As a remux session does: the home-network origin, only to a browser behind the home's own router. The router
+    // does not loop the public address back in, so from home that origin is the only direct way to the media; the
+    // page tries it first and the public one after it (oxyc/den#197).
+    if let Some(lan) = &state.lan_media_base {
+        if state.home_address.is_behind_home_router(base, source).await {
+            answer["lanBase"] = serde_json::Value::String(lan.clone());
+        }
+    }
+    direct_json(StatusCode::OK, &answer)
 }
 
 /// The only path shape Caddy publishes. Keep the exact original query for Reel's validator and the
@@ -2208,6 +2224,71 @@ mod tests {
             .await;
         assert_eq!(answer.status(), StatusCode::PRECONDITION_REQUIRED);
         assert_eq!(crate::handler::tests::body_json(answer).await["error"], "ipv4_hint_wanted");
+    }
+
+    /// As a remux session does: the home-network origin goes only to a browser behind the home's router — seen as the
+    /// home address, or IPv6 with the home address as its hint — and never to anyone else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reel_activation_names_the_lan_base_only_behind_the_home_router() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            axum::http::Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header("x-den-media-form", "progressive")
+                .header("x-den-media-expires", "4000000000")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
+        });
+
+        let mut h = Harness::in_dir(dir);
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel=http://{upstream_addr}"));
+        // An address literal names the home without a lookup; routable, since activation refuses private ranges.
+        state.public_media_base = Some("https://8.8.4.4".into());
+        state.lan_media_base = Some("https://lan.media.example:8449".into());
+        state.public_media_socket = Some(socket);
+        state.trusted_proxies.push("192.168.1.9".parse().unwrap());
+        let media = format!("/reel/m/s/{}?s={}", "A".repeat(40), "b".repeat(24));
+        for (visitor, body, home) in [
+            ("8.8.4.4", json!({ "media": media }), true),
+            ("2001:4860:4860::8888", json!({ "media": media, "ipv4Hint": "8.8.4.4" }), true),
+            ("8.8.8.8", json!({ "media": media }), false),
+        ] {
+            let answer = h
+                .send(
+                    "POST",
+                    super::REEL_ACTIVATE,
+                    Some(body.to_string()),
+                    &[("x-forwarded-for", visitor), ("content-type", "application/json")],
+                )
+                .await;
+            assert_eq!(answer.status(), StatusCode::OK, "{visitor}");
+            let body = crate::handler::tests::body_json(answer).await;
+            assert_eq!(body["publicBase"], "https://8.8.4.4", "{visitor}");
+            if home {
+                assert_eq!(body["lanBase"], "https://lan.media.example:8449", "{visitor}");
+            } else {
+                assert!(body.get("lanBase").is_none(), "{visitor}: {body}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -3787,6 +3868,39 @@ mod tests {
         let since = "Sat, 12 Sep 2026 12:00:00 GMT";
         let resp = h.send("GET", "/reel/play/abc.mp4", None, &[("if-modified-since", since)]).await;
         assert_eq!(crate::handler::tests::body_json(resp).await, json!({ "since": since }));
+    }
+
+    /// The public names are served through Cloudflare, which does not allow serving video: no trailer bytes there,
+    /// in any of reel's shapes. A native master (a playlist; Google serves the segments) and the LAN face still pass.
+    #[tokio::test]
+    async fn the_public_names_relay_no_trailer_bytes() {
+        let addon = public_addon().await;
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/reel={addon}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.example");
+        state.api_hosts = crate::parse_hosts("API_HOSTS", "d-api.example");
+        let carried = [
+            "/reel/m/s/AbC123?s=tag",
+            "/reel/cfg/m/s/AbC123?s=tag",
+            "/reel/m/s/seg?u=x",
+            "/reel/play/dQw4w9WgXcQ.mp4",
+            "/reel/progressive/dQw4w9WgXcQ.mp4",
+            "/reel/hls/dQw4w9WgXcQ.m3u8?s=tag",
+            "/reel/hls/seg?u=x",
+        ];
+        for host in ["d.example", "d-api.example"] {
+            for path in carried {
+                let refused = h.send("GET", path, None, &[("host", host)]).await;
+                assert_eq!(refused.status(), StatusCode::NOT_FOUND, "{host}{path}");
+            }
+        }
+        for path in ["/reel/m/n/AbC123?s=tag", "/reel/hls/dQw4w9WgXcQ.m3u8?s=tag&native=1"] {
+            let passed = h.send("GET", path, None, &[("host", "d.example")]).await;
+            assert_eq!(passed.status(), StatusCode::OK, "{path}");
+        }
+        // Any other name (the LAN address, the tailnet's) carries them as before.
+        assert_eq!(h.send("GET", "/reel/play/dQw4w9WgXcQ.mp4", None, &[]).await.status(), StatusCode::OK);
     }
 
     #[test]
