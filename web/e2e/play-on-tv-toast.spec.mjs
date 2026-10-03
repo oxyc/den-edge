@@ -4,6 +4,7 @@
 // Sent → the hint, if the TV hasn't opened Den → Playing, once a fresh position shows up (what a library pull
 // would carry) → dismissed.
 import { test, expect, chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
 const movie = {
@@ -39,9 +40,7 @@ async function openTitle(page, { pendingStatus = 200, pendingBody = { queued: tr
   await page.route('**/inbox/pending', (r) =>
     r.fulfill({ status: pendingStatus, json: pendingBody }),
   );
-  await page.goto(
-    'http://127.0.0.1:5198/test/library.html?populated&page=title&type=movie&id=1001',
-  );
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&page=title&type=movie&id=1001`);
   await expect(page.getByRole('heading', { name: 'Movie 1001', level: 1 })).toBeVisible();
   return { appends };
 }
@@ -114,9 +113,7 @@ test('says so when den-edge is unreachable, same as before this feature', async 
       }),
     );
     await page.route('**/inbox/append', (r) => r.abort('failed'));
-    await page.goto(
-      'http://127.0.0.1:5198/test/library.html?populated&page=title&type=movie&id=1001',
-    );
+    await page.goto(`${E2E_ORIGIN}/test/library.html?populated&page=title&type=movie&id=1001`);
     await expect(page.getByRole('heading', { name: 'Movie 1001', level: 1 })).toBeVisible();
     await play(page).click();
     await expect(page.getByRole('alert')).toHaveText(
