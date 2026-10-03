@@ -4,7 +4,12 @@ import {
   abandon,
   begin,
   confirm,
+  DeriveFailed,
   derive,
+  deviceCouldNot,
+  redeemMessages,
+  reportTiming,
+  type Timing,
   dueAtLaunch,
   forgetMakesInThisTab,
   markReconciled,
@@ -40,6 +45,8 @@ const vectors = JSON.parse(
 };
 
 const SLOW = 60_000;
+/** A derivation that reports its timing nowhere. */
+const quiet = { op: 'redeem', report: () => {} } as const;
 
 describe('den-spec recovery-v1 vectors', () => {
   it('makes and reads codes as the vectors do', () => {
@@ -53,17 +60,92 @@ describe('den-spec recovery-v1 vectors', () => {
     async () => {
       const key = fromHex(vectors.libraryKey);
       for (const entry of vectors.entries) {
-        const derived = await derive(entry.data);
+        const derived = await derive(entry.data, quiet);
         expect(derived.locator).toBe(entry.locator);
         expect([...derived.wrapKey]).toEqual([...fromHex(entry.wrapKey)]);
         expect(await seal(derived, key, 1790000000000, fromHex(entry.nonce))).toBe(entry.sealed);
         expect([...((await unseal(derived, entry.sealed)) ?? [])]).toEqual([...key]);
       }
-      const first = await derive(vectors.entries[0]!.data);
+      const first = await derive(vectors.entries[0]!.data, quiet);
       expect(await unseal(first, vectors.swappedLocator.sealed)).toBeNull();
     },
     SLOW,
   );
+});
+
+describe('a derivation that can’t finish (§3)', () => {
+  /** A Worker that answers `reply` after `afterMs`, or never. */
+  const fakeWorker =
+    (reply?: Record<string, string>, afterMs = 0) =>
+    () => {
+      const worker = {
+        onmessage: null as ((event: MessageEvent) => void) | null,
+        onerror: null,
+        postMessage() {
+          if (reply) setTimeout(() => worker.onmessage?.({ data: reply } as MessageEvent), afterMs);
+        },
+        terminate() {},
+      };
+      return worker as unknown as Worker;
+    };
+
+  it('times out, and is reported as a timeout with its time', async () => {
+    const timings: Timing[] = [];
+    const failed = derive('GEB2LP9UC63WQ95UNSLTXM', {
+      op: 'redeem',
+      worker: fakeWorker(),
+      timeoutMs: 20,
+      report: (t) => timings.push(t),
+    });
+    await expect(failed).rejects.toEqual(new DeriveFailed('timeout'));
+    expect(timings).toHaveLength(1);
+    expect(timings[0]).toMatchObject({ op: 'redeem', outcome: 'timeout' });
+    expect(timings[0]!.ms).toBeGreaterThanOrEqual(15);
+  });
+
+  it('a Worker that could not grow its memory fails as memory, with the device message', async () => {
+    const timings: Timing[] = [];
+    const failed = derive('GEB2LP9UC63WQ95UNSLTXM', {
+      op: 'make',
+      worker: fakeWorker({ error: 'memory' }),
+      report: (t) => timings.push(t),
+    });
+    await expect(failed).rejects.toEqual(new DeriveFailed('memory'));
+    expect(timings[0]).toMatchObject({ op: 'make', outcome: 'memory' });
+    expect(deviceCouldNot.make).toBe(
+      'This device couldn’t make the code — try Den Web on a computer.',
+    );
+    expect(redeemMessages.device).toBe(
+      'This device couldn’t open the code — try Den Web on a computer.',
+    );
+  });
+
+  it('a slow answer within the timeout is reported as ok', async () => {
+    const timings: Timing[] = [];
+    const entry = vectors.entries[0]!;
+    const derived = await derive(entry.data, {
+      op: 'redeem',
+      worker: fakeWorker({ locator: entry.locator, wrapKey: entry.wrapKey }, 30),
+      timeoutMs: 1000,
+      report: (t) => timings.push(t),
+    });
+    expect(derived.locator).toBe(entry.locator);
+    expect(timings[0]).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('reports a timing to den-edge with nothing of the code', async () => {
+    const sent: { url: string; body: string }[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(input), body: String(init?.body) });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    reportTiming({ op: 'make', outcome: 'ok', ms: 141.6 }, fetchImpl);
+    await Promise.resolve();
+    expect(sent[0]!.url).toBe('/recovery/timing');
+    const body = JSON.parse(sent[0]!.body) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['device', 'ms', 'op', 'outcome']);
+    expect(body).toMatchObject({ op: 'make', outcome: 'ok', ms: 142 });
+  });
 });
 
 // ---- a household: one library row at den-edge, read and written compare-and-set by each device
@@ -110,9 +192,8 @@ class FakeLog implements RecoveryLog {
   read: 'ok' | 'busy' | 'generation' = 'ok';
   constructor(private readonly edge: Server) {}
   async readToHead() {
-    if (this.read !== 'ok') return false;
     await this.refresh();
-    return true;
+    return this.read === 'ok';
   }
   settings(name: string) {
     return name === 'devices' ? this.edge.devices : this.row;
@@ -130,7 +211,13 @@ class FakeLog implements RecoveryLog {
     await this.refresh();
     return true;
   }
+  /**
+   * As `LibraryLog.refresh`: a busy log leaves what this device holds as it was, and a pass that meets a generation
+   * change has not yet read the current row. Either way the row held here is stale.
+   */
   async refresh() {
+    if (this.read === 'busy') return false;
+    if (this.read === 'generation') return true;
     this.seq = this.edge.seq;
     this.row = structuredClone(this.edge.row);
     return true;
@@ -436,10 +523,11 @@ describe('reconcile (§7)', () => {
       edge.seq = 2;
       edge.entries.set(c2, { sealed: 'CCCC', library: keys.id, createdAt: 2, opens: 0 });
       (web.log as FakeLog).read = read;
-      expect(await reconcile(web)).toBeNull();
-      expect(edge.deleted).toEqual([]);
-      expect([...edge.entries.keys()]).toEqual([c2]);
+      const status = await reconcile(web);
+      expect(edge.deleted, 'the current code is not deleted').toEqual([]);
+      expect([...edge.entries.keys()], 'the replaced code is not posted again').toEqual([c2]);
       expect(edge.seq).toBe(2);
+      expect(status).toBeNull();
     });
   }
 });
