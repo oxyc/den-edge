@@ -13,7 +13,27 @@ import {
 const pageStartedAt = Date.now();
 const pageStartedMono = globalThis.performance?.now() ?? 0;
 const TEN_MINUTES = 10 * 60_000;
-const heldLeases = new WeakMap<LibraryLog, { account: string; epoch: number; at: number }>();
+const HOLD = 120_000;
+/** This page's own take or renewal: when it was sent, on both clocks (v3 §6 *Holding*). */
+const heldLeases = new WeakMap<
+  LibraryLog,
+  { account: string; epoch: number; at: number; mono: number }
+>();
+
+const monoNow = () => globalThis.performance?.now() ?? 0;
+
+/**
+ * Whether this page still holds the account's lease (v3 §6 *Holding*): its take or renewal was sent less than two
+ * minutes ago on the greater of the elapsed `Date.now` and `performance.now`, and `Date.now` has not gone backwards.
+ * Checked immediately before every tracker request.
+ */
+function holding(log: LibraryLog, account: string): boolean {
+  const held = heldLeases.get(log);
+  if (held?.account !== account) return false;
+  const wall = Date.now() - held.at;
+  if (wall < 0) return false;
+  return Math.max(wall, monoNow() - held.mono) < HOLD;
+}
 
 /**
  * What this page has watched of a library (v3 §6 *Taking*): the generation it reads, since when, and each account's
@@ -70,8 +90,15 @@ interface Target extends Record<string, unknown> {
 
 interface Snapshot {
   watched: Set<string>;
-  listed: Set<string>;
+  /** Each listed title, with when SIMKL says it was added (ms), or null where it doesn't say. */
+  listed: Map<string, number | null>;
   ratings: Map<string, number>;
+}
+
+/** SIMKL's `added_to_watchlist_at`, in ms; null when absent or unreadable. */
+function addedAt(value: unknown): number | null {
+  const at = typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(at) ? at : null;
 }
 
 const identity = (media: string, id: number, season?: number, episode?: number) =>
@@ -153,7 +180,7 @@ function receipts(rows: Row[], provider: string, account: string): Record<string
 }
 
 function collectSnapshot(body: unknown): Snapshot {
-  const snapshot: Snapshot = { watched: new Set(), listed: new Set(), ratings: new Map() };
+  const snapshot: Snapshot = { watched: new Set(), listed: new Map(), ratings: new Map() };
   const root = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
   for (const item of Array.isArray(root.movies) ? root.movies : []) {
     const movie = item as {
@@ -161,12 +188,14 @@ function collectSnapshot(body: unknown): Snapshot {
       watched_at?: unknown;
       status?: string;
       user_rating?: number;
+      added_to_watchlist_at?: unknown;
     };
     const id = movie.movie?.ids?.tmdb;
     if (!id) continue;
     const key = identity('movie', id);
     if (movie.watched_at) snapshot.watched.add(key);
-    if (movie.status === 'plantowatch') snapshot.listed.add(key);
+    if (movie.status === 'plantowatch')
+      snapshot.listed.set(key, addedAt(movie.added_to_watchlist_at));
     if (typeof movie.user_rating === 'number') snapshot.ratings.set(key, movie.user_rating);
   }
   for (const item of [
@@ -177,12 +206,14 @@ function collectSnapshot(body: unknown): Snapshot {
       show?: { ids?: { tmdb?: number } };
       status?: string;
       user_rating?: number;
+      added_to_watchlist_at?: unknown;
       seasons?: { number?: number; episodes?: { number?: number; watched_at?: unknown }[] }[];
     };
     const id = show.show?.ids?.tmdb;
     if (!id) continue;
     const title = identity('tv', id);
-    if (show.status === 'plantowatch') snapshot.listed.add(title);
+    if (show.status === 'plantowatch')
+      snapshot.listed.set(title, addedAt(show.added_to_watchlist_at));
     if (typeof show.user_rating === 'number') snapshot.ratings.set(title, show.user_rating);
     for (const season of show.seasons ?? [])
       for (const episode of season.episodes ?? []) {
@@ -263,7 +294,7 @@ function remoteFacts(snapshot: Snapshot, id: string, title: string) {
     account_matches: true,
     simkl: true,
     watched: snapshot.watched.has(id) ? { at: null } : null,
-    listed: snapshot.listed.has(title) ? { at: null } : null,
+    listed: snapshot.listed.has(title) ? { at: snapshot.listed.get(title) ?? null } : null,
     rated: rating === undefined ? null : { at: null, value: rating },
     any_title_watch: snapshot.watched.has(title),
     unknown_or_newer_title_watch: false,
@@ -285,6 +316,10 @@ interface V4Pending {
   commands: (V4Target & Record<string, unknown>)[];
   settle: V4Target[];
   greatest_epoch: number;
+  /** `"held"` when the removals latch closes in this pass (v3 §6). */
+  removals?: unknown;
+  /** The account's unverified epochs after this read. */
+  unverified?: number[];
 }
 
 interface V4Pass {
@@ -418,6 +453,10 @@ async function deliverV4(log: LibraryLog, pass: V4Pass): Promise<void> {
       ),
     });
     if (outcome.action === 'hold' || outcome.action === 'superseded') continue;
+    if (outcome.action === 'send' && !holding(log, account)) {
+      console.warn('den: the SIMKL lease lapsed during a delivery pass; stopping it');
+      break;
+    }
     if (
       outcome.action === 'send' &&
       !(await send(command, target, pass.clientId, pass.token, pass.fetchImpl))
@@ -473,6 +512,73 @@ export async function deliverSimkl(
   return exclusive(`den.simkl.${account}`, () =>
     deliverAccount(log, device, fetchImpl, elapsed, account, token),
   );
+}
+
+/**
+ * The lease holder keeps what den-core answered about the account on its `set:deliver` row (v4 §9 *Account
+ * settings*): `removals` closed to `"held"`, and the `unverified` epochs when they changed. By compare-and-set; one
+ * that loses is decided again next pass.
+ */
+async function writeAccountState(
+  log: LibraryLog,
+  name: string,
+  pending: V4Pending,
+  device: string,
+) {
+  const row = log.settings(name);
+  if (!row) return;
+  const values = { ...row.values };
+  const at = (): Stamp =>
+    syncPolicy<Stamp>({ op: 'issue', last: log.newestStamp(), now: Date.now(), device });
+  let changed = false;
+  if (pending.removals === 'held' && jsonSetting(row, 'removals') !== 'held') {
+    values.removals = { value: { string: JSON.stringify('held') }, at: at() };
+    changed = true;
+  }
+  if (pending.unverified) {
+    const listed = row.values.unverified?.value;
+    const current = listed && 'ints' in listed ? listed.ints : [];
+    const epochs = [...pending.unverified].sort((a, b) => a - b);
+    if (JSON.stringify(epochs) !== JSON.stringify(current)) {
+      values.unverified = { value: { ints: epochs }, at: at() };
+      changed = true;
+    }
+  }
+  if (changed && !(await log.writeAt({ ...row, values }, log.seqOf(rowName(row)))))
+    console.warn(
+      `den: ${name}'s removals or unverified epochs lost a race; decided again next pass`,
+    );
+}
+
+/** The SIMKL list removals the removals latch holds (v3 §6), by title: what a person sees before approving them. */
+export function heldSimklRemovals(log: LibraryLog): { type: 'movie' | 'tv'; id: number }[] {
+  if (log.wireMinimum < 4) return [];
+  const connection = Object.keys(log.settings('trackers')?.values ?? {}).find(
+    (key) => key.startsWith('simkl:') && !key.endsWith('.token'),
+  );
+  const account = connection?.slice('simkl:'.length);
+  const row = account ? log.settings(`deliver:simkl:${account}`) : undefined;
+  const since = row && (jsonSetting(row, 'since') as Stamp | undefined);
+  if (!row || !since) return [];
+  const listed = row.values.unverified?.value;
+  const pending = syncPolicy<V4Pending>({
+    op: 'pending_targets_v4',
+    documents: log.documents().map(({ document }) => document),
+    deliver: {
+      provider: 'simkl',
+      account,
+      since,
+      removals: jsonSetting(row, 'removals') ?? null,
+      unverified: listed && 'ints' in listed ? listed.ints : [],
+    },
+    now: Date.now(),
+  });
+  return pending.commands
+    .filter((command) => command.removals_held === true && typeof command.title === 'string')
+    .map((command) => {
+      const [, type, id] = (command.title as string).split(':');
+      return { type: type === 'tv' ? 'tv' : 'movie', id: Number(id) };
+    });
 }
 
 /** A `set:deliver` setting holding JSON in a string (`since`, `removals`), parsed; undefined when absent. */
@@ -536,23 +642,26 @@ async function deliverAccount(
         })
       : null;
   const kept = heldLeases.get(log);
-  const locallyHeld =
-    lease[0] === device && kept?.account === account && Date.now() - kept.at < 120_000;
-  const epoch = locallyHeld
-    ? kept.epoch
-    : lease[0] === device && !fresh
-      ? Number(lease[1] ?? 0)
-      : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0) + 1;
-  if (!locallyHeld || Date.now() - kept!.at >= 60_000) {
+  const locallyHeld = lease[0] === device && holding(log, account);
+  const epoch =
+    locallyHeld && kept
+      ? kept.epoch
+      : lease[0] === device && !fresh
+        ? Number(lease[1] ?? 0)
+        : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0) + 1;
+  if (!locallyHeld || !kept || Math.max(Date.now() - kept.at, monoNow() - kept.mono) >= HOLD / 2) {
     // Compare-and-set on the lease as read: another device that took or renewed it since wins, and this pass stops.
+    // The hold counts from when the request was sent.
     const leased: SettingsRow = {
       ...base,
       values: { ...base.values, lease: { value: { strings: [device, String(epoch)] }, at } },
     };
+    const sent = { at: Date.now(), mono: monoNow() };
     if (!(await log.writeAt(leased, log.seqOf(rowName(leased))))) return false;
-    heldLeases.set(log, { account, epoch, at: Date.now() });
+    heldLeases.set(log, { account, epoch, ...sent });
     if (fresh) log.observedGeneration = log.currentGeneration;
   }
+  if (pendingV4) await writeAccountState(log, name, pendingV4, device);
   const order = orderCounter(account, epoch);
 
   const clientId = await fetchSimklClientId(fetchImpl);
@@ -600,6 +709,7 @@ async function deliverAccount(
       remote: remoteFacts(snapshot, id, title),
     });
     if (outcome.action === 'hold' || outcome.action === 'superseded') continue;
+    if (outcome.action === 'send' && !holding(log, account)) break;
     if (outcome.action === 'send' && !(await send(command, target, clientId, token, fetchImpl)))
       continue;
     const settled = syncPolicy<unknown>({

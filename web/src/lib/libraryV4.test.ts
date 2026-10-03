@@ -13,7 +13,7 @@ import { switchLibraryToV4 } from './libraryUpgrade';
 import { applyOps, opsFor } from './libraryV4';
 import type { Vault } from './localVault';
 import { LibraryLog } from './log';
-import { deliverSimkl } from './simklDelivery';
+import { deliverSimkl, heldSimklRemovals } from './simklDelivery';
 import { recordTrackerEvent } from './trackerEvents';
 import {
   deriveKeys,
@@ -368,6 +368,25 @@ describe('Library v4 documents', () => {
     expect(server.stored.size).toBe(2);
     expect(log.unreadable.size).toBe(0);
     expect(server.log.commits).toEqual([{ base: 3, wireMin: 4 }]);
+  });
+
+  it('leaves too many unreadable rows alone, and says delivery is paused', async () => {
+    const server = await edge([filmDocument(550), prefs]);
+    const keys = server.keys as LibraryKeys;
+    for (let id = 0; id < 11; id++)
+      server.put(
+        await sealPlaintext(
+          keys,
+          `title:movie:${9000 + id}`,
+          new TextEncoder().encode('{"format":4,"kind":"title","title":{"type":"movie","id":1}}'),
+        ),
+      );
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(log.unreadable.size).toBe(11);
+    expect(await log.compact()).toBe(false);
+    expect(server.log.commits).toEqual([]);
+    expect(server.stored.size).toBe(13);
+    expect(libraryAlert(log)).toBe('Delivery paused: library rows can’t be read');
   });
 });
 
@@ -818,12 +837,104 @@ describe('SIMKL delivery on Library v4', () => {
       const { server, connection } = await simkl([...removed, ...receipts, trackers, row]);
       const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
       expect(await watched(log, connection)).toBe(true);
-      return lists(await server.opened());
+      const opened = await server.opened();
+      const latch = opened.find(
+        (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+      )!.values.removals?.value;
+      return { lists: lists(opened), latch, held: heldSimklRemovals(log).length };
     };
-    // More than 20 removals hold every one of them, pass after pass.
-    expect(await delivered()).toEqual(Array(21).fill('in'));
+    // More than 20 removals hold every one of them, pass after pass, and the holder closes the latch on the row.
+    expect(await delivered()).toEqual({
+      lists: Array(21).fill('in'),
+      latch: { string: '"held"' },
+      held: 21,
+    });
     // Approved after they were made: every one is decided.
-    expect(await delivered({ approved: at(4000) })).toEqual(Array(21).fill('gone'));
+    expect((await delivered({ approved: at(4000) })).lists).toEqual(Array(21).fill('gone'));
+  });
+
+  it('sends a removal SIMKL still lists, once it knows when SIMKL listed it', async () => {
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [1, 1, 'bbbbbbbbbbbbbbbb']] },
+    };
+    const { connection, sent } = await simkl([
+      filmDocument(550, { deleted: { value: true, at: at(3000) } }),
+      receipts,
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const listing: typeof fetch = async (input, init) =>
+      String(input).includes('/sync/all-items')
+        ? new Response(
+            JSON.stringify({
+              movies: [
+                {
+                  movie: { ids: { tmdb: 550 } },
+                  status: 'plantowatch',
+                  added_to_watchlist_at: '1970-01-01T00:00:01Z',
+                },
+              ],
+            }),
+          )
+        : connection(input, init);
+    const log = (await LibraryLog.open(LIBRARY_KEY, listing, undefined, null))!;
+    expect(await watched(log, listing)).toBe(true);
+    expect(sent.count).toBe(1);
+  });
+
+  it('writes an epoch two devices settled under to unverified, and decides its receipts again', async () => {
+    const receipt = (id: number, device: string): DocumentRow => ({
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id },
+      entries: { list: ['in', at(1000), [3, 1, device]] },
+    });
+    const { server, connection, sent } = await simkl([
+      filmDocument(550),
+      filmDocument(551),
+      receipt(550, 'bbbbbbbbbbbbbbbb'),
+      receipt(551, 'cccccccccccccccc'),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, null))!;
+    expect(await watched(log, connection)).toBe(true);
+    expect(sent.count).toBe(2);
+    const row = (await server.opened()).find(
+      (row): row is SettingsRow => row.kind === 'set' && row.name === 'deliver:simkl:42',
+    )!;
+    expect(row.values.unverified?.value).toEqual({ ints: [3] });
+  });
+
+  it('checks its hold on the lease before every request, and stops once it has lapsed', async () => {
+    const { connection, sent } = await simkl([
+      filmDocument(550),
+      filmDocument(551),
+      trackers,
+      deliver(['', '1']),
+    ]);
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+    try {
+      // The first request takes longer than the two minutes a hold lasts.
+      const slow: typeof fetch = async (input, init) => {
+        const res = await connection(input, init);
+        if (String(input).includes('api.simkl.com') && init?.method === 'POST')
+          vi.advanceTimersByTime(121_000);
+        return res;
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, slow, undefined, null))!;
+      expect(await watched(log, slow)).toBe(true);
+      expect(sent.count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('sends a list add again whose receipt is unverified', async () => {

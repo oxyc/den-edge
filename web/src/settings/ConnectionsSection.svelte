@@ -27,6 +27,7 @@
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
   import type { Routes } from '../lib/routes';
+  import { routePath } from '../lib/route';
   import { denAddonOf } from '../lib/scout';
   import { clearTmdbCache } from '../lib/tmdbCache';
   import type { ConfigValue, SettingsRow } from '../lib/wire';
@@ -38,6 +39,8 @@
     keys,
     simklConnected,
     saveSimkl,
+    heldRemovals = [],
+    approveRemovals,
     plugins,
     routes,
     servers,
@@ -58,6 +61,9 @@
     keys: SettingsRow | undefined;
     simklConnected: boolean;
     saveSimkl: (token: string | null) => Promise<boolean>;
+    /** SIMKL watchlist removals held back until someone approves them (more than 20 at once). */
+    heldRemovals?: { type: 'movie' | 'tv'; id: number }[];
+    approveRemovals?: () => Promise<boolean>;
     plugins: string[];
     routes: Routes;
     servers: { kind: 'jellyfin' | 'plex'; url: string; user?: string }[];
@@ -603,7 +609,32 @@
     </p>
   </SettingRow>
 
-  <SettingRow id="simkl" label="SIMKL" value={simkl ? 'Connected' : 'Not connected'}>
+  <SettingRow
+    id="simkl"
+    label="SIMKL"
+    value={!simkl
+      ? 'Not connected'
+      : heldRemovals.length === 0
+        ? 'Connected'
+        : heldRemovals.length === 1
+          ? '1 removal held'
+          : `${heldRemovals.length} removals held`}
+  >
+    {#if simkl && heldRemovals.length && approveRemovals}
+      <div class="form">
+        <p>
+          Den held back these watchlist removals because there were so many at once:
+          {#each heldRemovals as title, i (`${title.type}:${title.id}`)}<a
+              href={routePath({ page: 'title', type: title.type, id: title.id })}
+              >{title.type === 'movie' ? 'Movie' : 'Series'} {title.id}</a
+            >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
+          Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
+        </p>
+        <button type="button" class="primary" {disabled} onclick={() => void approveRemovals()}
+          >Remove {heldRemovals.length === 1 ? '1 title' : `${heldRemovals.length} titles`} from SIMKL</button
+        >
+      </div>
+    {/if}
     {#if simkl}
       <div class="form">
         <Confirm

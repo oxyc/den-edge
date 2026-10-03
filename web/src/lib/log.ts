@@ -267,6 +267,8 @@ export class LibraryLog {
   predatesV3 = false;
   /** When `compact` last tried, so a refused one is not tried on every refresh. */
   private compactedAt = 0;
+  /** Why den-core's compaction guard last refused to remove the unreadable rows (§4); delivery stays paused. */
+  compactionRefused: string | null = null;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -680,8 +682,9 @@ export class LibraryLog {
 
   /**
    * Library v4 §4 *Unreadable rows*: once the log is read to its head, a fenced rewrite at the same minimum that
-   * stages every other row as it is stored, leaving out each unreadable one — unless it reads at `base` after all.
-   * True when one was removed.
+   * stages every other row as it is stored, leaving out each unreadable one — unless it reads at `base` after all,
+   * and only when den-core's `compaction_guard` allows that many (many unreadable rows at once is a wrong key or a
+   * reader bug, not corruption). True when one was removed.
    */
   async compact(): Promise<boolean> {
     if (this.offline || this.wireMin < WIRE || !this.unreadable.size || this.readOnly) return false;
@@ -705,7 +708,21 @@ export class LibraryLog {
         }
         writes.push({ k: entry.k, v: entry.v });
       }
-      return removed ? { writes, wireMin: this.wireMin } : null;
+      if (!removed) return null;
+      const verdict = syncPolicy<{ compact: boolean; reason?: string }>({
+        op: 'compaction_guard',
+        unreadable: removed,
+        rows: raw.length,
+      });
+      if (!verdict.compact) {
+        this.compactionRefused = verdict.reason ?? 'refused';
+        console.warn(
+          `den: ${removed} of ${raw.length} library rows can't be read; not removing them (${this.compactionRefused}), delivery stays paused`,
+        );
+        return null;
+      }
+      this.compactionRefused = null;
+      return { writes, wireMin: this.wireMin };
     });
   }
 

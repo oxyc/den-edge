@@ -172,5 +172,7 @@ export function libraryAlert(log: LibraryLog): string | null {
   if (log.upgradeRequired !== null) return 'Library update required';
   if (log.predatesV3) return 'Library backup predates v3';
   if (log.switchFailure) return `Library update failed: ${log.switchFailure}`;
+  if (log.compactionRefused && log.unreadable.size)
+    return 'Delivery paused: library rows can’t be read';
   return null;
 }

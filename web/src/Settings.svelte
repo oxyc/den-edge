@@ -39,6 +39,7 @@
   import { relayFetch } from './lib/relayFetch';
   import { findAddon, findAtlas, REEL, type Addon } from './lib/scout';
   import { fetchRoutes, type Routes } from './lib/routes';
+  import { heldSimklRemovals } from './lib/simklDelivery';
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { tmdbKeyOf } from './lib/tmdb';
   import { fetchSimklClientId, simklAccountID } from './settings/simkl';
@@ -231,6 +232,30 @@
     return true;
   }
 
+  /** The SIMKL watchlist removals the removals latch holds, until someone approves them here or on a TV. */
+  const heldRemovals = $derived.by(() => {
+    void version;
+    try {
+      return log ? heldSimklRemovals(log) : [];
+    } catch (error) {
+      console.warn('den: the held SIMKL removals could not be read', error);
+      return [];
+    }
+  });
+
+  /** Approve them: `{"approved": <fresh stamp>}` on the account's delivery row, which counts for every device. */
+  async function approveRemovals(): Promise<boolean> {
+    const account = simklConnection?.[0].slice('simkl:'.length);
+    if (!account) return false;
+    const at = clock.issue();
+    return write(
+      `deliver:simkl:${account}`,
+      { removals: { string: JSON.stringify({ approved: at }) } },
+      false,
+      at,
+    );
+  }
+
   /**
    * Linking a TV from a browser using its own library: every row goes into the TV's library, merged with what the TV
    * has, and only then is this browser's own library dropped.
@@ -323,6 +348,8 @@
       {keys}
       simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
       {saveSimkl}
+      {heldRemovals}
+      {approveRemovals}
       {plugins}
       {routes}
       {servers}
