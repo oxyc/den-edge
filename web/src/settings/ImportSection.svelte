@@ -1,4 +1,4 @@
-<!-- Settings › Import: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
+<!-- Settings › Import & export: a Netflix viewing history (Account › Profile › Viewing activity › Download all) marked seen,
      each film and episode at the day it was last watched. Read and matched in this browser; written as the library's
      own rows (`viewingImportJournal`), which the Apple TV's catch-up passes to Simkl in its own time, each at its date. -->
 <script lang="ts" module>
@@ -22,6 +22,8 @@
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
   import PrimeImportRow from './PrimeImportRow.svelte';
+  import HistoryExportRow from './HistoryExportRow.svelte';
+  import type { Title } from '../lib/library';
   import SettingsSection from './SettingsSection.svelte';
   import type { LibraryLog } from '../lib/log';
   import { parseCsv, plan, previewLines } from '../lib/netflixImport';
@@ -34,8 +36,15 @@
     device,
     tmdbKey,
     changed,
-  }: { log: LibraryLog | null | undefined; device: string; tmdbKey: string; changed: () => void } =
-    $props();
+    displays,
+  }: {
+    log: LibraryLog | null | undefined;
+    device: string;
+    tmdbKey: string;
+    changed: () => void;
+    /** The titles the page has named, which the history export reuses. */
+    displays: readonly Title[];
+  } = $props();
 
   async function read(file: File) {
     const opened = log;
@@ -100,7 +109,7 @@
     `${n.toLocaleString()} ${n === 1 ? one : many}`;
 </script>
 
-<SettingsSection id="import" title="Import">
+<SettingsSection id="import" title="Import & export">
   <SettingRow
     id="netflix-import"
     label="Netflix viewing history"
@@ -221,6 +230,7 @@
     {/if}
   </SettingRow>
   <PrimeImportRow {log} {device} {tmdbKey} {changed} />
+  <HistoryExportRow {log} {tmdbKey} {displays} />
 </SettingsSection>
 
 <style>
