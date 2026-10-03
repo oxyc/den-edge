@@ -1,6 +1,7 @@
 <!-- "Open with a recovery code" (den-spec recovery-code §8): a pasted or typed code, read and checked here, then the
      library it opens. The code is held only in this field until it is opened. -->
 <script lang="ts">
+  import Loading from './Loading.svelte';
   import { redeem, redeemMessages } from '../lib/recovery';
 
   let {
@@ -72,10 +73,10 @@
       disabled={busy}
       bind:value={code}
     />
-    <button class="primary" disabled={busy || !code.trim()}
-      >{busy ? 'Checking…' : 'Open with code'}</button
-    >
+    <button class="primary" disabled={busy || !code.trim()}>Open with code</button>
   </form>
+  <!-- Argon2id can take seconds on a slow phone (§3): say it is working, up to its timeout. -->
+  {#if busy}<Loading label="Working…" inline />{/if}
 {/if}
 {#if problem}<p class="bad" role="alert">{problem}</p>{/if}
 

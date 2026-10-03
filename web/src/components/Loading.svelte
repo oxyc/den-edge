@@ -1,8 +1,23 @@
 <script lang="ts">
-  let { label = 'Loading', page = false }: { label?: string; page?: boolean } = $props();
+  let {
+    label = 'Loading',
+    page = false,
+    inline = false,
+  }: {
+    label?: string;
+    page?: boolean;
+    /** Beside the label, which is then shown: a step in a form ("Working…"), not a whole area loading. */
+    inline?: boolean;
+  } = $props();
 </script>
 
-<div class="loading" class:page role="status" data-route-loading={page ? '' : undefined}>
+<div
+  class="loading"
+  class:page
+  class:inline
+  role="status"
+  data-route-loading={page ? '' : undefined}
+>
   <span class="spinner" aria-hidden="true"></span>
   <span class="label">{label}</span>
 </div>
@@ -30,7 +45,23 @@
     animation: turn 0.75s linear infinite;
   }
 
-  .label {
+  .inline {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    min-height: 0;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .inline .spinner {
+    width: 18px;
+    height: 18px;
+    border-width: 2px;
+  }
+
+  .loading:not(.inline) .label {
     position: absolute;
     width: 1px;
     height: 1px;

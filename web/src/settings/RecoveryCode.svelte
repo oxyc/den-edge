@@ -4,6 +4,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Confirm from './Confirm.svelte';
+  import Loading from '../components/Loading.svelte';
   import type { BrowserClock } from '../lib/clock';
   import type { Link } from '../lib/links.svelte';
   import type { LibraryLog } from '../lib/log';
@@ -11,6 +12,8 @@
     abandon,
     begin,
     confirm,
+    DeriveFailed,
+    deviceCouldNot,
     makingWaits,
     prepare,
     reconcile,
@@ -91,7 +94,10 @@
     } catch (error) {
       console.warn('den: a recovery code could not be made', error);
       phase = 'idle';
-      message = { text: failures.failed, bad: true };
+      message = {
+        text: error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed,
+        bad: true,
+      };
     }
   }
 
@@ -249,7 +255,8 @@
   {/if}
   <div class="form">
     {#if phase === 'making'}
-      <button type="button" class="primary" disabled>Making your code…</button>
+      <!-- Argon2id can take seconds on a slow phone (§3): say it is working, up to its timeout. -->
+      <Loading label="Working…" inline />
     {:else if live}
       <Confirm
         label="Make a new code"

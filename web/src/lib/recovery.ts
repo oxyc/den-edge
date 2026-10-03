@@ -10,6 +10,7 @@
 import { evaluate } from '../vendor/den-core/index.js';
 import { hex } from './crypto';
 import { readDevices } from '../settings/values';
+import { thisDevice } from './device.svelte';
 import {
   deriveKeys,
   fromBase64url,
@@ -122,21 +123,108 @@ export interface Derived {
   wrapKey: Uint8Array<ArrayBuffer>;
 }
 
-/** §3: Argon2id then HKDF, in a worker so the page keeps drawing; on the page's thread only where there is none. */
-export function derive(data: string): Promise<Derived> {
+/** How long one derivation may take before the device is told it can't (§3): generous, since a phone may be slow. */
+export const DERIVE_TIMEOUT_MS = 30_000;
+
+/** Why a derivation didn't finish: too slow, no room for its 64 MiB, or anything else. */
+export type DeriveOutcome = 'timeout' | 'memory' | 'error';
+
+export class DeriveFailed extends Error {
+  constructor(readonly outcome: DeriveOutcome) {
+    super(`recovery_derive: ${outcome}`);
+  }
+}
+
+/** What a person is told when this device can't derive (§3): another device can. */
+export const deviceCouldNot = {
+  make: 'This device couldn’t make the code — try Den Web on a computer.',
+  redeem: 'This device couldn’t open the code — try Den Web on a computer.',
+};
+
+/** One derivation's time and outcome, for den-edge's log (`POST /recovery/timing`): nothing of the code. */
+export interface Timing {
+  op: 'make' | 'redeem';
+  outcome: 'ok' | DeriveOutcome;
+  ms: number;
+}
+
+/** Best effort: a report that doesn't arrive costs one sample. The device label is the guessed one, never a name. */
+export function reportTiming(timing: Timing, fetchImpl: typeof fetch = fetch): void {
+  let device = 'unknown';
+  try {
+    device = deviceLabel();
+  } catch {
+    // No browser to describe.
+  }
+  void fetchImpl('/recovery/timing', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...timing, ms: Math.round(timing.ms), device }),
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
+/** The kind of device and browser ("iPhone · Safari"), at most 40 characters of what den-edge accepts. */
+function deviceLabel(): string {
+  return (
+    thisDevice.guess
+      .replace(/[^\p{L}\p{N} .·/-]/gu, '')
+      .slice(0, 40)
+      .trim() || 'unknown'
+  );
+}
+
+export interface DeriveOptions {
+  op: Timing['op'];
+  /** Where the derivation runs: a module Worker, as Den Web runs it. Tests stand one in. */
+  worker?: () => Pick<Worker, 'postMessage' | 'terminate' | 'onmessage' | 'onerror'>;
+  timeoutMs?: number;
+  report?: (timing: Timing) => void;
+}
+
+/**
+ * §3: Argon2id then HKDF, in a Worker so the page keeps drawing (on the page's thread only where there is none).
+ * Rejects with `DeriveFailed` after `DERIVE_TIMEOUT_MS`, when the Worker can't grow its memory, or on any other
+ * failure. Every attempt's time and outcome is reported to den-edge.
+ */
+export function derive(data: string, options: DeriveOptions = { op: 'redeem' }): Promise<Derived> {
+  const report = options.report ?? ((timing: Timing) => reportTiming(timing));
+  const started = performance.now();
+  const settle = (outcome: Timing['outcome']) =>
+    report({ op: options.op, outcome, ms: performance.now() - started });
   const answer = (out: { locator?: string; wrapKey?: string; error?: string }): Derived => {
-    if (!out.locator || !out.wrapKey) throw new Error(`recovery_derive: ${out.error ?? 'failed'}`);
+    if (!out.locator || !out.wrapKey) {
+      const outcome: DeriveOutcome = out.error === 'memory' ? 'memory' : 'error';
+      settle(outcome);
+      throw new DeriveFailed(outcome);
+    }
+    settle('ok');
     return { locator: out.locator, wrapKey: fromHex(out.wrapKey) };
   };
-  if (typeof Worker === 'undefined') {
-    const derived = policy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data });
-    return Promise.resolve(answer('error' in derived ? derived : derived.ok));
+  const makeWorker =
+    options.worker ??
+    (typeof Worker === 'undefined'
+      ? undefined
+      : () => new Worker(new URL('./recoveryWorker.ts', import.meta.url), { type: 'module' }));
+  if (!makeWorker) {
+    try {
+      const derived = policy<{ locator: string; wrapKey: string }>({ op: 'recovery_derive', data });
+      return Promise.resolve(answer('error' in derived ? derived : derived.ok));
+    } catch (error) {
+      return Promise.reject(error instanceof DeriveFailed ? error : new DeriveFailed('error'));
+    }
   }
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./recoveryWorker.ts', import.meta.url), { type: 'module' });
+    const worker = makeWorker();
+    const timer = setTimeout(() => {
+      worker.terminate();
+      settle('timeout');
+      reject(new DeriveFailed('timeout'));
+    }, options.timeoutMs ?? DERIVE_TIMEOUT_MS);
     worker.onmessage = (
       event: MessageEvent<{ locator?: string; wrapKey?: string; error?: string }>,
     ) => {
+      clearTimeout(timer);
       worker.terminate();
       try {
         resolve(answer(event.data));
@@ -144,9 +232,11 @@ export function derive(data: string): Promise<Derived> {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     };
-    worker.onerror = (event) => {
+    worker.onerror = () => {
+      clearTimeout(timer);
       worker.terminate();
-      reject(new Error(`recovery worker: ${event.message}`));
+      settle('error');
+      reject(new DeriveFailed('error'));
     };
     worker.postMessage(data);
   });
@@ -429,7 +519,7 @@ export interface Prepared {
 /** §6 step 1: a code, its locator, and the library key sealed under it. */
 export async function prepare(ctx: RecoveryContext, libraryKey: string): Promise<Prepared> {
   const { code, data } = newCode();
-  const derived = await derive(data);
+  const derived = await derive(data, { op: 'make' });
   const createdAt = now(ctx);
   const key = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
   const sealed = await seal(derived, key, createdAt);
@@ -681,6 +771,7 @@ export type RedeemError =
   | 'unreadable'
   | 'library_moved'
   | 'library_missing'
+  | 'device'
   | 'unreachable';
 
 /**
@@ -695,9 +786,9 @@ export async function redeem(
   if ('error' in read) return read;
   let derived: Derived;
   try {
-    derived = await derive(read.data);
+    derived = await derive(read.data, { op: 'redeem' });
   } catch {
-    return { error: 'unreachable' };
+    return { error: 'device' };
   }
   try {
     const res = await fetchImpl('/recovery/open', {
@@ -734,5 +825,6 @@ export const redeemMessages: Record<RedeemError, string> = {
   library_moved: 'This code is out of date: the library’s key was reset after it was made.',
   library_missing:
     'The library this code opens is no longer on Den. A device that still holds it can put it back.',
+  device: deviceCouldNot.redeem,
   unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
 };
