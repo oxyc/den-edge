@@ -164,14 +164,22 @@ export function reportTiming(timing: Timing, fetchImpl: typeof fetch = fetch): v
   }).catch(() => undefined);
 }
 
-/** The kind of device and browser ("iPhone · Safari"), at most 40 characters of what den-edge accepts. */
-function deviceLabel(): string {
+/**
+ * The kind of device and browser as den-edge takes it: at most 24 of `[a-z0-9-]` ("iPhone · Safari" is
+ * "iphone-safari").
+ */
+export function deviceSlug(guess: string): string {
   return (
-    thisDevice.guess
-      .replace(/[^\p{L}\p{N} .·/-]/gu, '')
-      .slice(0, 40)
-      .trim() || 'unknown'
+    guess
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .slice(0, 24)
+      .replace(/^-+|-+$/g, '') || 'unknown'
   );
+}
+
+function deviceLabel(): string {
+  return deviceSlug(thisDevice.guess);
 }
 
 export interface DeriveOptions {

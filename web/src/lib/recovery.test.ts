@@ -7,6 +7,7 @@ import {
   DeriveFailed,
   derive,
   deviceCouldNot,
+  deviceSlug,
   redeemMessages,
   reportTiming,
   type Timing,
@@ -145,6 +146,14 @@ describe('a derivation that can’t finish (§3)', () => {
     const body = JSON.parse(sent[0]!.body) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(['device', 'ms', 'op', 'outcome']);
     expect(body).toMatchObject({ op: 'make', outcome: 'ok', ms: 142 });
+    expect(body.device).toMatch(/^[a-z0-9-]{1,24}$/);
+  });
+
+  it('names the device as den-edge takes it: at most 24 of [a-z0-9-]', () => {
+    expect(deviceSlug('iPhone · Safari')).toBe('iphone-safari');
+    expect(deviceSlug('Android tablet · Firefox')).toBe('android-tablet-firefox');
+    expect(deviceSlug('Chromebook · Chrome · something long')).toMatch(/^[a-z0-9-]{1,24}$/);
+    expect(deviceSlug(' · ')).toBe('unknown');
   });
 });
 
