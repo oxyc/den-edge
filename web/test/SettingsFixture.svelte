@@ -49,6 +49,30 @@
     wireMinimum: 4,
     refresh: async () => false,
     rows: () => Object.values(settings),
+    // One film seen twice and one on the watchlist, for the history export.
+    documents: () => [
+      {
+        seq: 1,
+        document: {
+          format: 4,
+          kind: 'title',
+          title: { type: 'movie', id: 550 },
+          status: { value: 'watched', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+          resume: { value: 1, at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'], viewing: 1 },
+          reaction: { value: 'love', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+          watch: { plays: { '0': 1_760_000_000_000, '1': 1_789_000_000_000 }, cleared: null },
+        },
+      },
+      {
+        seq: 2,
+        document: {
+          format: 4,
+          kind: 'title',
+          title: { type: 'movie', id: 603 },
+          status: { value: 'watchlist', at: [1_789_000_000_000, 0, 'a1b2c3d4e5f60718'] },
+        },
+      },
+    ],
     newestStamp: () => at,
     kept: async () => undefined,
     keep: async () => {},
@@ -69,7 +93,10 @@
     },
     revision: 0,
     settingsRevision: 0,
-    displays: [],
+    displays: [
+      { type: 'movie', id: 550, title: 'Fight Club', year: 1999, imdbId: 'tt0137523' },
+      { type: 'movie', id: 603, title: 'The Matrix', year: 1999, imdbId: 'tt0133093' },
+    ],
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
