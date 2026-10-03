@@ -324,7 +324,7 @@ for (const width of [390, 834, 1280])
         episode: 1,
       });
       await row.getByLabel('Options for episode 1').click();
-      await row.getByRole('button', { name: 'Mark watched', exact: true }).click();
+      await row.getByRole('menuitem', { name: 'Mark watched', exact: true }).click();
       await expect(row.locator('.watched')).toBeVisible();
       await active.getByRole('tab', { name: 'Season 2', exact: true }).click();
       const upcoming = active.locator('.episode').filter({ hasText: 'Coming soon' });
@@ -442,7 +442,7 @@ test('episode Sources target the selected episode and downloads never requeue wh
     const row = active.locator('.episode').first();
     await expect(row).toContainText('Season 2 premiere');
     await row.getByLabel('Options for episode 1').click();
-    await row.getByRole('button', { name: 'Sources', exact: true }).click();
+    await row.getByRole('menuitem', { name: 'Sources', exact: true }).click();
     await expect(active.getByText('Sources for S2 · E1')).toBeVisible();
     const source = active.locator('.source-panel li').first();
     await source.getByRole('button', { name: 'Play', exact: true }).click();

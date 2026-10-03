@@ -591,13 +591,13 @@
           {#if onseason && seasonMarkable.length}
             <button
               class="season-seen"
-              aria-pressed={seasonSeen}
+              class:on={seasonSeen}
               aria-label={seasonSeen
                 ? `Mark season ${displayedSeason} unwatched`
                 : `Mark season ${displayedSeason} watched`}
               title={seasonSeen ? 'Mark season unwatched' : 'Mark season watched'}
-              disabled={busy || seasonLoading}
-              onclick={() => markSeason(!seasonSeen)}
+              aria-disabled={busy || seasonLoading}
+              onclick={() => !(busy || seasonLoading) && markSeason(!seasonSeen)}
             >
               <DetailIcon name={seasonSeen ? 'eye' : 'check'} />
             </button>
@@ -927,12 +927,12 @@
     outline-offset: 3px;
   }
 
-  .season-seen:disabled {
+  .season-seen[aria-disabled='true'] {
     opacity: 0.5;
     cursor: default;
   }
 
-  .season-seen[aria-pressed='true'] {
+  .season-seen.on {
     color: var(--fg);
   }
 

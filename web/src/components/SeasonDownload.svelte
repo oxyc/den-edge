@@ -23,19 +23,26 @@
     compact?: boolean;
   } = $props();
   const job = $derived(seasonJobs.get(seasonJobKey(scout, imdb, season)));
-  // Always spoken in full, however little is drawn: "Download" alone would not say what is downloaded.
   const label = $derived(`Download season ${season}`);
+  /**
+   * While running, the visible progress IS the name — "Preparing season 2: 3 of 12" — so an `aria-label`
+   * doesn't shadow it (the name must contain the visible text, WCAG 2.5.3). Idle and compact, there is no
+   * visible text at all (the icon stands for "download", the tab beside it already says which season), so
+   * that's the one case this still needs one.
+   */
+  const running = $derived(
+    `Preparing season ${season}: ${job?.checked ?? 0} of ${job?.total ?? 0}`,
+  );
 </script>
 
 <div class="download" class:compact>
   <button
     disabled={disabled || job?.running}
-    aria-label={label}
-    title={label}
+    aria-label={compact && !job?.running ? label : undefined}
+    title={job?.running ? undefined : label}
     onclick={() => void downloadSeason(scout, imdb, season, episodes, routes)}
   >
-    <DetailIcon name="download" />{#if job?.running}Preparing {job.checked} of {job.total}{:else if !compact}Download
-      season{/if}
+    <DetailIcon name="download" />{#if job?.running}{running}{:else if !compact}Download season {season}{/if}
   </button>
   {#if job && !job.running}<p role="status">
       {job.queued} queued · {job.ready} already ready{job.unavailable

@@ -388,16 +388,21 @@ for (const width of [320, 1280])
             r.fulfill({ contentType: 'text/html', body: '<title>YouTube fixture</title>' }),
           );
         await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html?browser-play`);
-        // Named for what pressing it does: with a video id known, it plays here rather than leaving.
-        const trailer = page.getByRole('link', { name: exact ? 'Trailer' : 'Trailer on YouTube' });
+        // With a video id known it is a real button, which plays here rather than leaving — announced as
+        // something that acts in place, not a link. With none, it is a real link that leaves for YouTube.
+        const trailer = exact
+          ? page.getByRole('button', { name: 'Trailer' })
+          : page.getByRole('link', { name: 'Trailer on YouTube' });
         await expect(trailer).toBeVisible();
         expect((await trailer.locator('span').boundingBox()).width).toBeGreaterThan(30);
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
         const url = exact
           ? 'https://www.youtube.com/watch?v=fixture-key'
           : 'https://www.youtube.com/results?search_query=The%20Movie%20official%20trailer';
-        // The link itself is unchanged either way, so a middle-click or a long press still opens it.
-        await expect(trailer).toHaveAttribute('href', url);
+        if (!exact) {
+          // The link itself is unchanged either way, so a middle-click or a long press still opens it.
+          await expect(trailer).toHaveAttribute('href', url);
+        }
         await expect(page.locator('iframe')).toHaveCount(0);
         if (exact) {
           // YouTube's embed, in place. This is what a trailer this page cannot play itself — refused

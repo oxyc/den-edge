@@ -6,8 +6,9 @@
      the browser opens its own menu, and "No rating" clears it — which pressing the active button twice never said. -->
 <script lang="ts">
   import type { TitleRow } from '../lib/wire';
-
-  type Reaction = NonNullable<TitleRow['reaction']['value']>;
+  import { shareOrCopy } from '../lib/share';
+  import { titleState, type Reaction } from '../lib/titleState';
+  import { toastContext } from '../lib/toast';
 
   let {
     row,
@@ -79,30 +80,21 @@
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
   let copied = $state(false);
   let copiedFor: ReturnType<typeof setTimeout> | undefined;
+  const notify = toastContext();
 
   async function shareTitle() {
     if (!share) return;
-    // The system sheet wherever there is one — a phone hands off to Messages, Mail, whatever is installed —
-    // and the clipboard where there isn't, which is most desktop browsers.
-    if (navigator.share) {
-      // Dismissing the sheet rejects, and is a choice rather than a failure worth reporting.
-      await navigator.share({ title: share.title, url: share.url }).catch(() => {});
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(share.url);
-      copied = true;
-      clearTimeout(copiedFor);
-      copiedFor = setTimeout(() => (copied = false), 2000);
-    } catch {
-      /* Refused the clipboard: the link is in the address bar, which is where it came from. */
-    }
+    const result = await shareOrCopy(share);
+    if (result !== 'copied') return;
+    copied = true;
+    clearTimeout(copiedFor);
+    copiedFor = setTimeout(() => (copied = false), 2000);
+    // The visible word on the button changes too, but a live region INSIDE the button it's read from is
+    // announced inconsistently (VoiceOver often says nothing) — the page toast is what actually speaks it.
+    notify?.('Link copied');
   }
 
-  const active = $derived(row !== undefined && !row.deleted.value);
-  const listed = $derived(active && row?.status.value === 'watchlist');
-  const seen = $derived(active && row?.status.value === 'watched');
-  const reaction = $derived(active ? (row?.reaction.value ?? null) : null);
+  const { listed, seen, reaction } = $derived(titleState(row));
   const reactions: [Reaction, string][] = [
     ['dislike', 'Not for me'],
     ['like', 'Like'],
@@ -121,45 +113,37 @@
       {@render lock()}<span>Blocked by parental controls</span>
     </p>
   {:else if onplayhere}
-    <button class="primary" disabled={busy} onclick={onplayhere}
+    <button class="primary" aria-disabled={busy} onclick={() => !busy && onplayhere()}
       >{@render play()}<span>{playLabel}</span></button
     >
   {:else if onplay}
-    <button class="primary" disabled={busy} onclick={onplay}
+    <button class="primary" aria-disabled={busy} onclick={() => !busy && onplay()}
       >{@render tv()}<span>{playLabel === 'Play' ? 'Play on TV' : `${playLabel} on TV`}</span
       ></button
     >
   {/if}
 
   <div class="pills">
-    {#if trailerHref && !restricted}
-      <!-- A normal link lets iOS hand off to YouTube, with the website as its fallback.
-           Avoid a new mobile tab that can be left blank after the app handoff. -->
+    {#if trailerHref && !restricted && ontrailer}
+      <!-- A real button: the plain click always opens the in-page dialog, so it must be announced as
+           something that acts in place rather than as a link that leaves the page. -->
+      <button type="button" class="pill trailer" aria-label="Trailer" onclick={ontrailer}>
+        {@render clapper()}<span>Trailer</span>
+      </button>
+    {:else if trailerHref && !restricted}
+      <!-- No trailer id to play in a dialog: a normal link, which really does leave for YouTube. A normal
+           link also lets iOS hand off to its app, with the website as its fallback. Avoid a new mobile tab
+           that can be left blank after the app handoff. -->
       <a
         class="pill trailer"
         href={trailerHref}
         target={viewportWidth < 760 ? undefined : '_blank'}
         rel="noopener noreferrer"
-        aria-label={ontrailer ? 'Trailer' : 'Trailer on YouTube'}
-        onclick={(event) => {
-          // Modified clicks belong to the browser: a new tab, a window, a download are all still the
-          // link's own job. Only the plain one is taken over to play it here.
-          if (!ontrailer || event.defaultPrevented) return;
-          if (
-            event.button !== 0 ||
-            event.metaKey ||
-            event.ctrlKey ||
-            event.shiftKey ||
-            event.altKey
-          )
-            return;
-          event.preventDefault();
-          ontrailer();
-        }}>{@render clapper()}<span>Trailer</span></a
+        aria-label="Trailer on YouTube">{@render clapper()}<span>Trailer</span></a
       >
     {/if}
     {#if onplayhere && onplay && !restricted}
-      <button class="pill" disabled={busy} onclick={onplay}
+      <button class="pill" aria-disabled={busy} onclick={() => !busy && onplay()}
         >{@render tv()}<span class="label">Play on TV</span></button
       >
     {/if}
@@ -170,8 +154,8 @@
       class:on={listed}
       aria-pressed={compact ? undefined : listed}
       aria-label={compact ? (listed ? 'Remove from watchlist' : 'Add to watchlist') : undefined}
-      disabled={busy}
-      onclick={() => onwatchlist(!listed)}
+      aria-disabled={busy}
+      onclick={() => !busy && onwatchlist(!listed)}
     >
       {@render bookmark()}{#if !compact}<span class="label">Watchlist</span>{/if}
     </button>
@@ -180,16 +164,14 @@
       class:on={seen}
       aria-pressed={compact ? undefined : seen}
       aria-label={compact ? (seen ? 'Mark as unseen' : 'Mark as seen') : undefined}
-      disabled={busy}
-      onclick={() => onseen(!seen)}
+      aria-disabled={busy}
+      onclick={() => !busy && onseen(!seen)}
     >
       {@render eye()}{#if !compact}<span class="label">Seen</span>{/if}
     </button>
     {#if share}
-      <button class="pill" disabled={busy} onclick={() => void shareTitle()}>
-        {@render send()}<span class="label" aria-live="polite"
-          >{copied ? 'Link copied' : 'Share'}</span
-        >
+      <button class="pill" aria-disabled={busy} onclick={() => !busy && void shareTitle()}>
+        {@render send()}<span class="label">{copied ? 'Link copied' : 'Share'}</span>
       </button>
     {/if}
 
@@ -364,6 +346,12 @@
 
   .pick {
     position: relative;
+
+    /* The oddity tapping it looked like: iOS showing a text-selection caret/loupe over the value and glyph,
+       which sit, as plain text and an SVG, under the invisible `<select>` that actually takes the tap. */
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   .trailer {
@@ -402,8 +390,11 @@
     outline-offset: 2px;
   }
 
-  .primary:disabled,
-  .pill:disabled,
+  /* `aria-disabled`, not `disabled`: the native attribute drops focus to `<body>` the moment a keyboard press
+     disables the very button that was focused (Chrome, Safari), losing a screen reader's place mid-save. The
+     select stays a real `disabled`, which does not have that problem. */
+  .primary[aria-disabled='true'],
+  .pill[aria-disabled='true'],
   .pick:has(select:disabled) {
     opacity: 0.6;
     cursor: progress;
@@ -498,7 +489,7 @@
   }
 
   .compact .pill:focus-visible,
-  .compact .pill:hover:not(:disabled) {
+  .compact .pill:hover:not([aria-disabled='true']) {
     background: rgb(255 255 255 / 0.16);
   }
 
