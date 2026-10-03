@@ -1,11 +1,17 @@
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
-  import { downloadSeason, seasonJobs, seasonJobKey } from '../lib/seasonDownloads.svelte';
+  import {
+    downloadSeason,
+    seasonJobs,
+    seasonJobKey,
+    type SeasonTitle,
+  } from '../lib/seasonDownloads.svelte';
   import type { Episode } from '../lib/detail';
   import type { Addon } from '../lib/scout';
   import type { Routes } from '../lib/routes';
   let {
     scout,
+    title,
     imdb,
     season,
     episodes,
@@ -14,6 +20,8 @@
     compact = false,
   }: {
     scout: Addon;
+    /** The series, as each episode's download is written down for every device to show. */
+    title: SeasonTitle;
     imdb: string;
     season: number;
     episodes: Episode[];
@@ -40,7 +48,7 @@
     disabled={disabled || job?.running}
     aria-label={compact && !job?.running ? label : undefined}
     title={job?.running ? undefined : label}
-    onclick={() => void downloadSeason(scout, imdb, season, episodes, routes)}
+    onclick={() => void downloadSeason(scout, imdb, season, episodes, routes, title)}
   >
     <DetailIcon name="download" />{#if job?.running}{running}{:else if !compact}Download season {season}{/if}
   </button>

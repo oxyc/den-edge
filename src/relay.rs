@@ -611,6 +611,16 @@ fn real_install(relays: &[(String, String)], guest: &Guest, addon: &str, given: 
     target(relays, &format!("/{addon}/{}", guest.installs.get(addon)?))
 }
 
+/// A download's cancel or reannounce (oxyc/den#202, den-scout's `DELETE /p/<ticket>`): the one `DELETE` relayed, on a
+/// play ticket and nothing else, with no query but `op=reannounce`. It reaches no route a `GET` could not, and scout
+/// acts only on a torrent it added itself.
+fn scout_cancel(path: &str, query: Option<&str>) -> bool {
+    let ticket = path.strip_prefix("/scout/p/").unwrap_or_default();
+    !ticket.is_empty()
+        && ticket.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        && matches!(query, None | Some("op=reannounce"))
+}
+
 async fn relay_with(
     state: &Arc<AppState>,
     req: Request,
@@ -620,7 +630,8 @@ async fn relay_with(
     grant: Option<Guest>,
 ) -> Response {
     let method = req.method().clone();
-    if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
+    let cancel = method == Method::DELETE && scout_cancel(req.uri().path(), req.uri().query());
+    if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !cancel {
         return json(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
     // On the public web name, scout answers only to a device that holds a library here.
@@ -3818,6 +3829,46 @@ mod tests {
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    /// A browser cancels or reannounces a download it queued (oxyc/den#202) with `DELETE` on the play ticket. That one
+    /// `DELETE` is relayed, as it was asked; every other is refused before scout is asked anything.
+    #[tokio::test]
+    async fn a_download_cancel_is_the_one_delete_relayed() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let asked = Arc::clone(&asked);
+            move |req: axum::extract::Request| {
+                let asked = Arc::clone(&asked);
+                async move {
+                    asked.lock().unwrap().push(format!("{} {}", req.method(), req.uri()));
+                    StatusCode::NO_CONTENT
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+        let mut h = Harness::new();
+        Arc::get_mut(&mut h.state).unwrap().relays = crate::parse_relays(&format!("/scout=http://{addr}"));
+        for allowed in ["/scout/p/AbC_-9", "/scout/p/AbC_-9?op=reannounce"] {
+            assert_eq!(
+                h.send("DELETE", allowed, None, &[]).await.status(),
+                StatusCode::NO_CONTENT,
+                "{allowed}"
+            );
+        }
+        for refused in [
+            "/scout/configure",
+            "/scout/p/AbC_-9?op=purge",
+            "/scout/p/a/b",
+            "/scout/p/..%2Fconfigure",
+            "/scout/cfg/play/token",
+        ] {
+            let answer = h.send("DELETE", refused, None, &[]).await;
+            assert_eq!(answer.status(), StatusCode::METHOD_NOT_ALLOWED, "{refused}");
+        }
+        assert_eq!(*asked.lock().unwrap(), ["DELETE /p/AbC_-9", "DELETE /p/AbC_-9?op=reannounce"]);
     }
 
     /// Only a member is answered on the web name, so what scout says anyone may keep must not be kept by a shared

@@ -456,9 +456,10 @@ test('episode Sources target the selected episode and downloads never requeue wh
       .last()
       .getByRole('button', { name: 'Download', exact: true })
       .click();
-    await expect(active.getByText('Downloading · 30%', { exact: true })).toBeVisible();
+    await expect(active.getByText('Downloading 30%', { exact: true })).toBeVisible();
     await expect.poll(() => downloadRequests.length, { timeout: 8000 }).toBeGreaterThan(1);
-    expect(downloadRequests.filter((q) => q === '')).toHaveLength(1);
+    // The one add is a prefetch: nobody is waiting on a download, so it can't spend the adds kept for Play.
+    expect(downloadRequests.filter((q) => q === '?prefetch=1')).toHaveLength(1);
     expect(downloadRequests.slice(1).every((q) => q === '?probe=1')).toBe(true);
   } finally {
     await browser.close();

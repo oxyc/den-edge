@@ -4,7 +4,11 @@
   import { untrack } from 'svelte';
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
+  import DownloadsPage from './components/DownloadsPage.svelte';
   import PosterCard from './components/PosterCard.svelte';
+  import { downloads, inFlight } from './lib/downloadQueue.svelte';
+  import { coordinate } from './lib/downloadRows';
+  import { headline } from './lib/downloadStatus';
   import PosterRow from './components/PosterRow.svelte';
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
@@ -244,6 +248,10 @@
     void applied;
     now = Date.now();
   });
+  /** Home's Downloading row: only while something is in flight, as the TV's shelf (den-spec library-v4 §17). */
+  const downloading = $derived(
+    log ? downloads.list().filter((d) => inFlight(downloads.status(d).state)) : [],
+  );
   const liveClock = (entry: ContinueEntry) => {
     const at = livePosition(entry, now);
     return at === undefined ? undefined : timecode(at);
@@ -1098,6 +1106,7 @@
       route.page === 'search' ||
       route.page === 'people' ||
       route.page === 'watchlist' ||
+      route.page === 'downloads' ||
       route.page === 'service'
     )
       return;
@@ -1332,6 +1341,16 @@
   <ScreenLoading screen={PeopleScreen} />
 {:else if route.page === 'people'}
   <PeopleScreen.current view={people} {tmdbKey} {atlas} {atlasReady} />
+{:else if route.page === 'downloads'}
+  {#if !library}
+    <p class="note">
+      Downloads live in your library, which this browser can’t keep. <a href="/settings"
+        >Link a TV</a
+      > to keep them there.
+    </p>
+  {:else}
+    <DownloadsPage {active} />
+  {/if}
 {:else if route.page === 'watchlist'}
   {#if !library}
     <p class="note">
@@ -1407,6 +1426,27 @@
             live={liveClock(entry)}
             href={titleHref(entry.title)}
             continueWatching
+          />
+        {/each}
+      </PosterRow>
+    {/if}
+    {#if !facet && downloading.length}
+      <PosterRow heading="Downloading" aside={{ label: 'All downloads', href: '/downloads' }}>
+        {#each downloading as download (download.name)}
+          {@const answer = downloads.answers.get(download.name)}
+          {@const title = {
+            type: download.title.mediaType,
+            id: download.title.mediaId,
+            title: download.title.title || download.release.label,
+            posterPath: download.title.posterPath,
+          }}
+          <PosterCard
+            {title}
+            caption={[coordinate(download.title), headline(downloads.status(download), answer)]
+              .filter(Boolean)
+              .join(' · ')}
+            progress={answer?.state === 'preparing' ? answer.progress : undefined}
+            href={titleHref(title)}
           />
         {/each}
       </PosterRow>

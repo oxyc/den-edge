@@ -9,6 +9,7 @@ import {
   fetchSources,
 } from './titleSources';
 import { DownloadQueue } from './downloadQueue.svelte';
+import { testClock, testLog } from './downloadTestLog';
 const addon = { install: 'http://lan:8080/config', base: '/scout/config' };
 const routes = { scout: [{ url: 'http://lan:8080' }] };
 const raw = {
@@ -127,18 +128,72 @@ it('does not mistake pending, absent or failed downloads for ready files', async
   expect(
     (await prepareSource('/scout/p/ticket', false, response(404, { error: 'not_queued' }))).state,
   ).toBe('not-queued');
-  expect((await prepareSource('/scout/p/ticket', false, response(503, {}))).state).toBe('unknown');
+  // A 503 is the debrid refusing, a fact about the account; anything else unexpected says nothing.
+  expect(
+    await prepareSource('/scout/p/ticket', false, response(503, { service: 'torbox' })),
+  ).toEqual({ state: 'refused', service: 'torbox' });
+  expect((await prepareSource('/scout/p/ticket', false, response(500, {}))).state).toBe('unknown');
 });
-it('coalesces duplicate download presses across page instances and only probes after an uncertain result', async () => {
+it('reads everything scout says about a fetch, as the TV does', async () => {
+  const response = (status: number, body: object, headers: Record<string, string> = {}) =>
+    (async () => Response.json(body, { status, headers })) as typeof fetch;
+  expect(
+    await prepareSource(
+      '/scout/p/ticket',
+      false,
+      response(202, {
+        progress: 0.12,
+        etaSeconds: 300,
+        bytesPerSecond: 500_000,
+        state: 'stalled',
+        seeds: 0,
+        peers: 2,
+        service: 'torbox',
+      }),
+    ),
+  ).toEqual({
+    state: 'preparing',
+    progress: 0.12,
+    etaSeconds: 300,
+    bytesPerSecond: 500_000,
+    fetch: { state: 'stalled', seeds: 0, peers: 2, service: 'torbox' },
+  });
+  // An older scout's 202 carries none of the debrid's account.
+  expect((await prepareSource('/scout/p/t', false, response(202, { progress: 0.5 }))).fetch).toBe(
+    undefined,
+  );
+  expect(
+    (await prepareSource('/scout/p/t', false, response(410, { error: 'ticket_expired' }))).state,
+  ).toBe('expired');
+  const held = await prepareSource(
+    '/scout/p/t',
+    true,
+    response(503, { error: 'reserved_for_play' }, { 'retry-after': '600' }),
+    true,
+  );
+  expect(held.state).toBe('paused');
+  expect(held.until! - Date.now()).toBeGreaterThan(590_000);
+});
+it('asks to add as a prefetch, which scout holds back for Play', async () => {
+  const asked: string[] = [];
+  const network = (async (input) => {
+    asked.push(String(input));
+    return new Response(null, { status: 302 });
+  }) as typeof fetch;
+  await prepareSource('/scout/p/ticket', true, network, true);
+  expect(asked).toEqual(['/scout/p/ticket?prefetch=1']);
+});
+it('coalesces duplicate download presses across page instances', async () => {
   const requests: boolean[] = [];
   const queue = new DownloadQueue(async (_, start) => {
     requests.push(start);
     await Promise.resolve();
-    return { state: 'unknown' };
+    return { state: 'preparing' };
   });
+  queue.attach(testLog().log, testClock('bbbbbbbbbbbbbbbb'));
   const source = parseSources({ streams: [raw] }, addon, routes)![0]!;
-  await Promise.all([queue.start('movie', source), queue.start('movie', source)]);
-  await queue.start('movie', source);
-  await queue.poll('movie', source);
+  const title = { mediaType: 'movie' as const, mediaId: 42, title: 'Film' };
+  await Promise.all([queue.start({ title, source }), queue.start({ title, source })]);
+  await queue.poll(queue.list()[0]!);
   expect(requests).toEqual([true, false]);
 });

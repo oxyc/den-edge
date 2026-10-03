@@ -16,6 +16,8 @@ export type Route =
   | { page: 'series' }
   /** `year`: the year Watched is showing (`2019`, or `unknown` for watches with no time); absent for every year. */
   | { page: 'watchlist'; year?: string }
+  /** What the household has asked the debrid to fetch, from any device (den-spec library-v4 §17). */
+  | { page: 'downloads' }
   | { page: 'settings' }
   | ({ page: 'search'; query: string } & Explore)
   | ({ page: 'people' } & PeopleView)
@@ -88,8 +90,8 @@ export function fansOf(id: string): { type: MediaType; id: number } | undefined 
   return match ? { type: match[1] as MediaType, id: Number(match[2]) } : undefined;
 }
 
-/** The top-level tabs, by the path they live at. `/` is Home, so the library is not in here. */
-const TABS = ['movies', 'series', 'watchlist', 'settings'] as const;
+/** The top-level pages, by the path they live at. `/` is Home, so the library is not in here. */
+const TABS = ['movies', 'series', 'watchlist', 'downloads', 'settings'] as const;
 
 /** Any origin will do: only the path and the query are ever read, and a relative input needs some base. */
 const BASE = 'https://den.invalid';

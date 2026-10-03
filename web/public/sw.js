@@ -22,7 +22,16 @@ const FILES = 'den-files-';
 const RELEASE = 'x-den-release';
 
 /** The app's pages that are a single segment, `/movies`, and the ones that carry an id after it, `/movie/550`. */
-const PAGES = new Set(['/', '/movies', '/series', '/watchlist', '/settings', '/search', '/people']);
+const PAGES = new Set([
+  '/',
+  '/movies',
+  '/series',
+  '/watchlist',
+  '/downloads',
+  '/settings',
+  '/search',
+  '/people',
+]);
 const RECORDS = ['/movie/', '/tv/', '/person/', '/service/'];
 
 /** Whether a navigation to `pathname` is one of the app's pages, which the kept shell answers. */

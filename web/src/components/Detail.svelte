@@ -543,6 +543,7 @@
           {remux}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}
+          title={d.title}
           onplay={onplayhere
             ? (filename) => onplayhere(d.title, sourceCoord?.season, sourceCoord?.episode, filename)
             : undefined}
@@ -586,6 +587,7 @@
           {#if scout && !guestScout && d.imdbId && displayedSeason !== null && seasonEpisodes}
             <SeasonDownload
               {scout}
+              title={d.title}
               imdb={d.imdbId}
               season={displayedSeason}
               episodes={seasonEpisodes}
