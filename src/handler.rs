@@ -546,7 +546,8 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
         p => match &state.web_dir {
             Some(_) if matches!(*req.method(), Method::GET | Method::HEAD) => {
                 let query = req.uri().query().map(str::to_owned);
-                crate::web::serve(state, p, query.as_deref(), req.headers(), face).await
+                let client = client_addr(state, &req);
+                crate::web::serve(state, p, query.as_deref(), req.headers(), face, client).await
             }
             _ => bare_json(StatusCode::NOT_FOUND, &error("not_found")),
         },
