@@ -22,6 +22,7 @@ mod ratings;
 mod relay;
 mod routes;
 mod skipdb;
+mod startup;
 mod store;
 mod sync;
 mod title_metadata;

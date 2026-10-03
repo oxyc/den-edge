@@ -36,6 +36,7 @@
     releaseParts,
     rememberLink,
     reportFailure,
+    routeKind,
     sourceFailed,
     startSession,
     wantedLanguages,
@@ -46,6 +47,12 @@
     type Want,
     videoCodecsOf,
   } from '../lib/remux';
+  import {
+    knownCodec,
+    parseServerTiming,
+    sendStartupReport,
+    sizeBucket,
+  } from '../lib/startupReport';
   import {
     nothingFits,
     optionLabel,
@@ -58,7 +65,7 @@
   import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
-  import { startupNotice } from '../lib/startupNotice';
+  import { startupNotice, type Progress as StartupProgress } from '../lib/startupNotice';
   import {
     bytesBetween,
     DeliveryMeter,
@@ -324,12 +331,24 @@
   let startupAskedAt = $state(Date.now());
   let now = $state(Date.now());
   let noticeTimer: ReturnType<typeof setInterval> | undefined;
-  /** When each session was asked for and when it answered, by the session object: read once its first frame logs
-   * den-edge#234's "Findings" line, and never confused with a later `begin()` by being keyed to the attempt's own
-   * session rather than to a shared mutable field. */
-  const startupTimings = new WeakMap<Session, { askedAt: number; answeredAt: number }>();
+  /**
+   * When each session was asked for and when it answered, by the session object — never confused with a later
+   * `begin()` by being keyed to the attempt's own session rather than to a shared mutable field — plus when its
+   * first segment arrived, filled in as it does (`updateBufferProgress`). Read once to send den-edge#234's
+   * step-0 report on the first frame.
+   */
+  const startupTimings = new WeakMap<
+    Session,
+    { askedAt: number; answeredAt: number; firstSegmentAt?: number }
+  >();
   /** How long this browser has waited for the session now starting, for the startup notice. */
   const elapsedMs = $derived(now - startupAskedAt);
+  /**
+   * What has arrived toward the first frame (den-edge#234: no bare spinner) — bytes and a rate from hls.js's
+   * `FRAG_LOADED`, or buffered seconds on native HLS, which has no byte loader to read. Updated on every
+   * `arriving()` (`updateBufferProgress`); cleared per attempt in `begin()`.
+   */
+  let bufferProgress = $state<StartupProgress | undefined>(undefined);
   /**
    * The line over the stage while there is still nothing to show for the wait (den-edge#234): den-remux's own
    * `prebuffer` countdown (`startsIn`) and a dropped connection (`reconnecting`) already say their own piece, so
@@ -339,7 +358,7 @@
     !session
       ? startupNotice(elapsedMs, 'session')
       : !played && !startsIn && !reconnecting
-        ? startupNotice(elapsedMs, 'starting', session.release)
+        ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
         : null,
   );
 
@@ -372,10 +391,12 @@
     clearTimeout(retry);
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
     // shown, so a slow `fetchImdbId` or `playable()` below counts as part of the wait too. Stopped once this
-    // attempt's first frame arrives (the `loadeddata` listener below) or the player closes (`finish`), never by
-    // polling `played`, which a mid-film switch leaves true from the session this one is replacing.
+    // attempt's first frame arrives (the `requestVideoFrameCallback`/`loadeddata` listener below) or the player
+    // closes (`finish`), never by polling `played`, which a mid-film switch leaves true from the session this
+    // one is replacing.
     now = Date.now();
     startupAskedAt = now;
+    bufferProgress = undefined;
     clearInterval(noticeTimer);
     noticeTimer = setInterval(() => (now = Date.now()), 250);
     if (!replacing) {
@@ -661,6 +682,30 @@
     let finished = 0;
     let loading: { loaded: number } | undefined;
     const arrived = () => finished + (loading?.loaded ?? 0);
+    /**
+     * The live "Buffering…" line's own data (den-edge#234: never a bare spinner) — hls.js gives real bytes and,
+     * once `meter` has a sample, a rate; native HLS has no loader to read bytes from, only `buffered` seconds.
+     * Also where this attempt's first-segment time is caught, the first time either says something arrived.
+     */
+    const updateProgress = () => {
+      if (played) return;
+      const timing = startupTimings.get(current);
+      if (hls) {
+        const bytesLoaded = arrived();
+        if (bytesLoaded <= 0) return;
+        if (timing && timing.firstSegmentAt === undefined) timing.firstSegmentAt = Date.now();
+        bufferProgress = {
+          bytesLoaded,
+          bytesTarget: current.segments?.[0]?.[1],
+          bitsPerSecond: meter.rate()?.bitsPerSecond,
+        };
+      } else {
+        const bufferedSecs = aheadIn(element.buffered, 0);
+        if (bufferedSecs <= 0) return;
+        if (timing && timing.firstSegmentAt === undefined) timing.firstSegmentAt = Date.now();
+        bufferProgress = { bufferedSecs };
+      }
+    };
     // A connection that went away is waited out, not taken for a browser that can't play: the watchdog, the
     // switching policy and hls.js's fatal path all leave it alone, and the viewer sees "Reconnecting…" over the held
     // frame once the buffer runs out. Playback carries on from the same second, on the same session, when it is back.
@@ -704,6 +749,7 @@
     const arriving = () => {
       stuck.progress();
       weighDelivery();
+      updateProgress();
     };
     element.addEventListener('progress', arriving);
     const cleanup = () => {
@@ -711,32 +757,49 @@
       element.removeEventListener('progress', arriving);
     };
     element.addEventListener('loadeddata', cleanup, { once: true });
-    element.addEventListener(
-      'loadeddata',
-      () => {
-        if (session !== current) return;
-        played = true;
-        clearInterval(noticeTimer);
-        // den-edge#234's step 0: how long this session took to open, hold and reach its first frame — read on a
-        // large release, on Safari and Chrome, to see which stretch the wait is really in.
-        const timing = startupTimings.get(current);
-        if (timing) {
-          const firstFrameAt = Date.now();
-          console.info('den: playback start', {
-            sessionMs: Math.round(timing.answeredAt - timing.askedAt),
-            holdMs: Math.round(firstFrameAt - timing.answeredAt),
-            holdTargetMs: current.prebuffer != null ? Math.round(current.prebuffer * 1000) : null,
-            firstFrameMs: Math.round(firstFrameAt - timing.askedAt),
-            size: current.release.size,
-            player: nativeHls(element) ? 'native' : 'hls.js',
-          });
-        }
-      },
-      { once: true },
-    );
+    // The real first frame (den-edge#234's step 0 and the owner's own correction: not `canplay`, which iOS
+    // native HLS can fire tens of seconds late). `requestVideoFrameCallback` fires once a frame has actually
+    // been presented; a browser without it (older Safari) falls back to `loadeddata`, as this did before.
+    let cancelFirstFrame: (() => void) | undefined;
+    const firstFrame = () => {
+      cancelFirstFrame = undefined;
+      if (session !== current || played) return;
+      played = true;
+      bufferProgress = undefined;
+      clearInterval(noticeTimer);
+      // den-edge#234's step 0: how long this session took to open, hold and reach its first frame, reported to
+      // den-edge's own request log (`startupReport.ts`) — never to the console, and never a title or a URL.
+      const timing = startupTimings.get(current);
+      if (timing) {
+        const firstFrameAt = Date.now();
+        const engine = nativeHls(element) ? 'native' : 'hls.js';
+        sendStartupReport({
+          sessionMs: Math.round(timing.answeredAt - timing.askedAt),
+          ...parseServerTiming(current.startupTiming),
+          firstSegmentMs: Math.round((timing.firstSegmentAt ?? firstFrameAt) - timing.askedAt),
+          firstFrameMs: Math.round(firstFrameAt - timing.askedAt),
+          bytesLoaded: engine === 'hls.js' ? Math.round(arrived()) : undefined,
+          size: sizeBucket(current.release.size),
+          codec: knownCodec(current.video?.codec),
+          transcoded: current.video?.transcoded === true,
+          player: engine,
+          route: routeKind(sessionRoute ?? route),
+        });
+      }
+    };
+    // The type is unconditional (every modern lib.dom.d.ts has it); the browser isn't — an older Safari lacks
+    // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`.
+    if (typeof element.requestVideoFrameCallback === 'function') {
+      const id = element.requestVideoFrameCallback(firstFrame);
+      cancelFirstFrame = () => element.cancelVideoFrameCallback(id);
+    } else {
+      element.addEventListener('loadeddata', firstFrame, { once: true });
+      cancelFirstFrame = () => element.removeEventListener('loadeddata', firstFrame);
+    }
     const reportUrl = reportUrlOf(current.playlist);
     const stopWatching = () => {
       cleanup();
+      cancelFirstFrame?.();
       watcher?.stop();
       watcher = undefined;
       unsubscribe();

@@ -66,4 +66,54 @@ describe('startupNotice', () => {
     const notice = startupNotice(5_000, 'starting', { label: 'unknown size' });
     expect(notice.text).toBe('Starting unknown size…');
   });
+
+  it('shows bytes and a rate once hls.js has loaded something, with no target yet', () => {
+    const notice = startupNotice(5_000, 'starting', SMALL, undefined, {
+      bytesLoaded: 2 * 1024 ** 2,
+      bitsPerSecond: 4 * 1024 ** 2 * 8,
+    });
+    expect(notice.text).toBe(`Buffering ${SMALL.label} — 2.0 MB (4.0 MB/s)`);
+  });
+
+  it('shows "of <target>" and an estimate labelled as one, once there is a byte target', () => {
+    const notice = startupNotice(5_000, 'starting', LARGE, undefined, {
+      bytesLoaded: 18 * 1024 ** 2,
+      bytesTarget: 40 * 1024 ** 2,
+      bitsPerSecond: 4 * 1024 ** 2 * 8,
+    });
+    expect(notice.text).toBe(
+      `Buffering ${LARGE.label} — 18.0 of 40.0 MB (4.0 MB/s) — ~6s left (estimate)`,
+    );
+  });
+
+  it('never shows an ETA without a target to measure against', () => {
+    const notice = startupNotice(5_000, 'starting', LARGE, undefined, {
+      bytesLoaded: 18 * 1024 ** 2,
+      bitsPerSecond: 4 * 1024 ** 2 * 8,
+    });
+    expect(notice.text).not.toContain('estimate');
+  });
+
+  it('never shows an ETA without a measured rate', () => {
+    const notice = startupNotice(5_000, 'starting', LARGE, undefined, {
+      bytesLoaded: 18 * 1024 ** 2,
+      bytesTarget: 40 * 1024 ** 2,
+    });
+    expect(notice.text).toBe(`Buffering ${LARGE.label} — 18.0 of 40.0 MB`);
+  });
+
+  it('falls back to buffered seconds on native HLS, which has no byte loader', () => {
+    const notice = startupNotice(5_000, 'starting', SMALL, undefined, { bufferedSecs: 3.2 });
+    expect(notice.text).toBe(`Buffering ${SMALL.label} — 3.2s buffered`);
+  });
+
+  it('keeps ticking the elapsed clock once buffering, same as before anything arrived', () => {
+    const notice = startupNotice(5_000, 'starting', SMALL, undefined, { bufferedSecs: 3.2 });
+    expect(notice.clock).toBe('0:05');
+  });
+
+  it('prefers the large-release line over an empty progress object with nothing in it yet', () => {
+    const notice = startupNotice(5_000, 'starting', LARGE, undefined, {});
+    expect(notice.text).toContain('large release');
+  });
 });
