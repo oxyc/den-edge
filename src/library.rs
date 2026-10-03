@@ -66,6 +66,10 @@ const TOKEN_HEADER: &str = "x-den-library-token";
 const WIRE_HEADER: &str = "x-den-wire";
 const WIRE_MIN_HEADER: &str = "x-den-wire-min";
 const GENERATION_HEADER: &str = "x-den-generation";
+/// On a `DELETE` that ends a key reset: the head the caller copied the library through. A write since refuses it.
+const BASE_HEADER: &str = "x-den-base";
+/// On a `DELETE` that ends a key reset: the id of the library it moved to, which `410 library_moved` then names.
+const SUCCESSOR_HEADER: &str = "x-den-successor";
 const REWRITE_NS: &str = "lib-rewrite";
 const REWRITE_EXT: &str = "json";
 const REWRITE_IDLE_MS: u64 = 5 * 60 * 1000;
@@ -622,7 +626,10 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
             changes(state, id, token_hash, since, limit, gzip > 0 && gzip >= identity, hold).await
         }
         ("member", Method::PUT) => register_member(state, id, token_hash, req).await,
-        ("", Method::DELETE) => forget(state, id, token_hash).await,
+        ("", Method::DELETE) => {
+            let (base, successor) = reset_headers(req.headers());
+            forget(state, id, token_hash, base, successor.as_deref()).await
+        }
         ("rewrite", Method::POST) => rewrite_open(state, id, token_hash).await,
         (action, Method::POST) if action.starts_with("rewrite/") && action.ends_with("/rows") => {
             rewrite_rows(state, id, token_hash, action, req).await
@@ -866,10 +873,26 @@ async fn register_member(state: &AppState, id: &str, token_hash: [u8; 32], req: 
     json_reply(StatusCode::OK, &json!({ "registered": true }))
 }
 
+/// A key reset's `DELETE` headers: the head it copied through, and the id of the library it moved to.
+fn reset_headers(headers: &axum::http::HeaderMap) -> (Option<u64>, Option<String>) {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let base = header(BASE_HEADER).and_then(|v| v.parse::<u64>().ok());
+    let successor = header(SUCCESSOR_HEADER).filter(|v| valid_hex_id(v)).map(str::to_owned);
+    (base, successor)
+}
+
 /// The library's owner ends it — a rekey moved the library to a new key (issue #8, audit #2). Its log and rows
 /// are gone, and the id is retired: a device still holding the old key gets `410 library_moved` rather than
-/// quietly starting the library over (den #12, S5).
-async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
+/// quietly starting the library over (den #12, S5). A key reset names the head it copied through (`base`, refused
+/// with `409 head_changed` once the library moved past it) and the library it moved to (`successor`, which the
+/// `410` then names, so a device that reset concurrently or lost this answer can tell whether the move was its own).
+async fn forget(
+    state: &AppState,
+    id: &str,
+    token_hash: [u8; 32],
+    base: Option<u64>,
+    successor: Option<&str>,
+) -> Response {
     let slot = state.libraries.slot(id, state.now());
     let mut library = slot.library.lock().await;
     match load_rewrite(state, id).await {
@@ -916,12 +939,35 @@ async fn forget(state: &AppState, id: &str, token_hash: [u8; 32]) -> Response {
     if !constant_time_eq(&stored_token, &token_hash) {
         return json_reply(StatusCode::FORBIDDEN, &error("forbidden"));
     }
+    // A key reset copied the library through `base` (den-spec library-v4 §12): a write since then would be lost with
+    // it, so the copy is made again first. Checked under the library's lock, so no write lands between this and the
+    // retirement. An unloaded v2 log is never the source of a reset, which needs minimum 4.
+    if let Some(base) = base {
+        let head = if selected_v3 {
+            let manager = Arc::clone(&state.library_v3);
+            let owned_id = id.to_owned();
+            match tokio::task::spawn_blocking(move || {
+                manager.existing_library(&owned_id, stored_token)?.range(base, 1).map(|page| page.head)
+            })
+            .await
+            {
+                Ok(Ok(head)) => Some(head),
+                Ok(Err(reason)) => return internal("library head", v3_io(reason)),
+                Err(reason) => return internal("library head task", io::Error::other(reason)),
+            }
+        } else {
+            library.as_ref().map(|lib| lib.head)
+        };
+        if head.is_some_and(|head| head != base) {
+            return json_reply(StatusCode::CONFLICT, &error("head_changed"));
+        }
+    }
     // The owner's guests go with the token that vouched for them.
     let revoked = match crate::grants::revoke_host(state, id).await {
         Ok(gids) => gids,
         Err(e) => return internal("library grants revoke", e),
     };
-    if let Err(e) = state.store.replace_file(NS, id, MOVED, b"").await {
+    if let Err(e) = state.store.replace_file(NS, id, MOVED, successor.unwrap_or_default().as_bytes()).await {
         return internal("library retire", e);
     }
     if let Err(e) = state.store.sync_dir(NS).await {
@@ -967,8 +1013,21 @@ async fn retired(state: &AppState, id: &str) -> io::Result<bool> {
     Ok(state.store.get_file(NS, id, MOVED).await?.is_some())
 }
 
-fn moved() -> Response {
-    json_reply(StatusCode::GONE, &error("library_moved"))
+/// `410 library_moved`, naming the library a key reset moved it to when its `DELETE` said (`SUCCESSOR_HEADER`).
+async fn moved(state: &AppState, id: &str) -> Response {
+    let successor = match state.store.get_file(NS, id, MOVED).await {
+        Ok(marker) => marker.and_then(|bytes| String::from_utf8(bytes).ok()).filter(|s| valid_hex_id(s)),
+        Err(reason) => {
+            eprintln!("library retire marker: {reason}");
+            None
+        }
+    };
+    match successor {
+        Some(successor) => {
+            json_reply(StatusCode::GONE, &json!({ "error": "library_moved", "successor": successor }))
+        }
+        None => json_reply(StatusCode::GONE, &error("library_moved")),
+    }
 }
 
 fn v3_io(error: v3::StoreError) -> io::Error {
@@ -1143,7 +1202,7 @@ async fn batch(state: &AppState, id: &str, token_hash: [u8; 32], req: Request) -
         Err(reason) => return read_error(reason),
     }
     let selected_v3 = match authority(state, &slot, id).await {
-        Ok(AUTHORITY_MOVED) => return moved(),
+        Ok(AUTHORITY_MOVED) => return moved(state, id).await,
         Ok(selected) => selected == AUTHORITY_V3,
         Err(reason) => return read_error(reason),
     };
@@ -1368,7 +1427,7 @@ async fn changes(
         let slot = state.libraries.slot(id, state.now());
         let mut library = slot.library.lock().await;
         match authority(state, &slot, id).await {
-            Ok(AUTHORITY_MOVED) => return moved(),
+            Ok(AUTHORITY_MOVED) => return moved(state, id).await,
             Ok(_) => {}
             Err(reason) => return read_error(reason),
         }
@@ -1847,6 +1906,49 @@ mod tests {
             .send("POST", &format!("/lib/{LIB}/batch"), Some(body), &[("x-den-library-token", TOKEN)])
             .await;
         assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn a_key_reset_deletes_only_through_the_head_it_copied_and_the_410_names_its_successor() {
+        for wire in [None, Some("4")] {
+            let h = Harness::new();
+            let mut headers = vec![("x-den-library-token", TOKEN), ("x-den-generation", "0")];
+            if let Some(wire) = wire {
+                headers.extend([("x-den-wire", wire), ("x-den-wire-min", wire)]);
+            }
+            let body = json!({ "writes": [{ "k": K1, "base": 0, "v": "c1" }] }).to_string();
+            let resp = h.send("POST", &format!("/lib/{LIB}/batch"), Some(body), &headers).await;
+            assert_eq!(resp.status(), StatusCode::OK, "wire {wire:?}");
+            let generation = resp.headers()["x-den-generation"].to_str().unwrap().to_owned();
+
+            let ending = |base: &'static str| {
+                let (h, generation) = (&h, generation.clone());
+                async move {
+                    let mut headers = vec![
+                        ("x-den-library-token", TOKEN),
+                        ("x-den-base", base),
+                        ("x-den-successor", LIB2),
+                        ("x-den-generation", generation.as_str()),
+                    ];
+                    if let Some(wire) = wire {
+                        headers.push(("x-den-wire", wire));
+                    }
+                    h.send("DELETE", &format!("/lib/{LIB}"), None, &headers).await
+                }
+            };
+            // A write after the copy: the library stays, to be copied again.
+            let refused = ending("0").await;
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "wire {wire:?}");
+            assert_eq!(body_json(refused).await, json!({ "error": "head_changed" }));
+            let kept = h.send("GET", &format!("/lib/{LIB}/changes"), None, &headers).await;
+            assert_eq!(kept.status(), StatusCode::OK);
+
+            assert_eq!(ending("1").await.status(), StatusCode::OK, "wire {wire:?}");
+            let gone =
+                h.send("GET", &format!("/lib/{LIB}/changes"), None, &[("x-den-library-token", TOKEN)]).await;
+            assert_eq!(gone.status(), StatusCode::GONE);
+            assert_eq!(body_json(gone).await, json!({ "error": "library_moved", "successor": LIB2 }));
+        }
     }
 
     #[tokio::test]
