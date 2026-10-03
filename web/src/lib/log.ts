@@ -296,6 +296,8 @@ export class LibraryLog {
   private readonly rejected = new Map<string, number>();
   /** Opened from this browser's copy without asking den-edge: `refresh` brings it up to date. */
   fromCache = false;
+  /** How many generation changes (library v2 §2) `refresh` has read and written back: a recovery reconcile follows each. */
+  generationChanges = 0;
 
   get wireMinimum(): number {
     return this.wireMin;
@@ -433,7 +435,9 @@ export class LibraryLog {
     // there. So that library is switched to v3 first; the TV reads the new form from den-edge's wire minimum. A v2
     // library taking v2 rows, or a v3 one taking either, needs nothing (`writeRows` converts v2 episode rows).
     if (this.wireMin >= 3 && next.wireMin < 3 && !(await next.switchWebOnly())) return null;
-    return (await next.writeRows(this.rows())) ? next : null;
+    // A recovery code stays with the library it opens: none is copied into another (recovery-code §9).
+    const rows = this.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
+    return (await next.writeRows(rows)) ? next : null;
   }
 
   /** The rows, each merged over what the log already holds for it, written in batches. */
@@ -1496,6 +1500,7 @@ export class LibraryLog {
             this.acknowledged.clear();
             this.dirty = true;
             this.unreported = true;
+            this.generationChanges++;
             continue; // Reread a restored store from zero; transport sequence is not a field timestamp.
           }
           this.generation = page.generation;

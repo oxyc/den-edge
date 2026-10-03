@@ -13,6 +13,7 @@ const api = [
   '/pair',
   '/inbox',
   '/lib',
+  '/recovery',
   '/config',
   '/health',
   '/routes',

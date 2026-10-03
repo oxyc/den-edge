@@ -1,6 +1,7 @@
 import { LIVE_PULL_MS } from './livePosition';
 import { browserClock } from './clock';
 import { LibraryLog } from './log';
+import { dueAtLaunch, reconcile, recoveryContext } from './recovery';
 import { deliverSimkl } from './simklDelivery';
 import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import type { Title, Shape } from './library';
@@ -29,6 +30,8 @@ export class LibrarySession {
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
   private readonly device = browserClock().device;
+  /** The log's generation changes the last recovery reconcile followed (`reconcileRecovery`). */
+  private recoveryGenerations = 0;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
   private early?: Promise<Routes> = fetchRoutes();
   /** Where the library's services answer, found once for every page (`sessionServices.svelte.ts`). */
@@ -100,6 +103,7 @@ export class LibrarySession {
           (await deliverSimkl(this.log, this.device))
         )
           this.changed(true);
+        await this.reconcileRecovery(this.log, this.key);
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
         console.warn('den: the library could not be refreshed', error);
@@ -110,6 +114,20 @@ export class LibrarySession {
       }
     })();
     return this.refreshing;
+  }
+
+  /**
+   * den-edge's recovery entries made to match the library (recovery-code §7): at launch at most once a day, and after
+   * each generation change once the write-back is done. Settings reconciles again when its screen opens.
+   */
+  private async reconcileRecovery(log: LibraryLog, key: string): Promise<void> {
+    const changed = log.generationChanges !== this.recoveryGenerations;
+    this.recoveryGenerations = log.generationChanges;
+    if (log.moved) return;
+    const ctx = await recoveryContext(key, log, browserClock());
+    if (!changed && !dueAtLaunch(ctx.libraryId)) return;
+    const status = await reconcile(ctx);
+    for (const notice of status?.notices ?? []) this.notify(notice);
   }
 
   start(onMoved: () => void): () => void {
