@@ -614,7 +614,7 @@ describe('resetting the library key (library v4 §12)', () => {
     expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
 
     // The person says this browser made it: the links move to the kept key.
-    expect(await adoptHeldReset()).toBe(true);
+    expect(await adoptHeldReset(destination(server))).toBe(true);
     expect(readLinks().map((link) => link.libraryKey)).toEqual([pending.to]);
     expect(readPendingReset()).toBeNull();
   });
@@ -686,6 +686,31 @@ describe('resetting the library key (library v4 §12)', () => {
     expect(tab.pendingActions).toBe(1);
 
     const key = keyOf(await reset(log, server));
+    const next = (await LibraryLog.open(key, server.fetchImpl, storage, null))!;
+    await next.refresh();
+    expect(next.pendingActions).toBe(0);
+    const stored = (await server.opened(key)).get('title:movie:550') as DocumentRow;
+    expect(stored.reaction).toEqual({ value: 'love', at: at(6000) });
+  });
+
+  it('"Use the new key" on a held reset moves the unsent edits to the new key too', async () => {
+    const server = edge({ legacy: true });
+    await server.seed(OLD_KEY, household(['', '1']));
+    const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, storage, null))!;
+    let refusing = false;
+    const gated: typeof fetch = async (input, init) =>
+      refusing && init?.method === 'POST'
+        ? new Response(JSON.stringify({ error: 'rewrite_in_progress' }), { status: 409 })
+        : server.fetchImpl(input, init);
+    const tab = (await LibraryLog.open(OLD_KEY, gated, storage, null))!;
+    refusing = true;
+    const film = tab.title({ type: 'movie', id: 550 })!;
+    expect(await tab.write(react(film, 'love', at(6000)))).not.toBeNull();
+    server.hooks.loseDeleteAnswer = true;
+
+    expect(await reset(log, server)).toEqual({ refused: 'held' });
+    const key = readPendingReset()!.to;
+    expect(await adoptHeldReset(destination(server))).toBe(true);
     const next = (await LibraryLog.open(key, server.fetchImpl, storage, null))!;
     await next.refresh();
     expect(next.pendingActions).toBe(0);

@@ -103,10 +103,12 @@ export function settlePendingReset(
  * A held reset (`PendingReset.held`) taken up because the person says this browser made it: every link moves to the
  * new key. Den never decides that on its own, since den-edge can't prove it. False when no reset is held.
  */
-export function adoptHeldReset(): Promise<boolean> {
+export function adoptHeldReset(destination: Destination = destinationOf): Promise<boolean> {
   return exclusive(LOCK, async () => {
     const pending = readPendingReset();
     if (!pending?.held) return false;
+    const [old, next] = await Promise.all([destination(pending.from), destination(pending.to)]);
+    await old.rekeyKept(next);
     links.rekey(pending.from, pending.to);
     return true;
   });

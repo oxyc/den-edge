@@ -859,7 +859,8 @@
         <p>
           <b>Reset outcome unknown.</b> Your library’s old key no longer works, but Den can’t tell whether
           this browser’s reset retired it. The new key is kept here, so nothing is lost. If you reset
-          the key on this browser just now, use the new key.
+          the key on this browser just now, use the new key. If another device also reset the key, pair
+          again with a code from it instead.
         </p>
         <button type="button" class="primary" onclick={() => void onadoptheld?.()}
           >Use the new key</button
