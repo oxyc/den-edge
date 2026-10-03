@@ -812,6 +812,35 @@ describe('LibraryLog', () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
+  /**
+   * `readToHead` says whether this pass read den-edge's log to its head, which `refresh`'s "changed" cannot: a busy
+   * den-edge and a quiet log both answer false there. A generation change is read from zero but counts only on the
+   * next pass, once its write-back landed (recovery-code §7).
+   */
+  it('reads to the head only when den-edge answered, and not across a generation change', async () => {
+    const server = await edge([row(1), row(2), row(3)]);
+    let busy = false;
+    let generation = 'original';
+    const connection: typeof fetch = async (url, init) => {
+      if (busy && init?.method !== 'POST')
+        return new Response('{"error":"server_busy"}', { status: 503 });
+      const res = await server.fetchImpl(url, init);
+      return new Response(JSON.stringify({ ...(await res.json()), generation }), {
+        status: res.status,
+      });
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection))!;
+    expect(await log.readToHead()).toBe(true);
+    expect(await log.readToHead(), 'nothing new is still read to the head').toBe(true);
+    busy = true;
+    expect(await log.readToHead()).toBe(false);
+    busy = false;
+    generation = 'restored';
+    expect(await log.readToHead(), 'the pass that met the new generation').toBe(false);
+    expect(log.generationChanges).toBe(1);
+    expect(await log.readToHead(), 'the next pass, after the write-back').toBe(true);
+  });
+
   /** README: after a restore, a device "writes back what the snapshot lacks" — it rewrote every row it held. */
   it('writes back only what a restored log lacks', async () => {
     let server = await edge([row(1), row(2), row(3), row(4)]);

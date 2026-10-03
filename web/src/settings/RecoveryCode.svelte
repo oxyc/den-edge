@@ -11,6 +11,7 @@
     abandon,
     begin,
     confirm,
+    makingWaits,
     prepare,
     reconcile,
     recoveryContext,
@@ -66,6 +67,7 @@
     full: 'Den holds too many codes for this library just now. Try again in a minute.',
     taken: 'That code collided with another. Make a new one.',
     failed: 'Couldn’t save the code. Check that this device is on your network.',
+    waits: 'Available after the library update.',
   };
 
   async function make() {
@@ -144,18 +146,14 @@
     else message = { text: failures.failed, bad: true };
   }
 
-  /** Copied, then cleared from the clipboard after a minute if it still holds the code (§6). */
+  /**
+   * Onto the clipboard, and nothing more: no clear is attempted. A browser lets a page read the clipboard (which a
+   * clear only if it still holds the code needs) only inside a gesture, and a blind clear would destroy whatever the
+   * person copied since (§6). The page asks them to clear it themselves.
+   */
   function copy(code: string) {
     void navigator.clipboard?.writeText(code).then(
-      () => {
-        copied = true;
-        setTimeout(() => {
-          void navigator.clipboard
-            ?.readText()
-            .then((now) => (now === code ? navigator.clipboard.writeText('') : undefined))
-            .catch(() => undefined);
-        }, 60_000);
-      },
+      () => (copied = true),
       (error: unknown) => console.warn('den: the recovery code was not copied', error),
     );
   }
@@ -185,9 +183,10 @@
         >{copied ? 'Copied' : 'Copy'}</button
       >
     </span>
-    <p class="small">
-      Clipboard history and your system’s clipboard sync can carry a copied code to other devices.
-      Den clears the clipboard after a minute.
+    <p class="small" role="status">
+      {copied ? 'Copied to your clipboard. ' : ''}Clipboard history and your system’s clipboard sync
+      can carry a copied code to other devices. Once the code is saved, copy something else to clear
+      it.
     </p>
     <form
       class="form"
@@ -226,7 +225,7 @@
   </span>
 {:else if !log}
   <p class="status">Your library isn’t open yet.</p>
-{:else if log.readOnly}
+{:else if makingWaits(log)}
   <p class="status">Available after the library update.</p>
 {:else}
   {#if status === undefined}

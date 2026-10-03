@@ -6,6 +6,8 @@ import {
   confirm,
   derive,
   dueAtLaunch,
+  forgetMakesInThisTab,
+  markReconciled,
   newCode,
   prepare,
   readCode,
@@ -103,7 +105,15 @@ class FakeLog implements RecoveryLog {
   private seq = 0;
   private row: SettingsRow | undefined;
   readOnly = false;
+  wireMinimum = 4;
+  /** What the next read meets: den-edge's log answers, it is busy (a 503), or it changed generation. */
+  read: 'ok' | 'busy' | 'generation' = 'ok';
   constructor(private readonly edge: Server) {}
+  async readToHead() {
+    if (this.read !== 'ok') return false;
+    await this.refresh();
+    return true;
+  }
   settings(name: string) {
     return name === 'devices' ? this.edge.devices : this.row;
   }
@@ -181,7 +191,7 @@ async function device(edge: Server, id: string, name: string, at = { now: 1_000_
     now: () => at.now,
     storage: new MemoryStorage() as unknown as Storage,
   };
-  await ctx.log.refresh();
+  await ctx.log.readToHead();
   return ctx;
 }
 
@@ -222,6 +232,7 @@ describe('making a code (§6)', () => {
       const begun = await begin(web, prepared);
       if (!begun.ok) throw new Error('begin failed');
       clock.now += 5 * 60_000;
+      forgetMakesInThisTab();
       const relaunched = { ...web, storage: web.storage, log: new FakeLog(edge) };
       const status = await reconcile(relaunched);
       expect(status?.notices).toContain(
@@ -383,13 +394,104 @@ describe('reconcile (§7)', () => {
     expect((await reconcile(web))?.notices).toEqual([]);
   });
 
-  it('runs at launch at most once a day', () => {
+  it('runs at launch at most once a day, and only a reconcile that succeeded uses up the day', () => {
     const storage = new MemoryStorage() as unknown as Storage;
-    expect(dueAtLaunch('lib', 0 + 86_400_000, storage)).toBe(true);
-    expect(dueAtLaunch('lib', 2 * 86_400_000 - 1, storage)).toBe(false);
-    expect(dueAtLaunch('lib', 2 * 86_400_000, storage)).toBe(true);
-    expect(dueAtLaunch('other', 2 * 86_400_000, storage)).toBe(true);
+    const day = 86_400_000;
+    expect(dueAtLaunch('lib', day, storage)).toBe(true);
+    expect(dueAtLaunch('lib', day + 1, storage), 'nothing succeeded yet').toBe(true);
+    markReconciled('lib', day, storage);
+    expect(dueAtLaunch('lib', 2 * day - 1, storage)).toBe(false);
+    expect(dueAtLaunch('lib', 2 * day, storage)).toBe(true);
+    expect(dueAtLaunch('other', 2 * day, storage)).toBe(true);
   });
+
+  /**
+   * A browser last saw C1 live; meanwhile another device replaced it with C2. When this pass cannot read the log to
+   * its head — den-edge busy (a 503 on the bulk lane while `/recovery` answers), or a generation change — acting on the
+   * cached row would delete C2 (the person's code) and post C1 (the replaced one) again. It must do nothing.
+   */
+  for (const read of ['busy', 'generation'] as const) {
+    it(`does nothing on a row it could not read to the head (${read})`, async () => {
+      const edge = server();
+      const c1 = 'ab'.repeat(16);
+      const c2 = 'cd'.repeat(16);
+      const keys = await deriveKeys(fromHex(vectors.libraryKey));
+      edge.row = {
+        kind: 'set',
+        schema: 2,
+        name: 'recovery',
+        values: { [c1]: { value: { string: live(keys.id) }, at: [1, 0, TV] } },
+      };
+      edge.seq = 1;
+      const web = await device(edge, WEB, 'Mac · Safari');
+      edge.row = {
+        kind: 'set',
+        schema: 2,
+        name: 'recovery',
+        values: {
+          [c1]: { value: null, at: [2, 0, TV] },
+          [c2]: { value: { string: live(keys.id, 'CCCC') }, at: [2, 0, TV] },
+        },
+      };
+      edge.seq = 2;
+      edge.entries.set(c2, { sealed: 'CCCC', library: keys.id, createdAt: 2, opens: 0 });
+      (web.log as FakeLog).read = read;
+      expect(await reconcile(web)).toBeNull();
+      expect(edge.deleted).toEqual([]);
+      expect([...edge.entries.keys()]).toEqual([c2]);
+      expect(edge.seq).toBe(2);
+    });
+  }
+});
+
+describe('making waits and storage', () => {
+  it('making a code waits on a library not yet on v4', async () => {
+    const edge = server();
+    const web = await device(edge, WEB, 'Mac · Safari');
+    (web.log as FakeLog).wireMinimum = 3;
+    const begun = await begin(web, {
+      code: 'x',
+      locator: 'ab'.repeat(16),
+      sealed: 'AAAA',
+      createdAt: 1,
+      lastGroup: 'XXXX',
+    });
+    expect(begun).toEqual({ ok: false, error: 'waits' });
+    expect(edge.seq).toBe(0);
+    expect(edge.entries.size).toBe(0);
+  });
+
+  it(
+    'a make where storage throws does not take its own pending entry for abandoned',
+    async () => {
+      const edge = server();
+      const web = await device(edge, WEB, 'Mac · Safari');
+      web.storage = {
+        getItem: () => {
+          throw new Error('blocked');
+        },
+        setItem: () => {
+          throw new Error('blocked');
+        },
+      } as unknown as Storage;
+      // Four strays of this library fill it, so the POST is refused and the make reconciles.
+      for (const n of [1, 2, 3, 4])
+        edge.entries.set(`${n}`.repeat(32), {
+          sealed: 'BBBB',
+          library: web.libraryId,
+          createdAt: 1,
+          opens: 0,
+        });
+      const prepared = await prepare(web, LIBRARY_KEY);
+      const begun = await begin(web, prepared);
+      if (!begun.ok) throw new Error(`begin failed: ${begun.error}`);
+      expect(readRecovery(edge.row).get(prepared.locator)?.state).toBe('pending');
+      expect(edge.entries.has(prepared.locator)).toBe(true);
+      expect(await confirm(web, prepared, begun.baseLive)).toEqual({ ok: true });
+      begun.done();
+    },
+    SLOW,
+  );
 });
 
 describe('redeeming (§8)', () => {

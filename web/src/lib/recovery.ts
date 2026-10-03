@@ -3,7 +3,9 @@
 //
 // The code and what it derives (`wrapKey`) live only in memory, in the caller, until its screen closes: nothing here
 // writes them to storage, to the library, to a log or to a URL. den-core makes, reads and derives (§2, §3); sealing
-// the library key under the wrap key is this file's, with WebCrypto (§4).
+// the library key under the wrap key is this file's, with WebCrypto (§4). The wrap key's bytes are zeroed once used;
+// the code and its data characters are JavaScript strings, which nothing can zero, so §8 step 6's "zero the code"
+// is met here only by dropping every reference to it.
 
 import { evaluate } from '../vendor/den-core/index.js';
 import { hex } from './crypto';
@@ -40,8 +42,11 @@ export interface RecoveryLog {
   settings(name: string): SettingsRow | undefined;
   seqOf(name: string): number;
   writeAt(row: SettingsRow, base: number): Promise<boolean>;
-  refresh(): Promise<boolean>;
+  /** A refresh that answers whether it read the log to its head in this pass (§7 step 1). */
+  readToHead(): Promise<boolean>;
   readonly readOnly: boolean;
+  /** The library's format: a code is made only on v4 (§10). */
+  readonly wireMinimum: number;
   /** The newest stamp read, seen before each write so a stamp issued here is later than any in the row. */
   newestStamp?(): Stamp;
 }
@@ -341,12 +346,25 @@ function writeMaking(making: Record<string, number>, storage?: Storage): void {
   }
 }
 
+/**
+ * The locators this tab is making. The storage beat tells this browser's other tabs; this tells this tab even where
+ * storage throws (a locked-down or private context), where the beat alone would make a make abandon itself.
+ */
+const makingHere = new Set<string>();
+
+/** What a new page load starts with: no make in progress in this tab. Tests stand in for a reload with it. */
+export function forgetMakesInThisTab(): void {
+  makingHere.clear();
+}
+
 /** Marks `locator` as being made in this tab until the returned function is called. */
 function markMaking(ctx: RecoveryContext, locator: string): () => void {
+  makingHere.add(locator);
   const beat = () => writeMaking({ ...readMaking(ctx.storage), [locator]: now(ctx) }, ctx.storage);
   beat();
   const timer = setInterval(beat, BEAT_MS);
   return () => {
+    makingHere.delete(locator);
     clearInterval(timer);
     const making = readMaking(ctx.storage);
     delete making[locator];
@@ -363,6 +381,7 @@ const now = (ctx: RecoveryContext) => (ctx.now ?? Date.now)();
 function abandoned(ctx: RecoveryContext, entry: RecoveryEntry, locator: string): boolean {
   if (entry.state !== 'pending') return false;
   if (now(ctx) - entry.createdAt > HOUR) return true;
+  if (makingHere.has(locator)) return false;
   const beat = readMaking(ctx.storage)[locator];
   return entry.by === ctx.device && !(beat !== undefined && now(ctx) - beat < 3 * BEAT_MS);
 }
@@ -421,10 +440,14 @@ export async function prepare(ctx: RecoveryContext, libraryKey: string): Promise
 
 export type Begun =
   | { ok: true; baseLive: Set<string>; done: () => void }
-  | { ok: false; error: 'full' | 'taken' | 'failed' };
+  | { ok: false; error: 'full' | 'taken' | 'failed' | 'waits' };
+
+/** Whether making a code waits for the library: not on v4 yet, or read-only after a failed switch (§10). */
+export const makingWaits = (log: RecoveryLog): boolean => log.readOnly || log.wireMinimum < 4;
 
 /** §6 steps 2–3: the entry pending in the library first, then at den-edge. */
 export async function begin(ctx: RecoveryContext, prepared: Prepared): Promise<Begun> {
+  if (makingWaits(ctx.log)) return { ok: false, error: 'waits' };
   const done = markMaking(ctx, prepared.locator);
   let baseLive = new Set<string>();
   const entry: RecoveryEntry = {
@@ -555,13 +578,14 @@ function winner(
 }
 
 /**
- * §7 *Reconcile*: den-edge made to match the row. A read-only library (v4 §10 step 3) skips the row writes. Null
- * when den-edge couldn't be read.
+ * §7 *Reconcile*: den-edge made to match the row. A read-only or v3 library (§10) skips the row writes. Null, having
+ * done nothing, when den-edge's entries or its log couldn't be read to the head in this pass: acting on a row read
+ * earlier could delete the person's current code and post a replaced one.
  */
 export async function reconcile(ctx: RecoveryContext): Promise<RecoveryStatus | null> {
   const listedEntries = await list(ctx);
   if (!listedEntries) return null;
-  await ctx.log.refresh();
+  if (!(await ctx.log.readToHead())) return null;
   const listed = new Set(listedEntries.map((entry) => entry.locator));
   const entries = readRecovery(ctx.log.settings(GROUP));
   const own = [...entries].filter(([, e]) => e.library === ctx.libraryId);
@@ -577,7 +601,7 @@ export async function reconcile(ctx: RecoveryContext): Promise<RecoveryStatus | 
   );
   if (live) named.add(live[0]);
   for (const locator of listed) if (!named.has(locator)) await remove(ctx, locator);
-  if (!ctx.log.readOnly)
+  if (!makingWaits(ctx.log))
     await update(ctx, (current) => {
       const nulls: Record<string, null> = {};
       for (const [locator, e] of current) {
@@ -628,16 +652,22 @@ export async function reconcile(ctx: RecoveryContext): Promise<RecoveryStatus | 
 
 const RECONCILED = 'den.recovery.reconciledAt.';
 
-/** At launch, at most once a day (§7): whether this browser should reconcile now, and that it did. */
+/** At launch, at most once a day (§7): whether this browser should reconcile now. */
 export function dueAtLaunch(libraryId: string, at = Date.now(), storage?: Storage): boolean {
   try {
-    const store = storage ?? globalThis.localStorage;
-    const last = Number(store?.getItem(RECONCILED + libraryId) ?? 0);
-    if (at - last < DAY) return false;
-    store?.setItem(RECONCILED + libraryId, String(at));
-    return true;
+    const last = Number((storage ?? globalThis.localStorage)?.getItem(RECONCILED + libraryId) ?? 0);
+    return at - last >= DAY;
   } catch {
     return true;
+  }
+}
+
+/** The day's launch reconcile done: marked only once one succeeded, so an offline launch doesn't use up the day. */
+export function markReconciled(libraryId: string, at = Date.now(), storage?: Storage): void {
+  try {
+    (storage ?? globalThis.localStorage)?.setItem(RECONCILED + libraryId, String(at));
+  } catch {
+    // The next launch reconciles again.
   }
 }
 
@@ -650,6 +680,7 @@ export type RedeemError =
   | 'rate_limited'
   | 'unreadable'
   | 'library_moved'
+  | 'library_missing'
   | 'unreachable';
 
 /**
@@ -686,7 +717,7 @@ export async function redeem(
       headers: { 'x-den-library-token': keys.token },
     });
     if (library.status === 410) return { error: 'library_moved' };
-    if (!library.ok) return { error: library.status === 404 ? 'unreadable' : 'unreachable' };
+    if (!library.ok) return { error: library.status === 404 ? 'library_missing' : 'unreachable' };
     return { libraryKey: btoa(String.fromCharCode(...key)) };
   } catch {
     return { error: 'unreachable' };
@@ -701,5 +732,7 @@ export const redeemMessages: Record<RedeemError, string> = {
   rate_limited: 'Too many tries. Wait a while and try again.',
   unreadable: 'Den couldn’t open what this code points to. Try again later.',
   library_moved: 'This code is out of date: the library’s key was reset after it was made.',
+  library_missing:
+    'The library this code opens is no longer on Den. A device that still holds it can put it back.',
   unreachable: 'Couldn’t reach Den. Check that this device is on your network.',
 };

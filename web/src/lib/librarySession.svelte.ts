@@ -1,7 +1,7 @@
 import { LIVE_PULL_MS } from './livePosition';
 import { browserClock } from './clock';
 import { LibraryLog } from './log';
-import { dueAtLaunch, reconcile, recoveryContext } from './recovery';
+import { dueAtLaunch, markReconciled, reconcile, recoveryContext } from './recovery';
 import { deliverSimkl } from './simklDelivery';
 import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import type { Title, Shape } from './library';
@@ -121,13 +121,16 @@ export class LibrarySession {
    * each generation change once the write-back is done. Settings reconciles again when its screen opens.
    */
   private async reconcileRecovery(log: LibraryLog, key: string): Promise<void> {
-    const changed = log.generationChanges !== this.recoveryGenerations;
-    this.recoveryGenerations = log.generationChanges;
     if (log.moved) return;
+    const generations = log.generationChanges;
     const ctx = await recoveryContext(key, log, browserClock());
-    if (!changed && !dueAtLaunch(ctx.libraryId)) return;
+    if (generations === this.recoveryGenerations && !dueAtLaunch(ctx.libraryId)) return;
     const status = await reconcile(ctx);
-    for (const notice of status?.notices ?? []) this.notify(notice);
+    // A reconcile that did nothing (den-edge or the log not read to its head) leaves both triggers armed.
+    if (!status) return;
+    this.recoveryGenerations = generations;
+    markReconciled(ctx.libraryId);
+    for (const notice of status.notices) this.notify(notice);
   }
 
   start(onMoved: () => void): () => void {

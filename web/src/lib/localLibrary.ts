@@ -78,6 +78,8 @@ async function mergeLocalLibrary(
     LibraryLog.openLocal(lost, vault),
     LibraryLog.openLocal(kept, vault),
   ]);
-  if (!from || !into || !(await into.writeRows(from.rows()))) return false;
+  // A browser's own library never holds `set:recovery`, but a code stays with the library it opens (recovery-code §9).
+  const rows = from?.rows().filter((row) => !(row.kind === 'set' && row.name === 'recovery'));
+  if (!from || !into || !rows || !(await into.writeRows(rows))) return false;
   return from.forget();
 }

@@ -298,6 +298,17 @@ export class LibraryLog {
   fromCache = false;
   /** How many generation changes (library v2 §2) `refresh` has read and written back: a recovery reconcile follows each. */
   generationChanges = 0;
+  /**
+   * Whether the last `refresh` read den-edge's log to its head, in one generation. `refresh`'s own answer says only
+   * whether something changed, which is also false when den-edge could not be read.
+   */
+  private reachedHead = false;
+
+  /** A `refresh` that answers whether it read the log to its head, where "nothing new" and "not read" differ. */
+  async readToHead(): Promise<boolean> {
+    await this.refresh();
+    return this.reachedHead;
+  }
 
   get wireMinimum(): number {
     return this.wireMin;
@@ -1449,10 +1460,13 @@ export class LibraryLog {
    * new is false, so what is built from the library is not rebuilt on every 30-second refresh.
    */
   async refresh(): Promise<boolean> {
+    this.reachedHead = false;
     // Nothing else writes a library kept only here but another tab, whose rows each save takes up (`takeKept`).
     if (this.offline) return false;
+    const generationsBefore = this.generationChanges;
     // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
-    const run = this.writes.then(async (): Promise<true | null> => {
+    // `missing` when den-edge holds no log for this library: nothing was read to a head.
+    const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
           const res = await this.send(
@@ -1470,7 +1484,7 @@ export class LibraryLog {
             this.acknowledged.clear();
             this.dirty = true;
             if (staged) this.unreported = true;
-            return true; // A first offline action must be able to create the log on reconnect: `replay` sends it.
+            return 'missing'; // A first offline action must be able to create the log on reconnect: `replay` sends it.
           }
           if (!res.ok) return null;
           // The log is here again (or always was): a refused start is over, and the membership stands again.
@@ -1524,14 +1538,18 @@ export class LibraryLog {
             }
           }
           this.head = page.entries.at(-1)?.seq ?? page.head;
-          if (!page.more || page.entries.length === 0) return true;
+          if (!page.more || page.entries.length === 0) return 'head';
         }
       } catch {
         return null;
       }
     });
     this.writes = run.catch(() => null);
-    if ((await run) === null) return false;
+    const read = await run;
+    if (read === null) return false;
+    // A generation change in this pass is read from zero, but its write-back (`replay`, below) has yet to land: a
+    // reader that must act on a current row waits for the next pass (recovery-code §7).
+    this.reachedHead = read === 'head' && this.generationChanges === generationsBefore;
     const changed = this.unreported;
     this.unreported = false;
     this.persist();
