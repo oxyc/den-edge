@@ -62,12 +62,9 @@ pub struct AppState {
     /// Every per-address budget's count (`link::throttled_at`, `link::throttled_per_minute`): a pairing's guesses,
     /// the relay's and the proxies' questions.
     pub claims: Mutex<link::Throttles>,
-    /// Recovery's per-visitor budgets (`recovery.rs`), apart from `claims`: their windows last up to a day, and must
-    /// never crowd out the minute-long budgets every other route counts in.
-    pub recovery_claims: Mutex<link::Throttles>,
-    /// Budgets that name no visitor (`link::is_global`): upstream quotas, a grant's or an MCP session's allowance. Kept
-    /// apart, in a table that never evicts, so a flood of new visitors cannot reset them.
-    pub global_claims: Mutex<link::Throttles>,
+    /// Recovery's per-visitor budgets (`recovery::Limiter`), apart from `claims`: their windows last up to a day, and
+    /// must never crowd out the minute-long budgets every other route counts in.
+    pub recovery_claims: Mutex<recovery::Limiter>,
     /// Pairing sessions by `sid`. Ten minutes long at most, so memory is enough: a restart costs a pairing in
     /// progress, which the TV simply starts again.
     pub pairs: Mutex<HashMap<String, pair::Session>>,
@@ -274,8 +271,7 @@ impl AppState {
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),
             library_limits,
             claims: Mutex::new(link::Throttles::default()),
-            recovery_claims: Mutex::new(link::Throttles::with_capacity(recovery::LIMIT_BUCKETS)),
-            global_claims: Mutex::new(link::Throttles::global()),
+            recovery_claims: Mutex::new(recovery::Limiter::default()),
             pairs: Mutex::new(HashMap::new()),
             clock: Box::new(now_ms),
             gen_nameplate: Box::new(pair::gen_nameplate),

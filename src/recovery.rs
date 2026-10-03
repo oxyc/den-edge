@@ -27,6 +27,7 @@ use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 
 const NS: &str = "recovery";
@@ -45,9 +46,11 @@ const OPEN_DAY: (u32, u64) = (20, 24 * 60 * MINUTE_MS);
 const OWNER: (u32, u64) = (60, 60 * MINUTE_MS);
 /// `POST /recovery/timing` per visitor: a person makes or redeems a code a handful of times.
 const TIMING: (u32, u64) = (10, 60 * MINUTE_MS);
-/// Recovery's own budget table (`AppState::recovery_claims`): two per visitor that opens, one per member. Full, it
-/// evicts rather than refuses (`link::Throttles`), so filling it locks nobody out (§5).
-pub const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
+/// Recovery's own budget table (`Limiter`): two per visitor that opens, one per member, one per timing reporter.
+const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
+/// The entries one IPv6 /56 — the usual delegation to one customer — may hold in it. A household holds a few: one per
+/// route it uses, per /64.
+const MAX_PER_PREFIX: usize = if cfg!(test) { 8 } else { 64 };
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -116,14 +119,168 @@ async fn owner_of(state: &AppState, locator: &str) -> io::Result<Option<String>>
 
 /// Counts one request against `bucket` in fixed windows, in recovery's own table; the refusal once it is over.
 fn limited(state: &AppState, bucket: &str, ip: &str, (limit, window): (u32, u64)) -> Option<Response> {
-    crate::link::throttled_in_window(
-        &state.recovery_claims,
-        state.now(),
-        &format!("{bucket}:{ip}"),
-        limit,
-        window,
-    )
-    .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+    let now = state.now();
+    crate::lock(&state.recovery_claims)
+        .count(&format!("{bucket}:{ip}"), ip, limit, window, now)
+        .map(|wait| retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait))
+}
+
+/// The prefix a visitor is capped by: an IPv6 /64 (as `client_ip` writes it) by its /56; anything else by itself,
+/// which leaves IPv4 ungrouped — a /24 is often many households behind one carrier.
+fn prefix_of(ip: &str) -> String {
+    match ip.strip_suffix("/64").and_then(|a| a.parse::<std::net::Ipv6Addr>().ok()) {
+        Some(addr) => {
+            let s = addr.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/56", s[0], s[1], s[2], s[3] & 0xff00)
+        }
+        None => ip.to_owned(),
+    }
+}
+
+struct Slot {
+    count: u32,
+    until: u64,
+    prefix: String,
+    /// When it was admitted: of two entries with the same count, the newer goes first.
+    seq: u64,
+    /// At its limit: the next request in this window is refused.
+    refusing: bool,
+}
+
+/// Recovery's budgets (`AppState::recovery_claims`), apart from the shared `link::Throttles`: a full table here never
+/// refuses a newcomer for being full, or filling it from many addresses would be a store-wide limit on `open` by
+/// another name (den-spec recovery §5). Instead:
+/// - expired entries are swept first;
+/// - one IPv6 /56 holds at most `MAX_PER_PREFIX` entries, and a newcomer from a /56 at its share is refused — that /56
+///   alone, which bounds a round-robin over its /64s;
+/// - past that, a newcomer evicts the entry with the lowest count, the newest of those first, and never one that is
+///   refusing while one that is not exists. So a flood evicts its own fresh entries before any caller already counted,
+///   and cannot free a bucket that is holding its caller back. (Evicting from the prefix holding the most first does
+///   not hold up: a flood from many /56s evens the prefixes out to a household's size, and then takes the household.)
+///
+/// Each victim is the first of an ordered set, so a newcomer costs O(log n), not a scan of the table. Residual: a
+/// flood can evict a caller's entry that has counted only as often as the flood's own, which gives that caller its
+/// count back; a flood request buys at most one such reset, never more than the request itself could have spent.
+#[derive(Default)]
+pub struct Limiter {
+    slots: HashMap<String, Slot>,
+    /// How many entries each prefix holds.
+    held: HashMap<String, usize>,
+    /// (count, newest first, key) of the entries not refusing; (until, key) of those refusing.
+    evictable: BTreeSet<(u32, std::cmp::Reverse<u64>, String)>,
+    refusing: BTreeSet<(u64, String)>,
+    admitted: u64,
+    /// A sweep scans the table: at most once a second, however many newcomers arrive.
+    sweep_after: u64,
+}
+
+impl Limiter {
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn held(&self, prefix: &str) -> usize {
+        self.held.get(prefix).copied().unwrap_or(0)
+    }
+
+    /// Takes `key` out of the victim order, before its count, window or refusal changes.
+    fn unfile(&mut self, key: &str) {
+        if let Some(s) = self.slots.get(key) {
+            if s.refusing {
+                self.refusing.remove(&(s.until, key.to_owned()));
+            } else {
+                self.evictable.remove(&(s.count, std::cmp::Reverse(s.seq), key.to_owned()));
+            }
+        }
+    }
+
+    /// Puts `key` back in the victim order, as it now stands.
+    fn file(&mut self, key: &str) {
+        if let Some(s) = self.slots.get(key) {
+            if s.refusing {
+                self.refusing.insert((s.until, key.to_owned()));
+            } else {
+                self.evictable.insert((s.count, std::cmp::Reverse(s.seq), key.to_owned()));
+            }
+        }
+    }
+
+    fn insert(&mut self, key: &str, prefix: String) {
+        *self.held.entry(prefix.clone()).or_default() += 1;
+        self.admitted += 1;
+        let slot = Slot { count: 0, until: 0, prefix, seq: self.admitted, refusing: false };
+        self.slots.insert(key.to_owned(), slot);
+        self.file(key);
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.unfile(key);
+        let Some(slot) = self.slots.remove(key) else { return };
+        if let Some(n) = self.held.get_mut(&slot.prefix) {
+            *n -= 1;
+            if *n == 0 {
+                self.held.remove(&slot.prefix);
+            }
+        }
+    }
+
+    fn sweep(&mut self, now: u64) {
+        if now < self.sweep_after {
+            return;
+        }
+        self.sweep_after = now.saturating_add(1_000);
+        let expired: Vec<String> =
+            self.slots.iter().filter(|(_, s)| s.until <= now).map(|(k, _)| k.clone()).collect();
+        for key in expired {
+            self.remove(&key);
+        }
+    }
+
+    /// The entry a full table gives up (see `Limiter`): the lowest count, newest first; only when every entry is
+    /// refusing, the one nearest its expiry.
+    fn victim(&self) -> Option<String> {
+        self.evictable
+            .first()
+            .map(|(_, _, key)| key.clone())
+            .or_else(|| self.refusing.first().map(|(_, key)| key.clone()))
+    }
+
+    /// Counts one request against `key`, whose visitor is `ip`, in fixed windows of `window` ms: a window opens at its
+    /// first request. How long until it clears, once it is over `limit` — or, for a newcomer whose /56 is at its
+    /// share, a whole window.
+    fn count(&mut self, key: &str, ip: &str, limit: u32, window: u64, now: u64) -> Option<u64> {
+        if !self.slots.contains_key(key) {
+            let prefix = prefix_of(ip);
+            if self.held(&prefix) >= MAX_PER_PREFIX || self.slots.len() >= LIMIT_BUCKETS {
+                self.sweep(now);
+            }
+            if self.held(&prefix) >= MAX_PER_PREFIX {
+                return Some(window);
+            }
+            if self.slots.len() >= LIMIT_BUCKETS {
+                if let Some(victim) = self.victim() {
+                    self.remove(&victim);
+                }
+            }
+            self.insert(key, prefix);
+        }
+        self.unfile(key);
+        let slot = self.slots.get_mut(key).expect("filed above");
+        if slot.until <= now {
+            slot.count = 0;
+            slot.until = now.saturating_add(window);
+        }
+        let wait = if slot.count >= limit {
+            Some(slot.until - now)
+        } else {
+            slot.count += 1;
+            None
+        };
+        slot.refusing = slot.count >= limit;
+        self.file(key);
+        wait
+    }
 }
 
 pub fn is_path(path: &str) -> bool {
@@ -131,7 +288,8 @@ pub fn is_path(path: &str) -> bool {
 }
 
 /// One Argon2id timing a browser reported, as the line den-edge logs: nothing but the operation, its outcome, its
-/// time and a short device label the page chose ("iPhone · Safari"). No locator, code or library.
+/// time and a short device slug the page chose ("iphone-safari"). No locator, code or library: the slug is at most
+/// 24 of `[a-z0-9-]`, too short to carry a locator's 32 hex characters.
 fn timing_line(body: &Value) -> Option<String> {
     let op = body.get("op").and_then(Value::as_str).filter(|op| matches!(*op, "make" | "redeem"))?;
     let outcome = body
@@ -140,8 +298,7 @@ fn timing_line(body: &Value) -> Option<String> {
         .filter(|o| matches!(*o, "ok" | "timeout" | "memory" | "error"))?;
     let ms = body.get("ms").and_then(Value::as_u64).filter(|ms| *ms <= 10 * 60 * 1000)?;
     let device = body.get("device").and_then(Value::as_str).filter(|d| {
-        (1..=40).contains(&d.chars().count())
-            && d.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '·' | '/'))
+        (1..=24).contains(&d.len()) && d.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
     })?;
     Some(format!("recovery timing: op={op} outcome={outcome} ms={ms} device=\"{device}\""))
 }
@@ -534,21 +691,21 @@ mod tests {
         assert_eq!(owner(&restored, "GET", &member(), None).await.1["entries"][0]["opens"], 2);
     }
 
-    /// One visitor per /64 filling recovery's table with day-long buckets locks nobody out: not a new visitor's
-    /// `open`, and not another route, which counts in a table recovery never touches (§5).
+    /// Visitors from four tables' worth of /56s filling recovery's table with day-long buckets lock nobody out: not a
+    /// new visitor's `open`, and not another route, which counts in the shared table recovery never touches (§5).
     #[tokio::test]
     async fn filling_the_limit_table_locks_no_one_out() {
         let mut h = harness().await;
         Arc::get_mut(&mut h.state).unwrap().trusted_proxies = vec![IpAddr::from([192, 168, 1, 9])];
-        for n in 0..LIMIT_BUCKETS {
-            let visitor = format!("2001:db8:0:{n:x}::1");
+        for n in 0..4 * LIMIT_BUCKETS {
+            let visitor = format!("2001:db8:{n:x}::1");
             assert_eq!(
                 open_from(&h, LOC, &[("x-forwarded-for", &visitor)]).await.status(),
                 StatusCode::NOT_FOUND
             );
         }
         assert_eq!(crate::lock(&h.state.recovery_claims).len(), LIMIT_BUCKETS, "full");
-        let fresh = [("x-forwarded-for", "2001:db8:ffff::1")];
+        let fresh = [("x-forwarded-for", "2001:db9::1")];
         assert_eq!(
             open_from(&h, LOC, &fresh).await.status(),
             StatusCode::NOT_FOUND,
@@ -563,24 +720,114 @@ mod tests {
             )
             .await;
         assert_eq!(pair.status(), StatusCode::OK, "and pairing is untouched");
-        assert!(crate::lock(&h.state.claims).len() < 4, "recovery never counted in the shared table");
+    }
+
+    fn v6(slash56: usize, slash64: usize) -> String {
+        format!("2001:db8:{slash56:x}:{:x}::/64", slash64 & 0xff)
+    }
+
+    /// Fills the table from `slash56s`, each /56 at its share, one bucket per /64.
+    fn flood(limiter: &mut Limiter, slash56s: std::ops::Range<usize>, now: u64) {
+        for p in slash56s {
+            for s in 0..MAX_PER_PREFIX {
+                let ip = v6(p, s);
+                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, now);
+            }
+        }
+    }
+
+    /// A household already counted keeps its budgets through a flood of four tables' worth from other prefixes: the
+    /// flood's own prefixes hold the most, so they go first.
+    #[test]
+    fn a_flood_displaces_no_existing_caller() {
+        let mut limiter = Limiter::default();
+        let household: Vec<String> = (0..3).map(|n| format!("route{n}:203.0.113.7")).collect();
+        for key in &household {
+            assert!(limiter.count(key, "203.0.113.7", 5, 60_000, 0).is_none());
+        }
+        flood(&mut limiter, 0..4 * LIMIT_BUCKETS / MAX_PER_PREFIX, 1);
+        assert_eq!(limiter.len(), LIMIT_BUCKETS, "bounded");
+        for key in &household {
+            assert_eq!(limiter.slots[key].count, 1, "{key} kept its count");
+        }
+    }
+
+    /// A bucket holding its caller back is never evicted while one that is not exists, however large the flood.
+    #[test]
+    fn a_flood_cannot_free_a_refusing_bucket() {
+        let mut limiter = Limiter::default();
+        let ip = v6(0xffff, 0);
+        let guessing = format!("recovery-open:{ip}");
+        for _ in 0..5 {
+            assert!(limiter.count(&guessing, &ip, 5, 60_000, 0).is_none());
+        }
+        assert!(limiter.count(&guessing, &ip, 5, 60_000, 0).is_some(), "refused");
+        flood(&mut limiter, 0..4 * LIMIT_BUCKETS / MAX_PER_PREFIX, 1);
+        assert!(limiter.count(&guessing, &ip, 5, 60_000, 2).is_some(), "still refused");
+    }
+
+    /// Cycling the /64s of one /56 never holds more than its share, so it never resets its own budgets.
+    #[test]
+    fn cycling_the_64s_of_one_56_stays_bounded() {
+        let mut limiter = Limiter::default();
+        let admitted = (0..4 * LIMIT_BUCKETS)
+            .filter(|s| {
+                let ip = v6(7, *s);
+                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 0).is_none()
+            })
+            .count();
+        assert_eq!(admitted, MAX_PER_PREFIX);
+        assert_eq!(prefix_of("2001:db8:1:2ff::/64"), "2001:db8:1:200::/56");
+        assert_eq!(prefix_of("203.0.113.7"), "203.0.113.7", "IPv4 is not grouped");
+    }
+
+    /// The index the victim is found by stays in step with the table through evictions, refusals and sweeps.
+    #[test]
+    fn the_victim_index_matches_the_table() {
+        let mut limiter = Limiter::default();
+        flood(&mut limiter, 0..2 * LIMIT_BUCKETS / MAX_PER_PREFIX, 0);
+        for s in 0..3 {
+            let ip = v6(0xfffe, s);
+            for _ in 0..6 {
+                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 0);
+            }
+        }
+        let check = |limiter: &Limiter| {
+            assert_eq!(limiter.held.values().sum::<usize>(), limiter.len());
+            assert_eq!(limiter.evictable.len() + limiter.refusing.len(), limiter.len());
+            for (key, s) in &limiter.slots {
+                let filed = if s.refusing {
+                    limiter.refusing.contains(&(s.until, key.clone()))
+                } else {
+                    limiter.evictable.contains(&(s.count, std::cmp::Reverse(s.seq), key.clone()))
+                };
+                assert!(filed, "{key}");
+            }
+        };
+        check(&limiter);
+        assert_eq!(limiter.refusing.len(), 3);
+        limiter.count("late:203.0.113.9", "203.0.113.9", 5, 60_000, 120_000);
+        check(&limiter);
+        assert_eq!(limiter.len(), 1, "everything else expired and swept");
     }
 
     /// A browser's Argon2id timing is one log line of the operation, outcome, time and a short device label; anything
     /// else in the body is refused rather than logged, and the route is limited per visitor.
     #[tokio::test]
     async fn a_timing_report_is_one_bounded_line() {
-        let ok = json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "iPhone · Safari" });
+        let ok = json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "android-phone-chrome" });
         assert_eq!(
             timing_line(&ok).as_deref(),
-            Some("recovery timing: op=redeem outcome=ok ms=141 device=\"iPhone · Safari\"")
+            Some("recovery timing: op=redeem outcome=ok ms=141 device=\"android-phone-chrome\"")
         );
         for bad in [
             json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "x\ny" }),
-            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": LOC.repeat(2) }),
-            json!({ "op": "steal", "outcome": "ok", "ms": 141, "device": "Mac" }),
-            json!({ "op": "make", "outcome": "fine", "ms": 141, "device": "Mac" }),
-            json!({ "op": "make", "outcome": "ok", "ms": -1, "device": "Mac" }),
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": LOC }),
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "iPhone · Safari" }),
+            json!({ "op": "redeem", "outcome": "ok", "ms": 141, "device": "" }),
+            json!({ "op": "steal", "outcome": "ok", "ms": 141, "device": "mac" }),
+            json!({ "op": "make", "outcome": "fine", "ms": 141, "device": "mac" }),
+            json!({ "op": "make", "outcome": "ok", "ms": -1, "device": "mac" }),
         ] {
             assert_eq!(timing_line(&bad), None, "{bad}");
         }
@@ -679,8 +926,13 @@ mod tests {
                     .status()
             }));
         }
-        let wrong = h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", "wrong")]).await;
-        assert_eq!(wrong.status(), StatusCode::FORBIDDEN, "answered without the recovery lock");
+        let wrong = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", "wrong")]),
+        )
+        .await
+        .expect("answered without the recovery lock");
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
         for delete in deletes {
             let status =
                 tokio::time::timeout(std::time::Duration::from_secs(5), delete).await.unwrap().unwrap();
