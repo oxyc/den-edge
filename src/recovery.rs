@@ -604,31 +604,90 @@ mod tests {
         assert_eq!(owner(&h, "GET", &member(), None).await.0, StatusCode::OK);
     }
 
-    /// A `POST` that passed the member check before a `DELETE /lib/{id}` retired the library writes nothing: it checks
-    /// again under the lock the cascade and the retirement hold (§5 *Cascade*).
+    /// A request body that arrives only once `release` fires.
+    struct Stalled {
+        release: Option<tokio::sync::oneshot::Receiver<()>>,
+        data: Option<axum::body::Bytes>,
+    }
+
+    impl axum::body::HttpBody for Stalled {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            use std::future::Future as _;
+            if let Some(release) = self.release.as_mut() {
+                if std::pin::Pin::new(release).poll(cx).is_pending() {
+                    return std::task::Poll::Pending;
+                }
+                self.release = None;
+            }
+            std::task::Poll::Ready(self.data.take().map(|d| Ok(http_body::Frame::data(d))))
+        }
+    }
+
+    /// The race §5 *Cascade* closes: a `POST` passes the member check, its body is still arriving while a key reset's
+    /// `DELETE /lib/{id}` deletes the library's entries and retires it, and only then does it write. Without the second
+    /// check under `recovery_lock` it wrote an entry for the retired library, which opened and which no proof could
+    /// delete.
     #[tokio::test]
     async fn a_post_racing_the_library_delete_writes_no_entry() {
         let h = Arc::new(harness().await);
-        let held = h.state.recovery_lock.lock().await;
-        let deleting = tokio::spawn({
-            let h = Arc::clone(&h);
-            async move {
-                h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", TOKEN)])
-                    .await
-                    .status()
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // The delete waits on the lock; the library still stands, so this post passes its first check and waits too.
+        let (release, held) = tokio::sync::oneshot::channel();
+        let body = Stalled {
+            release: Some(held),
+            data: Some(json!({ "locator": LOC, "sealed": SEALED }).to_string().into()),
+        };
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/recovery")
+            .header("x-den-library-member", member())
+            .header("content-type", "application/json")
+            .body(axum::body::Body::new(body))
+            .unwrap();
         let posting = tokio::spawn({
             let h = Arc::clone(&h);
-            async move { make(&h, LOC).await.0 }
+            async move { h.send_request(req).await.status() }
         });
+        // The post has passed its member check and waits for its body.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        drop(held);
-        assert_eq!(deleting.await.unwrap(), StatusCode::OK);
+        let deleted = h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", TOKEN)]).await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        release.send(()).unwrap();
         assert_eq!(posting.await.unwrap(), StatusCode::FORBIDDEN);
         assert_eq!(open_from(&h, LOC, &[]).await.status(), StatusCode::NOT_FOUND, "no orphan opens");
+    }
+
+    /// Deletes with a wrong token are refused before `recovery_lock` is taken: a flood of them does not stall
+    /// recovery while they wait.
+    #[tokio::test]
+    async fn a_flood_of_unauthenticated_library_deletes_does_not_stall_recovery() {
+        let h = Arc::new(harness().await);
+        make(&h, LOC).await;
+        // Held as a delete that reached the cascade would hold it; refused deletes never ask for it.
+        let held = h.state.recovery_lock.lock().await;
+        let mut deletes = Vec::new();
+        for n in 0..50 {
+            let h = Arc::clone(&h);
+            let id = format!("{n:032x}");
+            deletes.push(tokio::spawn(async move {
+                h.send("DELETE", &format!("/lib/{id}"), None, &[("x-den-library-token", "wrong")])
+                    .await
+                    .status()
+            }));
+        }
+        let wrong = h.send("DELETE", &format!("/lib/{LIB}"), None, &[("x-den-library-token", "wrong")]).await;
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN, "answered without the recovery lock");
+        for delete in deletes {
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(5), delete).await.unwrap().unwrap();
+            assert!(matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN), "{status}");
+        }
+        drop(held);
+        assert_eq!(open_from(&h, LOC, &[]).await.status(), StatusCode::OK);
     }
 
     fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

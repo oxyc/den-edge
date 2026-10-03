@@ -1218,7 +1218,11 @@ pub mod tests {
             for (k, v) in headers {
                 builder = builder.header(*k, *v);
             }
-            let mut req = builder.body(body.map_or_else(Body::empty, Body::from)).unwrap();
+            self.send_request(builder.body(body.map_or_else(Body::empty, Body::from)).unwrap()).await
+        }
+
+        /// A request built by the test itself: a body that arrives late, say.
+        pub async fn send_request(&self, mut req: Request) -> Response {
             req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 9], 5000))));
             handle(State(Arc::clone(&self.state)), req).await
         }
