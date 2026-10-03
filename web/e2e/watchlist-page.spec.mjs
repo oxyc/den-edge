@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 /** The library fixture's Watchlist page at `width`, every title named by a stand-in TMDB. */
 async function openWatchlist(browser, width, query = '') {
@@ -43,7 +44,7 @@ async function openWatchlist(browser, width, query = '') {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="342" height="513"><rect width="342" height="513" fill="blue"/></svg>',
     }),
   );
-  await page.goto(`http://127.0.0.1:5198/test/library.html?populated&page=watchlist${query}`);
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&page=watchlist${query}`);
   return page;
 }
 
@@ -120,7 +121,7 @@ test('the Watchlist billboard shows the watchlist, newest addition first, and go
     const empty = await browser.newPage({ viewport: { width: 1280, height: 852 } });
     await guardNetwork(empty);
     await empty.route('**/routes', (r) => r.fulfill({ json: {} }));
-    await empty.goto('http://127.0.0.1:5198/test/library.html?page=watchlist');
+    await empty.goto(`${E2E_ORIGIN}/test/library.html?page=watchlist`);
     await expect(empty.getByRole('heading', { name: 'Watchlist', level: 1 })).toBeVisible();
     await expect(empty.locator('.billboard')).toHaveCount(0);
   } finally {

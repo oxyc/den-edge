@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const watchEvents = `"Deleted from Watch History","Most Recent Watch Date","Seconds Watched","Title Description","Title Name"
 no,2026-06-14T02:38:10Z,6000,A film,Goodrich`;
@@ -41,7 +42,7 @@ test('Prime import requires both schemas, previews locally, and writes the playe
         });
       return route.fulfill({ status: 404, json: {} });
     });
-    await page.goto('http://127.0.0.1:5198/test/settings.html');
+    await page.goto(`${E2E_ORIGIN}/test/settings.html`);
 
     await page.getByRole('button', { name: /Prime Video viewing history/ }).click();
     const importRow = page.getByRole('region', { name: 'Prime Video viewing history' });

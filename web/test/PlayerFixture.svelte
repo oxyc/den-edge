@@ -8,7 +8,7 @@
 
   const title: Title = { type: 'movie', id: 42, title: 'The Movie', year: 2001 };
   const query = new URLSearchParams(location.search);
-  const remux = query.get('remux') ?? 'http://127.0.0.1:5198/direct';
+  const remux = query.get('remux') ?? `${location.origin}/direct`;
   const castDiscoveryMs = Number(query.get('castDiscoveryMs')) || undefined;
   const castPlayMs = Number(query.get('castPlayMs')) || undefined;
   let open = $state(true);

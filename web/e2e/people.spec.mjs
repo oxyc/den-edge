@@ -1,7 +1,8 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
-const FIXTURE = 'http://127.0.0.1:5198/test/nav-search.html';
+const FIXTURE = `${E2E_ORIGIN}/test/nav-search.html`;
 const active = (page) => page.locator('[data-route-page][data-active="true"]');
 
 /** Two actors and a director, each with the titles atlas says they are known for. */

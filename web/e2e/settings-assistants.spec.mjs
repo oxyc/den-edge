@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const MCP_URL = 'https://den.example/mcp';
 
@@ -14,7 +15,7 @@ async function settings(browser, { config, connections = [] }) {
     reducedMotion: 'reduce',
   });
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
-    origin: 'http://127.0.0.1:5198',
+    origin: E2E_ORIGIN,
   });
   const page = await context.newPage();
   await guardNetwork(page);
@@ -29,7 +30,7 @@ async function settings(browser, { config, connections = [] }) {
     if (request.method() === 'DELETE') return route.fulfill({ status: 204 });
     return route.fulfill({ json: { connections } });
   });
-  await page.goto('http://127.0.0.1:5198/test/settings.html');
+  await page.goto(`${E2E_ORIGIN}/test/settings.html`);
   return { page, asked };
 }
 

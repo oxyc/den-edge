@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 const art =
   '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="281"><rect width="500" height="281" fill="#264c68"/></svg>';
 const credits = {
@@ -261,7 +262,7 @@ for (const width of [390, 834, 1280])
       // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
       // document, and the title is the first history entry, exactly as opening its link would give.
       await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
-      await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
+      await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
       const active = page.locator('[data-active="true"]');
       await expect(active.locator('h1')).toHaveText('The Series');
       const before = await active.locator('.hero').boundingBox();
@@ -370,7 +371,7 @@ test('season requests cannot overwrite a newer selection and retained detail and
     const seasonGate = new Promise((r) => (releaseSeason = r));
     const requests = await setup(page, { seasonGate });
     await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
-    await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
     const active = () => page.locator('[data-active="true"]');
     await expect(active().getByText('Season 1 premiere', { exact: true })).toBeVisible();
     await active().getByRole('tab', { name: 'Season 2', exact: true }).click();
@@ -435,7 +436,7 @@ test('episode Sources target the selected episode and downloads never requeue wh
       return r.fulfill({ status: 202, json: { progress: 0.3 } });
     });
     await page.addInitScript(() => history.replaceState(null, '', '/tv/9'));
-    await page.goto('http://127.0.0.1:5198/test/detail-parity.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-parity.html`);
     const active = page.locator('[data-active="true"]');
     await active.getByRole('tab', { name: 'Season 2', exact: true }).click();
     const row = active.locator('.episode').first();

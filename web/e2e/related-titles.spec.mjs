@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const art = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>';
 const routePosters = (page) =>
@@ -16,7 +17,7 @@ test('a title’s rows below the fold load only as they near the screen', async 
     asked++;
     return r.fulfill({ json: { page: 2, results: [], total_pages: 1 } });
   });
-  await page.goto('http://127.0.0.1:5198/test/related-titles.html');
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html`);
   const row = page.getByRole('region', { name: 'More like this' });
   await expect(row).toBeAttached();
   // Well past the browser's next idle moment, which is when every row used to ask for its first page.
@@ -54,7 +55,7 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   });
   // The title's own first page of recommendations is all TMDB has.
   await routeTmdb(page, (r) => r.fulfill({ json: { page: 2, results: [], total_pages: 1 } }));
-  await page.goto('http://127.0.0.1:5198/test/related-titles.html');
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html`);
 
   // The rows load as they near the screen, so go to them first.
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
@@ -138,7 +139,7 @@ test('other versions sit between the franchise and More like this, never repeati
       },
     });
   });
-  await page.goto('http://127.0.0.1:5198/test/related-titles.html?atlas=/atlas-v');
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-v`);
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
 
   const franchise = page.getByRole('region', { name: 'The Seed Saga' });

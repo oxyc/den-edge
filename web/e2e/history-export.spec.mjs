@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('Settings downloads the watch history as CSV and JSON, built in the browser', async () => {
   const browser = await chromium.launch({
@@ -13,7 +14,7 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
     await page.route('**/version', (route) => route.fulfill({ json: { version: 'test' } }));
     await page.route('**/config', (route) => route.fulfill({ json: {} }));
     await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
-    await page.goto('http://127.0.0.1:5198/test/settings.html');
+    await page.goto(`${E2E_ORIGIN}/test/settings.html`);
 
     await page.getByRole('button', { name: /Download watch history/ }).click();
     const row = page.getByRole('region', { name: 'Download watch history' });

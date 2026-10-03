@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // A title page opened from Search, with the answers that arrive late on a slow connection held back and then
 // delivered one at a time — in the order a real visit saw them land. None of them may move the viewer.
@@ -125,7 +126,7 @@ test('late answers leave a title opened from Search where the viewer scrolled it
 }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const gates = await setup(page);
-  await page.goto('http://127.0.0.1:5198/test/title-scroll.html');
+  await page.goto(`${E2E_ORIGIN}/test/title-scroll.html`);
   await expect(page.getByRole('heading', { level: 1, name: 'Explore' })).toBeVisible();
 
   await page.evaluate(

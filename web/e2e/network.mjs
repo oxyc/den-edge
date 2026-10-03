@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const unexpected = [];
 test.beforeEach(() => {
@@ -32,12 +33,12 @@ export async function guardNetwork(page) {
       url.pathname === '/atlas/manifest.json' ||
       url.pathname === '/reel/manifest.json' ||
       url.pathname === '/remux/health';
-    if (url.origin === 'http://127.0.0.1:5198' && probe)
+    if (url.origin === E2E_ORIGIN && probe)
       return route.fulfill({ status: 404, body: 'Fixture catalogue unavailable' });
     // Every detail page asks den-edge for the title's ratings and content warnings, key or not. Unless a spec says
     // otherwise, den-edge keeps nothing for a fixture title and nobody here may look one up.
     const kept = /^\/(?:ratings|warnings)\/imdb\//.test(url.pathname);
-    if (url.origin === 'http://127.0.0.1:5198' && kept)
+    if (url.origin === E2E_ORIGIN && kept)
       return route.fulfill({ status: 404, json: { error: 'not_cached' } });
     // A title's You might also like asks for atlas's paged cards first. Unless a spec mocks them, the fixture's atlas
     // predates that route, and the row goes on from the POST it mocks (`relatedRows.ts`).
@@ -47,13 +48,13 @@ export async function guardNetwork(page) {
       /\/index\/(?:suggest|title|franchise|versions)\/(?:movie|series)\/\d+\.json$/.test(
         url.pathname,
       );
-    if (url.origin === 'http://127.0.0.1:5198' && cards)
+    if (url.origin === E2E_ORIGIN && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
     // Opening search asks den-edge to open its TMDB connection ahead of the lookups (`warmTmdb`); it answers nothing.
-    if (url.origin === 'http://127.0.0.1:5198' && url.pathname === '/tmdb/warm')
+    if (url.origin === E2E_ORIGIN && url.pathname === '/tmdb/warm')
       return route.fulfill({ status: 204 });
     const source = /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico)/.test(url.pathname);
-    if (url.origin === 'http://127.0.0.1:5198' && source) return route.continue();
+    if (url.origin === E2E_ORIGIN && source) return route.continue();
     unexpected.push(route.request().method() + ' ' + url.origin + url.pathname);
     return route.abort('blockedbyclient');
   });

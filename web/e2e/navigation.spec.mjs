@@ -2,6 +2,7 @@ import { guardNetwork } from './network.mjs';
 import { test } from '@playwright/test';
 import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('navigation regressions', async () => {
   for (const [name, engine] of [['chromium', chromium]]) {
@@ -52,7 +53,7 @@ test('navigation regressions', async () => {
           };
         });
         page.on('pageerror', (error) => errors.push(String(error)));
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         const active = page.locator('[data-route-page][data-active="true"]');
         await active.getByLabel('Search').fill('my query');
         await active.getByText('Load more').click();
@@ -207,7 +208,7 @@ test('navigation regressions', async () => {
         page.on('pageerror', (e) => errors.push(String(e)));
         if (mode === 'unsupported')
           await page.addInitScript(() => (document.startViewTransition = undefined));
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.locator('input').fill('retained');
         await page.evaluate(() => {
           scrollTo(0, 950);
@@ -247,7 +248,7 @@ test('navigation regressions', async () => {
         page.on('request', (r) => {
           if (r.isNavigationRequest() && r.frame() === page.mainFrame()) documents++;
         });
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         for (const path of ['/tv/1399', '/person/287']) {
           await page.evaluate(
@@ -313,7 +314,7 @@ test('navigation regressions', async () => {
         });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         await page.evaluate(() =>
           document.dispatchEvent(
@@ -401,7 +402,7 @@ test('navigation regressions', async () => {
         });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         const go = async (path) => {
           await page.evaluate(
@@ -457,7 +458,7 @@ test('navigation regressions', async () => {
         });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         // An entry from an earlier mount, or one the address bar made: a history position the router holds
         // no ledger entry for, which must start a fresh segment rather than inherit Home's.
@@ -520,7 +521,7 @@ test('navigation regressions', async () => {
         });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         const go = async (path) => {
           await page.evaluate(
@@ -561,7 +562,7 @@ test('navigation regressions', async () => {
         });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         const go = async (path) => {
           await page.evaluate(
@@ -595,7 +596,7 @@ test('navigation regressions', async () => {
         const context = await browser.newContext({ reducedMotion: 'reduce' });
         const page = await context.newPage();
         await guardNetwork(page);
-        await page.goto('http://127.0.0.1:5198/test/router.html');
+        await page.goto(`${E2E_ORIGIN}/test/router.html`);
         await page.waitForSelector('[data-active="true"]');
         for (const id of [41, 42, 43]) {
           await page.evaluate(

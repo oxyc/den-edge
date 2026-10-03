@@ -10,7 +10,7 @@ npm run lint
 npm run test:e2e
 ```
 
-Playwright starts an isolated Vite server on port 5198. Fixtures use the real router and, where appropriate, real Library/Detail/Person components with mocked TMDB data; no pairing or personal credentials are needed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` only to use an existing compatible Chromium installation.
+Playwright starts an isolated Vite server (`web/e2e/base-url.mjs`) and never reuses one already running on the port, so a run can't silently reuse — and test against — another worktree's server. Locally it picks a free port automatically unless `E2E_PORT` is set; set `E2E_PORT` explicitly to run the suite in more than one worktree at once (each needs a different value). CI always uses the default port, 5198, since it only ever runs one job at a time. Fixtures use the real router and, where appropriate, real Library/Detail/Person components with mocked TMDB data; no pairing or personal credentials are needed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` only to use an existing compatible Chromium installation.
 
 Coverage includes nested Back/Forward, scroll and horizontal rails, search/form state, retained rows, repeated visits, reduced motion, missing View Transition support, rapid navigation, swipe cancellation/overlap, ghost clicks, interior versus carousel gestures, loading covers, the Home → movie 1 → Home → movie 2 wrong-snapshot regression, direct hash entries, independent snapshot DOM ownership, frozen animation geometry, movie → actor → Back, poster rendering, and delayed metadata/image layout stability. Unit tests cover gesture direction/ownership and cancellation during asynchronous landing.
 

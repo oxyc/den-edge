@@ -10,8 +10,9 @@ import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
-const ORIGIN = 'http://127.0.0.1:5198';
+const ORIGIN = E2E_ORIGIN;
 const SID = 'AbCdEfGhIjKlMnOpQrStUv';
 const hls = new URL('./media/hls/', import.meta.url);
 

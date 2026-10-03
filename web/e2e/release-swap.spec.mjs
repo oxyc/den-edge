@@ -1,5 +1,6 @@
 import { guardNetwork } from './network.mjs';
 import { test, expect } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // A release the service worker found behind the kept shell waits for the next page opened (`release.ts`): the page
 // the person is on stays where it is, and the next one is loaded whole, onto the new release.
@@ -7,10 +8,10 @@ test('a waiting release is put on screen by the next page opened, never mid-visi
   page,
 }) => {
   await guardNetwork(page);
-  await page.route('http://127.0.0.1:5198/tv/1399', (route) =>
+  await page.route(`${E2E_ORIGIN}/tv/1399`, (route) =>
     route.fulfill({ contentType: 'text/html', body: '<p id="swapped">the new release</p>' }),
   );
-  await page.goto('http://127.0.0.1:5198/test/router.html');
+  await page.goto(`${E2E_ORIGIN}/test/router.html`);
   const active = page.locator('[data-route-page][data-active="true"]');
   await active.getByText('Details', { exact: true }).waitFor();
   await page.evaluate(async () => {

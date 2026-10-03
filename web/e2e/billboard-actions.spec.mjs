@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 /** The library fixture at `query`, every title named by a stand-in TMDB whose trending list is Movie 1–12. */
 async function open(browser, query, options = {}) {
@@ -39,7 +40,7 @@ async function open(browser, query, options = {}) {
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="blue"/></svg>',
     }),
   );
-  await page.goto(`http://127.0.0.1:5198/test/library.html${query}`);
+  await page.goto(`${E2E_ORIGIN}/test/library.html${query}`);
   return page;
 }
 
@@ -94,7 +95,7 @@ test('a billboard slide saves to the watchlist or marks seen, then moves on with
 
     // A guest's billboard (no library to write to) has neither button.
     const guest = await open(browser, '', { reducedMotion: 'reduce' });
-    await guest.goto('http://127.0.0.1:5198/test/billboard.html');
+    await guest.goto(`${E2E_ORIGIN}/test/billboard.html`);
     await guest.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
     await expect(guest.locator('.slide')).toHaveCount(2);
     await expect(guest.locator('.billboard .pill')).toHaveCount(0);

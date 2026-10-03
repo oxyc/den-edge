@@ -1,7 +1,8 @@
 import { test, expect, chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const ID = '0123456789abcdef0123456789abcdef';
-const ORIGIN = 'http://127.0.0.1:5198';
+const ORIGIN = E2E_ORIGIN;
 const CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 
 /** A context that answers den-edge's consent routes and records what the page sent them. */

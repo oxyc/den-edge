@@ -2,6 +2,7 @@ import { guardNetwork } from './network.mjs';
 import { expect, test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('snapshots regressions', async () => {
   const browser = await chromium.launch({
@@ -12,7 +13,7 @@ test('snapshots regressions', async () => {
     for (const width of [390, 1280]) {
       const page = await browser.newPage({ viewport: { width, height: 800 } });
       await guardNetwork(page);
-      await page.goto('http://127.0.0.1:5198/test/snapshot.html');
+      await page.goto(`${E2E_ORIGIN}/test/snapshot.html`);
       await page.waitForSelector('.hero');
       await page.waitForTimeout(350);
       const result = await page.evaluate(async () => {
@@ -79,7 +80,7 @@ test('a snapshot copies the page only when shown, and again once the hidden page
   page,
 }) => {
   await guardNetwork(page);
-  await page.goto('http://127.0.0.1:5198/test/snapshot.html');
+  await page.goto(`${E2E_ORIGIN}/test/snapshot.html`);
   await page.waitForSelector('.hero');
   const result = await page.evaluate(async () => {
     const { capturePage } = await import('/src/lib/pageSnapshot.ts');

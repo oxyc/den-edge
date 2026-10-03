@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 // Library v4 §10: the browser that switched the library says so once, and Settings › About names the format beside
 // the version, as a plain value.
@@ -14,7 +15,7 @@ test('the switch to Library v4 shows its toast, and About shows the library form
     await page.route('**/version', (r) => r.fulfill({ json: { version: '0.242.1' } }));
     await page.route('**/config', (r) => r.fulfill({ json: { simklClientId: 'client-1' } }));
     await routeTmdb(page, (route) => route.fulfill({ json: { results: [], images: {} } }));
-    await page.goto('http://127.0.0.1:5198/test/settings.html?switched');
+    await page.goto(`${E2E_ORIGIN}/test/settings.html?switched`);
 
     await expect(
       page.getByRole('status').filter({ hasText: 'Library updated to v4' }),

@@ -2,6 +2,7 @@ import { guardNetwork, routeTmdb } from './network.mjs';
 import { test } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 test('actual-routes regressions', async () => {
   const browser = await chromium.launch({
@@ -81,7 +82,7 @@ test('actual-routes regressions', async () => {
       // The fixture is a file on the dev server, so the title's path is taken before the app mounts: one
       // document, and the title is the first history entry, exactly as opening its link would give.
       await page.addInitScript(() => history.replaceState(null, '', '/movie/42'));
-      await page.goto('http://127.0.0.1:5198/test/actual-routes.html');
+      await page.goto(`${E2E_ORIGIN}/test/actual-routes.html`);
       // Loaded, and through its fade in: a picture caught mid-fade is a different frame from the next one.
       await page.waitForFunction(() => {
         const backdrop = document.querySelector('[data-active="true"] .backdrop.shown');

@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const PROVIDERS = {
   movie: [
@@ -83,7 +84,7 @@ for (const width of [320, 390, 820, 1280]) {
         const kind = url.pathname.endsWith('/tv') ? 'tv' : 'movie';
         return route.fulfill({ json: { results: PROVIDERS[kind] } });
       });
-      await page.goto('http://127.0.0.1:5198/test/settings.html');
+      await page.goto(`${E2E_ORIGIN}/test/settings.html`);
 
       const expectViewportWidth = async () =>
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);

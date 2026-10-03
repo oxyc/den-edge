@@ -4,6 +4,7 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const master = [
@@ -69,7 +70,7 @@ test('a trailer played through hls.js fetches each fragment once', async ({ page
       body: await readFile(new URL(file, hls)),
     });
   });
-  await page.goto('http://127.0.0.1:5198/test/detail-trailer.html');
+  await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
   const video = page.locator('[data-detail-media] video');
   await expect(video).toHaveClass(/\bplaying\b/, { timeout: 15000 });
   // A few seconds of playing, in which a loop would have asked thousands of times.
