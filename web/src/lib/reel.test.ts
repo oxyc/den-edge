@@ -9,6 +9,8 @@ import {
   isPlaylist,
   nativeHls,
   nextRung,
+  abandonDirect,
+  relaysMedia,
   resetActivationPause,
   trailerCandidates,
   watchDirect,
@@ -384,48 +386,141 @@ describe('fetchSources', () => {
     expect(got?.sources.map((source) => source.url)).toEqual([`/reel/cfg/m/s/${blob}?s=${tag}`]);
   });
 
-  // oxyc/den#197: at home the direct origin is the household's own public address, which its router does not loop
-  // back, so den-edge refuses the activation and the page stays on the relay without asking again for each trailer.
-  it('plays through the relay at home, and stops asking there', async () => {
+  describe('as remux plays a session (oxyc/den#197)', () => {
     const blob = 'A'.repeat(40);
     const tag = 'b'.repeat(24);
-    let activations = 0;
-    const fetchImpl: typeof fetch = async (input) => {
-      if (String(input).includes('/sources/')) {
-        return new Response(
-          JSON.stringify({
-            sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true }],
-          }),
-        );
-      }
-      activations++;
-      return new Response(JSON.stringify({ error: 'at_home' }), { status: 409 });
-    };
-    for (let i = 0; i < 3; i++) {
-      const got = await fetchSources(SOURCES, { surface: 'audible', player: 'native', fetchImpl });
-      expect(got?.sources.map(({ url, direct }) => ({ url, direct }))).toEqual([
-        { url: `/reel/cfg/m/s/${blob}?s=${tag}`, direct: undefined },
+    const media = `/reel/m/s/${blob}?s=${tag}`;
+    const relayed = `/reel/cfg/m/s/${blob}?s=${tag}`;
+    /** reel offering one carried source and one of Google's own, and den-edge answering activation with `answer`. */
+    const answering =
+      (answer: Response | (() => Response)): typeof fetch =>
+      async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({
+                sources: [
+                  { kind: 'mp4', url: `../m/s/${blob}?s=${tag}`, audio: true },
+                  { kind: 'mp4', url: 'https://rr3---sn-x.googlevideo.com/file', audio: true },
+                ],
+              }),
+            )
+          : typeof answer === 'function'
+            ? answer()
+            : answer.clone();
+    const activated = (lanBase?: string) =>
+      new Response(
+        JSON.stringify({
+          publicBase: 'https://media.example',
+          media: `https://media.example${media}`,
+          ...(lanBase ? { lanBase } : {}),
+        }),
+      );
+    const order = (sources: Source[] | undefined) =>
+      sources?.map(({ url, direct }) => (direct ? `${direct} ${url}` : url));
+
+    it('at home plays the home-network listener first, then the public one, then the relay where it may', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('https://lan.media.example:8449')),
+        relay: true,
+      });
+      expect(order(got?.sources)).toEqual([
+        `lan https://lan.media.example:8449${media}`,
+        `public https://media.example${media}`,
+        relayed,
+        'https://rr3---sn-x.googlevideo.com/file',
       ]);
-    }
-    expect(activations).toBe(1);
+    });
+
+    it('away plays the public listener, and on the public web name never the relay', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated()),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual([
+        `public https://media.example${media}`,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('with no direct listener, the public web name plays only what does not cross the relay', async () => {
+      const refused = () =>
+        new Response(JSON.stringify({ error: 'public_listener_unavailable' }), { status: 503 });
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(refused),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual(['https://rr3---sn-x.googlevideo.com/file']);
+      // A page on the LAN or the tailnet is not Cloudflare, and keeps the relay.
+      resetActivationPause();
+      const local = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(refused),
+        relay: true,
+      });
+      expect(order(local?.sources)).toEqual([relayed, 'https://rr3---sn-x.googlevideo.com/file']);
+    });
+
+    it('is no trailer at all when every source would cross the relay', async () => {
+      const onlyCarried: typeof fetch = async (input) =>
+        String(input).includes('/sources/')
+          ? new Response(
+              JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+            )
+          : new Response('{}', { status: 503 });
+      expect(
+        await fetchSources(SOURCES, {
+          surface: 'silent',
+          player: 'native',
+          fetchImpl: onlyCarried,
+          relay: false,
+        }),
+      ).toBeNull();
+    });
+
+    it('leaves the home-network listener out once a copy on it showed nothing', async () => {
+      abandonDirect({
+        kind: 'mp4',
+        url: `https://lan.media.example:8449${media}`,
+        audio: true,
+        height: null,
+        width: null,
+        direct: 'lan',
+      });
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('https://lan.media.example:8449')),
+        relay: false,
+      });
+      expect(order(got?.sources)).toEqual([
+        `public https://media.example${media}`,
+        'https://rr3---sn-x.googlevideo.com/file',
+      ]);
+    });
+
+    it('refuses a home-network origin that is not a bare https origin', async () => {
+      const got = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl: answering(activated('http://lan.media.example:8449')),
+        relay: false,
+      });
+      expect(got?.sources.some((source) => source.direct === 'lan')).toBe(false);
+    });
   });
 
-  it('marks the direct copies, and only those', async () => {
-    const blob = 'A'.repeat(40);
-    const tag = 'b'.repeat(24);
-    const fetchImpl: typeof fetch = async (input) =>
-      String(input).includes('/sources/')
-        ? new Response(
-            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
-          )
-        : new Response(
-            JSON.stringify({
-              publicBase: 'https://media.example',
-              media: `https://media.example/reel/m/s/${blob}?s=${tag}`,
-            }),
-          );
-    const got = await fetchSources(SOURCES, { surface: 'silent', player: 'native', fetchImpl });
-    expect(got?.sources.map((source) => source.direct)).toEqual([true, undefined]);
+  it('knows which pages may carry video through the relay', () => {
+    expect(relaysMedia('d.example'), 'the public web name, behind Cloudflare').toBe(false);
+    expect(relaysMedia('192.168.1.20'), 'the LAN address').toBe(true);
+    expect(relaysMedia('box.tail0000.ts.net'), 'the tailnet').toBe(true);
+    expect(relaysMedia('127.0.0.1')).toBe(true);
   });
 
   it('names the surface and the player, and keeps reel’s order', async () => {
@@ -586,7 +681,12 @@ describe('a direct source that does not play', () => {
     audio: true,
     height: null,
     width: null,
-    direct: true,
+    direct: 'public',
+  };
+  const lan: Source = {
+    ...direct,
+    url: 'https://lan.media.example:8449/reel/m/s/x',
+    direct: 'lan',
   };
   const relay: Source = { ...direct, url: '/reel/m/s/x', direct: undefined };
   /** The two things `watchDirect` reads of an element, and a way to say a frame arrived. */
@@ -603,7 +703,7 @@ describe('a direct source that does not play', () => {
     };
   };
 
-  it('is given up for the relay copy when no frame arrives in time, as iOS raises no error', () => {
+  it('is given up for the next copy when no frame arrives in time, as iOS raises no error', () => {
     vi.useFakeTimers();
     try {
       const player = element();
@@ -613,10 +713,26 @@ describe('a direct source that does not play', () => {
       expect(giveUp).not.toHaveBeenCalled();
       vi.advanceTimersByTime(1);
       expect(giveUp).toHaveBeenCalledOnce();
-      // The rest of the list's direct copies are on the same origin: the next step is the relay.
+      // The rest of the list's copies on that listener are passed over; the home-network ones still get a turn.
       expect(
         nextRung([direct, relay, { ...direct, url: 'https://media.example/y' }, relay], 1),
       ).toBe(3);
+      expect(nextRung([relay, direct, lan], 0)).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('at home steps from the home-network listener to the public one, not past it', () => {
+    vi.useFakeTimers();
+    try {
+      const giveUp = vi.fn();
+      watchDirect(element() as unknown as HTMLMediaElement, lan, giveUp);
+      vi.advanceTimersByTime(DIRECT_FIRST_FRAME_MS);
+      expect(giveUp).toHaveBeenCalledOnce();
+      expect(nextRung([lan, direct, relay], 0)).toBe(1);
+      // And a later list's home-network copy is passed over too.
+      expect(nextRung([relay, lan, direct], 0)).toBe(2);
     } finally {
       vi.useRealTimers();
     }

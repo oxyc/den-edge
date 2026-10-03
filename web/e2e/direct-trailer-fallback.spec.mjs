@@ -1,23 +1,29 @@
-// Direct (public) trailers when the direct origin cannot be reached (oxyc/den#197).
+// Where a trailer's bytes come from, and what happens when a direct listener cannot be reached (oxyc/den#197).
 //
-// At home the router does not loop the household's own public address back in, so a direct URL never answers —
-// and iOS's native player waited on it with no error, so nothing played. Two things hold that still: a direct copy
-// that has shown no frame within DIRECT_FIRST_FRAME_MS gives way to its relay copy, in Chromium and in WebKit; and
-// where den-edge says the browser is at home (`409 at_home`) the direct origin is never asked at all.
+// The public web name is served through Cloudflare, whose terms do not allow serving video, so there a trailer plays
+// only from den-reel's direct listeners, routed as den-remux routes a session: the home-network listener first where
+// den-edge names one (`lanBase`, at home, where the router does not loop the public address back in), then the public
+// one. Each gets DIRECT_FIRST_FRAME_MS to show a frame; iOS's native player waits on an unreachable origin without an
+// error, so the deadline is what moves it on. When neither plays, no trailer is shown, as remux shows no playback.
+// A page on the LAN address or the tailnet is not Cloudflare and keeps the same-origin relay as its last copy.
 //
-// "Unreachable" is a request that is never answered, which is what a dropped connection looks like to the element:
-// no `error`, just waiting.
+// "Unreachable" is a request that is never answered, which is what a dropped connection looks like to the element.
+// The public web name is `den.localhost`: a name that is not local to the page (`relaysMedia`) but that the browser
+// still resolves to the dev server.
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { E2E_ORIGIN, E2E_PORT } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
 const videoBytes = await readFile(new URL('./media/trailer.webm', import.meta.url));
-const ORIGIN = 'http://127.0.0.1:5198';
+const LOCAL = E2E_ORIGIN;
+const PUBLIC = `http://den.localhost:${E2E_PORT}`;
 const DIRECT = 'https://media.invalid';
+const LAN = 'https://lan.media.invalid:8449';
 const BLOB = 'A'.repeat(40);
 const TAG = 'b'.repeat(24);
-const RELAY_URL = `/reel/m/s/${BLOB}?s=${TAG}`;
+const MEDIA = `/reel/m/s/${BLOB}?s=${TAG}`;
 /** reel's `DIRECT_FIRST_FRAME_MS`, which these hold the page to. */
 const DEADLINE_MS = 2_000;
 
@@ -41,18 +47,19 @@ const serveVideo = (route) => {
     body: videoBytes.subarray(start, end + 1),
     headers: {
       'accept-ranges': 'bytes',
+      'access-control-allow-origin': '*',
       ...(range ? { 'content-range': `bytes ${start}-${end}/${videoBytes.length}` } : {}),
     },
   });
 };
 
 /**
- * reel answering one signed carried source, the relay serving it, and den-edge answering activation with
- * `activation`: `open` (200, the direct origin then never answers) or `home` (409 at_home).
+ * reel offering one signed carried source, and den-edge activating with `lanBase` when `home`. `reach` says which
+ * listeners answer: the others never do. The relay answers too, so a page that used it would be seen playing.
  */
-async function mock(page, activation) {
-  const seen = { activations: 0, direct: 0 };
-  await guardNetwork(page);
+async function mock(page, origin, { home, reach }) {
+  const seen = { activations: 0, lan: 0, direct: 0, relay: 0 };
+  await guardNetwork(page, origin);
   await routeTmdb(page, (r) => r.fulfill({ json: movie }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
@@ -77,27 +84,36 @@ async function mock(page, activation) {
   await page.route('**/sources/trailer.json**', (r) =>
     r.fulfill({
       json: {
-        sources: [
-          { kind: 'mp4', url: `http://internal/m/s/${BLOB}?s=${TAG}`, audio: true, height: 720 },
-        ],
+        sources: [{ kind: 'mp4', url: `http://internal${MEDIA}`, audio: true, height: 720 }],
       },
     }),
   );
-  await page.route(`${ORIGIN}/reel/activate`, (r) => {
+  await page.route(`${origin}/reel/activate`, (r) => {
     seen.activations += 1;
-    return activation === 'home'
-      ? r.fulfill({ status: 409, json: { error: 'at_home' } })
-      : r.fulfill({
-          json: { publicBase: DIRECT, media: `${DIRECT}${RELAY_URL}`, form: 'progressive' },
-        });
+    return r.fulfill({
+      json: {
+        publicBase: DIRECT,
+        media: `${DIRECT}${MEDIA}`,
+        form: 'progressive',
+        ...(home ? { lanBase: LAN } : {}),
+      },
+    });
   });
+  // Every way a trailer's bytes could cross this origin: the carried copy, and reel's own file and siblings.
   await page.route(
-    (url) => url.origin === ORIGIN && url.pathname.startsWith('/reel/m/s/'),
-    serveVideo,
+    (url) => url.origin === origin && /^\/reel\/(?:m\/s|play|progressive|hls)\//.test(url.pathname),
+    (route) => {
+      seen.relay += 1;
+      return serveVideo(route);
+    },
   );
-  // Never answered: a router that drops the connection, as the one at home does for its own public address.
-  await page.route(`${DIRECT}/**`, () => {
+  await page.route(`${LAN}/**`, (route) => {
+    seen.lan += 1;
+    if (reach.includes('lan')) return serveVideo(route);
+  });
+  await page.route(`${DIRECT}/**`, (route) => {
     seen.direct += 1;
+    if (reach.includes('public')) return serveVideo(route);
   });
   return seen;
 }
@@ -114,31 +130,35 @@ const engines = [
 const surfaces = [
   {
     name: 'hero',
-    open: (page) => page.goto(`${ORIGIN}/test/detail-trailer.html`),
+    open: (page, origin) => page.goto(`${origin}/test/detail-trailer.html`),
     video: '[data-detail-media] video',
   },
   {
     name: 'billboard',
-    open: async (page) => {
-      await page.goto(`${ORIGIN}/test/billboard.html?reel=1`);
+    open: async (page, origin) => {
+      await page.goto(`${origin}/test/billboard.html?reel=1`);
       await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
     },
     video: 'video.ambient',
   },
 ];
 
-/** Milliseconds from opening the surface until its trailer is playing, and what played. */
-async function timeToPlay(launch, surface, activation) {
+/** Opens the surface on `origin`; the time until its trailer is playing (null if it never does) and what played. */
+async function play(launch, surface, origin, network, wait = 15_000) {
   const browser = await launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    const seen = await mock(page, activation);
+    const seen = await mock(page, origin, network);
     const began = Date.now();
-    await surface.open(page);
+    await surface.open(page, origin);
     const video = page.locator(surface.video);
-    await expect(video).toHaveClass(/playing/, { timeout: 15_000 });
-    const took = Date.now() - began;
-    return { took, src: await video.getAttribute('src'), seen };
+    const played = await expect(video)
+      .toHaveClass(/playing/, { timeout: wait })
+      .then(() => true)
+      .catch(() => false);
+    const took = played ? Date.now() - began : null;
+    const src = (await video.count()) ? await video.getAttribute('src') : null;
+    return { took, src, seen };
   } finally {
     await browser.close();
   }
@@ -146,23 +166,55 @@ async function timeToPlay(launch, surface, activation) {
 
 for (const [engine, launch, available = () => true] of engines) {
   for (const surface of surfaces) {
-    test(`${engine} ${surface.name}: an unreachable direct origin gives way to the relay within the deadline`, async () => {
+    const name = `${engine} ${surface.name}`;
+
+    test(`${name}: at home plays from the home-network listener, never the relay`, async () => {
       test.skip(!available(), `${engine} is not installed here`);
-      const home = await timeToPlay(launch, surface, 'home');
-      const away = await timeToPlay(launch, surface, 'open');
-      // At home: asked once, refused, and the direct origin never touched.
-      expect(home.seen).toEqual({ activations: 1, direct: 0 });
-      expect(home.src).toBe(RELAY_URL);
-      // Unreachable: the direct copy was mounted, then the relay copy played.
-      expect(away.seen.activations).toBe(1);
-      expect(away.seen.direct).toBeGreaterThan(0);
-      expect(away.src).toBe(RELAY_URL);
+      const home = await play(launch, surface, PUBLIC, { home: true, reach: ['lan'] });
+      expect(home.src).toBe(`${LAN}${MEDIA}`);
+      expect(home.seen).toMatchObject({ direct: 0, relay: 0 });
+      // The home-network listener unreachable: the public one comes after it, one deadline later, no relay.
+      const lanDown = await play(launch, surface, PUBLIC, { home: true, reach: ['public'] });
+      expect(lanDown.src).toBe(`${DIRECT}${MEDIA}`);
+      expect(lanDown.seen.relay).toBe(0);
+      expect(lanDown.took).toBeLessThan(home.took + DEADLINE_MS + 1_500);
       test.info().annotations.push({
         type: 'time to playing',
-        description: `${engine} ${surface.name}: relay-only ${home.took} ms, direct unreachable ${away.took} ms`,
+        description: `${name}: home-network ${home.took} ms; home-network unreachable, public ${lanDown.took} ms`,
       });
-      // The deadline and no more: what the relay would have taken anyway, plus the wait for a first frame.
-      expect(away.took).toBeLessThan(home.took + DEADLINE_MS + 1_500);
+    });
+
+    test(`${name}: away plays from the public listener, never the relay`, async () => {
+      test.skip(!available(), `${engine} is not installed here`);
+      const away = await play(launch, surface, PUBLIC, { home: false, reach: ['public'] });
+      expect(away.src).toBe(`${DIRECT}${MEDIA}`);
+      expect(away.seen).toMatchObject({ lan: 0, relay: 0 });
+      test.info().annotations.push({
+        type: 'time to playing',
+        description: `${name}: public ${away.took} ms`,
+      });
+    });
+
+    test(`${name}: on the public web name a failed direct listener means no trailer, as remux`, async () => {
+      test.skip(!available(), `${engine} is not installed here`);
+      const failed = await play(
+        launch,
+        surface,
+        PUBLIC,
+        { home: false, reach: [] },
+        DEADLINE_MS + 4_000,
+      );
+      expect(failed.took, 'no trailer plays').toBeNull();
+      expect(failed.seen.direct).toBeGreaterThan(0);
+      expect(failed.seen.relay, 'and nothing crosses the relay').toBe(0);
+    });
+
+    test(`${name}: on a local origin the relay is still the last copy`, async () => {
+      test.skip(!available(), `${engine} is not installed here`);
+      const local = await play(launch, surface, LOCAL, { home: false, reach: [] });
+      expect(local.src).toBe(MEDIA);
+      expect(local.seen.direct).toBeGreaterThan(0);
+      expect(local.took).toBeLessThan(DEADLINE_MS + 5_000);
     });
   }
 }

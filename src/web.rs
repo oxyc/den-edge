@@ -131,6 +131,11 @@ async fn serve_file(
             if let Some(origin) = state.public_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
                 kept.push(origin.clone());
             }
+            // The home-network origin, which `/reel/activate` hands a browser behind the home's router: trailers
+            // play there from this page itself, unlike remux, whose home-network playback lives in the Cast origin.
+            if let Some(origin) = state.lan_media_base.as_ref().filter(|origin| !kept.contains(origin)) {
+                kept.push(origin.clone());
+            }
             &kept
         }
         _ => &state.media_origins,
@@ -1069,6 +1074,7 @@ mod tests {
         // PUBLIC_MEDIA_BASE separately names the DNS-only Caddy listener.
         state.media_origins.clear();
         state.public_media_base = Some("https://media.example".into());
+        state.lan_media_base = Some("https://lan.media.example:8449".into());
         state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
 
         let response = h.send("GET", "/", None, &[("host", "d.oxy.fi")]).await;
@@ -1076,6 +1082,11 @@ mod tests {
         for directive in ["media-src", "connect-src"] {
             let values = policy.split(directive).nth(1).unwrap().split(';').next().unwrap();
             assert!(values.contains("https://media.example"), "{directive} omitted direct media: {policy}");
+            // At home, trailers play from the home-network origin from this page itself.
+            assert!(
+                values.contains("https://lan.media.example:8449"),
+                "{directive} omitted LAN media: {policy}"
+            );
         }
     }
 

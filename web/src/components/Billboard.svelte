@@ -27,6 +27,7 @@
     nativeHls,
     nextRung,
     progressiveURL,
+    relaysMedia,
     trailerCandidates,
     watchDirect,
   } from '../lib/reel';
@@ -257,11 +258,18 @@
   let ambientCrop = $state<Crop | null>(null);
   /** Whether a bare element plays a playlist here, which decides what reel is worth offering. */
   const PLAYS_HLS = nativeHls();
+  /**
+   * Whether this page may play a trailer's bytes through its own `/reel` relay. Not on the public web name, which
+   * is served through Cloudflare (`relaysMedia`): there reel's own copy is never mounted, and a slide neither direct
+   * listener can serve keeps its still picture.
+   */
+  const RELAY = relaysMedia();
   /** This source will not play: reel's next offer, then its own copy, then the still picture. */
   function ambientFailedOver() {
     playing = false;
-    // A direct copy that will not play means its origin is out of reach from here: the relay copy is next.
-    if (rungs[rung]?.direct && ambient === rungs[rung]?.url) abandonDirect();
+    // A direct copy that will not play means its listener is out of reach from here: the next copy is tried.
+    const mounted = rungs[rung];
+    if (mounted?.direct && ambient === mounted.url) abandonDirect(mounted);
     const at = nextRung(rungs, rung);
     const next = rungs[at];
     if (next) {
@@ -373,13 +381,19 @@
             ) ?? [];
           const top = playable[0];
           if (top) {
-            proxied = url;
+            proxied = RELAY ? url : null;
             rungs = playable;
             rung = 0;
             ambientCrop = offered?.crop ?? null;
             ambient = top.url;
             return;
           }
+        }
+        // Nothing either direct listener can serve, on a page that may not carry video through the relay: the
+        // still picture stays.
+        if (!RELAY) {
+          ambientFailed = true;
+          return;
         }
         // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
         proxied = url;

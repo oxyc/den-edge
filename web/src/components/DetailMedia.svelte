@@ -10,6 +10,7 @@
     isPlaylist,
     nativeHls,
     nextRung,
+    relaysMedia,
     trailerCandidates,
     watchDirect,
   } from '../lib/reel';
@@ -73,7 +74,13 @@
    * spent on the one that was then discarded, beside 2289 ms on the one that was kept.
    */
   let asking = $state(false);
-  const source = $derived(asking ? null : (upgraded ?? url));
+  /**
+   * Whether this page may play a trailer's bytes through its own `/reel` relay: not on the public web name, which
+   * is served through Cloudflare (`relaysMedia`). There reel's own file and its proxied master are never mounted,
+   * and a trailer neither direct listener can serve is not shown.
+   */
+  const relay = relaysMedia();
+  const source = $derived(asking ? null : (upgraded ?? (relay ? url : null)));
   /**
    * What reel offered for this candidate, best first, and which of them is mounted.
    *
@@ -87,6 +94,11 @@
   let heroCrop = $state<Crop | null>(null);
   /** Does this browser play HLS from a bare element? Asked once: it mounts a video element to find out. */
   const playsHls = nativeHls();
+  /**
+   * The master this page names itself when reel named nothing. A native one's segments come from Google; the one
+   * hls.js plays carries every segment through the relay, so it is not named where the relay may not carry video.
+   */
+  const derivedMaster = (play: string) => (playsHls || relay ? hlsURL(play, playsHls) : null);
   /**
    * The source this page has to drive itself.
    *
@@ -407,8 +419,10 @@
     if (!offered) {
       // A reel older than 0.29.0 names no `/sources`, so the master is derived exactly as every version
       // before it did. This is the only remaining reason to derive one at all.
-      upgraded = hlsURL(play, playsHls);
+      upgraded = derivedMaster(play);
       asking = false;
+      // Nothing this page may mount for this candidate: the next one, or no trailer.
+      if (!upgraded && !relay) nextTrailer();
       return;
     }
     // Ask, and mount nothing until the answer comes. Deriving one to mount in the meantime cost a whole
@@ -434,7 +448,8 @@
       if (!top) {
         // reel could not say what to play, so fall back to the master this page can name itself — the
         // same thing an answer without a sources URL gets.
-        upgraded = hlsURL(play, playsHls);
+        upgraded = derivedMaster(play);
+        if (!upgraded && !relay) nextTrailer();
         return;
       }
       rungs = answer.sources;
@@ -637,9 +652,9 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
-    // A direct copy that will not play here says the origin is unreachable from this browser, not that the
-    // trailer is broken: its relay copy is next, and later trailers skip the direct origin for a while.
-    if (mounted?.direct && upgraded === mounted.url) abandonDirect();
+    // A direct copy that will not play here says its listener is unreachable from this browser, not that the
+    // trailer is broken: the next copy is tried, and later trailers pass that listener over for a while.
+    if (mounted?.direct && upgraded === mounted.url) abandonDirect(mounted);
     // reel offered these in order and guarantees them distinct, so a step always changes the source.
     // A step that did not would fire no load and no error, and the hero would stop here silently.
     const at = nextRung(rungs, rung);
@@ -658,8 +673,9 @@
       return;
     }
     // Every master refused. reel's own file is what is left, and it is worth one ask: a video with no
-    // HLS master at all still plays from it. Once, not once per candidate.
-    if (upgraded) {
+    // HLS master at all still plays from it. Once, not once per candidate, and only where the relay may
+    // carry it: on the public web name the trailer is given up instead.
+    if (upgraded && relay) {
       upgraded = null;
       rungs = [];
       rung = 0;
