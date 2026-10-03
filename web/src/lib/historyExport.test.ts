@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildHistoryExport, historyCsv } from './historyExport';
+import { buildHistoryExport, historyCsv, letterboxdCsv } from './historyExport';
 import type { Title } from './library';
 import type { DocumentRow, Stamp } from './wire';
 
@@ -52,6 +52,11 @@ const documents: DocumentRow[] = [
   film(27205, {
     ...watched(1_770_000_000_000),
     watch: { plays: { '0': 1_770_000_000_000 }, cleared: null },
+  }),
+  // Started, never finished.
+  film(238, {
+    status: { value: 'inProgress', at: at(1_788_500_000_000) },
+    resume: { value: 0.4, at: at(1_788_500_000_000), viewing: 0 },
   }),
   // On the watchlist, never seen.
   film(603, { status: { value: 'watchlist', at: at(1_788_000_000_000) } }),
@@ -107,6 +112,7 @@ const named = (type: 'movie' | 'tv', id: number, title: string, year: number, im
 const names = new Map([
   named('movie', 550, 'Fight Club', 1999, 'tt0137523'),
   named('movie', 146, 'Crouching Tiger, Hidden Dragon', 2000, 'tt0190332'),
+  named('movie', 238, 'The Godfather', 1972, 'tt0068646'),
   named('movie', 603, 'The Matrix', 1999, 'tt0133093'),
   named('movie', 680, 'Pulp Fiction', 1994, 'tt0110912'),
   named('movie', 13, 'Forrest Gump', 1994, 'tt0109830'),
@@ -136,6 +142,19 @@ describe('history export', () => {
           rating: null,
           addedAt: '2023-11-14T22:13:20.000Z',
           plays: [den('2025-06-15T15:06:40.000Z')],
+        },
+        {
+          type: 'movie',
+          tmdbId: 238,
+          imdbId: 'tt0068646',
+          title: 'The Godfather',
+          year: 1972,
+          status: 'inProgress',
+          watchlist: false,
+          reaction: null,
+          rating: null,
+          addedAt: '2023-11-14T22:13:20.000Z',
+          plays: [],
         },
         {
           type: 'movie',
@@ -223,19 +242,34 @@ describe('history export', () => {
     });
   });
 
-  it('writes one CSV line per viewing, newest first and the undated last', () => {
+  it('writes a line per viewing, newest first and the undated last, then each title with no viewing', () => {
     expect(historyCsv(history).split('\r\n')).toEqual([
-      'type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating',
-      'tv,1399,tt0944947,Game of Thrones,2011,1,2,2026-09-21T14:13:20.000Z,true,den,watched,false,dislike,2',
-      'movie,550,tt0137523,Fight Club,1999,,,2026-09-10T00:26:40.000Z,true,den,watched,false,love,10',
-      'tv,1399,tt0944947,Game of Thrones,2011,0,1,2026-06-21T00:00:00.000Z,false,den,watched,false,dislike,2',
-      'tv,1399,tt0944947,Game of Thrones,2011,1,2,2026-06-09T10:13:20.000Z,false,den,watched,false,dislike,2',
-      'tv,1399,tt0944947,Game of Thrones,2011,1,1,2026-05-28T20:26:40.000Z,false,den,watched,false,dislike,2',
-      'movie,27205,,,,,,2026-02-02T02:40:00.000Z,false,den,watched,false,,',
-      'movie,550,tt0137523,Fight Club,1999,,,2025-10-09T08:53:20.000Z,true,den,watched,false,love,10',
-      'movie,146,tt0190332,"Crouching Tiger, Hidden Dragon",2000,,,2025-06-15T15:06:40.000Z,false,den,watched,false,,',
-      'movie,550,tt0137523,Fight Club,1999,,,2023-11-14T22:13:20.000Z,false,import,watched,false,love,10',
-      'tv,1399,tt0944947,Game of Thrones,2011,1,3,,false,import,watched,false,dislike,2',
+      'kind,type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating',
+      'watch,tv,1399,tt0944947,Game of Thrones,2011,1,2,2026-09-21T14:13:20.000Z,true,den,watched,false,dislike,2',
+      'watch,movie,550,tt0137523,Fight Club,1999,,,2026-09-10T00:26:40.000Z,true,den,watched,false,love,10',
+      'watch,tv,1399,tt0944947,Game of Thrones,2011,0,1,2026-06-21T00:00:00.000Z,false,den,watched,false,dislike,2',
+      'watch,tv,1399,tt0944947,Game of Thrones,2011,1,2,2026-06-09T10:13:20.000Z,false,den,watched,false,dislike,2',
+      'watch,tv,1399,tt0944947,Game of Thrones,2011,1,1,2026-05-28T20:26:40.000Z,false,den,watched,false,dislike,2',
+      'watch,movie,27205,,,,,,2026-02-02T02:40:00.000Z,false,den,watched,false,,',
+      'watch,movie,550,tt0137523,Fight Club,1999,,,2025-10-09T08:53:20.000Z,true,den,watched,false,love,10',
+      'watch,movie,146,tt0190332,"Crouching Tiger, Hidden Dragon",2000,,,2025-06-15T15:06:40.000Z,false,den,watched,false,,',
+      'watch,movie,550,tt0137523,Fight Club,1999,,,2023-11-14T22:13:20.000Z,false,import,watched,false,love,10',
+      'watch,tv,1399,tt0944947,Game of Thrones,2011,1,3,,false,import,watched,false,dislike,2',
+      'in_progress,movie,238,tt0068646,The Godfather,1972,,,,,,inProgress,false,,',
+      'watchlist,movie,603,tt0133093,The Matrix,1999,,,,,,watchlist,true,,',
+      'rating,movie,680,tt0110912,Pulp Fiction,1994,,,,,,none,false,like,7',
+      '',
+    ]);
+  });
+
+  it('writes the films in Letterboxd’s import columns, one line per viewing on its UTC day', () => {
+    expect(letterboxdCsv(history).split('\r\n')).toEqual([
+      'Title,Year,imdbID,tmdbID,WatchedDate,Rating10,Rewatch',
+      'Fight Club,1999,tt0137523,550,2026-09-10,10,true',
+      ',,,27205,2026-02-02,,false',
+      'Fight Club,1999,tt0137523,550,2025-10-09,10,true',
+      '"Crouching Tiger, Hidden Dragon",2000,tt0190332,146,2025-06-15,,false',
+      'Fight Club,1999,tt0137523,550,2023-11-14,10,false',
       '',
     ]);
   });
@@ -243,13 +277,13 @@ describe('history export', () => {
   it('quotes a cell holding a quote', () => {
     const quoted = new Map([named('movie', 146, 'The "Best" Film', 2000, 'tt0190332')]);
     expect(historyCsv(buildHistoryExport(documents, quoted, NOW))).toContain(
-      'movie,146,tt0190332,"The ""Best"" Film",2000,',
+      'watch,movie,146,tt0190332,"The ""Best"" Film",2000,',
     );
   });
 
   it('exports nothing from an empty library', () => {
     expect(historyCsv(buildHistoryExport([], names, NOW))).toBe(
-      'type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating\r\n',
+      'kind,type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating\r\n',
     );
   });
 });

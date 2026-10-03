@@ -24,9 +24,22 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
     ]);
     expect(csv.suggestedFilename()).toMatch(/^den-history-\d{4}-\d{2}-\d{2}\.csv$/);
     expect((await readFile(await csv.path(), 'utf8')).split('\r\n')).toEqual([
-      'type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating',
-      'movie,550,tt0137523,Fight Club,1999,,,2026-09-10T00:26:40.000Z,true,den,watched,false,love,10',
-      'movie,550,tt0137523,Fight Club,1999,,,2025-10-09T08:53:20.000Z,false,den,watched,false,love,10',
+      'kind,type,tmdb_id,imdb_id,title,year,season,episode,watched_at,rewatch,source,status,watchlist,reaction,rating',
+      'watch,movie,550,tt0137523,Fight Club,1999,,,2026-09-10T00:26:40.000Z,true,den,watched,false,love,10',
+      'watch,movie,550,tt0137523,Fight Club,1999,,,2025-10-09T08:53:20.000Z,false,den,watched,false,love,10',
+      'watchlist,movie,603,tt0133093,The Matrix,1999,,,,,,watchlist,true,,',
+      '',
+    ]);
+
+    const [letterboxd] = await Promise.all([
+      page.waitForEvent('download'),
+      row.getByRole('button', { name: 'Letterboxd (films)' }).click(),
+    ]);
+    expect(letterboxd.suggestedFilename()).toMatch(/^den-letterboxd-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect((await readFile(await letterboxd.path(), 'utf8')).split('\r\n')).toEqual([
+      'Title,Year,imdbID,tmdbID,WatchedDate,Rating10,Rewatch',
+      'Fight Club,1999,tt0137523,550,2026-09-10,10,true',
+      'Fight Club,1999,tt0137523,550,2025-10-09,10,false',
       '',
     ]);
 
@@ -47,6 +60,7 @@ test('Settings downloads the watch history as CSV and JSON, built in the browser
           { watchedAt: '2026-09-10T00:26:40.000Z', rewatch: true, source: 'den' },
         ],
       }),
+      expect.objectContaining({ type: 'movie', tmdbId: 603, status: 'watchlist', plays: [] }),
     ]);
   } finally {
     await browser.close();

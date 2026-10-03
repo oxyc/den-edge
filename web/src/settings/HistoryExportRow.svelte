@@ -3,7 +3,7 @@
      Titles are named from TMDB as the rest of the page names them; the library itself never leaves the browser. -->
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
-  import { buildHistoryExport, historyCsv } from '../lib/historyExport';
+  import { buildHistoryExport, historyCsv, letterboxdCsv } from '../lib/historyExport';
   import { titleKey, type Title } from '../lib/library';
   import type { LibraryLog } from '../lib/log';
   import { ensureSyncPolicy } from '../lib/syncLoader';
@@ -49,7 +49,7 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  async function download(as: 'csv' | 'json') {
+  async function download(as: 'csv' | 'letterboxd' | 'json') {
     const opened = log;
     if (!opened) return;
     try {
@@ -66,6 +66,8 @@
       const history = buildHistoryExport(documents, await names(refs));
       const day = history.exportedAt.slice(0, 10);
       if (as === 'csv') save(`den-history-${day}.csv`, 'text/csv', historyCsv(history));
+      else if (as === 'letterboxd')
+        save(`den-letterboxd-${day}.csv`, 'text/csv', letterboxdCsv(history));
       else
         save(
           `den-history-${day}.json`,
@@ -86,9 +88,10 @@
   detail="Everything you’ve watched, rated or saved, as CSV or JSON"
 >
   <p class="foot">
-    The CSV has one line per viewing — every film and episode, each time you watched it — with its
-    TMDB and IMDb ids, for importing into another tracker. The JSON also holds your watchlist and
-    ratings for titles you haven’t watched. Both are made in this browser.
+    The CSV has a line for each time you watched a film or episode, then one for each title you
+    saved, started or rated without watching, with its TMDB and IMDb ids. The JSON holds the same,
+    title by title. <em>Letterboxd (films)</em> is your films in Letterboxd’s import format, each viewing
+    a diary entry. All are made in this browser.
   </p>
   <div class="form">
     <button
@@ -102,6 +105,12 @@
       class="quiet"
       disabled={!log || state.step === 'naming'}
       onclick={() => void download('json')}>Download JSON</button
+    >
+    <button
+      type="button"
+      class="quiet"
+      disabled={!log || state.step === 'naming'}
+      onclick={() => void download('letterboxd')}>Letterboxd (films)</button
     >
   </div>
   {#if state.step === 'naming'}

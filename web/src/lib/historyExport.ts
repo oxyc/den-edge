@@ -163,8 +163,12 @@ export function buildHistoryExport(
   return { format: 'den-history', version: 1, exportedAt: new Date(now).toISOString(), titles };
 }
 
-/** The CSV's columns: the ids and the date under the snake_case names trackers' CSV importers read. */
+/**
+ * The CSV's columns. `kind` says what a line is: `watch`, one viewing; else a title with no viewing, by its status
+ * (`watchlist`, `in_progress`, `watched`) or, with none, `rating` for a title that holds only a reaction.
+ */
 export const CSV_COLUMNS = [
+  'kind',
   'type',
   'tmdb_id',
   'imdb_id',
@@ -186,42 +190,107 @@ const cell = (value: string | number | boolean | null) => {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 };
 
+const KINDS: Record<Status, string> = {
+  none: 'rating',
+  watchlist: 'watchlist',
+  inProgress: 'in_progress',
+  watched: 'watched',
+};
+
 /**
- * The export as CSV (RFC 4180): one line per viewing — a film's, or an episode's with its season and episode — newest
- * first, the undated last. A title with no viewing (only on the watchlist, or only rated) has no line; the JSON holds it.
+ * The export as CSV (RFC 4180), the library as a record: one `watch` line per viewing — a film's, or an episode's with
+ * its season and episode — newest first and the undated last; then one line for each title with no viewing (`kind`
+ * from its status, or `rating`), with `watched_at` empty.
  */
 export function historyCsv(history: HistoryExport): string {
-  const lines: { at: string | null; cells: (string | number | boolean | null)[] }[] = [];
+  const watches: Line[] = [];
+  const others: Line[] = [];
   for (const title of history.titles) {
-    const line = (play: ExportedPlay, season: number | null, episode: number | null) =>
-      lines.push({
-        at: play.watchedAt,
-        cells: [
-          title.type,
-          title.tmdbId,
-          title.imdbId,
-          title.title,
-          title.year,
-          season,
-          episode,
-          play.watchedAt,
-          play.rewatch,
-          play.source,
-          title.status,
-          title.watchlist,
-          title.reaction,
-          title.rating,
-        ],
-      });
-    for (const play of title.plays ?? []) line(play, null, null);
+    const cells = (
+      kind: string,
+      play: ExportedPlay | null,
+      season: number | null,
+      episode: number | null,
+    ) => [
+      kind,
+      title.type,
+      title.tmdbId,
+      title.imdbId,
+      title.title,
+      title.year,
+      season,
+      episode,
+      play?.watchedAt ?? null,
+      play?.rewatch ?? null,
+      play?.source ?? null,
+      title.status,
+      title.watchlist,
+      title.reaction,
+      title.rating,
+    ];
+    const before = watches.length;
+    for (const play of title.plays ?? [])
+      watches.push({ at: play.watchedAt, cells: cells('watch', play, null, null) });
     for (const watched of title.episodes ?? [])
-      for (const play of watched.plays) line(play, watched.season, watched.episode);
+      for (const play of watched.plays)
+        watches.push({
+          at: play.watchedAt,
+          cells: cells('watch', play, watched.season, watched.episode),
+        });
+    if (watches.length === before)
+      others.push({ at: null, cells: cells(KINDS[title.status], null, null, null) });
   }
+  return csv(CSV_COLUMNS, watches, others);
+}
+
+interface Line {
+  at: string | null;
+  cells: (string | number | boolean | null)[];
+}
+
+/** `lines` under `columns`, newest first and the undated last, then `after` as it is. */
+function csv(columns: readonly string[], lines: Line[], after: Line[] = []): string {
   // ISO strings sort as their instants; a stable sort keeps a title's and a season's own order within one instant.
   lines.sort((a, b) =>
     a.at === b.at ? 0 : a.at === null ? 1 : b.at === null ? -1 : a.at < b.at ? 1 : -1,
   );
-  return [CSV_COLUMNS.join(','), ...lines.map((l) => l.cells.map(cell).join(','))]
+  return [columns.join(','), ...[...lines, ...after].map((l) => l.cells.map(cell).join(','))]
     .map((l) => `${l}\r\n`)
     .join('');
+}
+
+/** Letterboxd's import columns (letterboxd.com/about/importing-data). */
+export const LETTERBOXD_COLUMNS = [
+  'Title',
+  'Year',
+  'imdbID',
+  'tmdbID',
+  'WatchedDate',
+  'Rating10',
+  'Rewatch',
+] as const;
+
+/**
+ * The films as Letterboxd's import reads them: one line per viewing, which Letterboxd logs as a diary entry on its
+ * `WatchedDate` (the UTC day). A viewing with no date has an empty `WatchedDate`, which Letterboxd marks watched
+ * without a diary entry. Series have no place in Letterboxd and are left out, as are films with no viewing.
+ */
+export function letterboxdCsv(history: HistoryExport): string {
+  const lines = history.titles
+    .filter((title) => title.type === 'movie')
+    .flatMap((title) =>
+      (title.plays ?? []).map((play) => ({
+        at: play.watchedAt,
+        cells: [
+          title.title,
+          title.year,
+          title.imdbId,
+          title.tmdbId,
+          play.watchedAt?.slice(0, 10) ?? null,
+          title.rating,
+          play.rewatch,
+        ],
+      })),
+    );
+  return csv(LETTERBOXD_COLUMNS, lines);
 }
