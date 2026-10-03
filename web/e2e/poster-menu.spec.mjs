@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 async function open(browser, { width = 1280, hasTouch = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch });
@@ -7,7 +8,7 @@ async function open(browser, { width = 1280, hasTouch = false } = {}) {
   // A hover or a press warms the card's own title detail (`warmDetail`), same as any other poster row; none of
   // these fixture titles are real TMDB ids, so this just has to answer something rather than go unmocked.
   await page.route('**/tmdb/3/**', (r) => r.fulfill({ status: 404, json: {} }));
-  await page.goto('http://127.0.0.1:5198/test/poster-menu.html');
+  await page.goto(`${E2E_ORIGIN}/test/poster-menu.html`);
   return page;
 }
 

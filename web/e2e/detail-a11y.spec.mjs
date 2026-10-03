@@ -1,5 +1,6 @@
 import { test, expect, chromium } from '@playwright/test';
 import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
 
 const movie = {
   id: 42,
@@ -35,7 +36,7 @@ test('Trailer opens as a button, moves focus to Close, and Escape returns it', a
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await mock(page);
-    await page.goto('http://127.0.0.1:5198/test/detail-a11y.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
     const trailer = page.getByRole('button', { name: 'Trailer', exact: true });
     await expect(trailer).toBeVisible();
     await trailer.focus();
@@ -62,7 +63,7 @@ test('Watchlist keeps keyboard focus, and does not run again, while a save is in
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await mock(page);
-    await page.goto('http://127.0.0.1:5198/test/detail-a11y.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
     const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
     await watchlist.focus();
     await page.evaluate(() => window.fixture.setBusy(true));
@@ -90,7 +91,7 @@ test('the opinion group is named, and its phone select has no stray text-selecti
       hasTouch: true,
     });
     await mock(page);
-    await page.goto('http://127.0.0.1:5198/test/detail-a11y.html');
+    await page.goto(`${E2E_ORIGIN}/test/detail-a11y.html`);
     // The owner kept the select on phones: `DetailReactions`'s own `role="group"` exists (it is still what the
     // page uses ≥ 760px) but is hidden here, so it carries no accessible role at this width — the select is
     // the one actually offered, and it needs its own name since nothing wraps it in a group here.
