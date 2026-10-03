@@ -177,6 +177,8 @@ const PENDING_RESET_KEY = 'den.keyReset';
 export interface PendingReset {
   from: string;
   to: string;
+  /** The device that started it: settling may stamp its `set:devices` entry (`LibraryLog.fence`). */
+  device: string;
 }
 
 export function readPendingReset(
@@ -185,8 +187,9 @@ export function readPendingReset(
   try {
     const value = JSON.parse(storage?.getItem(PENDING_RESET_KEY) ?? 'null') as unknown;
     if (value && typeof value === 'object') {
-      const { from, to } = value as Record<string, unknown>;
-      if (typeof from === 'string' && typeof to === 'string') return { from, to };
+      const { from, to, device } = value as Record<string, unknown>;
+      if (typeof from === 'string' && typeof to === 'string' && typeof device === 'string')
+        return { from, to, device };
     }
   } catch {
     /* Nothing readable is kept: no reset is pending. */

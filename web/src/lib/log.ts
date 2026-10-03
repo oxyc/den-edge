@@ -86,10 +86,39 @@ export interface Moving {
   kept: { name: string; plaintext: Uint8Array<ArrayBuffer> }[];
   head: number;
   generation: string | null;
+  /** The device moving it. */
+  device: string;
 }
 
 /** Why a move did not start: a row only a newer build can carry, or a library that can't be read or moved now. */
 export type MoveRefusal = 'update_required' | 'unavailable';
+
+/**
+ * How the end of a move went for the library it left (`endMoved`):
+ * - `deleted`: by this move.
+ * - `changed`: written to after the move read it; copy again first.
+ * - `failed`: still there, and fenced against a late `DELETE`, so the new library can go.
+ * - `lost`: another device's reset deleted it, naming its own successor; the new library is a copy nobody needs.
+ * - `lost_unnamed`: deleted, naming no successor, so whose move it was can't be told; the new library stays.
+ * - `unknown`: den-edge can't say yet; the new library, and the pending reset, stay.
+ */
+export type MoveEnd = 'deleted' | 'changed' | 'failed' | 'lost' | 'lost_unnamed' | 'unknown';
+
+/**
+ * What a key reset's `DELETE` names as its successor (`x-den-successor`), and den-edge's `410` names back: the
+ * lowercase hex SHA-256 of the new library's id. The device that reset knows that id and can match it; nobody else
+ * who reads the `410` learns the new id.
+ */
+export async function successorTag(id: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', utf8.encode(id));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** A `410`'s successor read against `tag`: no successor is never ours (it may be a marker den-edge couldn't read). */
+function movedTo(moved: { successor?: string }, tag: string): MoveEnd {
+  if (moved.successor === undefined) return 'lost_unnamed';
+  return moved.successor === tag ? 'deleted' : 'lost';
+}
 
 /** Rows a v4 library holds only after a restore or an old build's write, and the switch converts (§10). */
 const legacy = (row: Row): boolean =>
@@ -833,7 +862,7 @@ export class LibraryLog {
         return { refused: 'update_required' };
       }
       if ('unreadable' in opened) {
-        if (opened.json) return { refused: 'unavailable' };
+        // Not attributable to a name, so not movable; §4 removes it anyway. It never blocks the move.
         console.warn(`den: the unreadable library row ${k} stays behind (${opened.unreadable})`);
         continue;
       }
@@ -853,7 +882,7 @@ export class LibraryLog {
         kept.push({ name: rowName(row), plaintext: (await openPlaintext(this.keys, k, v))! });
       else rows.push(row);
     }
-    return { rows, kept, head: read.head, generation: read.generation };
+    return { rows, kept, head: read.head, generation: read.generation, device };
   }
 
   /** Every row in the log to its head, as den-edge stores it; null when a page couldn't be read. */
@@ -996,6 +1025,8 @@ export class LibraryLog {
         for (const write of chunk) {
           const applied = batch.applied.find(({ k }) => k === write.k);
           if (applied) {
+            // Held as written, so copying again after a write to the old library sends only what changed.
+            if (write.row) this.acknowledge(write.name, applied.seq, write.row);
             rows.delete(write.name);
             kept.delete(write.name);
             continue;
@@ -1015,22 +1046,17 @@ export class LibraryLog {
   /**
    * The end of a move away from this library to `successor` (§12, v2 §1 step 3): deleted on den-edge, which retires
    * its id, so a device still holding its key gets `410 library_moved`. The `DELETE` names the head the move copied
-   * through and the successor; a den-edge that knows them refuses a write since (`409 head_changed`) and names the
-   * successor in its `410`. `changed` when something was written after `moving` read it — a new head, or a new
-   * generation — so the move copies again first. `failed` when it wasn't deleted, by this move or at all: another
-   * device's concurrent reset deleted it first, or den-edge refused. `unknown` when the answer was lost and whether it
-   * was deleted can't be told now: the new library must then stay, and the pending reset is settled later
-   * (`settle`).
+   * through and the successor's tag; a den-edge that knows them refuses a write since (`409 head_changed`) and names
+   * the tag in its `410`. Only a `200`, or den-edge naming this move's tag, is `deleted`; an answer that might have
+   * come after the library was retired is never taken as a failure without asking den-edge where it stands (`MoveEnd`).
    */
-  async endMoved(
-    moving: Moving,
-    successor: LibraryLog,
-  ): Promise<'deleted' | 'changed' | 'failed' | 'unknown'> {
+  async endMoved(moving: Moving, successor: LibraryLog): Promise<MoveEnd> {
+    const tag = await successorTag(successor.keys.id);
     const check = await this.standing();
     if (check === null) return 'failed';
-    if ('moved' in check) return check.successor === successor.keys.id ? 'deleted' : 'failed';
+    if ('moved' in check) return movedTo(check, tag);
     if (check.head !== moving.head || check.generation !== moving.generation) return 'changed';
-    let res: Response;
+    let res: Response | null = null;
     try {
       res = await this.send(`/lib/${this.keys.id}`, {
         method: 'DELETE',
@@ -1038,21 +1064,50 @@ export class LibraryLog {
           ...this.headers(),
           'x-den-generation': moving.generation ?? '0',
           'x-den-base': String(moving.head),
-          'x-den-successor': successor.keys.id,
+          'x-den-successor': tag,
         },
       });
     } catch {
-      const after = await this.standing();
-      if (after === null) return 'unknown';
-      if ('head' in after) return 'failed';
-      // A den-edge that names no successor can't say whose move it was; this one had just copied it, so it is ours.
-      return after.successor === undefined || after.successor === successor.keys.id
-        ? 'deleted'
-        : 'failed';
+      /* Whether it landed is read from den-edge below. */
     }
-    if (res.ok) return 'deleted';
-    const code = await errorCode(res);
-    return code === 'generation_changed' || code === 'head_changed' ? 'changed' : 'failed';
+    if (res?.ok) return 'deleted';
+    if (res?.status === 409) {
+      const code = await errorCode(res);
+      // Refused before anything changed: the copy goes again.
+      if (code === 'head_changed' || code === 'generation_changed') return 'changed';
+    }
+    // Any other answer, or none, may have come after den-edge retired the library: what it says now decides.
+    const after = await this.standing();
+    if (after === null) return 'unknown';
+    if ('moved' in after) return movedTo(after, tag);
+    // Still here — but a DELETE held somewhere on the way could land later. Moving the head past `base` first means
+    // it would be refused (`head_changed`), so the new library can go.
+    return (await this.fence(moving.device)) ? 'failed' : 'unknown';
+  }
+
+  /**
+   * A write that moves this library's head on — this device's `set:devices` entry stamped again — so that a key
+   * reset's `DELETE` still on its way is refused. False when it couldn't be written.
+   */
+  async fence(device: string): Promise<boolean> {
+    for (let round = 0; round < ROUNDS; round++) {
+      const now = Date.now();
+      const base: SettingsRow = this.settings('devices') ?? {
+        kind: 'set',
+        schema: 2,
+        name: 'devices',
+        values: {},
+      };
+      const row: SettingsRow = {
+        ...base,
+        values: {
+          ...base.values,
+          [`${device}.seen`]: { value: { int: now }, at: [now, 0, device] },
+        },
+      };
+      if (await this.writeAt(row, this.seqOf('set:devices'))) return true;
+    }
+    return false;
   }
 
   /**

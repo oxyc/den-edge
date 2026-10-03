@@ -22,7 +22,7 @@
   import { guestGrants } from '../lib/grants.svelte';
   import { receiveDeviceIdentities } from '../lib/inbox';
   import { links, type Link, type Shared } from '../lib/links.svelte';
-  import type { MoveRefusal } from '../lib/log';
+  import type { KeyResetRefusal } from '../lib/keyReset';
   import { navigate } from '../lib/navigation';
   import { formatCode, host, join, parseCode, type HostError, type JoinError } from '../lib/pair';
   import { acceptsAddonURL, readApiKey } from '../lib/prefs';
@@ -76,7 +76,7 @@
      * Moves the library to a new key, cutting off every other device (library v4 §12). Null when it moved, else why it
      * didn't. Absent where this browser can't: no linked library, or one not on v4 yet.
      */
-    onresetkey?: () => Promise<MoveRefusal | null>;
+    onresetkey?: () => Promise<KeyResetRefusal | null>;
     /** The library has a recovery code, which a reset ends. */
     hasRecoveryCode?: boolean;
   } = $props();
@@ -511,11 +511,15 @@
   // Resetting the library key: every other device is cut off and pairs again; this browser keeps the library.
   let resetting = $state(false);
   let resetProblem = $state<string | null>(null);
-  const resetFailures: Record<MoveRefusal, string> = {
+  const resetFailures: Record<KeyResetRefusal, string> = {
     update_required:
       'Your library holds something only a newer version of Den can move. Update Den on your devices, then try again.',
     unavailable:
       'Couldn’t move your library to a new key, so nothing changed. Check that this device is on your network and try again.',
+    unknown:
+      'Den lost the connection at the last step, so it can’t tell yet whether your library has its new key. Nothing is lost either way. Den checks again by itself while Settings is open; you can also press Reset library key again to check now.',
+    moved:
+      'Another device reset your library’s key first, so this browser no longer has it. Pair it again with a code from that device.',
   };
   async function resetKey() {
     if (!onresetkey) return;

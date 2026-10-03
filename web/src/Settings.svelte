@@ -24,10 +24,10 @@
   } from './settings/values';
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
-  import { links, type Link } from './lib/links.svelte';
-  import { resetLibraryKey } from './lib/keyReset';
+  import { onMount } from 'svelte';
+  import { links, readPendingReset, type Link } from './lib/links.svelte';
+  import { resetLibraryKey, settlePendingReset, type KeyResetRefusal } from './lib/keyReset';
   import { dropLocalLibrary } from './lib/localLibrary';
-  import type { MoveRefusal } from './lib/log';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { readApiKey, readPlugins } from './lib/prefs';
@@ -243,11 +243,22 @@
    * and the old one is deleted (library v4 §12). This browser then opens it under the new key; every other device
    * pairs again. Null when it moved, else why it didn't.
    */
-  async function resetKey(): Promise<MoveRefusal | null> {
+  async function resetKey(): Promise<KeyResetRefusal | null> {
     if (!log || !link) return 'unavailable';
     const reset = await resetLibraryKey(log, clock.device, link.libraryKey);
     return 'refused' in reset ? reset.refused : null;
   }
+
+  // A reset this browser didn't see through is settled when Settings opens, and again every 30 seconds while it stays
+  // pending (wire/library-v4 §12, den#192 spec §6): finished, the app reopens on the new key; undone, nothing changed.
+  onMount(() => {
+    const settle = () => {
+      if (readPendingReset()) void settlePendingReset();
+    };
+    settle();
+    const timer = window.setInterval(settle, 30_000);
+    return () => window.clearInterval(timer);
+  });
 
   // A recovery code wraps the library key, so a reset ends it (recovery-code §9; its Settings, oxyc/den#176, offers a
   // new one once the library reopens). The confirmation says so first.

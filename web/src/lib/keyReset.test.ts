@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { react } from './actions';
 import { resetLibraryKey, settlePendingReset } from './keyReset';
 import { links, readLinks, readPendingReset, writePendingReset } from './links.svelte';
-import { LibraryLog } from './log';
+import { LibraryLog, successorTag } from './log';
 import { deliverSimkl } from './simklDelivery';
 import {
   deriveKeys,
@@ -83,6 +83,8 @@ function edge({ legacy = false } = {}) {
     afterDelete: null as null | (() => void),
     /** Every request fails, as when den-edge can't be reached. */
     unreachable: false,
+    /** The next `DELETE` answers 500 — after retiring the library (`applied`), or before. */
+    failDelete: null as null | { applied: boolean },
   };
   const reply = (body: unknown, status = 200, library?: Library) =>
     new Response(JSON.stringify(body), {
@@ -114,6 +116,9 @@ function edge({ legacy = false } = {}) {
       const base = sent.get('x-den-base');
       if (!legacy && base !== null && Number(base) !== library.head)
         return reply({ error: 'head_changed' }, 409, library);
+      const failing = hooks.failDelete;
+      hooks.failDelete = null;
+      if (failing && !failing.applied) return reply({ error: 'internal' }, 500, library);
       libraries.delete(id);
       retired.set(id, sent.get('x-den-successor') ?? undefined);
       hooks.afterDelete?.();
@@ -122,6 +127,7 @@ function edge({ legacy = false } = {}) {
         hooks.loseDeleteAnswer = false;
         throw new TypeError('Failed to fetch');
       }
+      if (failing) return reply({ error: 'internal' }, 500);
       return reply({ deleted: true });
     }
     if (action === 'member') return library ? reply({}, 200, library) : reply({}, 404);
@@ -385,7 +391,7 @@ describe('resetting the library key (library v4 §12)', () => {
       member: `${old.id}:${old.member}`,
       wireMin: '4',
     });
-    expect(server.retired.get(old.id)).toBe(fresh.id);
+    expect(server.retired.get(old.id)).toBe(await successorTag(fresh.id));
     const after = await server.opened(key);
     // Every row, under its new name, as it was — but the recovery code, which wraps the old key, and the other devices.
     expect([...after.keys()].sort()).toEqual(
@@ -408,9 +414,19 @@ describe('resetting the library key (library v4 §12)', () => {
     expect(sent.count).toBe(delivered);
   });
 
-  it('cuts off a device on the old key, even one holding the delivery lease: it must pair again', async () => {
+  it('cuts off a device on the old key, even one holding the delivery lease, whose lease is waited out and taken past every carried settle', async () => {
     const server = edge();
-    await server.seed(OLD_KEY, household([OTHER, '7']));
+    const { fetchImpl, sent } = simkl(server);
+    // The other device holds the lease at epoch 7, and settled a receipt at epoch 9.
+    const receipts: DocumentRow = {
+      format: 4,
+      kind: 'delivery',
+      provider: 'simkl',
+      account: '42',
+      title: { type: 'movie', id: 550 },
+      entries: { list: ['in', at(1000), [9, 1, OTHER]] },
+    };
+    await server.seed(OLD_KEY, [...household([OTHER, '7']), receipts]);
     const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
     // The other device read the library before the reset.
     const other = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
@@ -423,6 +439,15 @@ describe('resetting the library key (library v4 §12)', () => {
     expect(await other.writeAt(lease as SettingsRow, 4)).toBe(false);
     expect(other.moved).toBe(true);
     expect((await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))?.moved).toBe(true);
+
+    // On the new key the cut-off holder's lease is waited out: not a minute short of ten.
+    const next = (await LibraryLog.open(key, fetchImpl, undefined, null))!;
+    expect(await deliverSimkl(next, DEVICE, fetchImpl, 599_999)).toBe(false);
+    expect(sent.count).toBe(0);
+    expect(await deliverSimkl(next, DEVICE, fetchImpl, 600_000)).toBe(true);
+    const taken = (await server.opened(key)).get('set:deliver:simkl:42') as SettingsRow;
+    // Above the carried settle's epoch 9, not only the lease's 7.
+    expect(taken.values.lease?.value).toEqual({ strings: [DEVICE, '10'] });
   });
 
   it('refuses while a row only a newer build can rename exists, and leaves the old library as it was', async () => {
@@ -521,9 +546,11 @@ describe('resetting the library key (library v4 §12)', () => {
       server.retired.set(old.id, theirs);
     };
 
-    expect(await reset(log, server)).toEqual({ refused: 'unavailable' });
+    expect(await reset(log, server)).toEqual({ refused: 'moved' });
     expect([...server.libraries.keys()]).toEqual([]);
-    expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
+    // Cut off: the link goes, and the link screen says why.
+    expect(readLinks()).toEqual([]);
+    expect(links.moved).toBe('Living room');
     expect(readPendingReset()).toBeNull();
   });
 
@@ -534,11 +561,50 @@ describe('resetting the library key (library v4 §12)', () => {
     server.hooks.loseDeleteAnswer = true;
 
     const key = keyOf(await reset(log, server));
-    expect(server.retired.get(old.id)).toBe((await keysOf(key)).id);
+    expect(server.retired.get(old.id)).toBe(await successorTag((await keysOf(key)).id));
     expect(readLinks().map((link) => link.libraryKey)).toEqual([key]);
   });
 
-  it('keeps the new library when whether the DELETE landed is unknown, and adopts it once it is', async () => {
+  it('finishes when the DELETE retired the library and then answered 500', async () => {
+    const server = edge();
+    const old = await server.seed(OLD_KEY, household(['', '1']));
+    const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
+    server.hooks.failDelete = { applied: true };
+
+    const key = keyOf(await reset(log, server));
+    expect(server.retired.has(old.id)).toBe(true);
+    expect(server.libraries.has((await keysOf(key)).id)).toBe(true);
+    expect(readLinks().map((link) => link.libraryKey)).toEqual([key]);
+  });
+
+  it('a DELETE that failed with the library still there fences it before deleting the new one', async () => {
+    const server = edge();
+    const old = await server.seed(OLD_KEY, household(['', '1']));
+    const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
+    const head = server.libraries.get(old.id)!.head;
+    server.hooks.failDelete = { applied: false };
+
+    expect(await reset(log, server)).toEqual({ refused: 'unavailable' });
+    // The head moved on, so a DELETE still on its way is refused (`head_changed`); only then did the new one go.
+    expect(server.libraries.get(old.id)!.head).toBeGreaterThan(head);
+    expect([...server.libraries.keys()]).toEqual([old.id]);
+    expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
+    expect(readPendingReset()).toBeNull();
+  });
+
+  it('a 410 naming no successor is not this reset: it keeps the new library and adopts nothing', async () => {
+    const server = edge({ legacy: true });
+    const old = await server.seed(OLD_KEY, household(['', '1']));
+    const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
+    server.hooks.loseDeleteAnswer = true;
+
+    expect(await reset(log, server)).toEqual({ refused: 'moved' });
+    expect(server.retired.has(old.id)).toBe(true);
+    expect(server.libraries.size).toBe(1);
+    expect(readPendingReset()).toBeNull();
+  });
+
+  it('keeps the new library when whether the DELETE landed is unknown, and pressing Reset again finishes it', async () => {
     const server = edge();
     const old = await server.seed(OLD_KEY, household(['', '1']));
     const log = (await LibraryLog.open(OLD_KEY, server.fetchImpl, undefined, null))!;
@@ -546,7 +612,7 @@ describe('resetting the library key (library v4 §12)', () => {
     server.hooks.loseDeleteAnswer = true;
     server.hooks.afterDelete = () => void (server.hooks.unreachable = true);
 
-    expect(await reset(log, server)).toEqual({ refused: 'unavailable' });
+    expect(await reset(log, server)).toEqual({ refused: 'unknown' });
     const pending = readPendingReset()!;
     expect(pending.from).toBe(OLD_KEY);
     expect(server.retired.has(old.id)).toBe(true);
@@ -556,19 +622,22 @@ describe('resetting the library key (library v4 §12)', () => {
     links.forgetMoved(links.list[0]!);
     expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
 
+    // Still unreachable: Settings' check leaves everything as it is.
+    expect(await settlePendingReset(destination(server))).toBe('unknown');
     server.hooks.unreachable = false;
-    await settlePendingReset(destination(server));
+    expect(await reset(log, server)).toEqual({ key: pending.to });
     expect(readLinks().map((link) => link.libraryKey)).toEqual([pending.to]);
     expect(readPendingReset()).toBeNull();
   });
 
-  it('undoes a reset cut short before the DELETE: the old library stays, the new one goes', async () => {
+  it('undoes a reset cut short before the DELETE: the old library is fenced and stays, the new one goes', async () => {
     const server = edge();
     const old = await server.seed(OLD_KEY, household(['', '1']));
+    const head = server.libraries.get(old.id)!.head;
     const to = btoa(String.fromCharCode(...new Uint8Array(32).fill(3)));
     const fresh = await keysOf(to);
     // A tab closed mid-copy: the pending reset, and a partial new library.
-    writePendingReset({ from: OLD_KEY, to });
+    writePendingReset({ from: OLD_KEY, to, device: DEVICE });
     server.libraries.set(fresh.id, {
       rows: new Map(),
       head: 0,
@@ -577,8 +646,9 @@ describe('resetting the library key (library v4 §12)', () => {
       member: '',
     });
 
-    await settlePendingReset(destination(server));
+    expect(await settlePendingReset(destination(server))).toBe('undone');
     expect(server.libraries.has(old.id)).toBe(true);
+    expect(server.libraries.get(old.id)!.head).toBeGreaterThan(head);
     expect(server.libraries.has(fresh.id)).toBe(false);
     expect(readLinks().map((link) => link.libraryKey)).toEqual([OLD_KEY]);
     expect(readPendingReset()).toBeNull();
