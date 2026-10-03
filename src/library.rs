@@ -986,6 +986,11 @@ async fn forget(
         Ok(gids) => gids,
         Err(e) => return internal("library grants revoke", e),
     };
+    // Its recovery codes go with it, before the id is retired: a code made for the old key opens nothing after a
+    // key reset (den-spec `wire/recovery-code.md` §5 *Cascade*).
+    if let Err(e) = crate::recovery::delete_library(state, id).await {
+        return internal("library recovery delete", e);
+    }
     if let Err(e) = state.store.replace_file(NS, id, MOVED, successor.unwrap_or_default().as_bytes()).await {
         return internal("library retire", e);
     }

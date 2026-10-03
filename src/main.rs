@@ -19,6 +19,7 @@ mod mmap;
 mod oauth;
 mod pair;
 mod ratings;
+mod recovery;
 mod relay;
 mod routes;
 mod skipdb;
@@ -226,6 +227,8 @@ pub struct AppState {
     pub media_leases: Mutex<HashMap<String, relay::Lease>>,
     /// Guest grants' in-memory state (`grants.rs`): last use, media source addresses, sessions already ended.
     pub grants: grants::Grants,
+    /// Held across every read-modify-write of recovery entries (`recovery.rs`).
+    pub recovery_lock: tokio::sync::Mutex<()>,
     /// Distinct `ipv4Hint` addresses each member rate-limit bucket (an IPv6 /64) had a media listener opened for,
     /// and when (`relay::MEMBER_HINTS`). A guest's are counted with its grant's sources instead.
     pub member_hints: Mutex<HashMap<String, Vec<(std::net::IpAddr, u64)>>>,
@@ -328,6 +331,7 @@ impl AppState {
             media_spent: Arc::new(Mutex::new((0, 0))),
             media_leases: Mutex::new(HashMap::new()),
             grants: grants::Grants::default(),
+            recovery_lock: tokio::sync::Mutex::new(()),
             member_hints: Mutex::new(HashMap::new()),
             reel_hints: Mutex::new(HashMap::new()),
             remux_edge_secret: None,

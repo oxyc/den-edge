@@ -247,6 +247,8 @@ fn is_control(route: &str) -> bool {
             | "/lib/:id/grants"
             | "/lib/:id/grants/:gid"
             | "/lib/:id"
+            | "/recovery"
+            | "/recovery/open"
             | "/oauth/authorize"
             | "/oauth/register"
             | "/oauth/token"
@@ -455,6 +457,9 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     if path.starts_with("/grant/") || crate::grants::is_host_path(&path) {
         return crate::grants::handle(state, req).await;
     }
+    if crate::recovery::is_path(&path) {
+        return crate::recovery::handle(state, req).await;
+    }
     // The MCP connector's authorization server and den-mcp behind it, before the addon relay: `/mcp` is streamed
     // and gated on the token's session, which the addon relay does neither of.
     if crate::oauth::is_path(&path) {
@@ -631,10 +636,13 @@ impl Face {
     fn serves(self, path: &str) -> bool {
         let device =
             ["/link", "/inbox", "/pair/", "/sync/", "/lib/", "/grant/"].iter().any(|p| path.starts_with(p))
-                || path == "/metrics";
+                || path == "/metrics"
+                || crate::recovery::is_path(path);
+        // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`).
         let web_app_calls = path.starts_with("/pair/")
             || path.starts_with("/lib/")
             || path.starts_with("/grant/")
+            || crate::recovery::is_path(path)
             || path == "/inbox/append"
             || path == "/inbox/drain";
         // TMDB, the content warnings and the ratings through this origin answer on every name: a browser asks them
@@ -734,6 +742,8 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/lib/") && p.ends_with("/rewrite") => "/lib/:id/rewrite",
         p if p.starts_with("/lib/") && p.contains("/rewrite/") => "/lib/:id/rewrite/:rid",
         p if p.starts_with("/lib/") && p.matches('/').count() == 2 => "/lib/:id",
+        "/recovery" => "/recovery",
+        "/recovery/open" => "/recovery/open",
         "/tmdb/warm" => "/tmdb/warm",
         p if p.starts_with("/tmdb/") => "/tmdb",
         p if p.starts_with("/warnings/") => "/warnings",
@@ -768,7 +778,10 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
     const DELETE: &[Method] = &[Method::DELETE];
     const GET_POST: &[Method] = &[Method::GET, Method::POST];
     const PUT_DELETE: &[Method] = &[Method::PUT, Method::DELETE];
+    const GET_POST_DELETE: &[Method] = &[Method::GET, Method::POST, Method::DELETE];
     match route {
+        "/recovery" => Some(GET_POST_DELETE),
+        "/recovery/open" => Some(POST),
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
