@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { react } from './actions';
 import { resetLibraryKey, settlePendingReset } from './keyReset';
@@ -6,6 +7,7 @@ import { LibraryLog } from './log';
 import { deliverSimkl } from './simklDelivery';
 import {
   deriveKeys,
+  fromBase64url,
   openEntry,
   openPlaintext,
   rowName,
@@ -304,6 +306,66 @@ const destination = (server: ReturnType<typeof edge>) => (key: string) =>
 const reset = (log: LibraryLog, server: ReturnType<typeof edge>) =>
   resetLibraryKey(log, DEVICE, OLD_KEY, destination(server));
 const keyOf = (result: Awaited<ReturnType<typeof reset>>) => (result as { key: string }).key;
+
+/** den-spec's move vectors (library-v4 §12, §15 *Moves*), which the TV's `LibraryMoveVectorTests` replays too. */
+const moveVectors = JSON.parse(
+  readFileSync(new URL('../../../spec/vectors/library-v4-moves.json', import.meta.url), 'utf8'),
+) as {
+  device: string;
+  from: { libraryKey: string };
+  to: { libraryKey: string };
+  first_batch: { 'x-den-wire-min': string; 'x-den-library-member': string };
+  cases: {
+    name: string;
+    refused?: string;
+    rows: {
+      k: string;
+      v: string;
+      after: { k: string; row?: unknown; plaintext?: string } | null;
+    }[];
+  }[];
+};
+
+describe('den-spec library v4 move vectors', () => {
+  for (const vector of moveVectors.cases)
+    it(vector.name, async () => {
+      const server = edge();
+      const from = await server.seed(moveVectors.from.libraryKey, [], vector.rows);
+      const log = (await LibraryLog.open(
+        moveVectors.from.libraryKey,
+        server.fetchImpl,
+        undefined,
+        null,
+      ))!;
+      const moving = await log.moving(moveVectors.device);
+      if (vector.refused) {
+        expect(moving).toEqual({ refused: vector.refused });
+        expect(server.libraries.get(from.id)!.rows.size).toBe(vector.rows.length);
+        expect(server.libraries.size).toBe(1);
+        return;
+      }
+      if ('refused' in moving) throw new Error(`refused: ${moving.refused}`);
+      const next = await LibraryLog.destination(moveVectors.to.libraryKey, server.fetchImpl);
+      expect(await next.takeMoved(moving, log.memberProof)).toBe(true);
+      const to = await keysOf(moveVectors.to.libraryKey);
+      expect(server.firstBatches.get(to.id)).toEqual({
+        member: moveVectors.first_batch['x-den-library-member'],
+        wireMin: moveVectors.first_batch['x-den-wire-min'],
+      });
+      const stored = server.libraries.get(to.id)!.rows;
+      const expected = vector.rows.flatMap((row) => (row.after ? [row.after] : []));
+      expect([...stored.keys()].sort()).toEqual(expected.map((after) => after.k).sort());
+      for (const after of expected) {
+        const { v } = stored.get(after.k)!;
+        if (after.plaintext)
+          expect(await openPlaintext(to, after.k, v)).toEqual(fromBase64url(after.plaintext));
+        else {
+          const opened = await openEntry(to, after.k, v);
+          expect('row' in opened && opened.row).toEqual(after.row);
+        }
+      }
+    });
+});
 
 describe('resetting the library key (library v4 §12)', () => {
   it('moves every document and receipt, so SIMKL is sent nothing it already has', async () => {
