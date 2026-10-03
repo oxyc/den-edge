@@ -36,6 +36,7 @@
   import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
+  import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
     applyLog,
@@ -517,6 +518,17 @@
       ? async (title: Title, season?: number, episode?: number) => {
           busy = true;
           failure = null;
+          const blocked = await playGuard(title, {
+            tmdbKey,
+            region: detailPrefs.region,
+            ceiling: detailPrefs.ceiling,
+          });
+          if (blocked) {
+            busy = false;
+            failure = blocked;
+            session.notify(blocked);
+            return;
+          }
           const sealed = await sendToTV(link, {
             type: 'play',
             tmdbId: title.id,
@@ -542,7 +554,17 @@
    */
   const playHere = $derived(
     scout && tmdbKey && remux !== null
-      ? (title: Title, season?: number, episode?: number, filename?: string) => {
+      ? async (title: Title, season?: number, episode?: number, filename?: string) => {
+          const blocked = await playGuard(title, {
+            tmdbKey,
+            region: detailPrefs.region,
+            ceiling: detailPrefs.ceiling,
+          });
+          if (blocked) {
+            failure = blocked;
+            session.notify(blocked);
+            return;
+          }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up =
               library &&

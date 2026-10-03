@@ -1,11 +1,11 @@
-// A title this browser already knows is blocked by the household's parental ceiling, from having opened its
-// page: `Detail.svelte` computes `isBlocked(detail.certifications, region, ceiling)` for its own Play/Sources/
-// trailer, and marks the result here so a poster's ⋯ menu (`titleActions.ts`) can reuse it rather than offer
-// Play for a title its own page would refuse.
+// A cheap hint only: whether this browser already knows a title is blocked by the household's parental ceiling,
+// from having opened its page (`Detail.svelte` computes `isBlocked(detail.certifications, region, ceiling)` for
+// its own Play/Sources/trailer, and marks the result here). `Detail.svelte` is the only writer.
 //
-// Not everywhere: a poster for a title never opened this session carries no signal yet and still offers Play —
-// nothing today fetches a certification at poster scope (a catalog `Title` and a synced `TitleRow` both lack
-// one), so there is nothing cheaper to check first. The same gap exists on the billboard's own Play button.
+// The poster ⋯ menu (`titleActions.ts`) reads this to skip drawing Play for a title it already knows is
+// blocked, so the item doesn't flash and then fail — but it is not what actually refuses anything: `playGuard`
+// (`Library.svelte`'s `play`/`playHere`, run before every start) is the one place that does, with its own
+// lookup, so a title never opened this session — this map has nothing on it — is refused there just the same.
 
 import { titleKey } from './library';
 

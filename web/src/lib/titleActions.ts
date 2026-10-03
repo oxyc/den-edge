@@ -76,8 +76,9 @@ export function titleMenuItems(
   if (ctx?.libraryOpen) {
     const { listed, seen, reaction } = titleState(ctx.rowOf(title));
     const busy = ctx.busy;
-    // Known blocked only for a title this browser has already opened the page of this session
-    // (`blockedTitles.ts`) — a poster for one it hasn't still offers Play, which is the gap this leaves.
+    // The real refusal is `playGuard` (`Library.svelte`'s `play`/`playHere`): this is only what the item
+    // shows cheaply, from a title this browser already opened the page of this session (`blockedTitles.ts`).
+    // An unknown title still offers Play here — pressing it runs `playGuard` exactly the same.
     const blocked = blockedTitles.of(title);
     if (ctx.playHere && !blocked) {
       const target = title.type === 'tv' ? ctx.resumeOf(title) : undefined;
