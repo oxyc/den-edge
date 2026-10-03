@@ -56,8 +56,10 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --ignore-scripts
-      # A known high or critical advisory in any web dependency fails the build, as it would ship in the image.
-      - run: npm audit --audit-level=high
+      # A known high or critical advisory in any web dependency fails the build, as it would ship in
+      # the image — except one on scripts/audit.mjs's time-boxed allowlist (dev-tooling-only advisories
+      # with no fix upstream, re-reviewed on expiry).
+      - run: npm run audit
       - run: npm run lint
       - run: npm test
       - run: npx playwright install --with-deps chromium webkit
