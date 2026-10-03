@@ -48,8 +48,9 @@ const OWNER: (u32, u64) = (60, 60 * MINUTE_MS);
 const TIMING: (u32, u64) = (10, 60 * MINUTE_MS);
 /// Recovery's own budget table (`Limiter`): two per visitor that opens, one per member, one per timing reporter.
 const LIMIT_BUCKETS: usize = if cfg!(test) { 64 } else { 16 * 1024 };
-/// The entries one IPv6 /56 — the usual delegation to one customer — may hold in it. A household holds a few: one per
-/// route it uses, per /64.
+/// The entries one IPv6 /56 — the usual delegation to one customer — may hold in it. A household holds a few per /64
+/// (two for opening, one as a member, one for timings). Where a carrier hands out /64s, a /56 is shared by many
+/// customers, and one of them at the cap refuses its neighbours' new buckets here: acceptable for recovery's rare routes.
 const MAX_PER_PREFIX: usize = if cfg!(test) { 8 } else { 64 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -141,7 +142,7 @@ struct Slot {
     count: u32,
     until: u64,
     prefix: String,
-    /// When it was admitted: of two entries with the same count, the newer goes first.
+    /// When it was admitted: of two entries with the same count, the older goes first.
     seq: u64,
     /// At its limit: the next request in this window is refused.
     refusing: bool,
@@ -153,21 +154,21 @@ struct Slot {
 /// - expired entries are swept first;
 /// - one IPv6 /56 holds at most `MAX_PER_PREFIX` entries, and a newcomer from a /56 at its share is refused — that /56
 ///   alone, which bounds a round-robin over its /64s;
-/// - past that, a newcomer evicts the entry with the lowest count, the newest of those first, and never one that is
-///   refusing while one that is not exists. So a flood evicts its own fresh entries before any caller already counted,
-///   and cannot free a bucket that is holding its caller back. (Evicting from the prefix holding the most first does
-///   not hold up: a flood from many /56s evens the prefixes out to a household's size, and then takes the household.)
+/// - past that, a newcomer evicts an entry of another /56 — never its own, so an address cannot reset its own buckets
+///   by taking turns between them or between its /64s — with the lowest count, the oldest of those first, and never
+///   one that is refusing while one that is not exists, so a flood cannot free a bucket that is holding its caller
+///   back. Evicting a bucket that is not refusing only gives that caller its budget back.
 ///
-/// Each victim is the first of an ordered set, so a newcomer costs O(log n), not a scan of the table. Residual: a
-/// flood can evict a caller's entry that has counted only as often as the flood's own, which gives that caller its
-/// count back; a flood request buys at most one such reset, never more than the request itself could have spent.
+/// Each victim is near the front of an ordered set (past at most `MAX_PER_PREFIX` entries of the newcomer's own /56),
+/// so a newcomer costs O(log n), not a scan of the table. Residual: an attacker cycling through more than the table's
+/// capacity — with the /56 cap, more than a /48 — reaches its own oldest entries again.
 #[derive(Default)]
 pub struct Limiter {
     slots: HashMap<String, Slot>,
     /// How many entries each prefix holds.
     held: HashMap<String, usize>,
-    /// (count, newest first, key) of the entries not refusing; (until, key) of those refusing.
-    evictable: BTreeSet<(u32, std::cmp::Reverse<u64>, String)>,
+    /// (count, admitted, key) of the entries not refusing; (until, key) of those refusing.
+    evictable: BTreeSet<(u32, u64, String)>,
     refusing: BTreeSet<(u64, String)>,
     admitted: u64,
     /// A sweep scans the table: at most once a second, however many newcomers arrive.
@@ -190,7 +191,7 @@ impl Limiter {
             if s.refusing {
                 self.refusing.remove(&(s.until, key.to_owned()));
             } else {
-                self.evictable.remove(&(s.count, std::cmp::Reverse(s.seq), key.to_owned()));
+                self.evictable.remove(&(s.count, s.seq, key.to_owned()));
             }
         }
     }
@@ -201,7 +202,7 @@ impl Limiter {
             if s.refusing {
                 self.refusing.insert((s.until, key.to_owned()));
             } else {
-                self.evictable.insert((s.count, std::cmp::Reverse(s.seq), key.to_owned()));
+                self.evictable.insert((s.count, s.seq, key.to_owned()));
             }
         }
     }
@@ -237,13 +238,17 @@ impl Limiter {
         }
     }
 
-    /// The entry a full table gives up (see `Limiter`): the lowest count, newest first; only when every entry is
-    /// refusing, the one nearest its expiry.
-    fn victim(&self) -> Option<String> {
+    /// The entry a full table gives up for a newcomer from `prefix` (see `Limiter`): of another /56, the lowest count,
+    /// oldest first; only when every such entry is refusing, the one nearest its expiry. Skips at most the newcomer's
+    /// own /56's entries.
+    fn victim(&self, prefix: &str) -> Option<String> {
+        let other = |key: &&String| self.slots[*key].prefix != prefix;
         self.evictable
-            .first()
-            .map(|(_, _, key)| key.clone())
-            .or_else(|| self.refusing.first().map(|(_, key)| key.clone()))
+            .iter()
+            .map(|(_, _, key)| key)
+            .find(other)
+            .or_else(|| self.refusing.iter().map(|(_, key)| key).find(other))
+            .cloned()
     }
 
     /// Counts one request against `key`, whose visitor is `ip`, in fixed windows of `window` ms: a window opens at its
@@ -259,7 +264,7 @@ impl Limiter {
                 return Some(window);
             }
             if self.slots.len() >= LIMIT_BUCKETS {
-                if let Some(victim) = self.victim() {
+                if let Some(victim) = self.victim(&prefix) {
                     self.remove(&victim);
                 }
             }
@@ -736,20 +741,51 @@ mod tests {
         }
     }
 
-    /// A household already counted keeps its budgets through a flood of four tables' worth from other prefixes: the
-    /// flood's own prefixes hold the most, so they go first.
-    #[test]
-    fn a_flood_displaces_no_existing_caller() {
+    /// One `open`, counted as `handle` counts it: the 10-minute bucket, then the day's. Whether it was refused.
+    fn open_refused(limiter: &mut Limiter, ip: &str, now: u64) -> bool {
+        let count = |limiter: &mut Limiter, bucket: &str, (limit, window): (u32, u64)| {
+            limiter.count(&format!("{bucket}:{ip}"), ip, limit, window, now)
+        };
+        count(limiter, "recovery-open", OPEN_SHORT)
+            .or_else(|| count(limiter, "recovery-open-day", OPEN_DAY))
+            .is_some()
+    }
+
+    fn timing_refused(limiter: &mut Limiter, ip: &str, now: u64) -> bool {
+        limiter.count(&format!("recovery-timing:{ip}"), ip, TIMING.0, TIMING.1, now).is_some()
+    }
+
+    /// A full table: every /56 of a /48 at its share.
+    fn full() -> Limiter {
         let mut limiter = Limiter::default();
-        let household: Vec<String> = (0..3).map(|n| format!("route{n}:203.0.113.7")).collect();
-        for key in &household {
-            assert!(limiter.count(key, "203.0.113.7", 5, 60_000, 0).is_none());
+        flood(&mut limiter, 0..LIMIT_BUCKETS / MAX_PER_PREFIX, 0);
+        assert_eq!(limiter.len(), LIMIT_BUCKETS);
+        limiter
+    }
+
+    /// Over a full table, each of `ips` taking turns is allowed exactly `limit` calls, then refused for good: a
+    /// newcomer never evicts its own /56's buckets, so neither sibling keys nor sibling /64s reset each other.
+    fn limited_over_a_full_table(ips: &[String], limit: u32, refused: fn(&mut Limiter, &str, u64) -> bool) {
+        let mut limiter = full();
+        for round in 0..4 * limit {
+            for ip in ips {
+                assert_eq!(refused(&mut limiter, ip, 1), round >= limit, "{ip}, call {}", round + 1);
+            }
         }
-        flood(&mut limiter, 0..4 * LIMIT_BUCKETS / MAX_PER_PREFIX, 1);
         assert_eq!(limiter.len(), LIMIT_BUCKETS, "bounded");
-        for key in &household {
-            assert_eq!(limiter.slots[key].count, 1, "{key} kept its count");
-        }
+    }
+
+    #[test]
+    fn open_is_limited_over_a_full_table() {
+        limited_over_a_full_table(&[v6(0x1000, 0)], OPEN_SHORT.0, open_refused);
+        limited_over_a_full_table(&[v6(0x1000, 0), v6(0x1000, 1)], OPEN_SHORT.0, open_refused);
+        limited_over_a_full_table(&["203.0.113.7".to_owned()], OPEN_SHORT.0, open_refused);
+    }
+
+    #[test]
+    fn timing_is_limited_over_a_full_table() {
+        limited_over_a_full_table(&[v6(0x1000, 0)], TIMING.0, timing_refused);
+        limited_over_a_full_table(&[v6(0x1000, 0), v6(0x1000, 1)], TIMING.0, timing_refused);
     }
 
     /// A bucket holding its caller back is never evicted while one that is not exists, however large the flood.
@@ -766,17 +802,19 @@ mod tests {
         assert!(limiter.count(&guessing, &ip, 5, 60_000, 2).is_some(), "still refused");
     }
 
-    /// Cycling the /64s of one /56 never holds more than its share, so it never resets its own budgets.
+    /// Cycling the /64s of one /56 over a full table never holds more than its share, so it never resets its own
+    /// budgets.
     #[test]
     fn cycling_the_64s_of_one_56_stays_bounded() {
-        let mut limiter = Limiter::default();
+        let mut limiter = full();
         let admitted = (0..4 * LIMIT_BUCKETS)
             .filter(|s| {
-                let ip = v6(7, *s);
-                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 0).is_none()
+                let ip = v6(0x2000, *s);
+                limiter.count(&format!("recovery-open:{ip}"), &ip, 5, 60_000, 1).is_none()
             })
             .count();
         assert_eq!(admitted, MAX_PER_PREFIX);
+        assert_eq!(limiter.len(), LIMIT_BUCKETS);
         assert_eq!(prefix_of("2001:db8:1:2ff::/64"), "2001:db8:1:200::/56");
         assert_eq!(prefix_of("203.0.113.7"), "203.0.113.7", "IPv4 is not grouped");
     }
@@ -799,7 +837,7 @@ mod tests {
                 let filed = if s.refusing {
                     limiter.refusing.contains(&(s.until, key.clone()))
                 } else {
-                    limiter.evictable.contains(&(s.count, std::cmp::Reverse(s.seq), key.clone()))
+                    limiter.evictable.contains(&(s.count, s.seq, key.clone()))
                 };
                 assert!(filed, "{key}");
             }
