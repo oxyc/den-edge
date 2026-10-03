@@ -16,7 +16,8 @@
     "format:check": "prettier --check .",
     "lint:css": "stylelint \"{src,test}/**/*.{css,svelte}\" --max-warnings 0",
     "lint": "npm run format:check && npm run lint:js && npm run lint:css && npm run check && npm run check:cast",
-    "lint:js": "eslint . --max-warnings 0"
+    "lint:js": "eslint . --max-warnings 0",
+    "audit": "node scripts/audit.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
