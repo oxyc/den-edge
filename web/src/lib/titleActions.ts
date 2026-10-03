@@ -4,6 +4,7 @@
 // and Share.
 
 import { getContext, setContext } from 'svelte';
+import { blockedTitles } from './blockedTitles.svelte';
 import type { Title } from './library';
 import { likeId, searchHref } from './route';
 import { navigate } from './navigation';
@@ -75,7 +76,10 @@ export function titleMenuItems(
   if (ctx?.libraryOpen) {
     const { listed, seen, reaction } = titleState(ctx.rowOf(title));
     const busy = ctx.busy;
-    if (ctx.playHere) {
+    // Known blocked only for a title this browser has already opened the page of this session
+    // (`blockedTitles.ts`) — a poster for one it hasn't still offers Play, which is the gap this leaves.
+    const blocked = blockedTitles.of(title);
+    if (ctx.playHere && !blocked) {
       const target = title.type === 'tv' ? ctx.resumeOf(title) : undefined;
       items.push({
         kind: 'item',
@@ -83,7 +87,7 @@ export function titleMenuItems(
         onselect: () => ctx.playHere?.(title),
       });
     }
-    if (ctx.play) {
+    if (ctx.play && !blocked) {
       items.push({ kind: 'item', label: 'Play on TV', onselect: () => ctx.play?.(title) });
     }
     items.push({
