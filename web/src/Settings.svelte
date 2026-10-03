@@ -293,6 +293,7 @@
       device={clock.device}
       tmdbKey={tmdbKeyOf(keys)}
       changed={() => session.changed()}
+      displays={session.displays}
     />
     <ContentSection
       {prefs}
