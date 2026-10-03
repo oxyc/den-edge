@@ -25,7 +25,9 @@
   import { browserClock } from './lib/clock';
   import { thisDevice } from './lib/device.svelte';
   import { links, type Link } from './lib/links.svelte';
+  import { resetLibraryKey } from './lib/keyReset';
   import { dropLocalLibrary } from './lib/localLibrary';
+  import type { MoveRefusal } from './lib/log';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import { ATLAS_FALLBACK, mergeCredits, readAttribution, type Credit } from './settings/credits';
   import { readApiKey, readPlugins } from './lib/prefs';
@@ -236,6 +238,23 @@
     return true;
   }
 
+  /**
+   * Cut every other device off: the library moves to a new key, with its documents, delivery receipts and settings,
+   * and the old one is deleted (library v4 §12). This browser then opens it under the new key; every other device
+   * pairs again. Null when it moved, else why it didn't.
+   */
+  async function resetKey(): Promise<MoveRefusal | null> {
+    if (!log || !link) return 'unavailable';
+    const reset = await resetLibraryKey(log, clock.device, link.libraryKey);
+    return 'refused' in reset ? reset.refused : null;
+  }
+
+  // A recovery code wraps the library key, so a reset ends it (recovery-code §9; its Settings, oxyc/den#176, offers a
+  // new one once the library reopens). The confirmation says so first.
+  const hasRecoveryCode = $derived(
+    Object.values(group('recovery')?.values ?? {}).some((setting) => setting.value !== null),
+  );
+
   // This browser lists itself among the devices with the library, as each device does when it opens it: again when its
   // name changes, and otherwise at most once a day.
   $effect(() => {
@@ -272,6 +291,8 @@
     <ConnectionsSection
       {link}
       onjoin={session.local ? moveOwnLibrary : undefined}
+      onresetkey={link && libraryFormat !== null && libraryFormat >= 4 ? resetKey : undefined}
+      {hasRecoveryCode}
       {keys}
       simklConnected={!!readApiKey(keys, 'simkl') || !!simklConnection}
       {saveSimkl}

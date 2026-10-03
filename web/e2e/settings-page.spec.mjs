@@ -150,7 +150,11 @@ for (const width of [320, 390, 820, 1280]) {
       await expect(
         devices.getByRole('heading', { name: 'Join another library', exact: true }),
       ).toBeVisible();
-      await expect(devices).toContainText('reset the library key on your Apple TV');
+      // A Library v4 library is cut off from here: the reset asks first, and says what it costs.
+      await devices.getByRole('button', { name: 'Reset library key…' }).click();
+      await expect(devices).toContainText('must pair again with a code');
+      await expect(devices.getByRole('button', { name: 'Cancel' })).toBeFocused();
+      await page.keyboard.press('Escape');
       for (const gone of ['Libraries this browser opens', 'handoff', 'linked', 'Library v3'])
         await expect(devices).not.toContainText(gone);
       // A synced device and this browser's way into its library are separate rows with separate actions.

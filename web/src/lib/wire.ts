@@ -299,11 +299,15 @@ export type Opened =
 
 const LEGACY_KINDS = new Set(['rec', 'ep', 'set', 'wat', 'snt']);
 
-export async function openEntry(keys: LibraryKeys, k: string, v: string): Promise<Opened> {
-  let plain: Uint8Array<ArrayBuffer>;
+/** A stored row's plaintext, as sealed (v2 §2); null when it doesn't open under these keys at this `k`. */
+export async function openPlaintext(
+  keys: LibraryKeys,
+  k: string,
+  v: string,
+): Promise<Uint8Array<ArrayBuffer> | null> {
   try {
     const bytes = fromBase64url(v);
-    plain = new Uint8Array(
+    return new Uint8Array(
       await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: fromHex(k), tagLength: 128 },
         keys.enc,
@@ -311,8 +315,13 @@ export async function openEntry(keys: LibraryKeys, k: string, v: string): Promis
       ),
     );
   } catch {
-    return { unreadable: 'open' };
+    return null;
   }
+}
+
+export async function openEntry(keys: LibraryKeys, k: string, v: string): Promise<Opened> {
+  const plain = await openPlaintext(keys, k, v);
+  if (!plain) return { unreadable: 'open' };
   const named = async (name: string | null | undefined) =>
     !!name && hex(await rowMac(keys, name)) === k;
   if (plain[0] === 0x7b) {

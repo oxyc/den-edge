@@ -3,7 +3,7 @@ import './app.css';
 import App from './App.svelte';
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
-import { links } from './lib/links.svelte';
+import { links, readPendingReset } from './lib/links.svelte';
 import { freshOn, startBillboard } from './lib/recommend';
 import { releaseWaiting, reloadOnce, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
@@ -23,6 +23,15 @@ if (invited) {
   if (!links.current) links.browse();
   history.replaceState(history.state, '', location.pathname + location.search);
 }
+
+// A key reset this browser started and didn't see through is finished or undone (den#192): until then the old
+// library's `410` doesn't drop the link (`Links.forgetMoved`).
+if (readPendingReset())
+  void import('./lib/keyReset')
+    .then(({ settlePendingReset }) => settlePendingReset())
+    .catch((error: unknown) =>
+      console.warn('den: a pending key reset could not be settled', error),
+    );
 
 // Home's billboard for everyone, asked now rather than once the app has found atlas and opened the library.
 startBillboard(location.pathname, !!links.current, freshOn());
