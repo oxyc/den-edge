@@ -51,6 +51,8 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match req.uri().path() {
         "/inbox/append" if req.method() == Method::POST => append(state, req).await,
         "/inbox/append" => method_not_allowed(),
+        "/inbox/pending" if req.method() == Method::POST => pending(state, req).await,
+        "/inbox/pending" => method_not_allowed(),
         "/inbox/drain" if req.method() == Method::POST => drain_many(state, req).await,
         "/inbox/drain" if req.method() == Method::GET => {
             if let Some(wait) = drain_budget(state, &crate::handler::client_ip(state, &req), 1) {
@@ -200,6 +202,37 @@ async fn append(state: &AppState, req: Request) -> Response {
     json_reply(StatusCode::OK, &json!({ "ok": true }))
 }
 
+/// Whether a sender's own message is still in its queue — a read, never a drain, so asking never costs the TV a
+/// message it hasn't gotten to yet. Answers `{"queued":false}` just as readily for a queue that expired, was
+/// drained, or never existed: none of those is this sealed message's to tell apart, and a sender only needs to know
+/// whether its send is still waiting. Priced against the append budget, the same per-address counter `append` uses:
+/// the browser that sent the message polls this at most every two seconds for at most two minutes while it waits
+/// (`playOnTv.svelte.ts`), which fits well inside it.
+async fn pending(state: &AppState, req: Request) -> Response {
+    let ip = crate::handler::client_ip(state, &req);
+    if let Some(wait) = crate::link::throttled_at(state, &format!("inbox:{ip}"), APPENDS_PER_WINDOW) {
+        return crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait);
+    }
+    let from_header = header_key(&req);
+    let body = match read_json(req, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(resp) => return *resp,
+    };
+    let key = from_header.as_deref().or_else(|| body.get("inboxKey").and_then(Value::as_str)).unwrap_or("");
+    if !valid_inbox_key(key) {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
+    }
+    let Some(sealed) = body.get("sealed").and_then(Value::as_str).filter(|s| is_sealed(s)) else {
+        return json_reply(StatusCode::BAD_REQUEST, &error("invalid_message"));
+    };
+    let queued = match load(state, key, state.now()).await {
+        Ok(Some(queue)) => queue.iter().any(|m| m.get("sealed").and_then(Value::as_str) == Some(sealed)),
+        Ok(None) => false,
+        Err(e) => return internal("inbox read", e),
+    };
+    json_reply(StatusCode::OK, &json!({ "queued": queued }))
+}
+
 async fn drain(state: &AppState, key: String) -> Response {
     if !valid_inbox_key(&key) {
         return json_reply(StatusCode::BAD_REQUEST, &error("invalid_inbox_key"));
@@ -230,13 +263,16 @@ async fn load(state: &AppState, key: &str, now: u64) -> std::io::Result<Option<V
     Ok(Some(stored.get("messages").and_then(Value::as_array).cloned().unwrap_or_default()))
 }
 
+/// Opaque base64url, which only a TV holding the link's key can open.
+fn is_sealed(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_SEALED_CHARS
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A paired device's message: opaque base64url, which only its TV can open.
 fn sealed_message(raw: &Value) -> Option<Value> {
-    let sealed = raw.as_str().filter(|s| {
-        !s.is_empty()
-            && s.len() <= MAX_SEALED_CHARS
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    })?;
+    let sealed = raw.as_str().filter(|s| is_sealed(s))?;
     Some(json!({ "sealed": sealed }))
 }
 
@@ -255,6 +291,76 @@ mod tests {
     async fn drain(h: &Harness) -> Vec<Value> {
         let resp = h.send("GET", "/inbox/drain", None, &[("x-den-link", KEY)]).await;
         crate::handler::tests::body_json(resp).await["messages"].as_array().unwrap().clone()
+    }
+
+    async fn pending(h: &Harness, sealed: &str) -> (StatusCode, Value) {
+        h.call("POST", "/inbox/pending", Some(json!({ "inboxKey": KEY, "sealed": sealed }))).await
+    }
+
+    /// `pending` says true while the message sits in its queue, false once it is drained, and false for a
+    /// different message — all without touching the queue itself.
+    #[tokio::test]
+    async fn pending_is_true_after_append_false_after_a_drain_and_for_another_message() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        assert_eq!(pending(&h, "AAEC").await, (StatusCode::OK, json!({ "queued": true })));
+        assert_eq!(
+            pending(&h, "zzzz").await,
+            (StatusCode::OK, json!({ "queued": false })),
+            "another message"
+        );
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "pending did not drain it");
+        assert_eq!(pending(&h, "AAEC").await, (StatusCode::OK, json!({ "queued": false })), "drained");
+    }
+
+    /// Asking for pending status any number of times never empties the queue — only a drain does.
+    #[tokio::test]
+    async fn pending_never_drains_the_queue() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        for _ in 0..3 {
+            assert_eq!(pending(&h, "AAEC").await, (StatusCode::OK, json!({ "queued": true })));
+        }
+        assert_eq!(drain(&h).await, vec![json!({ "sealed": "AAEC" })], "still there");
+    }
+
+    #[tokio::test]
+    async fn pending_answers_false_for_a_queue_that_never_existed() {
+        let h = Harness::new();
+        assert_eq!(pending(&h, "AAEC").await, (StatusCode::OK, json!({ "queued": false })));
+    }
+
+    #[tokio::test]
+    async fn pending_refuses_a_bad_key_or_a_malformed_message() {
+        let h = Harness::new();
+        let bad_key = h
+            .send(
+                "POST",
+                "/inbox/pending",
+                Some(json!({ "inboxKey": "short", "sealed": "AAEC" }).to_string()),
+                &[],
+            )
+            .await;
+        assert_eq!(bad_key.status(), StatusCode::BAD_REQUEST);
+        let too_long = "A".repeat(super::MAX_SEALED_CHARS + 1);
+        for bad in [json!(""), json!("a+b/"), json!(too_long), json!(3)] {
+            let status =
+                h.call("POST", "/inbox/pending", Some(json!({ "inboxKey": KEY, "sealed": bad }))).await.0;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(h.call("GET", "/inbox/pending", None).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// `pending` spends the same per-address budget as `append`: the browser polling it every two seconds for up
+    /// to two minutes never comes close, but it is not a free read either.
+    #[tokio::test]
+    async fn pending_is_counted_in_the_append_budget() {
+        let h = Harness::new();
+        assert_eq!(append(&h, "AAEC").await, StatusCode::OK);
+        for i in 0..super::APPENDS_PER_WINDOW - 1 {
+            assert_eq!(pending(&h, "AAEC").await.0, StatusCode::OK, "{i}");
+        }
+        assert_eq!(pending(&h, "AAEC").await.0, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

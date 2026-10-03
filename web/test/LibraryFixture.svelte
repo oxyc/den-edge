@@ -4,6 +4,7 @@
   // "Couldn't save that" — so the actions a test most wants to press were the ones it could not.
   import { onMount } from 'svelte';
   import Library from '../src/Library.svelte';
+  import LibraryStatus from '../src/components/LibraryStatus.svelte';
   import '../src/app.css';
   import {
     blankEpisode,
@@ -31,7 +32,15 @@
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
   let route = $state<Route>(
-    params.get('page') === 'watchlist' ? { page: 'watchlist' } : { page: 'library' },
+    params.get('page') === 'watchlist'
+      ? { page: 'watchlist' }
+      : params.get('page') === 'title'
+        ? {
+            page: 'title',
+            type: params.get('type') === 'tv' ? 'tv' : 'movie',
+            id: Number(params.get('id')),
+          }
+        : { page: 'library' },
   );
   // The app's Router answers a page's `navigate`; here the route just follows it, so a pick that lives in the address
   // (Watched's year) is drawn.
@@ -130,6 +139,8 @@
     },
   };
 
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  const TOAST_MS = 6000;
   const session = $state({
     // Bumped as the real session does, so a write is drawn rather than silently kept.
     changed(settings = false) {
@@ -144,11 +155,46 @@
     opened: Promise.resolve(log),
     routes: fetchRoutes,
     services: new SessionServices(fetchRoutes, () => session.changed(true)),
+    toast: null as string | null,
+    alert: null as string | null,
+    live: false,
+    // As `LibrarySession.notify` behaves (`librarySession.svelte.ts`): "Play on TV" (den-edge#235) needs this.
+    notify(message: string, { holdMs = TOAST_MS }: { holdMs?: number } = {}) {
+      this.toast = message;
+      clearTimeout(toastTimer);
+      if (Number.isFinite(holdMs)) toastTimer = setTimeout(() => (this.toast = null), holdMs);
+    },
   }) as unknown as LibrarySession;
-  const link = { inboxKey: 'fixture', libraryKey: 'fixture', linkKey: 'fixture' };
+  const link = {
+    inboxKey: 'fixture',
+    name: 'Living Room TV',
+    libraryKey: 'fixture',
+    linkKey: 'fixture',
+  };
+
+  // Test-only seam for den-edge#235's Playwright spec: stands in for "a library pull landed a fresh position",
+  // since this fixture's library never actually pulls over the network. `at` defaults to now, so a test can pass
+  // one in the past (den-edge#235: a position predating the send must not read as the TV having started it).
+  onMount(() => {
+    const denTestLivePosition = (
+      ref: { type: 'movie' | 'tv'; id: number },
+      seconds: number,
+      at = Date.now(),
+    ) => {
+      const before = log.title(ref) ?? blankTitle(ref, at);
+      put(updateProgress(before, 0.2, seconds, [at, 0, 'other-device']));
+      session.changed();
+    };
+    (window as unknown as { denTestLivePosition: typeof denTestLivePosition }).denTestLivePosition =
+      denTestLivePosition;
+    return () => {
+      delete (window as { denTestLivePosition?: unknown }).denTestLivePosition;
+    };
+  });
 </script>
 
 <main style="padding:var(--bar-space) var(--gutter)">
+  <LibraryStatus toast={session.toast} alert={session.alert} />
   <Library
     {link}
     {session}

@@ -138,11 +138,15 @@ export class LibrarySession {
     if (settings) this.settingsRevision++;
   }
 
-  /** A passing message, cleared after a few seconds. */
-  notify(message: string) {
+  /**
+   * A passing message. Cleared after `TOAST_MS` by default; `holdMs` overrides that, and `Infinity` holds it up
+   * until the next `notify` (or page navigation resets it) — for a toast that updates in place while something is
+   * still pending, such as "Play on TV"'s (`playOnTv.svelte.ts`).
+   */
+  notify(message: string, { holdMs = TOAST_MS }: { holdMs?: number } = {}) {
     this.toast = message;
     clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => (this.toast = null), TOAST_MS);
+    if (Number.isFinite(holdMs)) this.toastTimer = setTimeout(() => (this.toast = null), holdMs);
   }
 }
 

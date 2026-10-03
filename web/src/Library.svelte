@@ -35,6 +35,7 @@
   import { browseRows, homeRows, interleave, personalRows, tmdbPages } from './lib/catalog';
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
+  import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
     applyLog,
     continueWatching,
@@ -157,6 +158,12 @@
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
 
+  /** Feedback after a "Play on TV" press (den-edge#235): drives `session.notify` on its own; fed live positions
+   * below, as the library pull sees them. The parent keys this whole tree by `session`, so it is fixed for this
+   * component's life, same as `discovered` above. */
+  const playOnTv = untrack(() => new PlayOnTvTracker(session));
+  $effect(() => () => playOnTv.stop());
+
   $effect(() => {
     const opened = log;
     if (opened) clock.see(opened.newestStamp());
@@ -216,17 +223,18 @@
    * while something is playing, and meanwhile the library is pulled faster, so a pause stops it soon.
    */
   let now = $state(Date.now());
+  const continueEntries = $derived(library ? continueWatching(library) : []);
   const playingAnywhere = $derived(
-    library
-      ? continueWatching(library).some((entry) => livePosition(entry, now) !== undefined)
-      : false,
+    continueEntries.some((entry) => livePosition(entry, now) !== undefined),
   );
   $effect(() => {
-    session.live = playingAnywhere;
+    session.live = playingAnywhere || playOnTv.active;
     if (!playingAnywhere) return;
     const timer = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(timer);
   });
+  // Fed to the "Play on TV" tracker on every pull, so it can notice a fresh position without a poll of its own.
+  $effect(() => playOnTv.observe(continueEntries));
   // A fresh position arriving from a pull is live again without waiting for a tick to notice.
   $effect(() => {
     void applied;
@@ -482,14 +490,16 @@
    * Undefined for a guest, and that is the enforcement: `sendToTV` needs the link's own keys, so with no
    * link there is nothing to pass and this cannot be constructed at all. A missing callback, which the
    * type checker insists on, rather than a callback that declines at runtime.
+   *
+   * Feedback from here on is the bottom toast (`playOnTv`), not `notice` — the press can be far from where
+   * `notice` shows (an `EpisodeCard` up the page), and the toast is where it is seen.
    */
   const play = $derived(
     link
       ? async (title: Title, season?: number, episode?: number) => {
           busy = true;
           failure = null;
-          notice = null;
-          const sent = await sendToTV(link, {
+          const sealed = await sendToTV(link, {
             type: 'play',
             tmdbId: title.id,
             mediaType: title.type,
@@ -498,8 +508,11 @@
             episode,
           });
           busy = false;
-          if (sent)
-            notice = `Sent to ${link.name ?? 'your TV'}. It starts when the TV is on and Den is open.`;
+          if (sealed)
+            playOnTv.start(link, sealed, link.name ?? 'your TV', {
+              type: title.type,
+              id: title.id,
+            });
           else failure = 'Couldn’t reach your TV. Check that this device is on your network.';
         }
       : undefined,
