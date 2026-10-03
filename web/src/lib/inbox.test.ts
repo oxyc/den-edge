@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { receiveDeviceIdentity, sealMessage, sendToTV } from './inbox';
+import { receiveDeviceIdentity, sealMessage, sendToTV, stillQueued } from './inbox';
 import { linkKeys } from './pair';
 import { fromHex } from './wire';
 
@@ -50,11 +50,12 @@ describe('sending to a TV', () => {
     linkKey: btoa(String.fromCharCode(...fromHex(vectors.linkKey))),
   };
 
-  it('seals, and sends nothing readable', async () => {
+  it('seals, and sends nothing readable — and hands back the sealed string it sent', async () => {
     const { sent, fetchImpl } = capture();
-    expect(await sendToTV(link, play, fetchImpl)).toBe(true);
+    const sealed = await sendToTV(link, play, fetchImpl);
+    expect(sealed).toBeTruthy();
     expect(sent[0]?.headers['x-den-link']).toBe('abcdef0123456789');
-    expect(Object.keys(sent[0]?.body ?? {})).toEqual(['sealed']);
+    expect(sent[0]?.body).toEqual({ sealed });
     expect(JSON.stringify(sent[0]?.body)).not.toContain('Fight Club');
   });
 
@@ -63,6 +64,40 @@ describe('sending to a TV', () => {
       throw new TypeError('offline');
     }) as typeof fetch;
     expect(await sendToTV(link, play, down)).toBe(false);
+  });
+});
+
+describe('asking whether a send is still queued', () => {
+  const link = { inboxKey: 'abcdef0123456789' };
+
+  it('peeks /inbox/pending with the sealed string, and never drains', async () => {
+    const sent: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      expect(url).toBe('/inbox/pending');
+      sent.push({
+        headers: init?.headers as Record<string, string>,
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response('{"queued":true}', { status: 200 });
+    }) as typeof fetch;
+    expect(await stillQueued(link, 'AAEC', fetchImpl)).toBe(true);
+    expect(sent[0]?.headers['x-den-link']).toBe('abcdef0123456789');
+    expect(sent[0]?.body).toEqual({ sealed: 'AAEC' });
+  });
+
+  it('reads false once den-edge says the message is gone', async () => {
+    const fetchImpl = (async () =>
+      new Response('{"queued":false}', { status: 200 })) as typeof fetch;
+    expect(await stillQueued(link, 'AAEC', fetchImpl)).toBe(false);
+  });
+
+  it('answers null — not false — on a failed peek, so the caller asks again rather than reading it as received', async () => {
+    const down = (async () => {
+      throw new TypeError('offline');
+    }) as typeof fetch;
+    expect(await stillQueued(link, 'AAEC', down)).toBeNull();
+    const refused = (async () => new Response('{}', { status: 429 })) as typeof fetch;
+    expect(await stillQueued(link, 'AAEC', refused)).toBeNull();
   });
 });
 

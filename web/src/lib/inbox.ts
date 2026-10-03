@@ -123,12 +123,13 @@ export async function sealMessage(
   return toBase64url(out);
 }
 
-/** Queue `message`, sealed, for the TV behind `link`. False when den-edge didn't take it. */
+/** Queue `message`, sealed, for the TV behind `link`. The sealed string it appended, so a caller can ask
+ * `stillQueued` whether the TV has taken it yet; false when den-edge didn't take it. */
 export async function sendToTV(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   message: object,
   fetchImpl: typeof fetch = fetch,
-): Promise<boolean> {
+): Promise<string | false> {
   try {
     const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
     return appendSealed(link.inboxKey, enc, message, fetchImpl);
@@ -145,7 +146,7 @@ export async function sendToLink(
 ): Promise<boolean> {
   try {
     const { inbox, enc } = await linkKeys(linkKey);
-    return appendSealed(inbox, enc, message, fetchImpl);
+    return Boolean(await appendSealed(inbox, enc, message, fetchImpl));
   } catch {
     return false;
   }
@@ -156,18 +157,43 @@ async function appendSealed(
   enc: Bytes,
   message: object,
   fetchImpl: typeof fetch,
-): Promise<boolean> {
-  const body = { sealed: await sealMessage(enc, message) };
+): Promise<string | false> {
+  const sealed = await sealMessage(enc, message);
   try {
     const res = await fetchImpl('/inbox/append', {
       signal: AbortSignal.timeout(REQUEST_MS),
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-den-link': inbox },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ sealed }),
     });
-    return res.ok;
+    return res.ok ? sealed : false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Whether `sealed` (as `sendToTV` returned it) is still in the TV's queue — den-edge's read-only
+ * `POST /inbox/pending`, which never drains. Null when the peek itself failed (network, or den-edge refused it):
+ * that is not "received", it is "unknown", and the caller should simply ask again on its next tick.
+ */
+export async function stillQueued(
+  link: Pick<Link, 'inboxKey'>,
+  sealed: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean | null> {
+  try {
+    const res = await fetchImpl('/inbox/pending', {
+      signal: AbortSignal.timeout(REQUEST_MS),
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-den-link': link.inboxKey },
+      body: JSON.stringify({ sealed }),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { queued?: unknown };
+    return typeof body.queued === 'boolean' ? body.queued : null;
+  } catch {
+    return null;
   }
 }
 

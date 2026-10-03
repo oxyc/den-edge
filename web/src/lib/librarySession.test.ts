@@ -38,6 +38,33 @@ it('shows a copy kept from the last visit at once and brings it up to date strai
   expect(log.refresh).toHaveBeenCalledTimes(1);
 });
 
+it('notify clears after TOAST_MS by default, and a later call replaces an earlier timer', async () => {
+  vi.useFakeTimers();
+  const session = new LibrarySession(null);
+  session.notify('first');
+  session.notify('second');
+  expect(session.toast).toBe('second');
+  vi.advanceTimersByTime(5_999);
+  expect(session.toast).toBe('second');
+  vi.advanceTimersByTime(1);
+  expect(session.toast).toBeNull();
+});
+
+it('notify({ holdMs }) overrides how long the toast stays, and Infinity holds it until replaced', async () => {
+  vi.useFakeTimers();
+  const session = new LibrarySession(null);
+  session.notify('quick', { holdMs: 1_000 });
+  vi.advanceTimersByTime(1_000);
+  expect(session.toast).toBeNull();
+
+  session.notify('sent to the TV…', { holdMs: Infinity });
+  vi.advanceTimersByTime(60_000);
+  expect(session.toast).toBe('sent to the TV…');
+  session.notify('playing on the TV');
+  vi.advanceTimersByTime(6_000);
+  expect(session.toast).toBeNull();
+});
+
 it('refreshes remote configuration only when settings changed and serializes refreshes', async () => {
   const log = fakeLog();
   vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
