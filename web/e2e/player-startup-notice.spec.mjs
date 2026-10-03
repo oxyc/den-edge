@@ -5,9 +5,8 @@
 // itself held a beat so that line has a real window to be seen in before the first frame clears it.
 import { test, expect, chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
-
-const ORIGIN = 'http://127.0.0.1:5198';
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 const hls = new URL('./media/hls/', import.meta.url);
