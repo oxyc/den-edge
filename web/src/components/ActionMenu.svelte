@@ -40,13 +40,40 @@
   let coords: { x: number; y: number } | null = null;
   /** Set just before a Tab closes the menu, so the toggle handler doesn't steal the focus Tab is moving to. */
   let suppressRefocus = false;
+  /** A finger down on the sheet, dragged past `SHEET_DRAG_CLOSE_PX`, dismisses it — the bottom-sheet "drag
+   * down to close" convention (`ContentWarnings` does the same). Keyed by pointerId so a second touch
+   * can't finish a drag it didn't start. */
+  let sheetDragStart: { y: number; pointerId: number } | null = null;
+  const SHEET_DRAG_CLOSE_PX = 24;
+  /**
+   * Set by `outsidePointerDown` for the one `click` its own gesture is about to produce — decided fresh on
+   * every `pointerdown`, so it never outlives the gesture that set it (a drag with no following click, a
+   * later unrelated tap) stale-true.
+   */
+  let swallowNextClick = false;
 
   onMount(() => {
-    if (typeof matchMedia === 'undefined') return;
-    const query = matchMedia('(max-width: 759px), (pointer: coarse)');
-    const update = () => (mobile = query.matches);
-    query.addEventListener('change', update);
-    return () => query.removeEventListener('change', update);
+    const query =
+      typeof matchMedia === 'undefined'
+        ? undefined
+        : matchMedia('(max-width: 759px), (pointer: coarse)');
+    const update = () => (mobile = query!.matches);
+    query?.addEventListener('change', update);
+    // Permanent, not tied to `open`: a `pointerdown` outside both the menu and its trigger closes the menu —
+    // the native popover does that too, but only sometimes stops there (see `outsideClick`) — and a `click`
+    // is swallowed only when the `pointerdown` that preceded it asked for it.
+    document.addEventListener('pointerdown', outsidePointerDown, true);
+    document.addEventListener('click', outsideClick, true);
+    // The menu has no scroll of its own, so any scroll reaching here is the page behind it, or another row's
+    // carousel — a swipe that never produced a `click` at all. `scroll` doesn't bubble to `window` from an
+    // arbitrary element, only capturing does.
+    window.addEventListener('scroll', outsideScroll, { capture: true, passive: true });
+    return () => {
+      query?.removeEventListener('change', update);
+      document.removeEventListener('pointerdown', outsidePointerDown, true);
+      document.removeEventListener('click', outsideClick, true);
+      window.removeEventListener('scroll', outsideScroll, true);
+    };
   });
 
   /** Open anchored to a point rather than the trigger — a right-click or a long-press on the card. */
@@ -118,10 +145,64 @@
       // The popover is in the top layer by the time `toggle` fires, so the first item can take focus now.
       requestAnimationFrame(() => enabledItemEls()[0]?.focus());
     } else {
+      sheetDragStart = null;
       coords = null;
       if (!suppressRefocus) trigger?.focus();
       suppressRefocus = false;
     }
+  }
+
+  /**
+   * A `pointerdown` outside the menu and outside its own trigger — exactly what the browser's own popover
+   * light-dismiss treats as "outside" too. Closing it here, deterministically, rather than leaving it to
+   * that native behaviour: the native close can land before the `click` this same gesture is about to fire
+   * (its timing isn't ours to rely on), and by then whatever is under the pointer would already be exposed
+   * to it — which is the tap-through bug this fixes. `swallowNextClick` is decided fresh here on every
+   * `pointerdown`, independent of that timing, so `outsideClick` always knows what to do with the `click`
+   * that follows, whichever element it lands on.
+   *
+   * Checks `:popover-open` rather than the reactive `open` — the `toggle` event that sets `open` can itself
+   * land late (see `position`'s own comment on a queued style recalc dropping it), so a pointerdown landing
+   * in that gap would see a stale `open === false` for a menu the browser already shows, and wave it through.
+   * `:popover-open` is the browser's own synchronous answer to "is this showing right now", independent of
+   * whether that event has fired yet.
+   */
+  function outsidePointerDown(event: PointerEvent) {
+    if (!menu?.matches(':popover-open')) return;
+    const target = event.target;
+    const inside = target instanceof Node && (menu.contains(target) || trigger?.contains(target));
+    swallowNextClick = !inside;
+    if (swallowNextClick) close();
+  }
+
+  /** The `click` a swallowed `pointerdown` is about to produce — stopped before it can run whatever it
+   * landed on (a poster's own `<a>`, another trigger), in capture so it never even reaches that element. */
+  function outsideClick(event: MouseEvent) {
+    if (!swallowNextClick) return;
+    swallowNextClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function outsideScroll(event: Event) {
+    if (!menu?.matches(':popover-open')) return;
+    if (event.target instanceof Node && menu.contains(event.target)) return;
+    close();
+  }
+
+  function sheetPointerDown(event: PointerEvent) {
+    if (!mobile || event.pointerType === 'mouse') return;
+    sheetDragStart = { y: event.clientY, pointerId: event.pointerId };
+  }
+  function sheetPointerMove(event: PointerEvent) {
+    if (!sheetDragStart || event.pointerId !== sheetDragStart.pointerId) return;
+    if (event.clientY - sheetDragStart.y > SHEET_DRAG_CLOSE_PX) {
+      sheetDragStart = null;
+      close();
+    }
+  }
+  function sheetPointerUp(event: PointerEvent) {
+    if (sheetDragStart?.pointerId === event.pointerId) sheetDragStart = null;
   }
 
   function run(item: MenuItem) {
@@ -190,6 +271,10 @@
   onbeforetoggle={beforeToggle}
   ontoggle={toggled}
   onkeydown={onMenuKeydown}
+  onpointerdown={sheetPointerDown}
+  onpointermove={sheetPointerMove}
+  onpointerup={sheetPointerUp}
+  onpointercancel={sheetPointerUp}
 >
   {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
   {#each items as item, i (`${item.kind}:${item.label}:${i}`)}
