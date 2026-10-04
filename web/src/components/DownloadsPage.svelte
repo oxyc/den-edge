@@ -7,6 +7,7 @@
   import PosterCard from './PosterCard.svelte';
   import { downloads as shared, inFlight, type DownloadQueue } from '../lib/downloadQueue.svelte';
   import { coordinate, type Download } from '../lib/downloadRows';
+  import { headline, phase } from '../lib/downloadStatus';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
 
@@ -55,7 +56,8 @@
 {:else}
   <ul class="grid">
     {#each list as download (download.name)}
-      {@const state = queue.status(download, now).state}
+      {@const status = queue.status(download, now)}
+      {@const state = status.state}
       {@const answer = queue.answers.get(download.name)}
       <li data-download={download.content}>
         <PosterCard
@@ -66,6 +68,7 @@
             : answer?.state === 'preparing'
               ? answer.progress
               : undefined}
+          downloadBadge={{ state: phase(status, answer), label: headline(status, answer) }}
           href={titleHref(titleOf(download))}
           menu={false}
         />

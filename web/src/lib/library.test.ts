@@ -3,6 +3,7 @@ import { RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
   continueWatching,
+  contentWatched,
   emptyLibrary,
   standings,
   titleCaption,
@@ -132,6 +133,28 @@ describe('what each poster marks', () => {
   it('marks a watchlisted series already being watched as in progress', () => {
     const both = { ...library, marks: [...library.marks, mark(11, 1, 1, 0.3, 950)] };
     expect(standings(both).get('tv:11')).toBe('inProgress');
+  });
+});
+
+describe('a download row’s own watched state, never the series’', () => {
+  it('reads false for an episode whose series record says "watched" but whose own mark does not', () => {
+    // tv:5's record is `watched` (den#202: a series finished earlier reads this way), but its only mark
+    // (S1E1, fraction 0.5) is a resume, not a finish — the series' standing must not leak into a download of
+    // a specific, still-unwatched episode.
+    expect(contentWatched(library, { type: 'tv', id: 5, season: 1, episode: 1 })).toBe(false);
+  });
+
+  it('reads true once that exact episode’s own mark crosses the watched threshold', () => {
+    // mark(3, 2, 3, 1, 700): S2E3 itself finished.
+    expect(contentWatched(library, { type: 'tv', id: 3, season: 2, episode: 3 })).toBe(true);
+  });
+
+  it('reads a film by its own record — there is no series to conflate it with', () => {
+    const withFilm = { ...library, records: [...library.records, record('movie', 99, 'watched')] };
+    expect(contentWatched(withFilm, { type: 'movie', id: 99 })).toBe(true);
+    expect(contentWatched(library, { type: 'movie', id: 12 }), 'in progress, not watched').toBe(
+      false,
+    );
   });
 });
 

@@ -46,6 +46,10 @@ const GRANT: Grant = {
   devices: 1,
   deviceCount: 1,
   lastUsedAt: null,
+  playsTotal: 5,
+  hoursTotal: 2,
+  playsThisMonth: 1,
+  hoursThisMonth: 1,
 };
 
 function stubStorage() {
@@ -194,6 +198,43 @@ test('listing, changing and revoking use the grant’s route and read the answer
   const gone = answering(204);
   expect(await revokeGrant('abc123', 'a1b2c3d4', gone)).toEqual({ ok: true, value: null });
   expect(gone.mock.calls[0]![1]?.method).toBe('DELETE');
+});
+
+test('a grant’s plays and hours come through, and default to zero against an older den-edge', async () => {
+  const spy = answering(200, { grants: [GRANT] });
+  const reply = await listGrants('abc123', spy);
+  if (!reply.ok) throw new Error('unreachable');
+  expect(reply.value[0]).toMatchObject({
+    playsTotal: 5,
+    hoursTotal: 2,
+    playsThisMonth: 1,
+    hoursThisMonth: 1,
+  });
+
+  const withoutUsage = {
+    gid: GRANT.gid,
+    name: GRANT.name,
+    status: GRANT.status,
+    addons: GRANT.addons,
+    createdAt: GRANT.createdAt,
+    codeExpiresAt: GRANT.codeExpiresAt,
+    accessDays: GRANT.accessDays,
+    accessUntil: GRANT.accessUntil,
+    redeemedAt: GRANT.redeemedAt,
+    expiresAt: GRANT.expiresAt,
+    devices: GRANT.devices,
+    deviceCount: GRANT.deviceCount,
+    lastUsedAt: GRANT.lastUsedAt,
+  };
+  const stale = answering(200, { grants: [withoutUsage] });
+  const fromOlder = await listGrants('abc123', stale);
+  if (!fromOlder.ok) throw new Error('unreachable');
+  expect(fromOlder.value[0]).toMatchObject({
+    playsTotal: 0,
+    hoursTotal: 0,
+    playsThisMonth: 0,
+    hoursThisMonth: 0,
+  });
 });
 
 test('a refusal carries den-edge’s error code, and an unreachable one says so', async () => {

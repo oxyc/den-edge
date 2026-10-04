@@ -29,6 +29,11 @@ export interface Grant {
   devices: number;
   deviceCount: number;
   lastUsedAt: number | null;
+  /** Plays and hours watched (den-edge counts these; never a title). */
+  playsTotal: number;
+  hoursTotal: number;
+  playsThisMonth: number;
+  hoursThisMonth: number;
 }
 
 /** What creating or changing a grant sends. `installs` are single base64url config segments, never URLs. */
@@ -226,6 +231,10 @@ function readGrant(raw: unknown): Grant | null {
     devices: number(g.devices) ?? 1,
     deviceCount: number(g.deviceCount) ?? 0,
     lastUsedAt: number(g.lastUsedAt),
+    playsTotal: number(g.playsTotal) ?? 0,
+    hoursTotal: number(g.hoursTotal) ?? 0,
+    playsThisMonth: number(g.playsThisMonth) ?? 0,
+    hoursThisMonth: number(g.hoursThisMonth) ?? 0,
   };
 }
 

@@ -404,6 +404,30 @@ export function standings(library: Library): Map<string, Standing> {
   return out;
 }
 
+/**
+ * Whether this exact film or episode has been watched, by its own mark — never the series' standing
+ * (`standings`), which is a whole-series record and says nothing about one episode still downloading. What
+ * `download_prune`'s `watched` input (den-spec library-v4 §17) must be built from, so a series finished last
+ * season doesn't prune this season's downloads before anyone has watched them.
+ */
+export function contentWatched(
+  library: Library,
+  content: { type: MediaType; id: number; season?: number; episode?: number },
+): boolean {
+  if (content.type === 'tv' && content.season !== undefined && content.episode !== undefined) {
+    const key = markKey({
+      type: content.type,
+      id: content.id,
+      season: content.season,
+      episode: content.episode,
+    });
+    if (library.marks.some((m) => m.fraction >= WATCHED && markKey(m) === key)) return true;
+    return [...(library.flags?.values() ?? [])].some((f) => markKey(f) === key);
+  }
+  const record = library.records.find((r) => !r.deleted && titleKey(r.title) === titleKey(content));
+  return record?.status === 'watched';
+}
+
 /** The next episode in season order (Specials last), or none past the end — SeriesProgress.episode(after:). */
 export function episodeAfter(at: { season: number; episode: number }, shape: Shape) {
   const seasons = [...shape.counts.entries()].sort(
