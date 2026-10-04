@@ -196,9 +196,10 @@ async fn serve_file(
     if let Some(release) = build {
         resp.headers_mut().insert(RELEASE, release);
     }
-    // A cold browser can ask for the shared billboard while it is still downloading/parsing the app bundle. The
-    // service worker deliberately strips this header from the shell it keeps: tomorrow's page must not preload
-    // yesterday's day-keyed URL. A warm visit starts the same request at the top of `main.ts` instead.
+    // A browser loading this shell over the network can ask for the shared billboard while it is still
+    // downloading/parsing the app bundle. This header only ever reaches an actual navigation, never a route the
+    // app's own router moves to in place (`Router.svelte`) — Home reached that way starts the same request at
+    // the top of `main.ts` instead.
     if shell {
         let scope = match path {
             "/" | "/index.html" => Some("home"),
@@ -688,12 +689,12 @@ fn respond(
 
 const ROBOTS: HeaderName = HeaderName::from_static("x-robots-tag");
 
-/// The web build a shell belongs to, which the service worker compares against the shell it kept to learn of a
-/// release (`web/public/sw.js`). Not the ETag: Cloudflare drops that when it re-encodes the page, and it also
-/// moves with the policy. The shell names every other file of its build by hash, so its own hash is the build's.
+/// The web build a shell belongs to — a diagnostic, readable on any request for `/`. Not the ETag: Cloudflare
+/// drops that when it re-encodes the page, and it also moves with the policy. The shell names every other file
+/// of its build by hash, so its own hash is the build's.
 const RELEASE: HeaderName = HeaderName::from_static("x-den-release");
 
-/// The shell's digest, unquoted: the service worker names its file caches after it.
+/// The shell's digest, unquoted.
 fn release(shell: &HeaderValue) -> HeaderValue {
     let bare =
         shell.as_bytes().strip_prefix(b"\"").and_then(|b| b.strip_suffix(b"\"")).unwrap_or(shell.as_bytes());
@@ -975,9 +976,8 @@ mod tests {
         assert_ne!(identity.headers()[header::ETAG], gzip_etag);
     }
 
-    /// The service worker learns of a release from this header, since Cloudflare strips the ETag from `/`: it
-    /// names the shell's build the same way in every encoding, on a 304 and on an app route, and changes only
-    /// when the shell does.
+    /// A diagnostic, readable since Cloudflare strips the ETag from `/`: it names the shell's build the same
+    /// way in every encoding, on a 304 and on an app route, and changes only when the shell does.
     #[tokio::test]
     async fn the_shell_names_its_release() {
         let h = with_app();

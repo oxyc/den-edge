@@ -2,8 +2,9 @@ import { guardNetwork } from './network.mjs';
 import { test, expect } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 
-// A release the service worker found behind the kept shell waits for the next page opened (`release.ts`): the page
-// the person is on stays where it is, and the next one is loaded whole, onto the new release.
+// A release a missing chunk found (`recoverChunkFailure`, `release.ts`) waits for the next page opened when
+// reloading right now would cost something on screen: the page the person is on stays where it is, and the
+// next one is loaded whole, onto the new release.
 test('a waiting release is put on screen by the next page opened, never mid-visit', async ({
   page,
 }) => {
@@ -16,7 +17,7 @@ test('a waiting release is put on screen by the next page opened, never mid-visi
   await active.getByText('Details', { exact: true }).waitFor();
   await page.evaluate(async () => {
     window.denSameDocument = true;
-    // The module the router imported; the worker's `den:release` lands here in a built page (`main.ts`).
+    // The module the router imported; `recoverChunkFailure` marks a release waiting the same way.
     (await import('/src/lib/release.ts')).releaseWaiting();
     window.scrollTo(0, 950);
   });

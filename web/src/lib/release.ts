@@ -1,24 +1,23 @@
-// A newer release than the one this page runs: the service worker kept it (`den:release`, public/sw.js), or a file
-// of this release is gone from den-edge. The page moves onto it at a moment that interrupts nothing — the next page
-// opened, or while hidden if nothing on screen would be lost — never at once: reloading as soon as the release was
-// found threw a person browsing Home back to the top of a fresh page right after a deploy.
-//
-// A chunk failing to load right now (`recoverChunkFailure`, below) is a different signal from the rest of this
-// file: it says the page the person is ALREADY ON is missing something this instant — a row, a dialog, a screen
-// not behind `ScreenLoading` — not that a newer release merely exists somewhere. Waiting for the next navigation
-// would leave that gap on screen for the rest of the visit, so it reloads at once whenever nothing would be lost,
-// and only falls back to the deferred swap when it would.
+// A tab open since before a release can dynamically import a chunk den-edge no longer has: its image only ever
+// carries the current build's files, so one the tab has not yet asked for can 404 later (`recoverChunkFailure`,
+// `main.ts`'s `vite:preloadError` listener). That says the page the person is ALREADY ON is missing something
+// this instant — a row, a dialog, a screen not behind `ScreenLoading` — so it reloads at once whenever nothing
+// on screen would be lost: the top of the page, nothing heard playing, nothing being typed. When it would be
+// lost, the reload defers to the next moment that interrupts nothing — the next page opened, or while hidden —
+// never at once: reloading as soon as the chunk failed threw a person browsing Home back to the top of a fresh
+// page right after a deploy.
 
 let waiting = false;
 
-/** A newer release is kept; the page moves onto it at the next chance it gets. */
+/** A missing chunk found a newer release; the page moves onto it at the next chance it gets. */
 export function releaseWaiting(): void {
   waiting = true;
 }
 
 /**
- * Open `path` as a whole page load rather than drawing it in place, when a release is waiting: the shell the worker
- * keeps is the new one, so the page that loads runs it. `null` is a traversal, whose address is already the page's.
+ * Open `path` as a whole page load rather than drawing it in place, when a release is waiting: a fresh load gets
+ * the current release's shell and chunks, so the page that loads runs it. `null` is a traversal, whose address is
+ * already the page's.
  */
 export function swapOnNavigation(
   path: string | null,
@@ -63,10 +62,10 @@ export function swapFailedScreen(): void {
 
 /**
  * A chunk this page needed just failed to load — `vite:preloadError` (`main.ts`), fired for any dynamic import,
- * not only a `ScreenLoading` screen. den-edge has moved past the release this page's shell carries, so whatever
- * that chunk was for is going to stay missing until something reloads the page onto the current release. Doing
- * that now, rather than waiting for the next navigation, is what keeps a kept-old-shell visit from finishing the
- * one it's on half-drawn; it still defers, as every other waiting release does, when reloading would cost
+ * not only a `ScreenLoading` screen. den-edge has moved past the release this tab's bundle was built from, so
+ * whatever that chunk was for is going to stay missing until something reloads the page onto the current
+ * release. Doing that now, rather than waiting for the next navigation, is what keeps this visit from finishing
+ * the page it's on half-drawn; it still defers, as every other waiting release does, when reloading would cost
  * something on screen.
  */
 export function recoverChunkFailure(page: Page = window): boolean {
