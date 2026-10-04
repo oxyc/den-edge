@@ -20,9 +20,38 @@ const distAssets = join(dist, 'assets');
 const manifestName = 'release-manifest.json';
 const previousWeb = '/previous/web';
 
+/** A stable id for an exact set of files: every name is already content-addressed, so this needs no version. */
+export function hashFiles(files) {
+  return createHash('sha256')
+    .update([...files].sort().join('\n'))
+    .digest('hex');
+}
+
+/**
+ * The one generation this build should carry forward, or `null` when there is none: `previousManifest` is what
+ * the previous build wrote (`null` if it predates this mechanism, or there was no previous build at all).
+ * `legacyAssetFiles` is every file physically in the previous image's `/web/assets` — read only as a fallback,
+ * since without a manifest there is no finer record than "everything that's there is its own release's".
+ */
+export function chooseCarryForward({ currentId, previousManifest, legacyAssetFiles }) {
+  if (previousManifest) {
+    // A patch rebuild reproduces the same release's files: carry forward what IT called "previous", not itself,
+    // so the generation that is genuinely a release back is never dropped in favour of a no-op rebuild of this
+    // one.
+    return previousManifest.current?.id === currentId
+      ? previousManifest.previous
+      : previousManifest.current;
+  }
+  if (!legacyAssetFiles.length) return null; // no previous image at all (`scratch`), or it published nothing
+  const id = hashFiles(legacyAssetFiles);
+  // The previous image IS this exact build already (re-running against the release that's still `:latest`):
+  // nothing to carry forward, same as a first build of it would have found.
+  return id === currentId ? null : { id, files: [...legacyAssetFiles].sort() };
+}
+
 async function listAssets(dir) {
   try {
-    return (await readdir(dir)).sort();
+    return await readdir(dir);
   } catch {
     return [];
   }
@@ -45,46 +74,46 @@ async function exists(path) {
   }
 }
 
-const currentFiles = await listAssets(distAssets);
-// Every name is already content-addressed, so a stable id for "this exact set of files" is just a hash of the
-// (sorted) name list — nothing here needs the release version.
-const currentId = createHash('sha256').update(currentFiles.join('\n')).digest('hex');
+async function main() {
+  const currentFiles = await listAssets(distAssets);
+  const currentId = hashFiles(currentFiles);
+  const previousManifest = await readManifest(join(previousWeb, manifestName));
+  // Only read the previous image's assets directory when it has no manifest to answer from: a real previous
+  // release (today's live one predates this mechanism) still has to be carried forward whole the first time.
+  const legacyAssetFiles = previousManifest ? [] : await listAssets(join(previousWeb, 'assets'));
+  const carryForward = chooseCarryForward({ currentId, previousManifest, legacyAssetFiles });
 
-const previousManifest = await readManifest(join(previousWeb, manifestName));
-// A patch rebuild reproduces the same release's files: carry forward what IT called "previous", not itself,
-// so the generation that is genuinely a release back is never dropped in favour of a no-op rebuild of this one.
-const carryForward =
-  previousManifest?.current?.id === currentId
-    ? previousManifest.previous
-    : previousManifest?.current;
-
-let copied = 0;
-for (const name of carryForward?.files ?? []) {
-  const to = join(distAssets, name);
-  if (await exists(to)) continue; // this build already produced a file of that name (same hash, same bytes)
-  try {
-    await copyFile(join(previousWeb, 'assets', name), to);
-    copied++;
-    // Carry its precompressed siblings too (den-edge serves these directly, web.rs) rather than recompressing —
-    // the previous build already made them. Not every file has one: precompress.mjs skips a variant that
-    // doesn't shrink the file, and this release may predate precompression entirely.
-    for (const suffix of ['.gz', '.br']) {
-      if (await exists(join(previousWeb, 'assets', name + suffix))) {
-        await copyFile(join(previousWeb, 'assets', name + suffix), to + suffix);
+  let copied = 0;
+  for (const name of carryForward?.files ?? []) {
+    const to = join(distAssets, name);
+    if (await exists(to)) continue; // this build already produced a file of that name (same hash, same bytes)
+    try {
+      await copyFile(join(previousWeb, 'assets', name), to);
+      copied++;
+      // Carry its precompressed siblings too (den-edge serves these directly, web.rs) rather than recompressing —
+      // the previous build already made them. Not every file has one: precompress.mjs skips a variant that
+      // doesn't shrink the file, and this release may predate precompression entirely.
+      for (const suffix of ['.gz', '.br']) {
+        if (await exists(join(previousWeb, 'assets', name + suffix))) {
+          await copyFile(join(previousWeb, 'assets', name + suffix), to + suffix);
+        }
       }
+    } catch (error) {
+      console.warn(`den: could not carry forward previous asset ${name}:`, error.message);
     }
-  } catch (error) {
-    console.warn(`den: could not carry forward previous asset ${name}:`, error.message);
   }
+
+  await writeFile(
+    join(dist, manifestName),
+    JSON.stringify({
+      current: { id: currentId, files: currentFiles.sort() },
+      previous: carryForward ?? null,
+    }),
+  );
+  console.log(
+    `den: kept ${carryForward?.files?.length ?? 0} previous-release asset(s), carried forward ${copied} missing`,
+  );
 }
 
-await writeFile(
-  join(dist, manifestName),
-  JSON.stringify({
-    current: { id: currentId, files: currentFiles },
-    previous: carryForward ?? null,
-  }),
-);
-console.log(
-  `den: kept ${carryForward?.files?.length ?? 0} previous-release asset(s), carried forward ${copied} missing`,
-);
+// Run as the build's own step, not when a test imports `hashFiles`/`chooseCarryForward`.
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
