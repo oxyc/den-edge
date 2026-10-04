@@ -252,7 +252,11 @@
   </div>
 {/snippet}
 
-<h1>Watchlist</h1>
+<div class="title">
+  <h1>Watchlist</h1>
+  <!-- The library's other list: what the debrid is fetching for it, from any device. -->
+  <a class="aside" href="/downloads">Downloads ›</a>
+</div>
 {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
 <p class="visually-hidden" aria-live="polite">{confirming?.question ?? ''}</p>
 
@@ -347,9 +351,30 @@
 {/if}
 
 <style>
-  h1 {
+  .title {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
     margin: 0 0 24px;
+  }
+
+  h1 {
+    margin: 0;
     font-size: 28px;
+  }
+
+  .aside {
+    color: var(--muted);
+    font-size: 14px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .aside:hover,
+  .aside:focus-visible {
+    color: var(--fg);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   h2 {

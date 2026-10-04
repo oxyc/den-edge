@@ -5,6 +5,10 @@
   import type { EpisodeRow, TitleRow } from '../src/lib/wire';
   import type { Title } from '../src/lib/library';
   import '../src/app.css';
+  import { downloads } from '../src/lib/downloadQueue.svelte';
+  import { testClock, testLog } from '../src/lib/downloadTestLog';
+  // A download is a row in the library (den-spec library-v4 §17): this page's is one held in memory.
+  downloads.attach(testLog().log, testClock('aaaaaaaaaaaaaaaa'));
   const noop = () => {};
   const at = [100, 0, 'test'] as const;
   const stamped = <T,>(value: T) => ({ value, at });

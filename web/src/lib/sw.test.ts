@@ -196,6 +196,7 @@ describe('the service worker', () => {
       movies: { page: 'movies' },
       series: { page: 'series' },
       watchlist: { page: 'watchlist' },
+      downloads: { page: 'downloads' },
       settings: { page: 'settings' },
       search: { page: 'search', query: 'dune', chips: ['genre-28'] },
       people: { page: 'people', traits: ['role-director'] },

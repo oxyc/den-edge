@@ -20,6 +20,8 @@ export function pageTitle(route: Route): string {
       return `Series · ${SITE}`;
     case 'watchlist':
       return `Watchlist · ${SITE}`;
+    case 'downloads':
+      return `Downloads · ${SITE}`;
     case 'settings':
       return `Settings · ${SITE}`;
     case 'search':

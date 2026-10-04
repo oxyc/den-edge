@@ -3,6 +3,11 @@ import { browserClock } from './clock';
 import { LibraryLog } from './log';
 import { dueAtLaunch, markReconciled, reconcile, recoveryContext } from './recovery';
 import { deliverSimkl } from './simklDelivery';
+import { driveDownloads } from './downloadDriver';
+import { downloads } from './downloadQueue.svelte';
+import type { DownloadTitle } from './downloadRows';
+import { fetchImdbId } from './tmdb';
+import { fetchSourceList, scoutTicket, type SourceAnswer, type TitleSource } from './titleSources';
 import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import type { Title, Shape } from './library';
 import { forgetLibraryCredential } from './relayFetch';
@@ -29,7 +34,8 @@ export class LibrarySession {
   private toastTimer?: ReturnType<typeof setTimeout>;
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
-  private readonly device = browserClock().device;
+  private readonly clock = browserClock();
+  private readonly device = this.clock.device;
   /** The log's generation changes the last recovery reconcile followed (`reconcileRecovery`). */
   private recoveryGenerations = 0;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
@@ -83,6 +89,7 @@ export class LibrarySession {
         }
         if (!this.log) {
           this.log = await LibraryLog.open(this.key);
+          if (this.log) this.attachDownloads(this.log);
           if (this.log) this.changed(true);
           // The copy kept from the last visit shows at once; what changed since follows it.
           if (!this.log?.fromCache) return;
@@ -104,6 +111,15 @@ export class LibrarySession {
         )
           this.changed(true);
         await this.reconcileRecovery(this.log, this.key);
+        if (this.log.wireMinimum >= 4 && !this.log.readOnly) {
+          this.attachDownloads(this.log);
+          // Only a page someone is looking at polls den-scout and drives the queue; a hidden one lets its lease lapse.
+          // The lease holds only while each pass comes within 120 s of the last: `start` refreshes a visible page
+          // every 30 s (5 s while something plays), so a renewal due at 60 s always lands. A tick slower than 120 s
+          // would make den-core stop the hold, and the page would wait ten minutes to take it back.
+          const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+          if (visible && (await driveDownloads(this.log, downloads, this.device))) this.changed();
+        }
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
         console.warn('den: the library could not be refreshed', error);
@@ -160,6 +176,39 @@ export class LibrarySession {
   changed(settings = false) {
     this.revision++;
     if (settings) this.settingsRevision++;
+    downloads.touch();
+  }
+
+  /** The shared download queue reads and writes this library's rows (den-spec library-v4 §17). */
+  private attachDownloads(log: LibraryLog): void {
+    downloads.attach(
+      log,
+      this.clock,
+      (url) => this.ticket(url),
+      (title) => this.resolveDownload(title),
+    );
+  }
+
+  /** A play ticket another device wrote, as this page asks it (`scoutTicket`); null where it can't reach it. */
+  private ticket(url: string): string | null {
+    if (url.startsWith('/scout/')) return url;
+    const scout = this.services.scout;
+    return scout ? scoutTicket(url, scout, this.services.routes) : null;
+  }
+
+  /** A download's content resolved again at scout, for a fallback or a ticket this page can't use. */
+  private async resolveDownload(
+    title: DownloadTitle,
+  ): Promise<{ sources: TitleSource[] | null; answer?: SourceAnswer }> {
+    const scout = this.services.scout;
+    if (!scout) return { sources: null };
+    const imdb =
+      title.imdbId ??
+      (this.services.tmdbKey
+        ? await fetchImdbId({ type: title.mediaType, id: title.mediaId }, this.services.tmdbKey)
+        : undefined);
+    if (!imdb) return { sources: null };
+    return fetchSourceList(scout, imdb, this.services.routes, title.season, title.episode);
   }
 
   /**

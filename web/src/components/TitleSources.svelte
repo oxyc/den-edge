@@ -2,7 +2,10 @@
   import { tick } from 'svelte';
   import Loading from './Loading.svelte';
   import DetailIcon from './DetailIcon.svelte';
-  import { downloads, pollDelay } from '../lib/downloadQueue.svelte';
+  import DownloadStatus from './DownloadStatus.svelte';
+  import { downloads, inFlight, pollDelay } from '../lib/downloadQueue.svelte';
+  import { titleSummary } from '../lib/downloadStatus';
+  import { ensureSyncPolicy } from '../lib/syncLoader';
   import { ageOf, fetchSourceList, type SourceAnswer, type TitleSource } from '../lib/titleSources';
   import { playable } from '../lib/playable';
   import { listReleases, videoCodecsOf } from '../lib/remux';
@@ -17,6 +20,8 @@
     episode,
     active,
     remux = null,
+    title,
+    still,
     onplay,
   }: {
     imdb?: string;
@@ -27,6 +32,16 @@
     active: boolean;
     /** Where den-remux answers (`findRemux`), asked which releases play in this browser. */
     remux?: string | null;
+    /** The title these are sources of: what a download is written down as, for every device to show. */
+    title?: {
+      type: 'movie' | 'tv';
+      id: number;
+      title: string;
+      posterPath?: string;
+      originalLanguage?: string;
+    };
+    /** The episode's still, for a download of one. */
+    still?: string;
     onplay?: (filename: string) => void;
   } = $props();
   let sources = $state<TitleSource[] | null | undefined>();
@@ -38,14 +53,49 @@
     retry = $state(0);
   let panel = $state<HTMLDivElement>();
   const panelId = $props.id();
-  const key = (source: TitleSource) =>
-    `${scout?.install}:${imdb}:${season}:${episode}:${source.filename}`;
+  /** Whether den-core is up to rank the list; until it is, nothing is offered to download. */
+  let ranked = $state(false);
+  /** The release a Download starts with: the TV's first pick (den-core `rank_releases`). */
   const best = $derived(
-    sources?.find((s) => s.cached === true) ??
-      sources?.find((s) => s.seeders !== 0) ??
-      sources?.[0],
+    sources && ranked ? downloads.pick(sources, title?.originalLanguage) : undefined,
   );
-  const jobState = (source: TitleSource) => downloads.states.get(key(source));
+  /** This title's or episode's download, from the library: whichever device started it. */
+  const current = $derived(title ? downloads.of(title.type, title.id, season, episode) : undefined);
+  /** The download of `source`, when the one in the library is of this release. */
+  const jobOf = (source: TitleSource) =>
+    current && current.release.identity === source.identity ? current : undefined;
+  const stateOf = (source: TitleSource) => {
+    const job = jobOf(source);
+    return job ? downloads.status(job).state : undefined;
+  };
+  /** Everything this title has queued, for the line that says whether a press took (the TV's title note). */
+  const summary = $derived(
+    title
+      ? titleSummary(
+          downloads
+            .forTitle(title.type, title.id)
+            .map((download) => ({ download, status: downloads.status(download) })),
+        )
+      : '',
+  );
+  function download(source: TitleSource) {
+    if (!title) return;
+    void downloads.start({
+      title: {
+        mediaType: title.type,
+        mediaId: title.id,
+        imdbId: imdb,
+        season,
+        episode,
+        title: title.title,
+        posterPath: title.posterPath,
+        stillPath: still,
+        originalLanguage: title.originalLanguage,
+      },
+      source,
+      sources: sources ?? undefined,
+    });
+  }
   $effect(() => {
     const [addon, id, table, s, e] = [scout, imdb, routes, season, episode];
     void retry;
@@ -53,6 +103,10 @@
     answer = undefined;
     if (!addon || !id) return;
     const controller = new AbortController();
+    void ensureSyncPolicy().then(
+      () => (ranked = true),
+      (error: unknown) => console.warn('den: the release ranking could not be loaded', error),
+    );
     void fetchSourceList(addon, id, table, s, e, controller.signal).then((loaded) => {
       if (controller.signal.aborted) return;
       sources = loaded.sources;
@@ -92,17 +146,12 @@
   let quiet = 0;
   let lastSaid = '';
   $effect(() => {
-    if (!active || !sources) return;
-    const pending = sources.filter((source) =>
-      ['preparing', 'unknown'].includes(jobState(source)?.state ?? ''),
-    );
-    if (!pending.length) return;
-    const said = JSON.stringify(pending.map((source) => [key(source), jobState(source)]));
+    const job = current;
+    if (!active || !job || !inFlight(downloads.status(job).state)) return;
+    const said = JSON.stringify(downloads.answers.get(job.name) ?? null);
     quiet = said === lastSaid ? quiet + 1 : 0;
     lastSaid = said;
-    const timer = setTimeout(() => {
-      for (const source of pending) void downloads.poll(key(source), source);
-    }, pollDelay(quiet));
+    const timer = setTimeout(() => void downloads.poll(job), pollDelay(quiet));
     return () => clearTimeout(timer);
   });
   export async function show() {
@@ -121,25 +170,27 @@
     onclick={() => (open = !open)}
     ><DetailIcon name="sources" />Sources{sources ? ` (${sources.length})` : ''}</button
   >
-  {#if best && best.cached === false && best.seeders !== 0}
+  {#if title && best && best.cached === false && best.seeders !== 0}
+    {@const state = stateOf(best)}
     <button
       class="control"
-      disabled={!!jobState(best) && !['failed', 'not-queued'].includes(jobState(best)!.state)}
-      onclick={() => void downloads.start(key(best), best!)}
+      disabled={inFlight(state ?? null) || state === 'ready'}
+      onclick={() => download(best!)}
     >
-      <DetailIcon name="download" />{jobState(best)?.state === 'ready'
+      <DetailIcon name="download" />{state === 'ready'
         ? 'Ready to play'
-        : jobState(best)?.state === 'preparing'
+        : state === 'fetching'
           ? 'Downloading'
-          : jobState(best)?.state === 'unknown'
+          : state === 'starting' || state === 'paused'
             ? 'Checking download'
             : 'Download'}
     </button>
   {/if}
 </div>
-{#if best?.cached === false && !jobState(best)}<p class="readiness">
+{#if best?.cached === false && !jobOf(best)}<p class="readiness">
     This {season === undefined ? 'movie' : 'episode'} needs a download before it’s ready to play here.
   </p>{/if}
+{#if summary}<p class="readiness" data-title-downloads>{summary}</p>{/if}
 {#if open}
   <div id={panelId} bind:this={panel} class="source-panel">
     {#if season !== undefined}<p class="note">Sources for S{season} · E{episode}</p>{/if}
@@ -169,8 +220,9 @@
         </p>{/if}
       <ul>
         {#each sources as source (source.filename)}
-          {@const job = jobState(source)}
-          {@const ready = source.cached === true || job?.state === 'ready'}
+          {@const job = jobOf(source)}
+          {@const state = stateOf(source)}
+          {@const ready = source.cached === true || state === 'ready'}
           <li>
             <div class="source-copy">
               <p class="chips">
@@ -181,23 +233,25 @@
               {#if source.probed && source.languages.length}<p class="languages">
                   Audio: {source.languages.join(', ')}
                 </p>{/if}
-              <p class="status" class:ready>
-                <span class="dot" aria-hidden="true"></span>{ready
-                  ? 'Ready to play'
-                  : job?.state === 'preparing'
-                    ? `Downloading${job.progress !== undefined ? ` · ${Math.round(job.progress * 100)}%` : ''}`
-                    : (job?.message ??
-                      (source.cached === false
-                        ? source.seeders === 0
-                          ? 'No seeders'
-                          : 'Download needed'
-                        : 'Availability unknown'))}
-              </p>
-              {#if job?.state === 'preparing' && job.progress !== undefined}<progress
-                  value={job.progress}
-                  max="1"
-                  aria-label="Download progress"
-                ></progress>{/if}
+              {#if job && !ready}
+                {@const answer = downloads.answers.get(job.name)}
+                <DownloadStatus download={job} release={false} />
+                {#if answer?.state === 'preparing' && answer.progress !== undefined}<progress
+                    value={answer.progress}
+                    max="1"
+                    aria-label="Download progress"
+                  ></progress>{/if}
+              {:else}
+                <p class="status" class:ready>
+                  <span class="dot" aria-hidden="true"></span>{ready
+                    ? 'Ready to play'
+                    : source.cached === false
+                      ? source.seeders === 0
+                        ? 'No seeders'
+                        : 'Download needed'
+                      : 'Availability unknown'}
+                </p>
+              {/if}
             </div>
             <div class="source-actions">
               {#if ready && onplay}<button
@@ -208,18 +262,18 @@
                     : undefined}
                   onclick={() => onplay(source.filename)}><DetailIcon name="play" />Play</button
                 >
-              {:else if !ready}<button
+              {:else if !ready && title}<button
                   class="control"
-                  disabled={job?.state === 'preparing' || job?.state === 'unknown'}
-                  onclick={() => void downloads.start(key(source), source)}
+                  disabled={inFlight(state ?? null)}
+                  onclick={() => download(source)}
                   ><DetailIcon name="download" />{source.seeders === 0
                     ? 'Download anyway'
                     : 'Download'}</button
                 >{/if}
 
-              {#if job?.state === 'unknown'}<button
+              {#if job && (state === 'unreachable' || state === 'not_started')}<button
                   class="text-button"
-                  onclick={() => void downloads.poll(key(source), source)}>Check status</button
+                  onclick={() => void downloads.poll(job)}>Check status</button
                 >{/if}
             </div>
           </li>
