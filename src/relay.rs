@@ -629,6 +629,7 @@ async fn relay_with(
     face: crate::handler::Face,
     grant: Option<Guest>,
 ) -> Response {
+    let started = tokio::time::Instant::now();
     let method = req.method().clone();
     let cancel = method == Method::DELETE && scout_cancel(req.uri().path(), req.uri().query());
     if !matches!(method, Method::GET | Method::HEAD | Method::POST) && !cancel {
@@ -827,6 +828,9 @@ async fn relay_with(
         .filter_map(|name| req.headers().get(&name).cloned().map(|value| (name, value)))
         .collect();
     let control = req.uri().path().to_owned();
+    // The addon's bare name, for this relay's own error log (`log_relay_error`) — never the install segment
+    // `control` itself may carry.
+    let upstream = service_name(&control).to_owned();
     // Read before an upstream slot is taken, and within `TIMEOUT`: a slow upload must not hold the addons' slots.
     // It takes its own admission slot first, so arbitrarily many callers cannot each buffer 256 KiB outside every
     // global cap and exceed this container's memory limit.
@@ -1045,11 +1049,14 @@ async fn relay_with(
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     let answer = match tokio::time::timeout_at(deadline, state.relay_client.request(out)).await {
         Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            eprintln!("relay: {e}");
+        Ok(Err(_)) => {
+            log_relay_error("error", "addon_unreachable", &upstream, StatusCode::BAD_GATEWAY, started, rid);
             return json(StatusCode::BAD_GATEWAY, "addon_unreachable");
         }
-        Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
+        Err(_) => {
+            log_relay_error("error", "addon_timeout", &upstream, StatusCode::GATEWAY_TIMEOUT, started, rid);
+            return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout");
+        }
     };
     let (parts, body) = answer.into_parts();
     // An answer that says it is too large is refused whole, before any of it is passed on.
@@ -1067,7 +1074,16 @@ async fn relay_with(
     if !collect {
         return answer_response(
             &parts,
-            passed_body(body, deadline, ANSWER_IDLE, slot, Arc::clone(&state.metrics)),
+            passed_body(
+                body,
+                deadline,
+                ANSWER_IDLE,
+                slot,
+                Arc::clone(&state.metrics),
+                parts.status,
+                rid.to_owned(),
+                upstream,
+            ),
             public_session || playground || speed,
             member_only || grant.is_some(),
             None,
@@ -1084,7 +1100,7 @@ async fn relay_with(
         match collect_by(body, deadline, budget, multiplier, limit, Some(&state.metrics)).await {
             Ok(collected) => collected,
             Err((StatusCode::SERVICE_UNAVAILABLE, code)) => {
-                eprintln!("relay: collected answers are at COLLECT_BUDGET_BYTES; refused {control}");
+                log_relay_error("refused", code, &upstream, StatusCode::SERVICE_UNAVAILABLE, started, rid);
                 return crate::handler::retry_after(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &error(code),
@@ -1364,12 +1380,16 @@ struct Passed {
     terminal: Arc<Mutex<Option<&'static str>>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn passed_body<B>(
     mut body: B,
     deadline: tokio::time::Instant,
     idle: Duration,
     slot: tokio::sync::OwnedSemaphorePermit,
     metrics: Arc<crate::metrics::Metrics>,
+    status: StatusCode,
+    rid: String,
+    upstream: String,
 ) -> Body
 where
     B: http_body::Body<Data = Bytes> + Unpin + Send + 'static,
@@ -1381,6 +1401,7 @@ where
     tokio::spawn(async move {
         let _slot = slot;
         let _stream = metrics.stream_started(crate::metrics::StreamClass::Addon);
+        let started = tokio::time::Instant::now();
         let mut sent = 0usize;
         loop {
             // Reserve downstream room before reading upstream. Thus a stopped browser leaves at most the one frame
@@ -1393,7 +1414,7 @@ where
                         crate::metrics::StreamClass::Addon,
                         crate::metrics::StreamTermination::Lifetime,
                     );
-                    eprintln!("relay: answer cut off after {sent} bytes: {why}");
+                    log_relay_error("cutoff", "lifetime", &upstream, status, started, &rid);
                     *crate::lock(&failed) = Some(why);
                     break;
                 }
@@ -1416,7 +1437,7 @@ where
                         crate::metrics::StreamClass::Addon,
                         crate::metrics::StreamTermination::Lifetime,
                     );
-                    eprintln!("relay: answer cut off after {sent} bytes: {why}");
+                    log_relay_error("cutoff", "lifetime", &upstream, status, started, &rid);
                     *crate::lock(&failed) = Some(why);
                     break;
                 }
@@ -1436,17 +1457,17 @@ where
                         crate::metrics::StreamClass::Addon,
                         crate::metrics::StreamTermination::SourceIdle,
                     );
-                    eprintln!("relay: answer cut off after {sent} bytes: {why}");
+                    log_relay_error("cutoff", "source_idle", &upstream, status, started, &rid);
                     *crate::lock(&failed) = Some(why);
                     break;
                 }
                 Ok(Some(Ok(frame))) => frame,
-                Ok(Some(Err(e))) => {
+                Ok(Some(Err(_))) => {
                     metrics.stream_terminated(
                         crate::metrics::StreamClass::Addon,
                         crate::metrics::StreamTermination::UpstreamError,
                     );
-                    eprintln!("relay: answer cut off after {sent} bytes: {}", axum::Error::new(e));
+                    log_relay_error("cutoff", "upstream_error", &upstream, status, started, &rid);
                     *crate::lock(&failed) = Some("the addon answer failed");
                     break;
                 }
@@ -1459,7 +1480,7 @@ where
                     crate::metrics::StreamTermination::RouteLimit,
                 );
                 let why = "larger than MAX_ANSWER_BYTES";
-                eprintln!("relay: answer cut off after {sent} bytes: {why}");
+                log_relay_error("cutoff", "route_limit", &upstream, status, started, &rid);
                 *crate::lock(&failed) = Some(why);
                 break;
             }
@@ -1892,7 +1913,15 @@ struct MediaPermits {
     _member: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
-fn media_body<B>(mut body: B, state: Arc<AppState>, slot: Option<Arc<Slot>>, permits: MediaPermits) -> Body
+fn media_body<B>(
+    mut body: B,
+    state: Arc<AppState>,
+    slot: Option<Arc<Slot>>,
+    permits: MediaPermits,
+    status: StatusCode,
+    rid: String,
+    upstream: String,
+) -> Body
 where
     B: http_body::Body<Data = Bytes> + Unpin + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -1904,6 +1933,7 @@ where
     tokio::spawn(async move {
         let _admission = permits;
         let _stream = metrics.stream_started(crate::metrics::StreamClass::Media);
+        let started = tokio::time::Instant::now();
         let deadline = tokio::time::Instant::now() + MEDIA_LIFETIME;
         loop {
             // Reserve the sole downstream frame before reading another upstream frame. A non-reading client can
@@ -1966,12 +1996,12 @@ where
                     break;
                 }
                 Ok(Some(Ok(frame))) => frame,
-                Ok(Some(Err(error))) => {
+                Ok(Some(Err(_))) => {
                     metrics.stream_terminated(
                         crate::metrics::StreamClass::Media,
                         crate::metrics::StreamTermination::UpstreamError,
                     );
-                    eprintln!("relay media: {}", axum::Error::new(error));
+                    log_relay_error("cutoff", "upstream_error", &upstream, status, started, &rid);
                     *crate::lock(&failed) = Some("the media source failed");
                     break;
                 }
@@ -2002,6 +2032,10 @@ async fn stream(
     slot: Option<Arc<Slot>>,
     permits: MediaPermits,
 ) -> Response {
+    let started = tokio::time::Instant::now();
+    // reel is the only media relay (`media`'s own path check): named from the path anyway, rather than a bare
+    // literal, so a second one added later is not silently mislabelled.
+    let upstream = service_name(req.uri().path()).to_owned();
     let method = req.method().clone();
     let asked: Vec<_> = [
         header::RANGE,
@@ -2024,18 +2058,21 @@ async fn stream(
     // it takes to send, and cutting it off mid-stream would be a truncated file rather than an error.
     let answer = match tokio::time::timeout(TIMEOUT, state.relay_client.request(out)).await {
         Ok(Ok(answer)) => answer,
-        Ok(Err(e)) => {
-            eprintln!("relay media: {e}");
+        Ok(Err(_)) => {
+            log_relay_error("error", "addon_unreachable", &upstream, StatusCode::BAD_GATEWAY, started, rid);
             return json(StatusCode::BAD_GATEWAY, "addon_unreachable");
         }
-        Err(_) => return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout"),
+        Err(_) => {
+            log_relay_error("error", "addon_timeout", &upstream, StatusCode::GATEWAY_TIMEOUT, started, rid);
+            return json(StatusCode::GATEWAY_TIMEOUT, "addon_timeout");
+        }
     };
     let (parts, body) = answer.into_parts();
     // A guest's bytes are counted as they leave, not estimated from a header: a range request, a
     // player that seeks, a tab closed mid-segment all send a different number than `Content-Length`
     // claims. A member's bytes are not counted at all — the ceiling is a guest ceiling. Each is counted on the
     // day it leaves: a stream begun before UTC midnight that kept its first day reset the new day's count.
-    let body = media_body(body, Arc::clone(state), slot, permits);
+    let body = media_body(body, Arc::clone(state), slot, permits, parts.status, rid.to_owned(), upstream);
     let mut resp = Response::new(body);
     *resp.status_mut() = parts.status;
     for name in [
@@ -2062,6 +2099,40 @@ fn json(status: StatusCode, code: &str) -> Response {
     json_reply(status, &error(code))
 }
 
+/// The relayed service a path names, from its leading segment (`/scout/…` → `scout`): never the install segment
+/// or anything after it, which `log_relay_error`'s own `upstream` must not carry. `relay` for a path naming none,
+/// which should not happen but must not panic the line that reports it either.
+fn service_name(path: &str) -> &str {
+    path.trim_start_matches('/').split('/').next().filter(|s| !s.is_empty()).unwrap_or("relay")
+}
+
+/// The line `log_relay_error` writes, factored out so a test can check its shape without capturing stderr.
+fn relay_error_line(
+    outcome: &str,
+    reason: &str,
+    upstream: &str,
+    status: StatusCode,
+    dur_ms: u128,
+    rid: &str,
+) -> String {
+    format!("event=relay outcome={outcome} reason={reason} upstream={upstream} status={} dur_ms={dur_ms} rid={rid}", status.as_u16())
+}
+
+/// One line for a relay/proxy failure the browser's own answer doesn't fully explain — which upstream, what this
+/// call answered with, and how long it had been running — joinable to the browser's own request line and the
+/// addon's own log by `rid` alone. `upstream` is only the addon's bare name (`service_name`): never the relay
+/// target, which may carry a config segment or a token baked into its path or query.
+fn log_relay_error(
+    outcome: &str,
+    reason: &str,
+    upstream: &str,
+    status: StatusCode,
+    started: tokio::time::Instant,
+    rid: &str,
+) {
+    eprintln!("{}", relay_error_line(outcome, reason, upstream, status, started.elapsed().as_millis(), rid));
+}
+
 /// A refusal that says when the window clears, rather than leaving the caller to guess and come straight back.
 fn limited(after_ms: u64) -> Response {
     crate::handler::retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), after_ms)
@@ -2078,6 +2149,36 @@ mod tests {
     const LIB: &str = "0123456789abcdef0123456789abcdef";
     const TOKEN: &str = "the-write-token";
     const MEMBER: &str = "the-separate-member-proof";
+
+    #[test]
+    fn service_name_is_only_the_leading_path_segment() {
+        assert_eq!(super::service_name("/scout/configure/eyJhbGc.secret-token/manifest.json"), "scout");
+        assert_eq!(super::service_name("/remux/session"), "remux");
+        assert_eq!(super::service_name("/atlas/~guest123/recommend"), "atlas");
+        assert_eq!(super::service_name("/"), "relay");
+        assert_eq!(super::service_name(""), "relay");
+    }
+
+    /// `log_relay_error`'s own line, by construction, can only ever carry the service's bare name — never the
+    /// install segment, token or guest id that sat after it on the real path.
+    #[test]
+    fn a_relay_error_line_never_carries_more_than_the_services_bare_name() {
+        let path = "/scout/eyJhbGciOiJIUzI1NiJ9.secret-install-token/stream/movie/tt0111161.json";
+        let line = super::relay_error_line(
+            "error",
+            "addon_unreachable",
+            super::service_name(path),
+            StatusCode::BAD_GATEWAY,
+            42,
+            "ab12",
+        );
+        assert_eq!(
+            line,
+            "event=relay outcome=error reason=addon_unreachable upstream=scout status=502 dur_ms=42 rid=ab12"
+        );
+        assert!(!line.contains("secret-install-token"));
+        assert!(!line.contains("eyJhbGciOiJIUzI1NiJ9"));
+    }
 
     /// Relaying `/scout` at a port nothing listens on: whatever gets past the limit fails at the fetch, which is
     /// all these need to tell an allowed request from a refused one.
@@ -3487,6 +3588,9 @@ mod tests {
             idle,
             slot,
             std::sync::Arc::new(crate::metrics::Metrics::default()),
+            StatusCode::OK,
+            "test-rid".to_owned(),
+            "test".to_owned(),
         );
         let ended =
             tokio::time::timeout(std::time::Duration::from_secs(3), axum::body::to_bytes(passed, usize::MAX))
@@ -3514,6 +3618,9 @@ mod tests {
             std::time::Duration::from_secs(60),
             slot,
             std::sync::Arc::new(crate::metrics::Metrics::default()),
+            StatusCode::OK,
+            "test-rid".to_owned(),
+            "test".to_owned(),
         );
         assert_eq!(slots.available_permits(), 0);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -3544,6 +3651,9 @@ mod tests {
             std::time::Duration::from_secs(60),
             slot,
             Arc::clone(&metrics),
+            StatusCode::OK,
+            "test-rid".to_owned(),
+            "test".to_owned(),
         );
         assert!(passed.frame().await.unwrap().unwrap().is_data());
         drop(passed);

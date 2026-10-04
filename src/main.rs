@@ -85,6 +85,12 @@ pub struct AppState {
     pub metrics_token: Option<String>,
     /// One stderr line per request (env `LOG_REQUESTS`), naming the route and never a key.
     pub log_requests: bool,
+    /// Whether a playback report (`diagnostics.rs`, `startup.rs`) may log what was played — the TMDB id, the
+    /// release name and size, the chosen audio and subtitle tracks (env `LOG_IDENTITY`; default on, `0` or
+    /// `false` turns it off). The box's journal is RAM-only and readable only by its owner, who chose to keep
+    /// this on by default so a playback problem stays reproducible; every other field (event, outcome, reason,
+    /// duration, rid) is logged either way.
+    pub log_identity: bool,
     /// Origins a browser may call from (env `WEB_ORIGINS`, comma-separated): the Den web app when it is served
     /// from elsewhere. Empty sends no CORS headers at all — the app served here is same-origin and needs none.
     pub web_origins: Vec<String>,
@@ -282,6 +288,7 @@ impl AppState {
             bulk_request_slots: Arc::new(tokio::sync::Semaphore::new(handler::BULK_REQUESTS)),
             metrics_token,
             log_requests,
+            log_identity: true,
             web_origins: Vec::new(),
             web_dir: None,
             web_files: web::Files::default(),
@@ -386,6 +393,7 @@ async fn main() {
     state.web_origins = env_opt("WEB_ORIGINS")
         .map(|v| v.split(',').map(|o| o.trim().to_owned()).filter(|o| !o.is_empty()).collect())
         .unwrap_or_default();
+    state.log_identity = env_flag("LOG_IDENTITY", true);
     state.web_dir = env_opt("WEB_DIR").map(std::path::PathBuf::from);
     if let Some(web) = state.web_dir.as_deref() {
         match state.web_files.prepare(web).await {
@@ -473,13 +481,14 @@ async fn main() {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let on = |b: bool| if b { "on" } else { "off" };
     eprintln!(
-        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} web_origins={} \
+        "den-edge {} listening on :{port} — data={dir} web={} metrics={} log_requests={} log_identity={} web_origins={} \
          web_hosts={} api_hosts={} relays={} routes={} routes_public={} new_libraries={} tmdb={} warnings={} ratings={} guest_remux={} \
          oauth={}",
         env!("CARGO_PKG_VERSION"),
         state.web_dir.as_deref().map_or("none".to_owned(), |d| d.display().to_string()),
         on(state.metrics_token.is_some()),
         on(state.log_requests),
+        on(state.log_identity),
         if state.web_origins.is_empty() { "none".to_owned() } else { state.web_origins.join(",") },
         if state.web_hosts.is_empty() { "none".to_owned() } else { state.web_hosts.join(",") },
         if state.api_hosts.is_empty() { "none".to_owned() } else { state.api_hosts.join(",") },
@@ -613,6 +622,15 @@ fn oauth_config() -> Option<oauth::OAuth> {
 /// An env var's value, with unset and empty both meaning "not configured" — the rule every den addon uses.
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// A yes/no env var that defaults to `default` when unset or empty, rather than to off: `LOG_IDENTITY` must stay
+/// on through a deploy that forgets to set it, so only an explicit `0` or `false` (either case) turns it off.
+fn env_flag(name: &str, default: bool) -> bool {
+    match env_opt(name) {
+        None => default,
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false"),
+    }
 }
 
 /// A whole number from the environment, unset and empty both meaning "not configured". One that is set and does
@@ -974,6 +992,22 @@ mod tests {
         let answer =
             tokio::time::timeout(Duration::from_secs(3), exchange(addr, idle)).await.expect("still open");
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+
+    #[test]
+    fn log_identity_defaults_on_and_only_0_or_false_turns_it_off() {
+        let name = "DEN_EDGE_TEST_LOG_IDENTITY_FLAG";
+        std::env::remove_var(name);
+        assert!(env_flag(name, true), "unset must keep the default");
+        for off in ["0", "false", "FALSE", " false "] {
+            std::env::set_var(name, off);
+            assert!(!env_flag(name, true), "{off:?} must turn it off");
+        }
+        for on in ["1", "true", "yes", "anything-else"] {
+            std::env::set_var(name, on);
+            assert!(env_flag(name, true), "{on:?} must leave it on");
+        }
+        std::env::remove_var(name);
     }
 
     #[test]

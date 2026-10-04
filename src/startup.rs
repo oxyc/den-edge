@@ -6,6 +6,7 @@
 //! free-text line in the log. The one thing that reaches `eprintln!` (`StartupTag`, `handler.rs`) is the join of
 //! those typed fields back into text, so nothing freeform from the body ever does.
 
+use crate::diagnostics::Identity;
 use crate::handler::{client_ip, error, json_reply, read_json, retry_after, StartupTag};
 use crate::AppState;
 use axum::body::Body;
@@ -38,7 +39,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = StatusCode::NO_CONTENT;
     resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    resp.extensions_mut().insert(StartupTag(report.tag()));
+    resp.extensions_mut().insert(StartupTag(report.tag(state.log_identity)));
     resp
 }
 
@@ -60,6 +61,9 @@ struct Report {
     transcoded: bool,
     player: Player,
     route: Route,
+    /// What was opened — the TMDB id, the release — gated like every other identity field (`LOG_IDENTITY`).
+    #[serde(flatten)]
+    identity: Identity,
 }
 
 #[derive(Deserialize)]
@@ -139,7 +143,7 @@ impl Route {
 
 impl Report {
     /// `name:value` pairs, comma-joined, for one `startup=` tag on the request log line (`handler::log_line`).
-    fn tag(&self) -> String {
+    fn tag(&self, log_identity: bool) -> String {
         let ms = |n: u32| n.min(MAX_MS);
         let mut parts = vec![
             format!("session:{}", ms(self.session_ms)),
@@ -166,6 +170,7 @@ impl Report {
         if let Some(v) = self.init_ms {
             parts.push(format!("init:{}", ms(v)));
         }
+        parts.extend(self.identity.parts(log_identity));
         parts.join(",")
     }
 }
@@ -189,13 +194,14 @@ mod tests {
             transcoded: false,
             player: Player::HlsJs,
             route: Route::Lan,
+            identity: Identity::default(),
         }
     }
 
     #[test]
     fn the_tag_names_every_field_and_nothing_else() {
         assert_eq!(
-            report().tag(),
+            report().tag(true),
             "session:1234,firstSeg:2200,firstFrame:9800,size:large,codec:hevc,transcoded:0,\
              player:hls.js,route:lan,bytes:12345678,resolve:56,open:200,tried:3,init:90"
         );
@@ -210,7 +216,7 @@ mod tests {
         r.init_ms = None;
         r.bytes_loaded = None; // native HLS: no loader there to read a byte count from
         assert_eq!(
-            r.tag(),
+            r.tag(true),
             "session:1234,firstSeg:2200,firstFrame:9800,size:large,codec:hevc,transcoded:0,\
              player:hls.js,route:lan"
         );
@@ -220,7 +226,26 @@ mod tests {
     fn a_claimed_duration_past_ten_minutes_is_capped_before_the_log_sees_it() {
         let mut r = report();
         r.session_ms = u32::MAX;
-        assert!(r.tag().contains("session:600000"));
+        assert!(r.tag(true).contains("session:600000"));
+    }
+
+    #[test]
+    fn startup_identity_fields_are_gated_by_log_identity() {
+        let mut body = serde_json::json!({
+            "sessionMs": 1234, "firstSegmentMs": 2200, "firstFrameMs": 9800,
+            "size": "large", "codec": "hevc", "transcoded": false, "player": "hls.js", "route": "lan",
+        });
+        body["tmdbId"] = serde_json::json!(550);
+        body["mediaType"] = serde_json::json!("movie");
+        body["release"] = serde_json::json!({ "name": "Fight.Club.1999", "size": 123 });
+        let report: Report = serde_json::from_value(body).unwrap();
+        let on = report.tag(true);
+        assert!(on.contains("tmdbId:550"), "{on:?}");
+        assert!(on.contains("mediaType:movie"), "{on:?}");
+        assert!(on.contains("release:Fight.Club.1999"), "{on:?}");
+        let off = report.tag(false);
+        assert!(!off.contains("tmdbId"), "{off:?} must carry no identity field with LOG_IDENTITY off");
+        assert!(!off.contains("release"), "{off:?} must carry no identity field with LOG_IDENTITY off");
     }
 
     /// A body missing the required fields, or carrying anything outside the allowlisted shape — a title, say —

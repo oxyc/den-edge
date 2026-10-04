@@ -4,6 +4,7 @@ import {
   hlsFatalDetail,
   hlsFatalFromMessage,
   hlsFatalTypeOf,
+  identityOf,
   loadRelease,
   moduleOf,
   reportableLanguage,
@@ -128,6 +129,66 @@ describe('sendPageError', () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
     expect(() => sendPageError(report, fetchImpl)).not.toThrow();
     await new Promise((r) => setTimeout(r, 0));
+  });
+});
+
+describe('identityOf', () => {
+  const title = { id: 550, type: 'movie' as const };
+
+  it('names only the title when nothing has opened yet', () => {
+    expect(identityOf(title, undefined, undefined, undefined)).toEqual({
+      tmdbId: 550,
+      mediaType: 'movie',
+      season: undefined,
+      episode: undefined,
+    });
+  });
+
+  it('carries the release, the chosen audio track and its language once a session is open', () => {
+    const fields = identityOf(title, 2, 4, {
+      release: { filename: 'Fight.Club.1999.1080p.BluRay.x264-GROUP', size: 7_654_321_000 },
+      audioTrack: 1,
+      audioLanguage: 'en',
+    });
+    expect(fields).toEqual({
+      tmdbId: 550,
+      mediaType: 'movie',
+      season: 2,
+      episode: 4,
+      release: { name: 'Fight.Club.1999.1080p.BluRay.x264-GROUP', size: 7_654_321_000 },
+      audioTrackIndex: 1,
+      audioLanguage: 'en',
+      audioCodec: 'aac',
+    });
+  });
+
+  it('leaves out an audio language outside reportableLanguage’s shape', () => {
+    const fields = identityOf(title, undefined, undefined, {
+      release: { filename: 'x', size: 1 },
+      audioTrack: 0,
+      audioLanguage: '<script>',
+    });
+    expect(fields.audioLanguage).toBeUndefined();
+    expect(fields.audioCodec).toBe('aac');
+  });
+
+  it('carries the chosen subtitle’s index, language and source, dropping a -1 index and an invalid language', () => {
+    const withSubtitle = identityOf(title, undefined, undefined, undefined, {
+      index: 2,
+      language: 'pt-br',
+      source: 'den_subtitles',
+    });
+    expect(withSubtitle.subtitleIndex).toBe(2);
+    expect(withSubtitle.subtitleLanguage).toBe('pt-br');
+    expect(withSubtitle.subtitleSource).toBe('den_subtitles');
+
+    const noMatch = identityOf(title, undefined, undefined, undefined, {
+      index: -1,
+      language: '<script>',
+    });
+    expect(noMatch.subtitleIndex).toBeUndefined();
+    expect(noMatch.subtitleLanguage).toBeUndefined();
+    expect(noMatch.subtitleSource).toBeUndefined();
   });
 });
 
