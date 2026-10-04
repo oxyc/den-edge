@@ -9,6 +9,7 @@
   import Select from './Select.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
+  import { copyText } from '../lib/clipboard';
   import {
     cappedCodeExpiry,
     createGrant,
@@ -72,6 +73,11 @@
   let devices = $state(1);
   let created = $state<{ name: string; code: string } | null>(null);
   let copied = $state<string | null>(null);
+  /** Set once a copy fell back all the way to "select it yourself": the field is already selected for it. */
+  let manualLink = $state(false);
+  let manualCode = $state(false);
+  let linkField = $state<HTMLInputElement>();
+  let codeField = $state<HTMLInputElement>();
   let renaming = $state<{ gid: string; name: string } | null>(null);
   /** Codes of this browser's unused invites, so their links can be copied again (`keptCodes`). */
   let codes = $state<Record<string, string>>({});
@@ -144,18 +150,28 @@
     keepCode(reply.value.grant.gid, reply.value.code);
     codes = { ...codes, [reply.value.grant.gid]: reply.value.code };
     created = { name: reply.value.grant.name, code: reply.value.code };
+    copied = null;
+    manualLink = false;
+    manualCode = false;
     name = '';
     grants = [...(grants ?? []), reply.value.grant];
   }
 
+  /** A guest's own re-copy of an already-made invite: no field is shown there to fall back to. */
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      copied = text;
-    } catch {
-      // No clipboard here: the text is still on screen to copy by hand.
-      copied = null;
-    }
+    copied = (await copyText(text)) === 'copied' ? text : null;
+  }
+
+  async function copyLink(address: string) {
+    const result = await copyText(address, () => linkField?.select());
+    copied = result === 'copied' ? address : null;
+    manualLink = result === 'manual';
+  }
+
+  async function copyCode(code: string) {
+    const result = await copyText(code, () => codeField?.select());
+    copied = result === 'copied' ? code : null;
+    manualCode = result === 'manual';
   }
 
   async function change(grant: Grant, patch: GrantChange) {
@@ -266,17 +282,31 @@
             Sharing. It is shown once.
           </p>
           <span class="copy">
-            <input class="field mono" readonly aria-label="Invite link" value={address} />
-            <button type="button" class="quiet" onclick={() => void copy(address)}
+            <input
+              class="field mono"
+              readonly
+              aria-label="Invite link"
+              value={address}
+              bind:this={linkField}
+            />
+            <button type="button" class="quiet" onclick={() => void copyLink(address)}
               >{copied === address ? 'Copied' : 'Copy link'}</button
             >
           </span>
+          {#if manualLink}<p class="status" role="status">Select and copy the link.</p>{/if}
           <span class="copy">
-            <input class="field mono" readonly aria-label="Invite code" value={code} />
-            <button type="button" class="quiet" onclick={() => void copy(code)}
+            <input
+              class="field mono"
+              readonly
+              aria-label="Invite code"
+              value={code}
+              bind:this={codeField}
+            />
+            <button type="button" class="quiet" onclick={() => void copyCode(code)}
               >{copied === code ? 'Copied' : 'Copy code'}</button
             >
           </span>
+          {#if manualCode}<p class="status" role="status">Select and copy the code.</p>{/if}
           <button type="button" class="quiet" onclick={() => (created = null)}>Done</button>
         </div>
       {/if}

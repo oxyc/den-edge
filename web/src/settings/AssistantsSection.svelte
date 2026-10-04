@@ -5,6 +5,7 @@
   import Confirm from './Confirm.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
+  import { copyText } from '../lib/clipboard';
   import { fetchMcpUrl, listConnections, revokeConnection, type Connection } from '../lib/oauth';
 
   /** The connector's address; null while it is off on this server, undefined until known or when Den can't be asked. */
@@ -13,6 +14,8 @@
   let connections = $state<Connection[] | null>(null);
   let problem = $state<string | null>(null);
   let copied = $state(false);
+  let manual = $state(false);
+  let addressField = $state<HTMLInputElement>();
 
   const day = (at: number) =>
     new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
@@ -42,12 +45,9 @@
   }
 
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      copied = true;
-    } catch {
-      // No clipboard: the address is on screen to copy by hand.
-    }
+    const result = await copyText(text, () => addressField?.select());
+    copied = result === 'copied';
+    manual = result === 'manual';
   }
 
   const connectorValue = $derived(
@@ -66,11 +66,18 @@
     {@const address = mcpUrl}
     <SettingRow id="assistant-connector" label="Connector address" detail={address}>
       <span class="copy">
-        <input class="field mono" readonly aria-label="Connector address" value={address} />
+        <input
+          class="field mono"
+          readonly
+          aria-label="Connector address"
+          value={address}
+          bind:this={addressField}
+        />
         <button type="button" class="quiet" onclick={() => void copy(address)}
           >{copied ? 'Copied' : 'Copy'}</button
         >
       </span>
+      {#if manual}<p class="status" role="status">Select and copy the address.</p>{/if}
       <h3>Claude</h3>
       <ol class="steps">
         <li>Settings › Connectors › Add custom connector.</li>
