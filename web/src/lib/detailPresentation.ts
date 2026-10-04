@@ -217,10 +217,9 @@ export function seriesPresentation(
  * `undefined` for a movie, or a series TMDB has listed no aired episodes for yet: nothing to prefer over the
  * flag, so the raw status stands.
  */
-export function seriesSeenOverride(series: Pick<
-  ReturnType<typeof seriesPresentation>,
-  'watched' | 'total'
-> | null): boolean | undefined {
+export function seriesSeenOverride(
+  series: Pick<ReturnType<typeof seriesPresentation>, 'watched' | 'total'> | null,
+): boolean | undefined {
   return series && series.total > 0 ? series.watched === series.total : undefined;
 }
 

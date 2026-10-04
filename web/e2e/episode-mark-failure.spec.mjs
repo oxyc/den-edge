@@ -49,7 +49,9 @@ const episodeRow = (page) => page.locator('.episode').first();
 const toast = (page) => page.locator('p.library-status.toast');
 
 test('marking an episode watched succeeds silently, with no stray alert', async () => {
-  const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
   try {
     const page = await browser.newPage();
     await openTitle(page);
@@ -63,13 +65,17 @@ test('marking an episode watched succeeds silently, with no stray alert', async 
 });
 
 test('a refused episode mark says so on the page toast, not only in the far-off hero', async () => {
-  const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
   try {
     const page = await browser.newPage();
     await openTitle(page, '&failing');
     await episodeMenu(page).click();
     await markWatched(page).click();
-    await expect(toast(page)).toHaveText('Couldn’t save that. Check that this device is on your network.');
+    await expect(toast(page)).toHaveText(
+      'Couldn’t save that. Check that this device is on your network.',
+    );
     // Nothing was actually written: the row stays unwatched, and the item still offers to mark it.
     await expect(episodeRow(page).locator('.watched')).toHaveCount(0);
   } finally {
