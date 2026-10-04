@@ -14,6 +14,7 @@
     selfId,
     pendingActions,
     edgeVersion,
+    libraryFormat = null,
     write,
   }: {
     keys: SettingsRow | undefined;
@@ -22,6 +23,8 @@
     /** Changes kept on this device, waiting to reach the library. */
     pendingActions: number;
     edgeVersion: string | null;
+    /** The library's wire format (`LibraryLog.wireMinimum`), when one is open. */
+    libraryFormat?: number | null;
     write: (group: string, changes: Record<string, ConfigValue | null>) => Promise<boolean>;
   } = $props();
 
@@ -112,6 +115,12 @@
         <dt>Den</dt>
         <dd>{edgeVersion ? `den-edge ${edgeVersion}` : 'Checking…'}</dd>
       </div>
+      {#if libraryFormat !== null}
+        <div>
+          <dt>Library format</dt>
+          <dd>v{libraryFormat}</dd>
+        </div>
+      {/if}
       <div>
         <dt>This browser</dt>
         <dd class="mono">{selfId}</dd>

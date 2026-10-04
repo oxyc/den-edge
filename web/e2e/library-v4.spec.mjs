@@ -4,7 +4,7 @@ import { E2E_ORIGIN } from './base-url.mjs';
 
 // Library v4 §10: the browser that switched the library says so once, and Settings › About names the format beside
 // the version, as a plain value.
-test('the switch to Library v4 shows its toast, and About shows the library format', async () => {
+test('the switch to Library v4 shows its toast, and Diagnostics shows the library format', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -21,13 +21,13 @@ test('the switch to Library v4 shows its toast, and About shows the library form
       page.getByRole('status').filter({ hasText: 'Library updated to v4' }),
     ).toBeVisible();
 
-    const about = page.locator('#about');
-    await expect(about.locator('#version')).toContainText('den-edge 0.242.1');
-    const format = about.locator('#library-format');
-    await expect(format).toContainText('Library format');
-    await expect(format).toContainText('v4');
-    // A value to read, not a row that opens.
-    await expect(format.getByRole('button')).toHaveCount(0);
+    const diagnostics = page.locator('#diagnostics');
+    await diagnostics.getByRole('button', { name: /Diagnostics/ }).click();
+    await expect(diagnostics).toContainText('den-edge 0.242.1');
+    await expect(diagnostics.locator('div', { hasText: 'Library format' }).last()).toContainText(
+      'v4',
+    );
+    await expect(page.locator('#about #version, #about #library-format')).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   } finally {
     await browser.close();

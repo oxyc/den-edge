@@ -415,9 +415,10 @@
       selfId={clock.device}
       pendingActions={log?.pendingActions ?? 0}
       {edgeVersion}
+      {libraryFormat}
       {write}
     />
-    <AboutSection {edgeVersion} {libraryFormat} credits={mergeCredits(addonCredits)} />
+    <AboutSection credits={mergeCredits(addonCredits)} />
   </div>
 </div>
 
