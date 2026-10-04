@@ -123,7 +123,7 @@ describe('startSession', () => {
         ? answer(201, session)
         : answer(400, { error: 'bad_subtitles' });
     });
-    expect(result).toEqual(session);
+    expect(result).toEqual({ ...session, subtitleSource: 'den_subtitles' });
     expect(sent.map((b) => b.subtitles)).toEqual(want.subtitles);
     expect(sent[1]).toMatchObject({
       imdb: 'tt0111161',

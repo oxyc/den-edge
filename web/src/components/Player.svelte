@@ -87,6 +87,14 @@
   import { shouldWarmNext } from '../lib/binge';
   import { named } from '../lib/pageTitle';
   import { nameTab } from '../lib/tabName.svelte';
+  import {
+    hlsFatalFromMessage,
+    reportableLanguage,
+    sendCastReport,
+    sendPlaybackOutcome,
+    type CastFailReason,
+    type CastStage,
+  } from '../lib/diagnosticsReport';
 
   let {
     title,
@@ -231,6 +239,8 @@
   let session = $state<Session | null>(null);
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
+  /** The last session's `subtitleSource`, kept past a `letGo`/`session = null` the same way `sessionRoute` is. */
+  let lastSubtitleSource: 'den_subtitles' | undefined;
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
   >(null);
@@ -299,9 +309,28 @@
    * session to another copy.
    */
   let breaking: { session: Session; decode: boolean } | null = null;
-  /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was. */
+  /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was;
+   * also this whole visit's `secondsPlayed`, for den-edge's own outcome report sent once at `finish()`. */
   let playedSecs = 0;
   let lastPosition: number | undefined;
+  /** The last fatal error's code and, for an hls.js one, its type and detail — for den-edge's own outcome
+   * report; parsed back from `broke()`'s own message rather than threaded through every path that calls it. */
+  let lastFatal: { code?: number; hls?: ReturnType<typeof hlsFatalFromMessage> } | undefined;
+  /** Whether the viewer changed or turned off the subtitle after playback had already shown a frame: a signal
+   * the file first chosen was wrong, for den-edge's own outcome report. */
+  let subtitleSwitchedMidPlay = false;
+  let subtitleTurnedOffMidPlay = false;
+  /** An hls.js subtitle fragment failed to load, for the same report. */
+  let subtitleLoadFailedFlag = false;
+  /** Set by `finished()`: whether this visit's playback reached a natural end, for `endReason`. */
+  let reachedNaturalEnd = false;
+  /** The furthest stage a Chromecast attempt reached this visit, and how it went; undefined until the Cast
+   * control is first offered. Reported once, alongside the playback outcome, at `finish()`. */
+  let castFunnel: CastStage | undefined;
+  let castFailed = false;
+  let castFailReason: CastFailReason | undefined;
+  let castSessionStartedAt: number | undefined;
+  let castSessionSecs = 0;
   /** What the playing session's media is really arriving at. */
   let meter = new DeliveryMeter();
   /** Set once no other copy fitted the link: this one plays on, and delivery is not weighed again. */
@@ -522,6 +551,9 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     session = result;
     sessionRoute = on;
+    // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
+    // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
+    lastSubtitleSource = result.subtitleSource;
     // Another release is another encode, whose intro and credits sit at other times: its own are asked for.
     if (result.release.filename !== segmentsOf) {
       segments = [];
@@ -856,6 +888,7 @@
       // this browser does decode (`switchAway`).
       let recovered = false;
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.frag?.type === 'subtitle') subtitleLoadFailedFlag = true;
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
           recovered = true;
@@ -1041,17 +1074,24 @@
       }
     } else if (message.type === 'den-cast' && message.state === 'playing') {
       casting = true;
+      reachCast('started');
+      castSessionStartedAt = performance.now();
     } else if (message.type === 'den-cast' && message.state === 'stopped') {
       casting = false;
       castMode = false;
+      endCastSession();
       // Moved here to cast: casting over, the viewer is back in the player they left, where it had got to.
       if (castOffered) leaveCast();
       else restart({ filename: current.release.filename });
     } else if (message.type === 'den-ended') {
       casting = false;
+      endCastSession();
       finished();
     } else if (message.type === 'den-error') {
       casting = false;
+      endCastSession();
+      castFailed = true;
+      castFailReason = castFailReasonOf(message.message ?? '');
       // Keep the receiver only when one conservative H.264 retry remains; terminal attempts return local.
       if (degraded || current.video?.transcoded || castProfile === 'legacy') castMode = false;
       if (returnsFromCast(castOffered, castMode)) {
@@ -1069,6 +1109,36 @@
   /** Whether this browser could cast at all; Google's SDK exists only in desktop and Android Chromium. */
   const castable = canOfferCast();
 
+  const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
+  /** Moves `castFunnel` to `stage`, never back: den-edge's own cast report (`finish()`) names the furthest
+   * this visit's Chromecast attempt reached, not its last. */
+  function reachCast(stage: CastStage) {
+    if (!castFunnel || CAST_RANK[stage] > CAST_RANK[castFunnel]) castFunnel = stage;
+  }
+
+  /** `message`, folded into one of den-edge's allowlisted cast-failure classes — never the message itself. */
+  function castFailReasonOf(message: string): CastFailReason {
+    if (message.includes('nothing played')) return 'lan_unreachable';
+    if (message.includes('could not load') || message.includes('could not continue'))
+      return 'media_error';
+    if (message.includes('Cast SDK') || message.includes('no-cast-page'))
+      return 'receiver_not_loaded';
+    return 'other';
+  }
+
+  /** `castSessionStartedAt`, folded into `castSessionSecs` and cleared: a session just ended or failed. */
+  function endCastSession() {
+    if (castSessionStartedAt === undefined) return;
+    castSessionSecs += (performance.now() - castSessionStartedAt) / 1000;
+    castSessionStartedAt = undefined;
+  }
+
+  // The Cast control was available to press — the same condition the header's button renders under — whether or
+  // not the viewer ever did; den-edge's own cast report (`finish()`) is sent only once this has happened.
+  $effect(() => {
+    if (castable && session && !session.castOrigin && route !== RELAY) reachCast('offered');
+  });
+
   /**
    * The Cast button for a plain in-page player. The cast page is loaded unseen beside the video, which plays on, to
    * look for a receiver (`look`); only once it sees one does playback move to the relay, whose sessions carry the
@@ -1076,6 +1146,7 @@
    */
   async function offerCast() {
     if (!session || castOffer === 'looking') return;
+    reachCast('attempted');
     castOffer = 'looking';
     const origin = await fetchCastOrigin();
     if (castOffer !== 'looking' || ended) return;
@@ -1126,6 +1197,8 @@
     const wait = setTimeout(() => {
       if (session !== current || played || casting) return;
       const why = `nothing played in the cast page after ${castPlayMs / 1000} s`;
+      castFailed = true;
+      castFailReason = castFailReasonOf(why);
       if (returnsFromCast(castOffered, castMode)) {
         reportFailure(current, 0, why);
         leaveCast();
@@ -1185,6 +1258,9 @@
     kind: 'decode' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
   ) {
     if (!session || failure) return;
+    // den-edge's own outcome report (`finish()`) names the last fatal error this visit saw, whichever session it
+    // belonged to: a switch away from a bad copy is still something that went wrong once.
+    lastFatal = { code: code || undefined, hls: hlsFatalFromMessage(message) };
     if (breaking?.session === session) {
       if (kind === 'decode') breaking.decode = true;
       return;
@@ -1275,6 +1351,9 @@
   /** The end: count down to the next episode, when there is one. */
   function finished() {
     progress.complete(video?.currentTime ?? remoteTime);
+    // For den-edge's own outcome report (`finish()`): this visit reached a natural end, whether or not there is
+    // a next episode to count down to.
+    reachedNaturalEnd = true;
     if (!onnext || ended) return;
     // A second end (the last seconds replayed, or the cast page's `den-ended` again) starts the count over; left
     // running, the first would advance again every second after it.
@@ -1525,8 +1604,42 @@
     clearInterval(noticeTimer);
     clearTimeout(retry);
     report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
+    const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;
+    // den-edge's own outcome report (den-edge#262): once per visit, only when a session was actually asked for —
+    // a player opened and closed before `begin()` got anywhere has nothing to say. `hls` still names the engine
+    // that was playing; read before it is destroyed and nulled, below.
+    if (sessionRoute !== undefined) {
+      const subtitleLanguage = reportableLanguage(subtitleChoice);
+      sendPlaybackOutcome({
+        engine: hls ? 'hls.js' : 'native',
+        route: routeKind(sessionRoute),
+        stallCount: stats?.stallCount ?? 0,
+        stalledMs: Math.round(stats?.stalledMs ?? 0),
+        endReason: failure ? 'error' : reachedNaturalEnd ? 'finished' : 'user_exit',
+        errorCode: lastFatal?.code,
+        hlsFatalType: lastFatal?.hls?.type,
+        hlsFatalDetail: lastFatal?.hls?.detail,
+        secondsPlayed: Math.round(playedSecs),
+        subtitleLanguage,
+        // `lastSubtitleSource` is only ever `den_subtitles`; a language showing with no such source is this
+        // page's own embedded rendition.
+        subtitleSource: lastSubtitleSource ?? (subtitleLanguage ? 'release' : undefined),
+        subtitleSwitched: subtitleSwitchedMidPlay,
+        subtitleTurnedOff: subtitleTurnedOffMidPlay,
+        subtitleLoadFailed: subtitleLoadFailedFlag,
+      });
+    }
+    if (castFunnel) {
+      sendCastReport({
+        kind: 'chromecast',
+        reached: castFunnel,
+        failed: castFailed,
+        failReason: castFailReason,
+        sessionSecs: castSessionSecs > 0 ? Math.round(castSessionSecs) : undefined,
+      });
+    }
     hls?.destroy();
     hls = undefined;
     // A receiver fetches independently. Closing the sender page must not turn its signed URL into a 410.
@@ -1843,7 +1956,15 @@
               aria-label="Subtitles"
               value={subtitleChoice ?? ''}
               onchange={(event) => {
-                subtitleChoice = event.currentTarget.value || null;
+                const next = event.currentTarget.value || null;
+                // A change once playback has already shown a frame is a signal the file first chosen was wrong,
+                // for den-edge's own outcome report (`finish()`) — the very first pick, before anything played, is
+                // just Settings' preference taking effect and says nothing about it.
+                if (played && next !== subtitleChoice) {
+                  if (next === null) subtitleTurnedOffMidPlay = true;
+                  else subtitleSwitchedMidPlay = true;
+                }
+                subtitleChoice = next;
                 applySubtitles();
                 sendSubtitleChoice();
               }}

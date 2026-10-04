@@ -156,6 +156,9 @@ pub async fn handle(State(state): State<Arc<AppState>>, mut req: Request) -> Res
             ("tmdb", resp.headers().get("x-den-tmdb").and_then(|v| v.to_str().ok())),
             ("file", resp.extensions().get::<crate::web::Served>().map(|s| s.0)),
             ("startup", resp.extensions().get::<StartupTag>().map(|s| s.0.as_str())),
+            ("pageErr", resp.extensions().get::<PageErrorTag>().map(|s| s.0.as_str())),
+            ("playback", resp.extensions().get::<PlaybackOutcomeTag>().map(|s| s.0.as_str())),
+            ("cast", resp.extensions().get::<CastTag>().map(|s| s.0.as_str())),
         ]
         .into_iter()
         .filter_map(|(name, value)| Some((name, value?)))
@@ -349,10 +352,25 @@ pub struct ListenerScope(pub &'static str);
 #[derive(Clone)]
 pub struct StartupTag(pub String);
 
+/// A browser's page error (`diagnostics.rs`), carried on the response for the request log like `StartupTag`.
+#[derive(Clone)]
+pub struct PageErrorTag(pub String);
+
+/// A browser's playback-session outcome (`diagnostics.rs`), carried on the response for the request log like
+/// `StartupTag`.
+#[derive(Clone)]
+pub struct PlaybackOutcomeTag(pub String);
+
+/// A browser's cast or AirPlay attempt (`diagnostics.rs`), carried on the response for the request log like
+/// `StartupTag`.
+#[derive(Clone)]
+pub struct CastTag(pub String);
+
 /// The one line each request is logged as. Tags go on the end as `name=value`: an error answer's code, so a
 /// refusal can be told from another with the same status; a public session's listener scope; whether a TMDB
-/// answer came from the cache (`x-den-tmdb`); which kind of web-app file was served; and a browser's playback-
-/// startup timing (`startup.rs`). Nothing of the request's body or address does.
+/// answer came from the cache (`x-den-tmdb`); which kind of web-app file was served; a browser's playback-
+/// startup timing (`startup.rs`); and a page error, a playback outcome or a cast attempt (`diagnostics.rs`).
+/// Nothing of the request's body or address does.
 fn log_line(method: &Method, route: &str, status: u16, ms: u128, rid: &str, tags: &[(&str, &str)]) -> String {
     let mut line = format!("{method} {route} {status} {ms}ms rid={rid}");
     for (name, value) in tags {
@@ -499,6 +517,17 @@ async fn dispatch(state: &Arc<AppState>, req: Request, route: &'static str, rid:
     // Fire-and-forget: a browser's own playback-startup timing, for the request log alone (den-edge#234).
     if path == "/playback/startup" {
         return crate::startup::handle(state, req).await;
+    }
+    // Fire-and-forget: a page error, a playback session's outcome, or a cast/AirPlay attempt — den-edge's own
+    // log otherwise sees none of them (den-edge#262).
+    if path == "/playback/page-error" {
+        return crate::diagnostics::handle_page_error(state, req).await;
+    }
+    if path == "/playback/outcome" {
+        return crate::diagnostics::handle_playback_outcome(state, req).await;
+    }
+    if path == "/playback/cast" {
+        return crate::diagnostics::handle_cast(state, req).await;
     }
     if path.starts_with("/link") {
         return crate::link::handle(state, req).await;
@@ -654,9 +683,12 @@ impl Face {
             || path.starts_with("/ratings/")
             || path.starts_with("/metadata/")
             || path.starts_with("/skipdb/")
-            // The player's startup-timing beacon: wherever it plays from (home, the tailnet, away), not just
-            // this half.
+            // The player's startup-timing beacon, and its sibling reports (`diagnostics.rs`): wherever it plays
+            // from (home, the tailnet, away), not just this half.
             || path == "/playback/startup"
+            || path == "/playback/page-error"
+            || path == "/playback/outcome"
+            || path == "/playback/cast"
             // An assistant's server asks for tokens and calls `/mcp` on whichever public name it was given, and its
             // person approves in the web app: the connector answers on every name, its own gate being the token.
             || crate::oauth::is_path(path);
@@ -755,6 +787,9 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/ratings/") => "/ratings",
         p if p.starts_with("/skipdb/") => "/skipdb",
         "/playback/startup" => "/playback/startup",
+        "/playback/page-error" => "/playback/page-error",
+        "/playback/outcome" => "/playback/outcome",
+        "/playback/cast" => "/playback/cast",
         // One label each: what happens inside them is their own repo's log to keep.
         p if p.starts_with("/scout/") => "/scout",
         p if p.starts_with("/atlas/") => "/atlas",
@@ -799,7 +834,12 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/lib/:id/rewrite/:rid/commit"
         | "/pair/new"
         | "/pair/open" => Some(POST),
-        "/metadata/title/query" | "/tmdb/warm" | "/playback/startup" => Some(POST),
+        "/metadata/title/query"
+        | "/tmdb/warm"
+        | "/playback/startup"
+        | "/playback/page-error"
+        | "/playback/outcome"
+        | "/playback/cast" => Some(POST),
         "/metadata/title" => Some(PUT),
         "/link" | "/pair/:sid" | "/lib/:id" | "/lib/:id/rewrite/:rid" | "/sync/:id" | "/grant/:gid" => {
             Some(DELETE)
@@ -815,7 +855,7 @@ fn body_cap(route: &str) -> usize {
         // path takes.
         "/atlas" => crate::relay::RECOMMEND_BODY_BYTES,
         // A dozen durations and a few short labels: a few hundred bytes, generously.
-        "/playback/startup" => 2048,
+        "/playback/startup" | "/playback/page-error" | "/playback/outcome" | "/playback/cast" => 2048,
         _ => MAX_BODY_BYTES,
     }
 }
@@ -1065,6 +1105,35 @@ pub mod tests {
         assert_eq!(
             log_line(&Method::POST, "/playback/startup", 204, 3, "ab12", &[("startup", "session:1234")]),
             "POST /playback/startup 204 3ms rid=ab12 startup=session:1234"
+        );
+    }
+
+    #[test]
+    fn the_diagnostics_reports_are_small_post_only_routes_on_every_face() {
+        for route in ["/playback/page-error", "/playback/outcome", "/playback/cast"] {
+            assert_eq!(route_label(route), route);
+            assert_eq!(allowed_methods(route), Some(&[Method::POST][..]));
+            assert_eq!(body_cap(route), 2048);
+            for face in [Face::Web, Face::Api, Face::Both] {
+                assert!(face.serves(route), "{face:?} must answer {route}");
+            }
+            assert!(!Face::Invalid.serves(route));
+        }
+    }
+
+    #[test]
+    fn a_diagnostics_tag_goes_on_its_own_named_log_field() {
+        assert_eq!(
+            log_line(&Method::POST, "/playback/page-error", 204, 1, "ab12", &[("pageErr", "kind:uncaught")]),
+            "POST /playback/page-error 204 1ms rid=ab12 pageErr=kind:uncaught"
+        );
+        assert_eq!(
+            log_line(&Method::POST, "/playback/outcome", 204, 1, "ab12", &[("playback", "engine:native")]),
+            "POST /playback/outcome 204 1ms rid=ab12 playback=engine:native"
+        );
+        assert_eq!(
+            log_line(&Method::POST, "/playback/cast", 204, 1, "ab12", &[("cast", "kind:airplay")]),
+            "POST /playback/cast 204 1ms rid=ab12 cast=kind:airplay"
         );
     }
 
