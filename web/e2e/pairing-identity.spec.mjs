@@ -95,9 +95,9 @@ test('two browsers pair and join their stable identities through encrypted link 
     await joinerPage.getByRole('button', { name: 'Link', exact: true }).click();
     await expect(devices.getByText('Allow “Joining Browser”?')).toBeVisible();
     await devices.getByRole('button', { name: 'Allow', exact: true }).click();
-    await expect(devices.getByRole('status')).toContainText(
-      'Joining Browser now has your library.',
-    );
+    await expect(
+      devices.getByRole('status').filter({ hasText: 'Joining Browser now has your library.' }),
+    ).toBeVisible();
 
     await expect
       .poll(() =>
