@@ -1,4 +1,4 @@
-<!-- Settings › About, as on the TV: the Terms of Use, the version, and the credits the data's terms ask for — Den's own
+<!-- Settings › About, as on the TV: the Terms of Use and the credits the data's terms ask for — Den's own
      sources first, then each addon's, as its manifest names them (den-spec attribution-v1). -->
 <script lang="ts">
   import SettingRow from './SettingRow.svelte';
@@ -7,13 +7,8 @@
   import tmdbLogo from '../assets/tmdb-logo.svg';
 
   let {
-    edgeVersion,
-    libraryFormat = null,
     credits,
   }: {
-    edgeVersion: string | null;
-    /** The library's wire format (`LibraryLog.wireMinimum`), when one is open. */
-    libraryFormat?: number | null;
     /** What the installed addons credit, in their order. */
     credits: readonly Credit[];
   } = $props();
@@ -64,10 +59,6 @@
       <p class="term">{body}</p>
     {/each}
   </SettingRow>
-  <SettingRow id="version" label="Version" value={edgeVersion ? `den-edge ${edgeVersion}` : ''} />
-  {#if libraryFormat !== null}
-    <SettingRow id="library-format" label="Library format" value={`v${libraryFormat}`} />
-  {/if}
 </SettingsSection>
 
 <!-- TMDB's terms require its credit and logo wherever its data is shown; every other source's statement is as its
