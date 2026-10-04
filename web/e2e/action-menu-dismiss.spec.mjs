@@ -125,6 +125,48 @@ test('a page scroll while the menu is open closes it', async () => {
   }
 });
 
+// den-edge#260: closing on the bare `scroll` event closed the menu on any browser-caused scroll too — not
+// only a swipe or a wheel behind it. The W3C menu's own keyboard model moves focus to an item a short popover
+// has no room for (arrow keys cycling to one near an edge, or the menu simply opening low on a tall page),
+// and the browser scrolls that focus into view by itself — the same `scroll` a real swipe fires, but never
+// the user's own gesture. A keyboard or screen-reader user arrowing through their own open menu got it closed
+// under them.
+test('arrowing between items, and the browser scrolling a focus move into view, never closes the menu', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await openFixture(page);
+    const library = page.getByRole('region', { name: 'Library' });
+    const trigger = library.getByRole('button', { name: 'Actions for Series 701' });
+    await trigger.click();
+    const menu = page.getByRole('menu', { name: 'Actions for Series 701' });
+    await expect(menu).toBeVisible();
+
+    // Series 701's ten items (continueWatching adds one to the usual eight, play/playHere among them) cycle
+    // the W3C way: Home/End, and arrows wrapping at either end — real keyboard use, not a synthetic focus call.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Home');
+    await expect(menu).toBeVisible();
+
+    // The event itself, however it was caused — `scrollIntoView` bringing a focused item on-screen, a
+    // smooth-scroll settling after the page already moved, anything that isn't a wheel/touch/page-scroll key
+    // landing outside the menu. `outsideScrollGesture` no longer answers to this one at all.
+    await page.evaluate(() => window.dispatchEvent(new Event('scroll')));
+    await expect(menu).toBeVisible();
+
+    // Still closeable by a real dismissal — this isn't a menu stuck open, only one no longer confused by a
+    // scroll that was never anyone tapping or scrolling outside it.
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('desktop: clicking outside the menu closes it without activating the poster underneath, and Escape still closes it and returns focus', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

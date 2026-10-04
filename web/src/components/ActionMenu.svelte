@@ -64,15 +64,22 @@
     // is swallowed only when the `pointerdown` that preceded it asked for it.
     document.addEventListener('pointerdown', outsidePointerDown, true);
     document.addEventListener('click', outsideClick, true);
-    // The menu has no scroll of its own, so any scroll reaching here is the page behind it, or another row's
-    // carousel — a swipe that never produced a `click` at all. `scroll` doesn't bubble to `window` from an
-    // arbitrary element, only capturing does.
-    window.addEventListener('scroll', outsideScroll, { capture: true, passive: true });
+    // The user's own scroll gestures landing outside the menu — a wheel, a touch drag, a keyboard page-scroll
+    // key — close it, the same as a tap outside would (den-edge#260). Not the `scroll` event itself: that
+    // fires for the *result* of scrolling as much as the cause, and the W3C menu's own arrow-key model moves
+    // focus to items a short popover never has room for, which the browser then scrolls into view by itself
+    // (so does `scrollIntoView`, so does a smooth-scroll settling) — none of that is the page moving behind
+    // the menu, so closing on it would drop a keyboard or screen-reader user out of their own menu mid-press.
+    window.addEventListener('wheel', outsideScrollGesture, { capture: true, passive: true });
+    window.addEventListener('touchmove', outsideScrollGesture, { capture: true, passive: true });
+    window.addEventListener('keydown', outsideScrollGesture, true);
     return () => {
       query?.removeEventListener('change', update);
       document.removeEventListener('pointerdown', outsidePointerDown, true);
       document.removeEventListener('click', outsideClick, true);
-      window.removeEventListener('scroll', outsideScroll, true);
+      window.removeEventListener('wheel', outsideScrollGesture, true);
+      window.removeEventListener('touchmove', outsideScrollGesture, true);
+      window.removeEventListener('keydown', outsideScrollGesture, true);
     };
   });
 
@@ -184,9 +191,17 @@
     event.stopPropagation();
   }
 
-  function outsideScroll(event: Event) {
+  /** The keys that page-scroll an element with no handler of its own — Home/End and the arrows are excluded:
+   * inside the menu they navigate it instead (`onMenuKeydown`), and outside it they are as likely to be
+   * moving a caret or another widget's selection as scrolling the page. */
+  const SCROLL_KEYS = new Set([' ', 'PageUp', 'PageDown']);
+
+  /** A wheel, a touch drag, or a keyboard page-scroll key, landing outside the menu and its own trigger. */
+  function outsideScrollGesture(event: WheelEvent | TouchEvent | KeyboardEvent) {
     if (!menu?.matches(':popover-open')) return;
-    if (event.target instanceof Node && menu.contains(event.target)) return;
+    if (event instanceof KeyboardEvent && !SCROLL_KEYS.has(event.key)) return;
+    const target = event.target;
+    if (target instanceof Node && (menu.contains(target) || trigger?.contains(target))) return;
     close();
   }
 
