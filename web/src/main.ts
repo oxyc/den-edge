@@ -5,7 +5,7 @@ import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links, readPendingReset } from './lib/links.svelte';
 import { freshOn, startBillboard } from './lib/recommend';
-import { recoverChunkFailure, releaseWaiting, reloadOnce, swapWhileHidden } from './lib/release';
+import { recoverChunkFailure, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
@@ -42,29 +42,21 @@ if (!target) throw new Error('index.html has no #app element');
 target.replaceChildren();
 mount(App, { target });
 
-// A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has, so a newer release is
-// waiting; this reloads onto it at once, whole page or not, when nothing on screen would be lost — not only when the
-// screen the person opened is the one that failed (`ScreenLoading`) — so a chunk a row or dialog needed doesn't stay
-// missing for the rest of the visit. Offline, the file is simply out of reach, and reloading would not bring it back.
-// The event is left uncancelled: cancelling it makes Vite's import resolve to `undefined` rather than reject
-// (`handlePreloadError` in Vite 8), and whatever asked for it then never learns it failed.
+// A tab open since before a release can ask for a chunk den-edge no longer has (its image only ever carries the
+// current build's `/web`), so a newer release is waiting; this reloads onto it at once, whole page or not, when
+// nothing on screen would be lost — not only when the screen the person opened is the one that failed
+// (`ScreenLoading`) — so a chunk a row or dialog needed doesn't stay missing for the rest of the visit. Offline,
+// the file is simply out of reach, and reloading would not bring it back. The event is left uncancelled:
+// cancelling it makes Vite's import resolve to `undefined` rather than reject (`handlePreloadError` in Vite 8),
+// and whatever asked for it then never learns it failed.
 window.addEventListener('vite:preloadError', () => {
   if (navigator.onLine) recoverChunkFailure();
 });
 
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    if (event.data === 'den:release') releaseWaiting();
-    // The check met Cloudflare Access's login: the session has expired, and nothing on the page works until it is
-    // renewed.
-    else if (event.data === 'den:reload') reloadOnce();
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) swapWhileHidden();
-  });
-  navigator.serviceWorker
-    // The worker chooses every app-shell response. Never let a browser or intermediary freshness lifetime
-    // suppress its update check; the origin and Cloudflare rule also mark this exact mutable file no-cache.
-    .register('/sw.js', { updateViaCache: 'none' })
-    .catch((error: unknown) => console.warn('den: the app shell is not kept offline', error));
-}
+// A tab can sit open across a release: den-edge's image only ever carries the current build's assets, so a
+// chunk this tab has not yet asked for can 404 later (`vite:preloadError`, above). This is the deferred half of
+// recovering from that — applied while hidden, when nothing on screen would be lost — not a service worker's
+// doing: den no longer registers one (`public/sw.js` now only retires a browser's old registration).
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) swapWhileHidden();
+});
