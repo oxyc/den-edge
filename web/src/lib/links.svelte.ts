@@ -17,6 +17,11 @@ export interface Link {
   /** The local identity last delivered through this link. Missing makes an upgraded client resend it. */
   sentIdentityName?: string;
   sentIdentityDeviceId?: string;
+  /**
+   * A library key opened with a recovery code (den-spec recovery-code §8): held with no TV link. Its inbox and link
+   * keys are random and reach no TV, so nothing is sent through them.
+   */
+  recovered?: boolean;
 }
 
 /**
@@ -322,6 +327,32 @@ export class Links {
     this.moved = null;
     this.settle();
     this.saveLinks();
+  }
+
+  /**
+   * Keep a library key opened with a recovery code, as a link with no TV behind it, and open it from now on. A library
+   * already held is opened, not added twice.
+   */
+  addRecovered(libraryKey: string): void {
+    this.reread();
+    const held = this.list.find((link) => link.libraryKey === libraryKey);
+    if (held) return this.makeCurrent(held.inboxKey);
+    const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+    const inboxKey = Array.from(random(24), (b) => b.toString(16).padStart(2, '0')).join('');
+    this.list = [
+      ...this.list,
+      {
+        inboxKey,
+        name: 'a recovery code',
+        linkedAt: Date.now(),
+        libraryKey,
+        linkKey: btoa(String.fromCharCode(...random(32))),
+        recovered: true,
+      },
+    ];
+    this.moved = null;
+    this.saveLinks();
+    this.makeCurrent(inboxKey);
   }
 
   /** Open `inboxKey`'s library from now on: the link first, so it's the one the app starts with. */

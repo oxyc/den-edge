@@ -3,9 +3,10 @@
      so the TV and this browser share it and den-edge can't read it. What only a TV can do — sign in to Trakt, connect a
      server on its own network — says where to do it. -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, untrack, type Snippet } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Confirm from './Confirm.svelte';
+  import RecoveryRedeem from '../components/RecoveryRedeem.svelte';
   import SettingRow from './SettingRow.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import { KEY_SERVICES, keyStatus, type KeyCheck, type KeyService } from './keys';
@@ -55,6 +56,7 @@
     hasRecoveryCode = false,
     heldReset = false,
     onadoptheld,
+    recovery,
   }: {
     /** Null for a browser using its own library, with no TV linked yet. */
     link: Link | null;
@@ -91,7 +93,20 @@
     heldReset?: boolean;
     /** Use the held reset's new key: the person says this browser made it. */
     onadoptheld?: () => Promise<void>;
+    /** The library's recovery code, under Linked devices; none for a browser's own library. */
+    recovery?: Snippet;
   } = $props();
+
+  /**
+   * A library opened with a recovery code (recovery-code §8 step 5): what this browser saved on its own moves in
+   * first, as when it links a TV; then it opens the recovered library from now on.
+   */
+  async function openRecovered(libraryKey: string): Promise<boolean> {
+    if (onjoin && !(await onjoin(libraryKey))) return false;
+    links.addRecovered(libraryKey);
+    location.assign('/');
+    return true;
+  }
 
   const hostOf = (url: string) => {
     try {
@@ -940,6 +955,8 @@
       </p>
     {/if}
 
+    {@render recovery?.()}
+
     {#if links.list.length}
       <h3>Your library</h3>
       <ul class="list">
@@ -1017,6 +1034,14 @@
         Linked devices and type it here.
       {/if}
     </p>
+
+    <h3>Open with a recovery code</h3>
+    <RecoveryRedeem
+      question={link
+        ? 'This browser switches to that library. Your current library stays listed under Your library.'
+        : 'What you’ve saved here moves into that library, and this browser uses it from then on.'}
+      onopen={openRecovered}
+    />
 
     <h3 id="this-device-label">Name of this device</h3>
     <input

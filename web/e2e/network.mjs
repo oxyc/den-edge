@@ -51,6 +51,10 @@ export async function guardNetwork(page, origin = E2E_ORIGIN) {
       );
     if (url.origin === origin && cards)
       return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    // A library's recovery codes are checked at launch and when Settings opens (`recovery.ts`): none, unless a spec
+    // says otherwise.
+    if (url.origin === origin && url.pathname === '/recovery')
+      return route.fulfill({ json: { entries: [] } });
     // Opening search asks den-edge to open its TMDB connection ahead of the lookups (`warmTmdb`); it answers nothing.
     if (url.origin === origin && url.pathname === '/tmdb/warm')
       return route.fulfill({ status: 204 });

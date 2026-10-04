@@ -3,6 +3,7 @@
   import { browserClock } from './lib/clock';
   import { links } from './lib/links.svelte';
   import { formatCode, join, parseCode, type JoinError } from './lib/pair';
+  import RecoveryRedeem from './components/RecoveryRedeem.svelte';
 
   /** Inside another screen's dialog (the assistant consent page), which says where the code comes from itself. */
   let { embedded = false }: { embedded?: boolean } = $props();
@@ -128,6 +129,13 @@
   {#if failure}
     <p class="error" role="alert">{messages[failure]}</p>
   {/if}
+  {#if !embedded}
+    <!-- No TV at hand, or a new Apple ID: the code opens the library from den-edge alone (recovery-code §8). -->
+    <details class="recovery">
+      <summary>Open with a recovery code</summary>
+      <RecoveryRedeem onopen={(key) => (links.addRecovered(key), true)} />
+    </details>
+  {/if}
   <!-- Someone who only wants to look around should not be stopped by a pairing step. Dismissing is
        remembered, so the invitation belongs to a first visit; pairing stays under Settings afterwards. -->
   {#if !embedded}
@@ -251,6 +259,17 @@
 
   .error {
     color: var(--danger);
+  }
+
+  .recovery {
+    margin-top: 24px;
+    text-align: left;
+  }
+
+  .recovery summary {
+    color: var(--muted);
+    text-align: center;
+    cursor: pointer;
   }
 
   .quiet {

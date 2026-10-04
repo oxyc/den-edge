@@ -11,6 +11,7 @@
   import ContentSection from './settings/ContentSection.svelte';
   import ImportSection from './settings/ImportSection.svelte';
   import PlaybackSection from './settings/PlaybackSection.svelte';
+  import RecoveryCode from './settings/RecoveryCode.svelte';
   import SettingsNav from './settings/SettingsNav.svelte';
   import SharingSection from './settings/SharingSection.svelte';
   import {
@@ -385,7 +386,11 @@
       {disabled}
       {write}
       removeDevice={removeLibraryDevice}
+      recovery={link && !session.local ? recovery : undefined}
     />
+    {#snippet recovery()}
+      {#if link}<RecoveryCode {link} {log} {clock} />{/if}
+    {/snippet}
     <SharingSection {link} {plugins} {routes} ready={!!log} />
     <AssistantsSection />
     <PlaybackSection {prefs} {disabled} save={savePrefs} />

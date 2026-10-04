@@ -36,6 +36,7 @@
     const deviceId = identityClock.device;
     if (
       !links.list.includes(link) ||
+      link.recovered ||
       sendingIdentity.has(link.inboxKey) ||
       (link.sentIdentityName === name && link.sentIdentityDeviceId === deviceId)
     )
