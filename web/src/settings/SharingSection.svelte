@@ -226,6 +226,12 @@
     return parts.join(' · ');
   };
 
+  /** "12 plays · 9 h this month · 48 plays total": never a title, only counts. Null before a guest ever played. */
+  const usage = (grant: Grant): string | null =>
+    grant.playsTotal
+      ? `${grant.playsThisMonth} plays · ${grant.hoursThisMonth} h this month · ${grant.playsTotal} plays total`
+      : null;
+
   // The guest's side.
   let pasted = $state('');
   let redeeming = $state(false);
@@ -405,7 +411,7 @@
                     .map((addon) => NAMES[addon].label)
                     .join(', ')}{#if grant.devices > 1}
                     · {grant.deviceCount} of {grant.devices} devices{/if}</small
-                ></span
+                >{#if usage(grant)}<small>{usage(grant)}</small>{/if}</span
               >
               {#if grant.status !== 'revoked'}
                 {@const code = grant.status === 'invited' ? codes[grant.gid] : undefined}

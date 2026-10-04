@@ -243,6 +243,7 @@ fn is_control(route: &str) -> bool {
             | "/sync/:id"
             | "/grant/redeem"
             | "/grant/addons"
+            | "/grant/usage"
             | "/grant/:gid"
             | "/lib/:id/grants"
             | "/lib/:id/grants/:gid"
@@ -727,6 +728,7 @@ pub fn route_label(path: &str) -> &'static str {
         p if p.starts_with("/sync/") => "/sync/:id",
         "/grant/redeem" => "/grant/redeem",
         "/grant/addons" => "/grant/addons",
+        "/grant/usage" => "/grant/usage",
         p if p.starts_with("/grant/") && p.matches('/').count() == 2 => "/grant/:gid",
         // Before the `/lib/:id/…` labels below: `/lib/<id>/grants/<gid>` has four slashes and would read as "other".
         p if crate::grants::is_host_path(p) && p.matches('/').count() == 3 => "/lib/:id/grants",
@@ -786,7 +788,7 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         // A drain is one queue by its header (GET) or several by their keys in the body (POST).
         "/lib/:id/grants" | "/inbox/drain" => Some(GET_POST),
         "/lib/:id/grants/:gid" => Some(PUT_DELETE),
-        "/grant/redeem" | "/reel/activate" => Some(POST),
+        "/grant/redeem" | "/reel/activate" | "/grant/usage" => Some(POST),
         "/grant/addons" => Some(GET),
         "/health" | "/version" | "/config" | "/metrics" | "/lib/:id/changes" | "/tmdb" => Some(GET),
         "/pair/:sid/:slot" => Some(GET_PUT),
