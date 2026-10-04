@@ -207,6 +207,23 @@ export function seriesPresentation(
   };
 }
 
+/**
+ * The series "Seen" pill, once the episode layout is known (den-edge#258): a title's bare row flag can read
+ * `watched` with none of its episodes marked — the TV's Watchlist "Mark Watched" writes only that row, never
+ * the episodes it stands for — which then shows Seen over an episode list with nothing checked. den-core's own
+ * `continue_entry` already prefers the episodes once a layout is known ("where the layout is known, the
+ * episodes decide"); this follows the same rule for display, rather than trusting the flag on its own.
+ *
+ * `undefined` for a movie, or a series TMDB has listed no aired episodes for yet: nothing to prefer over the
+ * flag, so the raw status stands.
+ */
+export function seriesSeenOverride(series: Pick<
+  ReturnType<typeof seriesPresentation>,
+  'watched' | 'total'
+> | null): boolean | undefined {
+  return series && series.total > 0 ? series.watched === series.total : undefined;
+}
+
 export interface Ratings {
   imdb?: number;
   votes?: number;

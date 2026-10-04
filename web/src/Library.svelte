@@ -399,8 +399,14 @@
     }
   }
 
+  /**
+   * Unlike every other library write here, this one has no toast of its own (den-edge#258): the episode row
+   * that triggered it is usually far below the hero where `failure` renders, so a refusal was invisible — the
+   * press looked like it did nothing, because from here down the page nothing visibly did. `session.notify`
+   * puts the same word where the press happened, as the poster ⋯ menu's own writes already do.
+   */
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
-    if (!log) return;
+    if (!log) return false;
     try {
       await ensureSyncPolicy();
       remember(title);
@@ -408,9 +414,12 @@
       clock.see(log.newestStamp());
       const at = clock.issue();
       const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
-      return event ? await save(event, true) : true;
+      const ok = event ? await save(event, true) : true;
+      if (!ok) session.notify(SAVE_FAILED);
+      return ok;
     } catch {
       failure = SAVE_FAILED;
+      session.notify(SAVE_FAILED);
       return false;
     }
   }
