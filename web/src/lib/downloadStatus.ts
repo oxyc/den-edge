@@ -165,6 +165,20 @@ export function releaseLine(download: Download): string | undefined {
   return parts.length ? parts.join(' · ') : undefined;
 }
 
+export type DownloadPhase = 'queued' | 'downloading' | 'trouble' | 'ready';
+
+/**
+ * The four states a download card's own badge draws an icon for — queued or pending, downloading, stalled or
+ * failed, and downloaded or ready — never the library's watched checkmark, which says nothing about a download
+ * (`PosterCard`'s `standing` is a different, unrelated badge).
+ */
+export function phase(status: DownloadState, answer?: Preparation): DownloadPhase {
+  if (isTrouble(status, answer)) return 'trouble';
+  if (status.state === 'ready') return 'ready';
+  if (status.state === 'fetching') return 'downloading';
+  return 'queued';
+}
+
 /** Whether this reads as trouble rather than a wait: what turns the line orange. */
 export function isTrouble(status: DownloadState, answer?: Preparation): boolean {
   switch (status.state) {

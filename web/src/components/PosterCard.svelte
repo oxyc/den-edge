@@ -24,6 +24,7 @@
     continueWatching = false,
     menu = true,
     onopen,
+    downloadBadge,
   }: {
     title: Title;
     caption?: string;
@@ -42,6 +43,12 @@
     menu?: boolean;
     /** Called when this card's link is followed. */
     onopen?: () => void;
+    /**
+     * This card is a download row (`DownloadsPage`): draws the download's own state in the badge corner —
+     * queued, downloading, stalled/failed or ready — instead of the library's watched/watchlist/in-progress
+     * standing, which is the *title's* state, not the download's, and must never be shown as a checkmark here.
+     */
+    downloadBadge?: { state: 'queued' | 'downloading' | 'trouble' | 'ready'; label: string };
   } = $props();
 
   const titleActions = titleActionsContext();
@@ -69,7 +76,9 @@
   const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
   const faded = $derived(availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
-  const standing = $derived(libraryStandings.of(title));
+  // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
+  // earlier season, which says nothing about the episode this card is fetching.
+  const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
   const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
   $effect(() => availability.want(title));
 
@@ -176,7 +185,31 @@
     {#if live}
       <span class="live" class:raised={progress}>▶ {live}</span>
     {/if}
-    {#if standing}
+    {#if downloadBadge}
+      <span
+        class="standing download-{downloadBadge.state}"
+        class:raised={progress}
+        role="img"
+        aria-label={downloadBadge.label}
+        title={downloadBadge.label}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          {#if downloadBadge.state === 'queued'}
+            <circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5l3.2 2" />
+          {:else if downloadBadge.state === 'downloading'}
+            <path d="M12 4.5v10m0 0l-3.5-3.5m3.5 3.5l3.5-3.5" /><path d="M5.5 18.5h13" />
+          {:else if downloadBadge.state === 'trouble'}
+            <path d="M12 8v4.5" /><path d="M12 16v.01" /><circle cx="12" cy="12" r="8.5" />
+          {:else}
+            <path
+              class="filled"
+              d="M12 4v9.5l-3.5-3.5-1.4 1.4 5.9 5.9 5.9-5.9-1.4-1.4-3.5 3.5V4z"
+            />
+            <path d="M5.5 19.5h13" />
+          {/if}
+        </svg>
+      </span>
+    {:else if standing}
       <span
         class="standing"
         class:raised={progress}
@@ -405,6 +438,15 @@
 
   .standing .filled {
     fill: var(--fg);
+  }
+
+  /* Stalled or failed: the same orange `DownloadStatus` turns its headline. */
+  .standing.download-trouble svg {
+    stroke: #ffc177;
+  }
+
+  .standing.download-trouble .filled {
+    fill: #ffc177;
   }
 
   .holder {
