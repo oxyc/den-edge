@@ -6,6 +6,7 @@
 
 mod billboard;
 mod cache;
+mod diagnostics;
 mod grants;
 mod handler;
 mod hold;

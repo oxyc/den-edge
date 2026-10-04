@@ -149,6 +149,16 @@ export class PlaybackRecorder {
     return this.open?.stall;
   }
 
+  /** `stallCount` and `stalledMs` so far, counting a stall still under way through `now` — for a one-shot
+   * summary elsewhere (Player.svelte's den-edge outcome report) that wants the numbers without a full
+   * `snapshot`, which would also schedule a den-remux report this call must not cause. */
+  liveStalls(now: number): { stallCount: number; stalledMs: number } {
+    return {
+      stallCount: this.stallCount,
+      stalledMs: this.stalledMs + (this.open ? Math.round(now - this.open.since) : 0),
+    };
+  }
+
   /** Playing again at `now`. */
   resumed(now: number) {
     if (!this.open) return;
@@ -349,6 +359,8 @@ export interface Watcher {
   stop(): void;
   /** Count a report sent to this session from elsewhere, against den-remux's MAX_REPORTS. */
   spent(): void;
+  /** `stallCount` and `stalledMs` so far, for den-edge's own one-shot outcome report — never den-remux's. */
+  stats(): { stallCount: number; stalledMs: number };
 }
 
 /** Record a session's playback into reports (`ReportSchedule`). Nothing here waits on or retries a send. */
@@ -511,5 +523,6 @@ export function watchPlayback(options: WatchOptions): Watcher {
       listening.abort();
     },
     spent: () => schedule.spent(),
+    stats: () => recorder.liveStalls(now()),
   };
 }

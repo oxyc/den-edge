@@ -60,6 +60,13 @@ export interface Session {
    * why `maxSubtitlesPerLanguage` cannot be honoured here however it is set.
    */
   subtitles?: { language: string; name: string }[];
+  /**
+   * `den_subtitles` when this session was opened with a den-subtitles install offered as a candidate
+   * (`startSession`) — never which install — for the player's own den-edge outcome report
+   * (`diagnosticsReport.ts`). Absent otherwise; the player decides `release` itself from whether a subtitle is
+   * actually showing (`subtitleChoice`), which this alone cannot say.
+   */
+  subtitleSource?: 'den_subtitles';
   /** Bits a second a copy needs to start within 10 s and never run dry; null for a transcode or an unknown one. */
   need?: number | null;
   /** Seconds to buffer before playing, on the link this browser named, so it then plays through; null or absent: none. */
@@ -573,6 +580,10 @@ export async function startSession(
       }
       // den-edge#234's step 0: den-remux's own resolve/open/init timing, read back for the startup-timing report.
       session.startupTiming = res.headers.get('server-timing') ?? undefined;
+      // Only ever `den_subtitles`, and only when this exact session was opened with one: this says nothing about
+      // whether a subtitle is actually showing (the player's own choice, `subtitleChoice`), only where this
+      // session's own track would come from if one is. The player fills in `release` itself once it knows that.
+      session.subtitleSource = candidate ? 'den_subtitles' : undefined;
       if (candidate) subtitleVerdicts.set(candidate, true);
       // den-remux answers with an absolute path on its own host; on another origin it needs that host in front.
       const mediaBase = session.publicBase ?? (/^https?:/.test(base) ? base : undefined);
