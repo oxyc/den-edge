@@ -147,6 +147,80 @@ struct Record {
     access_until: Option<u64>,
     redeemed_at: Option<u64>,
     revoked_at: Option<u64>,
+    /// Plays and seconds watched (oxyc/den#100's follow-up): never a title, a release or an address — only
+    /// counts. Kept with the record, so revoking or letting a grant end leaves them in place; they are gone
+    /// only once the sweep reaps the whole record.
+    #[serde(default)]
+    usage: Usage,
+}
+
+/// How many months of a grant's playback a host can see, this one included: "this month" and eleven before it.
+const MAX_MONTHS: usize = 12;
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Usage {
+    starts: u64,
+    seconds: u64,
+    /// Newest first, at most `MAX_MONTHS` of them.
+    months: Vec<MonthBucket>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct MonthBucket {
+    /// A UTC month as `year * 12 + (month - 1)`, so the next one is always `month + 1`.
+    month: i64,
+    starts: u64,
+    seconds: u64,
+}
+
+/// `now`'s UTC month, as `year * 12 + (month - 1)`: Howard Hinnant's `civil_from_days`, so a bucket rolls at UTC
+/// midnight on the first wherever a guest or this box happens to be.
+fn month_index(now: u64) -> i64 {
+    let days = (now / DAY_MS) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + i64::from(month <= 2);
+    year * 12 + (month - 1)
+}
+
+impl Usage {
+    /// This month's bucket, inserting one if `now` started a new month. Months past `MAX_MONTHS` are dropped,
+    /// oldest first; `now`'s own month is always kept, since it was just inserted or already the newest.
+    fn month_mut(&mut self, now: u64) -> &mut MonthBucket {
+        let m = month_index(now);
+        if let Some(i) = self.months.iter().position(|b| b.month == m) {
+            return &mut self.months[i];
+        }
+        self.months.push(MonthBucket { month: m, starts: 0, seconds: 0 });
+        self.months.sort_by_key(|b| std::cmp::Reverse(b.month));
+        self.months.truncate(MAX_MONTHS);
+        self.months.iter_mut().find(|b| b.month == m).expect("just inserted, and the newest month")
+    }
+
+    fn start(&mut self, now: u64) {
+        self.starts += 1;
+        self.month_mut(now).starts += 1;
+    }
+
+    /// At most a day: one grant's single report cannot be the reason a month's hours run away.
+    fn seconds(&mut self, now: u64, secs: u64) {
+        let secs = secs.min(DAY_MS / 1000);
+        if secs == 0 {
+            return;
+        }
+        self.seconds += secs;
+        self.month_mut(now).seconds += secs;
+    }
+
+    fn this_month(&self, now: u64) -> (u64, u64) {
+        let m = month_index(now);
+        self.months.iter().find(|b| b.month == m).map_or((0, 0), |b| (b.starts, b.seconds))
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -197,6 +271,7 @@ fn ended_at(r: &Record, now: u64) -> Option<u64> {
 }
 
 fn grant_json(state: &AppState, r: &Record, now: u64) -> Value {
+    let (plays_this_month, seconds_this_month) = r.usage.this_month(now);
     json!({
         "gid": r.gid,
         "name": r.name,
@@ -211,6 +286,10 @@ fn grant_json(state: &AppState, r: &Record, now: u64) -> Value {
         "devices": r.max_devices,
         "deviceCount": r.devices.len(),
         "lastUsedAt": crate::lock(&state.grants.last_used).get(&r.gid).copied(),
+        "playsTotal": r.usage.starts,
+        "hoursTotal": r.usage.seconds / 3600,
+        "playsThisMonth": plays_this_month,
+        "hoursThisMonth": seconds_this_month / 3600,
     })
 }
 
@@ -375,12 +454,50 @@ pub async fn handle(state: &AppState, req: Request) -> Response {
     match (path.as_str(), req.method().clone()) {
         ("/grant/redeem", Method::POST) => redeem(state, req).await,
         ("/grant/addons", Method::GET | Method::HEAD) => addons(state, req).await,
+        ("/grant/usage", Method::POST) => usage_report(state, req).await,
         (p, Method::DELETE) if p.strip_prefix("/grant/").is_some_and(valid_gid) => {
             leave(state, req, &p["/grant/".len()..]).await
         }
-        ("/grant/redeem" | "/grant/addons", _) => method_not_allowed(),
+        ("/grant/redeem" | "/grant/addons" | "/grant/usage", _) => method_not_allowed(),
         _ => not_found(),
     }
+}
+
+/// One playback start, counted once per session (never per segment) and against the grant alone — nothing of what
+/// played or from where. Silently dropped for a grant this box no longer has: usage is best-effort telemetry, never
+/// a reason to fail a stream already under way.
+pub async fn record_start(state: &AppState, gid: &str) {
+    let now = state.now();
+    let _lock = state.grants.lock.lock().await;
+    let Ok(Some(mut record)) = load(state, gid).await else { return };
+    record.usage.start(now);
+    let _ = save(state, &record).await;
+}
+
+/// den-remux's report that one of a grant's sessions ended (`oxyc/den#100`'s follow-up): how long it played, and
+/// nothing else — den-remux never learns a title either, so there is nothing more it could send. Gated the same way
+/// `kill_remux` is trusted the other way: the one shared secret, presented here as den-remux's own call rather than
+/// den-edge's.
+async fn usage_report(state: &AppState, req: Request) -> Response {
+    let Some(secret) = state.remux_edge_secret.as_deref() else { return not_found() };
+    let presented = req.headers().get("x-den-edge-secret").and_then(|v| v.to_str().ok());
+    if !presented.is_some_and(|p| constant_time_eq(p.as_bytes(), secret.as_bytes())) {
+        return not_found();
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else { return bad_request() };
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return bad_request() };
+    let (Some(gid), Some(seconds)) = (
+        body.get("gid").and_then(Value::as_str).filter(|g| valid_gid(g)),
+        body.get("seconds").and_then(Value::as_u64),
+    ) else {
+        return bad_request();
+    };
+    let now = state.now();
+    let _lock = state.grants.lock.lock().await;
+    let Ok(Some(mut record)) = load(state, gid).await else { return no_content() };
+    record.usage.seconds(now, seconds);
+    let _ = save(state, &record).await;
+    no_content()
 }
 
 // ---- the host's side
@@ -505,6 +622,7 @@ async fn create(state: &AppState, host: &str, req: Request) -> Response {
         access_until: None,
         redeemed_at: None,
         revoked_at: None,
+        usage: Usage::default(),
     };
     if body.as_object().and_then(|map| apply(&mut record, map, now, true)).is_none() {
         return bad_request();
@@ -2653,5 +2771,163 @@ mod tests {
                 "{host}: reached the handler"
             );
         }
+    }
+
+    // ---- usage counts (oxyc/den#100's follow-up)
+
+    fn edge_secret(h: &mut Harness) {
+        Arc::get_mut(&mut h.state).unwrap().remux_edge_secret = Some("remux-shares-this".into());
+    }
+
+    #[tokio::test]
+    async fn a_start_and_a_usage_report_count_once_each_never_a_title() {
+        let mut h = harness().await;
+        edge_secret(&mut h);
+        let (gid, _) = redeemed(&h, json!({})).await;
+
+        record_start(&h.state, &gid).await;
+        record_start(&h.state, &gid).await;
+        let reported = h
+            .send(
+                "POST",
+                "/grant/usage",
+                Some(json!({ "gid": gid, "seconds": 1800, "title": "Arrival" }).to_string()),
+                &[("x-den-edge-secret", "remux-shares-this"), ("content-type", "application/json")],
+            )
+            .await;
+        assert_eq!(reported.status(), StatusCode::NO_CONTENT);
+
+        let (status, listed) = host_call(&h, "GET", "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let grant = &listed["grants"][0];
+        assert_eq!(grant["playsTotal"], 2, "{grant}");
+        assert_eq!(grant["hoursTotal"], 0, "30 minutes rounds down");
+        assert_eq!(grant["playsThisMonth"], 2);
+        assert_eq!(grant["hoursThisMonth"], 0);
+        // A report's extra fields (a title, here) are never read, let alone kept: only `gid` and `seconds` matter.
+        assert!(!listed.to_string().contains("Arrival"));
+        let raw = h.state.store.get(NS, &key(&gid)).await.unwrap().unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("Arrival"),
+            "the record on disk names no title either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_usage_report_needs_the_one_secret_remux_already_holds() {
+        let mut h = harness().await;
+        edge_secret(&mut h);
+        let (gid, _) = redeemed(&h, json!({})).await;
+        let body = json!({ "gid": gid, "seconds": 60 }).to_string();
+
+        // No secret, and the wrong one: both answer as a route that doesn't exist, same as every other guest gate.
+        assert_eq!(
+            h.send("POST", "/grant/usage", Some(body.clone()), &[("content-type", "application/json")])
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            h.send(
+                "POST",
+                "/grant/usage",
+                Some(body),
+                &[("x-den-edge-secret", "nope"), ("content-type", "application/json")]
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(host_call(&h, "GET", "", None).await.1["grants"][0]["playsTotal"], 0);
+
+        // It is never answered to a guest's own credential either: `/grant/usage` takes only the shared secret.
+        let header = format!("{gid}:not-a-real-device-secret");
+        assert_eq!(
+            h.send("GET", "/grant/addons", None, &grant_headers(&header)).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_rolls_into_a_fresh_month_and_keeps_the_running_total() {
+        let mut h = harness().await;
+        edge_secret(&mut h);
+        let (gid, _) = redeemed(&h, json!({})).await;
+
+        record_start(&h.state, &gid).await;
+        assert_eq!(host_call(&h, "GET", "", None).await.1["grants"][0]["playsThisMonth"], 1);
+
+        // Past the month this grant started in: the running total holds, "this month" starts over.
+        h.advance(32 * DAY_MS);
+        record_start(&h.state, &gid).await;
+        let grant = host_call(&h, "GET", "", None).await.1["grants"][0].clone();
+        assert_eq!(grant["playsTotal"], 2, "{grant}");
+        assert_eq!(grant["playsThisMonth"], 1, "the new month's own count, not last month's carried over");
+    }
+
+    #[test]
+    fn a_months_bucket_rolls_at_a_utc_boundary_and_a_known_date_lands_right() {
+        // 2026-01-01T00:00:00Z and the millisecond before it: two different months, exactly at midnight.
+        let jan_2026 = 1_767_225_600_000;
+        assert_eq!(month_index(jan_2026), 2026 * 12);
+        assert_eq!(month_index(jan_2026 - 1), 2026 * 12 - 1);
+        // A leap day (2024-02-29), still read as February.
+        assert_eq!(month_index(1_709_164_800_000), 2024 * 12 + 1);
+    }
+
+    #[test]
+    fn at_most_twelve_months_are_kept_the_newest_always_among_them() {
+        let mut usage = Usage::default();
+        for i in 0..20u64 {
+            usage.start(i * 31 * DAY_MS);
+        }
+        assert_eq!(usage.months.len(), MAX_MONTHS);
+        assert_eq!(usage.starts, 20);
+        let newest = month_index(19 * 31 * DAY_MS);
+        assert!(usage.months.iter().any(|b| b.month == newest));
+    }
+
+    #[test]
+    fn a_single_report_cannot_run_a_months_hours_away() {
+        let mut usage = Usage::default();
+        usage.seconds(0, 999_999_999);
+        assert!(usage.seconds <= DAY_MS / 1000, "{}", usage.seconds);
+        usage.seconds(0, 0);
+        assert_eq!(usage.seconds, DAY_MS / 1000, "a zero report adds nothing");
+    }
+
+    #[tokio::test]
+    async fn revoking_a_grant_keeps_its_counts_until_the_record_itself_is_reaped() {
+        let mut h = harness().await;
+        edge_secret(&mut h);
+        let (gid, _) = redeemed(&h, json!({})).await;
+        record_start(&h.state, &gid).await;
+
+        assert_eq!(host_call(&h, "DELETE", &format!("/{gid}"), None).await.0, StatusCode::NO_CONTENT);
+        let raw = h.state.store.get(NS, &key(&gid)).await.unwrap().unwrap();
+        let record: Record = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(record.usage.starts, 1, "revoking clears devices and installs, never usage");
+
+        // Only the sweep's reap, long after, drops the count along with the rest of the record.
+        h.advance(REAP_MS + DAY_MS);
+        sweep(&h.state).await;
+        assert!(h.state.store.get(NS, &key(&gid)).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_survives_a_restart_because_it_lives_in_the_grant_record() {
+        let dir = temp_dir();
+        let gid = {
+            let mut h = members_only(Harness::in_dir(dir.clone())).await;
+            edge_secret(&mut h);
+            let (gid, _) = redeemed(&h, json!({})).await;
+            record_start(&h.state, &gid).await;
+            record_start(&h.state, &gid).await;
+            gid
+        };
+        let h = Harness::in_dir(dir);
+        let raw = h.state.store.get(NS, &key(&gid)).await.unwrap().unwrap();
+        let record: Record = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(record.usage.starts, 2);
     }
 }
