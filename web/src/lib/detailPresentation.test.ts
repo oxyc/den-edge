@@ -12,6 +12,7 @@ import {
   posterReleaseBadge,
   productionFacts,
   seriesPresentation,
+  seriesSeenOverride,
   titleFacts,
 } from './detailPresentation';
 import { readDetailPrefs } from './prefs';
@@ -348,5 +349,29 @@ describe('markableEpisodes', () => {
     // No season open, and no episodes loaded: nothing to write either way.
     expect(markableEpisodes(null, episodes)).toEqual([]);
     expect(markableEpisodes(1, null)).toEqual([]);
+  });
+});
+
+describe('seriesSeenOverride', () => {
+  // den-edge#258: the TV's Watchlist "Mark Watched" writes a series' bare row flag without touching its
+  // episodes, so a series can read `watched` with nothing in its episode list checked. The pill must follow
+  // the episodes, not the flag, whenever the layout makes that possible to check at all.
+  it('reads unseen once a layout is known and no aired episode is actually marked', () => {
+    expect(seriesSeenOverride(seriesPresentation(detail(), new Map()))).toBe(false);
+  });
+  it('reads seen once every aired episode is marked, whatever the bare row flag says', () => {
+    const episodes = new Map([
+      ['1:1', ep(1, 1, 1)],
+      ['1:2', ep(1, 2, 1)],
+      ['1:3', ep(1, 3, 1)],
+      ['2:1', ep(2, 1, 1)],
+    ]);
+    expect(seriesSeenOverride(seriesPresentation(detail(), episodes))).toBe(true);
+  });
+  it('leaves the raw flag alone for a movie, and for a series TMDB has no aired episodes for yet', () => {
+    expect(seriesSeenOverride(null)).toBeUndefined();
+    expect(
+      seriesSeenOverride(seriesPresentation(detail({ first_air_date: '2099-01-01' }), new Map())),
+    ).toBeUndefined();
   });
 });

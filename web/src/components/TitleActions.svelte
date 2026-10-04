@@ -29,6 +29,7 @@
     detailPage = false,
     playLabel = 'Play',
     compact = false,
+    seenOverride = undefined,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -75,6 +76,15 @@
      * slide, which has its own Play and More beside them and no room for words.
      */
     compact?: boolean;
+    /**
+     * The series "Seen" pill, when the caller knows the episode layout and it disagrees with the title's own
+     * bare flag (den-edge#258): a series can read `watched` on its row — the TV's Watchlist "Mark Watched"
+     * writes only that, never the episodes — while none of its episodes carry a mark. den-core's own policy
+     * already treats the episodes as authoritative once the layout is known (`continue_entry`'s "where the
+     * layout is known, the episodes decide"); this pill follows the same rule rather than the raw flag, so it
+     * can never read Seen over an episode list showing nothing watched.
+     */
+    seenOverride?: boolean;
   } = $props();
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
@@ -94,7 +104,8 @@
     notify?.('Link copied');
   }
 
-  const { listed, seen, reaction } = $derived(titleState(row));
+  const { listed, seen: flagSeen, reaction } = $derived(titleState(row));
+  const seen = $derived(seenOverride ?? flagSeen);
   const reactions: [Reaction, string][] = [
     ['dislike', 'Not for me'],
     ['like', 'Like'],

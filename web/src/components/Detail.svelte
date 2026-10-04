@@ -10,6 +10,7 @@
     fetchRatings,
     markableEpisodes,
     seriesPresentation,
+    seriesSeenOverride,
     type Ratings,
   } from '../lib/detailPresentation';
   import { RESUME_FLOOR, WATCHED } from '../lib/actions';
@@ -333,6 +334,7 @@
   );
 
   const series = $derived(detail ? seriesPresentation(detail, episodes, row) : null);
+  const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
   const target = $derived(ref.type === 'tv' ? series?.target : undefined);
   const sourceCoord = $derived(sourceTarget ?? target);
   const fraction = $derived(
@@ -495,6 +497,7 @@
             playLabel={continuing ? 'Resume' : 'Play'}
             onwatchlist={(on) => onwatchlist(d.title, on)}
             onseen={(on) => onseen(d.title, on)}
+            {seenOverride}
             onreact={(reaction) => onreact(d.title, reaction)}
             onplay={onplay ? () => onplay(d.title, target?.season, target?.episode) : undefined}
             onplayhere={onplayhere
