@@ -20,6 +20,7 @@ import {
   withValues,
   type Download,
 } from './downloadRows';
+import { applyLog, contentWatched, emptyLibrary } from './library';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
 import { rankable } from './titleSources';
@@ -268,10 +269,25 @@ async function holderPass(
     const url = status.reannounce && written ? queue.urlFor(download) : undefined;
     if (url) await queue.cancelRelease(url, true);
   }
+  // The row's own episode or film watched, never the series' standing (den-spec library-v4 §17 *Pruning*): a
+  // series finished last season must not prune this season's downloads before anyone has watched them.
+  const library = applyLog(emptyLibrary(), log.rows());
+  const watched: Record<string, boolean> = {};
+  for (const d of decided)
+    if (
+      contentWatched(library, {
+        type: d.title.mediaType,
+        id: d.title.mediaId,
+        season: d.title.season,
+        episode: d.title.episode,
+      })
+    )
+      watched[d.name] = true;
   const pruned = syncPolicy<{ remove: string[] }>({
     op: 'download_prune',
     rows: decided.map((d) => d.row),
     states,
+    watched,
     now,
   });
   const byName = new Map(decided.map((d) => [d.name, d]));

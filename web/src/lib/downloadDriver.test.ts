@@ -10,7 +10,7 @@ import {
   titleValue,
 } from './downloadRows';
 import { source, testClock, testLog } from './downloadTestLog';
-import type { SettingsRow } from './wire';
+import type { Row, SettingsRow, WatchRow } from './wire';
 
 const TV = 'aaaaaaaaaaaaaaaa';
 const BROWSER = 'bbbbbbbbbbbbbbbb';
@@ -175,6 +175,31 @@ describe('the download driver', () => {
     };
     const other = downloadName('tv:1399:2:4');
     const shared = testLog([finished(NAME, 3), finished(other, 4)]);
+    // Both episodes watched: a ready row with no watched state behind it is never aged out any more (den-spec
+    // library-v4 §17 *Pruning*), so the race this test is actually about — a prune's compare-and-set landing on
+    // the row it decided on, not one read after — needs a reason to prune that isn't the clock.
+    // `episode_state` (den-core) reads visibility against the real wall clock, not this test's synthetic
+    // timeline, so the mark's own stamp must be in the real past.
+    const watchedAt: [number, number, string] = [Date.now() - MINUTE, 0, TV];
+    const watchRow = (episode: number): Row =>
+      ({
+        kind: 'wat',
+        schema: 3,
+        title: { type: 'tv', id: 1399 },
+        season: 2,
+        block: 0,
+        seasonReset: null,
+        entries: {
+          [episode]: {
+            imported: false,
+            progress: { value: 1, at: watchedAt, viewing: 0 },
+            plays: {},
+            cleared: null,
+          },
+        },
+      }) satisfies WatchRow;
+    const baseRows = shared.log.rows.bind(shared.log);
+    shared.log.rows = () => [...baseRows(), watchRow(3), watchRow(4)];
     const queue = new DownloadQueue(async () => ({ state: 'ready' }));
     queue.attach(shared.log, testClock(BROWSER));
     const now = T0 + 3 * 1440 * MINUTE;
@@ -199,6 +224,61 @@ describe('the download driver', () => {
     await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
     expect(requeued).toBeDefined();
     expect(readDownload(shared.log.settings(requeued!)!)).not.toBeNull();
+  });
+
+  /** A ready row the library holds no watched mark for: old enough that the pre-den#202 two-day limit would
+   * have pruned it, and still live. */
+  function readyUnwatched(): SettingsRow {
+    const row = stalledRow();
+    const at: [number, number, string] = [T0, 0, TV];
+    return {
+      ...row,
+      values: {
+        ...row.values,
+        reported: { value: { bool: true }, at },
+        announced: { value: { bool: true }, at },
+      },
+    };
+  }
+
+  it('a ready row with nothing watched behind it outlives the old two-day limit', async () => {
+    const shared = testLog([readyUnwatched()]);
+    const queue = new DownloadQueue(async () => ({ state: 'ready' }));
+    queue.attach(shared.log, testClock(BROWSER));
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 3 * 1440 * MINUTE,
+      observedFor: 0,
+    });
+    expect(readDownload(shared.log.settings(NAME)!)).not.toBeNull();
+  });
+
+  it('that same row is pruned once its own episode is watched, regardless of age', async () => {
+    const shared = testLog([readyUnwatched()]);
+    const watched: WatchRow = {
+      kind: 'wat',
+      schema: 3,
+      title: { type: 'tv', id: 1399 },
+      season: 2,
+      block: 0,
+      seasonReset: null,
+      entries: {
+        3: {
+          imported: false,
+          progress: { value: 1, at: [Date.now() - MINUTE, 0, TV], viewing: 0 },
+          plays: {},
+          cleared: null,
+        },
+      },
+    };
+    const baseRows = shared.log.rows.bind(shared.log);
+    shared.log.rows = () => [...baseRows(), watched];
+    const queue = new DownloadQueue(async () => ({ state: 'ready' }));
+    queue.attach(shared.log, testClock(BROWSER));
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 3 * 1440 * MINUTE,
+      observedFor: 0,
+    });
+    expect(readDownload(shared.log.settings(NAME)!)).toBeNull();
   });
 });
 
