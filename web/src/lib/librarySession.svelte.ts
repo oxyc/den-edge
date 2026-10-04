@@ -113,7 +113,9 @@ export class LibrarySession {
         await this.reconcileRecovery(this.log, this.key);
         if (this.log.wireMinimum >= 4 && !this.log.readOnly) {
           this.attachDownloads(this.log);
-          if (await driveDownloads(this.log, downloads, this.device)) this.changed();
+          // Only a page someone is looking at polls den-scout and drives the queue; a hidden one lets its lease lapse.
+          const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+          if (visible && (await driveDownloads(this.log, downloads, this.device))) this.changed();
         }
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.

@@ -7,6 +7,7 @@ import {
   FOREIGN,
   GONE,
   inFlight,
+  pollDelay,
   type DownloadQueue,
   type DownloadState,
 } from './downloadQueue.svelte';
@@ -28,6 +29,8 @@ const pageStartedAt = Date.now();
 const pageStartedMono = globalThis.performance?.now() ?? 0;
 /** How many probes are in flight at once: a season shouldn't be a burst of two dozen. */
 const CONCURRENCY = 4;
+/** The holder den-core is told of for a lease row naming this device that another window of it took. */
+const ANOTHER_WINDOW = 'another-window';
 
 /** This page's hold on the lease: its epoch, and when its take or renewal was sent, on both clocks. */
 interface Held {
@@ -67,13 +70,41 @@ export async function driveDownloads(
   const polled = all.filter((d) => {
     const state = queue.status(d, now).state;
     // A held-back add is made again by the holder at its time; until then there is nothing to ask.
-    return state !== 'no_working_release' && state !== 'release_gone' && state !== 'paused';
+    if (state === 'no_working_release' || state === 'release_gone' || state === 'paused')
+      return false;
+    return due(queue, d, now);
   });
   for (let i = 0; i < polled.length; i += CONCURRENCY)
-    await Promise.all(polled.slice(i, i + CONCURRENCY).map((d) => pollAndRenew(queue, d)));
+    await Promise.all(
+      polled.slice(i, i + CONCURRENCY).map(async (d) => {
+        await pollAndRenew(queue, d);
+        asked(queue, d, now);
+      }),
+    );
   queue.touch();
   if (!all.length || !(await holdLease(log, device, now, options.observedFor))) return false;
   return holderPass(log, queue, device, now);
+}
+
+/** Per download, when this page last asked and how many asks in a row changed nothing (`pollDelay`). */
+const asks = new WeakMap<DownloadQueue, Map<string, { at: number; quiet: number; said: string }>>();
+
+/** Whether a download is due another ask: `pollDelay` after the last, longer the longer its answers stay the same. */
+function due(queue: DownloadQueue, download: Download, now: number): boolean {
+  const last = asks.get(queue)?.get(download.name);
+  return !last || now - last.at >= pollDelay(last.quiet);
+}
+
+function asked(queue: DownloadQueue, download: Download, now: number): void {
+  let seen = asks.get(queue);
+  if (!seen) asks.set(queue, (seen = new Map()));
+  const said = JSON.stringify(queue.answers.get(download.name) ?? null);
+  const last = seen.get(download.name);
+  seen.set(download.name, {
+    at: now,
+    quiet: last && last.said === said ? last.quiet + 1 : 0,
+    said,
+  });
 }
 
 /**
@@ -113,13 +144,16 @@ export async function holdLease(
   const seen = observed.get(log);
   if (!seen || seen.seq !== seq) observed.set(log, { seq, at: now, mono });
   const watched = seen && seen.seq === seq ? (since(seen.at, seen.mono, now) ?? 0) : 0;
-  // A row naming this device that this page never took is a lease from an earlier visit: taken again, by CAS.
+  // Every window of this browser shares its device id. A row naming it that this page never took is another
+  // window's, or one closed since: watched like any other holder's and taken only once it has stayed unchanged ten
+  // minutes (v3 §6 *Taking*, as the SIMKL driver does). Taken at once, two windows would take it from each other on
+  // every pass, and both act as holder.
   const ours = holder === device && mine?.epoch === epoch;
   const decision = syncPolicy<{ action: string; epoch?: number }>({
     op: 'lease',
     input: {
       device,
-      holder: ours ? device : holder === device ? '' : holder,
+      holder: ours ? device : holder === device ? ANOTHER_WINDOW : holder,
       epoch,
       elapsed: ours ? since(mine.at, mine.mono, now) : undefined,
       observed: Math.max(watched, holder ? 0 : observedFor),
@@ -152,11 +186,17 @@ export async function holdLease(
   return true;
 }
 
-/** Whether this page still holds the lease: checked again immediately before every holder write. */
-function stillHeld(log: LibraryLog, now: number): boolean {
+/**
+ * Whether this page still holds the lease, checked again immediately before every holder write: its take or renewal
+ * is under 120 s old, and the lease row as last read still names this device at the epoch this page took.
+ */
+export function stillHeld(log: LibraryLog, device: string, now: number): boolean {
   const mine = held.get(log);
   const elapsed = mine ? since(mine.at, mine.mono, now) : undefined;
-  return elapsed !== undefined && elapsed < 120_000;
+  if (!mine || elapsed === undefined || elapsed >= 120_000) return false;
+  const value = log.settings(LEASE_ROW)?.values.lease?.value;
+  const [holder, epoch] = value && 'strings' in value ? value.strings : [];
+  return holder === device && Number(epoch) === mine.epoch;
 }
 
 /**
@@ -165,11 +205,12 @@ function stillHeld(log: LibraryLog, now: number): boolean {
  */
 async function write(
   log: LibraryLog,
+  device: string,
   download: Download,
   values: Record<string, Stamped<ConfigValue | null>>,
   now: number,
 ): Promise<boolean> {
-  if (!stillHeld(log, now)) return false;
+  if (!stillHeld(log, device, now)) return false;
   return log.writeAt(withValues(download.row, values), download.seq);
 }
 
@@ -183,7 +224,10 @@ async function holderPass(
   const states: Record<string, string> = {};
   const stamp = () =>
     syncPolicy<[number, number, string]>({ op: 'issue', last: log.newestStamp(), now, device });
-  for (const download of queue.list()) {
+  // Every decision below is made on these rows, at these seqs: a holder write compare-and-sets on the seq of the row
+  // it decided on, never one read after another write.
+  const decided = queue.list();
+  for (const download of decided) {
     const status = queue.status(download, now);
     if (status.state) states[download.name] = status.state;
     queue.clocks.set(download.name, status.clock);
@@ -195,20 +239,20 @@ async function holderPass(
       download.resumeAt <= now
     ) {
       const url = queue.urlFor(download);
-      if (url && (await write(log, download, resumed(stamp(), now), now))) {
+      if (url && (await write(log, device, download, resumed(stamp(), now), now))) {
         wrote = true;
         await queue.add(download.name, url);
       }
       continue;
     }
     if (queue.lapsed.has(download.name)) {
-      wrote = (await writeTicket(log, queue, download, now, stamp)) || wrote;
+      wrote = (await writeTicket(log, device, queue, download, now, stamp)) || wrote;
       continue;
     }
     // A ticket still to renew says nothing about the fetch.
     if (status.renew) continue;
     if (status.stalled) {
-      wrote = (await fallBack(log, queue, download, status, now, stamp)) || wrote;
+      wrote = (await fallBack(log, device, queue, download, status, now, stamp)) || wrote;
       continue;
     }
     const values: Record<string, Stamped<ConfigValue | null>> = {};
@@ -216,23 +260,26 @@ async function holderPass(
     if (status.report) values.reported = { value: { bool: true }, at };
     if (status.announce) values.announced = { value: { bool: true }, at };
     if (status.write_progress) values.progress = { value: clockValue(status.clock), at };
-    if (status.reannounce) {
-      const url = queue.urlFor(download);
-      if (url) await queue.cancelRelease(url, true);
-      values.reannounced = { value: { bool: true }, at };
-    }
-    if (Object.keys(values).length) wrote = (await write(log, download, values, now)) || wrote;
+    if (status.reannounce) values.reannounced = { value: { bool: true }, at };
+    if (!Object.keys(values).length) continue;
+    const written = await write(log, device, download, values, now);
+    wrote = written || wrote;
+    // Sent once `reannounced` is down: a write that conflicted is decided again next pass, and sends then.
+    const url = status.reannounce && written ? queue.urlFor(download) : undefined;
+    if (url) await queue.cancelRelease(url, true);
   }
   const pruned = syncPolicy<{ remove: string[] }>({
     op: 'download_prune',
-    rows: queue.list().map((d) => d.row),
+    rows: decided.map((d) => d.row),
     states,
     now,
   });
+  const byName = new Map(decided.map((d) => [d.name, d]));
   for (const name of pruned.remove) {
-    const row = log.settings(name);
-    if (!row || !stillHeld(log, now)) continue;
-    wrote = (await log.writeAt(removedRow(row, stamp()), log.seqOf(`set:${name}`))) || wrote;
+    const download = byName.get(name);
+    if (!download || !stillHeld(log, device, now)) continue;
+    // On the row and seq the decision read: one another device restarted since is a conflict, and stays.
+    wrote = (await log.writeAt(removedRow(download.row, stamp()), download.seq)) || wrote;
   }
   if (wrote) queue.touch();
   return wrote;
@@ -250,6 +297,7 @@ function resumed(at: [number, number, string], now: number) {
 /** A lapsed ticket this page renewed: the fresh one written to the row, so a relaunch asks with it. */
 async function writeTicket(
   log: LibraryLog,
+  device: string,
   queue: DownloadQueue,
   download: Download,
   now: number,
@@ -260,6 +308,7 @@ async function writeTicket(
   if (!url || url === download.release.url) return false;
   return write(
     log,
+    device,
     download,
     { release: { value: releaseValue({ ...download.release, url }), at: stamp() } },
     now,
@@ -272,6 +321,7 @@ async function writeTicket(
  */
 async function fallBack(
   log: LibraryLog,
+  device: string,
   queue: DownloadQueue,
   download: Download,
   status: DownloadState,
@@ -305,7 +355,7 @@ async function fallBack(
   if (next.candidates !== undefined) values.candidates = { value: { int: next.candidates }, at };
   if (next.decision === 'exhausted') {
     values.exhausted = { value: { bool: true }, at };
-    return write(log, download, values, now);
+    return write(log, device, download, values, now);
   }
   const chosen = sources![next.index!]!;
   Object.assign(values, {
@@ -331,7 +381,7 @@ async function fallBack(
       status.state === 'fetching' ? 'made no progress' : 'stalled'
     }; trying ${chosen.label}`,
   );
-  if (!(await write(log, download, values, now))) return false;
+  if (!(await write(log, device, download, values, now))) return false;
   // Only once the row names the next release: a write dropped above leaves the stalled one where it was.
   await queue.cancelIfSafe(download);
   queue.clocks.delete(download.name);

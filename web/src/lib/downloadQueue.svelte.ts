@@ -359,16 +359,19 @@ export class DownloadQueue {
     return !!saved;
   }
 
-  /** Cancel at the debrid, unless a sibling in flight shares the release. Best effort: the outcome changes nothing. */
+  /**
+   * Cancel at the debrid, unless den-core's `download_cancel_safe` says another live row still names the release —
+   * whatever that row's state: a sibling episode reading "not started" or "ready" may still be fetching or playing
+   * the same season pack. Best effort: the outcome changes nothing.
+   */
   async cancelIfSafe(download: Download): Promise<void> {
-    const needed = this.list().some(
-      (other) =>
-        other.name !== download.name &&
-        other.release.identity === download.release.identity &&
-        inFlight(this.status(other).state),
-    );
+    const safe = syncPolicy<boolean>({
+      op: 'download_cancel_safe',
+      row: download.row,
+      rows: this.list().map((d) => d.row),
+    });
     const url = this.urlFor(download);
-    if (needed || !url) return;
+    if (!safe || !url) return;
     await this.cancelRelease(url, false);
   }
 }

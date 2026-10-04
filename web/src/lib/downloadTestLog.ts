@@ -14,6 +14,8 @@ export interface TestLog {
   /** Another device's write landing: the row as given, at the next seq. */
   land(row: SettingsRow): void;
   writes: string[];
+  /** Another window of the same browser: its own log over the same den-edge. */
+  window(): LibraryLog;
 }
 
 export function testLog(rows: SettingsRow[] = []): TestLog {
@@ -30,34 +32,35 @@ export function testLog(rows: SettingsRow[] = []): TestLog {
           latest = value.at;
     return latest;
   };
-  const log = {
-    readOnly: false,
-    wireMinimum: 4,
-    rows: (): Row[] => [...held.values()].map(({ row }) => row),
-    settings: (name: string) => held.get(`set:${name}`)?.row,
-    seqOf: (name: string) => held.get(name)?.seq ?? 0,
-    newestStamp: newest,
-    async write(row: Row) {
-      const local = row as SettingsRow;
-      const name = rowName(local);
-      const seen = held.get(name)?.row;
-      const merged = seen ? syncPolicy<SettingsRow>({ op: 'merge', a: seen, b: local }) : local;
-      put(merged);
-      writes.push(`write ${name}`);
-      return merged;
-    },
-    async writeAt(row: SettingsRow, base: number) {
-      const name = rowName(row);
-      if ((held.get(name)?.seq ?? 0) !== base) {
-        writes.push(`conflict ${name}`);
-        return false;
-      }
-      put(row);
-      writes.push(`writeAt ${name}`);
-      return true;
-    },
-  } as unknown as LibraryLog;
-  return { log, rows: held, land: put, writes };
+  const open = () =>
+    ({
+      readOnly: false,
+      wireMinimum: 4,
+      rows: (): Row[] => [...held.values()].map(({ row }) => row),
+      settings: (name: string) => held.get(`set:${name}`)?.row,
+      seqOf: (name: string) => held.get(name)?.seq ?? 0,
+      newestStamp: newest,
+      async write(row: Row) {
+        const local = row as SettingsRow;
+        const name = rowName(local);
+        const seen = held.get(name)?.row;
+        const merged = seen ? syncPolicy<SettingsRow>({ op: 'merge', a: seen, b: local }) : local;
+        put(merged);
+        writes.push(`write ${name}`);
+        return merged;
+      },
+      async writeAt(row: SettingsRow, base: number) {
+        const name = rowName(row);
+        if ((held.get(name)?.seq ?? 0) !== base) {
+          writes.push(`conflict ${name}`);
+          return false;
+        }
+        put(row);
+        writes.push(`writeAt ${name}`);
+        return true;
+      },
+    }) as unknown as LibraryLog;
+  return { log: open(), rows: held, land: put, writes, window: open };
 }
 
 /** A release as `parseSources` reads one, with scout's `attributes` as given. */

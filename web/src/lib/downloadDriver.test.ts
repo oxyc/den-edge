@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { driveDownloads } from './downloadDriver';
+import { driveDownloads, holdLease, stillHeld } from './downloadDriver';
 import { DownloadQueue, type Resolve } from './downloadQueue.svelte';
 import {
   clockValue,
@@ -152,5 +152,106 @@ describe('the download driver', () => {
     const read = readDownload(holder.log.settings(NAME)!)!;
     expect(read.announced).toBe(true);
     expect(read.reported).toBe(true);
+  });
+
+  it('a prune compare-and-sets on the row it decided on, not one read after', async () => {
+    // Two episodes that finished three days ago: past their two-day lifetime.
+    const finished = (name: string, episode: number): SettingsRow => {
+      const row = stalledRow();
+      const at: [number, number, string] = [T0, 0, TV];
+      return {
+        ...row,
+        name,
+        values: {
+          ...row.values,
+          title: {
+            value: titleValue({ mediaType: 'tv', mediaId: 1399, season: 2, episode, title: 'R' }),
+            at,
+          },
+          reported: { value: { bool: true }, at },
+          announced: { value: { bool: true }, at },
+        },
+      };
+    };
+    const other = downloadName('tv:1399:2:4');
+    const shared = testLog([finished(NAME, 3), finished(other, 4)]);
+    const queue = new DownloadQueue(async () => ({ state: 'ready' }));
+    queue.attach(shared.log, testClock(BROWSER));
+    const now = T0 + 3 * 1440 * MINUTE;
+    // While the first tombstone is written, the TV queues the other episode again.
+    const writeAt = shared.log.writeAt.bind(shared.log);
+    let requeued: string | undefined;
+    (shared.log as { writeAt: typeof writeAt }).writeAt = async (
+      row: SettingsRow,
+      base: number,
+    ) => {
+      const ok = await writeAt(row, base);
+      if (!requeued && row.values.removed) {
+        requeued = row.name === NAME ? other : NAME;
+        const live = shared.log.settings(requeued)!;
+        shared.land({
+          ...live,
+          values: { ...live.values, queuedAt: { value: { int: now }, at: [now, 0, TV] } },
+        });
+      }
+      return ok;
+    };
+    await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
+    expect(requeued).toBeDefined();
+    expect(readDownload(shared.log.settings(requeued!)!)).not.toBeNull();
+  });
+});
+
+describe('the download lease', () => {
+  it('two windows of one browser never take it from each other', async () => {
+    const shared = testLog();
+    const a = shared.log;
+    const b = shared.window();
+    expect(await holdLease(a, BROWSER, T0, 0)).toBe(true);
+    expect(stillHeld(a, BROWSER, T0)).toBe(true);
+
+    // Window B sees the row name this browser, at an epoch it never took: another window's, watched like any holder.
+    for (let at = T0 + 30_000; at <= T0 + 9 * MINUTE; at += 30_000) {
+      expect(await holdLease(b, BROWSER, at, 0)).toBe(false);
+      expect(await holdLease(a, BROWSER, at, 0)).toBe(true);
+    }
+    const leaseWrites = shared.writes.filter((w) => w.includes(LEASE_ROW));
+    expect(leaseWrites.every((w) => w.startsWith('writeAt'))).toBe(true);
+    // The first take, then A's renewals every 60 s up to nine minutes: nothing from B, no taking back and forth.
+    expect(leaseWrites.length).toBe(1 + 9);
+    expect(shared.log.settings(LEASE_ROW)!.values.lease!.value).toEqual({
+      strings: [BROWSER, '1'],
+    });
+  });
+
+  it('a window whose lease another window took stops writing, and the other takes it once A is gone ten minutes', async () => {
+    const shared = testLog();
+    const a = shared.log;
+    const b = shared.window();
+    expect(await holdLease(a, BROWSER, T0, 0)).toBe(true);
+    // A closes. B watches the row unchanged for ten minutes, then takes it at the next epoch.
+    expect(await holdLease(b, BROWSER, T0 + MINUTE, 0)).toBe(false);
+    expect(await holdLease(b, BROWSER, T0 + 11 * MINUTE + 1, 0)).toBe(true);
+    expect(shared.log.settings(LEASE_ROW)!.values.lease!.value).toEqual({
+      strings: [BROWSER, '2'],
+    });
+    // A, back within its 120 s by its own clock, reads a row naming its device at an epoch it didn't take.
+    expect(stillHeld(a, BROWSER, T0 + 60_000)).toBe(false);
+  });
+
+  it('is taken at once when it names nobody, and let go after 120 s without a renewal', async () => {
+    const shared = testLog();
+    expect(await holdLease(shared.log, BROWSER, T0, 0)).toBe(true);
+    expect(stillHeld(shared.log, BROWSER, T0 + 119_000)).toBe(true);
+    expect(stillHeld(shared.log, BROWSER, T0 + 120_000)).toBe(false);
+    expect(await holdLease(shared.log, BROWSER, T0 + 121_000, 0)).toBe(false);
+  });
+
+  it('a lease another device took is let go at once, inside the 120 s', async () => {
+    const shared = testLog();
+    expect(await holdLease(shared.log, BROWSER, T0, 0)).toBe(true);
+    shared.land(leaseRow(TV, 7));
+    expect(stillHeld(shared.log, BROWSER, T0 + 1_000)).toBe(false);
+    expect(await holdLease(shared.log, BROWSER, T0 + 61_000, 0)).toBe(false);
   });
 });
