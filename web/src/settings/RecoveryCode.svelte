@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import Confirm from './Confirm.svelte';
   import Loading from '../components/Loading.svelte';
+  import { copyText } from '../lib/clipboard';
   import type { BrowserClock } from '../lib/clock';
   import type { Link } from '../lib/links.svelte';
   import type { LibraryLog } from '../lib/log';
@@ -41,6 +42,8 @@
   let typed = $state('');
   let message = $state<{ text: string; bad: boolean } | null>(null);
   let copied = $state(false);
+  let manual = $state(false);
+  let codeEl = $state<HTMLElement>();
   let baseLive = new Set<string>();
   let finish: () => void = () => {};
   let context: RecoveryContext | null = null;
@@ -77,6 +80,7 @@
     phase = 'making';
     message = null;
     copied = false;
+    manual = false;
     try {
       const c = await ctx();
       const made = await prepare(c, link.libraryKey);
@@ -157,11 +161,10 @@
    * clear only if it still holds the code needs) only inside a gesture, and a blind clear would destroy whatever the
    * person copied since (§6). The page asks them to clear it themselves.
    */
-  function copy(code: string) {
-    void navigator.clipboard?.writeText(code).then(
-      () => (copied = true),
-      (error: unknown) => console.warn('den: the recovery code was not copied', error),
-    );
+  async function copy(code: string) {
+    const result = await copyText(code, () => getSelection()?.selectAllChildren(codeEl!));
+    copied = result === 'copied';
+    manual = result === 'manual';
   }
 
   // Leaving with a code shown and not confirmed ends it; a closed tab leaves that to the next reconcile.
@@ -183,12 +186,13 @@
       <b>Anyone with this code can open your library.</b> Write it down or keep it in a password manager.
       Den can’t show it again.
     </p>
-    <b class="code" data-no-swipe>{made.code}</b>
+    <b class="code" data-no-swipe bind:this={codeEl}>{made.code}</b>
     <span class="actions">
-      <button type="button" class="quiet" onclick={() => copy(made.code)}
+      <button type="button" class="quiet" onclick={() => void copy(made.code)}
         >{copied ? 'Copied' : 'Copy'}</button
       >
     </span>
+    {#if manual}<p class="status" role="status">Select and copy the code.</p>{/if}
     <p class="small" role="status">
       {copied ? 'Copied to your clipboard. ' : ''}Clipboard history and your system’s clipboard sync
       can carry a copied code to other devices. Once the code is saved, copy something else to clear
