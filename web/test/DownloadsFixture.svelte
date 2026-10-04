@@ -17,6 +17,7 @@
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
 
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each read; the queue's `touch` redraws.
   let held = new Map<string, SettingsRow>();
   const read = async () => {
     const rows = (await (await fetch('/fixture-store/rows')).json()) as SettingsRow[];

@@ -25,7 +25,10 @@ function store() {
         schema: 2,
         name: 'devices',
         values: {
-          'aaaaaaaaaaaaaaaa.name': { value: { string: 'Chrome on Mac' }, at: [1, 0, 'aaaaaaaaaaaaaaaa'] },
+          'aaaaaaaaaaaaaaaa.name': {
+            value: { string: 'Chrome on Mac' },
+            at: [1, 0, 'aaaaaaaaaaaaaaaa'],
+          },
         },
       },
     ],
