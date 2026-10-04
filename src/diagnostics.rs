@@ -25,22 +25,19 @@ const MAX_MS: u32 = 600_000;
 const MAX_SECS: u32 = 24 * 3600;
 
 /// Read `req`'s body as `T` within `MAX_BODY_BYTES`, rate-limited per address under `bucket`. The shared half of
-/// every handler below; `Err` already carries the response to answer with.
+/// every handler below; `Err` already carries the response to answer with, boxed like `read_json`'s.
 async fn intake<T: DeserializeOwned>(
     state: &Arc<AppState>,
     req: Request,
     bucket: &str,
-) -> Result<T, Response> {
+) -> Result<T, Box<Response>> {
     let ip = client_ip(state, &req);
     if let Some(wait) = crate::link::throttled_per_minute(state, &format!("{bucket}:{ip}"), PER_MINUTE) {
-        return Err(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait));
+        return Err(Box::new(retry_after(StatusCode::TOO_MANY_REQUESTS, &error("rate_limited"), wait)));
     }
-    let value = match read_json(req, MAX_BODY_BYTES).await {
-        Ok(v) => v,
-        Err(r) => return Err(*r),
-    };
+    let value = read_json(req, MAX_BODY_BYTES).await?;
     serde_json::from_value::<T>(value)
-        .map_err(|_| json_reply(StatusCode::BAD_REQUEST, &error("invalid_report")))
+        .map_err(|_| Box::new(json_reply(StatusCode::BAD_REQUEST, &error("invalid_report"))))
 }
 
 /// A bare `204`, `no-store`, with `tag` for the request log — the shape every report in this file answers with.
@@ -194,7 +191,7 @@ impl PageErrorReport {
 pub async fn handle_page_error(state: &Arc<AppState>, req: Request) -> Response {
     let report: PageErrorReport = match intake(state, req, PAGE_ERROR_BUCKET).await {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     accepted(report.tag(), |resp, tag| {
         resp.extensions_mut().insert(PageErrorTag(tag));
@@ -402,7 +399,7 @@ impl PlaybackOutcomeReport {
 pub async fn handle_playback_outcome(state: &Arc<AppState>, req: Request) -> Response {
     let report: PlaybackOutcomeReport = match intake(state, req, PLAYBACK_OUTCOME_BUCKET).await {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     accepted(report.tag(), |resp, tag| {
         resp.extensions_mut().insert(PlaybackOutcomeTag(tag));
@@ -504,7 +501,7 @@ impl CastReport {
 pub async fn handle_cast(state: &Arc<AppState>, req: Request) -> Response {
     let report: CastReport = match intake(state, req, CAST_BUCKET).await {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     accepted(report.tag(), |resp, tag| {
         resp.extensions_mut().insert(CastTag(tag));
