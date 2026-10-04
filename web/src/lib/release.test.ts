@@ -77,3 +77,30 @@ describe('a waiting release', () => {
     expect(idle.at.went).toEqual(['reload']);
   });
 });
+
+describe('a chunk failing to load', () => {
+  it('reloads at once when nothing on screen would be lost — never waiting for a navigation', () => {
+    const idle = hiddenPage();
+    expect(release.recoverChunkFailure(idle.page)).toBe(true);
+    expect(idle.at.went).toEqual(['reload']);
+  });
+
+  it('still marks a release waiting, so it reaches the page by the usual route when it must defer', () => {
+    const scrolled = hiddenPage({ y: 840 });
+    expect(release.recoverChunkFailure(scrolled.page)).toBe(false);
+    expect(scrolled.at.went).toEqual([]);
+
+    // The release it found is now waiting, same as any other: the next navigation picks it up.
+    const at = place();
+    expect(release.swapOnNavigation('/movie/550', at)).toBe(true);
+    expect(at.went).toEqual(['assign /movie/550']);
+  });
+
+  it('defers the same way a hidden page does: playing media or typing hold it off too', () => {
+    const playing = hiddenPage({ media: [{ paused: false, muted: false }] });
+    expect(release.recoverChunkFailure(playing.page)).toBe(false);
+    const typing = hiddenPage({ typing: true });
+    expect(release.recoverChunkFailure(typing.page)).toBe(false);
+    expect([...playing.at.went, ...typing.at.went]).toEqual([]);
+  });
+});

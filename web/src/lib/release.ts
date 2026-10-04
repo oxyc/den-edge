@@ -2,6 +2,12 @@
 // of this release is gone from den-edge. The page moves onto it at a moment that interrupts nothing — the next page
 // opened, or while hidden if nothing on screen would be lost — never at once: reloading as soon as the release was
 // found threw a person browsing Home back to the top of a fresh page right after a deploy.
+//
+// A chunk failing to load right now (`recoverChunkFailure`, below) is a different signal from the rest of this
+// file: it says the page the person is ALREADY ON is missing something this instant — a row, a dialog, a screen
+// not behind `ScreenLoading` — not that a newer release merely exists somewhere. Waiting for the next navigation
+// would leave that gap on screen for the rest of the visit, so it reloads at once whenever nothing would be lost,
+// and only falls back to the deferred swap when it would.
 
 let waiting = false;
 
@@ -31,16 +37,21 @@ interface Page {
   location: Pick<Location, 'reload'>;
 }
 
+/** Whether reloading `page` right now would lose nothing: it sits at the top, nothing is heard playing, and
+ * nothing is being typed. Shared by `swapWhileHidden` and `recoverChunkFailure`. */
+function nothingToLose(page: Page): boolean {
+  if (page.scrollX !== 0 || page.scrollY !== 0) return false;
+  const media = [...page.document.querySelectorAll<HTMLMediaElement>('video, audio')];
+  if (media.some((element) => !element.paused && !element.muted)) return false;
+  return !page.document.activeElement?.matches('input, textarea, select, [contenteditable]');
+}
+
 /**
  * Reload a hidden page onto a waiting release when nothing on it would be lost: it sits at the top, nothing is
  * heard playing, and nothing is being typed. A page scrolled down stays as it is until the next page is opened.
  */
 export function swapWhileHidden(page: Page = window): boolean {
-  if (!waiting || page.scrollX !== 0 || page.scrollY !== 0) return false;
-  const media = [...page.document.querySelectorAll<HTMLMediaElement>('video, audio')];
-  if (media.some((element) => !element.paused && !element.muted)) return false;
-  if (page.document.activeElement?.matches('input, textarea, select, [contenteditable]'))
-    return false;
+  if (!waiting || !nothingToLose(page)) return false;
   page.location.reload();
   return true;
 }
@@ -50,8 +61,23 @@ export function swapFailedScreen(): void {
   if (waiting) reloadOnce();
 }
 
+/**
+ * A chunk this page needed just failed to load — `vite:preloadError` (`main.ts`), fired for any dynamic import,
+ * not only a `ScreenLoading` screen. den-edge has moved past the release this page's shell carries, so whatever
+ * that chunk was for is going to stay missing until something reloads the page onto the current release. Doing
+ * that now, rather than waiting for the next navigation, is what keeps a kept-old-shell visit from finishing the
+ * one it's on half-drawn; it still defers, as every other waiting release does, when reloading would cost
+ * something on screen.
+ */
+export function recoverChunkFailure(page: Page = window): boolean {
+  releaseWaiting();
+  if (!nothingToLose(page)) return false;
+  reloadOnce(page);
+  return true;
+}
+
 /** Reload onto the current release, at most once in a while: a missing file must not become a reload loop. */
-export function reloadOnce(): void {
+export function reloadOnce(page: Pick<Page, 'location'> = window): void {
   try {
     const last = Number(sessionStorage.getItem('den.reloadedAt'));
     if (Date.now() - last < 10_000) return;
@@ -59,5 +85,5 @@ export function reloadOnce(): void {
   } catch {
     // Without storage there is no loop guard; a reload is still better than a page that stays broken.
   }
-  location.reload();
+  page.location.reload();
 }

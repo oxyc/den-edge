@@ -72,7 +72,7 @@ jobs:
     needs: [source]
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.pushed.outputs.digest }}
       cast_digest: ${{ steps.build-cast.outputs.digest }}
     permissions:
       contents: read
@@ -139,8 +139,26 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # The release this build replaces — `:latest` only moves once this image is signed, below, so it still
+      # names the previous one here. The web stage carries its hashed chunks forward (web/scripts/keep-previous-
+      # assets.mjs), so a browser whose service worker kept that shell doesn't 404 fetching them once this image
+      # takes over. `scratch` (no pull, always resolvable) on the very first build, when there is no `:latest` yet.
+      - name: Resolve the previous release's image
+        id: prev
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            echo "image=$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=scratch" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         id: build
+        # A registry hiccup between the resolve above and the pull this triggers must not fail the whole
+        # release over a chunk-recovery convenience — the retry below catches exactly that, so this step's own
+        # failure is swallowed only when there is a plain build to fall back to (`prev` already found none).
+        continue-on-error: ${{ steps.prev.outputs.image != 'scratch' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -148,12 +166,44 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: PREVIOUS_IMAGE=${{ steps.prev.outputs.image }}
           pull: true
           no-cache: ${{ needs.source.outputs.patch == 'true' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+      # Only reached when pulling `prev`'s image failed despite `imagetools inspect` having just found it: build
+      # once more, carrying nothing forward, rather than fail a release over that image being unreachable again.
+      - name: Build and push, without the previous release's image
+        id: build-retry
+        if: steps.build.outcome == 'failure' && steps.prev.outputs.image != 'scratch'
+        # The explicit check below is what fails the job on this attempt failing too — plainly failing here
+        # instead would skip it, for a less legible "which of the two attempts actually failed" in the log.
+        continue-on-error: true
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: PREVIOUS_IMAGE=scratch
+          pull: true
+          no-cache: ${{ needs.source.outputs.patch == 'true' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Fail if neither build pushed an image
+        if: steps.build.outcome == 'failure' && steps.build-retry.outcome != 'success'
+        run: exit 1
+
+      - name: Resolve the digest that was pushed
+        id: pushed
+        run: echo "digest=${{ steps.build.outputs.digest || steps.build-retry.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Cast sender
         id: build-cast
@@ -177,7 +227,7 @@ jobs:
       - name: Scan image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.IMAGE }}@${{ steps.pushed.outputs.digest }}
           version: v0.74.0
           format: json
           output: trivy.json

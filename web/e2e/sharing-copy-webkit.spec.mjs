@@ -31,6 +31,10 @@ async function openInvite(page) {
             devices: 1,
             deviceCount: 0,
             lastUsedAt: null,
+            playsTotal: 12,
+            hoursTotal: 9,
+            playsThisMonth: 4,
+            hoursThisMonth: 3,
           },
         },
       });
@@ -56,6 +60,19 @@ async function tap(page, locator) {
   const box = await locator.boundingBox();
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
 }
+
+test('a guest’s row shows plays and hours, never a title', async () => {
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext({ ...devices['iPhone 15'] });
+    const page = await context.newPage();
+    await openInvite(page);
+
+    await expect(page.getByText('4 plays · 3 h this month · 12 plays total')).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
 
 test('Copy link turns to Copied on a touch-emulated iPhone', async () => {
   const browser = await webkit.launch();

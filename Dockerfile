@@ -1,5 +1,14 @@
 # den-edge — a static musl binary built on Alpine, copied into `scratch`, like every den Rust service, with
 # the Den web app's built files beside it.
+# The previous release's published runtime image, so the web stage below can carry its hashed chunks forward
+# (web/scripts/keep-previous-assets.mjs) — a browser whose service worker kept that release's shell can then
+# still fetch them after this image replaces it. docker-publish.yml resolves this to the current `:latest`
+# (the release this build replaces; it only moves below, once this image is signed). `scratch` — the default,
+# and always resolvable with no registry pull — copies as empty: the first build, and a worker that can't
+# resolve a previous one, carry nothing forward and simply don't have the previous release's shell to help.
+ARG PREVIOUS_IMAGE=scratch
+FROM ${PREVIOUS_IMAGE} AS previous
+
 FROM node:26-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -8,6 +17,8 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY web ./
 RUN npm run build
+COPY --from=previous / /previous
+RUN node scripts/keep-previous-assets.mjs
 
 FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev

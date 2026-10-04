@@ -1123,6 +1123,13 @@ async fn relay_with(
                     resp.extensions_mut().insert(ListenerScope(asked));
                     return resp;
                 }
+                // A fresh session, not a regrant of one already open: once per play, never per segment, and only
+                // a guest's own, counted against their grant (`grants::record_start`, oxyc/den#100's follow-up).
+                if guest_remux {
+                    if let Some(g) = &grant {
+                        crate::grants::record_start(state, &g.gid).await;
+                    }
+                }
                 if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     value["publicBase"] = serde_json::Value::String(base.clone());
                     // Opened for the page's reported address: if it was wrong, the page asks again without it.
