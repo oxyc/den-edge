@@ -5,7 +5,7 @@ import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links, readPendingReset } from './lib/links.svelte';
 import { freshOn, startBillboard } from './lib/recommend';
-import { releaseWaiting, reloadOnce, swapWhileHidden } from './lib/release';
+import { recoverChunkFailure, releaseWaiting, reloadOnce, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
 // Pages were addressed by fragment until 0.67.0, so a link shared or bookmarked before then still arrives that
@@ -43,12 +43,13 @@ target.replaceChildren();
 mount(App, { target });
 
 // A page kept from an earlier release (public/sw.js) can ask for a file den-edge no longer has, so a newer release is
-// waiting; the page moves onto it with the next page opened (`release.ts`), and at once only if the screen the person
-// opened is the one that failed (`ScreenLoading`). Offline, the file is simply out of reach, and reloading would not
-// bring it back. The event is left uncancelled: cancelling it makes Vite's import resolve to `undefined` rather than
-// reject (`handlePreloadError` in Vite 8), and the screen that asked for it then never learns it failed.
+// waiting; this reloads onto it at once, whole page or not, when nothing on screen would be lost — not only when the
+// screen the person opened is the one that failed (`ScreenLoading`) — so a chunk a row or dialog needed doesn't stay
+// missing for the rest of the visit. Offline, the file is simply out of reach, and reloading would not bring it back.
+// The event is left uncancelled: cancelling it makes Vite's import resolve to `undefined` rather than reject
+// (`handlePreloadError` in Vite 8), and whatever asked for it then never learns it failed.
 window.addEventListener('vite:preloadError', () => {
-  if (navigator.onLine) releaseWaiting();
+  if (navigator.onLine) recoverChunkFailure();
 });
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
