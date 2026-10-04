@@ -48,6 +48,18 @@ const markWatched = (page) => page.getByRole('menuitem', { name: 'Mark watched',
 const episodeRow = (page) => page.locator('.episode').first();
 const toast = (page) => page.locator('p.library-status.toast');
 
+/**
+ * `ActionMenu`'s popover closes on any page scroll, by design (den-edge#256, `action-menu-dismiss.spec.mjs`):
+ * a swipe or a scroll behind it is never the menu's own interaction. Playwright's own `.click()` first calls
+ * the element into view, and dispatches a genuine `scroll` event doing it even when the element already reads
+ * as in the viewport — which is exactly the event `outsideScroll` is watching for, closing the menu out from
+ * under its own second click before the click lands (den-edge#260 CI: both tests here hung at 120s for this,
+ * every run, on a clean runner — not sandbox contention). `{force: true}` skips the visibility/stability
+ * checks but keeps the same scroll-into-view step, so it hangs identically; only bypassing Playwright's
+ * action entirely and dispatching the click straight on the element avoids it.
+ */
+const clickMenuItem = (locator) => locator.evaluate((el) => el.click());
+
 test('marking an episode watched succeeds silently, with no stray alert', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -56,7 +68,7 @@ test('marking an episode watched succeeds silently, with no stray alert', async 
     const page = await browser.newPage();
     await openTitle(page);
     await episodeMenu(page).click();
-    await markWatched(page).click();
+    await clickMenuItem(markWatched(page));
     await expect(episodeRow(page).locator('.watched')).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
   } finally {
@@ -72,7 +84,7 @@ test('a refused episode mark says so on the page toast, not only in the far-off 
     const page = await browser.newPage();
     await openTitle(page, '&failing');
     await episodeMenu(page).click();
-    await markWatched(page).click();
+    await clickMenuItem(markWatched(page));
     await expect(toast(page)).toHaveText(
       'Couldn’t save that. Check that this device is on your network.',
     );
