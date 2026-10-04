@@ -362,14 +362,23 @@ export class DownloadQueue {
   /**
    * Cancel at the debrid, unless den-core's `download_cancel_safe` says another live row still names the release —
    * whatever that row's state: a sibling episode reading "not started" or "ready" may still be fetching or playing
-   * the same season pack. Best effort: the outcome changes nothing.
+   * the same season pack. Best effort: the outcome changes nothing. A refused check reads as "not safe" and never
+   * throws: a fallback calls this after writing the next release and before adding it, which must still happen.
    */
   async cancelIfSafe(download: Download): Promise<void> {
-    const safe = syncPolicy<boolean>({
-      op: 'download_cancel_safe',
-      row: download.row,
-      rows: this.list().map((d) => d.row),
-    });
+    let safe = false;
+    try {
+      safe = syncPolicy<boolean>({
+        op: 'download_cancel_safe',
+        row: download.row,
+        rows: this.list().map((d) => d.row),
+      });
+    } catch (error) {
+      console.warn(
+        `den: download ${download.content}: den-core refused the cancel check; not cancelling`,
+        error,
+      );
+    }
     const url = this.urlFor(download);
     if (!safe || !url) return;
     await this.cancelRelease(url, false);

@@ -120,6 +120,26 @@ describe('the queue is the library’s rows', () => {
     expect(cancelled).toEqual(['/scout/p/four']);
   });
 
+  it('a cancel check den-core refuses cancels nothing and throws nothing', async () => {
+    const shared = testLog();
+    const cancelled: string[] = [];
+    const made = new DownloadQueue(
+      async () => ({ state: 'preparing', progress: 0.2 }),
+      async (url) => {
+        cancelled.push(url);
+        return true;
+      },
+    );
+    made.attach(shared.log, testClock(BROWSER));
+    await made.start({ title: episode, source: source('Show.S02E03.1080p.mkv', {}, 'three') });
+    const three = made.of('tv', 1399, 2, 3)!;
+    // A row den-core can't read as a download: `download_cancel_safe` answers an error.
+    await expect(
+      made.cancelIfSafe({ ...three, row: { ...three.row, name: 'not-a-download' } }),
+    ).resolves.toBeUndefined();
+    expect(cancelled).toEqual([]);
+  });
+
   it('a ticket this browser can’t reach is renewed by identity, never asked as it is', async () => {
     const shared = testLog();
     const { made: tv } = queue();

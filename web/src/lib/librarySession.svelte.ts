@@ -114,6 +114,9 @@ export class LibrarySession {
         if (this.log.wireMinimum >= 4 && !this.log.readOnly) {
           this.attachDownloads(this.log);
           // Only a page someone is looking at polls den-scout and drives the queue; a hidden one lets its lease lapse.
+          // The lease holds only while each pass comes within 120 s of the last: `start` refreshes a visible page
+          // every 30 s (5 s while something plays), so a renewal due at 60 s always lands. A tick slower than 120 s
+          // would make den-core stop the hold, and the page would wait ten minutes to take it back.
           const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
           if (visible && (await driveDownloads(this.log, downloads, this.device))) this.changed();
         }
