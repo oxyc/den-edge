@@ -160,11 +160,17 @@
    * to it — which is the tap-through bug this fixes. `swallowNextClick` is decided fresh here on every
    * `pointerdown`, independent of that timing, so `outsideClick` always knows what to do with the `click`
    * that follows, whichever element it lands on.
+   *
+   * Checks `:popover-open` rather than the reactive `open` — the `toggle` event that sets `open` can itself
+   * land late (see `position`'s own comment on a queued style recalc dropping it), so a pointerdown landing
+   * in that gap would see a stale `open === false` for a menu the browser already shows, and wave it through.
+   * `:popover-open` is the browser's own synchronous answer to "is this showing right now", independent of
+   * whether that event has fired yet.
    */
   function outsidePointerDown(event: PointerEvent) {
-    if (!open) return;
+    if (!menu?.matches(':popover-open')) return;
     const target = event.target;
-    const inside = target instanceof Node && (menu?.contains(target) || trigger?.contains(target));
+    const inside = target instanceof Node && (menu.contains(target) || trigger?.contains(target));
     swallowNextClick = !inside;
     if (swallowNextClick) close();
   }
@@ -179,8 +185,8 @@
   }
 
   function outsideScroll(event: Event) {
-    if (!open) return;
-    if (event.target instanceof Node && menu?.contains(event.target)) return;
+    if (!menu?.matches(':popover-open')) return;
+    if (event.target instanceof Node && menu.contains(event.target)) return;
     close();
   }
 
