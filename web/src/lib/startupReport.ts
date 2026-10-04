@@ -1,8 +1,10 @@
 // den-edge#234's step 0: a browser's own record of how long a session took to start, sent once its first frame
 // renders — to den-edge (`POST /playback/startup`, same-origin: the page den-edge itself serves), not to
-// den-remux, so it lands in a request log an operator can actually read. The body carries nothing that could
-// identify what was played or where from: no title, no URL, no token — only durations, a size bucket, the
-// codec, whether it was transcoded, the player engine, and which kind of address was used.
+// den-remux, so it lands in a request log an operator can actually read. The body carries durations, a size
+// bucket, the codec, whether it was transcoded, the player engine, which kind of address was used, and — gated
+// by den-edge's own `LOG_IDENTITY` switch, never asked here — the identity fields (`diagnosticsReport.ts`).
+
+import type { IdentityFields } from './diagnosticsReport';
 
 export interface ServerTiming {
   resolveMs?: number;
@@ -60,7 +62,7 @@ export function knownCodec(codec: string | undefined): KnownCodec {
   return KNOWN_CODECS.includes(codec as KnownCodec) ? (codec as KnownCodec) : 'h264';
 }
 
-export interface StartupReport extends ServerTiming {
+export interface StartupReport extends ServerTiming, IdentityFields {
   sessionMs: number;
   firstSegmentMs: number;
   firstFrameMs: number;

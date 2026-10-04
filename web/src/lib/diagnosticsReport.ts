@@ -133,6 +133,71 @@ export function pageError(kind: PageErrorKind, module: Module): PageErrorReport 
   return { kind, module, release: currentRelease(), route: currentRouteKind() };
 }
 
+// ---- Identity: what was played (`LOG_IDENTITY`, den-edge's own switch — never asked here) ----
+//
+// Carried on the outcome, cast and startup reports alike, so the three share one shape. den-edge drops the whole
+// group from its log when its switch is off, and drops `release` alone when its name fails den-edge's own shape
+// there — so nothing here needs to validate or gate anything itself; it only reports what the player already
+// knows. Never a URL, a token or a library id.
+
+export type MediaTypeReport = 'movie' | 'tv';
+/** den-remux always re-encodes a browser session's audio to AAC (`remux.ts`'s `Session`). */
+export type AudioCodecReport = 'aac';
+
+export interface ReleaseIdentity {
+  name: string;
+  size: number;
+}
+
+export interface IdentityFields {
+  tmdbId?: number;
+  mediaType?: MediaTypeReport;
+  season?: number;
+  episode?: number;
+  release?: ReleaseIdentity;
+  audioTrackIndex?: number;
+  audioLanguage?: string;
+  audioCodec?: AudioCodecReport;
+  subtitleIndex?: number;
+  subtitleLanguage?: string;
+  subtitleSource?: SubtitleSource;
+}
+
+/**
+ * The identity fields a report may carry, built from the title on screen and den-remux's own session —
+ * `Player.svelte`'s own state, never fetched here. `session` is `undefined` when nothing has opened yet (a
+ * report sent before `begin()` got anywhere), in which case only the title itself is named.
+ */
+export function identityOf(
+  title: { id: number; type: MediaTypeReport },
+  season: number | undefined,
+  episode: number | undefined,
+  session:
+    | {
+        release: { filename: string; size: number };
+        audioTrack: number;
+        audioLanguage?: string | null;
+      }
+    | undefined,
+  subtitle: { index?: number; language?: string; source?: SubtitleSource } = {},
+): IdentityFields {
+  const fields: IdentityFields = { tmdbId: title.id, mediaType: title.type, season, episode };
+  if (session) {
+    fields.release = { name: session.release.filename, size: session.release.size };
+    fields.audioTrackIndex = session.audioTrack;
+    const audioLanguage = reportableLanguage(session.audioLanguage);
+    if (audioLanguage) fields.audioLanguage = audioLanguage;
+    fields.audioCodec = 'aac';
+  }
+  // `-1` is `Array.prototype.findIndex`'s own "not found", which every caller gets by passing its raw result
+  // straight through rather than filtering it out itself.
+  if (subtitle.index !== undefined && subtitle.index >= 0) fields.subtitleIndex = subtitle.index;
+  const subtitleLanguage = reportableLanguage(subtitle.language);
+  if (subtitleLanguage) fields.subtitleLanguage = subtitleLanguage;
+  if (subtitle.source) fields.subtitleSource = subtitle.source;
+  return fields;
+}
+
 // ---- A playback session's outcome (`POST /playback/outcome`) ----
 
 export type Engine = 'native' | 'hls.js' | 'progressive';
@@ -207,7 +272,7 @@ export function reportableLanguage(language: string | null | undefined): string 
   return /^[a-z-]{2,8}$/.test(lower) ? lower : undefined;
 }
 
-export interface PlaybackOutcomeReport {
+export interface PlaybackOutcomeReport extends IdentityFields {
   engine: Engine;
   route: NetworkRoute;
   stallCount: number;
@@ -217,8 +282,6 @@ export interface PlaybackOutcomeReport {
   hlsFatalType?: HlsFatalType;
   hlsFatalDetail?: HlsFatalDetail;
   secondsPlayed: number;
-  subtitleLanguage?: string;
-  subtitleSource?: SubtitleSource;
   subtitleSwitched?: boolean;
   subtitleTurnedOff?: boolean;
   subtitleLoadFailed?: boolean;
@@ -240,7 +303,7 @@ export type CastStage = 'offered' | 'attempted' | 'started';
 export type CastFailReason =
   'receiver_not_loaded' | 'media_error' | 'lan_unreachable' | 'session_error' | 'other';
 
-export interface CastReport {
+export interface CastReport extends IdentityFields {
   kind: CastKind;
   reached: CastStage;
   failed?: boolean;

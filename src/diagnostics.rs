@@ -90,6 +90,144 @@ impl TryFrom<String> for Language {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Identity: what was played, carried on `/playback/outcome`, `/playback/cast` and `/playback/startup` — the TMDB
+// id and media kind, the release opened, and the chosen audio/subtitle tracks — gated as one group by
+// `LOG_IDENTITY` (`AppState::log_identity`, default on). Joinable to the session, device or guest by the
+// request id every one of these reports is already logged with (`handler::log_line`'s `rid=`); never a title, a
+// URL, a token or a library id. The box's journal is RAM-only and reaches only its owner (den#246).
+//
+// Present on the struct whatever the switch says — accepting the field is this box's call, not a caller's — and
+// reaching the log only through `tag()`, which leaves the whole group out when `log_identity` is false.
+
+/// TMDB's own numeric id for a title. Carried as-is: this report never looks it up or validates it against TMDB.
+type TmdbId = u32;
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MediaType {
+    Movie,
+    Tv,
+}
+
+impl MediaType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            MediaType::Movie => "movie",
+            MediaType::Tv => "tv",
+        }
+    }
+}
+
+/// den-remux always re-encodes a browser session's audio to AAC (`web/src/lib/remux.ts`'s `Session`), so this is
+/// the one value a report can send today; typed rather than a free string so a future codec is a deliberate
+/// addition here, not a silent pass-through.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AudioCodec {
+    Aac,
+}
+
+impl AudioCodec {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AudioCodec::Aac => "aac",
+        }
+    }
+}
+
+/// A release name: letters, digits, space and `._-[]()+` only, and never empty or past `MAX_RELEASE_NAME_LEN`.
+///
+/// Unlike `Release` (the shell's digest) above, a name outside this shape does not fail the whole report: a
+/// release name is the one identity field a hostile or malformed body is most likely to get wrong, and the rest
+/// of the report — what matters for reproducing a stall — must still reach the log. So this is read as a plain
+/// `String` and checked here, after parsing, rather than through `TryFrom`.
+const MAX_RELEASE_NAME_LEN: usize = 200;
+
+fn valid_release_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_RELEASE_NAME_LEN
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b' ' | b'.' | b'_' | b'-' | b'[' | b']' | b'(' | b')' | b'+')
+        })
+}
+
+/// The release den-remux opened: a name and a size, validated and logged together — a name outside
+/// `valid_release_name`'s shape drops both rather than logging an orphaned size.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawRelease {
+    name: String,
+    size: u64,
+}
+
+/// The identity fields a report may carry, flattened into it so every one of them answers the same `LOG_IDENTITY`
+/// switch (`tag`) rather than each report gating its own copy.
+#[derive(Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Identity {
+    tmdb_id: Option<TmdbId>,
+    media_type: Option<MediaType>,
+    season: Option<u32>,
+    episode: Option<u32>,
+    release: Option<RawRelease>,
+    audio_track_index: Option<u32>,
+    audio_language: Option<Language>,
+    audio_codec: Option<AudioCodec>,
+    subtitle_index: Option<u32>,
+    subtitle_language: Option<Language>,
+    subtitle_source: Option<SubtitleSource>,
+}
+
+impl Identity {
+    /// This group's `name:value` parts, to extend a report's own into one `tag()` — empty when `log_identity` is
+    /// off, or when every field was absent or failed its own validation (a release name outside its shape, say).
+    pub(crate) fn parts(&self, log_identity: bool) -> Vec<String> {
+        if !log_identity {
+            return Vec::new();
+        }
+        let mut parts = Vec::new();
+        if let Some(id) = self.tmdb_id {
+            parts.push(format!("tmdbId:{id}"));
+        }
+        if let Some(t) = &self.media_type {
+            parts.push(format!("mediaType:{}", t.as_str()));
+        }
+        if let Some(s) = self.season {
+            parts.push(format!("season:{s}"));
+        }
+        if let Some(e) = self.episode {
+            parts.push(format!("episode:{e}"));
+        }
+        if let Some(r) = &self.release {
+            if valid_release_name(&r.name) {
+                parts.push(format!("release:{}", r.name));
+                parts.push(format!("releaseSize:{}", r.size));
+            }
+        }
+        if let Some(i) = self.audio_track_index {
+            parts.push(format!("audioTrack:{i}"));
+        }
+        if let Some(l) = &self.audio_language {
+            parts.push(format!("audioLang:{}", l.0));
+        }
+        if let Some(c) = &self.audio_codec {
+            parts.push(format!("audioCodec:{}", c.as_str()));
+        }
+        if let Some(i) = self.subtitle_index {
+            parts.push(format!("subIndex:{i}"));
+        }
+        if let Some(l) = &self.subtitle_language {
+            parts.push(format!("subLang:{}", l.0));
+        }
+        if let Some(s) = &self.subtitle_source {
+            parts.push(format!("subSource:{}", s.as_str()));
+        }
+        parts
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Page errors (`POST /playback/page-error`): an uncaught error, an unhandled rejection, a chunk that failed to
 // load, or a page whose first route never rendered.
 
@@ -320,7 +458,7 @@ impl HlsFatalDetail {
 
 /// Where the chosen subtitle came from: the release's own rendition, or den-subtitles' own search — never which
 /// file, which is not this report's to carry.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SubtitleSource {
     Release,
@@ -348,8 +486,9 @@ struct PlaybackOutcomeReport {
     hls_fatal_type: Option<HlsFatalType>,
     hls_fatal_detail: Option<HlsFatalDetail>,
     seconds_played: u32,
-    subtitle_language: Option<Language>,
-    subtitle_source: Option<SubtitleSource>,
+    /// What was playing — the subtitle's language and source among them (`LOG_IDENTITY`).
+    #[serde(flatten)]
+    identity: Identity,
     #[serde(default)]
     subtitle_switched: bool,
     #[serde(default)]
@@ -359,7 +498,7 @@ struct PlaybackOutcomeReport {
 }
 
 impl PlaybackOutcomeReport {
-    fn tag(&self) -> String {
+    fn tag(&self, log_identity: bool) -> String {
         let mut parts = vec![
             format!("engine:{}", self.engine.as_str()),
             format!("route:{}", self.route.as_str()),
@@ -377,12 +516,7 @@ impl PlaybackOutcomeReport {
         if let Some(d) = &self.hls_fatal_detail {
             parts.push(format!("hlsDetail:{}", d.as_str()));
         }
-        if let Some(l) = &self.subtitle_language {
-            parts.push(format!("subLang:{}", l.0));
-        }
-        if let Some(s) = &self.subtitle_source {
-            parts.push(format!("subSource:{}", s.as_str()));
-        }
+        parts.extend(self.identity.parts(log_identity));
         if self.subtitle_switched {
             parts.push("subSwitched:1".to_owned());
         }
@@ -401,7 +535,7 @@ pub async fn handle_playback_outcome(state: &Arc<AppState>, req: Request) -> Res
         Ok(r) => r,
         Err(resp) => return *resp,
     };
-    accepted(report.tag(), |resp, tag| {
+    accepted(report.tag(state.log_identity), |resp, tag| {
         resp.extensions_mut().insert(PlaybackOutcomeTag(tag));
     })
 }
@@ -479,10 +613,13 @@ struct CastReport {
     failed: bool,
     fail_reason: Option<CastFailReason>,
     session_secs: Option<u32>,
+    /// What was being cast (`LOG_IDENTITY`).
+    #[serde(flatten)]
+    identity: Identity,
 }
 
 impl CastReport {
-    fn tag(&self) -> String {
+    fn tag(&self, log_identity: bool) -> String {
         let mut parts =
             vec![format!("kind:{}", self.kind.as_str()), format!("reached:{}", self.reached.as_str())];
         if self.failed {
@@ -494,6 +631,7 @@ impl CastReport {
         if let Some(s) = self.session_secs {
             parts.push(format!("sessionSecs:{}", s.min(MAX_SECS)));
         }
+        parts.extend(self.identity.parts(log_identity));
         parts.join(",")
     }
 }
@@ -503,7 +641,7 @@ pub async fn handle_cast(state: &Arc<AppState>, req: Request) -> Response {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
-    accepted(report.tag(), |resp, tag| {
+    accepted(report.tag(state.log_identity), |resp, tag| {
         resp.extensions_mut().insert(CastTag(tag));
     })
 }
@@ -573,7 +711,7 @@ mod tests {
     fn playback_outcome_tag_leaves_out_absent_optionals() {
         let report: PlaybackOutcomeReport = serde_json::from_value(outcome()).unwrap();
         assert_eq!(
-            report.tag(),
+            report.tag(true),
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:finished,secondsPlayed:1200"
         );
     }
@@ -589,7 +727,7 @@ mod tests {
         body["subtitleSwitched"] = serde_json::json!(true);
         let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
         assert_eq!(
-            report.tag(),
+            report.tag(true),
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:error,secondsPlayed:1200,\
              hlsType:mediaError,hlsDetail:fragLoadError,subLang:pt-br,subSource:den_subtitles,subSwitched:1"
         );
@@ -601,8 +739,8 @@ mod tests {
         body["secondsPlayed"] = serde_json::json!(u32::MAX);
         body["stalledMs"] = serde_json::json!(u32::MAX);
         let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
-        assert!(report.tag().contains(&format!("secondsPlayed:{MAX_SECS}")));
-        assert!(report.tag().contains(&format!("stalledMs:{MAX_MS}")));
+        assert!(report.tag(true).contains(&format!("secondsPlayed:{MAX_SECS}")));
+        assert!(report.tag(true).contains(&format!("stalledMs:{MAX_MS}")));
     }
 
     #[test]
@@ -612,12 +750,78 @@ mod tests {
         assert!(serde_json::from_value::<PlaybackOutcomeReport>(body).is_err());
     }
 
+    /// Every identity field this report can carry, so a test can assert each is logged with `LOG_IDENTITY` on
+    /// and every one of them is gone with it off.
+    fn identity_fields() -> serde_json::Value {
+        serde_json::json!({
+            "tmdbId": 550,
+            "mediaType": "movie",
+            "season": 2,
+            "episode": 4,
+            "release": { "name": "Fight.Club.1999.1080p.BluRay.x264-GROUP", "size": 7_654_321_000u64 },
+            "audioTrackIndex": 1,
+            "audioLanguage": "en",
+            "audioCodec": "aac",
+            "subtitleIndex": 2,
+            "subtitleLanguage": "pt-br",
+            "subtitleSource": "den_subtitles",
+        })
+    }
+
+    #[test]
+    fn identity_fields_reach_the_outcome_tag_only_when_log_identity_is_on() {
+        let mut body = outcome();
+        for (k, v) in identity_fields().as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        let on = report.tag(true);
+        for part in [
+            "tmdbId:550",
+            "mediaType:movie",
+            "season:2",
+            "episode:4",
+            "release:Fight.Club.1999.1080p.BluRay.x264-GROUP",
+            "releaseSize:7654321000",
+            "audioTrack:1",
+            "audioLang:en",
+            "audioCodec:aac",
+            "subIndex:2",
+            "subLang:pt-br",
+            "subSource:den_subtitles",
+        ] {
+            assert!(on.contains(part), "{on:?} must contain {part:?}");
+        }
+        let off = report.tag(false);
+        assert_eq!(
+            off, "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:finished,secondsPlayed:1200",
+            "LOG_IDENTITY off must leave out every identity field and nothing else"
+        );
+    }
+
+    #[test]
+    fn an_over_long_or_bad_charset_release_name_logs_no_release() {
+        let too_long = "x".repeat(MAX_RELEASE_NAME_LEN + 1);
+        let bad_charset = "Fight Club <script>1999</script>";
+        for name in [too_long.as_str(), bad_charset] {
+            let mut body = outcome();
+            body["release"] = serde_json::json!({ "name": name, "size": 123 });
+            body["tmdbId"] = serde_json::json!(550);
+            let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+            let tag = report.tag(true);
+            assert!(!tag.contains("release:"), "{tag:?} must not carry an invalid release name");
+            assert!(!tag.contains("releaseSize:"), "{tag:?} must not carry an orphaned release size");
+            // The rest of the report still reaches the log: a bad release name drops only itself.
+            assert!(tag.contains("tmdbId:550"), "{tag:?} must still carry the rest of the report");
+        }
+    }
+
     #[test]
     fn cast_tag_names_the_stage_and_leaves_out_absent_failure() {
         let report: CastReport =
             serde_json::from_value(serde_json::json!({ "kind": "chromecast", "reached": "started" }))
                 .unwrap();
-        assert_eq!(report.tag(), "kind:chromecast,reached:started");
+        assert_eq!(report.tag(true), "kind:chromecast,reached:started");
     }
 
     #[test]
@@ -628,8 +832,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            report.tag(),
+            report.tag(true),
             "kind:airplay,reached:attempted,failed:1,failReason:lan_unreachable,sessionSecs:42"
         );
+    }
+
+    #[test]
+    fn cast_identity_fields_are_gated_by_log_identity_too() {
+        let mut body = serde_json::json!({ "kind": "airplay", "reached": "started" });
+        body["tmdbId"] = serde_json::json!(550);
+        body["mediaType"] = serde_json::json!("movie");
+        let report: CastReport = serde_json::from_value(body).unwrap();
+        assert_eq!(report.tag(true), "kind:airplay,reached:started,tmdbId:550,mediaType:movie");
+        assert_eq!(report.tag(false), "kind:airplay,reached:started");
     }
 }

@@ -89,6 +89,7 @@
   import { nameTab } from '../lib/tabName.svelte';
   import {
     hlsFatalFromMessage,
+    identityOf,
     reportableLanguage,
     sendCastReport,
     sendPlaybackOutcome,
@@ -805,6 +806,7 @@
       if (timing) {
         const firstFrameAt = Date.now();
         const engine = nativeHls(element) ? 'native' : 'hls.js';
+        const subtitleIndex = current.subtitles?.findIndex((s) => s.language === subtitleChoice);
         sendStartupReport({
           sessionMs: Math.round(timing.answeredAt - timing.askedAt),
           ...parseServerTiming(current.startupTiming),
@@ -816,6 +818,21 @@
           transcoded: current.video?.transcoded === true,
           player: engine,
           route: routeKind(sessionRoute ?? route),
+          ...identityOf(
+            title,
+            season,
+            episode,
+            {
+              release: current.release,
+              audioTrack: current.audioTrack,
+              audioLanguage: current.audioTracks[current.audioTrack]?.language,
+            },
+            {
+              index: subtitleIndex,
+              language: subtitleChoice ?? undefined,
+              source: current.subtitleSource,
+            },
+          ),
         });
       }
     };
@@ -1607,11 +1624,33 @@
     const stats = watcher?.stats();
     watcher?.stop();
     watcher = undefined;
-    // den-edge's own outcome report (den-edge#262): once per visit, only when a session was actually asked for —
-    // a player opened and closed before `begin()` got anywhere has nothing to say. `hls` still names the engine
-    // that was playing; read before it is destroyed and nulled, below.
+    // den-edge's own outcome and cast reports (den-edge#262 and its identity fields, #246): once per visit, only
+    // when a session was actually asked for — a player opened and closed before `begin()` got anywhere has
+    // nothing to say. `hls` still names the engine that was playing; read before it is destroyed and nulled,
+    // below. `identity` is shared between the two reports: both describe the same title and, when one was open,
+    // the same session.
+    const subtitleLanguage = reportableLanguage(subtitleChoice);
+    const subtitleIndex = session?.subtitles?.findIndex((s) => s.language === subtitleChoice);
+    const identity = identityOf(
+      title,
+      season,
+      episode,
+      session
+        ? {
+            release: session.release,
+            audioTrack: session.audioTrack,
+            audioLanguage: session.audioTracks[session.audioTrack]?.language,
+          }
+        : undefined,
+      {
+        index: subtitleIndex,
+        language: subtitleChoice ?? undefined,
+        // `lastSubtitleSource` is only ever `den_subtitles`; a language showing with no such source is this
+        // page's own embedded rendition.
+        source: lastSubtitleSource ?? (subtitleLanguage ? 'release' : undefined),
+      },
+    );
     if (sessionRoute !== undefined) {
-      const subtitleLanguage = reportableLanguage(subtitleChoice);
       sendPlaybackOutcome({
         engine: hls ? 'hls.js' : 'native',
         route: routeKind(sessionRoute),
@@ -1622,10 +1661,7 @@
         hlsFatalType: lastFatal?.hls?.type,
         hlsFatalDetail: lastFatal?.hls?.detail,
         secondsPlayed: Math.round(playedSecs),
-        subtitleLanguage,
-        // `lastSubtitleSource` is only ever `den_subtitles`; a language showing with no such source is this
-        // page's own embedded rendition.
-        subtitleSource: lastSubtitleSource ?? (subtitleLanguage ? 'release' : undefined),
+        ...identity,
         subtitleSwitched: subtitleSwitchedMidPlay,
         subtitleTurnedOff: subtitleTurnedOffMidPlay,
         subtitleLoadFailed: subtitleLoadFailedFlag,
@@ -1638,6 +1674,7 @@
         failed: castFailed,
         failReason: castFailReason,
         sessionSecs: castSessionSecs > 0 ? Math.round(castSessionSecs) : undefined,
+        ...identity,
       });
     }
     hls?.destroy();
