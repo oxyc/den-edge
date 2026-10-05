@@ -163,6 +163,13 @@ export interface ContinueEntry {
   at?: number;
 }
 
+/** A Continue Watching decision before the title's late TMDB display fields are laid over it. */
+export interface ContinueCandidate extends Omit<ContinueEntry, 'title'> {
+  ref: Pick<Title, 'type' | 'id'>;
+  /** A started series takes its display from its latest mark; a bare flag and a film take it from the record. */
+  display: 'mark' | 'record';
+}
+
 export function emptyLibrary(): Library {
   return { records: [], marks: [], flags: new Map(), shapes: new Map(), dismissed: new Map() };
 }
@@ -452,17 +459,54 @@ export function isAired(
   );
 }
 
-/** Started series (the episode to resume or start next), then in-progress movies, newest first. */
-export function continueWatching(library: Library): ContinueEntry[] {
+type ContinueDecision = (request: Record<string, unknown>) => ContinueAnswer;
+
+/**
+ * The policy half of Continue Watching. Title names arrive in small TMDB batches, but they cannot change which
+ * episode den-core chooses. Keeping these decisions by series means one late name or shape does not replay the
+ * policy for every series in the library during Svelte's next flush.
+ */
+export class ContinueProjector {
+  private decisions = new Map<string, { input: string; answer: ContinueAnswer }>();
+
+  constructor(
+    private readonly decide: ContinueDecision = (request) => syncPolicy<ContinueAnswer>(request),
+  ) {}
+
+  project(library: Library): ContinueCandidate[] {
+    const live = new Set<string>();
+    const decision = (key: string, request: Record<string, unknown>): ContinueAnswer => {
+      live.add(key);
+      const input = JSON.stringify(request);
+      const known = this.decisions.get(key);
+      if (known?.input === input) return known.answer;
+      const answer = this.decide(request);
+      this.decisions.set(key, { input, answer });
+      return answer;
+    };
+    const candidates = continueCandidates(library, decision);
+    for (const key of this.decisions.keys()) if (!live.has(key)) this.decisions.delete(key);
+    return candidates;
+  }
+}
+
+/** Started series (the episode to resume or start next), then in-progress movies, before display fields arrive. */
+function continueCandidates(
+  library: Library,
+  decide: (key: string, request: Record<string, unknown>) => ContinueAnswer,
+): ContinueCandidate[] {
   const dismissedSince = (key: string, activity: number) =>
     (library.dismissed.get(key) ?? -Infinity) >= activity;
-  const watchedTitles = new Set(
+  const records = new Map(
     library.records
-      .filter((r) => !r.deleted && r.status === 'watched')
-      .map((r) => titleKey(r.title)),
+      .filter((record) => !record.deleted)
+      .map((record) => [titleKey(record.title), record]),
+  );
+  const watchedTitles = new Set(
+    [...records].flatMap(([key, record]) => (record.status === 'watched' ? [key] : [])),
   );
   const seen = new Set<string>();
-  const entries: ContinueEntry[] = [];
+  const entries: ContinueCandidate[] = [];
 
   // Three summaries per series, because the policy asks three different questions of them and conflating any
   // two is a defect one of the clients actually shipped: where a resume would go (the mark touched last), how
@@ -498,23 +542,14 @@ export function continueWatching(library: Library): ContinueEntry[] {
   );
   for (const key of series) {
     const mark = latest.get(key);
-    // A series known only through a bare watched flag has no mark to take its name and art from — a tracker
-    // pull writes no progress — so the record carries the display instead. Without this such a series is
-    // decided correctly and then dropped for want of a title, which is the same as never offering it.
-    const title: Title | undefined = mark
-      ? {
-          type: mark.type as MediaType,
-          id: mark.id,
-          title: mark.title,
-          posterPath: mark.posterPath,
-          rating: mark.voteAverage,
-        }
-      : library.records.find((r) => !r.deleted && titleKey(r.title) === key)?.title;
-    if (!title || title.title === '' || (title.type !== 'movie' && title.type !== 'tv')) continue;
+    // A series known only through a bare watched flag has no mark to identify it, so its record does. Display
+    // fields are deliberately not inspected here: a late name changes presentation, not this policy decision.
+    const ref = mark ? { type: mark.type as MediaType, id: mark.id } : records.get(key)?.title;
+    if (!ref || (ref.type !== 'movie' && ref.type !== 'tv')) continue;
     const shape = library.shapes.get(key);
     // Branch on `code`, never on `reason`: matching the prose swallowed "dismissed" once and put a dismissed
     // series back on the row.
-    const answer = syncPolicy<ContinueAnswer>({
+    const answer = decide(key, {
       op: 'continue_entry',
       mark: mark
         ? {
@@ -543,7 +578,8 @@ export function continueWatching(library: Library): ContinueEntry[] {
       mark.season === answer.episode.season &&
       mark.episode === answer.episode.episode;
     entries.push({
-      title,
+      ref,
+      display: mark ? 'mark' : 'record',
       fraction: answer.fraction,
       episode: answer.episode,
       ...(resumes ? { seconds: mark.seconds, at: mark.updatedAt } : {}),
@@ -551,20 +587,51 @@ export function continueWatching(library: Library): ContinueEntry[] {
   }
 
   const movies = library.records
-    .filter(
-      (r) =>
-        !r.deleted && r.status === 'inProgress' && r.title.type === 'movie' && r.title.title !== '',
-    )
+    .filter((r) => !r.deleted && r.status === 'inProgress' && r.title.type === 'movie')
     .sort((a, b) => b.progressAt - a.progressAt);
   for (const record of movies) {
     const key = titleKey(record.title);
     if (dismissedSince(key, record.progressAt) || seen.has(key)) continue;
     seen.add(key);
     entries.push({
-      title: record.title,
+      ref: record.title,
+      display: 'record',
       fraction: record.progress,
       ...(record.seconds !== undefined ? { seconds: record.seconds, at: record.progressAt } : {}),
     });
   }
   return entries;
+}
+
+/** Lay late title names and artwork over policy decisions, dropping entries that are not named yet. */
+export function nameContinueCandidates(
+  candidates: readonly ContinueCandidate[],
+  library: Library,
+): ContinueEntry[] {
+  const records = new Map(library.records.map((record) => [titleKey(record.title), record.title]));
+  const marks = new Map<string, { title: Title; updatedAt: number }>();
+  for (const mark of library.marks) {
+    const key = titleKey(mark);
+    const current = marks.get(key);
+    if (!current || mark.updatedAt > current.updatedAt)
+      marks.set(key, {
+        title: {
+          type: mark.type as MediaType,
+          id: mark.id,
+          title: mark.title,
+          posterPath: mark.posterPath,
+          rating: mark.voteAverage,
+        },
+        updatedAt: mark.updatedAt,
+      });
+  }
+  return candidates.flatMap(({ ref, display, ...entry }) => {
+    const title = display === 'mark' ? marks.get(titleKey(ref))?.title : records.get(titleKey(ref));
+    return title?.title ? [{ ...entry, title }] : [];
+  });
+}
+
+/** Started series (the episode to resume or start next), then in-progress movies, newest first. */
+export function continueWatching(library: Library): ContinueEntry[] {
+  return nameContinueCandidates(new ContinueProjector().project(library), library);
 }
