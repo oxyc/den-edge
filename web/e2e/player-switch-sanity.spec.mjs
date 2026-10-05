@@ -2,8 +2,9 @@
 // play it). Fauda S1E3 on home Wi-Fi hopped between "13 GB" and "6.3 GB" every 10–30 s: the native path has no
 // byte loader, so between two whole segments landing in `buffered` its measured rate read 0, and a rate of 0 sent
 // a switch with no `fitsOnly`/`maxBitrate` at all — den-remux then opened its own favourite, a heavier copy. These
-// reproduce each symptom against a fake den-remux that does what the real one did with such a request.
-import { existsSync } from 'node:fs';
+// reproduce each symptom against a fake den-remux that does what the real one did with such a request. macOS's
+// WebKit plays them natively, as an iPhone does; Linux's (CI) has no native HLS and plays them through hls.js.
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test, expect, webkit, devices } from '@playwright/test';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
@@ -19,10 +20,32 @@ test.skip(
   'needs WebKit: npx playwright install webkit',
 );
 
-/** Three copies of one episode, as den-scout lists them: the labels carry pack sizes, the bitrates are per file. */
-const A = { filename: 'a.mkv', label: '1080p • WEB-DL • 13 GB', plays: 'yes', bitrate: 4_400_000 };
-const B = { filename: 'b.mkv', label: '1080p • WEB-DL • 6.3 GB', plays: 'yes', bitrate: 2_100_000 };
-const C = { filename: 'c.mkv', label: '2160p • WEB-DL • 68 GB', plays: 'yes', bitrate: 9_000_000 };
+/**
+ * The fixture's own bytes per segment. Every copy serves these, and what den-remux says each copy sends is these
+ * scaled by the copy's `scale`: hls.js (Linux WebKit has no native HLS) measures the bytes that really arrive, so
+ * a copy said to send more than is served would read as a link far slower than the one the test means.
+ */
+const FIXTURE_BYTES = Array.from(
+  { length: FIXTURE_SEGMENTS },
+  (_, n) => statSync(new URL(`seg${n}.m4s`, hls)).size,
+);
+const FIXTURE_BITRATE =
+  (FIXTURE_BYTES.reduce((sum, b) => sum + b, 0) * 8) / (FIXTURE_SEGMENTS * SEGMENT_SECS);
+
+/**
+ * Three copies of one episode, as den-scout lists them: the labels carry pack sizes, the bitrates are per file. A is
+ * the fixture as it is; B, the "6.3 GB", a quarter of it; C, the "68 GB", twice it.
+ */
+const copy = (filename, label, scale) => ({
+  filename,
+  label,
+  plays: 'yes',
+  scale,
+  bitrate: FIXTURE_BITRATE * scale,
+});
+const A = copy('a.mkv', '1080p • WEB-DL • 13 GB', 1);
+const B = copy('b.mkv', '1080p • WEB-DL • 6.3 GB', 0.25);
+const C = copy('c.mkv', '2160p • WEB-DL • 68 GB', 2);
 const RELEASES = [A, B, C];
 
 function playlist(segments) {
@@ -54,7 +77,11 @@ async function fakeRemux(page, { segments = FIXTURE_SEGMENTS, delayMs = () => 0 
   const served = [];
   const outcomes = [];
   await page.route(`${ORIGIN}/direct/releases`, (r) =>
-    r.fulfill({ json: { releases: RELEASES.map(({ bitrate: _, ...rest }) => rest) } }),
+    r.fulfill({
+      json: {
+        releases: RELEASES.map(({ filename, label, plays }) => ({ filename, label, plays })),
+      },
+    }),
   );
   await page.route(`${ORIGIN}/direct/session`, (r) => {
     const want = JSON.parse(r.request().postData() ?? '{}');
@@ -73,7 +100,7 @@ async function fakeRemux(page, { segments = FIXTURE_SEGMENTS, delayMs = () => 0 
     if (!release) return r.fulfill({ status: 404, json: { error: 'no_fitting_copy' } });
     served.push(release.filename);
     const sid = `${release.filename[0]}${served.length}`;
-    const bytes = (release.bitrate * SEGMENT_SECS) / 8;
+    const bytes = (n) => FIXTURE_BYTES[n % FIXTURE_SEGMENTS] * release.scale;
     return r.fulfill({
       status: 201,
       json: {
@@ -86,7 +113,7 @@ async function fakeRemux(page, { segments = FIXTURE_SEGMENTS, delayMs = () => 0 
           size: (release.bitrate * duration) / 8,
         },
         need: Math.round(release.bitrate * 1.1),
-        segments: Array.from({ length: segments }, (_, n) => [n * SEGMENT_SECS, bytes]),
+        segments: Array.from({ length: segments }, (_, n) => [n * SEGMENT_SECS, bytes(n)]),
         video: { codec: 'h264', transcoded: false },
         audioTrack: 0,
         audioTracks: [],
@@ -201,7 +228,7 @@ test('a link too slow for the playing copy moves only to a lighter one, then say
     await page.goto(`${ORIGIN}/test/player.html`);
     await playsTo(page, 1);
 
-    await expect.poll(() => remux.served.length, { timeout: 90_000 }).toBeGreaterThan(1);
+    await expect.poll(() => remux.asked.length, { timeout: 90_000 }).toBeGreaterThan(1);
     const [, ask] = remux.asked;
     // Asked only for a copy that fits under what A itself needs, by A's real bitrate rather than its pack label.
     expect(ask.fitsOnly).toBe(true);
