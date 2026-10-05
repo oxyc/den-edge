@@ -115,3 +115,27 @@ it('loads the episode shape even when a series name is already remembered', asyn
   expect(state.shapes.get('tv:7')).toEqual(shape);
   expect(state.displays).toEqual([series]);
 });
+
+it('checks a large already-named library in linear work', async () => {
+  let displayReads = 0;
+  const state = session();
+  state.displays = Array.from({ length: 1_000 }, (_, id) => ({
+    get type() {
+      displayReads++;
+      return 'movie' as const;
+    },
+    get id() {
+      displayReads++;
+      return id;
+    },
+    title: `Movie ${id}`,
+  }));
+  const refs = Array.from({ length: 1_000 }, (_, id) => ({ type: 'movie' as const, id }));
+  const lookup = vi.fn(async () => null);
+
+  await nameLibraryTitles(state, refs, 'key', lookup);
+
+  expect(lookup).not.toHaveBeenCalled();
+  // Each existing display is indexed once, rather than scanned again for every ref.
+  expect(displayReads).toBe(2_000);
+});

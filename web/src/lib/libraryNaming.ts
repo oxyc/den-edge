@@ -10,6 +10,8 @@ type Ref = { type: MediaType; id: number };
 interface NamingRun {
   key: string;
   pending: Map<string, Promise<void>>;
+  displays: Title[];
+  known: Set<string>;
   /** Found but not yet published: every assignment re-derives the whole Home, so names land together. */
   found: Map<string, Details>;
   timer?: ReturnType<typeof setTimeout>;
@@ -19,6 +21,15 @@ const runs = new WeakMap<NamedLibrary, NamingRun>();
 /** How long found names gather before they are published together. */
 const BATCH_MS = 100;
 
+/** Title membership for the current display snapshot, shared by every retained page's naming pass. */
+function knownTitles(session: NamedLibrary, run: NamingRun): Set<string> {
+  if (run.displays !== session.displays) {
+    run.displays = session.displays;
+    run.known = new Set(session.displays.map(titleKey));
+  }
+  return run.known;
+}
+
 /** Every name found since the last publish, in one assignment each to `displays` and `shapes`. */
 function publish(session: NamedLibrary, run: NamingRun): void {
   clearTimeout(run.timer);
@@ -27,9 +38,13 @@ function publish(session: NamedLibrary, run: NamingRun): void {
   run.found.clear();
   if (runs.get(session) !== run || !found.length) return;
   // A user action may have remembered a title while its metadata was loading.
-  const known = new Set(session.displays.map(titleKey));
+  const known = knownTitles(session, run);
   const titles = found.filter(([id]) => !known.has(id)).map(([, details]) => details.title);
-  if (titles.length) session.displays = [...session.displays, ...titles];
+  if (titles.length) {
+    session.displays = [...session.displays, ...titles];
+    run.displays = session.displays;
+    for (const title of titles) known.add(titleKey(title));
+  }
   const shapes = found.flatMap(([id, { shape }]) => (shape ? [[id, shape] as const] : []));
   if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
 }
@@ -42,19 +57,26 @@ export async function nameLibraryTitles(
 ): Promise<void> {
   let run = runs.get(session);
   if (!run || run.key !== key) {
-    run = { key, pending: new Map(), found: new Map() };
+    const displays = session.displays;
+    run = {
+      key,
+      pending: new Map(),
+      displays,
+      known: new Set(displays.map(titleKey)),
+      found: new Map(),
+    };
     runs.set(session, run);
   }
   const current = run;
   const queue = [...refs];
+  let next = 0;
   const worker = async () => {
-    for (let ref = queue.shift(); ref; ref = queue.shift()) {
+    for (let ref = queue[next++]; ref; ref = queue[next++]) {
       if (runs.get(session) !== current) return;
       const id = titleKey(ref);
       if (
         current.found.has(id) ||
-        (session.displays.some((title) => titleKey(title) === id) &&
-          (ref.type !== 'tv' || session.shapes.has(id)))
+        (knownTitles(session, current).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))
       )
         continue;
       let work = current.pending.get(id);
