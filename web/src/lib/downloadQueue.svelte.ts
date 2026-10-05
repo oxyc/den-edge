@@ -103,11 +103,28 @@ export class DownloadQueue {
   /** This browser's usable ticket for a persisted alternate. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Read by polls and winner handling, never by the page.
   readonly hedgeUrls = new Map<string, string>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Guards device-local tickets against row replacement.
+  private readonly hedgeIdentities = new Map<string, string>();
   /** Rows whose ticket den-scout said had lapsed, renewed here: the lease holder writes the fresh one back. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Read by the lease holder's pass, never by the page.
   readonly lapsed = new Set<string>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight deduplication is private bookkeeping.
   private pending = new Map<string, Promise<Preparation>>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A persisted alternate has its own add lifecycle.
+  private hedgePending = new Map<
+    string,
+    { identity: string; url: string; run: Promise<Preparation> }
+  >();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- In-flight alternate probes coalesce by row.
+  private hedgePolls = new Map<
+    string,
+    { identity: string; run: Promise<Preparation | undefined> }
+  >();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Invalidates async ticket resolution after clear/replace.
+  private hedgeTokens = new Map<string, number>();
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Bounded negative source-list cache, not UI state.
+  private noHedgeUntil = new Map<string, { key: string; until: number }>();
+  private generation = 0;
   private log: LibraryLog | null = null;
   private clock: BrowserClock | null = null;
   /** This page's own address for a ticket another device wrote (`scoutTicket`); null where it can't reach it. */
@@ -137,11 +154,19 @@ export class DownloadQueue {
     resolve?: Resolve,
   ): void {
     if (this.log !== log) {
+      this.generation++;
       this.answers.clear();
       this.hedgeAnswers.clear();
       this.clocks.clear();
       this.urls.clear();
       this.hedgeUrls.clear();
+      this.hedgeIdentities.clear();
+      this.hedgePending.clear();
+      this.hedgePolls.clear();
+      this.hedgeTokens.clear();
+      this.noHedgeUntil.clear();
+      this.pending.clear();
+      this.lapsed.clear();
     }
     this.log = log;
     this.clock = clock;
@@ -232,7 +257,9 @@ export class DownloadQueue {
   /** Fresh releases for a viewer choosing what to try beside the current partial download. */
   async alternatives(download: Download): Promise<TitleSource[] | null> {
     if (!this.resolve) return null;
-    return (await this.resolve(download.title)).sources;
+    const generation = this.generation;
+    const { sources } = await this.resolve(download.title);
+    return this.generation === generation ? sources : null;
   }
 
   /**
@@ -242,6 +269,7 @@ export class DownloadQueue {
   async tryAnother(download: Download, source: TitleSource): Promise<Preparation> {
     const log = this.log;
     const clock = this.clock;
+    const generation = this.generation;
     if (!log || !clock) return { state: 'unknown', message: 'Downloads need your library.' };
     const row = log.settings(download.name);
     if (!row) return { state: 'unknown', message: 'That download is no longer in the queue.' };
@@ -272,8 +300,16 @@ export class DownloadQueue {
       }),
     );
     if (!saved) return { state: 'unknown', message: SAVE_FAILED };
+    const latestRow = log.settings(download.name);
+    const latest = latestRow ? readDownload(latestRow) : null;
+    if (
+      this.generation !== generation ||
+      this.log !== log ||
+      latest?.release.hedge?.identity !== source.identity
+    )
+      return { state: 'unknown' };
     this.touch();
-    return this.addHedge(download.name, source.url);
+    return this.addHedge(download.name, source.url, source.identity);
   }
 
   /** The URL this browser asks about a download with, or null until a resolve finds it one. */
@@ -289,12 +325,13 @@ export class DownloadQueue {
     const name = downloadName(contentKeyOf(title));
     const pending = this.pending.get(name);
     if (pending) return pending;
-    const run = this.startOnce(name, title, source, sources);
+    const generation = this.generation;
+    const run = this.startOnce(name, title, source, sources, generation);
     this.pending.set(name, run);
     try {
       return await run;
     } finally {
-      this.pending.delete(name);
+      if (this.pending.get(name) === run) this.pending.delete(name);
     }
   }
 
@@ -303,6 +340,7 @@ export class DownloadQueue {
     title: DownloadTitle,
     source: TitleSource,
     sources?: TitleSource[],
+    generation = this.generation,
   ): Promise<Preparation> {
     const log = this.log;
     const clock = this.clock;
@@ -327,58 +365,177 @@ export class DownloadQueue {
       () => clock.issue(),
     );
     if (!(await log.write(row))) return { state: 'unknown', message: SAVE_FAILED };
-    this.urls.set(name, source.url);
-    this.clocks.delete(name);
-    this.answers.set(name, { state: 'unknown', message: 'Starting download…' });
-    this.touch();
+    if (this.generation === generation) {
+      this.urls.set(name, source.url);
+      this.clocks.delete(name);
+      this.answers.set(name, { state: 'unknown', message: 'Starting download…' });
+      this.touch();
+    }
     const answer = await this.prepare(source.url, true, true);
-    this.answers.set(name, answer);
+    if (this.generation === generation) this.answers.set(name, answer);
     if (answer.state === 'paused' && answer.until) {
       const current = log.settings(name);
       if (current)
         await log.write(
           withValues(current, { resumeAt: { value: { int: answer.until }, at: clock.issue() } }),
         );
-      this.touch();
+      if (this.generation === generation) this.touch();
     }
     return answer;
   }
 
   /** Ask den-scout to fetch a release a download moved on to, or one held back whose time has come. */
   async add(name: string, url: string): Promise<Preparation> {
+    const generation = this.generation;
     this.urls.set(name, url);
     const answer = await this.prepare(url, true, true);
-    this.answers.set(name, answer);
-    this.touch();
+    if (this.generation === generation && this.urls.get(name) === url) {
+      this.answers.set(name, answer);
+      this.touch();
+    }
     return answer;
   }
 
   /** Queue a persisted alternate without replacing the primary's answer or ticket. */
-  async addHedge(name: string, url: string): Promise<Preparation> {
+  async addHedge(name: string, url: string, identity = url): Promise<Preparation> {
+    const pending = this.hedgePending.get(name);
+    if (pending?.identity === identity && pending.url === url) return pending.run;
+    if (this.hedgeIdentities.get(name) !== identity) this.clearHedge(name);
+    const generation = this.generation;
+    this.hedgeIdentities.set(name, identity);
     this.hedgeUrls.set(name, url);
-    const answer = await this.prepare(url, true, true);
-    this.hedgeAnswers.set(name, answer);
-    this.touch();
-    return answer;
+    const run = this.prepare(url, true, true);
+    this.hedgePending.set(name, { identity, url, run });
+    try {
+      const answer = await run;
+      if (
+        this.generation === generation &&
+        this.hedgePending.get(name)?.run === run &&
+        this.hedgeUrls.get(name) === url
+      ) {
+        this.hedgeAnswers.set(name, answer);
+        this.touch();
+      }
+      return answer;
+    } finally {
+      if (this.hedgePending.get(name)?.run === run) this.hedgePending.delete(name);
+    }
   }
 
   /** Ask about the alternate, renewing its device-local ticket by identity when necessary. */
   async pollHedge(download: Download): Promise<Preparation | undefined> {
+    const identity = download.release.hedge?.identity;
+    if (!identity) return undefined;
+    if (
+      this.hedgeIdentities.has(download.name) &&
+      this.hedgeIdentities.get(download.name) !== identity
+    )
+      this.clearHedge(download.name);
+    const adding = this.hedgePending.get(download.name);
+    if (adding?.identity === identity) return adding.run;
+    if (adding) this.hedgePending.delete(download.name);
+    const pending = this.hedgePolls.get(download.name);
+    if (pending && pending.identity !== identity) this.clearHedge(download.name);
+    const current = this.hedgePolls.get(download.name);
+    if (current?.identity === identity) return current.run;
+    const generation = this.generation;
+    const token = this.hedgeTokens.get(download.name) ?? 0;
+    const run = this.pollHedgeOnce(download, generation, token);
+    this.hedgePolls.set(download.name, { identity, run });
+    try {
+      const answer = await run;
+      if (
+        answer &&
+        this.generation === generation &&
+        this.hedgePolls.get(download.name)?.run === run
+      )
+        this.hedgeAnswers.set(download.name, answer);
+      return answer;
+    } finally {
+      if (this.hedgePolls.get(download.name)?.run === run) this.hedgePolls.delete(download.name);
+    }
+  }
+
+  private async pollHedgeOnce(
+    download: Download,
+    generation: number,
+    token: number,
+  ): Promise<Preparation | undefined> {
     const hedge = download.release.hedge;
     if (!hedge) return undefined;
-    let url = this.hedgeUrls.get(download.name) ?? this.ticket(hedge.url);
+    const url = await this.hedgeUrl(download, generation, token);
+    if (!url) return undefined;
+    return this.prepare(url, false, false);
+  }
+
+  /** Queue a persisted alternate that a prior holder wrote but did not manage to add. Holder-only. */
+  async resumeHedge(
+    download: Download,
+    current: () => boolean = () => true,
+  ): Promise<Preparation | undefined> {
+    const generation = this.generation;
+    const token = this.hedgeTokens.get(download.name) ?? 0;
+    const url = await this.hedgeUrl(download, generation, token);
+    if (
+      this.generation !== generation ||
+      (this.hedgeTokens.get(download.name) ?? 0) !== token ||
+      !current()
+    )
+      return undefined;
+    return url ? this.addHedge(download.name, url, download.release.hedge?.identity) : undefined;
+  }
+
+  private async hedgeUrl(
+    download: Download,
+    generation: number,
+    token: number,
+  ): Promise<string | undefined> {
+    const hedge = download.release.hedge;
+    if (!hedge) return undefined;
+    let url =
+      (this.hedgeIdentities.get(download.name) === hedge.identity
+        ? this.hedgeUrls.get(download.name)
+        : undefined) ??
+      this.ticket(hedge.url) ??
+      undefined;
     if (!url && this.resolve) {
       const { sources } = await this.resolve(download.title);
+      if (this.generation !== generation || (this.hedgeTokens.get(download.name) ?? 0) !== token)
+        return undefined;
       const same = sources?.find((source) => source.identity === hedge.identity);
       if (same) {
         url = same.url;
+        this.hedgeIdentities.set(download.name, hedge.identity);
         this.hedgeUrls.set(download.name, url);
       }
     }
-    if (!url) return undefined;
-    const answer = await this.prepare(url, false, false);
-    this.hedgeAnswers.set(download.name, answer);
-    return answer;
+    if (this.generation !== generation || (this.hedgeTokens.get(download.name) ?? 0) !== token)
+      return undefined;
+    return url;
+  }
+
+  private hedgeResolveKey(download: Download): string {
+    return JSON.stringify([
+      download.content,
+      download.release.identity,
+      download.queuedAt,
+      [...download.tried].sort(),
+    ]);
+  }
+
+  /** Whether a complete no-alternate result has reached its bounded reconsideration time. */
+  hedgeResolveDue(download: Download, now: number): boolean {
+    const remembered = this.noHedgeUntil.get(download.name);
+    const key = this.hedgeResolveKey(download);
+    if (!remembered || remembered.key !== key) {
+      if (remembered) this.noHedgeUntil.delete(download.name);
+      return true;
+    }
+    return now >= remembered.until;
+  }
+
+  rememberNoHedge(download: Download, until: number): void {
+    this.noHedgeUntil.set(download.name, { key: this.hedgeResolveKey(download), until });
   }
 
   /** The alternate became the row's primary. Carry its local state across without adding it again. */
@@ -391,7 +548,11 @@ export class DownloadQueue {
   }
 
   clearHedge(name: string): void {
+    this.hedgeTokens.set(name, (this.hedgeTokens.get(name) ?? 0) + 1);
+    this.hedgePending.delete(name);
+    this.hedgePolls.delete(name);
     this.hedgeAnswers.delete(name);
+    this.hedgeIdentities.delete(name);
     this.hedgeUrls.delete(name);
   }
 
@@ -400,6 +561,7 @@ export class DownloadQueue {
     const pending = this.pending.get(download.name);
     if (pending) return pending;
     const url = this.urlFor(download);
+    const generation = this.generation;
     if (!url) {
       // A ticket this browser can't ask with is a ticket to renew, which says nothing about the fetch.
       const expired: Preparation = { state: 'expired', message: FOREIGN };
@@ -407,14 +569,15 @@ export class DownloadQueue {
       return expired;
     }
     const run = this.prepare(url, false, false).then((answer) => {
-      this.answers.set(download.name, answer);
+      if (this.generation === generation && this.pending.get(download.name) === run)
+        this.answers.set(download.name, answer);
       return answer;
     });
     this.pending.set(download.name, run);
     try {
       return await run;
     } finally {
-      this.pending.delete(download.name);
+      if (this.pending.get(download.name) === run) this.pending.delete(download.name);
     }
   }
 
@@ -425,7 +588,9 @@ export class DownloadQueue {
    */
   async renew(download: Download): Promise<string | 'gone' | null> {
     if (!this.resolve) return null;
+    const generation = this.generation;
     const { sources, answer } = await this.resolve(download.title);
+    if (this.generation !== generation) return null;
     if (!sources) return null;
     const same = sources.find((s) => s.identity === download.release.identity);
     if (same) {

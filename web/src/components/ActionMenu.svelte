@@ -6,7 +6,7 @@
      then-closes-and-returns-focus behaviour, and a bottom sheet below 760px or on a coarse pointer. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import type { MenuItem } from '../lib/titleActions';
 
   let {
@@ -53,6 +53,17 @@
    * later unrelated tap) stale-true.
    */
   let swallowNextClick = false;
+  let positionFrame: number | undefined;
+  let focusFrame: number | undefined;
+
+  function cancelFrames() {
+    if (positionFrame !== undefined) cancelAnimationFrame(positionFrame);
+    if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+    positionFrame = undefined;
+    focusFrame = undefined;
+  }
+
+  onDestroy(cancelFrames);
 
   // A closed poster contributes a trigger, not a matchMedia subscription and five global listeners. Native auto
   // popovers ensure only one menu is open, so listener work stays constant however many posters a long row retains.
@@ -121,6 +132,7 @@
     // Removing a popover need not preserve its queued `toggle` event. Keep the trigger truthful synchronously even
     // when an outside gesture releases the body before that event is delivered.
     open = false;
+    cancelFrames();
     prepared = false;
   }
 
@@ -143,8 +155,10 @@
   function position() {
     const positioned = menu;
     if (!positioned) return;
+    if (positionFrame !== undefined) cancelAnimationFrame(positionFrame);
     if (mobile) {
-      requestAnimationFrame(() => {
+      positionFrame = requestAnimationFrame(() => {
+        positionFrame = undefined;
         positioned.style.removeProperty('left');
         positioned.style.removeProperty('top');
       });
@@ -168,7 +182,8 @@
     }
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
-    requestAnimationFrame(() => {
+    positionFrame = requestAnimationFrame(() => {
+      positionFrame = undefined;
       positioned.style.left = `${x}px`;
       positioned.style.top = `${y}px`;
     });
@@ -182,8 +197,14 @@
     open = event.newState === 'open';
     if (open) {
       // The popover is in the top layer by the time `toggle` fires, so the first item can take focus now.
-      requestAnimationFrame(() => enabledItemEls()[0]?.focus());
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+      focusFrame = requestAnimationFrame(() => {
+        focusFrame = undefined;
+        enabledItemEls()[0]?.focus();
+      });
     } else {
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+      focusFrame = undefined;
       sheetDragStart = null;
       coords = null;
       if (!suppressRefocus) trigger?.focus();

@@ -4,7 +4,7 @@
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
      faded, as on the TV. -->
 <script lang="ts">
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { availability } from '../lib/availability.svelte';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
@@ -31,6 +31,8 @@
     menu = true,
     onopen,
     downloadBadge,
+    checkAvailability = true,
+    onvisibilitychange,
   }: {
     title: Title;
     caption?: string;
@@ -61,6 +63,10 @@
      * standing, which is the *title's* state, not the download's, and must never be shown as a checkmark here.
      */
     downloadBadge?: { state: 'queued' | 'downloading' | 'trouble' | 'ready'; label: string };
+    /** Download cards have their own persisted state; stream availability is unrelated and must not fade them. */
+    checkAvailability?: boolean;
+    /** Lets work tied to this card reuse its shared page/row/card visibility instead of adding an observer. */
+    onvisibilitychange?: (visible: boolean) => void;
   } = $props();
 
   const titleActions = titleActionsContext();
@@ -100,13 +106,16 @@
   });
   // While live art is deferred, `pageSnapshot` can materialize it only in an inert swipe copy.
   const showImage = $derived(page.active && (row?.near ?? true) && imageNear);
-  const faded = $derived(availability.unavailable(title));
+  $effect(() => onvisibilitychange?.(showImage));
+  const faded = $derived(checkAvailability && availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
   // earlier season, which says nothing about the episode this card is fetching.
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
   const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
-  $effect(() => availability.want(title));
+  $effect(() => {
+    if (checkAvailability && showImage) availability.want(title);
+  });
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
   // answer already under way. Delayed, and dropped on `pointercancel` — what a touch that turns into a scroll
@@ -177,10 +186,19 @@
     event.preventDefault();
     actionMenu?.openAt(event.clientX, event.clientY);
   }
+  onDestroy(() => {
+    clearTimeout(warming);
+    clearTimeout(longPressTimer);
+  });
 </script>
 
 {#snippet body()}
-  <span class="art" class:landscape data-snapshot-poster={art && !showImage ? art : undefined}>
+  <span
+    class="art"
+    class:landscape
+    data-snapshot-poster={art && !showImage ? art : undefined}
+    data-snapshot-fit={art && !showImage && portraitFallback ? 'contain' : undefined}
+  >
     {#if art}
       {#if showImage}
         <img
@@ -295,7 +313,9 @@
       }}>{@render body()}</a
     >
   {:else}
-    <figure bind:this={cardElement} class="card" class:faded class:landscape>{@render body()}</figure>
+    <figure bind:this={cardElement} class="card" class:faded class:landscape>
+      {@render body()}
+    </figure>
   {/if}
 {/snippet}
 

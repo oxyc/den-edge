@@ -42,6 +42,7 @@ test('snapshots regressions', async () => {
         const live = document.querySelector('#app .hero').getBoundingClientRect();
         const frozen = overlay.querySelector('.hero').getBoundingClientRect();
         const computed = getComputedStyle(overlay.querySelector('.animated'));
+        const deferred = overlay.querySelector('.deferred-art');
         return {
           visual,
           frozenVisual: { transform: computed.transform, opacity: computed.opacity },
@@ -53,6 +54,11 @@ test('snapshots regressions', async () => {
             height: frozen.height,
           },
           rail: overlay.querySelector('.rail').scrollLeft,
+          deferred: {
+            fit: deferred.querySelector('img')?.style.objectFit,
+            poster: deferred.hasAttribute('data-snapshot-poster'),
+            fitMarker: deferred.hasAttribute('data-snapshot-fit'),
+          },
         };
       });
       console.log(width, result);
@@ -62,6 +68,7 @@ test('snapshots regressions', async () => {
         'snapshot and live page must occupy identical pixels',
       );
       assert.equal(result.rail, 400);
+      assert.deepEqual(result.deferred, { fit: 'contain', poster: false, fitMarker: false });
       assert.deepEqual(
         result.frozenVisual,
         result.visual,

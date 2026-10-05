@@ -6,6 +6,7 @@
   import DownloadStatus from './DownloadStatus.svelte';
   import DownloadAlternatives from './DownloadAlternatives.svelte';
   import DownloadPosterCard from './DownloadPosterCard.svelte';
+  import { refreshDownloads } from '../lib/downloadDriver';
   import { downloads as shared, inFlight, type DownloadQueue } from '../lib/downloadQueue.svelte';
   import type { Download } from '../lib/downloadRows';
   import { headline, phase } from '../lib/downloadStatus';
@@ -26,9 +27,13 @@
   /** Asked once as the page shows, then by the library's own refresh: it opens on fresh figures. */
   $effect(() => {
     if (!active) return;
+    let live = true;
     untrack(() => {
-      for (const download of queue.list()) void queue.poll(download);
+      void refreshDownloads(queue, { force: true, shouldContinue: () => live && active });
     });
+    return () => {
+      live = false;
+    };
   });
   let busy = $state<string | null>(null);
 
@@ -57,13 +62,14 @@
 {:else}
   <ul class="grid">
     {#each list as download (download.name)}
+      {@const title = titleOf(download)}
       {@const status = queue.status(download, now)}
       {@const state = status.state}
       {@const answer = queue.answers.get(download.name)}
       <li data-download={download.content}>
         <DownloadPosterCard
           {download}
-          title={titleOf(download)}
+          {title}
           badge={answer?.state === 'preparing' && answer.progress
             ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
             : undefined}
@@ -73,10 +79,11 @@
               ? answer.progress
               : undefined}
           downloadBadge={{ state: phase(status, answer), label: headline(status, answer) }}
-          href={titleHref(titleOf(download))}
+          href={titleHref(title)}
           menu={false}
+          {active}
         />
-        <DownloadStatus {download} {queue} {now} />
+        <DownloadStatus {download} {queue} {now} {status} {answer} />
         {#if state !== 'ready'}<DownloadAlternatives {download} {queue} />{/if}
         <button
           type="button"

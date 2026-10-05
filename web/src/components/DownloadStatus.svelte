@@ -3,24 +3,31 @@
      browser. Text, not controls: it is a status. -->
 <script lang="ts">
   import { downloads as shared, type DownloadQueue } from '../lib/downloadQueue.svelte';
+  import type { DownloadState } from '../lib/downloadQueue.svelte';
   import { deviceName, type Download } from '../lib/downloadRows';
   import { facts, headline, isTrouble, queuedFrom, releaseLine } from '../lib/downloadStatus';
+  import type { Preparation } from '../lib/titleSources';
 
   let {
     download,
     queue = shared,
     now = Date.now(),
     release = true,
+    status: suppliedStatus,
+    answer: suppliedAnswer,
   }: {
     download: Download;
     queue?: DownloadQueue;
     now?: number;
     /** Name the release too: off where the release is already on screen (a title's source list). */
     release?: boolean;
+    /** A parent already drawing the card can share these computations. */
+    status?: DownloadState;
+    answer?: Preparation;
   } = $props();
 
-  const status = $derived(queue.status(download, now));
-  const answer = $derived(queue.answers.get(download.name));
+  const status = $derived(suppliedStatus ?? queue.status(download, now));
+  const answer = $derived(suppliedAnswer ?? queue.answers.get(download.name));
   const lines = $derived(facts(download, status, answer, now));
   const from = $derived(
     queuedFrom(download, queue.device, (device) =>

@@ -30,8 +30,12 @@ export class NearViewportObservers {
       const observer = this.create(
         (entries) => {
           for (const entry of entries) {
+            const listeners = callbacks.get(entry.target);
+            // IntersectionObserver delivery is queued. A target may have been unobserved after the browser made
+            // this entry; do not retain that detached element or notify a later subscriber with stale geometry.
+            if (!listeners?.size) continue;
             state.set(entry.target, entry.isIntersecting);
-            for (const notify of callbacks.get(entry.target) ?? []) notify(entry.isIntersecting);
+            for (const notify of listeners) notify(entry.isIntersecting);
           }
         },
         { rootMargin },

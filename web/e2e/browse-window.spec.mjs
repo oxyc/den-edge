@@ -2,6 +2,48 @@ import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork } from './network.mjs';
 
+test('a retained hidden browse page owns no viewport observers or idle expansion', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const Native = window.IntersectionObserver;
+    const active = new Set();
+    window.fixtureObserved = () => active.size;
+    window.IntersectionObserver = class extends Native {
+      mine = new Set();
+      observe(element) {
+        this.mine.add(element);
+        active.add(element);
+        super.observe(element);
+      }
+      unobserve(element) {
+        this.mine.delete(element);
+        active.delete(element);
+        super.unobserve(element);
+      }
+      disconnect() {
+        for (const element of this.mine) active.delete(element);
+        this.mine.clear();
+        super.disconnect();
+      }
+    };
+  });
+  await guardNetwork(page);
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+  await page.goto(`${E2E_ORIGIN}/test/browse-window.html?catalog&hidden`);
+  expect(await page.evaluate(() => window.fixtureObserved())).toBe(0);
+
+  await page.evaluate(() => window.fixture.setActive(true));
+  await expect.poll(() => page.evaluate(() => window.fixtureObserved())).toBeGreaterThan(0);
+  await page.evaluate(() => window.fixture.setActive(false));
+  await expect.poll(() => page.evaluate(() => window.fixtureObserved())).toBe(0);
+});
+
 test('large rows keep every title reachable while mounting a bounded card window', async ({
   browser,
 }) => {

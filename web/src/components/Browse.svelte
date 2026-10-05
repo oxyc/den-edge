@@ -5,6 +5,7 @@
   import { whenIdle } from '../lib/idle';
   import type { Title } from '../lib/library';
   import { observeNearViewport } from '../lib/nearViewport';
+  import { pageVisibility } from '../lib/pageVisibility.svelte';
   import BrowseRow from './BrowseRow.svelte';
 
   let {
@@ -26,6 +27,7 @@
   const STEP = 2;
   let count = $state(STEP);
   let bottom: HTMLElement;
+  const page = pageVisibility();
 
   // A different screen starts from the top again; the same rows rebuilt (after a write, say) keep their place.
   const signature = $derived(rows.map((r) => r.id).join('\n'));
@@ -35,6 +37,7 @@
   });
 
   $effect(() => {
+    if (!page.active) return;
     return observeNearViewport(
       bottom,
       (near) => {
@@ -49,6 +52,7 @@
   // afresh as rows are added, since a marker still in range after a step changes no intersection.
   $effect(() => {
     void count;
+    if (!page.active) return;
     let live = true;
     let cancelIdle = () => {};
     const stop = observeNearViewport(

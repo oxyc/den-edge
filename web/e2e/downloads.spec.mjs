@@ -225,3 +225,61 @@ test('Try another can resume a previous release beside the current partial', asy
     await browser.close();
   }
 });
+
+test('a legacy episode recovers its still only once its retained page becomes visible', async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date('2026-10-05T12:00:00Z') });
+  await guardNetwork(page);
+  let seasonRequests = 0;
+  await page.route('**/tmdb/3/tv/1399/season/*', (route) => {
+    seasonRequests += 1;
+    if (seasonRequests === 1) return route.fulfill({ status: 503, json: { retry: true } });
+    const season = Number(new URL(route.request().url()).pathname.split('/').at(-1));
+    return route.fulfill({
+      json: {
+        episodes: [
+          season === 2
+            ? { episode_number: 4, name: 'Four', still_path: '/four.jpg' }
+            : { episode_number: 1, name: 'One', still_path: '/one.jpg' },
+        ],
+      },
+    });
+  });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"/>',
+    }),
+  );
+
+  await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=artwork&hidden`);
+  await page.waitForTimeout(200);
+  expect(seasonRequests).toBe(0);
+
+  await page.evaluate(() => window.downloadsFixture.setActive(true));
+  await expect.poll(() => seasonRequests).toBe(1);
+  await expect(page.locator('.card img')).toHaveCount(0);
+
+  // Poll progress replaces the download row and nested title object. The semantic episode is unchanged, so no
+  // second recovery is scheduled even though a season answer would now be hot in the cache.
+  await page.evaluate(() => window.downloadsFixture.refreshIdentity());
+  await page.waitForTimeout(100);
+  expect(seasonRequests).toBe(1);
+
+  // A temporary failure is not kept forever and does not busy-loop: the next visibility activation after its
+  // quiet period retries the legacy artwork once.
+  await page.evaluate(() => window.downloadsFixture.setActive(false));
+  await page.clock.fastForward(30_001);
+  await page.evaluate(() => window.downloadsFixture.setActive(true));
+  await expect.poll(() => seasonRequests).toBe(2);
+  await expect(page.locator('.card img')).toHaveAttribute('src', /\/four\.jpg$/);
+
+  await page.evaluate(() => window.downloadsFixture.changeEpisode());
+  await expect.poll(() => seasonRequests).toBe(3);
+  await expect(page.locator('.card img')).toHaveAttribute('src', /\/one\.jpg$/);
+
+  await page.evaluate(() => window.downloadsFixture.setActive(false));
+  await page.waitForTimeout(200);
+  expect(seasonRequests).toBe(3);
+});

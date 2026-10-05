@@ -124,6 +124,123 @@ describe('Availability', () => {
     expect(calls.some((c) => c.url === '/scout/sealed-cfg/availability')).toBe(true);
   });
 
+  it('does not duplicate an in-flight ask when a windowed poster remounts', async () => {
+    let release!: (response: Response) => void;
+    const answer = new Promise<Response>((resolve) => (release = resolve));
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return answer;
+    };
+    const availability = new Availability(undefined, undefined);
+    availability.connect(SCOUT, 'key', fetchImpl);
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual(['/scout/sealed-cfg/availability']);
+
+    for (let mount = 0; mount < 20; mount++) availability.want(movie);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls, 'remounts join the pending id instead of scheduling another batch').toHaveLength(
+      1,
+    );
+
+    release(Response.json({ availability: { tt7654321: 'available' } }));
+    await vi.runAllTimersAsync();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not let a remount bypass an unknown verdict retry delay', async () => {
+    const { calls, fetchImpl } = fake(() => ({ tt7654321: 'unknown' }));
+    const availability = new Availability(undefined, undefined);
+    availability.connect(SCOUT, 'key', fetchImpl);
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+    const asked = () => calls.filter((call) => call.url.endsWith('/availability')).length;
+    expect(asked()).toBe(1);
+
+    for (let mount = 0; mount < 20; mount++) availability.want(movie);
+    await vi.advanceTimersByTimeAsync(RETRY_MS - 100);
+    expect(asked(), 'the retry remains blocked for its full backoff').toBe(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(asked()).toBe(2);
+  });
+
+  it('drops an old scout response and moves its pending id to the new scout', async () => {
+    let releaseOld!: (response: Response) => void;
+    const oldAnswer = new Promise<Response>((resolve) => (releaseOld = resolve));
+    const calls: string[] = [];
+    const oldFetch: typeof fetch = async (input) => {
+      calls.push(`old ${String(input)}`);
+      return oldAnswer;
+    };
+    const newFetch: typeof fetch = async (input) => {
+      calls.push(`new ${String(input)}`);
+      return Response.json({ availability: { tt7654321: 'available' } });
+    };
+    const availability = new Availability(undefined, undefined);
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.connect(SCOUT, 'key', oldFetch);
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+
+    availability.connect(null, '');
+    await vi.advanceTimersByTimeAsync(100);
+    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    await vi.advanceTimersByTimeAsync(100);
+    releaseOld(Response.json({ availability: { tt7654321: 'unavailable' } }));
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['old /scout/sealed-cfg/availability', 'new /scout/new/availability']);
+    expect(availability.unavailable(movie), 'the late old-service answer is ignored').toBe(false);
+  });
+
+  it('cancels an old scout retry delay and asks the new scout once', async () => {
+    const calls: string[] = [];
+    const oldFetch: typeof fetch = async (input) => {
+      calls.push(`old ${String(input)}`);
+      return Response.json({ availability: { tt7654321: 'unknown' } });
+    };
+    const newFetch: typeof fetch = async (input) => {
+      calls.push(`new ${String(input)}`);
+      return Response.json({ availability: { tt7654321: 'available' } });
+    };
+    const availability = new Availability(undefined, undefined);
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.connect(SCOUT, 'key', oldFetch);
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+
+    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    await vi.advanceTimersByTimeAsync(RETRY_MS + 100);
+    expect(calls).toEqual(['old /scout/sealed-cfg/availability', 'new /scout/new/availability']);
+  });
+
+  it('does not carry an old scout’s Retry-After timer into a new scout', async () => {
+    const calls: string[] = [];
+    const oldFetch: typeof fetch = async (input) => {
+      calls.push(`old ${String(input)}`);
+      return new Response('{"error":"busy"}', {
+        status: 429,
+        headers: { 'retry-after': '60' },
+      });
+    };
+    const newFetch: typeof fetch = async (input) => {
+      calls.push(`new ${String(input)}`);
+      return Response.json({ availability: { tt7654321: 'available' } });
+    };
+    const availability = new Availability(undefined, undefined);
+    const movie = { type: 'movie' as const, id: 9, imdbId: 'tt7654321' };
+    availability.connect(SCOUT, 'key', oldFetch);
+    availability.want(movie);
+    await vi.advanceTimersByTimeAsync(100);
+
+    availability.connect({ ...SCOUT, base: '/scout/new' }, 'key', newFetch);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual(['old /scout/sealed-cfg/availability', 'new /scout/new/availability']);
+  });
+
   /**
    * The fetch this class is CONSTRUCTED with is TMDB's. Scout is asked under this origin, where
    * den-edge relays it, and the relay wants the household's membership — so the default has to be

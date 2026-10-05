@@ -162,9 +162,10 @@ export function capturePage(
       image.src = src;
       image.alt = '';
       image.decoding = 'async';
-      image.style.cssText = 'display:block;width:100%;height:100%;object-fit:cover';
+      image.style.cssText = `display:block;width:100%;height:100%;object-fit:${art.dataset.snapshotFit ?? 'cover'}`;
       art.prepend(image);
       art.removeAttribute('data-snapshot-poster');
+      art.removeAttribute('data-snapshot-fit');
     }
     // A page copied once it was left is hidden; its copy is not.
     copy.hidden = false;

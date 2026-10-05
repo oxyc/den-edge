@@ -48,6 +48,27 @@ it('fans one target out to subscribers and remembers its current state', () => {
   stopSecond();
 });
 
+it('ignores a queued delivery after its target was unsubscribed', () => {
+  let made!: FakeObserver;
+  const pool = new NearViewportObservers((callback, options) => {
+    made = new FakeObserver(callback, options);
+    return made as unknown as IntersectionObserver;
+  });
+  const removed = {} as Element;
+  const keeper = {} as Element;
+  const stopRemoved = pool.observe(removed, vi.fn(), '50px');
+  const stopKeeper = pool.observe(keeper, vi.fn(), '50px');
+
+  stopRemoved();
+  made.emit(removed, true);
+  const later = vi.fn();
+  const stopLater = pool.observe(removed, later, '50px');
+  expect(later).not.toHaveBeenCalled();
+
+  stopLater();
+  stopKeeper();
+});
+
 class FakeObserver {
   observed = new Set<Element>();
   unobserved: Element[] = [];

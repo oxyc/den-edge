@@ -5,15 +5,21 @@
   // device, and `?device=` other than this one is how a test is "another device".
   import { onMount } from 'svelte';
   import Detail from '../src/components/Detail.svelte';
+  import DownloadPosterCard from '../src/components/DownloadPosterCard.svelte';
   import DownloadsPage from '../src/components/DownloadsPage.svelte';
+  import RoutePage from '../src/components/RoutePage.svelte';
   import '../src/app.css';
   import { downloads } from '../src/lib/downloadQueue.svelte';
+  import type { Download } from '../src/lib/downloadRows';
+  import type { Title } from '../src/lib/library';
   import type { LibraryLog } from '../src/lib/log';
   import { syncPolicy } from '../src/lib/syncCore';
   import { rowName, type Row, type SettingsRow, type Stamp } from '../src/lib/wire';
 
   const params = new URLSearchParams(location.search);
-  const page = params.get('page') === 'downloads' ? 'downloads' : 'title';
+  const requestedPage = params.get('page');
+  const page =
+    requestedPage === 'downloads' || requestedPage === 'artwork' ? requestedPage : 'title';
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
   const source = (filename: string, url: string, label: string) => ({
@@ -28,6 +34,59 @@
     identity: filename.toLowerCase(),
     attributes: { resolution: '1080p', cached: false, seeders: 10 },
   });
+  let artworkActive = $state(!params.has('hidden'));
+  let legacyEpisode = $state<Download>({
+    name: 'download:tv:1399:2:4',
+    content: 'tv:1399:2:4',
+    release: { identity: 'episode.mkv', label: 'Episode', url: '/scout/p/episode' },
+    title: {
+      mediaType: 'tv',
+      mediaId: 1399,
+      season: 2,
+      episode: 4,
+      title: 'Legacy episode',
+      posterPath: '/portrait.jpg',
+    },
+    queuedAt: 1,
+    queuedBy: device,
+    tried: [],
+    exhausted: false,
+    announced: false,
+    reported: false,
+    reannounced: false,
+    row: { kind: 'set', schema: 2, name: 'download:tv:1399:2:4', values: {} },
+    seq: 0,
+  });
+  const legacyTitle: Title = {
+    type: 'tv',
+    id: 1399,
+    title: 'Legacy episode',
+    posterPath: '/portrait.jpg',
+  };
+  (
+    window as unknown as {
+      downloadsFixture: {
+        setActive: (active: boolean) => void;
+        refreshIdentity: () => void;
+        changeEpisode: () => void;
+      };
+    }
+  ).downloadsFixture = {
+    setActive: (active) => (artworkActive = active),
+    refreshIdentity: () =>
+      (legacyEpisode = {
+        ...legacyEpisode,
+        title: { ...legacyEpisode.title },
+        row: { ...legacyEpisode.row },
+      }),
+    changeEpisode: () =>
+      (legacyEpisode = {
+        ...legacyEpisode,
+        content: 'tv:1399:3:1',
+        name: 'download:tv:1399:3:1',
+        title: { ...legacyEpisode.title, season: 3, episode: 1 },
+      }),
+  };
 
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each read; the queue's `touch` redraws.
   let held = new Map<string, SettingsRow>();
@@ -75,6 +134,7 @@
 
   let ready = $state(false);
   onMount(() => {
+    if (page === 'artwork') return;
     // What the library's held read does: another device's write shows here within one read.
     const timer = setInterval(() => void read().then(() => downloads.touch()), 300);
     void read().then(() => {
@@ -96,7 +156,16 @@
 </script>
 
 <main style="padding:100px 20px">
-  {#if ready && page === 'downloads'}
+  {#if page === 'artwork'}
+    <RoutePage active={artworkActive}>
+      <DownloadPosterCard
+        download={legacyEpisode}
+        title={legacyTitle}
+        active={artworkActive}
+        menu={false}
+      />
+    </RoutePage>
+  {:else if ready && page === 'downloads'}
     <DownloadsPage />
   {:else if ready}
     <Detail
