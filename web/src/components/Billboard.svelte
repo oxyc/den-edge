@@ -10,7 +10,7 @@
      nothing to press. It is decoration, so it gives way whenever it would cost more than it gives: Reduce
      Motion, Data Saver, or the billboard scrolled off the screen leave the still picture in its place. -->
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import DetailIcon from './DetailIcon.svelte';
   import TitleActions from './TitleActions.svelte';
@@ -128,6 +128,7 @@
   const firstTitleKey = $derived(shown[0] ? `${shown[0].type}:${shown[0].id}` : '');
 
   const keyOf = (title: Title) => `${title.type}:${title.id}`;
+  const currentKey = $derived(current ? keyOf(current) : '');
   const backdropURL = (path: string) => `https://image.tmdb.org/t/p/w1280${path}`;
   const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -315,9 +316,25 @@
     return () => document.removeEventListener('visibilitychange', seen);
   });
 
-  /** The trailer belongs to the slide, and is dropped when the slide changes — not when it goes out of view. */
+  interface AmbientRequest {
+    key: string;
+    controller: AbortController;
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  // Plain rather than state: this only suppresses duplicate work and must not itself retrigger the lookup effect.
+  let ambientRequest: AmbientRequest | undefined;
+  function cancelAmbientRequest() {
+    if (!ambientRequest) return;
+    clearTimeout(ambientRequest.timer);
+    ambientRequest.controller.abort(new DOMException('ambient trailer changed', 'AbortError'));
+    ambientRequest = undefined;
+  }
+  onDestroy(cancelAmbientRequest);
+
+  /** The trailer belongs to the slide, and is dropped when its identity changes — not when its display refreshes. */
   $effect(() => {
-    void current;
+    void currentKey;
+    cancelAmbientRequest();
     ambient = null;
     proxied = null;
     playing = false;
@@ -345,82 +362,100 @@
       still() ||
       saving() ||
       ambientFailed
-    )
+    ) {
+      cancelAmbientRequest();
       return;
+    }
     // Already found for this slide: scrolling back must resume it, not fetch it and sit out the settle again.
-    if (untrack(() => ambient)) return;
-    let live = true;
-    const timer = setTimeout(() => {
+    if (untrack(() => ambient)) {
+      cancelAmbientRequest();
+      return;
+    }
+    // A naming batch can replace `title` and `routes` with equal objects every 100 ms. The title, reel base and
+    // reachable reel routes are the complete identity of this lookup; keep its one request alive across those
+    // representation-only updates.
+    const requestKey = `${base}|${title.type}:${title.id}|${JSON.stringify(table?.reel ?? [])}`;
+    if (ambientRequest?.key === requestKey) return;
+    cancelAmbientRequest();
+    const controller = new AbortController();
+    const request: AmbientRequest = {
+      key: requestKey,
+      controller,
+    };
+    ambientRequest = request;
+    request.timer = setTimeout(() => {
       // Resolve only. Asking reel for the URLs costs a lookup; asking it for the file costs a download,
       // an ffmpeg re-mux, a slot on the cache volume and the trailer crossing the house twice.
       void trailerCandidates(base, title.type, { tmdb: title.id, imdb: imdbId }, table ?? {}, {
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
-      }).then(async (found) => {
-        const first = found[0];
-        if (!live || !first) return;
-        const url = first.play;
-        if (first.sources) {
-          const offered = await fetchSources(first.sources, {
-            surface: 'silent',
-            player: PLAYS_HLS ? 'native' : 'hls.js',
-          });
-          if (!live) return;
-          // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
-          // is only worth taking where the element parses one itself; offered to anything else it
-          // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
-          // A portrait trailer — a Short posted 9:16 — fills this slide with two black columns, and the
-          // letterbox crop cannot help: there is no picture at the sides for it to find. reel names the
-          // dimensions where it measured them, so an entry carrying none is taken as landscape, which is
-          // what an `hls` entry looks like whether it is one or not.
-          const playable =
-            offered?.sources.filter(
-              (one) =>
-                (one.kind === 'mp4' || PLAYS_HLS) &&
-                !(one.width && one.height && one.width < one.height),
-            ) ?? [];
-          const top = playable[0];
-          if (top) {
-            proxied = RELAY ? url : null;
-            rungs = playable;
-            rung = 0;
-            ambientCrop = offered?.crop ?? null;
-            ambient = top.url;
+        signal: controller.signal,
+      })
+        .then(async (found) => {
+          const first = found[0];
+          if (ambientRequest !== request || !first) return;
+          const url = first.play;
+          if (first.sources) {
+            const offered = await fetchSources(first.sources, {
+              surface: 'silent',
+              player: PLAYS_HLS ? 'native' : 'hls.js',
+              signal: controller.signal,
+            });
+            if (ambientRequest !== request) return;
+            // This element has no hls.js behind it — it is a bare `<video>` with a `src`. So a playlist
+            // is only worth taking where the element parses one itself; offered to anything else it
+            // errors, and the slide walks its whole ladder to arrive at the still picture it started on.
+            // A portrait trailer — a Short posted 9:16 — fills this slide with two black columns, and the
+            // letterbox crop cannot help: there is no picture at the sides for it to find. reel names the
+            // dimensions where it measured them, so an entry carrying none is taken as landscape, which is
+            // what an `hls` entry looks like whether it is one or not.
+            const playable =
+              offered?.sources.filter(
+                (one) =>
+                  (one.kind === 'mp4' || PLAYS_HLS) &&
+                  !(one.width && one.height && one.width < one.height),
+              ) ?? [];
+            const top = playable[0];
+            if (top) {
+              proxied = RELAY ? url : null;
+              rungs = playable;
+              rung = 0;
+              ambientCrop = offered?.crop ?? null;
+              ambient = top.url;
+              return;
+            }
+          }
+          // Nothing either direct listener can serve, on a page that may not carry video through the relay: the
+          // still picture stays.
+          if (!RELAY) {
+            ambientFailed = true;
             return;
           }
-        }
-        // Nothing either direct listener can serve, on a page that may not carry video through the relay: the
-        // still picture stays.
-        if (!RELAY) {
-          ambientFailed = true;
-          return;
-        }
-        // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
-        proxied = url;
-        // One file with its index in front, played by the element itself. No playlist, no player.
-        //
-        // This slide is muted and fifteen seconds long, so everything HLS is good at is wasted on it
-        // and everything it costs is paid in full: a master playlist, a variant playlist, an
-        // initialisation segment and a first media segment are four sequential round trips before a
-        // frame, and then ABR opens on whichever rung it guesses — four seconds of 144p, measured.
-        //
-        // Nor is Google's own file the answer. It is fragmented — an empty sample table, a `sidx`,
-        // twenty-eight `moof`/`mdat` pairs — so a player that starts at the beginning must visit every
-        // fragment first to learn what is in them. Safari does exactly that: twenty-six range requests
-        // opened and abandoned, 2.4s to metadata and 4.9s before it would play, where Chrome managed
-        // 811ms. reel reads that index once and serves a normal MP4 with a real `moov` at the front,
-        // which measured 1070ms in the same Safari on the same trailer.
-        //
-        // The element's own request is what makes reel build that index, and reel shares one build
-        // between everything asking for the same stream — so there is nothing to pre-warm here. It
-        // takes about 600ms on the box, spent while the still picture is still the thing on screen.
-        ambient = progressiveURL(url, SLIDE_HEIGHT) ?? url;
-      });
+          // reel's own copy, behind YouTube's URL: what is left if the ordered stream will not play.
+          proxied = url;
+          // One file with its index in front, played by the element itself. No playlist, no player.
+          //
+          // This slide is muted and fifteen seconds long, so everything HLS is good at is wasted on it
+          // and everything it costs is paid in full: a master playlist, a variant playlist, an
+          // initialisation segment and a first media segment are four sequential round trips before a
+          // frame, and then ABR opens on whichever rung it guesses — four seconds of 144p, measured.
+          //
+          // Nor is Google's own file the answer. It is fragmented — an empty sample table, a `sidx`,
+          // twenty-eight `moof`/`mdat` pairs — so a player that starts at the beginning must visit every
+          // fragment first to learn what is in them. Safari does exactly that: twenty-six range requests
+          // opened and abandoned, 2.4s to metadata and 4.9s before it would play, where Chrome managed
+          // 811ms. reel reads that index once and serves a normal MP4 with a real `moov` at the front,
+          // which measured 1070ms in the same Safari on the same trailer.
+          //
+          // The element's own request is what makes reel build that index, and reel shares one build
+          // between everything asking for the same stream — so there is nothing to pre-warm here. It
+          // takes about 600ms on the box, spent while the still picture is still the thing on screen.
+          ambient = progressiveURL(url, SLIDE_HEIGHT) ?? url;
+        })
+        .finally(() => {
+          if (ambientRequest === request) ambientRequest = undefined;
+        });
     }, SETTLE_MS);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
   });
 
   /**

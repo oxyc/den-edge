@@ -27,8 +27,15 @@
         },
       ];
     };
+    const republish = () => {
+      titles = titles.map((title) => ({ ...title }));
+    };
     window.addEventListener('fixture:titles', load);
-    return () => window.removeEventListener('fixture:titles', load);
+    window.addEventListener('fixture:republish', republish);
+    return () => {
+      window.removeEventListener('fixture:titles', load);
+      window.removeEventListener('fixture:republish', republish);
+    };
   });
 </script>
 

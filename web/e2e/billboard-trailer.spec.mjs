@@ -48,20 +48,23 @@ async function mock(page, sources) {
   );
   // Both halves of a link: the play URL every older path was built from, and the sources URL that
   // replaces building anything.
-  await page.route('**/reel/fixture/meta/**', (r) =>
-    r.fulfill({
+  await page.route('**/reel/fixture/meta/**', (r) => {
+    const current = r.request().url().includes('tmdb:42');
+    return r.fulfill({
       json: {
         meta: {
-          links: [
-            {
-              trailers: 'http://internal/play/trailer.webm',
-              sources: 'http://internal/sources/trailer.json',
-            },
-          ],
+          links: current
+            ? [
+                {
+                  trailers: 'http://internal/play/trailer.webm',
+                  sources: 'http://internal/sources/trailer.json',
+                },
+              ]
+            : [],
         },
       },
-    }),
-  );
+    });
+  });
   await page.route('**/sources/trailer.json**', (r) => r.fulfill({ json: sources }));
 }
 
@@ -92,6 +95,46 @@ test('billboard plays what reel offers, cropped where reel measured it', async (
     });
     // And the bars are trimmed, rather than drawn inside the hero.
     await expect(video).toHaveAttribute('style', /scale\(1\.04/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('equal title republishes do not restart the same ambient trailer request', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    let sourceRequests = 0;
+    await mock(page, {
+      sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
+    });
+    await page.unroute('**/sources/trailer.json**');
+    await page.route('**/sources/trailer.json**', (route) => {
+      sourceRequests += 1;
+      return route.fulfill({
+        json: {
+          sources: [
+            { kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 },
+          ],
+        },
+      });
+    });
+    await page.route('**/m/s/chosen.webm', serveVideo);
+    await start(page);
+    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
+      timeout: 15000,
+    });
+
+    await page.evaluate(async () => {
+      for (let n = 0; n < 3; n += 1) {
+        window.dispatchEvent(new Event('fixture:republish'));
+        await new Promise((resolve) => setTimeout(resolve, 650));
+      }
+    });
+
+    expect(sourceRequests).toBe(1);
   } finally {
     await browser.close();
   }
