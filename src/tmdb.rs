@@ -1447,10 +1447,7 @@ async fn detail_answer(
         // A settled record past its six months is asked again now, as it always was, without the allowance.
         Kept::Stale(..) => None,
         Kept::Nothing => {
-            if let Some(refusal) = over_allowance(state, ip, asked).await {
-                return refusal;
-            }
-            let asking = match one_asking(&detail.whole().1, "tmdb").await {
+            let asking = match one_tmdb_asking(&detail.whole().1, key).await {
                 Ok(asking) => asking,
                 Err(refusal) => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -1474,7 +1471,14 @@ async fn detail_answer(
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
                     return *refused(StatusCode::NOT_FOUND, "not_found");
                 }
-                Kept::Stale(..) | Kept::Nothing => Some(asking),
+                Kept::Stale(..) | Kept::Nothing => {
+                    // Only this elected caller still has an upstream question. Waiters that reopened the title
+                    // above are cache hits and must not each consume another visitor allowance claim.
+                    if let Some(refusal) = over_allowance(state, ip, asked).await {
+                        return refusal;
+                    }
+                    Some(asking)
+                }
             }
         }
     };
@@ -1689,7 +1693,7 @@ pub(crate) async fn ask(state: &AppState, path: &str, query: Option<&str>) -> Op
         };
         // Past the minute's questions, or TMDB failing, a title kept past its freshness is still the better preview.
         let asked = 'asked: {
-            let mut asking = match one_asking(&detail.whole().1, "tmdb").await {
+            let mut asking = match one_tmdb_asking(&detail.whole().1, key).await {
                 Ok(asking) => asking,
                 Err(refusal) if refusal.status() == StatusCode::NOT_FOUND => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -4041,6 +4045,18 @@ mod tests {
         let _ = ask(&h.state, "/3/movie/550", None).await.unwrap();
         let asked = crate::lock(&asked).clone();
         assert_eq!(asked.len(), 1, "{asked:?}");
+        const IP: &str = "192.168.1.9";
+        for _ in 1..GUEST_PER_WINDOW {
+            assert!(
+                crate::link::throttled_per_minute(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW)
+                    .is_none(),
+                "one detail upstream question consumed one visitor claim"
+            );
+        }
+        assert!(
+            crate::link::throttled_per_minute(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW).is_some(),
+            "coalesced detail waiters did not consume visitor claims"
+        );
         assert!(
             crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
             "nothing is left in flight"
