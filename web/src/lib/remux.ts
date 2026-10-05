@@ -138,6 +138,9 @@ export type Failure =
   | 'login'
   | 'none'
   | 'busy'
+  /** This same browser or install already has one being set up (`starting_already`) — not the server being
+   * full: waiting the moment for it to finish opening, succeed or fail, is what frees the next attempt. */
+  | 'starting'
   | 'transcode'
   | 'unreachable'
   | 'ended'
@@ -827,15 +830,35 @@ export function playedInCastPage(session: Session): boolean {
 /**
  * End the session, so it stops counting against den-remux's cap — sent even as the page goes away. Not one the cast
  * page plays: that page ends it as its frame is removed.
+ *
+ * A beacon survives an actual page unload more reliably than a keepalive fetch, and — a plain POST with no custom
+ * headers — needs no CORS preflight either, where DELETE always does cross-origin. Beacon is POST-only, so
+ * den-remux's `/end` is the beacon-compatible twin of its `DELETE`; the keepalive `DELETE` remains the fallback
+ * for a browser with no `sendBeacon` (or whose call to it failed outright).
  */
 export function endSession(session: Session, fetchImpl: typeof fetch = fetch): void {
   if (playedInCastPage(session)) return;
-  void fetchImpl(session.playlist.replace(/\/master\.m3u8$/, ''), {
+  const base = session.playlist.replace(/\/master\.m3u8$/, '');
+  if (globalThis.navigator?.sendBeacon?.(`${base}/end`, '')) return;
+  void fetchImpl(base, {
     method: 'DELETE',
     keepalive: true,
   }).catch(
     () => undefined, // it ends on its own once idle
   );
+}
+
+/**
+ * A paused viewer's own "still here" (`POST …/heartbeat`): den-remux frees a session's slot soon after its last
+ * request once nothing has served a segment in a while, which would otherwise mistake a deliberate pause for a
+ * closed tab. Player.svelte sends this on an interval while paused — never while actually playing, where the
+ * segment requests playback itself makes already say so. Not for a session the cast page plays, which has no
+ * pause of this page's own to protect: its own frame, not this one, is what would go away.
+ */
+export function sendHeartbeat(session: Session, fetchImpl: typeof fetch = fetch): void {
+  if (playedInCastPage(session)) return;
+  const url = session.playlist.replace(/\/master\.m3u8$/, '/heartbeat');
+  void fetchImpl(url, { method: 'POST' }).catch(() => undefined);
 }
 
 /**
@@ -971,6 +994,9 @@ function failureOf(status: number, error: string | undefined, shared: boolean): 
   // A revoked or unknown grant is a plain 404 from its `~<gid>` base, which reads like a title with no release —
   // den-remux's own answer for that names itself.
   if (status === 404) return shared && error !== 'no_playable_release' ? 'ended' : 'none';
+  // Told apart from a genuinely full server: nothing of this browser's or install's own is live yet to make
+  // room by ending, since its last attempt hasn't finished opening.
+  if (status === 429 && error === 'starting_already') return 'starting';
   if (status === 429) return 'busy';
   if (error === 'transcode_unavailable') return 'transcode';
   // The session has no public address to hand this network.

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   autoSubtitleLanguage,
   describeRelease,
@@ -24,6 +24,7 @@ import {
   onLan,
   releaseParts,
   reportFailure,
+  sendHeartbeat,
   sourceFailed,
   REMUX_PROBE_TIMEOUT_MS,
   SPEED_PROBE_BYTES,
@@ -217,6 +218,7 @@ describe('startSession', () => {
     expect(await failing(410, 'grant_expired')).toEqual({ failure: 'ended' });
     expect(await failing(404, 'no_playable_release')).toEqual({ failure: 'none' });
     expect(await failing(429, 'too_many_sessions')).toEqual({ failure: 'busy' });
+    expect(await failing(429, 'starting_already')).toEqual({ failure: 'starting' });
     expect(await failing(503, 'transcode_unavailable')).toEqual({ failure: 'transcode' });
     expect(await failing(404, 'no_copy')).toEqual({ failure: 'noCopy' });
     expect(await failing(404, 'no_fitting_copy')).toEqual({ failure: 'noFit' });
@@ -940,13 +942,41 @@ describe('login', () => {
 });
 
 describe('endSession', () => {
-  it('deletes the session by its signed path', async () => {
+  it('deletes the session by its signed path when sendBeacon is unavailable (this environment has none)', async () => {
     const calls: [string, RequestInit | undefined][] = [];
     endSession(session, async (input, init) => {
       calls.push([String(input), init]);
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+  });
+
+  describe('with a working sendBeacon', () => {
+    let sendBeacon: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      sendBeacon = vi.fn().mockReturnValue(true);
+      vi.stubGlobal('navigator', { ...navigator, sendBeacon });
+    });
+
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('prefers a beacon to the POST-only /end — it outruns the unload it may be sent on, and needs no CORS preflight', () => {
+      const fetchImpl = vi.fn();
+      endSession(session, fetchImpl);
+      expect(sendBeacon).toHaveBeenCalledWith('/remux/s/sid/sig/end', '');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the keepalive DELETE where the beacon itself refuses', () => {
+      sendBeacon.mockReturnValue(false);
+      const calls: [string, RequestInit | undefined][] = [];
+      endSession(session, async (input, init) => {
+        calls.push([String(input), init]);
+        return new Response(null, { status: 204 });
+      });
+      expect(calls).toEqual([['/remux/s/sid/sig', { method: 'DELETE', keepalive: true }]]);
+    });
   });
 
   it('leaves a session the cast page plays to that page, which alone may connect to its address', () => {
@@ -967,6 +997,31 @@ describe('endSession', () => {
       return new Response(null, { status: 204 });
     });
     expect(calls).toEqual(['/remux/s/sid/sig']);
+  });
+});
+
+describe('sendHeartbeat', () => {
+  it('posts to the session’s heartbeat path', () => {
+    const calls: [string, RequestInit | undefined][] = [];
+    sendHeartbeat(session, async (input, init) => {
+      calls.push([String(input), init]);
+      return new Response(null, { status: 204 });
+    });
+    expect(calls).toEqual([['/remux/s/sid/sig/heartbeat', { method: 'POST' }]]);
+  });
+
+  it('sends nothing for a session the cast page plays', () => {
+    const calls: string[] = [];
+    const framed = {
+      ...session,
+      publicBase: 'https://media.test',
+      castOrigin: 'https://cast.test',
+    };
+    sendHeartbeat(framed, async (input) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    });
+    expect(calls).toEqual([]);
   });
 });
 

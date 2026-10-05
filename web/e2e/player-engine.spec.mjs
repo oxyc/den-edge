@@ -49,6 +49,13 @@ test('a player whose hls.js cannot be loaded ends its session and offers a reloa
         asked.ended.push(path);
         return r.fulfill({ status: 204 });
       }
+      // A real browser's navigator.sendBeacon, which endSession() now prefers: the beacon-compatible twin
+      // of the DELETE above (beacon is POST-only). Normalized to the same base path so this still reads as
+      // one way of saying "ended", whichever one actually fired.
+      if (request.method() === 'POST' && path.endsWith('/end')) {
+        asked.ended.push(path.slice(0, -'/end'.length));
+        return r.fulfill({ status: 204 });
+      }
       if (request.method() === 'POST') return r.fulfill({ status: 204 });
       const file = path.endsWith('/master.m3u8') ? 'media.m3u8' : path.split('/').pop();
       return r.fulfill({

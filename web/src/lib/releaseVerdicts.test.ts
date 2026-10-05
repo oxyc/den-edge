@@ -145,6 +145,7 @@ describe('unchangedNotice', () => {
     for (const failure of [
       'unreachable',
       'busy',
+      'starting',
       'login',
       'ended',
       'public',
@@ -153,7 +154,10 @@ describe('unchangedNotice', () => {
     ] as const)
       expect(nothingFits(failure), failure).toBe(false);
     expect(unchangedNotice('unreachable')).toContain('Couldn’t reach Den’s player');
-    expect(unchangedNotice('busy')).toContain('already playing two things');
+    expect(unchangedNotice('busy')).toContain('already playing as much as it can');
+    // Distinct from `busy`: nothing of anyone else's is holding the slot, only this browser's or
+    // install's own last attempt still opening.
+    expect(unchangedNotice('starting')).toContain('finishing this browser');
     expect(unchangedNotice('login')).toContain('key');
     expect(unchangedNotice('ended', 'Your access to Kim’s library ended')).toBe(
       'Your access to Kim’s library ended, so this carries on as it was.',
