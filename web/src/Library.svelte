@@ -5,9 +5,9 @@
   import Billboard from './components/Billboard.svelte';
   import Browse from './components/Browse.svelte';
   import DownloadsPage from './components/DownloadsPage.svelte';
+  import DownloadPosterCard from './components/DownloadPosterCard.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import { downloads, inFlight } from './lib/downloadQueue.svelte';
-  import { coordinate } from './lib/downloadRows';
   import { headline } from './lib/downloadStatus';
   import PosterRow from './components/PosterRow.svelte';
   import { seenEpisodes, watchedHistory } from './lib/history';
@@ -1457,11 +1457,13 @@
             title: download.title.title || download.release.label,
             posterPath: download.title.posterPath,
           }}
-          <PosterCard
+          <DownloadPosterCard
+            {download}
             {title}
-            caption={[coordinate(download.title), headline(downloads.status(download), answer)]
-              .filter(Boolean)
-              .join(' · ')}
+            badge={answer?.state === 'preparing' && answer.progress
+              ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
+              : undefined}
+            caption={headline(downloads.status(download), answer)}
             progress={answer?.state === 'preparing' ? answer.progress : undefined}
             href={titleHref(title)}
           />

@@ -19,6 +19,7 @@ import {
   removedRow,
   withValues,
   type Download,
+  type DownloadHedge,
 } from './downloadRows';
 import { applyLog, contentWatched, emptyLibrary } from './library';
 import type { LibraryLog } from './log';
@@ -99,7 +100,10 @@ function due(queue: DownloadQueue, download: Download, now: number): boolean {
 function asked(queue: DownloadQueue, download: Download, now: number): void {
   let seen = asks.get(queue);
   if (!seen) asks.set(queue, (seen = new Map()));
-  const said = JSON.stringify(queue.answers.get(download.name) ?? null);
+  const said = JSON.stringify([
+    queue.answers.get(download.name) ?? null,
+    queue.hedgeAnswers.get(download.name) ?? null,
+  ]);
   const last = seen.get(download.name);
   seen.set(download.name, {
     at: now,
@@ -114,6 +118,7 @@ function asked(queue: DownloadQueue, download: Download, now: number): void {
  */
 async function pollAndRenew(queue: DownloadQueue, download: Download): Promise<void> {
   const answer = await queue.poll(download);
+  if (download.release.hedge) await queue.pollHedge(download);
   if (answer.state !== 'expired' || answer.message === GONE) return;
   const url = await queue.renew(download);
   if (typeof url !== 'string') return;
@@ -233,6 +238,38 @@ async function holderPass(
     if (status.state) states[download.name] = status.state;
     queue.clocks.set(download.name, status.clock);
     if (download.exhausted) continue;
+    if (download.release.hedge) {
+      // Prefer the work the viewer already had: if both finish in one polling pass, the primary wins.
+      if (status.state === 'ready') {
+        wrote = (await primaryWon(log, device, queue, download, now, stamp)) || wrote;
+        continue;
+      }
+      const alternate = queue.hedgeAnswers.get(download.name);
+      if (alternate?.state === 'ready') {
+        wrote = (await hedgeWon(log, device, queue, download, now, stamp)) || wrote;
+        continue;
+      }
+      if (
+        alternate?.state === 'preparing' &&
+        alternate.progress !== undefined &&
+        alternate.progress > (download.release.hedge.lastProgress ?? 0)
+      ) {
+        const hedge = {
+          ...download.release.hedge,
+          lastProgress: alternate.progress,
+          progressAt: now,
+        };
+        wrote =
+          (await write(
+            log,
+            device,
+            download,
+            { release: { value: releaseValue({ ...download.release, hedge }), at: stamp() } },
+            now,
+          )) || wrote;
+        continue;
+      }
+    }
     // A held-back add whose time has come is made again, with a fresh queue time.
     if (
       status.state === 'starting' &&
@@ -253,7 +290,13 @@ async function holderPass(
     // A ticket still to renew says nothing about the fetch.
     if (status.renew) continue;
     if (status.stalled) {
-      wrote = (await fallBack(log, device, queue, download, status, now, stamp)) || wrote;
+      const answer = queue.answers.get(download.name);
+      const progress =
+        answer?.progress ?? download.progress?.lastProgress ?? status.clock.lastProgress;
+      if (!download.release.hedge && answer?.fetch?.state !== 'failed' && progress > 0)
+        wrote = (await startHedge(log, device, queue, download, now, stamp)) || wrote;
+      else if (!download.release.hedge)
+        wrote = (await fallBack(log, device, queue, download, status, now, stamp)) || wrote;
       continue;
     }
     const values: Record<string, Stamped<ConfigValue | null>> = {};
@@ -299,6 +342,124 @@ async function holderPass(
   }
   if (wrote) queue.touch();
   return wrote;
+}
+
+/** The release object without its temporary alternate. */
+function primaryRelease(download: Download) {
+  return {
+    identity: download.release.identity,
+    label: download.release.label,
+    url: download.release.url,
+    sizeBytes: download.release.sizeBytes,
+    cached: download.release.cached,
+  };
+}
+
+/** A partial primary stalled: preserve it and queue one ranked, untried alternate beside it. */
+async function startHedge(
+  log: LibraryLog,
+  device: string,
+  queue: DownloadQueue,
+  download: Download,
+  now: number,
+  stamp: () => [number, number, string],
+): Promise<boolean> {
+  if (!queue.resolve) return false;
+  const { sources } = await queue.resolve(download.title);
+  if (!sources) return false;
+  const excluded = new Set([...download.tried, download.release.identity]);
+  const candidates = sources.filter(
+    (source) =>
+      !excluded.has(source.identity) && !(source.cached === false && source.seeders === 0),
+  );
+  const chosen = queue.pick(candidates, download.title.originalLanguage);
+  if (!chosen) return false;
+  const hedge: DownloadHedge = {
+    identity: chosen.identity,
+    label: chosen.label,
+    url: chosen.url,
+    sizeBytes: chosen.size,
+    cached: chosen.cached,
+    queuedAt: now,
+    lastProgress: 0,
+    progressAt: now,
+  };
+  const written = await write(
+    log,
+    device,
+    download,
+    { release: { value: releaseValue({ ...download.release, hedge }), at: stamp() } },
+    now,
+  );
+  if (!written) return false;
+  console.warn(
+    `den: download ${download.content}: keeping ${download.release.label} and trying ${chosen.label} beside it`,
+  );
+  await queue.addHedge(download.name, chosen.url);
+  return true;
+}
+
+/** The preserved primary recovered first: forget and safely cancel only its alternate. */
+async function primaryWon(
+  log: LibraryLog,
+  device: string,
+  queue: DownloadQueue,
+  download: Download,
+  now: number,
+  stamp: () => [number, number, string],
+): Promise<boolean> {
+  const written = await write(
+    log,
+    device,
+    download,
+    { release: { value: releaseValue(primaryRelease(download)), at: stamp() } },
+    now,
+  );
+  if (!written) return false;
+  await queue.cancelHedgeIfSafe(download);
+  queue.clearHedge(download.name);
+  return true;
+}
+
+/** The alternate finished first: promote it atomically, then safely cancel only the partial loser. */
+async function hedgeWon(
+  log: LibraryLog,
+  device: string,
+  queue: DownloadQueue,
+  download: Download,
+  now: number,
+  stamp: () => [number, number, string],
+): Promise<boolean> {
+  const hedge = download.release.hedge;
+  if (!hedge) return false;
+  const at = stamp();
+  const written = await write(
+    log,
+    device,
+    download,
+    {
+      release: {
+        value: releaseValue({
+          identity: hedge.identity,
+          label: hedge.label ?? download.release.label,
+          url: hedge.url,
+          sizeBytes: hedge.sizeBytes,
+          cached: hedge.cached,
+        }),
+        at,
+      },
+      queuedAt: { value: { int: hedge.queuedAt }, at },
+      progress: { value: clockValue({ lastProgress: 1, progressAt: now }), at },
+      announced: { value: { bool: false }, at },
+      reannounced: { value: { bool: false }, at },
+    },
+    now,
+  );
+  if (!written) return false;
+  await queue.cancelIfSafe(download);
+  queue.promoteHedge(download);
+  queue.clocks.delete(download.name);
+  return true;
 }
 
 /** The values a resumed add writes: its queue time and stall clock start again, and the appointment is kept no more. */

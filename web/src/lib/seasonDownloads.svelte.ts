@@ -85,6 +85,7 @@ export async function downloadSeason(
               episode: episode.number,
               title: title.title,
               posterPath: title.posterPath,
+              stillPath: episode.stillPath,
               originalLanguage: title.originalLanguage,
             },
             source,

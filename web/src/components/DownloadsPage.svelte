@@ -4,9 +4,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import DownloadStatus from './DownloadStatus.svelte';
-  import PosterCard from './PosterCard.svelte';
+  import DownloadPosterCard from './DownloadPosterCard.svelte';
   import { downloads as shared, inFlight, type DownloadQueue } from '../lib/downloadQueue.svelte';
-  import { coordinate, type Download } from '../lib/downloadRows';
+  import type { Download } from '../lib/downloadRows';
   import { headline, phase } from '../lib/downloadStatus';
   import type { Title } from '../lib/library';
   import { titleHref } from '../lib/route';
@@ -60,9 +60,12 @@
       {@const state = status.state}
       {@const answer = queue.answers.get(download.name)}
       <li data-download={download.content}>
-        <PosterCard
+        <DownloadPosterCard
+          {download}
           title={titleOf(download)}
-          caption={coordinate(download.title)}
+          badge={answer?.state === 'preparing' && answer.progress
+            ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
+            : undefined}
           progress={state === 'ready'
             ? 1
             : answer?.state === 'preparing'
@@ -98,10 +101,12 @@
 
   /* Search's and the Watchlist's grid, so a page of posters looks the same wherever it is. */
   .grid {
-    --card-w: 100%;
+    /* PosterCard widens a landscape row card by 1.45× relative to the portrait rhythm. Here the grid track is
+       already the final card width, so compensate instead of overflowing a phone viewport. */
+    --card-w: calc(100% / 1.45);
 
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(clamp(140px, 40vw, 190px), 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(clamp(220px, 70vw, 300px), 1fr));
     gap: 24px 14px;
     margin: 0;
     padding: 0;

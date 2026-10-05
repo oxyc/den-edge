@@ -22,6 +22,10 @@
     live,
     href,
     continueWatching = false,
+    stillPath,
+    landscape = false,
+    badge,
+    artCaption,
     menu = true,
     onopen,
     downloadBadge,
@@ -35,6 +39,12 @@
     href?: string;
     /** This card is on the Continue Watching row: its ⋯ offers "Remove from Continue Watching". */
     continueWatching?: boolean;
+    /** Episode artwork. Download cards use the same landscape visual language as episode/Continue cards. */
+    stillPath?: string;
+    landscape?: boolean;
+    /** Compact facts drawn over artwork, e.g. a download's percentage and Sx · Ey coordinate. */
+    badge?: string;
+    artCaption?: string;
     /**
      * False where a caller already draws its own per-card controls over the same corner, with their own
      * contract the shared menu doesn't replicate (`WatchlistPage`'s confirm-before-unmarking-a-series) — never
@@ -62,6 +72,7 @@
   const poster = $derived(
     title.posterPath ? `https://image.tmdb.org/t/p/w342${title.posterPath}` : title.posterUrl,
   );
+  const still = $derived(stillPath ? `https://image.tmdb.org/t/p/w500${stillPath}` : undefined);
   /**
    * The one picture that did not load, if any.
    *
@@ -71,7 +82,10 @@
    * a card later given TMDB's own path still tries it.
    */
   let failed = $state('');
-  const art = $derived(poster && poster !== failed ? poster : undefined);
+  const art = $derived(
+    still && still !== failed ? still : poster && poster !== failed ? poster : undefined,
+  );
+  const portraitFallback = $derived(landscape && !!poster && art === poster);
   /** A card in a row far from the screen draws no poster yet (`PosterRow`); one in no row always does. */
   const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
   const faded = $derived(availability.unavailable(title));
@@ -154,10 +168,11 @@
 </script>
 
 {#snippet body()}
-  <span class="art">
+  <span class="art" class:landscape>
     {#if art}
       {#if row?.near ?? true}
         <img
+          class:contained={portraitFallback}
           src={art}
           alt=""
           loading="lazy"
@@ -168,6 +183,8 @@
     {:else}
       <span class="placeholder">{title.title}</span>
     {/if}
+    {#if artCaption}<span class="art-caption" class:raised={progress}>{artCaption}</span>{/if}
+    {#if badge}<span class="badge">{badge}</span>{/if}
     {#if title.rating}
       <span
         class="rating"
@@ -242,6 +259,7 @@
   {#if href}
     <a
       class="card pick"
+      class:landscape
       class:faded
       {href}
       onclick={cardClick}
@@ -264,7 +282,7 @@
       }}>{@render body()}</a
     >
   {:else}
-    <figure class="card" class:faded>{@render body()}</figure>
+    <figure class="card" class:faded class:landscape>{@render body()}</figure>
   {/if}
 {/snippet}
 
@@ -273,7 +291,7 @@
 {/snippet}
 
 {#if menuItems.length}
-  <div class="holder">
+  <div class="holder" class:landscape>
     {@render card()}
     <ActionMenu
       bind:this={actionMenu}
@@ -315,6 +333,15 @@
     background: var(--card);
   }
 
+  .art.landscape {
+    aspect-ratio: 16 / 9;
+  }
+
+  .card.landscape,
+  .holder.landscape {
+    width: calc(var(--card-w) * 1.45);
+  }
+
   /* The TV's fade: dim, and less so under the pointer or focus so the card stays legible. */
   .faded .art {
     opacity: 0.5;
@@ -344,6 +371,35 @@
 
     /* iOS's own "save image" sheet would otherwise race the long-press that opens the ⋯ menu. */
     -webkit-touch-callout: none;
+  }
+
+  img.contained {
+    object-fit: contain;
+  }
+
+  .badge,
+  .art-caption {
+    position: absolute;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.72);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .badge {
+    top: 8px;
+    right: 8px;
+  }
+
+  .art-caption {
+    bottom: 8px;
+    left: 8px;
+  }
+
+  .art-caption.raised {
+    bottom: 18px;
   }
 
   .placeholder {

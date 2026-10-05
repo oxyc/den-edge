@@ -35,6 +35,9 @@
   </p>
   {#if lines.length}<p>{lines.join(' · ')}</p>{/if}
   {#if release && releaseLine(download)}<p class="release">{releaseLine(download)}</p>{/if}
+  {#if download.release.hedge}
+    <p class="alternate">Also trying {download.release.hedge.label ?? 'another release'}</p>
+  {/if}
   {#if from}<p class="from">{from}</p>{/if}
 </div>
 
@@ -56,6 +59,7 @@
   }
 
   .download-status .release,
+  .download-status .alternate,
   .download-status .from {
     font-size: 12px;
   }

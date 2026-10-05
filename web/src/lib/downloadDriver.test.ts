@@ -63,6 +63,20 @@ function stalledRow(): SettingsRow {
   };
 }
 
+function partialRow(): SettingsRow {
+  const row = stalledRow();
+  return {
+    ...row,
+    values: {
+      ...row.values,
+      progress: {
+        value: clockValue({ lastProgress: 0.5, progressAt: T0 }),
+        at: [T0, 0, TV],
+      },
+    },
+  };
+}
+
 const leaseRow = (holder: string, epoch: number): SettingsRow => ({
   kind: 'set',
   schema: 2,
@@ -135,6 +149,65 @@ describe('the download driver', () => {
     expect(asked).not.toContain(`add ${second.url}`);
     // Compare-and-set on the seq it read: den-edge refused it, and nothing was merged and sent again.
     expect(shared.writes.filter((w) => w.includes(NAME))).toEqual([`conflict set:${NAME}`]);
+  });
+
+  it('keeps a stalled partial primary while an alternate starts, then promotes the alternate winner', async () => {
+    const shared = testLog([partialRow()]);
+    const asked: string[] = [];
+    const cancelled: string[] = [];
+    const queue = new DownloadQueue(
+      async (url, add) => {
+        asked.push(`${add ? 'add' : 'probe'} ${url}`);
+        if (url === second.url && !add) return { state: 'ready' };
+        return { state: 'preparing', progress: url === first.url ? 0.5 : 0.1 };
+      },
+      async (url) => (cancelled.push(url), true),
+    );
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => ({
+      sources: [first, second],
+    }));
+
+    await driveDownloads(shared.log, queue, BROWSER, { now: T0 + 21 * MINUTE, observedFor: 0 });
+    const racing = readDownload(shared.log.settings(NAME)!)!;
+    expect(racing.release.identity).toBe(first.identity);
+    expect(racing.release.hedge?.identity).toBe(second.identity);
+    expect(cancelled).toEqual([]);
+
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 21 * MINUTE + 5_000,
+      observedFor: 0,
+    });
+    const won = readDownload(shared.log.settings(NAME)!)!;
+    expect(won.release.identity).toBe(second.identity);
+    expect(won.release.hedge).toBeUndefined();
+    expect(cancelled).toEqual([first.url]);
+    expect(asked).toContain(`add ${second.url}`);
+  });
+
+  it('keeps the original when it recovers first and cancels only the alternate', async () => {
+    const shared = testLog([partialRow()]);
+    const cancelled: string[] = [];
+    let primaryPolls = 0;
+    const queue = new DownloadQueue(
+      async (url, add) => {
+        if (url === first.url && !add && ++primaryPolls > 1) return { state: 'ready' };
+        return { state: 'preparing', progress: url === first.url ? 0.5 : 0.1 };
+      },
+      async (url) => (cancelled.push(url), true),
+    );
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => ({
+      sources: [first, second],
+    }));
+
+    await driveDownloads(shared.log, queue, BROWSER, { now: T0 + 21 * MINUTE, observedFor: 0 });
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 21 * MINUTE + 5_000,
+      observedFor: 0,
+    });
+    const won = readDownload(shared.log.settings(NAME)!)!;
+    expect(won.release.identity).toBe(first.identity);
+    expect(won.release.hedge).toBeUndefined();
+    expect(cancelled).toEqual([second.url]);
   });
 
   it('only the holder writes that den-scout described a download, and that it is ready', async () => {

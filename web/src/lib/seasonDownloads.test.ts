@@ -25,6 +25,7 @@ it('queues aired season episodes once across repeated clicks, skips ready files,
   const episodes = [1, 2, 3, 4].map((number) => ({
     number,
     name: `E${number}`,
+    stillPath: `/still-${number}.jpg`,
     airDate: number === 4 ? '2099-01-01' : '2020-01-01',
   }));
   const series = { type: 'tv' as const, id: 77, title: 'Series' };
@@ -42,7 +43,9 @@ it('queues aired season episodes once across repeated clicks, skips ready files,
     running: false,
   });
   // One row per episode started, for every device to show.
-  expect(readDownloads(shared.log.rows()).map((d) => d.content)).toEqual(['tv:77:1:2']);
+  const saved = readDownloads(shared.log.rows());
+  expect(saved.map((d) => d.content)).toEqual(['tv:77:1:2']);
+  expect(saved[0]?.title.stillPath).toBe('/still-2.jpg');
 
   // A second press leaves the episode in flight alone: asking again would be a fresh add at the debrid.
   await downloadSeason(addon, 'tt1', 1, episodes, {}, series, resolve, queue);

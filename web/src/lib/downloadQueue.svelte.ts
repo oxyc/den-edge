@@ -90,12 +90,17 @@ export class DownloadQueue {
   revision = $state(0);
   /** What den-scout last said about each download, by row name. */
   readonly answers = new SvelteMap<string, Preparation>();
+  /** What den-scout last said about an alternate being tried beside a partial primary. */
+  readonly hedgeAnswers = new SvelteMap<string, Preparation>();
   /** The stall clock this browser has seen move, by row name: ahead of the row's, which is written coarsely. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Moves only with a new answer, which `answers` announces.
   readonly clocks = new Map<string, StallClock>();
   /** The play ticket this browser asks with, by row name: its own resolve's, never written unless it holds the lease. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Read by the polls, never by the page.
   readonly urls = new Map<string, string>();
+  /** This browser's usable ticket for a persisted alternate. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Read by polls and winner handling, never by the page.
+  readonly hedgeUrls = new Map<string, string>();
   /** Rows whose ticket den-scout said had lapsed, renewed here: the lease holder writes the fresh one back. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Read by the lease holder's pass, never by the page.
   readonly lapsed = new Set<string>();
@@ -131,8 +136,10 @@ export class DownloadQueue {
   ): void {
     if (this.log !== log) {
       this.answers.clear();
+      this.hedgeAnswers.clear();
       this.clocks.clear();
       this.urls.clear();
+      this.hedgeUrls.clear();
     }
     this.log = log;
     this.clock = clock;
@@ -297,6 +304,48 @@ export class DownloadQueue {
     return answer;
   }
 
+  /** Queue a persisted alternate without replacing the primary's answer or ticket. */
+  async addHedge(name: string, url: string): Promise<Preparation> {
+    this.hedgeUrls.set(name, url);
+    const answer = await this.prepare(url, true, true);
+    this.hedgeAnswers.set(name, answer);
+    this.touch();
+    return answer;
+  }
+
+  /** Ask about the alternate, renewing its device-local ticket by identity when necessary. */
+  async pollHedge(download: Download): Promise<Preparation | undefined> {
+    const hedge = download.release.hedge;
+    if (!hedge) return undefined;
+    let url = this.hedgeUrls.get(download.name) ?? this.ticket(hedge.url);
+    if (!url && this.resolve) {
+      const { sources } = await this.resolve(download.title);
+      const same = sources?.find((source) => source.identity === hedge.identity);
+      if (same) {
+        url = same.url;
+        this.hedgeUrls.set(download.name, url);
+      }
+    }
+    if (!url) return undefined;
+    const answer = await this.prepare(url, false, false);
+    this.hedgeAnswers.set(download.name, answer);
+    return answer;
+  }
+
+  /** The alternate became the row's primary. Carry its local state across without adding it again. */
+  promoteHedge(download: Download): void {
+    const answer = this.hedgeAnswers.get(download.name);
+    const url = this.hedgeUrls.get(download.name) ?? download.release.hedge?.url;
+    if (answer) this.answers.set(download.name, answer);
+    if (url) this.urls.set(download.name, url);
+    this.clearHedge(download.name);
+  }
+
+  clearHedge(name: string): void {
+    this.hedgeAnswers.delete(name);
+    this.hedgeUrls.delete(name);
+  }
+
   /** Ask den-scout how a download is doing, without adding anything. */
   async poll(download: Download): Promise<Preparation> {
     const pending = this.pending.get(download.name);
@@ -347,7 +396,10 @@ export class DownloadQueue {
     const log = this.log;
     const clock = this.clock;
     if (!log || !clock) return false;
-    if (cancel) await this.cancelIfSafe(download);
+    if (cancel) {
+      await this.cancelIfSafe(download);
+      await this.cancelHedgeIfSafe(download);
+    }
     clock.see(log.newestStamp());
     const current = log.settings(download.name);
     if (!current) return true;
@@ -355,6 +407,7 @@ export class DownloadQueue {
     this.answers.delete(download.name);
     this.clocks.delete(download.name);
     this.urls.delete(download.name);
+    this.clearHedge(download.name);
     this.touch();
     return !!saved;
   }
@@ -382,6 +435,20 @@ export class DownloadQueue {
     const url = this.urlFor(download);
     if (!safe || !url) return;
     await this.cancelRelease(url, false);
+  }
+
+  /** Cancel an alternate only when no other live row names it as either primary or alternate. */
+  async cancelHedgeIfSafe(download: Download): Promise<void> {
+    const hedge = download.release.hedge;
+    if (!hedge) return;
+    const shared = this.list().some(
+      (other) =>
+        other.name !== download.name &&
+        (other.release.identity === hedge.identity ||
+          other.release.hedge?.identity === hedge.identity),
+    );
+    const url = this.hedgeUrls.get(download.name) ?? this.ticket(hedge.url);
+    if (!shared && url) await this.cancelRelease(url, false);
   }
 }
 

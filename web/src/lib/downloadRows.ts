@@ -5,6 +5,17 @@
 import { syncPolicy } from './syncCore';
 import type { ConfigValue, Row, SettingsRow, Stamp, Stamped } from './wire';
 
+export interface DownloadHedge {
+  identity: string;
+  label?: string;
+  url: string;
+  sizeBytes?: number;
+  cached?: boolean;
+  queuedAt: number;
+  lastProgress?: number;
+  progressAt: number;
+}
+
 /** The release a download is fetching. `url` is the writer's play ticket, which another device may not reach. */
 export interface DownloadRelease {
   identity: string;
@@ -12,6 +23,8 @@ export interface DownloadRelease {
   url: string;
   sizeBytes?: number;
   cached?: boolean;
+  /** One alternate tried beside a partial primary. Persisted so whichever device holds the lease can finish it. */
+  hedge?: DownloadHedge;
 }
 
 /** What a download is of, and what to show for it. */
