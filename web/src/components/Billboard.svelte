@@ -329,7 +329,24 @@
     ambientRequest.controller.abort(new DOMException('ambient trailer changed', 'AbortError'));
     ambientRequest = undefined;
   }
-  onDestroy(cancelAmbientRequest);
+
+  interface WarmRequest {
+    key: string;
+    controller: AbortController;
+    cancelIdle?: () => void;
+  }
+  // Also plain: a completed warm is remembered for this slide so equal title objects do not ask `/sources` again.
+  let nextWarm: WarmRequest | undefined;
+  function cancelNextWarm() {
+    if (!nextWarm) return;
+    nextWarm.cancelIdle?.();
+    nextWarm.controller.abort(new DOMException('next ambient trailer changed', 'AbortError'));
+    nextWarm = undefined;
+  }
+  onDestroy(() => {
+    cancelAmbientRequest();
+    cancelNextWarm();
+  });
 
   /** The trailer belongs to the slide, and is dropped when its identity changes — not when its display refreshes. */
   $effect(() => {
@@ -477,17 +494,25 @@
     const next = shown[index + 1];
     const base = reel;
     const table = routes;
-    if (!active || !playing || !next || !base || !onScreen || still() || saving()) return;
-    let live = true;
-    const cancel = whenIdle(() => {
-      if (!live) return;
+    if (!active || !playing || !next || !base || !onScreen || still() || saving()) {
+      cancelNextWarm();
+      return;
+    }
+    const key = `${base}|${next.type}:${next.id}|${JSON.stringify(table?.reel ?? [])}`;
+    if (nextWarm?.key === key) return;
+    cancelNextWarm();
+    const request: WarmRequest = { key, controller: new AbortController() };
+    nextWarm = request;
+    request.cancelIdle = whenIdle(() => {
+      if (nextWarm !== request) return;
       const ids = { tmdb: next.id, imdb: known.get(keyOf(next))?.imdbId };
       void trailerCandidates(base, next.type, ids, table ?? {}, {
         prewarm: 'direct',
         height: SLIDE_HEIGHT,
+        signal: request.controller.signal,
       }).then((found) => {
         const first = found[0];
-        if (!live || !first?.sources) return;
+        if (nextWarm !== request || !first?.sources) return;
         // Asking IS the warming. `/sources` waits for the resolve its first entry plays from, and
         // builds that entry's index where it needs one, so there is no separate prewarm to keep in
         // step with what this slide will go on to ask for — which is precisely what went wrong when a
@@ -495,13 +520,10 @@
         void fetchSources(first.sources, {
           surface: 'silent',
           player: PLAYS_HLS ? 'native' : 'hls.js',
+          signal: request.controller.signal,
         });
       });
     }, WARM_IDLE_TIMEOUT_MS);
-    return () => {
-      live = false;
-      cancel();
-    };
   });
 
   // Scrolled out of view, or left in a tab nobody is looking at: stop. Back in view: carry on from where it

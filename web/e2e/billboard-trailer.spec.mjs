@@ -50,22 +50,38 @@ async function mock(page, sources) {
   // replaces building anything.
   await page.route('**/reel/fixture/meta/**', (r) => {
     const current = r.request().url().includes('tmdb:42');
+    const next = r.request().url().includes('tmdb:43');
     return r.fulfill({
       json: {
         meta: {
-          links: current
-            ? [
-                {
-                  trailers: 'http://internal/play/trailer.webm',
-                  sources: 'http://internal/sources/trailer.json',
-                },
-              ]
-            : [],
+          links:
+            current || next
+              ? [
+                  {
+                    trailers: `http://internal/play/${current ? 'trailer' : 'next'}.webm`,
+                    sources: `http://internal/sources/${current ? 'trailer' : 'next'}.json`,
+                  },
+                ]
+              : [],
         },
       },
     });
   });
   await page.route('**/sources/trailer.json**', (r) => r.fulfill({ json: sources }));
+  await page.route('**/sources/next.json**', (r) =>
+    r.fulfill({
+      json: {
+        sources: [
+          {
+            kind: 'mp4',
+            url: 'https://rr3---sn-x.googlevideo.com/next',
+            audio: false,
+            height: 720,
+          },
+        ],
+      },
+    }),
+  );
 }
 
 /** Titles arrive on an event, so the slide is not resolving while the page is still being set up. */
@@ -135,6 +151,52 @@ test('equal title republishes do not restart the same ambient trailer request', 
     });
 
     expect(sourceRequests).toBe(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('equal title republishes do not restart the next trailer prewarm', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    let nextRequests = 0;
+    await mock(page, {
+      sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: false, height: 720 }],
+    });
+    await page.unroute('**/sources/next.json**');
+    await page.route('**/sources/next.json**', (route) => {
+      nextRequests += 1;
+      return route.fulfill({
+        json: {
+          sources: [
+            {
+              kind: 'mp4',
+              url: 'https://rr3---sn-x.googlevideo.com/next',
+              audio: false,
+              height: 720,
+            },
+          ],
+        },
+      });
+    });
+    await page.route('**/m/s/chosen.webm', serveVideo);
+    await start(page);
+    await expect(page.locator('video.ambient')).toHaveAttribute('src', '/reel/m/s/chosen.webm', {
+      timeout: 15000,
+    });
+    await expect.poll(() => nextRequests).toBe(1);
+
+    await page.evaluate(async () => {
+      for (let n = 0; n < 3; n += 1) {
+        window.dispatchEvent(new Event('fixture:republish'));
+        await new Promise((resolve) => setTimeout(resolve, 650));
+      }
+    });
+
+    expect(nextRequests).toBe(1);
   } finally {
     await browser.close();
   }
