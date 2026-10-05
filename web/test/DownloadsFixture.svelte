@@ -35,6 +35,7 @@
     attributes: { resolution: '1080p', cached: false, seeders: 10 },
   });
   let artworkActive = $state(!params.has('hidden'));
+  let artworkMounted = $state(true);
   let legacyEpisode = $state<Download>({
     name: 'download:tv:1399:2:4',
     content: 'tv:1399:2:4',
@@ -67,12 +68,14 @@
     window as unknown as {
       downloadsFixture: {
         setActive: (active: boolean) => void;
+        setMounted: (mounted: boolean) => void;
         refreshIdentity: () => void;
         changeEpisode: () => void;
       };
     }
   ).downloadsFixture = {
     setActive: (active) => (artworkActive = active),
+    setMounted: (mounted) => (artworkMounted = mounted),
     refreshIdentity: () =>
       (legacyEpisode = {
         ...legacyEpisode,
@@ -158,12 +161,14 @@
 <main style="padding:100px 20px">
   {#if page === 'artwork'}
     <RoutePage active={artworkActive}>
-      <DownloadPosterCard
-        download={legacyEpisode}
-        title={legacyTitle}
-        active={artworkActive}
-        menu={false}
-      />
+      {#if artworkMounted}
+        <DownloadPosterCard
+          download={legacyEpisode}
+          title={legacyTitle}
+          active={artworkActive}
+          menu={false}
+        />
+      {/if}
     </RoutePage>
   {:else if ready && page === 'downloads'}
     <DownloadsPage />
