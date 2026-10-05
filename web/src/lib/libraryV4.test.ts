@@ -35,6 +35,7 @@ const dryRun = vi.hoisted(() => ({ fail: false }));
 vi.mock('./syncCore', async (original) => {
   const real = await original<typeof import('./syncCore')>();
   return {
+    ...real,
     syncPolicy: <T>(request: Record<string, unknown>): T =>
       request.op === 'v4_dry_run' && dryRun.fail
         ? ({
