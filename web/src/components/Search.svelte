@@ -269,6 +269,9 @@
               !isHidden(hit.title, rules, {
                 ignoringYearFloor: true,
                 requirePoster: !awaitingPicture(hit.title),
+                // Typing a name is an explicit request: a direct match still shows past the hidden-language and
+                // hidden-genre filters (never past the adult flag or the parental ceiling, enforced elsewhere).
+                query: text,
               }),
           );
           pending = false;

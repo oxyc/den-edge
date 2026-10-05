@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
-import { acceptsAddonURL, isHidden, readApiKey, readPlugins, readPrefs } from './prefs';
+import { isBlocked } from './parental';
+import { acceptsAddonURL, isHidden, readApiKey, readPlugins, readPrefs, type Prefs } from './prefs';
 import { toTitle } from './tmdb';
 import type { SettingsRow, Stamp } from './wire';
 
@@ -96,6 +97,52 @@ describe('prefs', () => {
     ).toBe(false);
     expect(isHidden(film({ year: 1985 }), prefs)).toBe(true);
     expect(isHidden(film({ year: 1985 }), prefs, { ignoringYearFloor: true })).toBe(false);
+  });
+
+  it('shows a title the typed query names exactly, past the household’s hidden languages and genres', () => {
+    // Fauda-shaped: an Arabic-language series the household has hidden by language, as in oxyc/den-edge's
+    // example — searching its name is an explicit request, unlike browsing, so it must still be findable.
+    const fauda: Title = {
+      type: 'tv',
+      id: 50,
+      title: 'Fauda',
+      posterPath: '/p.jpg',
+      year: 2015,
+      genreIds: [18],
+      originalLanguage: 'ar',
+    };
+    const arabicHidden: Prefs = {
+      excludedGenres: new Set(),
+      excludedLanguages: new Set(['ar']),
+      hideAnime: false,
+      hideWatched: false,
+      minReleaseYear: undefined,
+      services: [],
+      servicesConfigured: false,
+    };
+    expect(
+      isHidden(fauda, arabicHidden, { ignoringYearFloor: true, query: 'fauda' }),
+      'an exact name match bypasses the hidden-language filter',
+    ).toBe(false);
+    expect(
+      isHidden(fauda, arabicHidden, { ignoringYearFloor: true, query: 'fau' }),
+      'three letters is still a guess, not a name typed in full — the filter still applies',
+    ).toBe(true);
+    const homeland: Title = { ...fauda, id: 51, title: 'Homeland' };
+    expect(
+      isHidden(homeland, arabicHidden, { ignoringYearFloor: true, query: 'fauda' }),
+      'a hit the query does not name keeps today’s filtering exactly',
+    ).toBe(true);
+    // The bypass only reaches the three filters above; the household's parental ceiling lives outside
+    // `isHidden` entirely (enforced at Play, `playGuard.ts`) and this change must never read it.
+    expect(
+      isHidden(fauda, arabicHidden, { ignoringYearFloor: true, query: 'fauda' }),
+      'the direct match is shown in the list',
+    ).toBe(false);
+    expect(
+      isBlocked({ US: 'TV-MA' }, 'US', 'pg13'),
+      'but the ceiling still blocks it at Play, untouched by the match above',
+    ).toBe(true);
   });
 
   it('reads an API key the TV shares', () => {

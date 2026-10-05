@@ -118,9 +118,17 @@ export function pluralVariant(query: string): string | undefined {
   return words.join(' ');
 }
 
-/** Case- and accent-folded, a leading English article dropped, so "matrix" is the exact title "The Matrix". */
+/**
+ * Case- and accent-folded, punctuation and whitespace collapsed to single spaces, a leading English article
+ * dropped — so "matrix" is the exact title "The Matrix", and "2001 a space odyssey" is "2001: A Space Odyssey".
+ */
 export function foldedTitle(text: string): string {
-  let folded = text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trim();
+  let folded = text
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
   for (const article of ['the ', 'an ', 'a ']) {
     if (folded.startsWith(article)) {
       folded = folded.slice(article.length);
@@ -128,6 +136,28 @@ export function foldedTitle(text: string): string {
     }
   }
   return folded;
+}
+
+/**
+ * Whether typing `query` is an explicit request for this title — not a theme or a browse — so it must be found
+ * even past the household's hidden-language, hidden-genre and anime filters (`prefs.isHidden`'s `query` option).
+ * It never reaches past the adult flag, the poster/year floors, or the parental ceiling, which live outside this
+ * check entirely and are never this lenient.
+ *
+ * A direct match is the folded query equal to the folded name or one of the folded `alternativeTitles` (the hit's
+ * known AKAs, when it carries any) at any length, or a folded prefix of the name at four folded characters or
+ * more — long enough that it isn't still an abbreviation guess ("fau" for "Fauda").
+ */
+export function isDirectMatch(
+  title: Title,
+  query: string,
+  alternativeTitles: readonly string[] = [],
+): boolean {
+  const q = foldedTitle(query);
+  if (!q) return false;
+  const name = foldedTitle(title.title);
+  if (q === name || alternativeTitles.some((aka) => foldedTitle(aka) === q)) return true;
+  return q.length >= 4 && name.startsWith(q);
 }
 
 const isExact = (hit: Hit, query: string) =>

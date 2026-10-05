@@ -3,6 +3,7 @@
 
 import type { Title } from './library';
 import { RATING_SOURCES } from '../settings/catalogs';
+import { isDirectMatch } from './search';
 import type { ConfigValue, SettingsRow } from './wire';
 
 /** A streaming service the viewer has, in one country: the same provider in two countries is two picks. */
@@ -131,11 +132,24 @@ function lanHost(host: string): boolean {
  * unless `ignoringYearFloor` — explicit search sets it, since a title typed by name must be findable — and then the
  * hidden genres and languages, and anime when that's hidden. A surface that draws something other than a poster
  * passes `requirePoster: false`.
+ *
+ * `query`, when given, is the text that was typed to find this title: typing a name is an explicit request, unlike
+ * browsing, so a direct match (`isDirectMatch`) still shows past the hidden-language, hidden-genre and anime checks
+ * below. It never reaches the adult flag, the poster/year floors above, or the household's parental ceiling — that
+ * one isn't read here at all, and is enforced separately where Play actually starts (`playGuard.ts`).
  */
 export function isHidden(
   title: Title,
   prefs: Prefs,
-  { ignoringYearFloor = false, requirePoster = true } = {},
+  {
+    ignoringYearFloor = false,
+    requirePoster = true,
+    query,
+  }: {
+    ignoringYearFloor?: boolean;
+    requirePoster?: boolean;
+    query?: string;
+  } = {},
 ): boolean {
   if (title.adult) return true;
   // A card with no poster is a blank card. The billboard draws a backdrop instead, and an addon catalog names
@@ -150,6 +164,7 @@ export function isHidden(
   ) {
     return true;
   }
+  if (query !== undefined && isDirectMatch(title, query)) return false;
   const genres = title.genreIds ?? [];
   if (genres.some((g) => prefs.excludedGenres.has(g))) return true;
   if (title.originalLanguage && prefs.excludedLanguages.has(title.originalLanguage)) return true;
