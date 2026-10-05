@@ -239,8 +239,12 @@ const nextFrame = () =>
  * lookups while the posters themselves took 0.17 s; now each poster shows as its own lookup answers, those landing
  * before one paint sharing it (`nextFrame`).
  *
- * The last list is the finished one: a title still without a poster is no longer waiting for one. Before it, a
- * waiting title is a copy marked `awaiting`, so the hide rules show its name rather than dropping it.
+ * The last list is the finished one, but a title still without a poster stays marked `awaiting`: atlas matched it
+ * for a reason, and its own lookup not landing in time (a slow or failed TMDB request, a queue behind other
+ * lookups) is not proof there is no art — unlike an addon-catalog entry, which never had a lookup to land. Hiding
+ * it the moment the stream settles dropped exactly the hit that mattered most, the one atlas ranked first, while
+ * slower neighbors that happened to land in time stayed. A waiting title is a copy marked `awaiting`, so the hide
+ * rules show its name rather than dropping it, settled or not.
  */
 async function* pictured(
   found: { people: Person[]; titles: Title[] },
@@ -256,14 +260,12 @@ async function* pictured(
   });
   const titles = [...found.titles];
   let people: Hit[] = found.people.map((person) => ({ kind: 'person', person }));
-  const hits = (last: boolean) =>
+  const hits = () =>
     dedupe([
       ...people,
-      ...titles.map((title, at) =>
-        titleHit(last || title.posterPath ? title : (waiting.get(at) ?? title)),
-      ),
+      ...titles.map((title, at) => titleHit(title.posterPath ? title : (waiting.get(at) ?? title))),
     ]);
-  if (waiting.size) yield hits(false);
+  if (waiting.size) yield hits();
 
   let changed = false;
   let done = false;
@@ -310,10 +312,10 @@ async function* pictured(
     await nextFrame();
     if (done) break;
     changed = false;
-    yield hits(false);
+    yield hits();
   }
   await all;
-  yield hits(true);
+  yield hits();
 }
 
 /** People atlas named, with the photo TMDB has of each; one TMDB can't draw keeps atlas's name. */

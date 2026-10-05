@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Title } from './library';
+import { isHidden, type Prefs } from './prefs';
 import {
+  awaitingPicture,
   foldedTitle,
   hitKey,
   normalizeQuery,
@@ -118,6 +120,48 @@ describe('searchStream over atlas’s /index/query', () => {
     });
     expect(await final('the matrix', s)).toEqual(['movie-603', 'movie-157336']);
     expect(named).toEqual(['movie-157336']);
+  });
+
+  it('keeps atlas’s top hit shown by name when only its own TMDB lookup never lands a poster', async () => {
+    // Fauda (tv 69557), as atlas actually answers "fauda": ranked first, no poster of its own yet. A neighbour
+    // with the same gap in atlas's answer gets its poster from TMDB; Fauda's own lookup does not.
+    const fauda: Title = {
+      type: 'tv',
+      id: 69557,
+      title: 'Fauda',
+      year: 2015,
+      imdbId: 'tt4565380',
+      originalLanguage: 'ar',
+      genreIds: [28, 18, 53],
+    };
+    const saudade = movie(999001, 'Saudade');
+    const s = sources({
+      query: async () => ({ people: [], titles: [fauda, saudade], named: true }),
+      title: async (ref) => (ref.id === 69557 ? null : { ...saudade, posterPath: '/s.jpg' }),
+    });
+    const batches: Hit[][] = [];
+    for await (const batch of searchStream('fauda', s)) batches.push(batch);
+    const last = batches.at(-1)!;
+    // Fauda stays in the finished grid, ahead of the neighbour whose lookup happened to land.
+    expect(last.map(hitKey)).toEqual(['tv-69557', 'movie-999001']);
+    const faudaHit = last.find((h) => hitKey(h) === 'tv-69557');
+    if (faudaHit?.kind !== 'title') throw new Error('expected a title hit');
+    // The web's own hide rule, un-simplified: a lookup that never lands a poster is not the same as a title with
+    // no possible art, so it must not be treated as a blank card.
+    const prefs: Prefs = {
+      excludedGenres: new Set(),
+      excludedLanguages: new Set(),
+      hideAnime: false,
+      hideWatched: false,
+      services: [],
+      servicesConfigured: false,
+    };
+    expect(
+      isHidden(faudaHit.title, prefs, {
+        ignoringYearFloor: true,
+        requirePoster: !awaitingPicture(faudaHit.title),
+      }),
+    ).toBe(false);
   });
 
   it('asks TMDB only for what den-edge’s shared metadata could not picture', async () => {
