@@ -208,7 +208,7 @@ describe('the queue is the library’s rows', () => {
       queuedAt: 1,
       tried: [],
       release: { identity: 'primary', label: 'Primary', url: '/scout/p/primary' },
-    } as Parameters<DownloadQueue['hedgeResolveDue']>[0];
+    } as unknown as Parameters<DownloadQueue['hedgeResolveDue']>[0];
     made.attach(first.log, testClock(BROWSER));
     made.rememberNoHedge(download, 10_000);
     expect(made.hedgeResolveDue(download, 1)).toBe(false);
