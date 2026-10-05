@@ -6,7 +6,7 @@
      then-closes-and-returns-focus behaviour, and a bottom sheet below 760px or on a coarse pointer. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { onMount } from 'svelte';
+  import { tick } from 'svelte';
   import type { MenuItem } from '../lib/titleActions';
 
   let {
@@ -16,7 +16,8 @@
     glyph,
     triggerClass = '',
   }: {
-    items: MenuItem[];
+    /** Built only while this menu is open. An array keeps episode menus source-compatible. */
+    items: MenuItem[] | (() => MenuItem[]);
     /** The trigger's accessible name ("Actions for Dune", "Options for episode 3"). */
     label: string;
     /** Headed with this on the phone bottom sheet; omitted there is no heading. */
@@ -29,13 +30,14 @@
 
   const menuId = $props.id();
   let trigger: HTMLButtonElement;
-  let menu: HTMLDivElement;
+  let menu = $state<HTMLDivElement>();
+  let prepared = $state(false);
   let open = $state(false);
-  let mobile = $state(
-    typeof matchMedia === 'undefined'
-      ? false
-      : matchMedia('(max-width: 759px), (pointer: coarse)').matches,
-  );
+  let mobile = $state(false);
+  const shownItems = $derived.by(() => {
+    if (!prepared) return [];
+    return typeof items === 'function' ? items() : items;
+  });
   /** Where a right-click or long-press opened this, in viewport coordinates; null for the trigger's own click. */
   let coords: { x: number; y: number } | null = null;
   /** Set just before a Tab closes the menu, so the toggle handler doesn't steal the focus Tab is moving to. */
@@ -52,18 +54,25 @@
    */
   let swallowNextClick = false;
 
-  onMount(() => {
+  // A closed poster contributes a trigger, not a matchMedia subscription and five global listeners. Native auto
+  // popovers ensure only one menu is open, so listener work stays constant however many posters a long row retains.
+  $effect(() => {
+    if (!prepared) return;
     const query =
       typeof matchMedia === 'undefined'
         ? undefined
         : matchMedia('(max-width: 759px), (pointer: coarse)');
     const update = () => (mobile = query!.matches);
+    if (query) mobile = query.matches;
     query?.addEventListener('change', update);
-    // Permanent, not tied to `open`: a `pointerdown` outside both the menu and its trigger closes the menu —
-    // the native popover does that too, but only sometimes stops there (see `outsideClick`) — and a `click`
-    // is swallowed only when the `pointerdown` that preceded it asked for it.
-    document.addEventListener('pointerdown', outsidePointerDown, true);
-    document.addEventListener('click', outsideClick, true);
+    // A `pointerdown` outside both the menu and its trigger closes the menu — the native popover does that too,
+    // but only sometimes stops there (see `outsideClick`) — and a `click` is swallowed only when the same
+    // pointer gesture asked for it. Pointerdown never prevents a default, so it is passive; click cannot be.
+    document.addEventListener('pointerdown', outsidePointerDown, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener('click', outsideClick, { capture: true });
     // The user's own scroll gestures landing outside the menu — a wheel, a touch drag, a keyboard page-scroll
     // key — close it, the same as a tap outside would (den-edge#260). Not the `scroll` event itself: that
     // fires for the *result* of scrolling as much as the cause, and the W3C menu's own arrow-key model moves
@@ -83,14 +92,36 @@
     };
   });
 
+  async function show(at: { x: number; y: number } | null) {
+    coords = at;
+    if (!prepared) {
+      prepared = true;
+      await tick();
+    }
+    if (!menu) return;
+    if (menu.matches(':popover-open')) position();
+    else menu.showPopover();
+  }
+
+  function toggleFromTrigger() {
+    if (menu?.matches(':popover-open')) close();
+    else void show(null);
+  }
+
   /** Open anchored to a point rather than the trigger — a right-click or a long-press on the card. */
   export function openAt(x: number, y: number) {
-    coords = { x, y };
-    menu?.showPopover();
+    void show({ x, y });
   }
 
   export function close() {
     menu?.hidePopover();
+  }
+
+  function finishClose() {
+    // Removing a popover need not preserve its queued `toggle` event. Keep the trigger truthful synchronously even
+    // when an outside gesture releases the body before that event is delivered.
+    open = false;
+    prepared = false;
   }
 
   function menuItemEls(): HTMLButtonElement[] {
@@ -110,11 +141,12 @@
    * is what actually flips `open`/`aria-expanded`. The read stays synchronous; only the write moves.
    */
   function position() {
-    if (!menu) return;
+    const positioned = menu;
+    if (!positioned) return;
     if (mobile) {
       requestAnimationFrame(() => {
-        menu.style.removeProperty('left');
-        menu.style.removeProperty('top');
+        positioned.style.removeProperty('left');
+        positioned.style.removeProperty('top');
       });
       return;
     }
@@ -123,7 +155,7 @@
     // Not yet laid out at this point, so a representative size stands in for the real one — close enough to
     // decide which side of the viewport it has to flip away from.
     const width = 240,
-      height = items.length * 44 + 16;
+      height = shownItems.length * 44 + 16;
     let x: number, y: number;
     if (coords) {
       x = coords.x;
@@ -137,8 +169,8 @@
     x = Math.min(Math.max(8, x), Math.max(8, vw - width - 8));
     y = Math.min(Math.max(8, y), Math.max(8, vh - height - 8));
     requestAnimationFrame(() => {
-      menu.style.left = `${x}px`;
-      menu.style.top = `${y}px`;
+      positioned.style.left = `${x}px`;
+      positioned.style.top = `${y}px`;
     });
   }
 
@@ -156,6 +188,9 @@
       coords = null;
       if (!suppressRefocus) trigger?.focus();
       suppressRefocus = false;
+      // An outside pointerdown must retain the capture-click listener through the click that follows it. That click
+      // calls `finishClose`; every other close can release the menu body and listeners immediately.
+      if (!swallowNextClick) finishClose();
     }
   }
 
@@ -175,7 +210,15 @@
    * whether that event has fired yet.
    */
   function outsidePointerDown(event: PointerEvent) {
-    if (!menu?.matches(':popover-open')) return;
+    if (!menu?.matches(':popover-open')) {
+      // A drag can end without a click. A later pointerdown starts a different gesture and must not let that stale
+      // swallow escape into its click; releasing `prepared` also tears down the listeners left for the old gesture.
+      if (swallowNextClick) {
+        swallowNextClick = false;
+        finishClose();
+      }
+      return;
+    }
     const target = event.target;
     const inside = target instanceof Node && (menu.contains(target) || trigger?.contains(target));
     swallowNextClick = !inside;
@@ -189,6 +232,7 @@
     swallowNextClick = false;
     event.preventDefault();
     event.stopPropagation();
+    finishClose();
   }
 
   /** The keys that page-scroll an element with no handler of its own — Home/End and the arrows are excluded:
@@ -266,49 +310,50 @@
   class="trigger {triggerClass}"
   aria-haspopup="menu"
   aria-expanded={open}
-  aria-controls={menuId}
+  aria-controls={prepared ? menuId : undefined}
   aria-label={label}
-  popovertarget={menuId}
-  onclick={() => (coords = null)}
+  onclick={toggleFromTrigger}
 >
   {@render glyph()}
 </button>
 
-<div
-  bind:this={menu}
-  id={menuId}
-  class="menu"
-  class:sheet={mobile}
-  popover="auto"
-  role="menu"
-  aria-label={label}
-  tabindex="-1"
-  onbeforetoggle={beforeToggle}
-  ontoggle={toggled}
-  onkeydown={onMenuKeydown}
-  onpointerdown={sheetPointerDown}
-  onpointermove={sheetPointerMove}
-  onpointerup={sheetPointerUp}
-  onpointercancel={sheetPointerUp}
->
-  {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
-  {#each items as item, i (`${item.kind}:${item.label}:${i}`)}
-    <button
-      type="button"
-      role={item.kind === 'item'
-        ? 'menuitem'
-        : item.kind === 'checkbox'
-          ? 'menuitemcheckbox'
-          : 'menuitemradio'}
-      aria-checked={item.kind === 'item' ? undefined : item.checked}
-      aria-disabled={item.disabled || undefined}
-      class="item"
-      onclick={() => run(item)}
-    >
-      {item.label}
-    </button>
-  {/each}
-</div>
+{#if prepared}
+  <div
+    bind:this={menu}
+    id={menuId}
+    class="menu"
+    class:sheet={mobile}
+    popover="auto"
+    role="menu"
+    aria-label={label}
+    tabindex="-1"
+    onbeforetoggle={beforeToggle}
+    ontoggle={toggled}
+    onkeydown={onMenuKeydown}
+    onpointerdown={sheetPointerDown}
+    onpointermove={sheetPointerMove}
+    onpointerup={sheetPointerUp}
+    onpointercancel={sheetPointerUp}
+  >
+    {#if mobile && heading}<p class="sheet-heading">{heading}</p>{/if}
+    {#each shownItems as item, i (`${item.kind}:${item.label}:${i}`)}
+      <button
+        type="button"
+        role={item.kind === 'item'
+          ? 'menuitem'
+          : item.kind === 'checkbox'
+            ? 'menuitemcheckbox'
+            : 'menuitemradio'}
+        aria-checked={item.kind === 'item' ? undefined : item.checked}
+        aria-disabled={item.disabled || undefined}
+        class="item"
+        onclick={() => run(item)}
+      >
+        {item.label}
+      </button>
+    {/each}
+  </div>
+{/if}
 
 <style>
   .trigger {

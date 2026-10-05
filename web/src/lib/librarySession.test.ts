@@ -1,6 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { continueWatching } from './library';
 import { LibraryLog } from './log';
 import { LibrarySession } from './librarySession.svelte';
+import { ensureSyncPolicy } from './syncLoader';
+import type { Row } from './wire';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -11,6 +14,7 @@ const fakeLog = () => ({
   moved: false,
   settings: vi.fn(),
   refresh: vi.fn().mockResolvedValue(true),
+  rows: vi.fn().mockReturnValue([]),
 });
 
 it('retries an initially failed open without discarding a recovered log', async () => {
@@ -119,4 +123,67 @@ it('keeps a single foreground retry loop independent of the active route and cle
   win.dispatchEvent(new Event('online'));
   await vi.advanceTimersByTimeAsync(30_000);
   expect(log.refresh).toHaveBeenCalledTimes(stopped);
+});
+
+it('shares one immutable library projection per revision across retained pages', async () => {
+  const log = fakeLog();
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+
+  const first = session.libraryProjection();
+  expect(session.libraryProjection()).toBe(first);
+  expect(log.rows).toHaveBeenCalledOnce();
+
+  const applied = first!.library;
+  const displayed = session.displayedLibrary(applied);
+  expect(session.displayedLibrary(applied)).toBe(displayed);
+  const continued = session.continueWatching(applied, displayed);
+  expect(session.continueWatching(applied, displayed)).toBe(continued);
+
+  session.displays = [{ type: 'movie', id: 1, title: 'One' }];
+  const renamed = session.displayedLibrary(applied);
+  expect(renamed).not.toBe(displayed);
+  expect(session.displayedLibrary(applied)).toBe(renamed);
+
+  session.changed();
+  const changed = session.libraryProjection();
+  expect(changed).not.toBe(first);
+  expect(log.rows).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the shared projection and Continue result equal to the real den-core path', async () => {
+  await ensureSyncPolicy();
+  const rows: Row[] = [
+    {
+      kind: 'rec',
+      schema: 2,
+      title: { type: 'tv', id: 7 },
+      status: { value: 'inProgress', at: [1000, 0, 'web'] },
+      resume: { value: 0, at: [1000, 0, 'web'], viewing: 0 },
+      reaction: { value: null, at: [0, 0, ''] },
+      deleted: { value: false, at: [0, 0, ''] },
+      dismissed: { value: false, at: [0, 0, ''] },
+      episodesReset: null,
+      addedAt: 1000,
+      watchedAt: null,
+    },
+    {
+      kind: 'ep',
+      schema: 2,
+      title: { type: 'tv', id: 7 },
+      season: 1,
+      episode: 2,
+      progress: { value: 0.4, seconds: 900, viewing: 0, at: [2000, 0, 'web'] },
+    },
+  ];
+  const log = { ...fakeLog(), rows: vi.fn(() => rows) };
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+  session.displays = [{ type: 'tv', id: 7, title: 'Seven' }];
+
+  const applied = session.libraryProjection()!.library;
+  const displayed = session.displayedLibrary(applied);
+  expect(session.continueWatching(applied, displayed)).toEqual(continueWatching(displayed));
 });

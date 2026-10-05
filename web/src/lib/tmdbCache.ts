@@ -56,9 +56,11 @@ export const MOST_KEPT = 2_000;
  * one read-write transaction, and every read of the store waits behind it. The first prune after the cap came in
  * had a backlog of up to six months of answers to drop.
  */
-export const PRUNE_BATCH = 100;
+export const PRUNE_BATCH = 20;
 /** How long a prune waits between batches, and after the first TMDB question of the page before it starts. */
 export const PRUNE_PAUSE_MS = 1_000;
+/** An idle callback eventually runs even on a continuously busy page or in a throttled background tab. */
+const PRUNE_IDLE_TIMEOUT_MS = 5_000;
 /** A tab kept open prunes again after this many answers kept, not only once per page load. */
 export const PRUNE_EVERY = 200;
 /** How long past fresh an answer is still shown at once while it is refreshed. */
@@ -76,9 +78,9 @@ export interface Store {
   put(key: string, entry: Entry): Promise<void>;
   /**
    * Drop what was fetched before `cutoff`, and the oldest beyond the `most` newest: at most `batch` of them, oldest
-   * first. True when it dropped that many, and more may be left.
+   * first. Returns how many it dropped; a full batch means more may be left.
    */
-  prune(cutoff: number, most: number, batch: number): Promise<boolean>;
+  prune(cutoff: number, most: number, batch: number): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -229,15 +231,45 @@ export function cachingFetch(
   /** Answers kept since the last prune started; undefined until the first one has. */
   let keptSince: number | undefined;
   let pruning = false;
-  /** Prune in batches (`PRUNE_BATCH`), each after a pause, so reads of the store are not held behind all of it. */
+  const pauseForHousekeeping = () =>
+    new Promise<void>((resolve) => {
+      setTimeout(() => {
+        if (typeof globalThis.requestIdleCallback === 'function')
+          globalThis.requestIdleCallback(() => resolve(), { timeout: PRUNE_IDLE_TIMEOUT_MS });
+        else resolve();
+      }, PRUNE_PAUSE_MS);
+    });
+  const exclusively = async <T>(work: () => Promise<T>): Promise<T | undefined> => {
+    let locks: LockManager | undefined;
+    try {
+      locks = globalThis.navigator?.locks;
+    } catch {
+      // A restricted browser can expose navigator but refuse one of its capabilities.
+    }
+    if (!locks) return work();
+    return locks.request('den-tmdb-cache-prune', { ifAvailable: true }, (lock) =>
+      lock ? work() : undefined,
+    );
+  };
+  /**
+   * Prune in short transactions, each after both a pause and an idle opportunity. Reads are never queued behind a
+   * six-month backlog, and an origin-wide lock keeps retained tabs from doing the same startup scan concurrently.
+   */
   const prune = () => {
     if (!store || pruning) return;
     pruning = true;
     keptSince = 0;
-    const pause = () => new Promise((resolve) => setTimeout(resolve, PRUNE_PAUSE_MS));
     void (async () => {
-      do await pause();
-      while (await store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH));
+      let dropped: number;
+      do {
+        await pauseForHousekeeping();
+        const result = await exclusively(() =>
+          store.prune(now() - RETENTION, MOST_KEPT, PRUNE_BATCH),
+        );
+        // Another tab is doing this origin's same housekeeping. Its IndexedDB transaction is sufficient.
+        if (result === undefined) return;
+        dropped = result;
+      } while (dropped >= PRUNE_BATCH);
     })()
       .catch(() => undefined)
       .finally(() => (pruning = false));
@@ -352,7 +384,7 @@ function indexedStore(): Store | null {
           };
         };
       });
-      return dropped >= batch;
+      return dropped;
     },
     clear: async () => {
       await run('readwrite', (answers) => answers.clear());

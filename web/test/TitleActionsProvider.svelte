@@ -27,6 +27,8 @@
   let toast = $state<string | null>(null);
   let undo = $state<{ label: string; run: () => void } | null>(null);
   const calls: Record<string, number> = {
+    rowOf: 0,
+    resumeOf: 0,
     toggleWatchlist: 0,
     toggleSeen: 0,
     setReaction: 0,
@@ -59,10 +61,14 @@
       return busy;
     },
     rowOf: (title) => {
+      calls.rowOf += 1;
       void version;
       return rowOf(title);
     },
-    resumeOf: (title: Title) => (title.type === 'tv' ? { season: 2, episode: 4 } : undefined),
+    resumeOf: (title: Title) => {
+      calls.resumeOf += 1;
+      return title.type === 'tv' ? { season: 2, episode: 4 } : undefined;
+    },
     toggleWatchlist: (title, on) => {
       calls.toggleWatchlist += 1;
       change(title, on ? addToWatchlist : removeFromLibrary);

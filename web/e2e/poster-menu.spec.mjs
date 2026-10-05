@@ -12,6 +12,93 @@ async function open(browser, { width = 1280, hasTouch = false } = {}) {
   return page;
 }
 
+test('closed poster menus do no action work and retain no menu body or global listeners', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => {
+      const prototype = EventTarget.prototype;
+      const add = prototype.addEventListener;
+      const remove = prototype.removeEventListener;
+      const listeners = new WeakMap();
+      const tracked = new Set(['pointerdown', 'click', 'wheel', 'touchmove', 'keydown']);
+      const bucket = (target, type) => {
+        let byType = listeners.get(target);
+        if (!byType) listeners.set(target, (byType = new Map()));
+        let active = byType.get(type);
+        if (!active) byType.set(type, (active = new Set()));
+        return active;
+      };
+      prototype.addEventListener = function (type, listener, options) {
+        if (tracked.has(type) && listener) bucket(this, type).add(listener);
+        return add.call(this, type, listener, options);
+      };
+      prototype.removeEventListener = function (type, listener, options) {
+        if (tracked.has(type) && listener) bucket(this, type).delete(listener);
+        return remove.call(this, type, listener, options);
+      };
+      window.fixtureListeners = () =>
+        Object.fromEntries(
+          [...tracked].map((type) => [
+            type,
+            (listeners.get(document)?.get(type)?.size ?? 0) +
+              (listeners.get(window)?.get(type)?.size ?? 0),
+          ]),
+        );
+    });
+    await guardNetwork(page);
+    await page.route('**/tmdb/3/**', (r) => r.fulfill({ status: 404, json: {} }));
+    await page.goto(`${E2E_ORIGIN}/test/poster-menu.html`);
+    const ordinary = await page.evaluate(() => window.fixtureListeners());
+    await page.goto(`${E2E_ORIGIN}/test/poster-menu.html?scale=120`);
+
+    await expect(page.locator('[data-menu-scale] .trigger')).toHaveCount(120);
+    await expect(page.locator('[data-menu-scale] [role="menu"]')).toHaveCount(0);
+    expect(await page.evaluate(() => window.fixture.calls().rowOf)).toBe(0);
+    expect(await page.evaluate(() => window.fixture.calls().resumeOf)).toBe(0);
+    const closed = await page.evaluate(() => window.fixtureListeners());
+    expect(closed).toEqual(ordinary);
+    expect(closed.wheel).toBe(0);
+    expect(closed.touchmove).toBe(0);
+    expect(closed.pointerdown).toBeLessThan(5);
+    expect(closed.click).toBeLessThan(5);
+
+    // Opening one card creates exactly one body and computes exactly that card's current action state.
+    await page
+      .locator('[data-menu-scale] .trigger')
+      .first()
+      .evaluate((button) => button.click());
+    await expect(page.getByRole('menu', { name: 'Actions for Scale Series 1' })).toBeVisible();
+    await expect(page.locator('[data-menu-scale] [role="menu"]')).toHaveCount(1);
+    expect(await page.evaluate(() => window.fixture.calls().rowOf)).toBe(1);
+    expect(await page.evaluate(() => window.fixture.calls().resumeOf)).toBe(1);
+    const opened = await page.evaluate(() => window.fixtureListeners());
+    // Pointerdown/click each gain one menu listener and one Svelte delegated listener the first time their
+    // menu-body events exist. The delegated pair is process-wide and stays; the other five are open-menu-only.
+    expect(opened).toEqual({
+      pointerdown: closed.pointerdown + 2,
+      click: closed.click + 2,
+      wheel: closed.wheel + 1,
+      touchmove: closed.touchmove + 1,
+      keydown: closed.keydown + 1,
+    });
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[data-menu-scale] [role="menu"]')).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => window.fixtureListeners()))
+      .toEqual({
+        ...closed,
+        pointerdown: closed.pointerdown + 1,
+        click: closed.click + 1,
+      });
+  } finally {
+    await browser.close();
+  }
+});
+
 test('hovering shows ⋯, clicking opens the menu, and a right-click opens the same one', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

@@ -177,9 +177,20 @@ export type Row = TitleRow | EpisodeRow | SettingsRow | WatchRow | ReceiptRow | 
 export const isDocument = (row: Row): row is DocumentRow =>
   row.kind === 'title' || row.kind === 'season' || row.kind === 'delivery';
 
+// Documents are immutable snapshots: merges and writes return a new object. Opening a document asks its policy
+// name several times (lookup, insert, acknowledgement), so keep that synchronous JSON/WASM result with the exact
+// object. A changed document has a different identity and is named again.
+const documentNames = new WeakMap<DocumentRow, string>();
+
 /** The name a row's key is the HMAC of. */
 export function rowName(row: Row): string {
-  if (isDocument(row)) return syncPolicy<string>({ op: 'doc_name', document: row });
+  if (isDocument(row)) {
+    const known = documentNames.get(row);
+    if (known) return known;
+    const name = syncPolicy<string>({ op: 'doc_name', document: row });
+    documentNames.set(row, name);
+    return name;
+  }
   if (row.kind === 'set') return `set:${row.name}`;
   if (row.kind === 'wat') return `wat:${row.title.type}:${row.title.id}:${row.season}:${row.block}`;
   if (row.kind === 'snt') {

@@ -1,29 +1,27 @@
-<script module lang="ts">
-  /**
-   * Whether the last thing the viewer did was press a key rather than point or touch. Focus put back on a page
-   * shows its ring only then: a poster tapped, then Back, came back ringed for someone who never used a key.
-   */
-  let keyboard = false;
-  if (typeof document !== 'undefined') {
-    const listen = { capture: true, passive: true };
-    document.addEventListener('keydown', () => (keyboard = true), listen);
-    document.addEventListener('pointerdown', () => (keyboard = false), listen);
-  }
-</script>
-
 <script lang="ts">
-  import { tick, untrack, type Snippet } from 'svelte';
+  import { onMount, setContext, tick, untrack, type Snippet } from 'svelte';
+  import { keyboardInput, trackInputModality } from '../lib/inputModality';
   import { scrolledWithin } from '../lib/scrolled';
+  import { PAGE_VISIBILITY, type PageVisibility } from '../lib/pageVisibility.svelte';
   let { active, children }: { active: boolean; children: Snippet } = $props();
+  // Start closed: a RoutePage first created in the retained, hidden stack must never get one frame of active
+  // observers, idle preloads, or cards before the prop-sync effect runs.
+  const visibility = $state<PageVisibility>({ active: false });
+  setContext(PAGE_VISIBILITY, visibility);
+  $effect(() => {
+    visibility.active = active;
+  });
   let root: HTMLDivElement;
   let scrolls: { element: HTMLElement; x: number; y: number }[] = [];
   let focused: HTMLElement | null = null;
+  let focusKey: string | undefined;
   let controls: {
     element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
     value: string;
     checked?: boolean;
   }[] = [];
   let activation = 0;
+  onMount(trackInputModality);
   $effect.pre(() => {
     const visible = active;
     untrack(() => {
@@ -49,6 +47,7 @@
         focused = root.contains(document.activeElement)
           ? (document.activeElement as HTMLElement)
           : null;
+        focusKey = focused?.closest<HTMLElement>('[data-route-focus-key]')?.dataset.routeFocusKey;
         scrolls = (scrolledWithin(root) as HTMLElement[])
           .filter((element) => element.scrollLeft !== 0 || element.scrollTop !== 0)
           .map((element) => ({ element, x: element.scrollLeft, y: element.scrollTop }));
@@ -59,7 +58,14 @@
           // Restoring the page's old focus must not take focus or the keyboard away from it.
           const currentFocus = document.activeElement;
           if (!currentFocus || currentFocus === document.body || root.contains(currentFocus)) {
-            focused?.focus({ preventScroll: true, focusVisible: keyboard });
+            const target = focused?.isConnected
+              ? focused
+              : focusKey
+                ? Array.from(root.querySelectorAll<HTMLElement>('[data-route-focus-key]'))
+                    .find((element) => element.dataset.routeFocusKey === focusKey)
+                    ?.querySelector<HTMLElement>('a, button, input, [tabindex]')
+                : null;
+            target?.focus({ preventScroll: true, focusVisible: keyboardInput() });
           }
           const restore = () => {
             if (!active || activation !== ticket) return;

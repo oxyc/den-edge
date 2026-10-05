@@ -185,13 +185,53 @@ test('desktop: clicking outside the menu closes it without activating the poster
     // Playwright's own "obscured" check to prove the real browser's hit-test lands on the scrim, not the card.
     await otherCard.click({ force: true });
     await expect(menu).toBeHidden();
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
     await expect(page).toHaveURL(/poster-menu\.html$/);
 
+    // The body/listeners released by the outside gesture leave a live trigger, not stale expanded state.
     await trigger.click();
     await expect(menu).toBeVisible();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
     await page.keyboard.press('Escape');
     await expect(menu).toBeHidden();
     await expect(trigger).toBeFocused();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a pointerdown with no click cannot swallow a later gesture, and native auto-popover releases the prior body', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await openFixture(page);
+    const library = page.getByRole('region', { name: 'Library' });
+    const first = library.getByRole('button', { name: 'Actions for Movie 101' });
+    const second = library.getByRole('button', { name: 'Actions for Series 701' });
+    const otherCard = library.getByRole('link', { name: 'Series 701' });
+
+    await first.click();
+    await expect(page.getByRole('menu', { name: 'Actions for Movie 101' })).toBeVisible();
+    // A drag/cancel can produce pointerdown without a click. The next complete gesture must start fresh.
+    await otherCard.dispatchEvent('pointerdown', {
+      pointerType: 'mouse',
+      button: 0,
+      bubbles: true,
+    });
+    await expect(first).toHaveAttribute('aria-expanded', 'false');
+    await first.click();
+    await expect(page.getByRole('menu', { name: 'Actions for Movie 101' })).toBeVisible();
+
+    // Programmatic opening has no outside pointerdown. Native `popover="auto"` closes the first; its body and
+    // expanded state must still be released while the second becomes the one live menu.
+    await second.evaluate((button) => button.click());
+    await expect(page.locator('[role="menu"]')).toHaveCount(1);
+    await expect(page.getByRole('menu', { name: 'Actions for Series 701' })).toBeVisible();
+    await expect(first).toHaveAttribute('aria-expanded', 'false');
+    await expect(second).toHaveAttribute('aria-expanded', 'true');
   } finally {
     await browser.close();
   }

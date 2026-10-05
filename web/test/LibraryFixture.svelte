@@ -18,6 +18,7 @@
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import { SessionServices } from '../src/lib/sessionServices.svelte';
+  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import { trackerEvent } from '../src/lib/trackerEvents';
   import {
     rowName,
@@ -142,6 +143,7 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   const TOAST_MS = 6000;
   const session = $state({
+    ...fixtureLibrarySessionMethods,
     // Bumped as the real session does, so a write is drawn rather than silently kept.
     changed(settings = false) {
       this.revision++;

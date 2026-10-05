@@ -210,7 +210,13 @@ test('a poster tapped mid-scroll opens its title at the top, and Back returns to
       requestAnimationFrame(glide);
     });
   });
-  await card.tap();
+  // This is deliberately a tap during continuous motion. Locator.tap waits for two motionless frames that this
+  // test intentionally never provides; a real touchscreen delivers at the finger's coordinates immediately.
+  const point = await card.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.touchscreen.tap(point.x, point.y);
   await page.evaluate(() => window.glided);
   await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
   await page.waitForTimeout(100);

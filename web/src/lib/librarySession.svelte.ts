@@ -9,7 +9,19 @@ import type { DownloadTitle } from './downloadRows';
 import { fetchImdbId } from './tmdb';
 import { fetchSourceList, scoutTicket, type SourceAnswer, type TitleSource } from './titleSources';
 import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
-import type { Title, Shape } from './library';
+import {
+  applyLog,
+  ContinueProjector,
+  emptyLibrary,
+  nameContinueCandidates,
+  withDisplay,
+  type ContinueCandidate,
+  type ContinueEntry,
+  type Library,
+  type Shape,
+  type Title,
+} from './library';
+import type { Row } from './wire';
 import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
@@ -35,6 +47,26 @@ export class LibrarySession {
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
   private readonly clock = browserClock();
+  /** One immutable fold of the log for every revision, shared by all retained route trees. */
+  private projection?: { revision: number; log: LibraryLog; rows: Row[]; library: Library };
+  /** Policy decisions survive revisions; ContinueProjector invalidates only the series whose input changed. */
+  private readonly continueProjector = new ContinueProjector();
+  private continued?: {
+    projection: Library;
+    shapes: Map<string, Shape>;
+    candidates: ContinueCandidate[];
+  };
+  private displayed?: {
+    projection: Library;
+    displays: Title[];
+    shapes: Map<string, Shape>;
+    library: Library;
+  };
+  private namedContinue?: {
+    candidates: ContinueCandidate[];
+    library: Library;
+    entries: ContinueEntry[];
+  };
   private readonly device = this.clock.device;
   /** The log's generation changes the last recovery reconcile followed (`reconcileRecovery`). */
   private recoveryGenerations = 0;
@@ -177,6 +209,70 @@ export class LibrarySession {
     this.revision++;
     if (settings) this.settingsRevision++;
     downloads.touch();
+  }
+
+  /**
+   * Rows and their policy fold at the current log revision. A page, its naming pass, and retained sibling pages
+   * all ask for the same snapshot; none should replay every synchronous den-core operation independently.
+   */
+  libraryProjection(): { rows: Row[]; library: Library } | null {
+    const revision = this.revision;
+    const log = this.log;
+    if (!log) return null;
+    if (!this.projection || this.projection.revision !== revision || this.projection.log !== log) {
+      const rows = log.rows();
+      this.projection = { revision, log, rows, library: applyLog(emptyLibrary(), rows) };
+    }
+    return this.projection;
+  }
+
+  /** The current projection with late display metadata overlaid, shared while those exact inputs are current. */
+  displayedLibrary(projection: Library): Library {
+    const displays = this.displays;
+    const shapes = this.shapes;
+    if (
+      !this.displayed ||
+      this.displayed.projection !== projection ||
+      this.displayed.displays !== displays ||
+      this.displayed.shapes !== shapes
+    ) {
+      this.displayed = {
+        projection,
+        displays,
+        shapes,
+        library: { ...withDisplay(projection, displays), shapes },
+      };
+    }
+    return this.displayed.library;
+  }
+
+  /** Continue Watching from the same shared projection, recomputing only changed per-series policy inputs. */
+  continueWatching(projection: Library, displayed: Library): ContinueEntry[] {
+    const shapes = this.shapes;
+    if (
+      !this.continued ||
+      this.continued.projection !== projection ||
+      this.continued.shapes !== shapes
+    ) {
+      this.continued = {
+        projection,
+        shapes,
+        candidates: this.continueProjector.project({ ...projection, shapes }),
+      };
+    }
+    const candidates = this.continued.candidates;
+    if (
+      !this.namedContinue ||
+      this.namedContinue.candidates !== candidates ||
+      this.namedContinue.library !== displayed
+    ) {
+      this.namedContinue = {
+        candidates,
+        library: displayed,
+        entries: nameContinueCandidates(candidates, displayed),
+      };
+    }
+    return this.namedContinue.entries;
   }
 
   /** The shared download queue reads and writes this library's rows (den-spec library-v4 §17). */
