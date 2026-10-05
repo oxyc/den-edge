@@ -126,44 +126,95 @@ export class DeliveryMeter {
  * the link gave this player, not a probe's guess at it, so less is held back than the probe's 70 %: room to dip.
  */
 export const LIVE_HEADROOM = 0.85;
+/**
+ * The most a delivery switch may ask for against the playing copy's own bitrate: what replaces a copy the link can't
+ * carry is a lighter one, never one that only fits under a high reading of the link.
+ */
+export const LIGHTER_SHARE = 0.9;
 
 /**
- * What a switch adds to its session request: never a transcode, not the release playing now or one switched away
- * from before, and — for delivery — only a copy that fits what the link is really giving.
+ * A copy's average bitrate: den-remux's own bytes for its segments over its length, else the file's size over it — the
+ * file's, never a season pack's, which is what a release's label may name. Undefined where neither is known.
+ */
+export function averageBitrate(
+  demand: Demand | null | undefined,
+  duration: number,
+  size?: number,
+): number | undefined {
+  if (!(duration > 0)) return undefined;
+  const bytes = demand?.length ? demand.reduce((sum, [, b]) => sum + b, 0) : size;
+  return bytes && bytes > 0 ? (bytes * 8) / duration : undefined;
+}
+
+/**
+ * What a switch adds to its session request: never a transcode, and not the release playing now or one switched away
+ * from before. For delivery, only a copy that fits under both what the link is really giving (`rate`, where it was
+ * measured) and LIGHTER_SHARE of the playing copy's own bitrate — so a switch for speed always lands on a lighter copy.
+ * Null where the playing copy's bitrate isn't known: there is then nothing to call lighter, and nothing is asked.
  */
 export function switchAsk(
   reason: 'decode' | 'delivery',
   playing: string,
   excluded: readonly string[],
-  rate?: number,
-): Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> {
-  return {
-    exclude: [...excluded, playing],
-    transcode: 'never',
-    ...(reason === 'delivery' && rate
-      ? { fitsOnly: true, maxBitrate: Math.round(rate * LIVE_HEADROOM) }
-      : {}),
-  };
+  { rate, bitrate }: { rate?: number; bitrate?: number } = {},
+): Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> | null {
+  const ask = { exclude: [...new Set([...excluded, playing])], transcode: 'never' as const };
+  if (reason === 'decode') return ask;
+  if (!bitrate || !(bitrate > 0)) return null;
+  const cap = Math.min(bitrate * LIGHTER_SHARE, rate && rate > 0 ? rate * LIVE_HEADROOM : Infinity);
+  return { ...ask, fitsOnly: true, maxBitrate: Math.round(cap) };
 }
+
+/**
+ * Stalls a native player has to sit through, and seconds stalled in all, before its delivery counts as too slow. Its
+ * own buffer is the only measure it gives: no bytes, no request times, and its fetches come in bursts with nothing
+ * between them while it is ahead. A buffer that stops growing is that player being ahead, so only stalls the viewer
+ * actually sat through — more than one, and for long, or one as long as a viewer waits for a start — say the link
+ * can't carry the copy.
+ */
+export const NATIVE_MIN_STALLS = 2;
+export const NATIVE_STALLED_SECS = 15;
+
+/** What a playing session's delivery says: a measured rate, or a native player's stalls. */
+export type Delivery =
+  /** The wait `waitAt` gives at the live rate (what is buffered counted in it), over how long that rate was measured, and the seconds buffered ahead. */
+  | { kind: 'delivery'; wait: number; measuredMs: number; aheadSecs: number }
+  /** A native player: the stalls since its first frame, and the seconds they lasted. */
+  | { kind: 'stalls'; stalls: number; stalledSecs: number };
 
 /** What a playing session saw that might move it to another release. */
 export type Signal =
   /** The decoder refused what it said it takes, and can't go on. */
-  | { kind: 'decode' }
-  /** Delivery: the wait `waitAt` gives at the live rate (what is buffered already counted in it), and over how long that rate was measured. */
-  | { kind: 'delivery'; wait: number; measuredMs: number };
+  { kind: 'decode' } | Delivery;
+
+/**
+ * Whether `delivery` says the link can't carry the playing copy, at any point in its playing. A rate counts only once
+ * it was measured long enough to mean something, and not while the player has a buffer that isn't running short — a
+ * rate read while a player paces itself is its own pacing. Then only when even waiting as long as a viewer would
+ * wouldn't carry it through. A native player's only evidence is the stalls it sat through.
+ */
+export function tooSlow(delivery: Delivery, shownFrame: boolean): boolean {
+  if (delivery.kind === 'stalls')
+    return (
+      shownFrame &&
+      delivery.stalledSecs >=
+        (delivery.stalls >= NATIVE_MIN_STALLS ? NATIVE_STALLED_SECS : FIRST_FRAME_WAIT_SECS)
+    );
+  if (delivery.measuredMs < MIN_MEASURE_MS || !Number.isFinite(delivery.wait)) return false;
+  if (shownFrame && delivery.aheadSecs >= PLAYING_WAIT_SECS) return false;
+  return delivery.wait > (shownFrame ? PLAYING_WAIT_SECS : FIRST_FRAME_WAIT_SECS);
+}
 
 /**
  * Whether a session moves to another release on `signal`, `playedSecs` into its playing, having shown a frame or not.
  * A decoder that can't go on is a hard impossibility at any time, and the play head is kept. Delivery moves it only
- * early, only on a rate measured long enough to mean something, and only when even waiting as long as a viewer would
- * wouldn't carry it through — never on a stall alone, which a spike and a buffer that was too short also give.
+ * early, and only when `tooSlow` says so.
  */
 export function shouldSwitch(
   signal: Signal,
   { playedSecs, shownFrame }: { playedSecs: number; shownFrame: boolean },
 ): boolean {
   if (signal.kind === 'decode') return true;
-  if (playedSecs >= EARLY_WINDOW_SECS || signal.measuredMs < MIN_MEASURE_MS) return false;
-  return signal.wait > (shownFrame ? PLAYING_WAIT_SECS : FIRST_FRAME_WAIT_SECS);
+  if (playedSecs >= EARLY_WINDOW_SECS) return false;
+  return tooSlow(signal, shownFrame);
 }

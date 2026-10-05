@@ -38,6 +38,7 @@
     rememberLink,
     reportFailure,
     routeKind,
+    segmentAnswer,
     sendHeartbeat,
     sourceFailed,
     startSession,
@@ -81,13 +82,17 @@
     type Progress as StartupProgress,
   } from '../lib/startupNotice';
   import {
+    averageBitrate,
     bytesBetween,
     DeliveryMeter,
     scaleDemand,
     shouldSwitch,
     switchAsk,
+    tooSlow,
     waitAt,
+    type Delivery,
   } from '../lib/switchPolicy';
+  import { recallReleases, rememberReleases } from '../lib/releaseMemory';
   import type { Addon } from '../lib/scout';
   import { fetchImdbId } from '../lib/tmdb';
   import {
@@ -173,6 +178,18 @@
   const HEARTBEAT_MS = 20_000;
   /** How long a video may go without a picture before it counts as one the browser can't play. */
   const STUCK_MS = 30_000;
+  /**
+   * How quickly den-remux answers for a segment it already has (`segmentAnswer`): slower, and it is still making it.
+   * And how long that answer is waited for before the start is taken for a slow one.
+   */
+  const SEGMENT_READY_MS = 3_000;
+  const SEGMENT_ASK_MS = 10_000;
+  /**
+   * How long a play head that nothing paused may stand still before it counts as a stall, and how far it has to move
+   * to count as moving: WebKit nudges a stalled one back and forth by a millisecond.
+   */
+  const HEAD_STILL_MS = 1_000;
+  const HEAD_MOVED_SECS = 0.1;
   /** How far from the asked-for second a native player may start and still count as there: it starts on a segment. */
   const START_SLACK_SECS = 10;
   /** How long before asking again while every slot, or the GPU, is taken — unless den-remux names its own. */
@@ -257,8 +274,14 @@
   let askedMaxBitrate: number | undefined;
   /** What this page's own video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
   let watcher: Watcher | undefined;
-  /** The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick. */
-  let chosenRelease: string | undefined = untrack(() => filename);
+  /** This title's (or episode's) releases as this tab remembers them across a reload (`releaseMemory`). */
+  const memoryKey = untrack(() => `${title.type}:${title.id}:${season ?? ''}:${episode ?? ''}`);
+  const recalled = recallReleases(memoryKey);
+  /**
+   * The release the viewer chose — from the title's sources, or the picker here — rather than den-remux's own pick.
+   * Nothing moves playback off it on its own: where it can't keep up, the viewer is told and offered another.
+   */
+  let chosenRelease: string | undefined = untrack(() => filename) ?? recalled.chosen;
   let session = $state<Session | null>(null);
   /** The route `session` was started on: the same one's credentials, so the same owner at den-remux. */
   let sessionRoute: string | undefined;
@@ -336,16 +359,31 @@
   // $state (den-edge#234): the startup notice's own derived reads this to clear itself once the first frame
   // arrives, which needs it reactive — every other read here is a plain check inside a function body.
   let played = $state(false);
-  /** Releases of this title a switch moved away from (`switchAway`), not asked for again; the viewer's pick clears it. */
-  let excluded: string[] = [];
-  let switching = false;
+  /**
+   * Releases of this title playback left — a switch moved away from it (`switchAway`), or a decoder refused it — which
+   * no automatic pick lands on again this visit, a reload included. The viewer may still pick one from the list.
+   */
+  let excluded: string[] = recalled.left;
+  // $state: a notice of a switch under way stays up until it lands, and only then starts to fade.
+  let switching = $state(false);
+
+  /** Keep `chosenRelease` and `excluded` for a reload of this same visit. */
+  function keepReleases() {
+    rememberReleases(memoryKey, { chosen: chosenRelease, left: excluded });
+  }
+
+  /** Leave `filename` for good this visit: no automatic pick lands on it again. */
+  function leave(filename: string) {
+    if (!excluded.includes(filename)) excluded = [...excluded, filename];
+    keepReleases();
+  }
   /**
    * The session `broke` is already judging, and whether a decoder refused it. A video's `error` and a fatal hls.js
    * error, the stuck watch, or the cast page's `den-error` twice, can arrive for one failure; the second would find the
    * first's switch under way and call it unplayable. A decoder's refusal among them still counts: it is what moves the
    * session to another copy.
    */
-  let breaking: { session: Session; decode: boolean } | null = null;
+  let breaking: { session: Session; decode: boolean; refused: boolean } | null = null;
   /**
    * Seconds played on an earlier src this same `<video>` held, before the one playing now: a mid-film switch
    * (`element.src = …`, or hls.js's `loadSource`/`attachMedia`) resets the element's own `played` ranges, so
@@ -384,8 +422,17 @@
   let meter = new DeliveryMeter();
   /** Set once no other copy fitted the link: this one plays on, and delivery is not weighed again. */
   let deliveryGaveUp = false;
-  /** Shown while the link is slower than the playing release needs, and nothing else fits it. */
-  let struggling = $state(false);
+  /** Shown while the link is slower than the playing release needs, and no lighter one fits it: that release's label. */
+  let struggling = $state<string | null>(null);
+  /**
+   * The viewer's own pick can't keep up with the link (`tooSlow`): its label, shown with an offer of another, which
+   * playback never takes on its own. Said once per session.
+   */
+  let slowPick = $state<string | null>(null);
+  /** The playing session's stalls since its first frame, and their length: a native player's whole evidence. */
+  let stallCount = 0;
+  let stalledMs = 0;
+  let stallSince: number | undefined;
   /**
    * The bytes of the playing session's fragments against what den-remux said it sends for the same stretches
    * (`segments`): the share of its demand that really comes, which `waitAt` is weighed with.
@@ -459,6 +506,38 @@
     stalling && !autoSwitch ? bufferingWhilePlaying(stallProgress, deliveryGaveUp) : null,
   );
 
+  /** How long a notice that asks nothing of the viewer stays up. */
+  const NOTICE_MS = 6_000;
+  /** Clear a notice NOTICE_MS after `shown` says it is up; a new text starts the time over. */
+  function fades(shown: () => unknown, clear: () => void) {
+    $effect(() => {
+      if (!shown()) return;
+      const timer = setTimeout(clear, NOTICE_MS);
+      return () => clearTimeout(timer);
+    });
+  }
+  fades(
+    () => swapped,
+    () => (swapped = null),
+  );
+  // Only once the switch has landed: "trying another release…" stays until it says where it went.
+  fades(
+    () => !switching && autoSwitch,
+    () => (autoSwitch = null),
+  );
+  fades(
+    () => struggling,
+    () => (struggling = null),
+  );
+  fades(
+    () => unchanged,
+    () => (unchanged = null),
+  );
+  fades(
+    () => castOffer === 'none',
+    () => (castOffer = 'idle'),
+  );
+
   const heading = $derived(
     season !== undefined ? `${title.title} · S${season} · E${episode}` : title.title,
   );
@@ -479,8 +558,8 @@
    * started, and kept for good when none does: true when one did, den-remux's refusal when it refused one, else false.
    */
   async function begin(
-    pick: { audioTrack?: number; filename: string } | undefined = filename
-      ? { filename }
+    pick: { audioTrack?: number; filename: string } | undefined = chosenRelease
+      ? { filename: chosenRelease }
       : undefined,
     extra: Pick<Want, 'exclude' | 'transcode' | 'fitsOnly' | 'maxBitrate'> = {},
     replacing?: Session,
@@ -584,6 +663,13 @@
         );
         return result.failure;
       }
+      // Everything left earlier in the visit leaves nothing to start on: those are only kept off an automatic
+      // pick while there is another to make, so the start is asked for again with none left out.
+      if ((result.failure === 'none' || result.failure === 'noCopy') && excluded.length) {
+        excluded = [];
+        keepReleases();
+        return begin(pick, extra);
+      }
       failure = result.failure;
       if (
         result.failure === 'busy' ||
@@ -615,10 +701,15 @@
     if (replacing) playedSecs += video ? playedSecondsOf(video.played) : 0;
     else playedSecs = 0;
     lastPosition = undefined;
+    // Each session is judged on its own delivery: nothing measured of the one it replaces says anything of this one.
     meter = new DeliveryMeter();
     delivered = { bytes: 0, demand: 0 };
     deliveryGaveUp = false;
-    struggling = false;
+    struggling = null;
+    slowPick = null;
+    stallCount = 0;
+    stalledMs = 0;
+    stallSince = undefined;
     hold = result.prebuffer ? new PrebufferHold(result.prebuffer, performance.now()) : null;
     startsIn = null;
     // For the startup timing line (den-edge#234's "Findings"), logged once this session's first frame arrives.
@@ -687,6 +778,13 @@
   ): Promise<boolean | Failure> {
     const current = session;
     if (!current || switching) return false;
+    // For delivery, only a copy lighter than this one by its real bitrate — never by a label, which can name a whole
+    // season pack — and none at all where this one's bitrate isn't known.
+    const ask = switchAsk(reason, current.release.filename, excluded, {
+      rate,
+      bitrate: averageBitrate(current.segments, current.duration, current.release.size),
+    });
+    if (!ask) return 'noFit';
     switching = true;
     const fromLabel = current.release.label;
     autoSwitch = autoSwitchNotice(
@@ -700,13 +798,17 @@
       const at = video?.currentTime ?? remoteTime;
       const total = length();
       if (total && at >= 1) startAt = { seconds: at, fraction: at / total };
-      const moved = await begin(
-        undefined,
-        switchAsk(reason, current.release.filename, excluded, rate),
-        current,
-      );
+      let moved: boolean | Failure;
+      try {
+        moved = await begin(undefined, ask, current);
+      } catch (error) {
+        // A request a suspended page never got the answer to (an iPhone's tab put in the background): the session
+        // playing carries on, as for any refusal.
+        console.warn('A switch to another release got no answer; this one carries on.', error);
+        moved = false;
+      }
       if (moved === true) {
-        excluded = [...excluded, current.release.filename];
+        leave(current.release.filename);
         switchCount += 1;
         lastSwitchReason = reason;
         autoSwitch = autoSwitchedNotice(
@@ -725,34 +827,75 @@
   }
 
   /**
-   * Weigh the link as it is delivering against what the playing copy asks of it (`shouldSwitch`), and move early to
-   * one it carries when even a viewer's wait wouldn't do. Past the early window, or with nothing that fits, it plays on.
+   * What the playing session's delivery says (`Delivery`). hls.js gives every fragment's bytes and timing, weighed
+   * against what den-remux said the copy asks (`waitAt`). A native player gives neither — only how far its buffer
+   * reaches, which stands still between its bursts of fetching while it is ahead, so a rate read from it is its own
+   * pacing — and is judged on the stalls it sat through instead.
+   */
+  function deliveryOf(current: Session, element: HTMLVideoElement): Delivery | null {
+    if (!hls) {
+      const open = stallSince === undefined ? 0 : performance.now() - stallSince;
+      return { kind: 'stalls', stalls: stallCount, stalledSecs: (stalledMs + open) / 1000 };
+    }
+    if (!current.segments) return null;
+    const total = length();
+    const buffered = element.buffered;
+    const reach = buffered.length ? buffered.end(buffered.length - 1) : element.currentTime;
+    const live = meter.rate();
+    if (!live) return null;
+    // What den-remux said it sends, scaled by the share of it that came for the fragments loaded so far.
+    const demand = scaleDemand(current.segments, delivered);
+    return {
+      kind: 'delivery',
+      wait: waitAt(demand, total, element.currentTime, reach, live.bitsPerSecond),
+      measuredMs: live.spanMs,
+      aheadSecs: aheadIn(buffered, element.currentTime),
+    };
+  }
+
+  /**
+   * Weigh the link as it is delivering against what the playing copy asks of it (`shouldSwitch`), and move early to a
+   * lighter one it carries when even a viewer's wait wouldn't do. Past the early window, or with nothing lighter that
+   * fits, it plays on. The viewer's own pick is never moved: they are told it can't keep up, and offered another.
    */
   function weighDelivery() {
     const current = session;
     const element = video;
-    if (!current?.segments || !element || switching || deliveryGaveUp || castMode) return;
-    // A connection that is down delivers nothing, and that is no verdict on what this release asks of it.
-    if (link?.down) return;
-    const total = length();
-    const buffered = element.buffered;
-    const reach = buffered.length ? buffered.end(buffered.length - 1) : element.currentTime;
-    if (!hls)
-      meter.reached(performance.now(), bytesBetween(current.segments, total, started ?? 0, reach));
-    const live = meter.rate();
-    if (!live) return;
-    // What den-remux said it sends, scaled by the share of it that came for the fragments loaded so far.
-    const demand = scaleDemand(current.segments, delivered);
-    const wait = waitAt(demand, total, element.currentTime, reach, live.bitsPerSecond);
-    const signal = { kind: 'delivery' as const, wait, measuredMs: live.spanMs };
-    if (!shouldSwitch(signal, { playedSecs: totalPlayedSecs(), shownFrame: played })) return;
-    void switchAway('delivery', live.bitsPerSecond).then((moved) => {
-      if (moved === true || session !== current) return;
-      // This release plays on. Only where nothing fits the link as it is is the viewer told that is why it pauses; a
-      // den-remux out of reach or busy said nothing about the link.
-      deliveryGaveUp = true;
-      struggling = typeof moved !== 'string' || nothingFits(moved);
-    });
+    if (!current || !element || switching || deliveryGaveUp || castMode) return;
+    // A connection that is down delivers nothing, and a hidden page's player fetches nothing: neither is a verdict on
+    // what this release asks of the link.
+    if (link?.down || document.visibilityState === 'hidden') return;
+    const delivery = deliveryOf(current, element);
+    if (!delivery) return;
+    if (current.release.filename === chosenRelease) {
+      if (!slowPick && tooSlow(delivery, played)) slowPick = current.release.label;
+      return;
+    }
+    if (!shouldSwitch(delivery, { playedSecs: totalPlayedSecs(), shownFrame: played })) return;
+    const rate = delivery.kind === 'delivery' ? meter.rate()?.bitsPerSecond : undefined;
+    void switchAway('delivery', rate).then((moved) => gaveUp(current, moved));
+  }
+
+  /**
+   * After a delivery switch that didn't move: this release plays on, and delivery is not weighed again. Only where no
+   * lighter copy fits is the viewer told that is why it pauses; a den-remux out of reach or busy said nothing about
+   * the link.
+   */
+  function gaveUp(current: Session, moved: boolean | Failure) {
+    if (moved === true || session !== current) return;
+    deliveryGaveUp = true;
+    struggling = typeof moved !== 'string' || nothingFits(moved) ? current.release.label : null;
+  }
+
+  /** The viewer's "Try another release" on their own pick that can't keep up: a lighter one, as any delivery switch. */
+  function tryAnother() {
+    const current = session;
+    if (!current) return;
+    slowPick = null;
+    chosenRelease = undefined;
+    keepReleases();
+    const rate = hls ? meter.rate()?.bitsPerSecond : undefined;
+    void switchAway('delivery', rate).then((moved) => gaveUp(current, moved));
   }
 
   /**
@@ -871,16 +1014,20 @@
           return;
         }
         const noSource = element.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
-        if (
-          noSource ||
-          (!element.paused && element.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
-        ) {
-          void broke(
-            element.error?.code ?? 0,
-            `no picture after ${STUCK_MS / 1000} s with nothing arriving (readyState ${element.readyState}, networkState ${element.networkState})`,
-            'other',
-          );
+        const why = `no picture after ${STUCK_MS / 1000} s with nothing arriving (readyState ${element.readyState}, networkState ${element.networkState})`;
+        if (noSource) {
+          void broke(element.error?.code ?? 0, why, 'format');
+          return;
         }
+        if (element.paused || element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        // Nothing arriving and no picture is a refusal only where den-remux has the segment ready to send: one it is
+        // still making — a slow source behind it — is a slow start, waited out with the startup line showing.
+        void segmentAnswer(current, stalledAt(), fetch, SEGMENT_ASK_MS).then((answer) => {
+          if (session !== current || failure || played) return;
+          const ready = answer && answer.status < 300 && answer.ms < SEGMENT_READY_MS;
+          if (ready || answer?.status === 502) void broke(element.error?.code ?? 0, why, 'format');
+          else stuck.progress();
+        });
       },
       arrived,
     );
@@ -907,17 +1054,31 @@
     const updateStallProgress = () => {
       stallProgress = {
         bufferedSecs: aheadIn(element.buffered, element.currentTime),
-        bitsPerSecond: meter.rate()?.bitsPerSecond,
+        // hls.js's fragments say what the link gives; a native player's buffer says only how far it reaches.
+        bitsPerSecond: hls ? meter.rate()?.bitsPerSecond : undefined,
       };
+      // A stall fires nothing else to weigh delivery on, and the stalls are a native player's whole evidence.
+      weighDelivery();
+    };
+    // Counted for `deliveryOf` while the page is seen: one hidden fetches nothing, and is waited on by no one.
+    const endStall = () => {
+      if (session === current && stallSince !== undefined)
+        stalledMs += performance.now() - stallSince;
+      if (session === current) stallSince = undefined;
     };
     const onStallWaiting = () => {
       if (!played || element.seeking) return;
       stalling = true;
+      if (stallSince === undefined && document.visibilityState === 'visible') {
+        stallCount += 1;
+        stallSince = performance.now();
+      }
       updateStallProgress();
       clearInterval(stallTimer);
       stallTimer = setInterval(updateStallProgress, 500);
     };
     const onStallResume = () => {
+      endStall();
       stalling = false;
       clearInterval(stallTimer);
       stallTimer = undefined;
@@ -925,6 +1086,27 @@
     };
     element.addEventListener('waiting', onStallWaiting);
     element.addEventListener('playing', onStallResume);
+    // A paused or hidden player is waited on by no one: what it sits through then is not counted as stalling.
+    const stopCounting = () => {
+      if (element.paused || document.visibilityState === 'hidden') endStall();
+    };
+    element.addEventListener('pause', stopCounting);
+    document.addEventListener('visibilitychange', stopCounting);
+    // WebKit's own player can stop with nothing to show and fire no `waiting`, and resume without `playing`: the play
+    // head standing still while nothing paused, sought or ended it is a stall all the same, and moving again ends one.
+    let headAt = element.currentTime;
+    let headMovedAt = performance.now();
+    const headWatch = setInterval(() => {
+      const now = performance.now();
+      const moved = Math.abs(element.currentTime - headAt) > HEAD_MOVED_SECS;
+      if (moved || element.paused || element.seeking || element.ended) {
+        headAt = element.currentTime;
+        headMovedAt = now;
+        if (stalling && moved) onStallResume();
+        return;
+      }
+      if (!stalling && now - headMovedAt >= HEAD_STILL_MS) onStallWaiting();
+    }, 250);
     // The real first frame (den-edge#234's step 0 and the owner's own correction: not `canplay`, which iOS
     // native HLS can fire tens of seconds late). `requestVideoFrameCallback` fires once a frame has actually
     // been presented; a browser without it (older Safari) falls back to `loadeddata`, as this did before.
@@ -991,12 +1173,16 @@
       watcher = undefined;
       unsubscribe();
       clearInterval(watching);
+      endStall();
+      clearInterval(headWatch);
       clearInterval(stallTimer);
       stallTimer = undefined;
       stalling = false;
       stallProgress = undefined;
       element.removeEventListener('waiting', onStallWaiting);
       element.removeEventListener('playing', onStallResume);
+      element.removeEventListener('pause', stopCounting);
+      document.removeEventListener('visibilitychange', stopCounting);
       connection.dispose();
       if (link === connection) link = undefined;
       reconnecting = false;
@@ -1411,12 +1597,14 @@
   /**
    * The browser gave up on the video: say so here, and tell den-remux why — no server log sees it otherwise. `kind` is
    * whether the decoder refused it (`MediaError` 3 or 4, a media error hls.js couldn't recover), which moves the
-   * session to another copy; anything else stops here.
+   * session to another copy; a format it won't take at all (`format`: no source it can use, or a ready segment it
+   * shows nothing of), which stops here as "couldn't play"; or anything else (`other`: the network, an aborted
+   * load), which is no verdict on the release and never reads as one.
    */
   async function broke(
     code = video?.error?.code ?? 0,
     message = video?.error?.message ?? '',
-    kind: 'decode' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
+    kind: 'decode' | 'format' | 'other' = code === 3 || code === 4 ? 'decode' : 'other',
   ) {
     if (!session || failure) return;
     // den-edge's own outcome report (`finish()`) names the last fatal error this visit saw, whichever session it
@@ -1424,10 +1612,15 @@
     lastFatal = { code: code || undefined, hls: hlsFatalFromMessage(message) };
     if (breaking?.session === session) {
       if (kind === 'decode') breaking.decode = true;
+      if (kind !== 'other') breaking.refused = true;
       return;
     }
     const current = session;
-    const judging = (breaking = { session: current, decode: kind === 'decode' });
+    const judging = (breaking = {
+      session: current,
+      decode: kind === 'decode',
+      refused: kind !== 'other',
+    });
     watcher?.spent();
     reportFailure(current, code, message);
     // Opened for the address this page reported, and nothing ever arrived: most likely that address was wrong (a
@@ -1449,16 +1642,42 @@
     }
     // The session may have been replaced while that was asked.
     if (session !== current || failure) return;
+    // Not a refusal: the load was cut off, or the network failed it. Playing, it picks up from where it got to at
+    // the viewer's word; not yet playing, the release stopped answering. Neither is "couldn't play" — a cast page's
+    // is, as before: it has no other way of saying it couldn't.
+    if (!judging.refused && !current.castOrigin) {
+      if (played) lose(video?.currentTime ?? lastPosition ?? 0);
+      else failure = 'source';
+      return;
+    }
+    const picked = current.release.filename === chosenRelease;
     // It was copied because this browser said it could take it, and it couldn't: another release, copied, that it
     // does take, from the same second (`switchPolicy`). Never this one converted — a transcode is chosen before
-    // playback or not at all — and with no such copy, playback stops here and says so.
-    const moved = judging.decode ? await switchAway('decode') : false;
+    // playback or not at all — and with no such copy, playback stops here and says so. Never from the viewer's own
+    // pick: they are told, and offered another (`tryAfterRefusal`).
+    const moved = judging.decode && !picked ? await switchAway('decode') : false;
+    if (judging.decode) {
+      // No automatic pick lands on it again this visit; and a pick of the viewer's it disproved is theirs no more.
+      if (picked) chosenRelease = undefined;
+      leave(current.release.filename);
+    }
     if (moved === true) return;
     // A refusal that says nothing about this browser — den-remux out of reach, a login gone, access ended — is said as
     // itself. A busy den-remux is not: its note promises a wait that nothing here would then retry.
     if (session === current && !failure)
       failure =
         typeof moved === 'string' && !nothingFits(moved) && moved !== 'busy' ? moved : 'playback';
+  }
+
+  /** "Try another release" under "couldn't play": another copy, as a decoder's refusal moves to one. */
+  function tryAfterRefusal() {
+    const current = session;
+    if (!current) return;
+    void switchAway('decode').then((moved) => {
+      if (session !== current || moved === true) return;
+      failure =
+        typeof moved === 'string' && !nothingFits(moved) && moved !== 'busy' ? moved : 'playback';
+    });
   }
 
   /** Where playback stopped: the end of what was buffered, else the play head. */
@@ -1692,10 +1911,12 @@
     const filename = (event.currentTarget as HTMLSelectElement).value;
     if (!session || filename === session.release.filename) return;
     // Another file gets this browser's full claims: what one release couldn't decode says nothing about
-    // whether the next needs converting. The viewer's pick is theirs to make, switched-away-from or not.
+    // whether the next needs converting. The viewer's pick is theirs to make, switched-away-from or not; the
+    // others playback left stay left for any automatic pick after it.
     degraded = false;
-    excluded = [];
+    excluded = excluded.filter((one) => one !== filename);
     chosenRelease = filename;
+    keepReleases();
     switchCount += 1;
     lastSwitchReason = 'user';
     restart({ filename });
@@ -1942,6 +2163,45 @@
       </svg>
     </button>
   </header>
+  <!-- What playback says as it goes, above the video and apart from what is playing below it: banners that fade
+       on their own (`fades`) unless they offer something to do, and the buffering line, which clears itself the
+       moment playback resumes. -->
+  <div class="notices">
+    {#if session}
+      {#if castOffer === 'looking'}
+        {@render banner('Looking for a Chromecast…')}
+      {:else if castOffer === 'none'}
+        {@render banner(
+          'No Chromecast found. Check that it is awake and on the same network as this device.',
+          () => (castOffer = 'idle'),
+        )}
+      {/if}
+      {#if swapped}
+        {@render banner(swapped, () => (swapped = null))}
+      {/if}
+      {#if autoSwitch}
+        {@render banner(autoSwitch, () => (autoSwitch = null))}
+      {:else if bufferLine}
+        {@render banner(bufferLine)}
+      {/if}
+      {#if slowPick}
+        {@render banner(
+          `${slowPick} needs more than this connection is giving: it may pause now and then to catch up.`,
+          () => (slowPick = null),
+          { label: 'Try another release', run: tryAnother },
+        )}
+      {/if}
+      {#if struggling}
+        {@render banner(
+          `This connection is slower than ${struggling} needs, and no lighter release fits it: it may pause now and then to catch up.`,
+          () => (struggling = null),
+        )}
+      {/if}
+      {#if unchanged}
+        {@render banner(unchanged, () => (unchanged = null))}
+      {/if}
+    {/if}
+  </div>
   <div class="stage">
     {#if failure === 'login'}
       <form onsubmit={letIn}>
@@ -1974,6 +2234,11 @@
       </p>
     {:else if failure}
       <p class="error" role="alert">{messages[failure]}</p>
+      {#if failure === 'playback' && session}
+        <button class="primary" disabled={switching} onclick={tryAfterRefusal}
+          >Try another release</button
+        >
+      {/if}
       {#if failure === 'engine'}
         <!-- Not another `import()`: on the dev server Chromium answered a second one of the chunk whose fetch failed
              with the same failure, fetching nothing (e2e/player-engine.spec.mjs). A reload fetches it again. -->
@@ -2021,7 +2286,12 @@
           onpause={paused}
           ontimeupdate={tick}
           onended={finished}
-          onerror={() => broke()}
+          onerror={() => {
+            // An `error` with no MediaError behind it — what iOS fired as a page came back from the background,
+            // while its video went on loading — is no failure of the element.
+            if (video?.error) void broke();
+            else console.warn('The video fired an error with no MediaError; it plays on.');
+          }}
         ></video>
         {#if reconnecting}
           <p class="countdown" role="status">Reconnecting…</p>
@@ -2054,47 +2324,6 @@
     {@const playingTrack = session.audioTracks[session.audioTrack] ?? session.audioTracks[0]}
     {@const downmix = downmixLabel(session)}
     <footer>
-      {#if castOffer === 'looking'}
-        <p class="swap" role="status"><span>Looking for a Chromecast…</span></p>
-      {:else if castOffer === 'none'}
-        <p class="swap" role="status">
-          <span
-            >No Chromecast found. Check that it is awake and on the same network as this device.</span
-          >
-          <button onclick={() => (castOffer = 'idle')}>Dismiss</button>
-        </p>
-      {/if}
-      {#if swapped}
-        <p class="swap" role="status">
-          <span>{swapped}</span>
-          <button onclick={() => (swapped = null)}>Dismiss</button>
-        </p>
-      {/if}
-      {#if autoSwitch}
-        <p class="swap" role="status">
-          <span>{autoSwitch}</span>
-          <button onclick={() => (autoSwitch = null)}>Dismiss</button>
-        </p>
-      {:else if bufferLine}
-        <!-- Transient, unlike the banners above: it clears itself the moment playback resumes, so it carries
-             no Dismiss of its own. -->
-        <p class="swap" role="status"><span>{bufferLine}</span></p>
-      {/if}
-      {#if struggling}
-        <p class="swap" role="status">
-          <span
-            >This connection is slower than this release needs, and no other fits it: it may pause
-            now and then to catch up.</span
-          >
-          <button onclick={() => (struggling = false)}>Dismiss</button>
-        </p>
-      {/if}
-      {#if unchanged}
-        <p class="swap" role="status">
-          <span>{unchanged}</span>
-          <button onclick={() => (unchanged = null)}>Dismiss</button>
-        </p>
-      {/if}
       <!-- What plays, then where it came from: two parts of one sentence, so the source moves down whole rather
            than breaking mid-label when there is no room beside it. -->
       <p class="release" aria-live="polite">
@@ -2229,6 +2458,20 @@
   </svg>
 {/snippet}
 
+{#snippet banner(text: string, dismiss?: () => void, action?: { label: string; run: () => void })}
+  <p class="notice" role="status">
+    <span>{text}</span>
+    {#if action}<button class="act" onclick={action.run}>{action.label}</button>{/if}
+    {#if dismiss}
+      <button class="dismiss" aria-label="Dismiss" onclick={dismiss}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m6 6 12 12M18 6 6 18" />
+        </svg>
+      </button>
+    {/if}
+  </p>
+{/snippet}
+
 {#snippet chevron()}
   <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="m6 9.5 6 6 6-6" />
@@ -2244,7 +2487,7 @@
     inset: 0 0 auto;
     z-index: 50;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
     height: 100vh;
     height: 100dvh;
     padding: max(12px, env(safe-area-inset-top)) max(var(--gutter), env(safe-area-inset-right))
@@ -2425,17 +2668,60 @@
     margin: 0;
   }
 
-  /* Another release opened than the one picked: a line of its own above the footer's rows. */
-  .swap {
+  /* What playback says as it goes: banners in a row of their own between the title and the video, so they cover
+     neither the picture nor the video's own controls, nor read as part of what is playing below it. */
+  .notices {
+    display: grid;
+    gap: 8px;
+    justify-items: center;
+  }
+
+  /* Glass, as every control over media is (`app.css`), with LibraryStatus's accent edge: a passing note. */
+  .notice {
     display: flex;
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    gap: 6px 16px;
+    gap: 4px 12px;
     align-items: center;
-    justify-content: space-between;
+    width: min(100%, 36rem);
     margin: 0;
-    color: rgb(255 255 255 / 0.85);
+    padding: 6px 6px 6px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--glass-edge));
+    border-radius: 12px;
+    background: var(--glass-bg);
+    color: rgb(255 255 255 / 0.9);
     font-size: 14px;
+    line-height: 1.35;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  .notice:last-of-type {
+    margin-bottom: 10px;
+  }
+
+  /* A notice with nothing to dismiss still sits the same height as one with. */
+  .notice > span {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 6px 0;
+  }
+
+  /* The offer a notice makes: the accent's text, as LibraryStatus's Undo. */
+  .act {
+    min-height: 36px;
+    padding: 4px 8px;
+    border: 0;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* A glyph, not a pill: closing a note is the least it asks. */
+  .dismiss {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-color: transparent;
   }
 
   .playing {
@@ -2512,6 +2798,11 @@
     width: 22px;
     height: 22px;
     opacity: 0.85;
+  }
+
+  .dismiss .icon {
+    width: 18px;
+    height: 18px;
   }
 
   /* The control itself fills the pill — never hidden, which would stop a phone opening it. */

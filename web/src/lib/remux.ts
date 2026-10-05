@@ -941,15 +941,28 @@ export async function sourceFailed(
   at: number,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
+  return (await segmentAnswer(session, at, fetchImpl))?.status === 502;
+}
+
+/**
+ * How den-remux answers for the segment at `at` (`sourceFailed`): its status, and how long it took to start
+ * answering — a segment it is still making takes as long as that does. Undefined for anything unclear.
+ */
+export async function segmentAnswer(
+  session: Session,
+  at: number,
+  fetchImpl: typeof fetch = fetch,
+  deadlineMs = REMUX_ANSWER_MS,
+): Promise<{ status: number; ms: number } | undefined> {
   // One deadline for the whole check: past it, not knowing is the answer.
-  const signal = AbortSignal.timeout(REMUX_ANSWER_MS);
+  const signal = AbortSignal.timeout(deadlineMs);
   try {
     const master = new URL(session.playlist, globalThis.location?.href ?? 'https://den.invalid/');
     const variant = (await (await fetchImpl(master.href, { signal })).text())
       .split('\n')
       .map((line) => line.trim())
       .find((line) => line && !line.startsWith('#'));
-    if (!variant) return false;
+    if (!variant) return undefined;
     const media = new URL(variant, master);
     const lines = (await (await fetchImpl(media.href, { signal })).text())
       .split('\n')
@@ -966,13 +979,14 @@ export async function sourceFailed(
       }
       start += span;
     }
-    if (!stalled) return false;
+    if (!stalled) return undefined;
+    const asked = Date.now();
     const answer = await fetchImpl(new URL(stalled, media).href, { cache: 'no-store', signal });
     // The body is never read: a segment is tens of megabytes and the status is the whole answer.
     void answer.body?.cancel();
-    return answer.status === 502;
+    return { status: answer.status, ms: Date.now() - asked };
   } catch {
-    return false;
+    return undefined;
   }
 }
 

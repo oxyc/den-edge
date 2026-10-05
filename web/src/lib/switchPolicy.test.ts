@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  averageBitrate,
   bytesBetween,
   DeliveryMeter,
   EARLY_WINDOW_SECS,
+  FIRST_FRAME_WAIT_SECS,
+  LIGHTER_SHARE,
+  NATIVE_MIN_STALLS,
+  NATIVE_STALLED_SECS,
   scaleDemand,
   shouldSwitch,
   switchAsk,
+  tooSlow,
   waitAt,
   type Demand,
 } from './switchPolicy';
@@ -88,6 +94,7 @@ describe('shouldSwitch', () => {
     kind: 'delivery' as const,
     wait: waitAt(film, end, 8, 20, rate),
     measuredMs: 8_000,
+    aheadSecs: 2,
   });
 
   it('rides out a stall where the live rate carries the film with a short wait', () => {
@@ -107,7 +114,7 @@ describe('shouldSwitch', () => {
   });
 
   it('tolerates a longer wait before the first frame than once playing', () => {
-    const wait = { kind: 'delivery' as const, wait: 20, measuredMs: 8_000 };
+    const wait = { kind: 'delivery' as const, wait: 20, measuredMs: 8_000, aheadSecs: 0 };
     expect(shouldSwitch(wait, { playedSecs: 0, shownFrame: false })).toBe(false);
     expect(shouldSwitch(wait, { playedSecs: 0, shownFrame: true })).toBe(true);
   });
@@ -115,6 +122,51 @@ describe('shouldSwitch', () => {
   it('switches for a decoder that can’t go on, early or late', () => {
     expect(shouldSwitch({ kind: 'decode' }, early)).toBe(true);
     expect(shouldSwitch({ kind: 'decode' }, late)).toBe(true);
+  });
+
+  it('reads nothing into a buffer that stopped growing: no rate is no measurement', () => {
+    // What a native player's buffer gives between bursts, or any player's while it is ahead: 0 bits a second.
+    const still = { kind: 'delivery' as const, wait: Infinity, measuredMs: 20_000, aheadSecs: 0 };
+    expect(shouldSwitch(still, early)).toBe(false);
+  });
+
+  it('never switches a player that has a buffer ahead of it', () => {
+    expect(shouldSwitch({ ...measured(6_000_000), aheadSecs: 25 }, early)).toBe(false);
+  });
+
+  it('moves a native player only on stalls it sat through, more than one and long', () => {
+    const stalls = (n: number, secs: number) => ({
+      kind: 'stalls' as const,
+      stalls: n,
+      stalledSecs: secs,
+    });
+    expect(shouldSwitch(stalls(1, NATIVE_STALLED_SECS + 10), early)).toBe(false);
+    expect(shouldSwitch(stalls(NATIVE_MIN_STALLS, NATIVE_STALLED_SECS - 1), early)).toBe(false);
+    expect(shouldSwitch(stalls(NATIVE_MIN_STALLS, NATIVE_STALLED_SECS), early)).toBe(true);
+    // One stall that goes on as long as a viewer waits for a start is as sure.
+    expect(shouldSwitch(stalls(1, FIRST_FRAME_WAIT_SECS), early)).toBe(true);
+    // Before its first frame a native player has stalled through nothing.
+    expect(shouldSwitch(stalls(3, 40), { playedSecs: 0, shownFrame: false })).toBe(false);
+    expect(shouldSwitch(stalls(3, 40), late)).toBe(false);
+    // `tooSlow` is the same judgement without the early window: what a viewer's own pick is warned on.
+    expect(tooSlow(stalls(3, 40), true)).toBe(true);
+  });
+});
+
+describe('averageBitrate', () => {
+  it('is den-remux’s bytes over the length, else the file’s size, never anything else', () => {
+    expect(
+      averageBitrate(
+        [
+          [0, 500_000],
+          [2, 500_000],
+        ],
+        4,
+      ),
+    ).toBe(2_000_000);
+    expect(averageBitrate(null, 2054, 547_008_511)).toBeCloseTo(2_130_510, -1);
+    expect(averageBitrate(undefined, 0, 547_008_511)).toBeUndefined();
+    expect(averageBitrate([], 60)).toBeUndefined();
   });
 });
 
@@ -131,19 +183,34 @@ describe('scaleDemand', () => {
 describe('switchAsk', () => {
   it('never asks for a transcode, and not for a release it moved away from', () => {
     for (const reason of ['decode', 'delivery'] as const) {
-      const ask = switchAsk(reason, 'b.mkv', ['a.mkv'], 6_000_000);
-      expect(ask.transcode).toBe('never');
-      expect(ask.exclude).toEqual(['a.mkv', 'b.mkv']);
+      const ask = switchAsk(reason, 'b.mkv', ['a.mkv'], { rate: 6_000_000, bitrate: 9_000_000 });
+      expect(ask?.transcode).toBe('never');
+      expect(ask?.exclude).toEqual(['a.mkv', 'b.mkv']);
     }
   });
 
   it('asks, for delivery, only for a copy that fits the rate the link is really giving', () => {
-    expect(switchAsk('delivery', 'b.mkv', [], 6_000_000)).toMatchObject({
-      fitsOnly: true,
-      maxBitrate: 5_100_000,
-    });
+    expect(
+      switchAsk('delivery', 'b.mkv', [], { rate: 6_000_000, bitrate: 9_000_000 }),
+    ).toMatchObject({ fitsOnly: true, maxBitrate: 5_100_000 });
     // A decoder's refusal says nothing about the link: the session's own limit stands.
     expect(switchAsk('decode', 'b.mkv', [])).not.toHaveProperty('fitsOnly');
     expect(switchAsk('decode', 'b.mkv', [])).not.toHaveProperty('maxBitrate');
+  });
+
+  it('asks, for delivery, only for a copy lighter than the one playing, however fast the link reads', () => {
+    // The evening's "6.3 GB" (2.1 Mbit/s a file) left for the "13 GB" pack's 4.4 Mbit/s episode: never again.
+    const ask = switchAsk('delivery', 'b.mkv', [], { rate: 30_000_000, bitrate: 2_100_000 });
+    expect(ask).toMatchObject({
+      fitsOnly: true,
+      maxBitrate: Math.round(2_100_000 * LIGHTER_SHARE),
+    });
+    // No rate measured — a native player, or a buffer that stood still — is still a lighter copy, not any copy.
+    expect(switchAsk('delivery', 'b.mkv', [], { rate: 0, bitrate: 2_100_000 })).toMatchObject({
+      fitsOnly: true,
+      maxBitrate: Math.round(2_100_000 * LIGHTER_SHARE),
+    });
+    // Nothing known of the playing copy: nothing can be called lighter, and no switch is asked for.
+    expect(switchAsk('delivery', 'b.mkv', [], { rate: 30_000_000 })).toBeNull();
   });
 });
