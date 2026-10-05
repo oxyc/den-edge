@@ -40,7 +40,7 @@ import {
 } from './wire';
 import { trackerEvent } from './trackerEvents';
 import { ensureSyncPolicy } from './syncLoader';
-import { syncPolicy } from './syncCore';
+import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 
 interface Entry {
   seq: number;
@@ -391,11 +391,11 @@ export class LibraryLog {
     await ensureSyncPolicy();
     const saved = await log.kept<Snapshot>(SNAPSHOT);
     log.takeForm(saved);
-    for (const [name, seq, row] of saved?.entries ?? []) {
-      if (!wellFormed(row)) continue;
+    await inPolicySlices(saved?.entries ?? [], ([name, seq, row]) => {
+      if (!wellFormed(row)) return;
       log.acknowledged.set(name, { seq, row });
       log.entries.set(name, { seq, row });
-    }
+    });
     return log;
   }
 
@@ -1299,12 +1299,12 @@ export class LibraryLog {
       log.memberRegistered = saved.memberRegistered ?? false;
       log.generation = saved.generation;
       log.head = saved.head;
-      for (const [name, seq, row] of saved.entries) {
-        if (!wellFormed(row)) continue;
+      await inPolicySlices(saved.entries, ([name, seq, row]) => {
+        if (!wellFormed(row)) return;
         log.noteFormat(row);
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
-      }
+      });
       // Shown before den-edge is asked anything: an unanswered request kept the kept library off the screen. A
       // membership not yet registered is registered beside it, and claimed once den-edge has it; `refresh`, which
       // follows at once, sends the work kept here.
@@ -1327,11 +1327,11 @@ export class LibraryLog {
     if (partial) {
       log.generation = partial.generation;
       log.head = since = partial.head;
-      for (const [name, seq, row] of partial.entries) {
-        if (!wellFormed(row)) continue;
+      await inPolicySlices(partial.entries, ([name, seq, row]) => {
+        if (!wellFormed(row)) return;
         log.acknowledged.set(name, { seq, row });
         log.entries.set(name, { seq, row });
-      }
+      });
     }
     for (;;) {
       let res: Response;
@@ -1405,6 +1405,17 @@ export class LibraryLog {
     return [...this.entries.values()].flatMap(({ row }) =>
       isDocument(row) ? projectDocument(row) : [row],
     );
+  }
+
+  /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
+  async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
+    const rows: Row[] = [];
+    const completed = await inPolicySlices(
+      this.entries.values(),
+      ({ row }) => rows.push(...(isDocument(row) ? projectDocument(row) : [row])),
+      options,
+    );
+    return completed ? rows : null;
   }
 
   /** Every v4 document as it is held, with the seq den-edge last gave it: what tracker delivery decides on (§9). */

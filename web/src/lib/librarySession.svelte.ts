@@ -11,6 +11,7 @@ import { fetchSourceList, scoutTicket, type SourceAnswer, type TitleSource } fro
 import { switchLibraryToV4, upgradeLibrary } from './libraryUpgrade';
 import {
   applyLog,
+  applyLogInSlices,
   ContinueProjector,
   emptyLibrary,
   nameContinueCandidates,
@@ -47,6 +48,8 @@ export class LibrarySession {
   readonly opened: Promise<LibraryLog | null>;
   private refreshing?: Promise<void>;
   private readonly clock = browserClock();
+  /** False once the component that owns this session has replaced it; abandoned startup work stops at a slice. */
+  private active = true;
   /** One immutable fold of the log for every revision, shared by all retained route trees. */
   private projection?: { revision: number; log: LibraryLog; rows: Row[]; library: Library };
   /** Policy decisions survive revisions; ContinueProjector invalidates only the series whose input changed. */
@@ -113,44 +116,51 @@ export class LibrarySession {
           // Its own library is still a visitor's: it proves no membership of anything on den-edge.
           forgetLibraryCredential();
           if (!this.log) {
-            this.log = await LibraryLog.openLocal(this.key);
-            if (this.log) this.changed(true);
+            const before = this.log;
+            const opened = await LibraryLog.openLocal(this.key);
+            if (!opened) {
+              if (this.log === before) this.log = null;
+              return;
+            }
+            if (!(await this.publishOpened(before, opened, true))) return;
           }
           if (this.log && (await upgradeLibrary(this.log, true))) this.changed(true);
           return;
         }
         if (!this.log) {
-          this.log = await LibraryLog.open(this.key);
-          if (this.log) this.attachDownloads(this.log);
-          if (this.log) this.changed(true);
+          const before = this.log;
+          const opened = await LibraryLog.open(this.key);
+          if (!opened) {
+            if (this.log === before) this.log = null;
+            return;
+          }
+          if (!(await this.publishOpened(before, opened, true, true))) return;
           // The copy kept from the last visit shows at once; what changed since follows it.
-          if (!this.log?.fromCache) return;
+          if (!opened.fromCache) return;
         }
+        const log = this.log;
+        if (!log) return;
         const settings = () =>
-          JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => this.log?.settings(name)));
+          JSON.stringify(['keys', 'plugins', 'prefs'].map((name) => log.settings(name)));
         const before = settings();
-        if (await this.log.refresh()) this.changed(before !== settings());
-        if (await upgradeLibrary(this.log, false)) this.changed(true);
-        if (await switchLibraryToV4(this.log)) {
+        if (await log.refresh()) this.changed(before !== settings());
+        if (await upgradeLibrary(log, false)) this.changed(true);
+        if (await switchLibraryToV4(log)) {
           this.changed(true);
           this.notify('Library updated to v4');
         }
-        if (await this.log.compact()) this.changed(true);
-        if (
-          this.log.wireMinimum >= 3 &&
-          !this.log.readOnly &&
-          (await deliverSimkl(this.log, this.device))
-        )
+        if (await log.compact()) this.changed(true);
+        if (log.wireMinimum >= 3 && !log.readOnly && (await deliverSimkl(log, this.device)))
           this.changed(true);
-        await this.reconcileRecovery(this.log, this.key);
-        if (this.log.wireMinimum >= 4 && !this.log.readOnly) {
-          this.attachDownloads(this.log);
+        await this.reconcileRecovery(log, this.key);
+        if (log.wireMinimum >= 4 && !log.readOnly) {
+          this.attachDownloads(log);
           // Only a page someone is looking at polls den-scout and drives the queue; a hidden one lets its lease lapse.
           // The lease holds only while each pass comes within 120 s of the last: `start` refreshes a visible page
           // every 30 s (5 s while something plays), so a renewal due at 60 s always lands. A tick slower than 120 s
           // would make den-core stop the hold, and the page would wait ten minutes to take it back.
           const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
-          if (visible && (await driveDownloads(this.log, downloads, this.device))) this.changed();
+          if (visible && (await driveDownloads(log, downloads, this.device))) this.changed();
         }
       } catch (error) {
         // Keep an existing log and its journal intact; an initial failure can open again next tick.
@@ -183,7 +193,10 @@ export class LibrarySession {
 
   start(onMoved: () => void): () => void {
     // Nothing to poll for, and no library that could move out from under this browser.
-    if (this.key === null || this.local) return () => undefined;
+    if (this.key === null || this.local)
+      return () => {
+        this.active = false;
+      };
     let disposed = false;
     const refresh = async () => {
       if (document.hidden || disposed) return;
@@ -199,6 +212,7 @@ export class LibrarySession {
     window.addEventListener('online', refresh);
     document.addEventListener('visibilitychange', refresh);
     return () => {
+      this.active = false;
       disposed = true;
       clearTimeout(timer);
       window.removeEventListener('online', refresh);
@@ -209,6 +223,32 @@ export class LibrarySession {
     this.revision++;
     if (settings) this.settingsRevision++;
     downloads.touch();
+  }
+
+  /**
+   * Build the first visible snapshot cooperatively, then install the log, revision and exact projection together.
+   * The log is not exposed while this yields. If anything else replaced it meanwhile, this work is stale and is
+   * discarded rather than publishing rows from one generation under another.
+   */
+  private async publishOpened(
+    expected: LibraryLog | null | undefined,
+    log: LibraryLog,
+    settings: boolean,
+    attachDownloads = false,
+  ): Promise<boolean> {
+    const expectedRevision = this.revision;
+    const current = () =>
+      this.active && this.log === expected && this.revision === expectedRevision;
+    const rows = await log.rowsInSlices({ shouldContinue: current });
+    if (!rows) return false;
+    const library = await applyLogInSlices(emptyLibrary(), rows, { shouldContinue: current });
+    if (!library || !current()) return false;
+    const revision = this.revision + 1;
+    if (attachDownloads) this.attachDownloads(log);
+    this.projection = { revision, log, rows, library };
+    this.log = log;
+    this.changed(settings);
+    return true;
   }
 
   /**
