@@ -37,6 +37,25 @@ it('preserves unknown readiness and only trusts supplied display metadata', () =
   expect(sources[1]!.cached).toBeUndefined();
   expect(sources[1]!.probed).toBe(false);
 });
+it('carries the season pack a probed episode came from as context, never in place of its own size', () => {
+  const episode = {
+    title: 'Show.S01E03.1080p.WEB-DL.mkv',
+    url: 'http://lan:8080/p/ticket-ep',
+    behaviorHints: { filename: 'Show.S01E03.1080p.WEB-DL.mkv' },
+    attributes: {
+      resolution: '1080p',
+      cached: true,
+      sizeBytes: 1_136_580_921,
+      packSizeBytes: 68_000_000_000,
+    },
+  };
+  const [source] = parseSources({ streams: [episode] }, addon, routes)!;
+  expect(source!.size).toBe(1_136_580_921);
+  expect(source!.packSize).toBe(68_000_000_000);
+  // A plain movie, with no pack behind it, gets none — not a zero, not the same number twice.
+  const [movie] = parseSources({ streams: [raw] }, addon, routes)!;
+  expect(movie!.packSize).toBeUndefined();
+});
 it('scopes series sources to the exact requested episode', async () => {
   let path = '';
   const network = (async (input) => {
