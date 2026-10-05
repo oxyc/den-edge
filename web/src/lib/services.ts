@@ -10,6 +10,7 @@ import {
   discoverParams,
   interleave,
   matchesPrimaryGenre,
+  runBounded,
   tmdbPages,
   type DiscoverQuery,
   type Pages,
@@ -605,24 +606,38 @@ export async function serviceHero(
 export async function withBackdrops(
   titles: Title[],
   key: string,
-  { head = HERO_SLIDES, fetchImpl = tmdbFetch }: { head?: number; fetchImpl?: typeof fetch } = {},
+  {
+    head = HERO_SLIDES,
+    atOnce = FILL_AT_ONCE,
+    fetchImpl = tmdbFetch,
+  }: { head?: number; atOnce?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<Title[]> {
   const candidates = titles.slice(0, head);
-  const looked = await Promise.all(
-    candidates.map(async (title): Promise<Title | null> => {
-      if (title.backdropPath) return title;
+  const looked: (Title | null)[] = [...candidates];
+  const missing = candidates.flatMap((title, at) => (title.backdropPath ? [] : [{ title, at }]));
+  let stopped = false;
+  await runBounded(
+    missing,
+    atOnce,
+    async ({ title, at }) => {
       try {
         const url = `https://api.themoviedb.org/3/${title.type}/${title.id}?api_key=${encodeURIComponent(key)}`;
         const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
-        if (!res.ok) return title;
+        // den-edge turns TMDB's 429 into a 503 with the same Retry-After. Once one job sees either form, do not
+        // dequeue more speculative art lookups during the provider's requested rest.
+        if (res.status === 429 || (res.status === 503 && res.headers.has('retry-after')))
+          stopped = true;
+        if (!res.ok) return;
         const body = (await res.json()) as { backdrop_path?: unknown };
-        return typeof body.backdrop_path === 'string'
-          ? { ...title, backdropPath: body.backdrop_path }
-          : null;
+        looked[at] =
+          typeof body.backdrop_path === 'string'
+            ? { ...title, backdropPath: body.backdrop_path }
+            : null;
       } catch {
-        return title;
+        // It may still draw its own lookup when it is visible.
       }
-    }),
+    },
+    () => stopped,
   );
   const pictured = looked.filter((title): title is Title => title !== null);
   // Nothing with a picture at all: the words are still a better hero than an empty one.

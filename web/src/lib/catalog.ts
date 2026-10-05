@@ -809,6 +809,34 @@ export interface RowDef {
   caption?: (title: Title) => string | undefined;
 }
 
+/**
+ * Work a queue with at most `limit` active jobs. A failure or `canceled` becoming true stops taking queued items;
+ * already-active jobs are awaited so callers never get late mutations after this promise settles.
+ */
+export async function runBounded<T>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+  canceled: () => boolean = () => false,
+): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failure && !canceled()) {
+      const at = next++;
+      if (at >= items.length) return;
+      try {
+        await work(items[at]!);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  const workers = Math.min(items.length, Math.max(1, Math.floor(limit)));
+  await Promise.all(Array.from({ length: workers }, worker));
+  if (failure) throw failure.error;
+}
+
 /** One page of a TMDB list as titles. Rejects when TMDB doesn't answer; an empty page is the end. */
 export type Pages = (
   path: string,
@@ -866,27 +894,28 @@ export function drawn(row: RowDef, title: AtlasFilterSource['title']): RowDef {
   if (!title) return row;
   return {
     ...row,
-    load: async (page) =>
-      Promise.all(
-        (await row.load(page)).map((t) =>
-          t.posterPath
-            ? t
-            : title(t)
-                .then((full) =>
-                  full
-                    ? {
-                        ...full,
-                        primaryGenreName: t.primaryGenreName ?? full.primaryGenreName,
-                        likely: t.likely,
-                      }
-                    : t,
-                )
-                .catch((error: unknown) => {
-                  console.warn('atlas row: no poster for', `${t.type}:${t.id}`, error);
-                  return t;
-                }),
-        ),
-      ),
+    load: async (page) => {
+      const loaded = await row.load(page);
+      const out = [...loaded];
+      const missing = loaded.flatMap((title, at) => (title.posterPath ? [] : [{ title, at }]));
+      await runBounded(missing, 4, async ({ title: partial, at }) => {
+        try {
+          const full = await title(partial);
+          if (full)
+            out[at] = {
+              ...full,
+              primaryGenreName: partial.primaryGenreName ?? full.primaryGenreName,
+              likely: partial.likely,
+            };
+        } catch (error) {
+          console.warn('atlas row: no poster for', `${partial.type}:${partial.id}`, error);
+          // Leaving this page cancels the remaining speculative lookups. An ordinary failure still belongs only to
+          // this title, as before the queue was bounded; the other cards can still find their artwork.
+          if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        }
+      }).catch(() => undefined);
+      return out;
+    },
   };
 }
 

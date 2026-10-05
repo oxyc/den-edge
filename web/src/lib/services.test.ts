@@ -581,6 +581,51 @@ describe('withBackdrops', () => {
     const titles = [title(1), title(2)];
     expect(await withBackdrops(titles, 'k', { fetchImpl })).toEqual(titles);
   });
+
+  it('bounds the hero’s missing-backdrop lookups', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let active = 0;
+    let most = 0;
+    let asked = 0;
+    const fetchImpl: typeof fetch = async () => {
+      asked++;
+      most = Math.max(most, ++active);
+      await gate;
+      active--;
+      return new Response('{"backdrop_path":"/found.jpg"}');
+    };
+    const loading = withBackdrops(
+      Array.from({ length: 8 }, (_, id) => title(id + 1)),
+      'k',
+      {
+        atOnce: 3,
+        fetchImpl,
+      },
+    );
+    await vi.waitFor(() => expect(asked).toBe(3));
+    expect(most).toBe(3);
+    release();
+    expect(await loading).toHaveLength(8);
+    expect(asked).toBe(8);
+  });
+
+  it('cancels queued backdrop lookups after den-edge asks it to wait', async () => {
+    const asked: number[] = [];
+    const fetchImpl: typeof fetch = async (url) => {
+      const id = Number(/\/(\d+)\?/.exec(String(url))?.[1]);
+      asked.push(id);
+      return id === 1
+        ? new Response('{"error":"tmdb_rate_limited"}', {
+            status: 503,
+            headers: { 'retry-after': '30' },
+          })
+        : new Response('{"backdrop_path":"/found.jpg"}');
+    };
+    const titles = Array.from({ length: 8 }, (_, id) => title(id + 1));
+    await withBackdrops(titles, 'k', { atOnce: 3, fetchImpl });
+    expect(asked, 'only work already active when the refusal arrived').toEqual([1, 2, 3]);
+  });
 });
 
 describe('fillPosters', () => {

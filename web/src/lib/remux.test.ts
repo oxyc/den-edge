@@ -246,6 +246,58 @@ describe('startSession', () => {
     for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('cancels every retry when the player leaves during a session start', async () => {
+    const leaving = new AbortController();
+    const signals: AbortSignal[] = [];
+    let asked = 0;
+    const starting = startSession(
+      { ...want, subtitleLanguages: [] },
+      async (_input, init) => {
+        const signal = init?.signal as AbortSignal;
+        signals.push(signal);
+        if (++asked === 1) return answer(428, { error: 'ipv4_hint_wanted' });
+        return new Promise<Response>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+      },
+      '/remux',
+      async () => '198.51.100.7',
+      leaving.signal,
+    );
+    await vi.waitFor(() => expect(asked).toBe(2));
+
+    leaving.abort(new DOMException('player left', 'AbortError'));
+
+    expect(await starting).toEqual({ failure: 'unreachable' });
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('does not wait for an IPv4 lookup after its player leaves', async () => {
+    const leaving = new AbortController();
+    let asked = 0;
+    let looking = false;
+    const starting = startSession(
+      { ...want, subtitleLanguages: [] },
+      async () => {
+        asked += 1;
+        return answer(428, { error: 'ipv4_hint_wanted' });
+      },
+      '/remux',
+      () => {
+        looking = true;
+        return new Promise<string>(() => {});
+      },
+      leaving.signal,
+    );
+    await vi.waitFor(() => expect(looking).toBe(true));
+
+    leaving.abort(new DOMException('player left', 'AbortError'));
+
+    expect(await starting).toEqual({ failure: 'unreachable' });
+    expect(asked).toBe(1);
+  });
+
   it('says a guest’s revoked grant ended, and that a session has no public address for this network', async () => {
     vi.stubGlobal('location', { href: 'https://den.example/', origin: 'https://den.example' });
     try {

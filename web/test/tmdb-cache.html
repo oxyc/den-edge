@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>TMDB cache fixture</title>
+  </head>
+  <body>
+    <script type="module">
+      import { RETENTION, tmdbFetch } from '../src/lib/tmdbCache.ts';
+
+      const request = (value) =>
+        new Promise((resolve, reject) => {
+          value.onsuccess = () => resolve(value.result);
+          value.onerror = () => reject(value.error);
+        });
+
+      const transaction = (database, mode, work) =>
+        new Promise((resolve, reject) => {
+          const tx = database.transaction('answers', mode);
+          const result = work(tx.objectStore('answers'));
+          tx.oncomplete = () => resolve(result?.result);
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
+
+      window.exerciseTmdbPrune = async () => {
+        await request(indexedDB.deleteDatabase('den-tmdb'));
+        const opening = indexedDB.open('den-tmdb', 1);
+        opening.onupgradeneeded = () =>
+          opening.result.createObjectStore('answers').createIndex('fetchedAt', 'fetchedAt');
+        const database = await request(opening);
+        await transaction(database, 'readwrite', (answers) =>
+          answers.put({ body: '{"id":1}', fetchedAt: 0, checked: true }, 'expired'),
+        );
+        database.close();
+
+        await tmdbFetch(
+          'https://api.themoviedb.org/3/movie/603?api_key=den-proxy&append_to_response=credits',
+        );
+
+        const deadline = Date.now() + 10_000;
+        let keys = ['expired'];
+        while (Date.now() < deadline && keys.includes('expired')) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const db = await request(indexedDB.open('den-tmdb', 1));
+          keys = await transaction(db, 'readonly', (answers) => answers.getAllKeys());
+          db.close();
+        }
+        return { keys, retention: RETENTION };
+      };
+    </script>
+  </body>
+</html>

@@ -92,7 +92,8 @@ const throttleListeners = new Set<(throttle: TmdbThrottle) => void>();
 let throttleUntil = 0;
 
 /**
- * Hear only refusals that leave a page without a usable cached answer.
+ * Hear a provider refusal even when a usable cached answer hides it from the current card. Other speculative
+ * lookups on the page must still observe TMDB's requested rest instead of continuing to spend its budget.
  *
  * The deadline is retained as well as broadcast. A page can ask for TMDB while Svelte is still mounting the
  * root listener, and several concurrent questions can be refused with different waits. A late listener gets
@@ -112,6 +113,11 @@ function announceThrottle(res: Response): void {
   throttleUntil = proposedUntil;
   const throttle = { retryMs: throttleUntil - now };
   for (const listener of throttleListeners) listener(throttle);
+}
+
+/** TMDB says 429 directly; den-edge deliberately translates that provider refusal to a cacheable-safe 503. */
+function throttled(res: Response): boolean {
+  return res.status === 429 || (res.status === 503 && res.headers.has('retry-after'));
 }
 
 /**
@@ -200,6 +206,9 @@ function keepable(body: string): object | undefined {
  */
 const parsedAnswers = new WeakMap<Response, object>();
 
+/** A successful answer whose inert string body can be copied without teeing a Response stream. */
+const reusableAnswers = new WeakMap<Response, { body: string; parsed?: object }>();
+
 /** A TMDB answer's JSON: the object it was checked as, where it was, or the body parsed now. */
 export function tmdbJson(res: Response): Promise<unknown> {
   const parsed = parsedAnswers.get(res);
@@ -218,6 +227,7 @@ function fetchedAtOf(res: Response, lent: boolean, now: number): number {
 
 function answer(body: string, parsed?: object): Response {
   const res = new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+  reusableAnswers.set(res, { body, parsed });
   if (parsed) parsedAnswers.set(res, parsed);
   return res;
 }
@@ -326,9 +336,9 @@ export function cachingFetch(
     try {
       const res = await network(asked, init);
       if (!res.ok) {
+        if (throttled(res)) announceThrottle(res);
         // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
         if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body);
-        if (res.status === 429) announceThrottle(res);
         return res;
       }
       const body = await res.text();
@@ -373,11 +383,17 @@ function indexedStore(): Store | null {
         count.onsuccess = () => {
           let over = count.result - most;
           // Oldest first: past the cutoff, or beyond the newest `most`.
-          const cursor = answers.index('fetchedAt').openCursor();
+          // Only its index key and primary key decide what is deleted. A value cursor structured-cloned every
+          // retained JSON body merely to ignore it; this key cursor keeps those bodies out of the main thread.
+          const cursor = answers.index('fetchedAt').openKeyCursor();
           cursor.onsuccess = () => {
             const at = cursor.result;
             if (!at || dropped >= batch || (over <= 0 && (at.key as number) >= cutoff)) return;
-            at.delete();
+            // `openKeyCursor` deliberately avoids cloning the answer body, but its cursor is key-only and the
+            // IndexedDB spec forbids `IDBCursor.delete()` on it. Delete through the object store with the cursor's
+            // primary key instead; this stays key-only while working in Chromium, WebKit and standards-compliant
+            // implementations.
+            answers.delete(at.primaryKey);
             dropped++;
             over--;
             at.continue();
@@ -427,15 +443,20 @@ export function sharingFlights(inner: typeof fetch): typeof fetch {
     if (!href.startsWith(TMDB) || (init?.method ?? 'GET') !== 'GET') return inner(input, init);
     const key = keyOf(new URL(href));
     let flight = flying.get(key);
+    let owns = false;
     if (!flight) {
+      owns = true;
       flight = inner(href, { ...init, signal: AbortSignal.timeout(SHARED_MS) });
       flying.set(key, flight);
       const done = () => flying.delete(key);
       flight.then(done, done);
     }
-    // Every caller reads its own copy of the body; the original is never read, so each clone can be. The object it
-    // was already parsed as goes with each copy (`tmdbJson`).
+    // `Response.clone()` tees and copies the body stream. Answers made by `cachingFetch` already have their inert
+    // string and parsed object, so the owner can read the original and joiners can reconstruct an equivalent answer.
+    // An arbitrary injected fetch has no such representation and retains ordinary fetch-copy semantics.
     return awaitedBy(flight, init?.signal).then((res) => {
+      const reusable = reusableAnswers.get(res);
+      if (reusable) return owns ? res : answer(reusable.body, reusable.parsed);
       const copy = res.clone();
       const parsed = parsedAnswers.get(res);
       if (parsed) parsedAnswers.set(copy, parsed);

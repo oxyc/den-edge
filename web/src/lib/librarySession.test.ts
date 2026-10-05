@@ -10,12 +10,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
-const fakeLog = () => ({
-  moved: false,
-  settings: vi.fn(),
-  refresh: vi.fn().mockResolvedValue(true),
-  rows: vi.fn().mockReturnValue([]),
-});
+const fakeLog = (held: Row[] = []) => {
+  const rows = vi.fn().mockReturnValue(held);
+  return {
+    moved: false,
+    settings: vi.fn(),
+    refresh: vi.fn().mockResolvedValue(true),
+    rows,
+    rowsInSlices: vi.fn(async () => rows()),
+  };
+};
 
 it('retries an initially failed open without discarding a recovered log', async () => {
   const log = fakeLog();
@@ -40,6 +44,70 @@ it('shows a copy kept from the last visit at once and brings it up to date strai
   await session.opened;
   expect(session.log).toBe(log);
   expect(log.refresh).toHaveBeenCalledTimes(1);
+});
+
+it('publishes the first log only after its complete projection is ready', async () => {
+  let finish!: (rows: Row[]) => void;
+  const log = {
+    ...fakeLog(),
+    rowsInSlices: vi.fn(
+      () =>
+        new Promise<Row[]>((resolve) => {
+          finish = resolve;
+        }),
+    ),
+  };
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await vi.waitFor(() => expect(log.rowsInSlices).toHaveBeenCalledOnce());
+  expect(session.log).toBeUndefined();
+  finish([]);
+  await session.opened;
+  expect(session.log).toBe(log);
+  expect(session.libraryProjection()?.rows).toEqual([]);
+});
+
+it('discards a sliced projection whose session revision changed while it yielded', async () => {
+  let finish!: () => void;
+  const log = {
+    ...fakeLog(),
+    rowsInSlices: vi.fn(
+      (options: { shouldContinue?: () => boolean }) =>
+        new Promise<Row[] | null>((resolve) => {
+          finish = () => resolve(options.shouldContinue?.() ? [] : null);
+        }),
+    ),
+  };
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await vi.waitFor(() => expect(log.rowsInSlices).toHaveBeenCalledOnce());
+  session.changed();
+  finish();
+  expect(await session.opened).toBeNull();
+  expect(session.log).toBeUndefined();
+  expect(session.libraryProjection()).toBeNull();
+});
+
+it('stops projecting an abandoned session before another local library replaces it', async () => {
+  let finish!: () => void;
+  const log = {
+    ...fakeLog(),
+    rowsInSlices: vi.fn(
+      (options: { shouldContinue?: () => boolean }) =>
+        new Promise<Row[] | null>((resolve) => {
+          finish = () => resolve(options.shouldContinue?.() ? [] : null);
+        }),
+    ),
+  };
+  vi.spyOn(LibraryLog, 'openLocal').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test', true);
+  const stop = session.start(vi.fn());
+  await vi.waitFor(() => expect(log.rowsInSlices).toHaveBeenCalledOnce());
+  stop();
+  finish();
+  expect(await session.opened).toBeNull();
+  expect(session.log).toBeUndefined();
+  expect(session.libraryProjection()).toBeNull();
 });
 
 it('notify clears after TOAST_MS by default, and a later call replaces an earlier timer', async () => {
@@ -177,7 +245,7 @@ it('keeps the shared projection and Continue result equal to the real den-core p
       progress: { value: 0.4, seconds: 900, viewing: 0, at: [2000, 0, 'web'] },
     },
   ];
-  const log = { ...fakeLog(), rows: vi.fn(() => rows) };
+  const log = fakeLog(rows);
   vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
   const session = new LibrarySession('test');
   await session.opened;
