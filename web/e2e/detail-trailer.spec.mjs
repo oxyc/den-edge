@@ -116,6 +116,36 @@ for (const width of [390, 1280])
         expect(frame.frozen).toEqual(frame.bounds);
         expect(frame.fit).toBe(width < 760 ? 'contain' : 'cover');
       }
+      if (width < 760) {
+        // The first tap grants sound and native controls without touching playback itself. `quieten()` used to
+        // make the playback effect depend on `sound`, so this one gesture called play(), pause(), play() in a
+        // few milliseconds; iOS could reopen the progressive MP4 at zero. Chromium does not reset its clock,
+        // but the otherwise-spurious pause event pins the same bug without pretending to emulate AVFoundation.
+        await page.evaluate(() => {
+          window.trailerPauses = 0;
+          document.querySelector('video').addEventListener('pause', () => window.trailerPauses++);
+        });
+        const beforeTap = await video.evaluate((v) => v.currentTime);
+        await video.click();
+        expect(await video.evaluate((v) => v.controls)).toBe(true);
+        expect(await page.evaluate(() => window.trailerPauses)).toBe(0);
+        expect(await video.evaluate((v) => v.currentTime)).toBeGreaterThanOrEqual(beforeTap);
+
+        // Do not rely on a narrow native control bar to offer full screen. Den's own action uses the same
+        // requestFullscreen/webkitEnterFullscreen path as desktop and remains after native controls appear.
+        const expand = page.getByRole('button', { name: 'Play trailer full screen with sound' });
+        await expect(expand).toBeVisible();
+        await video.evaluate((v) => {
+          window.fullscreenRequests = 0;
+          v.requestFullscreen = () => {
+            window.fullscreenRequests++;
+            return Promise.resolve();
+          };
+        });
+        await expand.click();
+        expect(await page.evaluate(() => window.fullscreenRequests)).toBe(1);
+        expect(await page.evaluate(() => window.trailerPauses)).toBe(0);
+      }
       await page.screenshot({ path: test.info().outputPath(`detail-trailer-${width}.png`) });
       await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
       await expect.poll(() => video.evaluate((v) => v.paused)).toBe(true);
@@ -138,12 +168,6 @@ for (const width of [390, 1280])
       );
       await expect(video).toHaveClass(/\bplaying\b/);
       expect(await video.evaluate((v) => v.currentTime)).toBeLessThan(3);
-      // And they arrive the moment they are asked for, on the phone where the controls are how a
-      // viewer reaches the sound at all. Only there: the desktop hero is not pointer-interactive.
-      if (width < 760) {
-        await video.click();
-        expect(await video.evaluate((v) => v.controls)).toBe(true);
-      }
       expect(errors).toEqual([]);
     } finally {
       await browser.close();
