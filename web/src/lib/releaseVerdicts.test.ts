@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Release, Session } from './remux';
 import {
+  autoSwitchedNotice,
+  autoSwitchNotice,
   nothingFits,
   optionLabel,
   releaseAfterMeasure,
@@ -74,6 +76,28 @@ describe('swapNotice', () => {
 
   it('is silent when den-remux names the very release that plays as the requested one', () => {
     expect(swapNotice('b.mkv', session({ requested: { filename: 'b.mkv' } }))).toBeNull();
+  });
+});
+
+describe('autoSwitchNotice', () => {
+  it('names why, and counts in once the release list has loaded enough to', () => {
+    expect(autoSwitchNotice('decode', '1080p • WEB-DL', 2, 5)).toBe(
+      '1080p • WEB-DL couldn’t play here — trying another release… (2 of 5)',
+    );
+    expect(autoSwitchNotice('delivery', '4K • REMUX', 1)).toBe(
+      '4K • REMUX is too slow for this connection — trying another release…',
+    );
+  });
+});
+
+describe('autoSwitchedNotice', () => {
+  it('says what moved and why, past tense once it has landed', () => {
+    expect(autoSwitchedNotice('decode', '1080p • WEB-DL', '720p • WEB')).toBe(
+      '1080p • WEB-DL couldn’t play here — playing 720p • WEB instead.',
+    );
+    expect(autoSwitchedNotice('delivery', '4K • REMUX', '1080p • WEB-DL')).toBe(
+      '4K • REMUX was too slow for this connection — playing 1080p • WEB-DL instead.',
+    );
   });
 });
 
