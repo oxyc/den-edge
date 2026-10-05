@@ -1160,6 +1160,57 @@ fn warm(state: &Arc<AppState>) {
     });
 }
 
+/// What a waiter finds after the caller ahead of it finished an exact (non-`Detail`) question.
+enum Reopened {
+    Absent,
+    Fresh(crate::cache::JsonFile, Duration, Duration, SystemTime),
+    StillMissing,
+}
+
+async fn reopen_exact(file: &Path, path: &str, query: Option<&str>) -> Reopened {
+    let opened = match crate::cache::open_json(file, MAX_ANSWER_BYTES).await {
+        Some(prepared) if is_season(path) => {
+            prepared.with_bytes().await.map(|(prepared, body)| (prepared, Some(body)))
+        }
+        other => other.map(|prepared| (prepared, None)),
+    };
+    let Some((prepared, body)) = opened else {
+        return Reopened::StillMissing;
+    };
+    let (age, modified) = (prepared.age(), prepared.modified());
+    let fresh = if carries_moving(query) || body.is_some_and(|body| unfinished(path, &body)) {
+        LIST_TTL
+    } else {
+        fresh_for(path)
+    };
+    match verdict(prepared.matches(ABSENT), age, fresh) {
+        Cached::Absent => Reopened::Absent,
+        Cached::Fresh => Reopened::Fresh(prepared, fresh, age, modified),
+        Cached::Refresh | Cached::Cold => Reopened::StillMissing,
+    }
+}
+
+fn reopened_answer(state: &AppState, reopened: Reopened, asked: &HeaderMap) -> Option<Response> {
+    match reopened {
+        Reopened::Absent => {
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Negative);
+            Some(*refused(StatusCode::NOT_FOUND, "not_found"))
+        }
+        Reopened::Fresh(prepared, fresh, age, modified) => {
+            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
+            Some(answer_prepared(
+                Prepared::File(prepared),
+                &fresh_policy(fresh, fresh.saturating_sub(age)),
+                "hit",
+                modified,
+                asked,
+                &state.mmaps,
+            ))
+        }
+        Reopened::StillMissing => None,
+    }
+}
+
 pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response {
     let Some(key) = state.tmdb_key.as_deref() else {
         return json(StatusCode::NOT_FOUND, "tmdb_proxy_off");
@@ -1249,6 +1300,19 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     );
                 }
                 Cached::Refresh => {
+                    let mut asking = match one_asking(file, "tmdb").await {
+                        Ok(asking) => asking,
+                        Err(refusal) => {
+                            state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
+                            return *refusal;
+                        }
+                    };
+                    // The exact question ahead of this one kept its answer before releasing the turn.
+                    if let Some(response) =
+                        reopened_answer(state, reopen_exact(file, &path, query.as_deref()).await, asked)
+                    {
+                        return response;
+                    }
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
                     return match revalidate(state, &path, query.as_deref(), key, rid, file).await {
                         Ok(Revalidated::Answer(new, etag)) => {
@@ -1266,7 +1330,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                             crate::title_metadata::observe_tmdb(state, &path, &body);
                             answer(body, &fresh_policy(fresh, fresh), "revalidated", SystemTime::now(), asked)
                         }
-                        Err(response) => *response,
+                        Err(response) => *asking.failed(response).await,
                     };
                 }
                 // Falls out to the cold path below: the per-IP bucket, a fetch, and a rewritten sentinel.
@@ -1274,11 +1338,32 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
             }
         }
     }
-    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
     let ip = crate::handler::client_ip(state, &req);
     if let Some(refusal) = over_allowance(state, &ip, asked).await {
+        state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
         return refusal;
     }
+    let mut asking = match &file {
+        Some(file) => {
+            let asking = match one_asking(file, "tmdb").await {
+                Ok(asking) => asking,
+                Err(refusal) => {
+                    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
+                    return *refusal;
+                }
+            };
+            // A caller that held this exact turn first has finished its write. Read that answer instead of spending
+            // a second upstream question; a failed turn was returned by `one_asking` above.
+            if let Some(response) =
+                reopened_answer(state, reopen_exact(file, &path, query.as_deref()).await, asked)
+            {
+                return response;
+            }
+            Some(asking)
+        }
+        None => None,
+    };
+    state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
     match fetch(state, &path, query.as_deref(), key, rid).await {
         Ok((body, etag)) => {
             if let Some(file) = &file {
@@ -1298,7 +1383,10 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     state.metrics.provider_cache_store(Provider::Tmdb, CacheStore::Skipped);
                 }
             }
-            *response
+            match &mut asking {
+                Some(asking) => *asking.failed(response).await,
+                None => *response,
+            }
         }
     }
 }
@@ -1413,6 +1501,41 @@ async fn detail_answer(
 /// Questions being asked of an upstream right now, by the file their answer will be kept at.
 static ASKING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Arc<Turn>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Until when each configured TMDB identity is resting after TMDB answered 429, in the app clock's milliseconds.
+///
+/// The key itself must never become process metadata or a log field, so the map holds only its digest. Keeping the
+/// deadline per identity matters in tests and during a key rotation: one credential's refusal says nothing about a
+/// different one. In production there is one configured identity and this process-local memory deliberately clears
+/// on restart, just as an upstream connection does.
+static RESTING: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn provider_identity(key: &str) -> [u8; 32] {
+    Sha256::digest(key.as_bytes()).into()
+}
+
+/// Milliseconds left in TMDB's requested rest, if any. An expired deadline removes itself on the next question.
+fn resting(state: &AppState, key: &str) -> Option<u64> {
+    let identity = provider_identity(key);
+    let now = state.now();
+    let mut resting = crate::lock(&RESTING);
+    match resting.get(&identity).copied() {
+        Some(until) if until > now => Some(until - now),
+        Some(_) => {
+            resting.remove(&identity);
+            None
+        }
+        None => None,
+    }
+}
+
+fn remember_rest(state: &AppState, key: &str, wait_ms: u64) {
+    let until = state.now().saturating_add(wait_ms);
+    let mut resting = crate::lock(&RESTING);
+    let remembered = resting.entry(provider_identity(key)).or_default();
+    *remembered = (*remembered).max(until);
+}
 
 /// One file's question: whose turn it is to ask, and how the last ask ended.
 #[derive(Default)]
@@ -1788,6 +1911,16 @@ async fn send(
     rid: &str,
     etag: Option<&str>,
 ) -> Result<Fetched, Box<Response>> {
+    // TMDB's Retry-After applies to the configured credential, not only to the question it refused. Remember it
+    // ahead of the daily spend so a cold miss and every stale refresh during the rest neither leave the box nor use
+    // another unit of the household's budget.
+    if let Some(wait) = resting(state, key) {
+        return Err(Box::new(retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &error("tmdb_rate_limited"),
+            wait,
+        )));
+    }
     // The whole point of the daily ceiling: a key that is lent out can be spent by anyone who finds the route,
     // and the household would be the one rate-limited by TMDB afterwards.
     if !spend(state) {
@@ -1848,7 +1981,7 @@ async fn send(
         } else {
             ProviderUpstream::Failed
         });
-        return Err(refusal(state, status, &headers));
+        return Err(refusal(state, key, status, &headers));
     }
     attempt.finished(ProviderUpstream::Updated);
     Ok(Fetched::Answer(bytes, tag))
@@ -1859,7 +1992,7 @@ async fn send(
 /// Anything but a 404 is said in the log, once a minute per status: a revoked `TMDB_KEY` (401), TMDB rate-limiting
 /// the household (429) or TMDB down (5xx) otherwise showed only as a 502 to whoever asked next. A 429 is passed on
 /// as a wait, with TMDB's own `Retry-After`, rather than as a failure.
-fn refusal(state: &AppState, status: StatusCode, headers: &HeaderMap) -> Box<Response> {
+fn refusal(state: &AppState, key: &str, status: StatusCode, headers: &HeaderMap) -> Box<Response> {
     if status == StatusCode::NOT_FOUND {
         return refused(StatusCode::NOT_FOUND, "not_found");
     }
@@ -1873,6 +2006,7 @@ fn refusal(state: &AppState, status: StatusCode, headers: &HeaderMap) -> Box<Res
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok())
             .unwrap_or(10);
+        remember_rest(state, key, secs.saturating_mul(1000));
         return Box::new(retry_after(
             StatusCode::SERVICE_UNAVAILABLE,
             &error("tmdb_rate_limited"),
@@ -2310,6 +2444,11 @@ struct Refresh {
 /// question at a time — every page open in the seconds a refresh takes would otherwise start another — and each
 /// still spends from the daily budget, which `fetch` takes.
 fn refresh_behind(state: &Arc<AppState>, asking: Refresh) {
+    // A stale answer is already being served. During TMDB's requested rest there is nothing useful for a task to do,
+    // and starting one per stale read would only churn the executor before `send` refused it locally.
+    if resting(state, &asking.key).is_some() {
+        return;
+    }
     if !crate::lock(&state.tmdb_refreshing).insert(asking.cached.clone()) {
         return;
     }
@@ -2480,17 +2619,17 @@ mod tests {
         let h = Harness::in_dir_with(temp_dir(), |state| state.tmdb_daily_max = Some(0));
         let mut waits = HeaderMap::new();
         waits.insert(header::RETRY_AFTER, HeaderValue::from_static("7"));
-        let limited = refusal(&h.state, StatusCode::TOO_MANY_REQUESTS, &waits);
+        let limited = refusal(&h.state, "refusal-waits", StatusCode::TOO_MANY_REQUESTS, &waits);
         assert_eq!(limited.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(limited.headers()[header::RETRY_AFTER], "7");
-        let limited = refusal(&h.state, StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new());
+        let limited = refusal(&h.state, "refusal-default", StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new());
         assert_eq!(limited.headers()[header::RETRY_AFTER], "10", "a 429 without a wait still names one");
         assert_eq!(
-            refusal(&h.state, StatusCode::UNAUTHORIZED, &HeaderMap::new()).status(),
+            refusal(&h.state, "refusal-other", StatusCode::UNAUTHORIZED, &HeaderMap::new()).status(),
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
-            refusal(&h.state, StatusCode::NOT_FOUND, &HeaderMap::new()).status(),
+            refusal(&h.state, "refusal-other", StatusCode::NOT_FOUND, &HeaderMap::new()).status(),
             StatusCode::NOT_FOUND
         );
 
@@ -2502,6 +2641,51 @@ mod tests {
         h.advance(DAY_MS - h.state.now() % DAY_MS - 5_000);
         let spent = send(&h.state, "/3/movie/550", None, "k", "t", None).await.err().unwrap();
         assert_eq!(spent.headers()[header::RETRY_AFTER], "5", "five seconds before midnight");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_retry_after_rests_cold_questions_and_stale_refreshes() {
+        let cache = temp_dir();
+        let key = "remembered-upstream-rest";
+        let kept_in = cache.clone();
+        let h = Harness::in_dir_with(temp_dir(), |state| {
+            state.tmdb_key = Some(key.into());
+            state.tmdb_cache_dir = Some(kept_in);
+            state.tmdb_daily_max = Some(5);
+        });
+        let asked = Arc::new(std::sync::Mutex::new(0));
+        let seen = Arc::clone(&asked);
+        let tmdb: Upstream = Arc::new(move |_| {
+            *crate::lock(&seen) += 1;
+            Ok(Fetched::Answer(Bytes::from_static(b"{\"results\":[]}"), None))
+        });
+        crate::lock(&UPSTREAMS).push((key.to_owned(), tmdb));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("7"));
+        drop(refusal(&h.state, key, StatusCode::TOO_MANY_REQUESTS, &headers));
+
+        let cold = h.send("GET", "/tmdb/3/search/movie?query=rested", None, &[]).await;
+        assert_eq!(cold.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(cold.headers()[header::RETRY_AFTER], "7");
+        assert_eq!(*crate::lock(&asked), 0, "the cold question stayed inside the box");
+        assert_eq!(crate::lock(&h.state.tmdb_spent).1, 0, "and spent no daily allowance");
+
+        let list = cache_path(&cache, &cache_key("/3/trending/all/week", None));
+        write(&list, &Bytes::from_static(b"{\"page\":1}")).await;
+        aged(&list, LIST_TTL + Duration::from_secs(1));
+        let stale = h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await;
+        assert_eq!(stale.headers()["x-den-tmdb"], "stale");
+        assert!(crate::lock(&h.state.tmdb_refreshing).is_empty(), "no queued refresh during the rest");
+        assert_eq!(*crate::lock(&asked), 0);
+
+        h.advance(7_000);
+        assert_eq!(
+            h.send("GET", "/tmdb/3/search/movie?query=rested", None, &[]).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(*crate::lock(&asked), 1, "the deadline, not a permanent latch, ended the rest");
+        assert_eq!(crate::lock(&h.state.tmdb_spent).1, 1);
     }
 
     /// What a cached body is worth, decided without a clock or a filesystem.
@@ -3845,6 +4029,37 @@ mod tests {
         let _ = ask(&h.state, "/3/movie/550", None).await.unwrap();
         let asked = crate::lock(&asked).clone();
         assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
+            "nothing is left in flight"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn callers_asking_for_one_cold_list_at_once_ask_tmdb_once() {
+        let cache = temp_dir();
+        let h = Arc::new(lending_as(&cache, "list-at-once"));
+        let asked = Arc::new(std::sync::Mutex::new(0));
+        let seen = Arc::clone(&asked);
+        let slow: Upstream = Arc::new(move |_| {
+            *crate::lock(&seen) += 1;
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(Fetched::Answer(Bytes::from_static(b"{\"page\":1,\"results\":[]}"), None))
+        });
+        crate::lock(&UPSTREAMS).push(("list-at-once".to_owned(), slow));
+
+        let callers: Vec<_> = (0..4)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                tokio::spawn(async move { h.send("GET", "/tmdb/3/trending/all/week", None, &[]).await })
+            })
+            .collect();
+        for caller in callers {
+            let response = caller.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body_json(response).await["page"], 1);
+        }
+        assert_eq!(*crate::lock(&asked), 1, "the non-detail cold miss was coalesced");
         assert!(
             crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
             "nothing is left in flight"
