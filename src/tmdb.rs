@@ -1300,7 +1300,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
                     );
                 }
                 Cached::Refresh => {
-                    let mut asking = match one_asking(file, "tmdb").await {
+                    let mut asking = match one_tmdb_asking(file, key).await {
                         Ok(asking) => asking,
                         Err(refusal) => {
                             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -1339,13 +1339,9 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
     }
     let ip = crate::handler::client_ip(state, &req);
-    if let Some(refusal) = over_allowance(state, &ip, asked).await {
-        state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
-        return refusal;
-    }
     let mut asking = match &file {
         Some(file) => {
-            let asking = match one_asking(file, "tmdb").await {
+            let asking = match one_tmdb_asking(file, key).await {
                 Ok(asking) => asking,
                 Err(refusal) => {
                     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
@@ -1363,6 +1359,12 @@ pub async fn handle(state: &Arc<AppState>, req: Request, rid: &str) -> Response 
         }
         None => None,
     };
+    // Only the elected caller has a cold question left. Callers that waited for the same file reopened the answer
+    // above, so charging their address too would spend N visitor claims for the one upstream request they shared.
+    if let Some(refusal) = over_allowance(state, &ip, asked).await {
+        state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
+        return refusal;
+    }
     state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Cold);
     match fetch(state, &path, query.as_deref(), key, rid).await {
         Ok((body, etag)) => {
@@ -1513,6 +1515,16 @@ static RESTING: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], u64>> =
 
 fn provider_identity(key: &str) -> [u8; 32] {
     Sha256::digest(key.as_bytes()).into()
+}
+
+fn provider_turn_identity(key: &str) -> String {
+    crate::hex(&provider_identity(key))
+}
+
+/// Join only a question made with this configured credential. During key rotation, a refusal for the old key says
+/// nothing about the new one even though both questions map to the same cache file.
+async fn one_tmdb_asking(file: &Path, key: &str) -> Result<Asking, Box<Response>> {
+    one_asking(file, &provider_turn_identity(key)).await
 }
 
 /// Milliseconds left in TMDB's requested rest, if any. An expired deadline removes itself on the next question.
@@ -4060,6 +4072,18 @@ mod tests {
             assert_eq!(body_json(response).await["page"], 1);
         }
         assert_eq!(*crate::lock(&asked), 1, "the non-detail cold miss was coalesced");
+        const IP: &str = "192.168.1.9";
+        for allowed in 1..GUEST_PER_WINDOW {
+            assert!(
+                crate::link::throttled_per_minute(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW)
+                    .is_none(),
+                "the one upstream question plus {allowed} later claims fit"
+            );
+        }
+        assert!(
+            crate::link::throttled_per_minute(&h.state, &format!("tmdb:{IP}"), GUEST_PER_WINDOW).is_some(),
+            "the coalesced waiters did not each debit the visitor allowance"
+        );
         assert!(
             crate::lock(&ASKING).keys().all(|file| !file.starts_with(&cache)),
             "nothing is left in flight"
@@ -4110,18 +4134,18 @@ mod tests {
     #[tokio::test]
     async fn a_failed_ask_answers_only_for_its_own_key_and_its_own_waiters() {
         let file = cache_path(&temp_dir(), "/3/movie/552?");
-        let mut holder = one_asking(&file, "made-up").await.ok().unwrap();
+        let mut holder = one_tmdb_asking(&file, "old-key").await.ok().unwrap();
         let waiter = |whose: &'static str| {
             let file = file.clone();
-            tokio::spawn(async move { one_asking(&file, whose).await.map(drop).map_err(|r| r.status()) })
+            tokio::spawn(async move { one_tmdb_asking(&file, whose).await.map(drop).map_err(|r| r.status()) })
         };
-        let (same, other) = (waiter("made-up"), waiter("household"));
+        let (same, other) = (waiter("old-key"), waiter("rotated-key"));
         tokio::task::yield_now().await;
         let _ = holder.failed(refused(StatusCode::UNAUTHORIZED, "key_refused")).await;
         drop(holder);
         assert_eq!(same.await.unwrap(), Err(StatusCode::UNAUTHORIZED));
         assert_eq!(other.await.unwrap(), Ok(()), "another key asks for itself");
-        assert!(one_asking(&file, "made-up").await.is_ok(), "a caller after the failure asks again");
+        assert!(one_tmdb_asking(&file, "old-key").await.is_ok(), "a caller after the failure asks again");
     }
 
     /// A waiter dropped between the holder letting go and its own first look — a preview past its budget, a page
