@@ -23,7 +23,39 @@
     return () => clearInterval(timer);
   });
 
+  const titleOf = (download: Download): Title => ({
+    type: download.title.mediaType,
+    id: download.title.mediaId,
+    title: download.title.title || download.release.label,
+    posterPath: download.title.posterPath,
+  });
+
   const list = $derived(queue.list());
+  /** One reactive snapshot per row: sectioning and drawing reuse the same status/title/answer work. */
+  const rows = $derived(
+    list.map((download) => ({
+      download,
+      title: titleOf(download),
+      status: queue.status(download, now),
+      answer: queue.answers.get(download.name),
+    })),
+  );
+  const groups = $derived(
+    [
+      {
+        title: 'In progress',
+        items: rows.filter(
+          ({ download, status }) => !download.announced && status.state !== 'ready',
+        ),
+      },
+      {
+        title: 'Recently downloaded',
+        items: rows.filter(
+          ({ download, status }) => download.announced || status.state === 'ready',
+        ),
+      },
+    ].filter((group) => group.items.length),
+  );
   /** Asked once as the page shows, then by the library's own refresh: it opens on fresh figures. */
   $effect(() => {
     if (!active) return;
@@ -36,13 +68,6 @@
     };
   });
   let busy = $state<string | null>(null);
-
-  const titleOf = (download: Download): Title => ({
-    type: download.title.mediaType,
-    id: download.title.mediaId,
-    title: download.title.title || download.release.label,
-    posterPath: download.title.posterPath,
-  });
 
   async function drop(download: Download) {
     busy = download.name;
@@ -58,43 +83,46 @@
 <p class="note">Your debrid fetches these — you can close Den, they keep going.</p>
 
 {#if !list.length}
-  <p class="note">Nothing downloading. Download a title from its Sources to see it here.</p>
+  <p class="note">No downloads yet. Download a title from its Sources to see it here.</p>
 {:else}
-  <ul class="grid">
-    {#each list as download (download.name)}
-      {@const title = titleOf(download)}
-      {@const status = queue.status(download, now)}
-      {@const state = status.state}
-      {@const answer = queue.answers.get(download.name)}
-      <li data-download={download.content}>
-        <DownloadPosterCard
-          {download}
-          {title}
-          badge={answer?.state === 'preparing' && answer.progress
-            ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
-            : undefined}
-          progress={state === 'ready'
-            ? 1
-            : answer?.state === 'preparing'
-              ? answer.progress
-              : undefined}
-          downloadBadge={{ state: phase(status, answer), label: headline(status, answer) }}
-          href={titleHref(title)}
-          menu={false}
-          {active}
-        />
-        <DownloadStatus {download} {queue} {now} {status} {answer} />
-        {#if state !== 'ready'}<DownloadAlternatives {download} {queue} />{/if}
-        <button
-          type="button"
-          class="control"
-          disabled={busy === download.name}
-          onclick={() => void drop(download)}
-          >{inFlight(state) ? 'Cancel download' : 'Remove'}</button
-        >
-      </li>
-    {/each}
-  </ul>
+  {#each groups as group (group.title)}
+    <section>
+      <h2>{group.title}</h2>
+      <ul class="grid">
+        {#each group.items as row (row.download.name)}
+          {@const { download, title, status, answer } = row}
+          {@const state = status.state}
+          <li data-download={download.content}>
+            <DownloadPosterCard
+              {download}
+              {title}
+              badge={answer?.state === 'preparing' && answer.progress
+                ? `${Math.floor(Math.min(answer.progress, 1) * 100)}%`
+                : undefined}
+              progress={state === 'ready'
+                ? 1
+                : answer?.state === 'preparing'
+                  ? answer.progress
+                  : undefined}
+              downloadBadge={{ state: phase(status, answer), label: headline(status, answer) }}
+              href={titleHref(title)}
+              menu={false}
+              {active}
+            />
+            <DownloadStatus {download} {queue} {now} {status} {answer} />
+            {#if state !== 'ready'}<DownloadAlternatives {download} {queue} />{/if}
+            <button
+              type="button"
+              class="control"
+              disabled={busy === download.name}
+              onclick={() => void drop(download)}
+              >{inFlight(state) ? 'Cancel download' : 'Remove'}</button
+            >
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/each}
 {/if}
 
 <style>
@@ -106,6 +134,15 @@
   .note {
     margin: 0 0 24px;
     color: var(--muted);
+  }
+
+  section + section {
+    margin-top: 34px;
+  }
+
+  h2 {
+    margin: 0 0 14px;
+    font-size: 18px;
   }
 
   /* Search's and the Watchlist's grid, so a page of posters looks the same wherever it is. */

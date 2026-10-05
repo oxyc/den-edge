@@ -5,7 +5,7 @@
   "rust": "1.95.0",
   "uniffi": "0.29.5",
   "wasmBindgen": "0.2.128",
-  "sourceDigest": "594c1f48561d6eeaff0d4137470fe86109aaec039e3cc2add1b67ecc59baca29",
+  "sourceDigest": "2d0d1b01e53b989aac75d99e616efdfb56608e1172becfc4054e7b81ab700adb",
   "sources": {
     "Cargo.lock": "e386f4930262eafd758f9c0943226ebde8cbc172267e57fc8bf0f011e2d51a18",
     "Cargo.toml": "077268c9845d9e79834277357f88523d48c785963bf11e3d3e30cfe8dd5aa22e",
@@ -22,7 +22,7 @@
     "crates/den-store/tests/fixture.rs": "a154c1b720653e8ce4958f21010fe650b87464171a21ca2053d00631b1dc11bb",
     "crates/den-sync/Cargo.toml": "c4c44c649322e442e32b17323df87cb4ba02233896a0520a77dcfe6d5a988470",
     "crates/den-sync/src/delivery.rs": "63ba2d927f08864595785278e70460d80d0e5305ef849e7ae28fba3c2defcd54",
-    "crates/den-sync/src/downloads.rs": "ae30f5aa3496213bb61ed297527c648d01c207f7127cf2b4a46bb68feb98b517",
+    "crates/den-sync/src/downloads.rs": "f683be68ab736179c4819a15c83214a95c8b976eeb2a35325ffda3cd31e163a2",
     "crates/den-sync/src/episodes.rs": "3c9787ddab9bea400ca23a81e6fe2b672e2716b891ee5c3e144d298f3a1298c4",
     "crates/den-sync/src/events.rs": "80df2462f9830d9fe887c87d3c5faa5819bbc3e4e20629f6c186b3f02248fc58",
     "crates/den-sync/src/lib.rs": "3428e6f652704ab758bed281463c4aab699e99ba3f3c8a3a2cc4bd37c42c098b",
@@ -41,9 +41,9 @@
     "crates/den-sync/src/series.rs": "b2ffe596cda0ee39814ca802252a39caf6101b180eb390ba2d37e61a3f1a9d22",
     "crates/den-sync/src/tilt.rs": "23a073cc9585412644e7b70cf2c8e74f7cfb6d841b8d7d0a38889f3ef486baeb",
     "crates/den-sync/src/wire.rs": "741d774fc528eeb742cfc5e1c802f45400a26effe2231ee92d7476022f91732f",
-    "crates/den-sync/tests/conformance.rs": "9d6c5e20405973fb2e3e54a179ef68b6aa14a743d042f21de826b9010c7f9afd",
+    "crates/den-sync/tests/conformance.rs": "a294310379aca775093066ffbf9fc625c2f06055e217142d2505d558fd27ab31",
     "crates/den-sync/tests/fixtures/merge-v2.json": "8dbbbb681be4e68e1a7fd2badb33643d46d8f4568ca74514d5afa1e67ffa04a9",
-    "crates/den-sync/tests/fixtures/policy-v1.json": "9c60eb107585f0905783efb71bbc145285a592d7d38512568a13d5ac1f8cc5b0",
+    "crates/den-sync/tests/fixtures/policy-v1.json": "ab255dd60fa5e93abf861c4a988755ec94d7c1709660233776f81cc601c72ec4",
     "crates/den-sync/tests/fixtures/policy-v3.json": "042a6a51c7fb9d943363e66ba2bc71eec7c545f2b0cc38d4ee67baa6457cae1f",
     "crates/den-sync/tests/fixtures/policy-v4.json": "24775328d22f4b3da7e3b06af8659cf505fdd63fbe7cdf6b05d60e8418dbbb74",
     "crates/den-sync/tests/library_v4.rs": "4eedcf0bb3d049ce6a21afa8e65a6c2892a4f413faddca1934fab341bc4fcff6",
@@ -57,11 +57,11 @@
     "LICENSE": "78d07b0e03dde5590c86e9df27e9b7ba5d84b2f282ebea4c45022bf84cf86c0e",
     "generated/den_core.d.ts": "7341b801ebf993ae6df3ee3956fbf7b3d926782fbd4106efe5a9bca65828e3f8",
     "generated/den_core.js": "f3a99a15fdb6a5c6a22713c9b4199c95286a87173afd989bdf8a58843327a139",
-    "generated/den_core_bg.wasm": "bc94672f871724a0c70200cb3e9bd593849d503d3573fe370c2932b42cf103b0",
+    "generated/den_core_bg.wasm": "65d1ac5a3baa0c48de29465edf9726a6737e6d3da602163376d435972a09ceed",
     "generated/den_core_bg.wasm.d.ts": "1de059c9adfafeb5d797c76ee1b2277830ae11882cdfecbecec537d52b6a31e3",
     "index.d.ts": "1eb37d6dac93f3e3b9026619669d8e5502420e7940f902859bae416fd5245791",
     "index.js": "9a422f0eb8b40e3206e970b47c47c07daf1b1a3920b781cf377d5935e045ec87",
-    "policy-v1.json": "9c60eb107585f0905783efb71bbc145285a592d7d38512568a13d5ac1f8cc5b0",
+    "policy-v1.json": "ab255dd60fa5e93abf861c4a988755ec94d7c1709660233776f81cc601c72ec4",
     "policy-v3.json": "042a6a51c7fb9d943363e66ba2bc71eec7c545f2b0cc38d4ee67baa6457cae1f"
   }
 }

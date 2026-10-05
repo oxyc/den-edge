@@ -54,6 +54,8 @@ export interface Download {
   tried: string[];
   candidates?: number;
   exhausted: boolean;
+  /** When the last complete source pass ran out. Used to schedule a fresh search without hammering addons. */
+  exhaustedAt?: number;
   announced: boolean;
   reported: boolean;
   reannounced: boolean;
@@ -147,6 +149,7 @@ export function readDownload(row: Row): Download | null {
     tried: tried && 'strings' in tried ? tried.strings : [],
     candidates: int(values.candidates),
     exhausted: flag(values.exhausted),
+    exhaustedAt: flag(values.exhausted) ? values.exhausted?.at[0] : undefined,
     announced: flag(values.announced),
     reported: flag(values.reported),
     reannounced: flag(values.reannounced),

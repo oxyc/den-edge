@@ -657,7 +657,7 @@
                     ? undefined
                     : downloads.of(d.title.type, d.title.id, displayedSeason, e.number)}
                 {@const episodeDownloadState = episodeDownload
-                  ? downloads.status(episodeDownload).state === 'ready'
+                  ? episodeDownload.announced || downloads.status(episodeDownload).state === 'ready'
                     ? 'ready'
                     : inFlight(downloads.status(episodeDownload).state)
                       ? 'downloading'

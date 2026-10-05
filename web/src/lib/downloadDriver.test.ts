@@ -111,6 +111,18 @@ function hedgedRow(): SettingsRow {
   };
 }
 
+function exhaustedRow(): SettingsRow {
+  const row = stalledRow();
+  return {
+    ...row,
+    values: {
+      ...row.values,
+      tried: { value: { strings: [first.identity] }, at: [T0, 0, TV] },
+      exhausted: { value: { bool: true }, at: [T0, 0, TV] },
+    },
+  };
+}
+
 const leaseRow = (holder: string, epoch: number): SettingsRow => ({
   kind: 'set',
   schema: 2,
@@ -131,6 +143,46 @@ function browserQueue(resolve: Resolve) {
 }
 
 describe('the download driver', () => {
+  it('keeps an exhausted request and retries fresh sources on a bounded schedule', async () => {
+    const shared = testLog([exhaustedRow()]);
+    const { queue, asked } = browserQueue(async () => ({ sources: [first, second] }));
+    let resolves = 0;
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => {
+      resolves++;
+      return { sources: [first, second] };
+    });
+
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 6 * 60 * MINUTE,
+      observedFor: 0,
+    });
+    const retried = readDownload(shared.log.settings(NAME)!)!;
+    expect(resolves).toBe(1);
+    expect(retried.exhausted).toBe(false);
+    expect(retried.release.identity).toBe(second.identity);
+    expect(asked).toContain(`add ${second.url}`);
+  });
+
+  it('drops an exhausted retry result when the active library changes', async () => {
+    const shared = testLog([exhaustedRow()]);
+    const next = testLog([exhaustedRow()]);
+    const { queue, asked } = browserQueue(async () => ({ sources: [first, second] }));
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => {
+      queue.attach(next.log, testClock(BROWSER), undefined, async () => ({
+        sources: [first, second],
+      }));
+      return { sources: [first, second] };
+    });
+
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: T0 + 6 * 60 * MINUTE,
+      observedFor: 0,
+    });
+
+    expect(readDownload(shared.log.settings(NAME)!)!.exhausted).toBe(true);
+    expect(asked).not.toContain(`add ${second.url}`);
+  });
+
   it('falls back only while it holds the lease', async () => {
     const shared = testLog([stalledRow(), leaseRow(TV, 3)]);
     const { queue, asked } = browserQueue(async () => ({ sources: [first, second] }));
@@ -394,7 +446,7 @@ describe('the download driver', () => {
   });
 
   it('a prune compare-and-sets on the row it decided on, not one read after', async () => {
-    // Two episodes that finished three days ago: past their two-day lifetime.
+    // Two watched episodes that finished three days ago: past their recent-history window.
     const finished = (name: string, episode: number): SettingsRow => {
       const row = stalledRow();
       const at: [number, number, string] = [T0, 0, TV];
@@ -414,9 +466,8 @@ describe('the download driver', () => {
     };
     const other = downloadName('tv:1399:2:4');
     const shared = testLog([finished(NAME, 3), finished(other, 4)]);
-    // Both episodes watched: a ready row with no watched state behind it is never aged out any more (den-spec
-    // library-v4 §17 *Pruning*), so the race this test is actually about — a prune's compare-and-set landing on
-    // the row it decided on, not one read after — needs a reason to prune that isn't the clock.
+    // Both episodes watched: unwatched ready rows never age out, while these are old enough to prune. That gives
+    // this test the removal it needs to exercise the compare-and-set race.
     // `episode_state` (den-core) reads visibility against the real wall clock, not this test's synthetic
     // timeline, so the mark's own stamp must be in the real past.
     const watchedAt: [number, number, string] = [Date.now() - MINUTE, 0, TV];
@@ -491,7 +542,7 @@ describe('the download driver', () => {
     expect(readDownload(shared.log.settings(NAME)!)).not.toBeNull();
   });
 
-  it('that same row is pruned once its own episode is watched, regardless of age', async () => {
+  it('a watched ready row remains visible as recent download history', async () => {
     const shared = testLog([readyUnwatched()]);
     const watched: WatchRow = {
       kind: 'wat',
@@ -514,10 +565,10 @@ describe('the download driver', () => {
     const queue = new DownloadQueue(async () => ({ state: 'ready' }));
     queue.attach(shared.log, testClock(BROWSER));
     await driveDownloads(shared.log, queue, BROWSER, {
-      now: T0 + 3 * 1440 * MINUTE,
+      now: T0 + 1440 * MINUTE,
       observedFor: 0,
     });
-    expect(readDownload(shared.log.settings(NAME)!)).toBeNull();
+    expect(readDownload(shared.log.settings(NAME)!)).not.toBeNull();
   });
 });
 

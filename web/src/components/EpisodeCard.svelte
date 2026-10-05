@@ -103,6 +103,9 @@
             .join(' · ')}</span
         ></span
       >
+      {#if downloadState}<span class="download-state">
+          <DetailIcon name="download" />{downloadState === 'ready' ? 'Downloaded' : 'Downloading'}
+        </span>{/if}
       {#if upcoming}<span class="air-date">Airs <time datetime={episode.airDate}>{date}</time></span
         >
       {:else if episode.overview}<span class="overview">{cleanedOverview(episode)}</span>{/if}
@@ -257,6 +260,20 @@
   .facts {
     color: var(--muted);
     font-size: 14px;
+  }
+
+  .download-state {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 7px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .download-state :global(svg) {
+    width: 15px;
+    height: 15px;
   }
 
   .overview {

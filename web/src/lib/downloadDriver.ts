@@ -34,6 +34,8 @@ const pageStartedMono = globalThis.performance?.now() ?? 0;
 const CONCURRENCY = 4;
 /** A complete source list with no usable alternate is reconsidered periodically, not every driver pass. */
 const NO_HEDGE_MS = 10 * 60_000;
+/** An exhausted request stays in Downloads and gets a genuinely fresh source pass a few times a day. */
+const EXHAUSTED_RETRY_EVERY = 6 * 60 * 60_000;
 /** The holder den-core is told of for a lease row naming this device that another window of it took. */
 const ANOTHER_WINDOW = 'another-window';
 
@@ -284,7 +286,11 @@ async function holderPass(
     const status = queue.status(download, now);
     if (status.state) states[download.name] = status.state;
     queue.clocks.set(download.name, status.clock);
-    if (download.exhausted) continue;
+    if (download.exhausted) {
+      if (now - (download.exhaustedAt ?? download.queuedAt) >= EXHAUSTED_RETRY_EVERY)
+        wrote = (await retryExhausted(log, device, queue, download, now, stamp)) || wrote;
+      continue;
+    }
     if (download.release.hedge) {
       // Prefer the work the viewer already had: if both finish in one polling pass, the primary wins.
       if (status.state === 'ready') {
@@ -399,6 +405,64 @@ async function holderPass(
   }
   if (wrote) queue.touch();
   return wrote;
+}
+
+/**
+ * Revisit a request that previously ran out of releases. It remains a durable user request: a later indexer pass
+ * may discover a new stream, and after every known stream has been tried we start another cycle rather than
+ * silently deleting the episode. Restamping `exhausted` when nothing changed schedules the next bounded retry.
+ */
+async function retryExhausted(
+  log: LibraryLog,
+  device: string,
+  queue: DownloadQueue,
+  download: Download,
+  now: number,
+  stamp: () => [number, number, string],
+): Promise<boolean> {
+  if (!queue.resolve) return false;
+  const library = queue.library;
+  const { sources, answer } = await queue.resolve(download.title);
+  if (queue.library !== library || library !== log || !stillHeld(log, device, now)) return false;
+  if (sources === null || !completeAnswer(answer)) return false;
+  const viable = sources.filter((source) => !(source.cached === false && source.seeders === 0));
+  const tried = new Set([...download.tried, download.release.identity]);
+  const fresh = viable.filter((source) => !tried.has(source.identity));
+  // Prefer something not seen in the last cycle. If the catalogue is unchanged, begin another rotation.
+  const pool = fresh.length ? fresh : viable;
+  const chosen = queue.pick(pool, download.title.originalLanguage);
+  const at = stamp();
+  if (!chosen) {
+    return write(log, device, download, { exhausted: { value: { bool: true }, at } }, now);
+  }
+  const nextTried = fresh.length ? [...tried] : [];
+  const values: Record<string, Stamped<ConfigValue | null>> = {
+    release: {
+      value: releaseValue({
+        identity: chosen.identity,
+        label: chosen.label,
+        url: chosen.url,
+        sizeBytes: chosen.size,
+        cached: chosen.cached,
+      }),
+      at,
+    },
+    queuedAt: { value: { int: now }, at },
+    tried: { value: { strings: nextTried }, at },
+    candidates: { value: { int: viable.length }, at },
+    exhausted: { value: { bool: false }, at },
+    progress: { value: clockValue({ lastProgress: 0, progressAt: now }), at },
+    reported: { value: { bool: false }, at },
+    announced: { value: { bool: false }, at },
+    reannounced: { value: { bool: false }, at },
+    resumeAt: { value: null, at },
+  };
+  if (!(await write(log, device, download, values, now))) return false;
+  console.warn(`den: download ${download.content}: sources refreshed; trying ${chosen.label}`);
+  queue.clocks.delete(download.name);
+  if (queue.library === log && stillHeld(log, device, now))
+    await queue.add(download.name, chosen.url);
+  return true;
 }
 
 /** The release object without its temporary alternate. */
