@@ -30,6 +30,7 @@
 
   const params = new URLSearchParams(location.search);
   const populated = params.has('populated');
+  const many = Math.max(0, Math.min(500, Number(params.get('many')) || 0));
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
   let route = $state<Route>(
@@ -79,6 +80,10 @@
                 ...years,
               ]
             : []),
+          ...Array.from({ length: many }, (_, index) => {
+            const id = 3000 + index;
+            return updateProgress(blankTitle({ type: 'movie', id }, id), 0.5, 40, [id, 0, 'test']);
+          }),
         ]
       : [],
   );
@@ -151,7 +156,11 @@
     },
     revision: 0,
     settingsRevision: 0,
-    displays: [],
+    displays: Array.from({ length: many }, (_, index) => ({
+      type: 'movie' as const,
+      id: 3000 + index,
+      title: `Measured movie ${index + 1}`,
+    })),
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
