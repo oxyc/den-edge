@@ -55,6 +55,8 @@
     sizeBucket,
   } from '../lib/startupReport';
   import {
+    autoSwitchedNotice,
+    autoSwitchNotice,
     nothingFits,
     optionLabel,
     releaseAfterMeasure,
@@ -72,7 +74,11 @@
   import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
-  import { startupNotice, type Progress as StartupProgress } from '../lib/startupNotice';
+  import {
+    bufferingWhilePlaying,
+    startupNotice,
+    type Progress as StartupProgress,
+  } from '../lib/startupNotice';
   import {
     bytesBetween,
     DeliveryMeter,
@@ -103,6 +109,7 @@
     subtitleSourceOf,
     type CastFailReason,
     type CastStage,
+    type SwitchReason,
   } from '../lib/diagnosticsReport';
 
   let {
@@ -288,6 +295,19 @@
   /** Said when den-remux opened another release than the one picked; dismissed by the viewer. */
   let swapped = $state<string | null>(null);
   /**
+   * Said while a playing session moves to another release on its own (`switchAway`) and once it has: decode or
+   * delivery only, never the viewer's own pick from the list, which the picker itself already shows picking.
+   * Dismissed by the viewer, same as `swapped`.
+   */
+  let autoSwitch = $state<string | null>(null);
+  /**
+   * How many times this visit has moved to another release, and why the last one did — a closed
+   * `SwitchReason`, for den-edge's own outcome report (den-edge#275): never free text, so a visit that hopped
+   * releases like this is answerable from the log without guessing what the player did.
+   */
+  let switchCount = 0;
+  let lastSwitchReason: SwitchReason | undefined;
+  /**
    * Whether this release has already been asked for again with the browser's claims cut back.
    *
    * A browser can claim a codec, take the playlist, and then refuse the very first segment — an iPhone
@@ -363,6 +383,17 @@
    * (`segments`): the share of its demand that really comes, which `waitAt` is weighed with.
    */
   let delivered = { bytes: 0, demand: 0 };
+  /**
+   * Whether the element is waiting on data once a frame has already shown (den-edge#275): never a bare
+   * spinner here either, same as the startup line. Driven by the `<video>`'s own `waiting`/`playing` events in
+   * the session effect below, not by `weighDelivery`'s early-window switching, which this plays alongside.
+   */
+  let stalling = $state(false);
+  /** What `meter` and the buffer say while `stalling`, refreshed on a timer since a stall fires no `progress`
+   * or `timeupdate` of its own to read it from. */
+  let stallProgress = $state<{ bufferedSecs?: number; bitsPerSecond?: number } | undefined>(
+    undefined,
+  );
   /** The playing session's start, held until it can play through (`prebuffer`); null once it plays. */
   let hold: PrebufferHold | null = null;
   /** What the countdown over a held start says; null when there is none to show. */
@@ -410,6 +441,14 @@
       : !played && !startsIn && !reconnecting
         ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
         : null,
+  );
+  /**
+   * The live line over a mid-play stall (den-edge#275): `autoSwitch` already says its own piece once a switch
+   * is actually under way or has landed, so this only shows where a stall is just a stall — still buffering,
+   * or given up on a link nothing else fits either.
+   */
+  const bufferLine = $derived(
+    stalling && !autoSwitch ? bufferingWhilePlaying(stallProgress, deliveryGaveUp) : null,
   );
 
   const heading = $derived(
@@ -601,7 +640,8 @@
       leaveCast();
       return true;
     }
-    // A switch is silent: the viewer sees the picture pause, not a notice about which file plays now.
+    // A mid-film replacement names itself through `switchAway`'s own `autoSwitch`, not through this: `swapNotice`
+    // is for a pick that didn't open what was asked for, which `replacing` is not.
     if (!replacing)
       swapped = swapNotice(
         pick?.filename,
@@ -624,6 +664,10 @@
    * decoder that can't go on, narrowing what this browser claims; for a link that can't carry this one, one that fits
    * the rate it is really getting. Never a transcode, and the release playing now keeps playing until the other has
    * started — or for good, where none will do. True when it moved, and den-remux's refusal when it refused.
+   *
+   * Named as it happens (`autoSwitch`, den-edge#275): the viewer sees why, and — once `releases` has loaded
+   * enough to say — where this attempt stands among the releases on offer, rather than the picture just
+   * pausing with nothing said about it.
    */
   async function switchAway(
     reason: 'decode' | 'delivery',
@@ -632,6 +676,13 @@
     const current = session;
     if (!current || switching) return false;
     switching = true;
+    const fromLabel = current.release.label;
+    autoSwitch = autoSwitchNotice(
+      reason,
+      fromLabel,
+      excluded.length + 1,
+      releases.length || undefined,
+    );
     try {
       if (reason === 'decode') degraded = true;
       const at = video?.currentTime ?? remoteTime;
@@ -642,8 +693,19 @@
         switchAsk(reason, current.release.filename, excluded, rate),
         current,
       );
-      if (moved === true) excluded = [...excluded, current.release.filename];
-      else startAt = null;
+      if (moved === true) {
+        excluded = [...excluded, current.release.filename];
+        switchCount += 1;
+        lastSwitchReason = reason;
+        autoSwitch = autoSwitchedNotice(
+          reason,
+          fromLabel,
+          session?.release.label ?? 'another release',
+        );
+      } else {
+        startAt = null;
+        autoSwitch = null;
+      }
       return moved;
     } finally {
       switching = false;
@@ -823,6 +885,34 @@
       element.removeEventListener('progress', arriving);
     };
     element.addEventListener('loadeddata', cleanup, { once: true });
+    /**
+     * A stall once a frame has already shown (den-edge#275): `weighDelivery`'s early switch covers the first
+     * EARLY_WINDOW_SECS on its own `progress` events; this is what the viewer sees meanwhile, and what is left
+     * once that window has passed or nothing else fits. `stallTimer` refreshes `stallProgress` on its own
+     * clock since a stall, by definition, fires neither `progress` nor `timeupdate`.
+     */
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
+    const updateStallProgress = () => {
+      stallProgress = {
+        bufferedSecs: aheadIn(element.buffered, element.currentTime),
+        bitsPerSecond: meter.rate()?.bitsPerSecond,
+      };
+    };
+    const onStallWaiting = () => {
+      if (!played || element.seeking) return;
+      stalling = true;
+      updateStallProgress();
+      clearInterval(stallTimer);
+      stallTimer = setInterval(updateStallProgress, 500);
+    };
+    const onStallResume = () => {
+      stalling = false;
+      clearInterval(stallTimer);
+      stallTimer = undefined;
+      stallProgress = undefined;
+    };
+    element.addEventListener('waiting', onStallWaiting);
+    element.addEventListener('playing', onStallResume);
     // The real first frame (den-edge#234's step 0 and the owner's own correction: not `canplay`, which iOS
     // native HLS can fire tens of seconds late). `requestVideoFrameCallback` fires once a frame has actually
     // been presented; a browser without it (older Safari) falls back to `loadeddata`, as this did before.
@@ -889,6 +979,12 @@
       watcher = undefined;
       unsubscribe();
       clearInterval(watching);
+      clearInterval(stallTimer);
+      stallTimer = undefined;
+      stalling = false;
+      stallProgress = undefined;
+      element.removeEventListener('waiting', onStallWaiting);
+      element.removeEventListener('playing', onStallResume);
       connection.dispose();
       if (link === connection) link = undefined;
       reconnecting = false;
@@ -1581,6 +1677,8 @@
     degraded = false;
     excluded = [];
     chosenRelease = filename;
+    switchCount += 1;
+    lastSwitchReason = 'user';
     restart({ filename });
   }
 
@@ -1699,6 +1797,8 @@
         subtitleSwitched: subtitleSwitchedMidPlay,
         subtitleTurnedOff: subtitleTurnedOffMidPlay,
         subtitleLoadFailed: subtitleLoadFailedFlag,
+        switchCount: switchCount || undefined,
+        lastSwitchReason,
       });
     }
     if (castFunnel) {
@@ -1949,6 +2049,16 @@
           <span>{swapped}</span>
           <button onclick={() => (swapped = null)}>Dismiss</button>
         </p>
+      {/if}
+      {#if autoSwitch}
+        <p class="swap" role="status">
+          <span>{autoSwitch}</span>
+          <button onclick={() => (autoSwitch = null)}>Dismiss</button>
+        </p>
+      {:else if bufferLine}
+        <!-- Transient, unlike the banners above: it clears itself the moment playback resumes, so it carries
+             no Dismiss of its own. -->
+        <p class="swap" role="status"><span>{bufferLine}</span></p>
       {/if}
       {#if struggling}
         <p class="swap" role="status">

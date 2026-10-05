@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LARGE_RELEASE_BYTES, startupNotice } from './startupNotice';
+import { bufferingWhilePlaying, LARGE_RELEASE_BYTES, startupNotice } from './startupNotice';
 
 const SMALL = { label: '1080p • WEB-DL • 6 GB', size: 6 * 1024 ** 3 };
 const LARGE = { label: '4K • REMUX • 58 GB', size: 58 * 1024 ** 3 };
@@ -115,5 +115,30 @@ describe('startupNotice', () => {
   it('prefers the large-release line over an empty progress object with nothing in it yet', () => {
     const notice = startupNotice(5_000, 'starting', LARGE, undefined, {});
     expect(notice.text).toContain('large release');
+  });
+});
+
+describe('bufferingWhilePlaying', () => {
+  it('names both numbers once there are any, in the owner’s own wording', () => {
+    expect(
+      bufferingWhilePlaying({ bufferedSecs: 6, bitsPerSecond: 3.1 * 8 * 1024 ** 2 }, false),
+    ).toBe('Buffering — 6 s ahead, downloading at 3.1 MB/s');
+  });
+
+  it('says just "Buffering…" with nothing to measure yet', () => {
+    expect(bufferingWhilePlaying(undefined, false)).toBe('Buffering');
+  });
+
+  it('shows only the rate on native HLS before the first buffered sample lands, and vice versa', () => {
+    expect(bufferingWhilePlaying({ bitsPerSecond: 8 * 1024 ** 2 }, false)).toBe(
+      'Buffering — downloading at 1.0 MB/s',
+    );
+    expect(bufferingWhilePlaying({ bufferedSecs: 2 }, false)).toBe('Buffering — 2 s ahead');
+  });
+
+  it('says the source is slow once nothing else fits, rather than implying a switch is still coming', () => {
+    expect(bufferingWhilePlaying({ bufferedSecs: 0 }, true)).toBe(
+      'Buffering — 0 s ahead. The source is slow right now.',
+    );
   });
 });

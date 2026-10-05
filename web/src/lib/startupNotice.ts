@@ -99,6 +99,28 @@ function bufferingLine(label: string, progress: Progress | undefined): string | 
   return null;
 }
 
+/**
+ * The live line over a stall once a frame has already shown (den-edge#275): the same link data `weighDelivery`
+ * already measures — `meter`'s rate and the seconds buffered ahead of the play head — read here only to tell
+ * the viewer rather than to decide anything. Never a bare spinner, same as the startup line above it.
+ * `gaveUp` is true once no other release fit the link either, so the line says play carries on rather than
+ * implying a switch is still coming; a switch actually under way shows `autoSwitchNotice` instead, not this.
+ */
+export function bufferingWhilePlaying(
+  progress: { bufferedSecs?: number; bitsPerSecond?: number } | undefined,
+  gaveUp: boolean,
+): string {
+  const parts: string[] = [];
+  if (progress?.bufferedSecs !== undefined)
+    parts.push(`${Math.round(progress.bufferedSecs)} s ahead`);
+  if (progress?.bitsPerSecond) {
+    const rateMBps = progress.bitsPerSecond / 8 / 1024 ** 2;
+    parts.push(`downloading at ${rateMBps.toFixed(1)} MB/s`);
+  }
+  const detail = parts.length ? ` — ${parts.join(', ')}` : '';
+  return gaveUp ? `Buffering${detail}. The source is slow right now.` : `Buffering${detail}`;
+}
+
 export function startupNotice(
   elapsedMs: number,
   phase: Phase,

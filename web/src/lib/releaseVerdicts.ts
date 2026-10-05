@@ -26,6 +26,34 @@ export function swapNotice(
 }
 
 /**
+ * The line to show while a playing session moves to another release on its own (`Player.svelte`'s
+ * `switchAway`) — never the viewer's own pick from the list, which the picker itself already shows. `attempt`
+ * and `total`, where the release list has loaded enough to give them, say where this stands among the
+ * releases den-remux has offered, so a run of several silent hops reads as progress rather than as nothing
+ * happening.
+ */
+export function autoSwitchNotice(
+  reason: 'decode' | 'delivery',
+  fromLabel: string,
+  attempt: number,
+  total?: number,
+): string {
+  const why = reason === 'decode' ? 'couldn’t play here' : 'is too slow for this connection';
+  const count = total ? ` (${attempt} of ${total})` : '';
+  return `${fromLabel} ${why} — trying another release…${count}`;
+}
+
+/** What `autoSwitchNotice` becomes once the switch it named has landed on another release. */
+export function autoSwitchedNotice(
+  reason: 'decode' | 'delivery',
+  fromLabel: string,
+  toLabel: string,
+): string {
+  const why = reason === 'decode' ? 'couldn’t play here' : 'was too slow for this connection';
+  return `${fromLabel} ${why} — playing ${toLabel} instead.`;
+}
+
+/**
  * What the session restarted once the link is measured names, if anything: the release the viewer chose, and never
  * one den-remux picked before it knew the link. A named release is kept however far it is over the link, so naming
  * den-remux's own first pick would keep a 4K copy on a link that carries a quarter of it; named nothing, it picks again

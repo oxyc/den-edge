@@ -276,6 +276,14 @@ export type HlsFatalDetail =
 export type SubtitleSource = 'release' | 'den_subtitles' | 'unknown';
 
 /**
+ * Why, if at all, this visit moved to another release before it ended: the decoder refusing what played
+ * (`decode`), the link not carrying it (`delivery`), or the viewer's own pick from the release list (`user`).
+ * Absent on the report when none did. A closed set, never the releases themselves, so a visit like Fauda's own
+ * (den-edge#275) is answerable from the log without guessing which the player meant.
+ */
+export type SwitchReason = 'decode' | 'delivery' | 'user';
+
+/**
  * What a report can honestly say served the subtitle actually showing. den-remux decides, per rendition
  * language, whether the release's own track beats a den-subtitles candidate it was offered for the session —
  * and never says which won (`Session::subtitle_used` is den-remux's own, for its log line only) — so a
@@ -359,6 +367,10 @@ export interface PlaybackOutcomeReport extends IdentityFields {
   subtitleSwitched?: boolean;
   subtitleTurnedOff?: boolean;
   subtitleLoadFailed?: boolean;
+  /** How many times this visit moved to another release, by any `SwitchReason`; absent where it never did. */
+  switchCount?: number;
+  /** The last switch's own reason; absent alongside `switchCount` when there was none. */
+  lastSwitchReason?: SwitchReason;
 }
 
 /** `sendBeacon` first (`beacon`): a session's outcome is as likely to be sent from a page hiding or unloading as

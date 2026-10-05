@@ -526,6 +526,27 @@ impl HlsFatalDetail {
     }
 }
 
+/// Why, if at all, a visit moved to another release before it ended: the decoder refusing what played, the link
+/// not carrying it, or the viewer's own pick from the release list — never the releases themselves
+/// (`web/src/lib/diagnosticsReport.ts`'s `SwitchReason`).
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SwitchReason {
+    Decode,
+    Delivery,
+    User,
+}
+
+impl SwitchReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SwitchReason::Decode => "decode",
+            SwitchReason::Delivery => "delivery",
+            SwitchReason::User => "user",
+        }
+    }
+}
+
 /// Where the chosen subtitle came from: the release's own rendition, or den-subtitles' own search — never which
 /// file, which is not this report's to carry. `Unknown`: den-remux decides per language whether its own track
 /// beats a den-subtitles candidate it was offered, and never says which won, so a session that offered one
@@ -570,6 +591,10 @@ struct PlaybackOutcomeReport {
     subtitle_turned_off: bool,
     #[serde(default)]
     subtitle_load_failed: bool,
+    /// How many times this visit moved to another release, by any `SwitchReason`; absent where it never did.
+    switch_count: Option<u32>,
+    /// The last of those switches' own reason; absent alongside `switch_count` when there was none.
+    last_switch_reason: Option<SwitchReason>,
 }
 
 impl PlaybackOutcomeReport {
@@ -600,6 +625,12 @@ impl PlaybackOutcomeReport {
         }
         if self.subtitle_load_failed {
             parts.push("subLoadFailed:1".to_owned());
+        }
+        if let Some(count) = self.switch_count.filter(|c| *c > 0) {
+            parts.push(format!("switches:{}", count.min(1000)));
+        }
+        if let Some(reason) = &self.last_switch_reason {
+            parts.push(format!("switchReason:{}", reason.as_str()));
         }
         parts.join(",")
     }
@@ -833,6 +864,23 @@ mod tests {
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:error,secondsPlayed:1200,\
              hlsType:mediaError,hlsDetail:fragLoadError,subLang:pt-br,subSource:den_subtitles,subSwitched:1"
         );
+    }
+
+    #[test]
+    fn a_switch_mid_visit_names_its_count_and_last_reason() {
+        let mut body = outcome();
+        body["switchCount"] = serde_json::json!(3);
+        body["lastSwitchReason"] = serde_json::json!("delivery");
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        assert!(report.tag(true).contains("switches:3,switchReason:delivery"));
+    }
+
+    #[test]
+    fn a_zero_switch_count_is_left_out_like_an_absent_one() {
+        let mut body = outcome();
+        body["switchCount"] = serde_json::json!(0);
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        assert!(!report.tag(true).contains("switches:"));
     }
 
     #[test]
