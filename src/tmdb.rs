@@ -1163,7 +1163,7 @@ fn warm(state: &Arc<AppState>) {
 /// What a waiter finds after the caller ahead of it finished an exact (non-`Detail`) question.
 enum Reopened {
     Absent,
-    Fresh(crate::cache::JsonFile, Duration, Duration, SystemTime),
+    Fresh(Box<crate::cache::JsonFile>, Duration, Duration, SystemTime),
     StillMissing,
 }
 
@@ -1185,7 +1185,7 @@ async fn reopen_exact(file: &Path, path: &str, query: Option<&str>) -> Reopened 
     };
     match verdict(prepared.matches(ABSENT), age, fresh) {
         Cached::Absent => Reopened::Absent,
-        Cached::Fresh => Reopened::Fresh(prepared, fresh, age, modified),
+        Cached::Fresh => Reopened::Fresh(Box::new(prepared), fresh, age, modified),
         Cached::Refresh | Cached::Cold => Reopened::StillMissing,
     }
 }
@@ -1199,7 +1199,7 @@ fn reopened_answer(state: &AppState, reopened: Reopened, asked: &HeaderMap) -> O
         Reopened::Fresh(prepared, fresh, age, modified) => {
             state.metrics.provider_cache_access(Provider::Tmdb, CacheAccess::Fresh);
             Some(answer_prepared(
-                Prepared::File(prepared),
+                Prepared::File(*prepared),
                 &fresh_policy(fresh, fresh.saturating_sub(age)),
                 "hit",
                 modified,
