@@ -10,7 +10,12 @@ export interface TitleSource {
   label: string;
   cached?: boolean;
   seeders?: number;
+  /** The file this source actually plays — an episode's own size, never a season pack's (scout corrects
+   *  it once it has probed the resolved file). */
   size?: number;
+  /** The season pack this episode came from, present only when scout knows it differs meaningfully from
+   *  `size` — context for the size shown, never a number to rank or filter on. */
+  packSize?: number;
   badges: string[];
   languages: string[];
   probed: boolean;
@@ -59,6 +64,8 @@ export function parseSources(body: unknown, addon: Addon, routes: Routes): Title
         cached: typeof a.cached === 'boolean' ? a.cached : undefined,
         seeders: Number.isFinite(a.seeders) && a.seeders >= 0 ? a.seeders : undefined,
         size: Number.isFinite(a.sizeBytes) && a.sizeBytes > 0 ? a.sizeBytes : undefined,
+        packSize:
+          Number.isFinite(a.packSizeBytes) && a.packSizeBytes > 0 ? a.packSizeBytes : undefined,
         badges: [
           a.resolution === '2160p' ? '4K' : a.resolution,
           a.dolbyVision ? 'Dolby Vision' : '',

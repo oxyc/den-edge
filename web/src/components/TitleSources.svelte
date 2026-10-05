@@ -227,7 +227,11 @@
             <div class="source-copy">
               <p class="chips">
                 {#each source.badges as badge, i (i)}<span class="chip">{badge}</span>{/each}
-                {#if size(source.size)}<span class="chip quiet">{size(source.size)}</span>{/if}
+                {#if size(source.size)}<span class="chip quiet"
+                    >{size(source.size)}{#if source.packSize}<span class="pack">
+                        · from a {size(source.packSize)} pack</span
+                      >{/if}</span
+                  >{/if}
               </p>
               <strong>{source.filename}</strong>
               {#if source.probed && source.languages.length}<p class="languages">
@@ -375,6 +379,12 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Context, not the headline: the size chip already says what this release plays. Dropped first on a
+     narrow layout, where the chip row is the tightest on space. */
+  .pack {
+    opacity: 0.8;
+  }
+
   strong {
     overflow-wrap: anywhere;
     font-size: 14px;
@@ -452,6 +462,11 @@
       font-size: 14px;
       border-radius: 999px;
       padding-inline: 14px;
+    }
+
+    /* Narrow: the size chip alone, not the pack it came from. */
+    .pack {
+      display: none;
     }
   }
 </style>
