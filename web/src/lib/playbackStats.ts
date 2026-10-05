@@ -313,7 +313,7 @@ export function browserName(
   const hints = nav?.userAgentData;
   const brands = (hints?.brands ?? []).filter((b) => !/not.?a.?brand/i.test(b.brand));
   const brand = brands.find((b) => b.brand !== 'Chromium') ?? brands[0];
-  const os =
+  let os =
     hints?.platform ||
     (
       [
@@ -326,6 +326,15 @@ export function browserName(
       ] as const
     ).find(([pattern]) => pattern.test(ua))?.[1] ||
     'unknown OS';
+  // The device class a failure happened on, not just that it was "iOS": there is no client-hints platform
+  // version on WebKit, and a device/chip split (AV1, HEVC 10-bit, hardware decode) hides behind the same
+  // bare "iOS" otherwise. iOS names its version `iPhone OS 18_5` and iPadOS `CPU OS 18_5`, both before the
+  // `Mac OS X` they also say, so the major version is the first digits after ` OS `. A bare digit, never the
+  // UA string itself.
+  if (os === 'iOS') {
+    const major = / OS (\d+)[_.]/.exec(ua)?.[1];
+    if (major) os = `iOS ${major}`;
+  }
   let browser = brand ? `${brand.brand} ${brand.version}` : undefined;
   if (!browser) {
     const found = (
