@@ -342,7 +342,16 @@ describe('browserName', () => {
       ],
       [
         'Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1',
-        'Safari 26 / iOS',
+        'Safari 26 / iOS 26',
+      ],
+      [
+        'Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+        'Safari 17 / iOS 17',
+      ],
+      [
+        // No iOS version in the string at all: the bare OS name, not a guess.
+        'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0.7339.101 Mobile/15E148 Safari/604.1',
+        'Chrome 140 / iOS',
       ],
       [
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0',
