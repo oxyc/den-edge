@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  autoSubtitleLanguage,
   describeRelease,
   downmixLabel,
   endSession,
@@ -77,8 +78,9 @@ describe('wantedLanguages', () => {
   });
 
   /**
-   * The chosen language must come FIRST. den-remux marks the first rendition DEFAULT=YES, so whichever
-   * language leads here is the one a player that honours the default would bring up.
+   * The chosen language must come FIRST: not because a player brings up whichever rendition leads (none is
+   * DEFAULT=YES — see `autoSubtitleLanguage`), but because den-remux's own cap (`subs::plan`) fills from this
+   * list in order, so a language named late here is the one most likely to be the cap's casualty.
    */
   it('leads with the chosen language, then Settings’ shown list, then the browser’s', () => {
     expect(
@@ -93,6 +95,43 @@ describe('wantedLanguages', () => {
       wantedLanguages({ shownSubtitles: ['fi', 'sv', 'en', 'de', 'fr', 'es'] }, undefined, ['it'])
         .subtitleLanguages,
     ).toEqual(['fi', 'sv', 'en', 'de']);
+  });
+});
+
+describe('autoSubtitleLanguage', () => {
+  it('shows nothing when the audio is already in a language the browser names', () => {
+    expect(
+      autoSubtitleLanguage('heb', ['he-IL', 'en'], [{ language: 'he' }, { language: 'en' }]),
+    ).toBeNull();
+  });
+
+  it('picks the browser’s own language when a rendition offers it', () => {
+    expect(
+      autoSubtitleLanguage('he', ['sv-SE', 'sv'], [{ language: 'en' }, { language: 'sv' }]),
+    ).toBe('sv');
+  });
+
+  /**
+   * The Fauda S1E3 bug this was filed against: a guest's audio is Hebrew, their browser is Swedish, and the
+   * release's only rendition is English — den-remux always offers it (`subs::plan` guarantees it a place
+   * second only to the viewer's own first choice), and this is what makes a foreign film actually followable
+   * without the viewer ever opening Settings.
+   */
+  it('falls back to English when the browser’s own language has no rendition', () => {
+    expect(autoSubtitleLanguage('he', ['sv-SE', 'sv'], [{ language: 'en' }])).toBe('en');
+  });
+
+  it('shows nothing when neither the browser’s language nor English is offered', () => {
+    expect(autoSubtitleLanguage('he', ['sv-SE', 'sv'], [{ language: 'fr' }])).toBeNull();
+  });
+
+  it('compares an audio track’s own ISO 639-2 tag, not just a BCP-47 one', () => {
+    // A Matroska release tags its audio the long way (`heb`), never canonicalized before this page sees it.
+    expect(autoSubtitleLanguage('heb', ['he'], [{ language: 'en' }])).toBeNull();
+  });
+
+  it('treats an unknown audio language as foreign, never as already understood', () => {
+    expect(autoSubtitleLanguage(undefined, ['sv-SE', 'sv'], [{ language: 'en' }])).toBe('en');
   });
 });
 

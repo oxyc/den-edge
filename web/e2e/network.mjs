@@ -26,6 +26,11 @@ export async function routeTmdb(page, handler) {
 export async function guardNetwork(page, origin = E2E_ORIGIN) {
   // Page-specific fixture mocks take precedence over this context-level fallback.
   await page.context().route('**/*', (route) => {
+    // A browser-internal reference (WebKit's own native `<video controls>` generates a run of these for its
+    // scrubber's thumbnails), never a request this origin or any fixture answers: Node's URL parses blob:'s
+    // opaque path as the whole `blob:<origin>/<id>` string, which looks like neither `origin` nor one of the
+    // patterns below, and gets aborted as "unexpected" — so it is read as a string, before that parse.
+    if (route.request().url().startsWith('blob:')) return route.continue();
     const url = new URL(route.request().url());
     // The app asks this origin whether it serves atlas or reel itself, when the library lists neither as a
     // plugin — a guest lists nothing at all, and both have a same-origin fallback (findAtlas, findReel).
