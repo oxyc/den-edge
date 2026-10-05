@@ -389,7 +389,11 @@ function indexedStore(): Store | null {
           cursor.onsuccess = () => {
             const at = cursor.result;
             if (!at || dropped >= batch || (over <= 0 && (at.key as number) >= cutoff)) return;
-            at.delete();
+            // `openKeyCursor` deliberately avoids cloning the answer body, but its cursor is key-only and the
+            // IndexedDB spec forbids `IDBCursor.delete()` on it. Delete through the object store with the cursor's
+            // primary key instead; this stays key-only while working in Chromium, WebKit and standards-compliant
+            // implementations.
+            answers.delete(at.primaryKey);
             dropped++;
             over--;
             at.continue();
