@@ -16,12 +16,16 @@ void loadRelease();
 // den-edge's own request log sees nothing past the page load that reached it: an uncaught error or an unhandled
 // rejection anywhere in the app today just sits in the browser console, for nobody to read (den-edge#262).
 window.addEventListener('error', (event) => {
-  sendPageError(pageError('uncaught', moduleOf(event.error?.stack)));
+  sendPageError(pageError('uncaught', moduleOf(event.error?.stack), event.error));
 });
 window.addEventListener('unhandledrejection', (event) => {
   const reason: unknown = event.reason;
   sendPageError(
-    pageError('unhandled_rejection', moduleOf(reason instanceof Error ? reason.stack : undefined)),
+    pageError(
+      'unhandled_rejection',
+      moduleOf(reason instanceof Error ? reason.stack : undefined),
+      reason,
+    ),
   );
 });
 

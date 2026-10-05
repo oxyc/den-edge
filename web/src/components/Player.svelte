@@ -61,7 +61,13 @@
     swapNotice,
     unchangedNotice,
   } from '../lib/releaseVerdicts';
-  import { aheadIn, reportUrlOf, watchPlayback, type Watcher } from '../lib/playbackStats';
+  import {
+    aheadIn,
+    playedSecondsOf,
+    reportUrlOf,
+    watchPlayback,
+    type Watcher,
+  } from '../lib/playbackStats';
   import { Link, wasInterrupted } from '../lib/resumingLoader';
   import { stuckWatch } from '../lib/stuckWatch';
   import { countdownLabel, PrebufferHold } from '../lib/prebufferHold';
@@ -93,6 +99,7 @@
     reportableLanguage,
     sendCastReport,
     sendPlaybackOutcome,
+    subtitleSourceOf,
     type CastFailReason,
     type CastStage,
   } from '../lib/diagnosticsReport';
@@ -310,10 +317,22 @@
    * session to another copy.
    */
   let breaking: { session: Session; decode: boolean } | null = null;
-  /** Seconds of the playing session actually played, for `switchPolicy`'s early window, and where it last was;
-   * also this whole visit's `secondsPlayed`, for den-edge's own outcome report sent once at `finish()`. */
+  /**
+   * Seconds played on an earlier src this same `<video>` held, before the one playing now: a mid-film switch
+   * (`element.src = …`, or hls.js's `loadSource`/`attachMedia`) resets the element's own `played` ranges, so
+   * `begin()`'s `replacing` branch folds what they held into this before that happens. `totalPlayedSecs` adds
+   * the current src's own `played` on top — never a step counter driven by `timeupdate`, which iOS Safari's
+   * native HLS fires too coarsely to trust (see `playedSecondsOf`).
+   */
   let playedSecs = 0;
   let lastPosition: number | undefined;
+
+  /** `playedSecs` plus however much of the current src is played so far — the one number both `weighDelivery`
+   * and `finish()` report. */
+  function totalPlayedSecs(): number {
+    return playedSecs + (video ? playedSecondsOf(video.played) : 0);
+  }
+
   /** The last fatal error's code and, for an hls.js one, its type and detail — for den-edge's own outcome
    * report; parsed back from `broke()`'s own message rather than threaded through every path that calls it. */
   let lastFatal: { code?: number; hls?: ReturnType<typeof hlsFatalFromMessage> } | undefined;
@@ -538,8 +557,11 @@
     askedMaxBitrate = maxBitrate;
     played = false;
     // A switch keeps the early window it was made in: the time already played counts, or every switch would open
-    // another thirty seconds for the next.
-    if (!replacing) playedSecs = 0;
+    // another thirty seconds for the next. Folded in now, while `video` is still showing the session being
+    // replaced — the session effect below is about to reassign `element.src` (or hls.js's `loadSource` /
+    // `attachMedia`), which resets this same `<video>`'s own `played` ranges to nothing.
+    if (replacing) playedSecs += video ? playedSecondsOf(video.played) : 0;
+    else playedSecs = 0;
     lastPosition = undefined;
     meter = new DeliveryMeter();
     delivered = { bytes: 0, demand: 0 };
@@ -638,7 +660,7 @@
     const demand = scaleDemand(current.segments, delivered);
     const wait = waitAt(demand, total, element.currentTime, reach, live.bitsPerSecond);
     const signal = { kind: 'delivery' as const, wait, measuredMs: live.spanMs };
-    if (!shouldSwitch(signal, { playedSecs, shownFrame: played })) return;
+    if (!shouldSwitch(signal, { playedSecs: totalPlayedSecs(), shownFrame: played })) return;
     void switchAway('delivery', live.bitsPerSecond).then((moved) => {
       if (moved === true || session !== current) return;
       // This release plays on. Only where nothing fits the link as it is is the viewer told that is why it pauses; a
@@ -830,7 +852,10 @@
             {
               index: subtitleIndex,
               language: subtitleChoice ?? undefined,
-              source: current.subtitleSource,
+              source: subtitleSourceOf(
+                current.subtitleSource === 'den_subtitles',
+                subtitleChoice !== null,
+              ),
             },
           ),
         });
@@ -1475,11 +1500,8 @@
    */
   function tick() {
     const at = video?.currentTime ?? remoteTime;
-    // Playing time, for the early window a switch is judged in: a playing player's forward steps, not its seeks.
-    if (video && !video.paused && !video.seeking && lastPosition !== undefined) {
-      const step = at - lastPosition;
-      if (step > 0 && step < 1) playedSecs += step;
-    }
+    // Where it last was, for `carryPosition`'s fallback once the element is gone. How much actually played is
+    // `totalPlayedSecs`, from the element's own `played` ranges — never summed here.
     lastPosition = at;
     weighDelivery();
     warmNext(at);
@@ -1645,9 +1667,10 @@
       {
         index: subtitleIndex,
         language: subtitleChoice ?? undefined,
-        // `lastSubtitleSource` is only ever `den_subtitles`; a language showing with no such source is this
-        // page's own embedded rendition.
-        source: lastSubtitleSource ?? (subtitleLanguage ? 'release' : undefined),
+        source: subtitleSourceOf(
+          lastSubtitleSource === 'den_subtitles',
+          subtitleLanguage !== undefined,
+        ),
       },
     );
     if (sessionRoute !== undefined) {
@@ -1660,7 +1683,7 @@
         errorCode: lastFatal?.code,
         hlsFatalType: lastFatal?.hls?.type,
         hlsFatalDetail: lastFatal?.hls?.detail,
-        secondsPlayed: Math.round(playedSecs),
+        secondsPlayed: Math.round(totalPlayedSecs()),
         ...identity,
         subtitleSwitched: subtitleSwitchedMidPlay,
         subtitleTurnedOff: subtitleTurnedOffMidPlay,

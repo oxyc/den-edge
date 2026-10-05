@@ -102,6 +102,19 @@ export function aheadIn(ranges: TimeRanges, time: number): number {
   return 0;
 }
 
+/**
+ * Seconds of `ranges` played in total — a media element's own `played`, summed. The browser keeps this itself,
+ * from however the picture actually moved, so it stays correct where a `timeupdate`-driven step counter would
+ * not: iOS Safari's native HLS player fires `timeupdate` in coarse, uneven batches (the same batching
+ * `FROZEN_SECS`'s comment notes for `totalVideoFrames`), so a counter that only trusts a step under a fixed
+ * ceiling can land on zero across a whole session that in fact played through.
+ */
+export function playedSecondsOf(ranges: TimeRanges): number {
+  let total = 0;
+  for (let i = 0; i < ranges.length; i++) total += ranges.end(i) - ranges.start(i);
+  return total;
+}
+
 /** The counts behind a report, fed by `watchPlayback`. */
 export class PlaybackRecorder {
   buffers: PlaybackStats['buffers'] = 'combined';

@@ -99,26 +99,75 @@ const MODULE_FILES: readonly Module[] = [
 ];
 
 /**
- * The stack's first app-source frame's file name, against a fixed allowlist — never the frame itself, which may
- * carry a full path or a query string a production build appends for cache-busting. A built bundle's chunk
- * names are usually hashed and so match nothing here, which is fine: `other` is as true an answer as this method
- * can give then, and still never free text.
+ * The stack's first app-source frame's file name, exactly as it was written there — never the frame itself,
+ * which may carry a full path or a query string a production build appends for cache-busting. `moduleOf` lower-
+ * cases this against a fixed allowlist; `chunkOf` keeps the case, for the built chunk's own name.
  */
-export function moduleOf(stack: string | undefined): Module {
-  const frame = stack
+function firstFrameFile(stack: string | undefined): string | undefined {
+  return stack
     ?.split('\n')
     .map((line) => /([A-Za-z0-9_-]+)\.(?:ts|svelte|js)(?:[:?]|$)/.exec(line)?.[1])
     .find((name): name is string => name !== undefined);
-  const name = frame?.toLowerCase();
+}
+
+/**
+ * The stack's first app-source frame's file name, against a fixed allowlist. A built bundle's chunk names are
+ * usually hashed and so match nothing here, which is fine: `other` is as true an answer as this method can give
+ * then, and still never free text.
+ */
+export function moduleOf(stack: string | undefined): Module {
+  const name = firstFrameFile(stack)?.toLowerCase();
   if (name === 'app' || name === 'main') return 'app';
   if (name === 'routepage' || name === 'navigation') return 'router';
   const found = MODULE_FILES.find((m) => name === m || (m === 'row' && name?.endsWith('row')));
   return found ?? 'other';
 }
 
+/**
+ * The built chunk this stack's first app-source frame names, once a production build's content hash is
+ * stripped (`Library-a1b2c3d4.js` → `Library`) — one of the app's own page or component chunks, which this
+ * build names in PascalCase; a vendor or runtime chunk's own lowercase name fails the check and is left out,
+ * same as any frame whose name doesn't fit at all. Never the frame's full path, a query string, or free text:
+ * the shape check both is this method's allowlist and bounds its length.
+ */
+export function chunkOf(stack: string | undefined): string | undefined {
+  const frame = firstFrameFile(stack);
+  if (!frame) return undefined;
+  const base = frame.replace(/-[0-9a-fA-F]{6,12}$/, '');
+  return /^[A-Z][A-Za-z0-9]{0,31}$/.test(base) ? base : undefined;
+}
+
+/** A closed read of `error`'s real constructor — never its (freely settable) `message` or `.name` string, and
+ * never a URL. `DOMException` covers every one of its named variants but `NetworkError`, called out on its own
+ * as the one a fetch or a media element's own network failure actually throws. */
+export type ErrorKind =
+  | 'TypeError'
+  | 'ReferenceError'
+  | 'RangeError'
+  | 'SyntaxError'
+  | 'DOMException'
+  | 'NetworkError'
+  | 'other';
+
+export function errorKindOf(error: unknown): ErrorKind {
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
+    return error.name === 'NetworkError' ? 'NetworkError' : 'DOMException';
+  }
+  if (error instanceof TypeError) return 'TypeError';
+  if (error instanceof ReferenceError) return 'ReferenceError';
+  if (error instanceof RangeError) return 'RangeError';
+  if (error instanceof SyntaxError) return 'SyntaxError';
+  return 'other';
+}
+
 export interface PageErrorReport {
   kind: PageErrorKind;
   module: Module;
+  /** The error's real constructor (`errorKindOf`); absent for a report with no caught error to read one from
+   * (`render_stall`, `chunk_load`). */
+  errorKind?: ErrorKind;
+  /** The built chunk the error's first stack frame names (`chunkOf`); absent where none matched. */
+  chunk?: string;
   /** Absent when `loadRelease` hasn't resolved yet. */
   release?: string;
   route: RouteKind;
@@ -128,9 +177,18 @@ export function sendPageError(report: PageErrorReport, fetchImpl: typeof fetch =
   post('/playback/page-error', report, fetchImpl);
 }
 
-/** A `PageErrorReport` for `kind`, filling in the release and route this call stands at. */
-export function pageError(kind: PageErrorKind, module: Module): PageErrorReport {
-  return { kind, module, release: currentRelease(), route: currentRouteKind() };
+/** A `PageErrorReport` for `kind`, filling in the release and route this call stands at, and — from `error`,
+ * where the caller caught one — its real constructor and the chunk its first stack frame names. */
+export function pageError(kind: PageErrorKind, module: Module, error?: unknown): PageErrorReport {
+  const stack = error instanceof Error ? error.stack : undefined;
+  return {
+    kind,
+    module,
+    errorKind: error !== undefined ? errorKindOf(error) : undefined,
+    chunk: chunkOf(stack),
+    release: currentRelease(),
+    route: currentRouteKind(),
+  };
 }
 
 // ---- Identity: what was played (`LOG_IDENTITY`, den-edge's own switch — never asked here) ----
@@ -215,7 +273,23 @@ export type HlsFatalDetail =
   | 'levelLoadError'
   | 'keyLoadError'
   | 'other';
-export type SubtitleSource = 'release' | 'den_subtitles';
+export type SubtitleSource = 'release' | 'den_subtitles' | 'unknown';
+
+/**
+ * What a report can honestly say served the subtitle actually showing. den-remux decides, per rendition
+ * language, whether the release's own track beats a den-subtitles candidate it was offered for the session —
+ * and never says which won (`Session::subtitle_used` is den-remux's own, for its log line only) — so a
+ * session that offered a candidate cannot be told apart, from here, from one that used it. `release` only
+ * when no den-subtitles candidate was offered this session at all, the one case with just one possible
+ * source; `unknown` when one was offered; absent when no subtitle is showing.
+ */
+export function subtitleSourceOf(
+  candidateOffered: boolean,
+  shown: boolean,
+): SubtitleSource | undefined {
+  if (!shown) return undefined;
+  return candidateOffered ? 'unknown' : 'release';
+}
 
 const HLS_FATAL_DETAILS: readonly HlsFatalDetail[] = [
   'bufferStalledError',

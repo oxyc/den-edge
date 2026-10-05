@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  chunkOf,
   currentRelease,
+  errorKindOf,
   hlsFatalDetail,
   hlsFatalFromMessage,
   hlsFatalTypeOf,
   identityOf,
   loadRelease,
   moduleOf,
+  pageError,
   reportableLanguage,
   routeKindOf,
   sendCastReport,
   sendPageError,
   sendPlaybackOutcome,
+  subtitleSourceOf,
   type CastReport,
   type PageErrorReport,
   type PlaybackOutcomeReport,
@@ -42,6 +46,19 @@ describe('moduleOf', () => {
   it('falls back to other for a hashed production chunk or no stack at all', () => {
     expect(moduleOf('Error: boom\n    at x (index-abc123.js:1:1)')).toBe('other');
     expect(moduleOf(undefined)).toBe('other');
+  });
+});
+
+describe('chunkOf', () => {
+  it('names the built chunk, its content hash stripped', () => {
+    expect(chunkOf('Error: boom\n    at x (Library-a1b2c3d4.js:1:1)')).toBe('Library');
+    expect(chunkOf('Error: boom\n    at x (Home.js:1:1)')).toBe('Home');
+  });
+
+  it('leaves out a vendor or runtime chunk’s own lowercase name, or no stack at all', () => {
+    expect(chunkOf('Error: boom\n    at x (index-abc123.js:1:1)')).toBeUndefined();
+    expect(chunkOf('Error: boom\n    at x (vendor-deadbeef.js:1:1)')).toBeUndefined();
+    expect(chunkOf(undefined)).toBeUndefined();
   });
 });
 
@@ -107,6 +124,45 @@ describe('loadRelease / currentRelease', () => {
   it('leaves the release unset, rather than throwing, when the re-fetch fails', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
     await expect(loadRelease(fetchImpl)).resolves.toBeUndefined();
+  });
+});
+
+describe('errorKindOf', () => {
+  it('reads a built-in error’s real constructor', () => {
+    expect(errorKindOf(new TypeError('x'))).toBe('TypeError');
+    expect(errorKindOf(new ReferenceError('x'))).toBe('ReferenceError');
+    expect(errorKindOf(new RangeError('x'))).toBe('RangeError');
+    expect(errorKindOf(new SyntaxError('x'))).toBe('SyntaxError');
+  });
+
+  it('tells a NetworkError DOMException apart from any other named one', () => {
+    expect(errorKindOf(new DOMException('x', 'NetworkError'))).toBe('NetworkError');
+    expect(errorKindOf(new DOMException('x', 'AbortError'))).toBe('DOMException');
+  });
+
+  it('is other for anything else, never the (freely settable) .name or .message', () => {
+    expect(errorKindOf(new Error('x'))).toBe('other');
+    const spoofed = new Error('<script>evil</script>');
+    spoofed.name = 'TypeError';
+    expect(errorKindOf(spoofed)).toBe('other');
+    expect(errorKindOf('not an error')).toBe('other');
+    expect(errorKindOf(undefined)).toBe('other');
+  });
+});
+
+describe('pageError', () => {
+  it('leaves out errorKind and chunk with no error to read them from', () => {
+    const report = pageError('render_stall', 'app');
+    expect(report.errorKind).toBeUndefined();
+    expect(report.chunk).toBeUndefined();
+  });
+
+  it('carries the caught error’s real kind and the chunk its stack names', () => {
+    const error = new TypeError('x');
+    error.stack = 'TypeError: x\n    at render (Library-a1b2c3d4.js:9:1)';
+    const report = pageError('uncaught', moduleOf(error.stack), error);
+    expect(report.errorKind).toBe('TypeError');
+    expect(report.chunk).toBe('Library');
   });
 });
 
@@ -189,6 +245,21 @@ describe('identityOf', () => {
     expect(noMatch.subtitleIndex).toBeUndefined();
     expect(noMatch.subtitleLanguage).toBeUndefined();
     expect(noMatch.subtitleSource).toBeUndefined();
+  });
+});
+
+describe('subtitleSourceOf', () => {
+  it('says release only when no den-subtitles candidate was ever offered', () => {
+    expect(subtitleSourceOf(false, true)).toBe('release');
+  });
+
+  it('cannot tell release and den-subtitles apart once a candidate was offered — unknown, not a guess', () => {
+    expect(subtitleSourceOf(true, true)).toBe('unknown');
+  });
+
+  it('names no source for a session with nothing showing, candidate or not', () => {
+    expect(subtitleSourceOf(false, false)).toBeUndefined();
+    expect(subtitleSourceOf(true, false)).toBeUndefined();
   });
 });
 
