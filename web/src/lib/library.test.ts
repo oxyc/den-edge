@@ -2,15 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
+  ContinueProjector,
   continueWatching,
   contentWatched,
   emptyLibrary,
+  nameContinueCandidates,
   standings,
   titleCaption,
   watchlist,
   watchlistSlides,
+  withDisplay,
   type Library,
 } from './library';
+import { syncPolicy } from './syncCore';
 
 describe('poster captions', () => {
   const title = { type: 'movie' as const, id: 1, title: 'One', year: 2020 };
@@ -215,6 +219,82 @@ describe('folding episode rows in', () => {
 });
 
 describe("the TV's rows", () => {
+  it('keeps per-series policy decisions across late display and unrelated shape batches', () => {
+    const base: Library = {
+      records: [],
+      marks: [
+        { ...mark(1, 1, 2, 0.5, 1000), title: '' },
+        { ...mark(2, 1, 3, 0.6, 900), title: '' },
+      ],
+      flags: new Map(),
+      shapes: new Map([
+        ['tv:1', { counts: new Map([[1, 8]]) }],
+        ['tv:2', { counts: new Map([[1, 8]]) }],
+      ]),
+      dismissed: new Map(),
+    };
+    let decisions = 0;
+    const projector = new ContinueProjector((request) => {
+      decisions++;
+      return syncPolicy(request);
+    });
+
+    const candidates = projector.project(base);
+    expect(decisions).toBe(2);
+    expect(nameContinueCandidates(candidates, withDisplay(base, []))).toEqual([]);
+    expect(
+      nameContinueCandidates(
+        candidates,
+        withDisplay(base, [{ type: 'tv', id: 1, title: 'One' }]),
+      ).map((entry) => entry.title.title),
+    ).toEqual(['One']);
+    expect(decisions, 'display fields never ask policy again').toBe(2);
+
+    const unrelatedShape = {
+      ...base,
+      shapes: new Map([...base.shapes, ['tv:99', { counts: new Map([[1, 12]]) }]]),
+    };
+    projector.project(unrelatedShape);
+    expect(decisions, 'an unrelated shape changes no series input').toBe(2);
+
+    const changedShapes = new Map(base.shapes);
+    changedShapes.set('tv:1', { counts: new Map([[1, 9]]) });
+    const shapeChanged = { ...base, shapes: changedShapes };
+    projector.project(shapeChanged);
+    expect(decisions, 'only the series whose shape changed is decided again').toBe(3);
+
+    const changedMarks = [...base.marks];
+    changedMarks[1] = { ...changedMarks[1]!, fraction: 0.7 };
+    const markChanged = { ...shapeChanged, marks: changedMarks };
+    projector.project(markChanged);
+    expect(decisions, 'only the series whose live position changed is decided again').toBe(4);
+
+    const secondsChanged = [...changedMarks];
+    secondsChanged[1] = { ...secondsChanged[1]!, seconds: 70 };
+    const withSeconds = projector.project({ ...markChanged, marks: secondsChanged });
+    expect(decisions, "seconds change the card, not den-core's episode decision").toBe(4);
+    expect(withSeconds.find((entry) => entry.ref.id === 2)?.seconds).toBe(70);
+  });
+
+  it('bounds projected decisions to the series that remain in the library', () => {
+    let decisions = 0;
+    const projector = new ContinueProjector((request) => {
+      decisions++;
+      return syncPolicy(request);
+    });
+    const two: Library = {
+      records: [],
+      marks: [mark(1, 1, 2, 0.5, 1000), mark(2, 1, 3, 0.6, 900)],
+      flags: new Map(),
+      shapes: new Map(),
+      dismissed: new Map(),
+    };
+    projector.project(two);
+    projector.project({ ...two, marks: [two.marks[0]!] });
+    projector.project(two);
+    expect(decisions, 'a removed series is evicted and decided if it returns').toBe(3);
+  });
+
   it('lists the watchlist newest first, without deleted titles', () => {
     expect(watchlist(library).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:11', 'movie:10']);
     expect(watchlist(library)[0]).toMatchObject({

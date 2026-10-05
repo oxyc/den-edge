@@ -44,10 +44,11 @@
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
     applyLog,
-    continueWatching,
+    ContinueProjector,
     emptyLibrary,
     episodeAfter,
     isAired,
+    nameContinueCandidates,
     standings,
     titleKey,
     untitled,
@@ -221,6 +222,18 @@
   const library = $derived(
     applied && { ...withDisplay(applied, session.displays), shapes: session.shapes },
   );
+  /**
+   * TMDB names arrive in small batches. They change the cards, but not den-core's answer about which episode
+   * continues a series. Keep those policy decisions across display-only flushes and invalidate each series only
+   * when its marks, shape, dismissal or watched state changes.
+   */
+  const continueProjector = untrack(() => new ContinueProjector());
+  const continueCandidates = $derived(
+    applied ? continueProjector.project({ ...applied, shapes: session.shapes }) : [],
+  );
+  const continueEntries = $derived(
+    library ? nameContinueCandidates(continueCandidates, library) : [],
+  );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() => libraryStandings.set(applied ? standings(applied) : new Map()));
@@ -231,7 +244,6 @@
    * while something is playing, and meanwhile the library is pulled faster, so a pause stops it soon.
    */
   let now = $state(Date.now());
-  const continueEntries = $derived(library ? continueWatching(library) : []);
   const playingAnywhere = $derived(
     continueEntries.some((entry) => livePosition(entry, now) !== undefined),
   );
@@ -583,9 +595,7 @@
             return;
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
-            const up =
-              library &&
-              continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode;
+            const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
             playing = { title, ...(up ?? { season: 1, episode: 1 }) };
           } else {
             playing = { title, season, episode, filename };
@@ -615,8 +625,8 @@
     },
     rowOf,
     resumeOf: (title) =>
-      title.type === 'tv' && library
-        ? continueWatching(library).find((e) => titleKey(e.title) === titleKey(title))?.episode
+      title.type === 'tv'
+        ? continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode
         : undefined,
     toggleWatchlist: (title, on) => {
       void act(title, on ? addToWatchlist : removeFromLibrary).then((ok) =>
@@ -1388,7 +1398,7 @@
       />
     {/if}
     <WatchlistScreen.current
-      resume={continueWatching(library)}
+      resume={continueEntries}
       saved={watchlist(library)}
       {history}
       year={watchedYear}
@@ -1402,9 +1412,7 @@
     />
   {/if}
 {:else}
-  {@const resume = library
-    ? continueWatching(library).filter((e) => !facet || e.title.type === facet)
-    : []}
+  {@const resume = continueEntries.filter((e) => !facet || e.title.type === facet)}
   {@const saved = library ? watchlist(library).filter((t) => !facet || t.type === facet) : []}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
