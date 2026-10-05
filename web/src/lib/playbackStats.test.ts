@@ -6,6 +6,7 @@ import {
   MAX_STALLS,
   percentile,
   PlaybackRecorder,
+  playedSecondsOf,
   reportBody,
   ReportSchedule,
   reportUrlOf,
@@ -97,6 +98,13 @@ describe('aheadIn', () => {
     expect(aheadIn(buffered, 4)).toBe(6);
     expect(aheadIn(buffered, 11), 'in the hole between them').toBe(0);
     expect(aheadIn(buffered, 11.92), 'just short of a range counts as in it').toBe(18.1);
+  });
+});
+
+describe('playedSecondsOf', () => {
+  it('sums every played range', () => {
+    expect(playedSecondsOf(ranges([0, 10], [12, 30]))).toBe(10 + 18);
+    expect(playedSecondsOf(ranges())).toBe(0);
   });
 });
 

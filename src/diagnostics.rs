@@ -283,6 +283,66 @@ impl Module {
     }
 }
 
+/// The error's real constructor (`web/src/lib/diagnosticsReport.ts`'s `errorKindOf`), from a closed allowlist —
+/// never its `message` or its (freely settable) `.name`, and never a URL. `DomException` covers every one of a
+/// `DOMException`'s named variants but `NetworkError`, named on its own as the one a fetch or a media element's
+/// own network failure actually throws.
+#[derive(Deserialize)]
+enum ThrownErrorKind {
+    #[serde(rename = "TypeError")]
+    TypeError,
+    #[serde(rename = "ReferenceError")]
+    ReferenceError,
+    #[serde(rename = "RangeError")]
+    RangeError,
+    #[serde(rename = "SyntaxError")]
+    SyntaxError,
+    #[serde(rename = "DOMException")]
+    DomException,
+    #[serde(rename = "NetworkError")]
+    NetworkError,
+    #[serde(rename = "other")]
+    Other,
+}
+
+impl ThrownErrorKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ThrownErrorKind::TypeError => "TypeError",
+            ThrownErrorKind::ReferenceError => "ReferenceError",
+            ThrownErrorKind::RangeError => "RangeError",
+            ThrownErrorKind::SyntaxError => "SyntaxError",
+            ThrownErrorKind::DomException => "DOMException",
+            ThrownErrorKind::NetworkError => "NetworkError",
+            ThrownErrorKind::Other => "other",
+        }
+    }
+}
+
+/// A built chunk's base name (`web/src/lib/diagnosticsReport.ts`'s `chunkOf`): PascalCase, letters and digits
+/// only, capped well past any real chunk's name — never the frame it came from, which may carry a path or a
+/// query string a production build appends for cache-busting.
+const MAX_CHUNK_LEN: usize = 32;
+
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+struct Chunk(String);
+
+impl TryFrom<String> for Chunk {
+    type Error = &'static str;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        let ok = !s.is_empty()
+            && s.len() <= MAX_CHUNK_LEN
+            && s.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+            && s.bytes().all(|b| b.is_ascii_alphanumeric());
+        if ok {
+            Ok(Chunk(s))
+        } else {
+            Err("invalid_chunk")
+        }
+    }
+}
+
 /// Which kind of page this was, never the page itself: a title's id or a search's query must not reach the log.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -309,6 +369,10 @@ impl PageRoute {
 struct PageErrorReport {
     kind: ErrorKind,
     module: Module,
+    /// Absent for a report with no caught error to read one from (`render_stall`, `chunk_load`).
+    error_kind: Option<ThrownErrorKind>,
+    /// Absent where the error's first stack frame named no app chunk (`chunkOf`).
+    chunk: Option<Chunk>,
     /// Absent when the page's own re-fetch of its release (`diagnosticsReport.ts`'s `loadRelease`) hadn't
     /// resolved yet — an error in the first moment of a load — rather than a report that waits for it.
     release: Option<Release>,
@@ -318,6 +382,12 @@ struct PageErrorReport {
 impl PageErrorReport {
     fn tag(&self) -> String {
         let mut tag = format!("kind:{},module:{}", self.kind.as_str(), self.module.as_str());
+        if let Some(error_kind) = &self.error_kind {
+            tag.push_str(&format!(",errorKind:{}", error_kind.as_str()));
+        }
+        if let Some(chunk) = &self.chunk {
+            tag.push_str(&format!(",chunk:{}", chunk.0));
+        }
         if let Some(release) = &self.release {
             tag.push_str(&format!(",release:{}", release.0));
         }
@@ -457,12 +527,16 @@ impl HlsFatalDetail {
 }
 
 /// Where the chosen subtitle came from: the release's own rendition, or den-subtitles' own search — never which
-/// file, which is not this report's to carry.
+/// file, which is not this report's to carry. `Unknown`: den-remux decides per language whether its own track
+/// beats a den-subtitles candidate it was offered, and never says which won, so a session that offered one
+/// cannot be told apart from a session that used it — the client sends `release` only when no den-subtitles
+/// candidate was offered this session at all (the only source then possible), `unknown` otherwise.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SubtitleSource {
     Release,
     DenSubtitles,
+    Unknown,
 }
 
 impl SubtitleSource {
@@ -470,6 +544,7 @@ impl SubtitleSource {
         match self {
             SubtitleSource::Release => "release",
             SubtitleSource::DenSubtitles => "den_subtitles",
+            SubtitleSource::Unknown => "unknown",
         }
     }
 }
@@ -660,6 +735,33 @@ mod tests {
     }
 
     #[test]
+    fn page_error_carries_the_thrown_error_s_real_kind_and_the_chunk_it_named() {
+        let report: PageErrorReport = serde_json::from_value(serde_json::json!({
+            "kind": "uncaught", "module": "other", "errorKind": "TypeError", "chunk": "Library",
+            "route": "home",
+        }))
+        .unwrap();
+        assert_eq!(report.tag(), "kind:uncaught,module:other,errorKind:TypeError,chunk:Library,route:home");
+    }
+
+    #[test]
+    fn a_network_error_is_told_apart_from_any_other_dom_exception() {
+        let report: PageErrorReport = serde_json::from_value(serde_json::json!({
+            "kind": "uncaught", "module": "other", "errorKind": "NetworkError", "route": "home",
+        }))
+        .unwrap();
+        assert!(report.tag().contains("errorKind:NetworkError"));
+    }
+
+    #[test]
+    fn a_chunk_name_outside_the_shape_does_not_parse() {
+        let bad = serde_json::json!({
+            "kind": "uncaught", "module": "other", "chunk": "../evil", "route": "home",
+        });
+        assert!(serde_json::from_value::<PageErrorReport>(bad).is_err());
+    }
+
+    #[test]
     fn a_release_outside_the_allowed_charset_does_not_parse() {
         let bad = serde_json::json!({
             "kind": "uncaught", "module": "app", "release": "deadbeef (patched)", "route": "home",
@@ -731,6 +833,15 @@ mod tests {
             "engine:hls.js,route:lan,stalls:3,stalledMs:4500,end:error,secondsPlayed:1200,\
              hlsType:mediaError,hlsDetail:fragLoadError,subLang:pt-br,subSource:den_subtitles,subSwitched:1"
         );
+    }
+
+    #[test]
+    fn an_unresolved_subtitle_source_logs_as_unknown() {
+        let mut body = outcome();
+        body["subtitleLanguage"] = serde_json::json!("pt-br");
+        body["subtitleSource"] = serde_json::json!("unknown");
+        let report: PlaybackOutcomeReport = serde_json::from_value(body).unwrap();
+        assert!(report.tag(true).contains("subSource:unknown"));
     }
 
     #[test]
