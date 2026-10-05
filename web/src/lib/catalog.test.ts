@@ -494,7 +494,7 @@ describe('rows atlas’s filter answers', () => {
         async (ref) => {
           asked.push(ref.id);
           if (ref.id === 0) throw new Error('one title failed');
-          return { ...ref, posterPath: `/${ref.id}.jpg` };
+          return { ...ref, title: `Drawn ${ref.id}`, posterPath: `/${ref.id}.jpg` };
         },
       );
       const loaded = await row.load(1);
