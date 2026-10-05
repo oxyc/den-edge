@@ -517,13 +517,15 @@ export function wantedLanguages(
 ): Pick<Want, 'audio' | 'subtitleLanguages'> {
   const base = (tag: string) => tag.split('-')[0]!.toLowerCase();
   const first = prefs.audio ?? original;
-  // The preferred language leads, because den-remux marks the FIRST rendition DEFAULT=YES — so the one the
-  // viewer chose in Settings is the one that comes up without asking.
+  // The preferred language leads so it is first among what den-remux offers (`subs::plan` guarantees it, and
+  // English right behind it, a place) — but no rendition ever comes up unasked: every one of them is
+  // DEFAULT=NO, and it is `autoSubtitleLanguage`, not this list's order, that decides what shows without the
+  // viewer choosing.
   //
-  // Asking for more than one is what gives the player a picker at all: a single rendition marked default is
-  // subtitles forced on with nothing to switch to and no Off. And languages are asked for even when the
-  // subtitle setting is unset, or "no preferred language" would keep meaning "no subtitles offered", which is
-  // not the same thing and is not what the setting says.
+  // Asking for more than one is what gives the player a picker at all: a single rendition would be a choice
+  // with nothing to switch to and no Off. And languages are asked for even when the subtitle setting is unset,
+  // or "no preferred language" would keep meaning "no subtitles offered", which is not the same thing and is
+  // not what the setting says.
   const wanted = [
     ...(prefs.subtitle ? [prefs.subtitle] : []),
     ...(prefs.shownSubtitles ?? []),
@@ -536,6 +538,102 @@ export function wantedLanguages(
       MAX_SUBTITLE_LANGUAGES,
     ),
   };
+}
+
+/**
+ * ISO 639-2/B and 639-2/T codes a release may tag a track with, to their ISO 639-1 equivalent: a subtitle
+ * rendition's own `language` is already ISO 639-1 (den-remux's `subs::plan` canonicalizes it there before this
+ * page ever sees it), but the audio track actually playing is reported as the file tagged it
+ * (`Session.audioTracks[].language`), which a Matroska release names the long way as often as the short.
+ * Mirrors den-remux's own `lang::canonical` table just far enough to compare the two.
+ */
+const ISO_639_2: Readonly<Record<string, string>> = {
+  eng: 'en',
+  fin: 'fi',
+  swe: 'sv',
+  nor: 'no',
+  nob: 'no',
+  nno: 'no',
+  dan: 'da',
+  ice: 'is',
+  isl: 'is',
+  ger: 'de',
+  deu: 'de',
+  fre: 'fr',
+  fra: 'fr',
+  spa: 'es',
+  ita: 'it',
+  por: 'pt',
+  dut: 'nl',
+  nld: 'nl',
+  pol: 'pl',
+  cze: 'cs',
+  ces: 'cs',
+  slo: 'sk',
+  slk: 'sk',
+  hun: 'hu',
+  rum: 'ro',
+  ron: 'ro',
+  bul: 'bg',
+  hrv: 'hr',
+  srp: 'sr',
+  slv: 'sl',
+  gre: 'el',
+  ell: 'el',
+  tur: 'tr',
+  rus: 'ru',
+  ukr: 'uk',
+  est: 'et',
+  lav: 'lv',
+  lit: 'lt',
+  ara: 'ar',
+  heb: 'he',
+  per: 'fa',
+  fas: 'fa',
+  hin: 'hi',
+  tam: 'ta',
+  tel: 'te',
+  jpn: 'ja',
+  kor: 'ko',
+  chi: 'zh',
+  zho: 'zh',
+  tha: 'th',
+  vie: 'vi',
+  ind: 'id',
+  may: 'ms',
+  msa: 'ms',
+};
+
+/**
+ * `tag`'s primary subtag as ISO 639-1, as far as this needs to compare one: a known 639-2 code mapped, else the
+ * subtag itself, lower-cased — already what a subtitle rendition's `language` and a BCP-47 browser tag are, so
+ * only an audio track's own tag ever actually needs the mapping.
+ */
+function canonicalLanguage(tag: string): string {
+  const primary = tag.split(/[-_]/)[0]!.toLowerCase();
+  return ISO_639_2[primary] ?? primary;
+}
+
+/**
+ * The subtitle language `Player.svelte` shows without the viewer ever choosing one: their own first language,
+ * where the session's audio isn't already in it and a rendition offers it — English failing that, since
+ * den-remux always offers it second behind whatever the browser asked for (`subs::plan`) — or Off where the
+ * audio already is a language this browser names, or neither is actually offered.
+ *
+ * Only ever consulted where `subtitleLanguage` (Settings' own setting) was never set: a deliberate choice,
+ * explicit or Off, is never overridden. Without this, a guest whose own language has no rendition at all —
+ * Fauda S1E3, Hebrew audio, a Swedish browser with no Swedish track — saw nothing, English included, even
+ * though English was right there in the picker (den-edge#<pending>).
+ */
+export function autoSubtitleLanguage(
+  audioLanguage: string | null | undefined,
+  browserLanguages: readonly string[],
+  offered: readonly { language: string }[],
+): string | null {
+  const own = browserLanguages.map(canonicalLanguage);
+  if (audioLanguage && own.includes(canonicalLanguage(audioLanguage))) return null;
+  const offeredLangs = new Set(offered.map((o) => canonicalLanguage(o.language)));
+  return own.find((l) => offeredLangs.has(l)) ?? (offeredLangs.has('en') ? 'en' : null);
 }
 
 /**

@@ -24,6 +24,7 @@
   import { PlaybackProgressReporter } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
+    autoSubtitleLanguage,
     downmixLabel,
     nativeHls,
     endSession,
@@ -574,6 +575,16 @@
     startupTimings.set(result, { askedAt: startupAskedAt, answeredAt: Date.now() });
     session = result;
     sessionRoute = on;
+    // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
+    // first, or English, never overriding a choice already made. Only on the title's first session — a later
+    // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand.
+    if (!replacing && subtitleLanguage === undefined && subtitleChoice === null) {
+      subtitleChoice = autoSubtitleLanguage(
+        result.audioTracks[result.audioTrack]?.language,
+        navigator.languages,
+        result.subtitles ?? [],
+      );
+    }
     // Kept past a `letGo`/`session = null` the same way `sessionRoute` already is: den-edge's own outcome report
     // (`finish()`) names the last session's subtitle source even when the player closes between sessions.
     lastSubtitleSource = result.subtitleSource;
@@ -1878,8 +1889,13 @@
           onloadedmetadata={() => {
             seekToStart();
             void loadSegments();
-            // The native path has its text tracks by now, and one of them is DEFAULT=YES.
+            // Every rendition is DEFAULT=NO, so showing one — `subtitleChoice`, explicit or
+            // `autoSubtitleLanguage`'s own pick — is this call's doing, never the engine auto-selecting by
+            // itself. But the native path's own `textTracks` are not always populated by `loadedmetadata`
+            // yet — WebKit can still be parsing the subtitle group — so this alone is not enough on it:
+            // `textTracks.onaddtrack` below is what actually catches a track that arrives late.
             applySubtitles();
+            if (video) video.textTracks.onaddtrack = applySubtitles;
           }}
           onplay={playing}
           onpause={paused}
