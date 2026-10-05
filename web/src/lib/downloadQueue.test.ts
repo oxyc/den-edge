@@ -140,6 +140,35 @@ describe('the queue is the library’s rows', () => {
     expect(cancelled).toEqual([]);
   });
 
+  it('a viewer can try a previous release beside the current one without cancelling either', async () => {
+    const shared = testLog();
+    const asked: string[] = [];
+    const cancelled: string[] = [];
+    const first = source('first.mkv');
+    const second = source('second.mkv');
+    const made = new DownloadQueue(
+      async (url, add, prefetch) => {
+        asked.push(`${add ? (prefetch ? 'prefetch' : 'add') : 'probe'} ${url}`);
+        return { state: 'preparing', progress: url === first.url ? 0.97 : 0.2 };
+      },
+      async (url) => (cancelled.push(url), true),
+    );
+    made.attach(shared.log, testClock(BROWSER), undefined, async () => ({
+      sources: [first, second],
+    }));
+    await made.start({ title: episode, source: second, sources: [first, second] });
+    const current = made.list()[0]!;
+
+    await expect(made.alternatives(current)).resolves.toEqual([first, second]);
+    await made.tryAnother(current, first);
+
+    const racing = made.list()[0]!;
+    expect(racing.release.identity).toBe(second.identity);
+    expect(racing.release.hedge?.identity).toBe(first.identity);
+    expect(cancelled).toEqual([]);
+    expect(asked).toEqual([`prefetch ${second.url}`, `prefetch ${first.url}`]);
+  });
+
   it('a ticket this browser can’t reach is renewed by identity, never asked as it is', async () => {
     const shared = testLog();
     const { made: tv } = queue();

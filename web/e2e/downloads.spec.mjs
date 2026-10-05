@@ -47,11 +47,11 @@ function store() {
   };
 }
 
-async function open(context, shared, query) {
+async function open(context, shared, query, tmdb = movie) {
   const page = await context.newPage();
   await guardNetwork(page);
   await page.route('**/fixture-store/rows', shared.route);
-  await routeTmdb(page, (r) => r.fulfill({ json: movie }));
+  await routeTmdb(page, (r) => r.fulfill({ json: tmdb }));
   await page.route('https://image.tmdb.org/**', (r) =>
     r.fulfill({
       contentType: 'image/svg+xml',
@@ -72,7 +72,7 @@ async function open(context, shared, query) {
       },
     }),
   );
-  await page.route('**/scout/p/ticket42**', (r) =>
+  await page.route('**/scout/p/**', (r) =>
     r.fulfill({
       status: 202,
       json: { progress: 0.25, bytesPerSecond: 1_000_000, state: 'downloading', seeds: 5, peers: 9 },
@@ -109,6 +109,118 @@ test('a download queued on a title page is a row every device reads', async () =
     await expect(theirs).toContainText('The Movie', { timeout: 2000 });
     await expect(theirs).toContainText('Queued from Chrome on Mac');
     expect(await other.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an older episode download recovers and keeps its episode still', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const shared = store();
+    const at = [1, 0, 'aaaaaaaaaaaaaaaa'];
+    shared.rows.set('set:download:tv:1399:2:4', {
+      kind: 'set',
+      schema: 2,
+      name: 'download:tv:1399:2:4',
+      values: {
+        release: {
+          value: {
+            string: JSON.stringify({
+              identity: 'episode-four.mkv',
+              label: 'Episode.Four.1080p.mkv',
+              url: '/scout/p/episode-four',
+            }),
+          },
+          at,
+        },
+        title: {
+          value: {
+            // Rows queued before episode artwork was added have the series poster but no stillPath.
+            string: JSON.stringify({
+              mediaType: 'tv',
+              mediaId: 1399,
+              season: 2,
+              episode: 4,
+              title: 'A Series',
+              posterPath: '/series.jpg',
+            }),
+          },
+          at,
+        },
+        queuedAt: { value: { int: 1 }, at },
+      },
+    });
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await open(context, shared, 'page=downloads', {
+      episodes: [{ episode_number: 4, name: 'Four', still_path: '/episode-four.jpg' }],
+    });
+    const card = page.locator('[data-download="tv:1399:2:4"]');
+    await expect(card.locator('img')).toHaveAttribute('src', /\/episode-four\.jpg$/);
+    await expect(card.locator('img')).not.toHaveAttribute('src', /\/series\.jpg$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Try another can resume a previous release beside the current partial', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const shared = store();
+    const at = [1, 0, 'aaaaaaaaaaaaaaaa'];
+    shared.rows.set('set:download:tv:1399:2:4', {
+      kind: 'set',
+      schema: 2,
+      name: 'download:tv:1399:2:4',
+      values: {
+        release: {
+          value: {
+            string: JSON.stringify({
+              identity: 'second.mkv',
+              label: 'Second release',
+              url: '/scout/p/second',
+            }),
+          },
+          at,
+        },
+        title: {
+          value: {
+            string: JSON.stringify({
+              mediaType: 'tv',
+              mediaId: 1399,
+              season: 2,
+              episode: 4,
+              title: 'A Series',
+            }),
+          },
+          at,
+        },
+        queuedAt: { value: { int: 1 }, at },
+        tried: { value: { strings: ['first.mkv'] }, at },
+      },
+    });
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await open(context, shared, 'page=downloads', {
+      episodes: [{ episode_number: 4, name: 'Four', still_path: '/episode-four.jpg' }],
+    });
+    const card = page.locator('[data-download="tv:1399:2:4"]');
+    await card.getByRole('button', { name: 'Try another', exact: true }).click();
+    await card.getByRole('combobox', { name: 'Try another release' }).selectOption({
+      label: 'First release',
+    });
+    await expect(
+      card.getByRole('status').filter({ hasText: 'Also trying First release' }),
+    ).toBeVisible();
+
+    const saved = JSON.parse(
+      shared.rows.get('set:download:tv:1399:2:4').values.release.value.string,
+    );
+    expect(saved.identity).toBe('second.mkv');
+    expect(saved.hedge.identity).toBe('first.mkv');
   } finally {
     await browser.close();
   }

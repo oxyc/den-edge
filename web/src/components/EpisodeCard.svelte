@@ -14,6 +14,8 @@
     onplaytv,
     onseen,
     onsources,
+    ondownload,
+    downloadState,
   }: {
     episode: Episode;
     progress: number;
@@ -27,6 +29,8 @@
     onplaytv?: () => void;
     onseen: (seen: boolean) => void;
     onsources?: () => void;
+    ondownload?: () => void;
+    downloadState?: 'downloading' | 'ready';
   } = $props();
   const seen = $derived(progress >= WATCHED);
   const upcoming = $derived(futureDate(episode.airDate));
@@ -37,6 +41,21 @@
       : []),
     ...(onsources && !upcoming
       ? [{ kind: 'item' as const, label: 'Sources', onselect: onsources }]
+      : []),
+    ...(ondownload && !upcoming
+      ? [
+          {
+            kind: 'item' as const,
+            label:
+              downloadState === 'ready'
+                ? 'Downloaded'
+                : downloadState === 'downloading'
+                  ? 'Downloading'
+                  : 'Download',
+            disabled: downloadState !== undefined,
+            onselect: ondownload,
+          },
+        ]
       : []),
     {
       kind: 'item',

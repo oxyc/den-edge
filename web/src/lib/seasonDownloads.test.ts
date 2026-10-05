@@ -1,5 +1,10 @@
 import { expect, it } from 'vitest';
-import { downloadSeason, seasonJobs, seasonJobKey } from './seasonDownloads.svelte';
+import {
+  downloadEpisode,
+  downloadSeason,
+  seasonJobs,
+  seasonJobKey,
+} from './seasonDownloads.svelte';
 import { DownloadQueue } from './downloadQueue.svelte';
 import { readDownloads } from './downloadRows';
 import { source, testClock, testLog } from './downloadTestLog';
@@ -50,4 +55,34 @@ it('queues aired season episodes once across repeated clicks, skips ready files,
   // A second press leaves the episode in flight alone: asking again would be a fresh add at the debrid.
   await downloadSeason(addon, 'tt1', 1, episodes, {}, series, resolve, queue);
   expect(queued).toEqual(['/scout/p/2']);
+});
+
+it('queues one episode from its menu with its still and does not re-add an active download', async () => {
+  const addon = { install: 'http://scout/config', base: '/scout/config' };
+  const picked = source('Episode.1080p.mkv', { cached: false, seeders: 12 }, 'episode');
+  let resolves = 0;
+  const resolve = async () => {
+    resolves++;
+    return { sources: [picked] };
+  };
+  const shared = testLog();
+  const queued: string[] = [];
+  const queue = new DownloadQueue(async (url) => {
+    queued.push(url);
+    return { state: 'preparing', progress: 0.1 };
+  });
+  queue.attach(shared.log, testClock('bbbbbbbbbbbbbbbb'));
+  const episode = { number: 4, name: 'Four', stillPath: '/four.jpg' };
+  const series = { type: 'tv' as const, id: 77, title: 'Series', posterPath: '/series.jpg' };
+
+  await expect(downloadEpisode(addon, 'tt1', 2, episode, {}, series, resolve, queue)).resolves.toBe(
+    'queued',
+  );
+  await expect(downloadEpisode(addon, 'tt1', 2, episode, {}, series, resolve, queue)).resolves.toBe(
+    'queued',
+  );
+
+  expect(resolves).toBe(1);
+  expect(queued).toEqual(['/scout/p/episode']);
+  expect(queue.list()[0]?.title).toMatchObject({ season: 2, episode: 4, stillPath: '/four.jpg' });
 });

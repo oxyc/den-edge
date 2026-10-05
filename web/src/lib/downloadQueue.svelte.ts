@@ -5,10 +5,12 @@ import {
   downloadName,
   readDownload,
   readDownloads,
+  releaseValue,
   removedRow,
   startRow,
   withValues,
   type Download,
+  type DownloadHedge,
   type DownloadTitle,
   type StallClock,
 } from './downloadRows';
@@ -225,6 +227,53 @@ export class DownloadQueue {
       preferred: this.preferred(),
     });
     return pick === null ? undefined : sources[pick];
+  }
+
+  /** Fresh releases for a viewer choosing what to try beside the current partial download. */
+  async alternatives(download: Download): Promise<TitleSource[] | null> {
+    if (!this.resolve) return null;
+    return (await this.resolve(download.title)).sources;
+  }
+
+  /**
+   * Queue the viewer's choice beside the current release. The current partial stays primary and is never cancelled;
+   * whichever reaches ready first wins through the same hedge path as an automatic retry.
+   */
+  async tryAnother(download: Download, source: TitleSource): Promise<Preparation> {
+    const log = this.log;
+    const clock = this.clock;
+    if (!log || !clock) return { state: 'unknown', message: 'Downloads need your library.' };
+    const row = log.settings(download.name);
+    if (!row) return { state: 'unknown', message: 'That download is no longer in the queue.' };
+    const current = readDownload(row);
+    if (!current) return { state: 'unknown', message: 'That download is no longer in the queue.' };
+    if (source.identity === current.release.identity)
+      return this.answers.get(download.name) ?? { state: 'unknown' };
+    if (current.release.hedge)
+      return { state: 'unknown', message: 'This download is already trying two releases.' };
+    clock.see(log.newestStamp());
+    const now = Date.now();
+    const hedge: DownloadHedge = {
+      identity: source.identity,
+      label: source.label,
+      url: source.url,
+      sizeBytes: source.size,
+      cached: source.cached,
+      queuedAt: now,
+      lastProgress: 0,
+      progressAt: now,
+    };
+    const saved = await log.write(
+      withValues(row, {
+        release: {
+          value: releaseValue({ ...current.release, hedge }),
+          at: clock.issue(),
+        },
+      }),
+    );
+    if (!saved) return { state: 'unknown', message: SAVE_FAILED };
+    this.touch();
+    return this.addHedge(download.name, source.url);
   }
 
   /** The URL this browser asks about a download with, or null until a resolve finds it one. */

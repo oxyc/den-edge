@@ -16,6 +16,18 @@
   const page = params.get('page') === 'downloads' ? 'downloads' : 'title';
   const device = params.get('device') ?? 'aaaaaaaaaaaaaaaa';
   const noop = () => {};
+  const source = (filename: string, url: string, label: string) => ({
+    filename,
+    url,
+    label,
+    cached: false,
+    seeders: 10,
+    badges: ['1080p'],
+    languages: [],
+    probed: true,
+    identity: filename.toLowerCase(),
+    attributes: { resolution: '1080p', cached: false, seeders: 10 },
+  });
 
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Replaced whole on each read; the queue's `touch` redraws.
   let held = new Map<string, SettingsRow>();
@@ -66,7 +78,17 @@
     // What the library's held read does: another device's write shows here within one read.
     const timer = setInterval(() => void read().then(() => downloads.touch()), 300);
     void read().then(() => {
-      downloads.attach(log, clock, (url) => (url.startsWith('/scout/') ? url : null));
+      downloads.attach(
+        log,
+        clock,
+        (url) => (url.startsWith('/scout/') ? url : null),
+        async () => ({
+          sources: [
+            source('first.mkv', '/scout/p/first', 'First release'),
+            source('second.mkv', '/scout/p/second', 'Second release'),
+          ],
+        }),
+      );
       ready = true;
     });
     return () => clearInterval(timer);

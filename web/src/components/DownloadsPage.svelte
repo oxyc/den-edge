@@ -4,6 +4,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import DownloadStatus from './DownloadStatus.svelte';
+  import DownloadAlternatives from './DownloadAlternatives.svelte';
   import DownloadPosterCard from './DownloadPosterCard.svelte';
   import { downloads as shared, inFlight, type DownloadQueue } from '../lib/downloadQueue.svelte';
   import type { Download } from '../lib/downloadRows';
@@ -76,6 +77,7 @@
           menu={false}
         />
         <DownloadStatus {download} {queue} {now} />
+        {#if state !== 'ready'}<DownloadAlternatives {download} {queue} />{/if}
         <button
           type="button"
           class="control"

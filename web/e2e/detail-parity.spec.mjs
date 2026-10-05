@@ -451,11 +451,23 @@ test('episode Sources target the selected episode and downloads never requeue wh
       episode: 1,
       filename: 'Episode.1080p.WEB.mkv',
     });
-    await active
-      .locator('.source-panel li')
-      .last()
-      .getByRole('button', { name: 'Download', exact: true })
-      .click();
+    // The direct menu action resolves afresh and chooses the release that needs fetching.
+    await page.route('**/scout/config/stream/**', (r) =>
+      r.fulfill({
+        json: {
+          streams: [
+            {
+              title: 'Episode.4K.mkv',
+              url: 'http://scout.internal/p/download',
+              behaviorHints: { filename: 'Episode.4K.mkv' },
+              attributes: { cached: false, resolution: '2160p', seeders: 10 },
+            },
+          ],
+        },
+      }),
+    );
+    await row.getByRole('button', { name: 'Options for episode 1', exact: true }).click();
+    await row.getByRole('menuitem', { name: 'Download', exact: true }).click();
     await expect(active.getByText('Downloading 30%', { exact: true })).toBeVisible();
     await expect.poll(() => downloadRequests.length, { timeout: 8000 }).toBeGreaterThan(1);
     // The one add is a prefetch: nobody is waiting on a download, so it can't spend the adds kept for Play.

@@ -43,8 +43,9 @@
 
   $effect(() => {
     const key = artworkKey;
-    recoveredStill = download.title.stillPath;
-    if (recoveredStill) return;
+    const storedStill = download.title.stillPath;
+    recoveredStill = storedStill;
+    if (storedStill) return;
     let current = true;
     void downloadStill(download.title).then((still) => {
       if (current && artworkKey === key) recoveredStill = still;

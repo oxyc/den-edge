@@ -24,6 +24,8 @@
   import DetailTabs from './DetailTabs.svelte';
   import EpisodeCard from './EpisodeCard.svelte';
   import SeasonDownload from './SeasonDownload.svelte';
+  import { downloadEpisode } from '../lib/seasonDownloads.svelte';
+  import { downloads, inFlight } from '../lib/downloadQueue.svelte';
   import DetailIcon from './DetailIcon.svelte';
   import DetailReactions from './DetailReactions.svelte';
   import RelatedTitles from './RelatedTitles.svelte';
@@ -40,6 +42,7 @@
   import { titleHref } from '../lib/route';
   import { fetchIconicStudios, type IconicStudio } from '../lib/iconicStudios';
   import { fetchTitleFacts, NO_FACTS, type TitleFacts } from '../lib/titleFacts';
+  import { toastContext } from '../lib/toast';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -199,6 +202,7 @@
     return premeasureLink(remux);
   });
   let sourcesPanel = $state<TitleSources>();
+  const notify = toastContext();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
   let detail = $state<TitleDetail | null | undefined>();
   /** The curated studios credited on this title; undefined while they are asked for. */
@@ -376,6 +380,18 @@
       picked = untrack(() => displayedSeason);
     // A guest has neither, so there is nothing to start and the episode row simply does not act.
     if (d && picked !== null) (onplayhere ?? onplay)?.(d.title, picked, number);
+  }
+
+  async function queueEpisode(episode: Episode) {
+    const d = untrack(() => detail),
+      picked = untrack(() => displayedSeason);
+    if (!d || !scout || guestScout || !d.imdbId || picked === null) return;
+    const result = await downloadEpisode(scout, d.imdbId, picked, episode, routes, d.title);
+    if (result === 'ready') notify?.('This episode is already ready to play.');
+    else if (result === 'unavailable')
+      notify?.('No downloadable release was found for that episode.');
+    else if (result === 'uncertain')
+      notify?.('Couldn’t start that download. Try again in a moment.');
   }
 </script>
 
@@ -636,6 +652,17 @@
               aria-hidden={seasonLoading}
             >
               {#each seasonEpisodes as e (e.number)}
+                {@const episodeDownload =
+                  displayedSeason === null
+                    ? undefined
+                    : downloads.of(d.title.type, d.title.id, displayedSeason, e.number)}
+                {@const episodeDownloadState = episodeDownload
+                  ? downloads.status(episodeDownload).state === 'ready'
+                    ? 'ready'
+                    : inFlight(downloads.status(episodeDownload).state)
+                      ? 'downloading'
+                      : undefined
+                  : undefined}
                 <EpisodeCard
                   episode={e}
                   progress={episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row)}
@@ -655,6 +682,10 @@
                           void sourcesPanel?.show();
                         }
                       }}
+                  ondownload={scout && !guestScout && d.imdbId
+                    ? () => void queueEpisode(e)
+                    : undefined}
+                  downloadState={episodeDownloadState}
                 />
               {/each}
             </ol>

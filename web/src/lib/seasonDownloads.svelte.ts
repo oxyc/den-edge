@@ -29,6 +29,52 @@ export interface SeasonTitle {
   originalLanguage?: string;
 }
 
+export type EpisodeDownloadResult = 'queued' | 'ready' | 'unavailable' | 'uncertain';
+
+/** Queue one episode with the same ranked pick as its Sources panel and a season download. */
+export async function downloadEpisode(
+  addon: Addon,
+  imdb: string,
+  season: number,
+  episode: Episode,
+  routes: Routes,
+  title: SeasonTitle,
+  resolve = fetchSourceList,
+  queue = downloads,
+): Promise<EpisodeDownloadResult> {
+  await ensureSyncPolicy();
+  const current = queue.of(title.type, title.id, season, episode.number);
+  if (current) {
+    const state = queue.status(current).state;
+    if (state === 'ready') return 'ready';
+    if (inFlight(state)) return 'queued';
+  }
+  const { sources } = await resolve(addon, imdb, routes, season, episode.number);
+  if (sources === null) return 'uncertain';
+  const source = queue.pick(sources, title.originalLanguage);
+  if (!source || (source.cached === false && source.seeders === 0)) return 'unavailable';
+  if (source.cached === true) return 'ready';
+  const result = await queue.start({
+    title: {
+      mediaType: title.type,
+      mediaId: title.id,
+      imdbId: imdb,
+      season,
+      episode: episode.number,
+      title: title.title,
+      posterPath: title.posterPath,
+      stillPath: episode.stillPath,
+      originalLanguage: title.originalLanguage,
+    },
+    source,
+    sources,
+  });
+  if (result.state === 'ready') return 'ready';
+  if (result.state === 'preparing' || result.state === 'paused') return 'queued';
+  if (result.state === 'unknown' || result.state === 'not-queued') return 'uncertain';
+  return 'unavailable';
+}
+
 /**
  * The queue owns this pass, not the page. Leaving a detail must not stop halfway through a season. One library row
  * per episode, each started with the TV's own pick (`rank_releases`), so a season queued here is the one the TV
