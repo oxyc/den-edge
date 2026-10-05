@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { driveDownloads, holdLease, stillHeld } from './downloadDriver';
-import { DownloadQueue, type Resolve } from './downloadQueue.svelte';
+import { driveDownloads, holdLease, refreshDownloads, stillHeld } from './downloadDriver';
+import {
+  DownloadQueue,
+  POLL_MAX_MS,
+  type DownloadState,
+  type Resolve,
+} from './downloadQueue.svelte';
 import {
   clockValue,
   downloadName,
@@ -30,12 +35,12 @@ const second = source('Rebecka.S02E03.1080p.WEB.h264-GRP.mkv', {
 });
 
 /** The TV queued episode 3 at T0 with the first release, and den-scout has reported nothing moving since. */
-function stalledRow(): SettingsRow {
+function stalledRow(episode = 3): SettingsRow {
   const at: [number, number, string] = [T0, 0, TV];
   return {
     kind: 'set',
     schema: 2,
-    name: NAME,
+    name: downloadName(`tv:1399:2:${episode}`),
     values: {
       release: {
         value: releaseValue({
@@ -52,7 +57,7 @@ function stalledRow(): SettingsRow {
           mediaId: 1399,
           imdbId: 'tt1',
           season: 2,
-          episode: 3,
+          episode,
           title: 'Rebecka Martinsson',
         }),
         at,
@@ -63,8 +68,8 @@ function stalledRow(): SettingsRow {
   };
 }
 
-function partialRow(): SettingsRow {
-  const row = stalledRow();
+function partialRow(episode = 3): SettingsRow {
+  const row = stalledRow(episode);
   return {
     ...row,
     values: {
@@ -72,6 +77,35 @@ function partialRow(): SettingsRow {
       progress: {
         value: clockValue({ lastProgress: 0.5, progressAt: T0 }),
         at: [T0, 0, TV],
+      },
+    },
+  };
+}
+
+function hedgedRow(): SettingsRow {
+  const row = partialRow();
+  const at: [number, number, string] = [T0, 0, TV];
+  return {
+    ...row,
+    values: {
+      ...row.values,
+      release: {
+        value: releaseValue({
+          identity: first.identity,
+          label: first.label,
+          url: first.url,
+          cached: false,
+          hedge: {
+            identity: second.identity,
+            label: second.label,
+            url: second.url,
+            cached: false,
+            queuedAt: T0,
+            lastProgress: 0,
+            progressAt: T0,
+          },
+        }),
+        at,
       },
     },
   };
@@ -208,6 +242,138 @@ describe('the download driver', () => {
     expect(won.release.identity).toBe(first.identity);
     expect(won.release.hedge).toBeUndefined();
     expect(cancelled).toEqual([second.url]);
+  });
+
+  it('resumes once when a persisted alternate was not added before the prior pass stopped', async () => {
+    const shared = testLog([partialRow()]);
+    let hedgeAdds = 0;
+    let hedgeQueued = false;
+    const queue = new DownloadQueue(async (url, add) => {
+      if (url === second.url && add) {
+        hedgeAdds++;
+        if (hedgeAdds === 1) throw new Error('holder stopped after persisting the hedge');
+        hedgeQueued = true;
+        return { state: 'preparing', progress: 0.1 };
+      }
+      if (url === second.url)
+        return hedgeQueued ? { state: 'preparing', progress: 0.1 } : { state: 'not-queued' };
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => ({
+      sources: [first, second],
+    }));
+    const now = T0 + 21 * MINUTE;
+
+    await expect(
+      driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 }),
+    ).rejects.toThrow('holder stopped');
+    expect(readDownload(shared.log.settings(NAME)!)!.release.hedge?.identity).toBe(second.identity);
+
+    await driveDownloads(shared.log, queue, BROWSER, { now: now + 5_000, observedFor: 0 });
+    await driveDownloads(shared.log, queue, BROWSER, { now: now + 10_000, observedFor: 0 });
+    expect(hedgeAdds).toBe(2);
+  });
+
+  it('writes moving alternate progress no more than once per maximum poll interval', async () => {
+    const shared = testLog([partialRow()]);
+    let hedgeProgress = 0;
+    const queue = new DownloadQueue(async (url, add) => {
+      if (url === second.url) {
+        hedgeProgress = add ? 0.1 : hedgeProgress + 0.1;
+        return { state: 'preparing', progress: hedgeProgress };
+      }
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => ({
+      sources: [first, second],
+    }));
+    const now = T0 + 21 * MINUTE;
+
+    await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
+    const writesAfterStart = shared.writes.filter((write) => write.includes(NAME)).length;
+    await driveDownloads(shared.log, queue, BROWSER, { now: now + 5_000, observedFor: 0 });
+    expect(shared.writes.filter((write) => write.includes(NAME))).toHaveLength(writesAfterStart);
+
+    await driveDownloads(shared.log, queue, BROWSER, {
+      now: now + POLL_MAX_MS,
+      observedFor: 0,
+    });
+    expect(shared.writes.filter((write) => write.includes(NAME))).toHaveLength(
+      writesAfterStart + 1,
+    );
+    expect(readDownload(shared.log.settings(NAME)!)!.release.hedge?.lastProgress).toBeGreaterThan(
+      0.1,
+    );
+  });
+
+  it('caches a definitive no-alternate answer for ten minutes and invalidates it on a fresh queue time', async () => {
+    const shared = testLog([partialRow()]);
+    let resolves = 0;
+    const queue = new DownloadQueue(async () => ({ state: 'preparing', progress: 0.5 }));
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => {
+      resolves++;
+      return { sources: [first], answer: { kind: 'live', missing: 0 } };
+    });
+    const now = T0 + 21 * MINUTE;
+
+    await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
+    await driveDownloads(shared.log, queue, BROWSER, { now: now + 5_000, observedFor: 0 });
+    expect(resolves).toBe(1);
+
+    const row = shared.log.settings(NAME)!;
+    shared.land({
+      ...row,
+      values: {
+        ...row.values,
+        queuedAt: { value: { int: T0 + 1 }, at: [T0 + 1, 0, TV] },
+      },
+    });
+    await driveDownloads(shared.log, queue, BROWSER, { now: now + 10_000, observedFor: 0 });
+    expect(resolves).toBe(2);
+
+    for (let minute = 1; minute <= 10; minute++)
+      await driveDownloads(shared.log, queue, BROWSER, {
+        now: now + 10_000 + minute * MINUTE,
+        observedFor: 0,
+      });
+    expect(resolves).toBe(3);
+  });
+
+  it('does not cache partial, unknown, stale, outage, or missing-source answers', async () => {
+    const answers = [
+      { kind: 'partial' as const, missing: 0 },
+      { kind: 'unknown' as const, missing: 0 },
+      { kind: 'stale' as const, missing: 0 },
+      { kind: 'live' as const, missing: 0, outage: { builtAt: T0 } },
+      { kind: 'live' as const, missing: 1 },
+    ];
+    for (const answer of answers) {
+      const shared = testLog([partialRow()]);
+      let resolves = 0;
+      const queue = new DownloadQueue(async () => ({ state: 'preparing', progress: 0.5 }));
+      queue.attach(shared.log, testClock(BROWSER), undefined, async () => {
+        resolves++;
+        return { sources: [first], answer };
+      });
+      const now = T0 + 21 * MINUTE;
+      await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
+      await driveDownloads(shared.log, queue, BROWSER, { now: now + 5_000, observedFor: 0 });
+      expect(resolves, answer.kind).toBe(2);
+    }
+  });
+
+  it('does not remember or start an alternate when the lease is lost during resolve', async () => {
+    const shared = testLog([partialRow()]);
+    const queue = new DownloadQueue(async () => ({ state: 'preparing', progress: 0.5 }));
+    queue.attach(shared.log, testClock(BROWSER), undefined, async () => {
+      shared.land(leaseRow(TV, 9));
+      return { sources: [first, second], answer: { kind: 'live', missing: 0 } };
+    });
+    const now = T0 + 21 * MINUTE;
+    await driveDownloads(shared.log, queue, BROWSER, { now, observedFor: 0 });
+
+    expect(readDownload(shared.log.settings(NAME)!)!.release.hedge).toBeUndefined();
+    expect(queue.hedgeResolveDue(queue.list()[0]!, now)).toBe(true);
   });
 
   it('only the holder writes that den-scout described a download, and that it is ready', async () => {
@@ -352,6 +518,114 @@ describe('the download driver', () => {
       observedFor: 0,
     });
     expect(readDownload(shared.log.settings(NAME)!)).toBeNull();
+  });
+});
+
+describe('download refresh', () => {
+  it('runs at most four probes at once', async () => {
+    const shared = testLog(Array.from({ length: 9 }, (_, index) => partialRow(index + 1)));
+    let active = 0;
+    let maximum = 0;
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const queue = new DownloadQueue(async () => {
+      calls++;
+      active++;
+      maximum = Math.max(maximum, active);
+      await gate;
+      active--;
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(shared.log, testClock(BROWSER));
+
+    const refreshing = refreshDownloads(queue, { now: T0 + 21 * MINUTE, force: true });
+    await Promise.resolve();
+    expect(calls).toBe(4);
+    release();
+    await refreshing;
+    expect(calls).toBe(9);
+    expect(maximum).toBe(4);
+  });
+
+  it('forces active rows but skips ready and terminal rows', async () => {
+    const shared = testLog(Array.from({ length: 5 }, (_, index) => partialRow(index + 1)));
+    let calls = 0;
+    const queue = new DownloadQueue(async () => {
+      calls++;
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(shared.log, testClock(BROWSER));
+    const status = queue.status.bind(queue);
+    const states: DownloadState['state'][] = [
+      'ready',
+      'paused',
+      'no_working_release',
+      'release_gone',
+      'fetching',
+    ];
+    queue.status = (download, now) => ({
+      ...status(download, now),
+      state: states[(download.title.episode ?? 1) - 1]!,
+    });
+
+    await refreshDownloads(queue, { now: T0 + 21 * MINUTE, force: true });
+    expect(calls).toBe(1);
+  });
+
+  it('stops after the active library changes and does not back off the new session', async () => {
+    const old = testLog([hedgedRow()]);
+    const next = testLog([hedgedRow()]);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const entered = new Promise<void>((resolve) => (started = resolve));
+    let calls = 0;
+    const queue = new DownloadQueue(async () => {
+      calls++;
+      if (calls === 1) {
+        started();
+        await gate;
+      }
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(old.log, testClock(BROWSER));
+
+    const stale = refreshDownloads(queue, { now: T0 + 21 * MINUTE, force: true });
+    await entered;
+    queue.attach(next.log, testClock(BROWSER));
+    release();
+    await stale;
+    expect(calls).toBe(1);
+
+    await refreshDownloads(queue, { now: T0 + 21 * MINUTE });
+    expect(calls).toBe(3); // The new session's primary and persisted alternate were both probed.
+  });
+
+  it('does not start later batches after its page is no longer active', async () => {
+    const shared = testLog(Array.from({ length: 9 }, (_, index) => partialRow(index + 1)));
+    let active = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    const queue = new DownloadQueue(async () => {
+      calls++;
+      await gate;
+      return { state: 'preparing', progress: 0.5 };
+    });
+    queue.attach(shared.log, testClock(BROWSER));
+
+    const refreshing = refreshDownloads(queue, {
+      now: T0 + 21 * MINUTE,
+      force: true,
+      shouldContinue: () => active,
+    });
+    await Promise.resolve();
+    expect(calls).toBe(4);
+    active = false;
+    release();
+    await refreshing;
+    expect(calls).toBe(4);
   });
 });
 

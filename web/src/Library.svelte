@@ -43,18 +43,13 @@
   import { playGuard } from './lib/playGuard';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
-    applyLog,
-    ContinueProjector,
-    emptyLibrary,
     episodeAfter,
     isAired,
-    nameContinueCandidates,
     standings,
     titleKey,
     untitled,
     watchlist,
     watchlistSlides,
-    withDisplay,
     type ContinueEntry,
     type Title,
   } from './lib/library';
@@ -194,8 +189,10 @@
       // Naming the library is still only the paired case: it reads the log itself.
       const key = discovered.tmdbKey;
       if (key && opened) {
-        const raw = applyLog(emptyLibrary(), opened.rows());
-        const priority = shelfTitleRefs(raw, opened.rows());
+        const projection = session.libraryProjection();
+        if (!projection) return;
+        const raw = projection.library;
+        const priority = shelfTitleRefs(raw, projection.rows);
         const reserved = new Set(priority.map(titleKey));
         void nameLibraryTitles(session, priority, key).then(() => {
           if (disposed) return;
@@ -217,22 +214,16 @@
   /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */
   const applied = $derived.by(() => {
     void version;
-    return log ? applyLog(emptyLibrary(), log.rows()) : null;
+    return session.libraryProjection()?.library ?? null;
   });
-  const library = $derived(
-    applied && { ...withDisplay(applied, session.displays), shapes: session.shapes },
-  );
+  const library = $derived(applied && session.displayedLibrary(applied));
   /**
    * TMDB names arrive in small batches. They change the cards, but not den-core's answer about which episode
    * continues a series. Keep those policy decisions across display-only flushes and invalidate each series only
    * when its marks, shape, dismissal or watched state changes.
    */
-  const continueProjector = untrack(() => new ContinueProjector());
-  const continueCandidates = $derived(
-    applied ? continueProjector.project({ ...applied, shapes: session.shapes }) : [],
-  );
   const continueEntries = $derived(
-    library ? nameContinueCandidates(continueCandidates, library) : [],
+    applied && library ? session.continueWatching(applied, library) : [],
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.

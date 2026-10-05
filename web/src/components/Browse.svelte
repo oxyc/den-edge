@@ -4,6 +4,8 @@
   import type { RowDef } from '../lib/catalog';
   import { whenIdle } from '../lib/idle';
   import type { Title } from '../lib/library';
+  import { observeNearViewport } from '../lib/nearViewport';
+  import { pageVisibility } from '../lib/pageVisibility.svelte';
   import BrowseRow from './BrowseRow.svelte';
 
   let {
@@ -25,6 +27,7 @@
   const STEP = 2;
   let count = $state(STEP);
   let bottom: HTMLElement;
+  const page = pageVisibility();
 
   // A different screen starts from the top again; the same rows rebuilt (after a write, say) keep their place.
   const signature = $derived(rows.map((r) => r.id).join('\n'));
@@ -34,14 +37,14 @@
   });
 
   $effect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) count += STEP;
+    if (!page.active) return;
+    return observeNearViewport(
+      bottom,
+      (near) => {
+        if (near) count = Math.min(rows.length, count + STEP);
       },
-      { rootMargin: '300px 0px' },
+      '300px 0px',
     );
-    observer.observe(bottom);
-    return () => observer.disconnect();
   });
 
   // Within three screens of the bottom, rows are added while the browser is idle, a step at a time, so a quick
@@ -49,20 +52,24 @@
   // afresh as rows are added, since a marker still in range after a step changes no intersection.
   $effect(() => {
     void count;
+    if (!page.active) return;
     let live = true;
-    const ahead = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((e) => e.isIntersecting) || count >= rows.length) return;
-        whenIdle(() => {
-          if (live) count += STEP;
+    let cancelIdle = () => {};
+    const stop = observeNearViewport(
+      bottom,
+      (near) => {
+        if (!near || count >= rows.length) return;
+        cancelIdle();
+        cancelIdle = whenIdle(() => {
+          if (live) count = Math.min(rows.length, count + STEP);
         });
       },
-      { rootMargin: '300% 0px' },
+      '300% 0px',
     );
-    ahead.observe(bottom);
     return () => {
       live = false;
-      ahead.disconnect();
+      cancelIdle();
+      stop();
     };
   });
 </script>

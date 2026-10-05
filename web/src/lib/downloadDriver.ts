@@ -7,6 +7,7 @@ import {
   FOREIGN,
   GONE,
   inFlight,
+  POLL_MAX_MS,
   pollDelay,
   type DownloadQueue,
   type DownloadState,
@@ -24,13 +25,15 @@ import {
 import { applyLog, contentWatched, emptyLibrary } from './library';
 import type { LibraryLog } from './log';
 import { syncPolicy } from './syncCore';
-import { rankable } from './titleSources';
+import { rankable, type SourceAnswer } from './titleSources';
 import type { ConfigValue, SettingsRow, Stamped } from './wire';
 
 const pageStartedAt = Date.now();
 const pageStartedMono = globalThis.performance?.now() ?? 0;
 /** How many probes are in flight at once: a season shouldn't be a burst of two dozen. */
 const CONCURRENCY = 4;
+/** A complete source list with no usable alternate is reconsidered periodically, not every driver pass. */
+const NO_HEDGE_MS = 10 * 60_000;
 /** The holder den-core is told of for a lease row naming this device that another window of it took. */
 const ANOTHER_WINDOW = 'another-window';
 
@@ -68,24 +71,61 @@ export async function driveDownloads(
   options: DriveOptions = {},
 ): Promise<boolean> {
   const now = options.now ?? Date.now();
+  if (queue.library !== log) return false;
+  const library = queue.library;
   const all = queue.list();
-  const polled = all.filter((d) => {
-    const state = queue.status(d, now).state;
-    // A held-back add is made again by the holder at its time; until then there is nothing to ask.
-    if (state === 'no_working_release' || state === 'release_gone' || state === 'paused')
-      return false;
-    return due(queue, d, now);
-  });
-  for (let i = 0; i < polled.length; i += CONCURRENCY)
-    await Promise.all(
-      polled.slice(i, i + CONCURRENCY).map(async (d) => {
-        await pollAndRenew(queue, d);
-        asked(queue, d, now);
-      }),
-    );
-  queue.touch();
+  await refreshDownloadRows(queue, all, library, { now });
+  if (queue.library !== library || library !== log) return false;
   if (!all.length || !(await holdLease(log, device, now, options.observedFor))) return false;
   return holderPass(log, queue, device, now);
+}
+
+export interface RefreshDownloadsOptions {
+  now?: number;
+  force?: boolean;
+  /** Stop starting more work after the page that requested a foreground refresh is no longer active. */
+  shouldContinue?: () => boolean;
+}
+
+/** Refresh downloads in bounded batches. `force` ignores only the normal poll backoff. */
+export async function refreshDownloads(
+  queue: DownloadQueue,
+  { now = Date.now(), force = false, shouldContinue = () => true }: RefreshDownloadsOptions = {},
+): Promise<void> {
+  const library = queue.library;
+  await refreshDownloadRows(queue, queue.list(), library, { now, force, shouldContinue });
+}
+
+async function refreshDownloadRows(
+  queue: DownloadQueue,
+  downloads: Download[],
+  library: LibraryLog | null,
+  { now = Date.now(), force = false, shouldContinue = () => true }: RefreshDownloadsOptions,
+): Promise<void> {
+  const current = () => queue.library === library && shouldContinue();
+  const polled = downloads.filter((download) => {
+    const state = queue.status(download, now).state;
+    // A held-back add is made again by the holder at its time. An explicit foreground refresh does not need to
+    // revalidate a known-ready row, while the ordinary driver retains its periodic ready/ticket revalidation.
+    if (
+      (force && state === 'ready') ||
+      state === 'no_working_release' ||
+      state === 'release_gone' ||
+      state === 'paused'
+    )
+      return false;
+    return force || due(queue, download, now);
+  });
+  for (let i = 0; i < polled.length; i += CONCURRENCY) {
+    if (!current()) break;
+    await Promise.all(
+      polled.slice(i, i + CONCURRENCY).map(async (download) => {
+        await pollAndRenew(queue, download, current);
+        if (current()) asked(queue, download, now);
+      }),
+    );
+  }
+  if (current()) queue.touch();
 }
 
 /** Per download, when this page last asked and how many asks in a row changed nothing (`pollDelay`). */
@@ -116,11 +156,18 @@ function asked(queue: DownloadQueue, download: Download, now: number): void {
  * Ask about one download, and when its ticket is one this browser can't use — lapsed, or another device's — find the
  * same release again and ask with that. Every client renews for itself (§17 *Play tickets*).
  */
-async function pollAndRenew(queue: DownloadQueue, download: Download): Promise<void> {
+async function pollAndRenew(
+  queue: DownloadQueue,
+  download: Download,
+  current: () => boolean,
+): Promise<void> {
   const answer = await queue.poll(download);
+  if (!current()) return;
   if (download.release.hedge) await queue.pollHedge(download);
+  if (!current()) return;
   if (answer.state !== 'expired' || answer.message === GONE) return;
   const url = await queue.renew(download);
+  if (!current()) return;
   if (typeof url !== 'string') return;
   if (answer.message !== FOREIGN) queue.lapsed.add(download.name);
   await queue.poll(download);
@@ -249,10 +296,20 @@ async function holderPass(
         wrote = (await hedgeWon(log, device, queue, download, now, stamp)) || wrote;
         continue;
       }
+      // The row may have landed before its holder managed to add the alternate. Only the holder repairs it.
+      if (alternate?.state === 'not-queued') {
+        if (queue.library === log && stillHeld(log, device, now))
+          await queue.resumeHedge(
+            download,
+            () => queue.library === log && stillHeld(log, device, now),
+          );
+        continue;
+      }
       if (
         alternate?.state === 'preparing' &&
         alternate.progress !== undefined &&
-        alternate.progress > (download.release.hedge.lastProgress ?? 0)
+        alternate.progress > (download.release.hedge.lastProgress ?? 0) &&
+        now - download.release.hedge.progressAt >= POLL_MAX_MS
       ) {
         const hedge = {
           ...download.release.hedge,
@@ -364,8 +421,10 @@ async function startHedge(
   now: number,
   stamp: () => [number, number, string],
 ): Promise<boolean> {
-  if (!queue.resolve) return false;
-  const { sources } = await queue.resolve(download.title);
+  if (!queue.resolve || !queue.hedgeResolveDue(download, now)) return false;
+  const library = queue.library;
+  const { sources, answer } = await queue.resolve(download.title);
+  if (queue.library !== library || library !== log || !stillHeld(log, device, now)) return false;
   if (!sources) return false;
   const excluded = new Set([...download.tried, download.release.identity]);
   const candidates = sources.filter(
@@ -373,7 +432,10 @@ async function startHedge(
       !excluded.has(source.identity) && !(source.cached === false && source.seeders === 0),
   );
   const chosen = queue.pick(candidates, download.title.originalLanguage);
-  if (!chosen) return false;
+  if (!chosen) {
+    if (completeAnswer(answer)) queue.rememberNoHedge(download, now + NO_HEDGE_MS);
+    return false;
+  }
   const hedge: DownloadHedge = {
     identity: chosen.identity,
     label: chosen.label,
@@ -395,8 +457,21 @@ async function startHedge(
   console.warn(
     `den: download ${download.content}: keeping ${download.release.label} and trying ${chosen.label} beside it`,
   );
-  await queue.addHedge(download.name, chosen.url);
+  if (queue.library === log && stillHeld(log, device, now))
+    await queue.addHedge(download.name, chosen.url, chosen.identity);
   return true;
+}
+
+/** Whether a source-list answer is authoritative enough to make an empty choice cacheable. */
+function completeAnswer(answer: SourceAnswer | undefined) {
+  // Older scouts omitted answer metadata; their non-null list retains the pre-metadata complete-list semantics.
+  return !(
+    answer?.kind === 'partial' ||
+    answer?.kind === 'unknown' ||
+    answer?.kind === 'stale' ||
+    answer?.outage ||
+    (answer?.missing ?? 0) > 0
+  );
 }
 
 /** The preserved primary recovered first: forget and safely cancel only its alternate. */
@@ -507,11 +582,7 @@ async function fallBack(
 ): Promise<boolean> {
   if (!queue.resolve) return false;
   const { sources, answer } = await queue.resolve(download.title);
-  const complete = !(
-    answer?.kind === 'partial' ||
-    answer?.kind === 'unknown' ||
-    (answer?.missing ?? 0) > 0
-  );
+  const complete = completeAnswer(answer);
   const next = syncPolicy<{
     decision: 'next' | 'exhausted' | 'undecided';
     index?: number;

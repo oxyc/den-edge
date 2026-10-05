@@ -45,9 +45,20 @@ export class Availability {
   private readonly imdbIds = new Map<number, string | null>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request scheduling must not subscribe the components that enqueue titles.
   private readonly wanted = new Set<number>();
+  /** IDs in a TMDB/scout ask, or deliberately waiting for their retry time. A virtualized card may remount many
+   * times during either interval; it must not turn those mounts into duplicate requests or bypass the backoff. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
+  private readonly pending = new Set<number>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Retry bookkeeping; only verdict changes are observable.
   private readonly tries = new Map<number, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** Only one availability batch asks upstream at once; new mounts gather behind it. */
+  private asking: number | undefined;
+  private askSerial = 0;
+  /** Invalidates old-service responses and retry timers when the configured scout changes. */
+  private generation = 0;
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Timer cleanup bookkeeping, not UI state.
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   /**
    * Scout said "not now" (429) until then: nothing is asked before it. A refusal used to count as "still checking",
    * so each poster was asked again 10 s later, three times, and then never — whatever the wait scout gave.
@@ -92,7 +103,16 @@ export class Availability {
   connect(scout: Addon | null, tmdbKey: string, fetchImpl: typeof fetch = relayFetch): void {
     const previous = this.scout?.base;
     this.scout = scout && tmdbKey ? { base: scout.base, tmdbKey, fetch: fetchImpl } : null;
-    if (this.scout && previous !== undefined && this.scout.base !== previous) {
+    if (previous !== undefined && this.scout?.base !== previous) {
+      this.generation++;
+      clearTimeout(this.timer);
+      this.timer = undefined;
+      for (const timer of this.retryTimers) clearTimeout(timer);
+      this.retryTimers.clear();
+      for (const id of this.pending) this.wanted.add(id);
+      this.pending.clear();
+      this.asking = undefined;
+      this.pausedUntil = 0;
       this.verdicts.clear();
       this.settled.clear();
       this.tries.clear();
@@ -102,7 +122,13 @@ export class Availability {
 
   /** A poster is showing: its movie is asked about along with the others showing now. */
   want(title: Pick<Title, 'type' | 'id' | 'imdbId'>): void {
-    if (title.type !== 'movie' || this.settled.has(title.id) || this.wanted.has(title.id)) return;
+    if (
+      title.type !== 'movie' ||
+      this.settled.has(title.id) ||
+      this.wanted.has(title.id) ||
+      this.pending.has(title.id)
+    )
+      return;
     // A title named by TMDB's details or an atlas catalog already knows its IMDb id: no lookup for it.
     if (title.imdbId) this.imdbIds.set(title.id, title.imdbId);
     this.wanted.add(title.id);
@@ -115,7 +141,7 @@ export class Availability {
   }
 
   private gather(): void {
-    if (!this.scout || this.timer || this.wanted.size === 0) return;
+    if (!this.scout || this.asking !== undefined || this.timer || this.wanted.size === 0) return;
     this.timer = setTimeout(
       () => {
         this.timer = undefined;
@@ -127,54 +153,76 @@ export class Availability {
 
   private async ask(): Promise<void> {
     const scout = this.scout;
-    if (!scout) return;
+    if (!scout || this.asking !== undefined) return;
+    const run = ++this.askSerial;
+    const generation = this.generation;
+    this.asking = run;
     const ids = [...this.wanted].slice(0, MAX_IDS);
-    for (const id of ids) this.wanted.delete(id);
-
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local request accumulator, published through verdicts after the response.
-    const byImdb = new Map<string, number>();
-    const again: number[] = [];
-    await each(ids, LOOKUPS, async (id) => {
-      const imdb = await this.imdbId(id, scout.tmdbKey);
-      if (imdb === undefined) again.push(id);
-      else if (imdb === null) this.settle(id, 'unknown');
-      else byImdb.set(imdb, id);
-    });
-
-    let answer: Record<string, Verdict> = {};
-    let refused = false;
-    if (byImdb.size > 0) {
-      try {
-        const res = await scout.fetch(`${scout.base}/availability`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ids: [...byImdb.keys()] }),
-          signal: AbortSignal.timeout(ANSWER_MS),
-        });
-        if (res.status === 429) {
-          refused = true;
-          this.pausedUntil = this.now() + retryAfterMs(res, RETRY_MS, this.now);
-        } else if (res.ok)
-          answer =
-            ((await res.json()) as { availability?: Record<string, Verdict> }).availability ?? {};
-      } catch {
-        // Out of reach: every movie stays unknown, and is asked again.
-      }
+    for (const id of ids) {
+      this.wanted.delete(id);
+      this.pending.add(id);
     }
-    // Not an answer about any of them, and no try spent: asked again once the wait is over.
-    if (refused) for (const id of byImdb.values()) this.wanted.add(id);
-    else
-      for (const [imdb, id] of byImdb) {
-        const verdict = answer[imdb] ?? 'unknown';
-        if (verdict === 'unknown') again.push(id);
-        else this.settle(id, verdict);
+
+    try {
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Local request accumulator, published through verdicts after the response.
+      const byImdb = new Map<string, number>();
+      const again: number[] = [];
+      const noImdb: number[] = [];
+      await each(ids, LOOKUPS, async (id) => {
+        const imdb = await this.imdbId(id, scout.tmdbKey);
+        if (imdb === undefined) again.push(id);
+        else if (imdb === null) noImdb.push(id);
+        else byImdb.set(imdb, id);
+      });
+      if (generation !== this.generation) return;
+      for (const id of noImdb) this.settle(id, 'unknown');
+
+      let answer: Record<string, Verdict> = {};
+      let refused = false;
+      if (byImdb.size > 0) {
+        try {
+          const res = await scout.fetch(`${scout.base}/availability`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ids: [...byImdb.keys()] }),
+            signal: AbortSignal.timeout(ANSWER_MS),
+          });
+          if (res.status === 429) {
+            refused = true;
+            this.pausedUntil = this.now() + retryAfterMs(res, RETRY_MS, this.now);
+          } else if (res.ok)
+            answer =
+              ((await res.json()) as { availability?: Record<string, Verdict> }).availability ?? {};
+        } catch {
+          // Out of reach: every movie stays unknown, and is asked again.
+        }
       }
-    this.keep();
-    this.later(again);
-    this.gather();
+      if (generation !== this.generation) return;
+      // Not an answer about any of them, and no try spent: asked again once the wait is over.
+      if (refused)
+        for (const id of byImdb.values()) {
+          this.pending.delete(id);
+          this.wanted.add(id);
+        }
+      else
+        for (const [imdb, id] of byImdb) {
+          const verdict = answer[imdb] ?? 'unknown';
+          if (verdict === 'unknown') again.push(id);
+          else this.settle(id, verdict);
+        }
+      this.keep();
+      this.later(again);
+    } catch {
+      // A lookup implementation that unexpectedly rejects must not leave the IDs permanently pending.
+      if (generation === this.generation) this.later(ids.filter((id) => this.pending.has(id)));
+    } finally {
+      if (this.asking === run) this.asking = undefined;
+      this.gather();
+    }
   }
 
   private settle(id: number, verdict: Verdict): void {
+    this.pending.delete(id);
     this.verdicts.set(id, verdict);
     this.settled.add(id);
     this.givenAt.set(id, this.now());
@@ -203,10 +251,17 @@ export class Availability {
       return tries <= RETRIES;
     });
     if (retry.length === 0) return;
-    setTimeout(() => {
-      for (const id of retry) this.wanted.add(id);
+    const generation = this.generation;
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      if (generation !== this.generation) return;
+      for (const id of retry) {
+        this.pending.delete(id);
+        this.wanted.add(id);
+      }
       this.gather();
     }, RETRY_MS);
+    this.retryTimers.add(timer);
   }
 
   private async imdbId(id: number, key: string): Promise<string | null | undefined> {

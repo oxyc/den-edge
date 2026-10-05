@@ -152,6 +152,21 @@ export function capturePage(
       canvas.getContext('2d')?.drawImage(frame, 0, 0);
       node.replaceWith(canvas);
     });
+    // A retained hidden page deliberately does not observe or fetch deferred poster art. A swipe is the first
+    // moment that page is actually about to paint again: materialize its marked artwork in the inert copy only,
+    // without waking the hidden page's components, listeners, or image network work.
+    for (const art of copy.querySelectorAll<HTMLElement>('[data-snapshot-poster]')) {
+      const src = art.dataset.snapshotPoster;
+      if (!src || art.querySelector(':scope > img')) continue;
+      const image = document.createElement('img');
+      image.src = src;
+      image.alt = '';
+      image.decoding = 'async';
+      image.style.cssText = `display:block;width:100%;height:100%;object-fit:${art.dataset.snapshotFit ?? 'cover'}`;
+      art.prepend(image);
+      art.removeAttribute('data-snapshot-poster');
+      art.removeAttribute('data-snapshot-fit');
+    }
     // A page copied once it was left is hidden; its copy is not.
     copy.hidden = false;
     copy.querySelectorAll('iframe').forEach((node) => node.remove());

@@ -9,45 +9,46 @@
 
 <script lang="ts">
   import { setContext, type Snippet } from 'svelte';
+  import { observeNearViewport } from '../lib/nearViewport';
+  import { pageVisibility } from '../lib/pageVisibility.svelte';
 
   let {
     heading,
     headingLink,
     aside,
+    active,
     children,
+    track = $bindable(),
   }: {
     heading: string;
     headingLink?: { before: string; label: string; after: string; href: string };
     /** A quiet link beside the heading, to where the row goes on. */
     aside?: { label: string; href: string };
+    /** A loading row already tracks its vertical window and supplies it here to avoid observing it twice. */
+    active?: boolean;
     children: Snippet;
+    /** The horizontal scroller, for a loader that windows and extends its own cards. */
+    track?: HTMLDivElement;
   } = $props();
 
   /**
-   * Whether the row has come within `AHEAD` of the screen, after which it stays so. Until then its cards draw no
-   * poster at all, rather than a lazy one: the browser watches every lazy image for the screen, and Home's few
-   * hundred, most of them rows below, cost 40-70 ms of a phone's main thread on every row swipe.
+   * Whether the row is within `AHEAD` of the active screen. Far and retained-hidden rows release their images;
+   * one shared observer replaces a separate browser lazy-image watch for every poster.
    */
   const row = $state({ near: false });
   setContext(ROW_NEAR, row);
+  const page = pageVisibility();
   let section: HTMLElement;
   $effect(() => {
-    const box = section.getBoundingClientRect();
-    // On screen already, or in a page that is not laid out (a hidden one), where nothing can be measured.
-    if (!box.height || (box.top < innerHeight + AHEAD && box.bottom > -AHEAD)) {
-      row.near = true;
+    if (!page.active) {
+      row.near = false;
       return;
     }
-    const near = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((e) => e.isIntersecting)) return;
-        row.near = true;
-        near.disconnect();
-      },
-      { rootMargin: `${AHEAD}px 0px` },
-    );
-    near.observe(section);
-    return () => near.disconnect();
+    if (active !== undefined) {
+      row.near = active;
+      return;
+    }
+    return observeNearViewport(section, (near) => (row.near = near), `${AHEAD}px 0px`);
   });
 </script>
 
@@ -63,7 +64,7 @@
     </h2>
     {#if aside}<a class="aside" href={aside.href}>{aside.label} ›</a>{/if}
   </div>
-  <div class="track">
+  <div class="track" bind:this={track}>
     {@render children()}
   </div>
 </section>

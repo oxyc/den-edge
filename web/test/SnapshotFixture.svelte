@@ -11,6 +11,11 @@
         {#each Array(12) as _, i (i)}<div style="flex:0 0 160px">{i}</div>{/each}
       </div>
     </section>
+    <div
+      class="deferred-art"
+      data-snapshot-poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+      data-snapshot-fit="contain"
+    ></div>
     <div style="height:2000px">Rows</div>
   </RoutePage>
 </main>

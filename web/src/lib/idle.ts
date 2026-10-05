@@ -8,22 +8,56 @@ let chain: Promise<void> = Promise.resolve();
 /** The longest one task holds up the next: a slow answer must not stall the whole queue behind it. */
 const HOLD_MS = 1000;
 
-/** Run `task` once the tasks queued before it are done and the browser is next idle; never on a slow link. */
-export function whenIdle(task: () => unknown): void {
+/**
+ * Run `task` once the tasks queued before it are done and the browser is next idle; never on a slow link.
+ * The returned cleanup removes work that its component no longer needs before it begins.
+ */
+export function whenIdle(task: () => unknown): () => void {
   const connection = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
-  if (!permitsScreenPreload(connection)) return;
+  if (!permitsScreenPreload(connection)) return () => {};
+  let live = true;
+  let idle: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let finish: (() => void) | undefined;
   chain = chain.then(
     () =>
       new Promise<void>((resolve) => {
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+          resolve();
+        };
+        finish = settle;
+        if (!live) {
+          settle();
+          return;
+        }
         const run = () => {
-          setTimeout(resolve, HOLD_MS);
+          idle = undefined;
+          if (!live) {
+            settle();
+            return;
+          }
+          timer = setTimeout(settle, HOLD_MS);
           Promise.resolve()
             .then(task)
             .catch((error: unknown) => console.warn('idle task failed', error))
-            .finally(resolve);
+            .finally(settle);
         };
-        if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 3000 });
-        else setTimeout(run, 200);
+        if (typeof requestIdleCallback === 'function')
+          idle = requestIdleCallback(run, { timeout: 3000 });
+        else timer = setTimeout(run, 200);
       }),
   );
+  return () => {
+    live = false;
+    if (idle !== undefined) cancelIdleCallback(idle);
+    if (timer !== undefined) clearTimeout(timer);
+    finish?.();
+  };
 }

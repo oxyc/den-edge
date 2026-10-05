@@ -27,7 +27,7 @@ function memory() {
     put: async (key, entry) => void entries.set(key, entry),
     prune: async (cutoff, most, batch) => {
       pruned.push([cutoff, most, batch]);
-      return backlog.batches-- > 0;
+      return backlog.batches-- > 0 ? batch : 0;
     },
     clear: async () => entries.clear(),
   };
@@ -287,6 +287,51 @@ describe('cachingFetch', () => {
       await cached(`https://api.themoviedb.org/3/discover/movie?page=${PRUNE_EVERY}&api_key=x`);
       await vi.advanceTimersByTimeAsync(10 * PRUNE_PAUSE_MS);
       expect(pruned, 'again after as many answers kept').toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts each housekeeping transaction only after the page offers idle time', async () => {
+    const { pruned, store } = memory();
+    const idle: IdleRequestCallback[] = [];
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('requestIdleCallback', (callback: IdleRequestCallback) => {
+      idle.push(callback);
+      return idle.length;
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const cached = cachingFetch(store, network().fetchImpl, () => RETENTION + 5);
+      await cached(detail);
+      await vi.advanceTimersByTimeAsync(PRUNE_PAUSE_MS);
+      expect(pruned).toEqual([]);
+      expect(idle).toHaveLength(1);
+      idle[0]!({ didTimeout: false, timeRemaining: () => 10 });
+      await vi.waitFor(() => expect(pruned).toEqual([[5, MOST_KEPT, PRUNE_BATCH]]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves startup housekeeping to the tab that already holds the origin lock', async () => {
+    const { pruned, store } = memory();
+    const request = vi.fn(
+      async (_name: string, _options: LockOptions, callback: (lock: Lock | null) => unknown) =>
+        callback(null),
+    );
+    vi.stubGlobal('navigator', { locks: { request } });
+    vi.stubGlobal('requestIdleCallback', (callback: IdleRequestCallback) => {
+      callback({ didTimeout: false, timeRemaining: () => 10 });
+      return 1;
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const cached = cachingFetch(store, network().fetchImpl, () => RETENTION + 5);
+      await cached(detail);
+      await vi.advanceTimersByTimeAsync(PRUNE_PAUSE_MS);
+      expect(request).toHaveBeenCalledOnce();
+      expect(pruned).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

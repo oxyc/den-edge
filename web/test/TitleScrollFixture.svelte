@@ -7,6 +7,7 @@
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import type { Explore, Route } from '../src/lib/route';
   import { SessionServices } from '../src/lib/sessionServices.svelte';
+  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import type { Row } from '../src/lib/wire';
 
   const stamp = [1, 0, 'test'];
@@ -45,6 +46,7 @@
       routesGate = resolve;
     });
   const session = $state({
+    ...fixtureLibrarySessionMethods,
     changed(settingsChanged = false) {
       this.revision++;
       if (settingsChanged) this.settingsRevision++;

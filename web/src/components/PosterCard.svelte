@@ -4,8 +4,10 @@
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
      faded, as on the TV. -->
 <script lang="ts">
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { availability } from '../lib/availability.svelte';
+  import { observeNearViewport } from '../lib/nearViewport';
+  import { pageVisibility } from '../lib/pageVisibility.svelte';
   import { ROW_NEAR } from './PosterRow.svelte';
   import { notePressed, warmDetail } from '../lib/detail';
   import { posterReleaseBadge } from '../lib/detailPresentation';
@@ -29,6 +31,8 @@
     menu = true,
     onopen,
     downloadBadge,
+    checkAvailability = true,
+    onvisibilitychange,
   }: {
     title: Title;
     caption?: string;
@@ -59,14 +63,16 @@
      * standing, which is the *title's* state, not the download's, and must never be shown as a checkmark here.
      */
     downloadBadge?: { state: 'queued' | 'downloading' | 'trouble' | 'ready'; label: string };
+    /** Download cards have their own persisted state; stream availability is unrelated and must not fade them. */
+    checkAvailability?: boolean;
+    /** Lets work tied to this card reuse its shared page/row/card visibility instead of adding an observer. */
+    onvisibilitychange?: (visible: boolean) => void;
   } = $props();
 
   const titleActions = titleActionsContext();
   const notify = toastContext();
   let actionMenu = $state<ActionMenu>();
-  const menuItems = $derived(
-    menu && href ? titleMenuItems(title, titleActions, { continueWatching, href, notify }) : [],
-  );
+  const hasMenu = $derived(menu && !!href);
   // TMDB's path is the poster wherever there is one; `posterUrl` is the fallback a service catalog carries for a
   // title TMDB's own path is missing here, so a row is not half placeholder.
   const poster = $derived(
@@ -86,15 +92,30 @@
     still && still !== failed ? still : poster && poster !== failed ? poster : undefined,
   );
   const portraitFallback = $derived(landscape && !!poster && art === poster);
-  /** A card in a row far from the screen draws no poster yet (`PosterRow`); one in no row always does. */
+  /** Far or retained-hidden cards keep their geometry but draw no poster; one shared observer activates nearby art. */
   const row = getContext<{ near: boolean } | undefined>(ROW_NEAR);
-  const faded = $derived(availability.unavailable(title));
+  const page = pageVisibility();
+  let cardElement = $state<HTMLElement>();
+  let imageNear = $state(false);
+  $effect(() => {
+    if (!cardElement) return;
+    // A retained hidden route still supplies the frozen frame for swipe history. Release its observer and stop new
+    // image work, but preserve prior proximity so reactivation can restore loaded art without another observer turn.
+    if (!page.active || row?.near === false) return;
+    return observeNearViewport(cardElement, (near) => (imageNear = near), '1250px');
+  });
+  // While live art is deferred, `pageSnapshot` can materialize it only in an inert swipe copy.
+  const showImage = $derived(page.active && (row?.near ?? true) && imageNear);
+  $effect(() => onvisibilitychange?.(showImage));
+  const faded = $derived(checkAvailability && availability.unavailable(title));
   const release = $derived(posterReleaseBadge(title));
   // A download row's own state replaces the standing badge outright: the title may well be "Seen" from an
   // earlier season, which says nothing about the episode this card is fetching.
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
   const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
-  $effect(() => availability.want(title));
+  $effect(() => {
+    if (checkAvailability && showImage) availability.want(title);
+  });
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an
   // answer already under way. Delayed, and dropped on `pointercancel` — what a touch that turns into a scroll
@@ -124,7 +145,7 @@
   let longPressFired = false;
 
   function pressStart(event: PointerEvent) {
-    if (event.pointerType !== 'touch' || !menuItems.length) return;
+    if (event.pointerType !== 'touch' || !hasMenu) return;
     longPressAt = { x: event.clientX, y: event.clientY };
     clearTimeout(longPressTimer);
     longPressTimer = setTimeout(() => {
@@ -153,7 +174,7 @@
   }
   /** The ContextMenu key or Shift+F10 on the focused card, same as a right-click on it. */
   function cardKeydown(event: KeyboardEvent) {
-    if (!menuItems.length) return;
+    if (!hasMenu) return;
     if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;
     event.preventDefault();
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -161,16 +182,25 @@
   }
   /** A right-click opens the same menu; Shift+right-click is left to the browser's own. */
   function cardContextMenu(event: MouseEvent) {
-    if (event.shiftKey || !menuItems.length) return;
+    if (event.shiftKey || !hasMenu) return;
     event.preventDefault();
     actionMenu?.openAt(event.clientX, event.clientY);
   }
+  onDestroy(() => {
+    clearTimeout(warming);
+    clearTimeout(longPressTimer);
+  });
 </script>
 
 {#snippet body()}
-  <span class="art" class:landscape>
+  <span
+    class="art"
+    class:landscape
+    data-snapshot-poster={art && !showImage ? art : undefined}
+    data-snapshot-fit={art && !showImage && portraitFallback ? 'contain' : undefined}
+  >
     {#if art}
-      {#if row?.near ?? true}
+      {#if showImage}
         <img
           class:contained={portraitFallback}
           src={art}
@@ -258,6 +288,7 @@
 {#snippet card()}
   {#if href}
     <a
+      bind:this={cardElement}
       class="card pick"
       class:landscape
       class:faded
@@ -282,7 +313,9 @@
       }}>{@render body()}</a
     >
   {:else}
-    <figure class="card" class:faded class:landscape>{@render body()}</figure>
+    <figure bind:this={cardElement} class="card" class:faded class:landscape>
+      {@render body()}
+    </figure>
   {/if}
 {/snippet}
 
@@ -290,12 +323,12 @@
   <span aria-hidden="true">⋯</span>
 {/snippet}
 
-{#if menuItems.length}
+{#if hasMenu}
   <div class="holder" class:landscape>
     {@render card()}
     <ActionMenu
       bind:this={actionMenu}
-      items={menuItems}
+      items={() => titleMenuItems(title, titleActions, { continueWatching, href: href!, notify })}
       label={`Actions for ${title.title}`}
       heading={title.title}
       triggerClass={release ? 'action below' : 'action'}

@@ -50,8 +50,8 @@ test('Coming Soon captions stay on one line in a horizontal-only shelf', async (
   await page.close();
 });
 
-// The browser watches every lazy image for the screen, on every frame of a scroll. A row far below draws its
-// cards without posters until it comes near, so its images are not among them; its cards are all there.
+// A shared observer activates art only where both axes are near. A far row has no posters; when the row arrives,
+// posters near its horizontal viewport load, and art at the far end remains reachable by scrolling the shelf.
 test('a row far below the screen draws its posters only once it comes near', async ({
   browser,
 }) => {
@@ -69,10 +69,16 @@ test('a row far below the screen draws its posters only once it comes near', asy
   await page.waitForTimeout(300);
   await expect(far.locator('img')).toHaveCount(0);
   await far.scrollIntoViewIfNeeded();
-  await expect(far.locator('img')).toHaveCount(10);
+  await expect(far.locator('img').first()).toBeVisible();
+  expect(await far.locator('img').count()).toBeLessThan(10);
   await expect(far.locator('img').first()).toHaveAttribute(
     'src',
     'https://image.tmdb.org/t/p/w342/far1.jpg',
   );
+  await far.locator('.track').evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+    node.dispatchEvent(new Event('scroll'));
+  });
+  await expect(far.locator('img[src$="/far10.jpg"]')).toHaveCount(1);
   await page.close();
 });

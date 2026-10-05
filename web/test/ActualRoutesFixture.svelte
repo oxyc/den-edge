@@ -4,6 +4,7 @@
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import { SessionServices } from '../src/lib/sessionServices.svelte';
+  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import '../src/app.css';
   const noop = () => {};
   const log = {
@@ -19,6 +20,7 @@
     keep: async () => {},
   };
   const session = {
+    ...fixtureLibrarySessionMethods,
     changed: () => {},
     revision: 0,
     settingsRevision: 0,

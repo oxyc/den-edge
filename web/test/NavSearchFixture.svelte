@@ -7,6 +7,7 @@
   import type { LibrarySession } from '../src/lib/librarySession.svelte';
   import { fetchRoutes } from '../src/lib/routes';
   import { SessionServices } from '../src/lib/sessionServices.svelte';
+  import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import '../src/app.css';
   let route = $state(parseRoute(location.pathname + location.search));
   // As App does it: the address owns the query, but the field keeps what was typed while a result is open.
@@ -70,6 +71,7 @@
     },
   };
   const session = {
+    ...fixtureLibrarySessionMethods,
     changed: () => {},
     revision: 0,
     settingsRevision: 0,
