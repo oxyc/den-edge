@@ -119,7 +119,9 @@ export function unchangedNotice(failure: Failure, ended?: string | null): string
     case 'unreachable':
       return `Couldn’t reach Den’s player for that, so ${carriesOn}`;
     case 'busy':
-      return `Den is already playing two things, so ${carriesOn}`;
+      return `Den is already playing as much as it can right now, so ${carriesOn}`;
+    case 'starting':
+      return `Den is still finishing this browser's or install's last attempt, so ${carriesOn}`;
     case 'login':
       return `Den’s player wants this browser’s key again, so ${carriesOn}`;
     case 'ended':

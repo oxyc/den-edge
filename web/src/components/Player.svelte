@@ -38,6 +38,7 @@
     rememberLink,
     reportFailure,
     routeKind,
+    sendHeartbeat,
     sourceFailed,
     startSession,
     wantedLanguages,
@@ -167,6 +168,9 @@
   } = $props();
 
   const REPORT_MS = 60_000;
+  /** How often a paused viewer's "still here" goes out — comfortably under den-remux's own UNATTENDED_IDLE
+   * (60s), with room for a missed beat, so a deliberate pause is told apart from a closed tab. */
+  const HEARTBEAT_MS = 20_000;
   /** How long a video may go without a picture before it counts as one the browser can't play. */
   const STUCK_MS = 30_000;
   /** How far from the asked-for second a native player may start and still count as there: it starts on a segment. */
@@ -216,8 +220,11 @@
     engine: 'Couldn’t load the player. Check the connection, then reload the page.',
   };
   /** Waiting on den-remux, which is asked again every RETRY_MS. */
-  const waits: Record<'busy' | 'transcode', string> = {
-    busy: 'Den is already playing two things. Waiting for one to stop…',
+  const waits: Record<'busy' | 'starting' | 'transcode', string> = {
+    busy: 'Den is already playing as much as it can right now. Waiting for one to stop…',
+    // Distinct from `busy`: this browser or install's own last attempt is still opening — nobody else's
+    // slot to wait out, so this says so rather than naming an imaginary "two things".
+    starting: 'Den is still finishing your last attempt at this. One moment…',
     transcode:
       'This needs converting for this browser, and the homelab is converting another. Waiting for it to finish…',
   };
@@ -278,6 +285,7 @@
   let imdb: string | undefined;
   let hls: Hls | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let ended = false;
@@ -577,7 +585,11 @@
         return result.failure;
       }
       failure = result.failure;
-      if (result.failure === 'busy' || result.failure === 'transcode')
+      if (
+        result.failure === 'busy' ||
+        result.failure === 'starting' ||
+        result.failure === 'transcode'
+      )
         // What it asked for, where it said: a converting GPU can mean minutes, and knocking every
         // twenty seconds until then is work for a box that is already the reason we are waiting.
         retry = setTimeout(() => void begin(pick, extra), result.retryMs ?? RETRY_MS);
@@ -1490,11 +1502,18 @@
     progress.playing();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
+    // The segment requests playback itself makes already say this viewer is here.
+    clearInterval(heartbeat);
   }
 
   function paused() {
     clearInterval(timer);
     report();
+    if (session) {
+      sendHeartbeat(session);
+      clearInterval(heartbeat);
+      heartbeat = setInterval(() => session && sendHeartbeat(session), HEARTBEAT_MS);
+    }
   }
 
   /** The end: count down to the next episode, when there is one. */
@@ -1748,6 +1767,7 @@
     if (ended) return;
     ended = true;
     clearInterval(timer);
+    clearInterval(heartbeat);
     clearInterval(countdown);
     clearInterval(noticeTimer);
     clearTimeout(retry);
@@ -1941,7 +1961,7 @@
             That isn’t one of the homelab’s browser keys.
           </p>{/if}
       </form>
-    {:else if failure === 'busy' || failure === 'transcode'}
+    {:else if failure === 'busy' || failure === 'starting' || failure === 'transcode'}
       <p class="note" role="status">{waits[failure]}</p>
     {:else if failure === 'lost'}
       <div class="lost" role="alert">
