@@ -9,7 +9,7 @@
   import PosterCard from './components/PosterCard.svelte';
   import { downloads, inFlight } from './lib/downloadQueue.svelte';
   import { headline } from './lib/downloadStatus';
-  import PosterRow from './components/PosterRow.svelte';
+  import WindowedPosterRow from './components/WindowedPosterRow.svelte';
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
     DetailScreen,
@@ -1425,8 +1425,14 @@
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
     {#if resume.length}
-      <PosterRow heading="Continue Watching">
-        {#each resume as entry (`${entry.title.type}:${entry.title.id}`)}
+      <WindowedPosterRow
+        heading="Continue Watching"
+        items={resume}
+        itemKey={(entry) => `${entry.title.type}:${entry.title.id}`}
+        itemHref={(entry) => titleHref(entry.title)}
+        itemLabel={(entry) => entry.title.title}
+      >
+        {#snippet children(entry)}
           <PosterCard
             title={entry.title}
             caption={caption(entry)}
@@ -1435,12 +1441,25 @@
             href={titleHref(entry.title)}
             continueWatching
           />
-        {/each}
-      </PosterRow>
+        {/snippet}
+      </WindowedPosterRow>
     {/if}
     {#if !facet && downloading.length}
-      <PosterRow heading="Downloading" aside={{ label: 'All downloads', href: '/downloads' }}>
-        {#each downloading as download (download.name)}
+      <WindowedPosterRow
+        heading="Downloading"
+        aside={{ label: 'All downloads', href: '/downloads' }}
+        items={downloading}
+        itemKey={(download) => download.name}
+        itemHref={(download) =>
+          titleHref({
+            type: download.title.mediaType,
+            id: download.title.mediaId,
+            title: download.title.title || download.release.label,
+          })}
+        itemLabel={(download) => download.title.title || download.release.label}
+        landscape
+      >
+        {#snippet children(download)}
           {@const answer = downloads.answers.get(download.name)}
           {@const title = {
             type: download.title.mediaType,
@@ -1458,19 +1477,25 @@
             progress={answer?.state === 'preparing' ? answer.progress : undefined}
             href={titleHref(title)}
           />
-        {/each}
-      </PosterRow>
+        {/snippet}
+      </WindowedPosterRow>
     {/if}
     {#if saved.length}
-      <PosterRow heading="Watchlist">
-        {#each saved as title (`${title.type}:${title.id}`)}
+      <WindowedPosterRow
+        heading="Watchlist"
+        items={saved}
+        itemKey={(title) => `${title.type}:${title.id}`}
+        itemHref={titleHref}
+        itemLabel={(title) => title.title}
+      >
+        {#snippet children(title)}
           <PosterCard
             {title}
             caption={title.year ? String(title.year) : undefined}
             href={titleHref(title)}
           />
-        {/each}
-      </PosterRow>
+        {/snippet}
+      </WindowedPosterRow>
     {/if}
     {#if !facet}
       <ServicesRow {services} pending={naming ? servicePicks.length : 0} onintent={primeService} />
