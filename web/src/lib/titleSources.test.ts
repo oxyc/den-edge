@@ -56,6 +56,22 @@ it('carries the season pack a probed episode came from as context, never in plac
   const [movie] = parseSources({ streams: [raw] }, addon, routes)!;
   expect(movie!.packSize).toBeUndefined();
 });
+it('a never-opened pack sends sizeBytes:null — size must become undefined, never 0 or NaN', () => {
+  const unopened = {
+    title: 'Show.S01.COMPLETE.1080p.WEB-DL.mkv',
+    url: 'http://lan:8080/p/ticket-pack',
+    behaviorHints: { filename: 'Show.S01.COMPLETE.1080p.WEB-DL.mkv' },
+    attributes: {
+      resolution: '1080p',
+      cached: true,
+      sizeBytes: null,
+      packSizeBytes: 68_000_000_000,
+    },
+  };
+  const [source] = parseSources({ streams: [unopened] }, addon, routes)!;
+  expect(source!.size).toBeUndefined();
+  expect(source!.packSize).toBe(68_000_000_000);
+});
 it('scopes series sources to the exact requested episode', async () => {
   let path = '';
   const network = (async (input) => {
