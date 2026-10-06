@@ -13,6 +13,11 @@ const ALLOWLIST = {
       'dev-only lint tooling; DoS on attacker-crafted glob patterns, which lint never receives',
     expires: '2026-11-02',
   },
+  'GHSA-68fv-2mgg-jv7q': {
+    reason:
+      'build-time source-map parsing; DoS needs an attacker-crafted source map, which the build never reads; fixed 1.2.2 clears the npm min-release-age on 2026-10-07',
+    expires: '2026-10-08',
+  },
 };
 
 function runAudit() {
