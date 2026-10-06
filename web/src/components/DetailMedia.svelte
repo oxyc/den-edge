@@ -237,8 +237,14 @@
    * rendition, `pause()`, and destroying the element outright — all measured.
    */
   function quieten(player: HTMLMediaElement) {
-    player.muted = !sound;
-    player.volume = sound ? 1 : 0;
+    // This helper is also called from the effect that owns playback. Reading `sound` reactively there made
+    // the first phone tap tear that effect down: tap() called play(), the cleanup immediately called pause(),
+    // and the new run called play() again. AVFoundation can reopen a progressively served MP4 at zero during
+    // that reconfiguration. Sound changes apply themselves synchronously through this helper, so they must not
+    // also become reasons to restart the playback effect.
+    const audible = untrack(() => sound);
+    player.muted = !audible;
+    player.volume = audible ? 1 : 0;
     // reel's masters carry `EXT-X-MEDIA:TYPE=AUDIO`, and Safari hands such a master to AVFoundation,
     // which plays that rendition through a path neither `muted` nor `volume` reaches: the element
     // reports silence while the sound comes out of it. Switching the rendition itself off is what stops
@@ -247,7 +253,7 @@
     if (!tracks) return;
     for (let at = 0; at < tracks.length; at += 1) {
       const track = tracks[at];
-      if (track) track.enabled = sound;
+      if (track) track.enabled = audible;
     }
   }
 
@@ -263,19 +269,27 @@
     quieten(player);
     // Back to a quiet page on the way out: a trailer still talking after the viewer closed it is
     // the thing they would then have to go and silence.
+    const stopListening = () => {
+      document.removeEventListener('fullscreenchange', leave);
+      player.removeEventListener('webkitendfullscreen', leave);
+    };
     const leave = () => {
       if (document.fullscreenElement) return;
       sound = false;
       quieten(player);
-      document.removeEventListener('fullscreenchange', leave);
+      stopListening();
     };
     document.addEventListener('fullscreenchange', leave);
+    // iOS's native video full screen does not participate in the document Fullscreen API.
+    player.addEventListener('webkitendfullscreen', leave);
     try {
       if (player.requestFullscreen) await player.requestFullscreen();
-      else
-        (
-          player as HTMLVideoElement & { webkitEnterFullscreen?: () => void }
-        ).webkitEnterFullscreen?.();
+      else {
+        const enter = (player as HTMLVideoElement & { webkitEnterFullscreen?: () => void })
+          .webkitEnterFullscreen;
+        if (!enter) throw new Error('Full screen is not supported');
+        enter.call(player);
+      }
     } catch {
       // Refused, or unsupported: `leave` will never fire, so take it back off rather than leave a listener
       // behind for every press — and go back to silence. Keeping the sound on here was how a trailer began
@@ -285,7 +299,7 @@
       // navigation has already spent its gesture gets full screen refused and, before this, audio anyway.
       sound = false;
       quieten(player);
-      document.removeEventListener('fullscreenchange', leave);
+      stopListening();
     }
     void player.play().catch(() => {});
   }
@@ -776,11 +790,12 @@
     ></canvas>
   {/if}
   <div class="scrim" aria-hidden="true"></div>
-  <!-- Glass, because this is a control over media — the one place the look is for. Full screen is desktop
-       only: a phone's is a tap on its own native controls instead. Sound stays until `touched` on a phone
-       too — until then there is no keyboard route to the native controls that replace it (they only show up
-       after the same gesture this grants), so a keyboard or switch user had no way to hear this at all. -->
-  {#if !mobile && !!source && !failed && !ended}
+  <!-- Glass, because this is a control over media — the one place the look is for. Keep Den's full-screen
+       action on phones too: a narrow native control bar may omit its own, and before the first tap there is no
+       native bar at all. Sound stays until `touched` on a phone — until then there is no keyboard route to the
+       native controls that replace it (they only show up after the same gesture this grants), so a keyboard or
+       switch user otherwise has no way to hear this at all. -->
+  {#if !!source && !failed && !ended}
     <button
       class="control expand glass"
       onpointerdown={press}
@@ -793,7 +808,6 @@
   {#if (!mobile || !touched) && !!source && !failed && !ended}
     <button
       class="control sound glass"
-      class:alone={mobile}
       onpointerdown={press}
       onclick={mobile ? tap : toggleSound}
       aria-label={sound ? 'Mute trailer' : 'Play trailer with sound'}
@@ -934,10 +948,9 @@
       display: none;
     }
 
-    /* Nothing to hover on a phone, and no `.expand` above it to clear: shown plainly, at the top position, so
-       there is a visible, keyboard-reachable way to this trailer's sound before the first tap. */
-    .sound.alone {
-      top: calc(var(--bar-space) + 12px);
+    /* Nothing to hover on a phone. Both explicit media actions must be visible before the native controls exist;
+       after the first tap the sound action gives way to those controls and Expand keeps its place. */
+    .control {
       opacity: 1;
     }
   }

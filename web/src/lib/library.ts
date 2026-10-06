@@ -3,7 +3,7 @@
 // so the web shows the same rows in the same order.
 
 import { WATCHED } from './actions';
-import { syncPolicy } from './syncCore';
+import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
 import { wellFormed, type Row, type Stamp } from './wire';
 
 export type MediaType = 'movie' | 'tv';
@@ -187,74 +187,66 @@ export const titleKey = (t: { type: string; id: number }) => `${t.type}:${t.id}`
  * It is called from a `$derived`, which cannot await, so there is nowhere to fix this further down.
  */
 export function applyLog(library: Library, rows: Row[]): Library {
-  const records = new Map(library.records.map((r) => [titleKey(r.title), r]));
-  const dismissed = new Map(library.dismissed);
-  const marks = new Map(library.marks.map((m) => [markKey(m), m]));
+  const fold = new LibraryFold(library);
+  for (const row of rows) fold.add(row);
+  return fold.finish();
+}
+
+/** The same fold as `applyLog`, staged across browser tasks and published only after it is complete. */
+export async function applyLogInSlices(
+  library: Library,
+  rows: Row[],
+  options?: PolicySliceOptions,
+): Promise<Library | null> {
+  const fold = new LibraryFold(library);
+  function* steps() {
+    for (const row of rows) {
+      if (!wellFormed(row)) continue;
+      if (row.kind !== 'wat') {
+        yield () => fold.add(row);
+        continue;
+      }
+      if (row.title.type !== 'tv') continue;
+      for (const [number, register] of Object.entries(row.entries))
+        yield () => fold.addWatch(row, number, register);
+    }
+  }
+  const completed = await inPolicySlices(steps(), (step) => step(), options);
+  return completed ? fold.finish() : null;
+}
+
+class LibraryFold {
+  private readonly records: Map<string, LibraryRecord>;
+  private readonly dismissed: Map<string, number>;
+  private readonly marks: Map<string, Mark>;
   // A mark of each series, for the display a new episode mark borrows: scanning every mark per episode row was
   // quadratic in a long watch history.
-  const seriesMarks = new Map(library.marks.map((m) => [titleKey(m), m]));
-  const flags = new Map(library.flags ?? []);
-  const resets = new Map<string, number>();
-  for (const row of rows) {
-    if (row.kind === 'set' || row.kind === 'snt' || !wellFormed(row)) continue; // settings and receipts have no display projection
+  private readonly seriesMarks: Map<string, Mark>;
+  private readonly flags: Map<
+    string,
+    { type: string; id: number; season: number; episode: number }
+  >;
+  private readonly resets = new Map<string, number>();
+
+  constructor(private readonly library: Library) {
+    this.records = new Map(library.records.map((r) => [titleKey(r.title), r]));
+    this.dismissed = new Map(library.dismissed);
+    this.marks = new Map(library.marks.map((m) => [markKey(m), m]));
+    this.seriesMarks = new Map(library.marks.map((m) => [titleKey(m), m]));
+    this.flags = new Map(library.flags ?? []);
+  }
+
+  add(row: Row): void {
+    const { records, dismissed, marks, seriesMarks, flags, resets } = this;
+    if (row.kind === 'set' || row.kind === 'snt' || !wellFormed(row)) return; // settings and receipts have no display projection
     if (row.kind === 'wat') {
-      if (row.title.type !== 'tv') continue;
-      const key = titleKey(row.title);
+      if (row.title.type !== 'tv') return;
       for (const [number, register] of Object.entries(row.entries)) {
-        const episode = {
-          type: 'tv' as const,
-          id: row.title.id,
-          season: row.season,
-          episode: Number(number),
-        };
-        const state = syncPolicy<{
-          watched: boolean;
-          resume: { value: number; at: Stamp; seconds?: number } | null;
-          watched_at: number | null;
-        }>({
-          op: 'episode_state',
-          register,
-          resets: [row.seasonReset].filter(Boolean),
-          now: Date.now(),
-        });
-        const held = marks.get(markKey(episode));
-        if (state.resume) {
-          const series = held ?? seriesMarks.get(key);
-          const mark = {
-            ...episode,
-            fraction: state.resume.value,
-            updatedAt: state.resume.at[0],
-            ...(state.resume.seconds !== undefined ? { seconds: state.resume.seconds } : {}),
-            title: series?.title ?? '',
-            posterPath: series?.posterPath,
-            voteAverage: series?.voteAverage ?? 0,
-          };
-          marks.set(markKey(episode), mark);
-          seriesMarks.set(key, mark);
-          flags.delete(markKey(episode));
-        } else if (state.watched) {
-          if (register.progress) {
-            const series = held ?? seriesMarks.get(key);
-            const mark = {
-              ...episode,
-              fraction: 1,
-              updatedAt: register.progress.at[0],
-              title: series?.title ?? '',
-              posterPath: series?.posterPath,
-              voteAverage: series?.voteAverage ?? 0,
-            };
-            marks.set(markKey(episode), mark);
-            seriesMarks.set(key, mark);
-            flags.delete(markKey(episode));
-          } else flags.set(markKey(episode), episode);
-        } else {
-          marks.delete(markKey(episode));
-          flags.delete(markKey(episode));
-        }
+        this.addWatch(row, number, register);
       }
-      continue;
+      return;
     }
-    if (row.title.type !== 'movie' && row.title.type !== 'tv') continue;
+    if (row.title.type !== 'movie' && row.title.type !== 'tv') return;
     const key = titleKey(row.title);
     if (row.kind === 'ep') {
       const episode = {
@@ -299,9 +291,9 @@ export function applyLog(library: Library, rows: Row[]): Library {
         // Real progress supersedes a timeless bit for the same episode.
         flags.delete(markKey(episode));
       }
-      continue;
+      return;
     }
-    if (row.kind !== 'rec') continue;
+    if (row.kind !== 'rec') return;
     if (row.episodesReset) resets.set(key, row.episodesReset[0]);
     records.set(key, {
       title: records.get(key)?.title ?? { type: row.title.type, id: row.title.id, title: '' },
@@ -315,24 +307,86 @@ export function applyLog(library: Library, rows: Row[]): Library {
     if (row.dismissed.value)
       dismissed.set(key, Math.max(dismissed.get(key) ?? -Infinity, row.dismissed.at[0]));
   }
-  // A whole series un-watched: every episode progress from before it goes.
-  for (const [key, mark] of marks) {
-    const reset = resets.get(titleKey(mark));
-    if (reset !== undefined && mark.updatedAt <= reset) marks.delete(key);
+
+  addWatch(
+    row: Extract<Row, { kind: 'wat' }>,
+    number: string,
+    register: Extract<Row, { kind: 'wat' }>['entries'][string],
+  ): void {
+    const { marks, seriesMarks, flags } = this;
+    const key = titleKey(row.title);
+    const episode = {
+      type: 'tv' as const,
+      id: row.title.id,
+      season: row.season,
+      episode: Number(number),
+    };
+    const state = syncPolicy<{
+      watched: boolean;
+      resume: { value: number; at: Stamp; seconds?: number } | null;
+      watched_at: number | null;
+    }>({
+      op: 'episode_state',
+      register,
+      resets: [row.seasonReset].filter(Boolean),
+      now: Date.now(),
+    });
+    const held = marks.get(markKey(episode));
+    if (state.resume) {
+      const series = held ?? seriesMarks.get(key);
+      const mark = {
+        ...episode,
+        fraction: state.resume.value,
+        updatedAt: state.resume.at[0],
+        ...(state.resume.seconds !== undefined ? { seconds: state.resume.seconds } : {}),
+        title: series?.title ?? '',
+        posterPath: series?.posterPath,
+        voteAverage: series?.voteAverage ?? 0,
+      };
+      marks.set(markKey(episode), mark);
+      seriesMarks.set(key, mark);
+      flags.delete(markKey(episode));
+    } else if (state.watched) {
+      if (register.progress) {
+        const series = held ?? seriesMarks.get(key);
+        const mark = {
+          ...episode,
+          fraction: 1,
+          updatedAt: register.progress.at[0],
+          title: series?.title ?? '',
+          posterPath: series?.posterPath,
+          voteAverage: series?.voteAverage ?? 0,
+        };
+        marks.set(markKey(episode), mark);
+        seriesMarks.set(key, mark);
+        flags.delete(markKey(episode));
+      } else flags.set(markKey(episode), episode);
+    } else {
+      marks.delete(markKey(episode));
+      flags.delete(markKey(episode));
+    }
   }
-  // And every timeless bit for it, whenever it was learned. A flag has no stamp to compare, so it can never
-  // lose the test above — and a series un-watched while fabricated "watched" bits survive would offer them
-  // again on the next pull, and go on doing so forever.
-  for (const [key, flag] of flags) {
-    if (resets.has(titleKey(flag))) flags.delete(key);
+
+  finish(): Library {
+    // A whole series un-watched: every episode progress from before it goes.
+    for (const [key, mark] of this.marks) {
+      const reset = this.resets.get(titleKey(mark));
+      if (reset !== undefined && mark.updatedAt <= reset) this.marks.delete(key);
+    }
+    // And every timeless bit for it, whenever it was learned. A flag has no stamp to compare, so it can never
+    // lose the test above — and a series un-watched while fabricated "watched" bits survive would offer them
+    // again on the next pull, and go on doing so forever.
+    for (const [key, flag] of this.flags) {
+      if (this.resets.has(titleKey(flag))) this.flags.delete(key);
+    }
+    return {
+      ...this.library,
+      records: [...this.records.values()],
+      marks: [...this.marks.values()],
+      flags: this.flags,
+      dismissed: this.dismissed,
+    };
   }
-  return {
-    ...library,
-    records: [...records.values()],
-    marks: [...marks.values()],
-    flags,
-    dismissed,
-  };
 }
 
 const markKey = (m: { type: string; id: number; season: number; episode: number }) =>

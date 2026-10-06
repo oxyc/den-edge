@@ -261,6 +261,15 @@ test('a legacy episode recovers its still only once its retained page becomes vi
   await expect.poll(() => seasonRequests).toBe(1);
   await expect(page.locator('.card img')).toHaveCount(0);
 
+  // A windowed Downloading shelf destroys a card after it leaves the horizontal viewport. Recreating it within the
+  // failure quiet period must retain the semantic recovery, not turn that remount into another season request.
+  await page.evaluate(() => window.downloadsFixture.setMounted(false));
+  await expect(page.locator('.card')).toHaveCount(0);
+  await page.evaluate(() => window.downloadsFixture.setMounted(true));
+  await expect(page.locator('.card')).toHaveCount(1);
+  await page.waitForTimeout(100);
+  expect(seasonRequests).toBe(1);
+
   // Poll progress replaces the download row and nested title object. The semantic episode is unchanged, so no
   // second recovery is scheduled even though a season answer would now be hot in the cache.
   await page.evaluate(() => window.downloadsFixture.refreshIdentity());

@@ -4,6 +4,7 @@ import {
   browseRows,
   categories,
   discoverParams,
+  drawn,
   equivalentGenre,
   EXPLORE,
   GENRES,
@@ -422,6 +423,87 @@ describe('rows atlas’s filter answers', () => {
     expect(atlas.asked).toEqual([
       '/atlas/index/filter/movie/titles.json?sel=subgenre:Romantic%20Comedy',
     ]);
+  });
+
+  it('bounds a posterless atlas page’s TMDB lookups', async () => {
+    const titles = Array.from({ length: 10 }, (_, id) => ({
+      type: 'movie' as const,
+      id,
+      title: `Title ${id}`,
+    }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let active = 0;
+    let most = 0;
+    let asked = 0;
+    const row = drawn(
+      { id: 'bounded', title: 'Bounded', load: async () => titles },
+      async (ref) => {
+        asked++;
+        most = Math.max(most, ++active);
+        await gate;
+        active--;
+        return { ...ref, title: `Drawn ${ref.id}`, posterPath: `/${ref.id}.jpg` };
+      },
+    );
+
+    const loading = row.load(1);
+    await vi.waitFor(() => expect(asked).toBe(4));
+    expect(most).toBe(4);
+    release();
+    const loaded = await loading;
+    expect(asked).toBe(10);
+    expect(loaded.map((title) => title.id)).toEqual(titles.map((title) => title.id));
+  });
+
+  it('stops queued poster lookups when one active lookup is canceled', async () => {
+    const titles = Array.from({ length: 10 }, (_, id) => ({
+      type: 'movie' as const,
+      id,
+      title: `Title ${id}`,
+    }));
+    const asked: number[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const row = drawn(
+        { id: 'canceled', title: 'Canceled', load: async () => titles },
+        async (ref) => {
+          asked.push(ref.id);
+          if (ref.id === 0) throw new DOMException('left', 'AbortError');
+          return { ...ref, title: `Drawn ${ref.id}`, posterPath: `/${ref.id}.jpg` };
+        },
+      );
+      await expect(row.load(1)).resolves.toHaveLength(10);
+      expect(asked, 'only the four jobs already active').toEqual([0, 1, 2, 3]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('continues queued poster lookups after one title alone fails', async () => {
+    const titles = Array.from({ length: 7 }, (_, id) => ({
+      type: 'movie' as const,
+      id,
+      title: `Title ${id}`,
+    }));
+    const asked: number[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const row = drawn(
+        { id: 'one-failure', title: 'One failure', load: async () => titles },
+        async (ref) => {
+          asked.push(ref.id);
+          if (ref.id === 0) throw new Error('one title failed');
+          return { ...ref, title: `Drawn ${ref.id}`, posterPath: `/${ref.id}.jpg` };
+        },
+      );
+      const loaded = await row.load(1);
+      expect(asked).toEqual(titles.map((title) => title.id));
+      expect(loaded[0]?.posterPath).toBeUndefined();
+      expect(loaded.slice(1).every((title) => title.posterPath)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps TMDB for the spine, Nordic Noir and Critically Acclaimed, and asks atlas nothing without it', async () => {

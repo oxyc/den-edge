@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { RESUME_FLOOR, WATCHED } from './actions';
 import {
   applyLog,
+  applyLogInSlices,
   ContinueProjector,
   continueWatching,
   contentWatched,
@@ -15,6 +16,7 @@ import {
   type Library,
 } from './library';
 import { syncPolicy } from './syncCore';
+import type { Row } from './wire';
 
 describe('poster captions', () => {
   const title = { type: 'movie' as const, id: 1, title: 'One', year: 2020 };
@@ -163,6 +165,82 @@ describe('a download row’s own watched state, never the series’', () => {
 });
 
 describe('folding episode rows in', () => {
+  it('matches the synchronous fold across yields, including a reset before one large season', async () => {
+    const reset: Row = {
+      kind: 'rec' as const,
+      schema: 2,
+      title: { type: 'tv' as const, id: 7 },
+      status: { value: 'inProgress', at: [2000, 0, 'aaaaaaaaaaaaaaaa'] },
+      resume: { value: 0, viewing: 0, at: [2000, 0, 'aaaaaaaaaaaaaaaa'] },
+      reaction: { value: null, at: [0, 0, ''] },
+      deleted: { value: false, at: [0, 0, ''] },
+      dismissed: { value: false, at: [0, 0, ''] },
+      episodesReset: [2000, 0, 'aaaaaaaaaaaaaaaa'] as [number, number, string],
+      addedAt: 2000,
+      watchedAt: null,
+    };
+    const season: Row = {
+      kind: 'wat' as const,
+      schema: 3 as const,
+      title: { type: 'tv' as const, id: 7 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: Object.fromEntries(
+        Array.from({ length: 500 }, (_, index) => [
+          String(index + 1),
+          {
+            imported: false,
+            progress: {
+              value: 0.4,
+              viewing: 0,
+              at: [1000, index, 'aaaaaaaaaaaaaaaa'] as [number, number, string],
+            },
+            plays: {},
+            cleared: null,
+          },
+        ]),
+      ),
+    };
+    const rows = [reset, season];
+    const expected = applyLog(emptyLibrary(), rows);
+    let clock = 0;
+    let yields = 0;
+    const staged = await applyLogInSlices(emptyLibrary(), rows, {
+      budgetMs: 4,
+      now: () => clock++,
+      yieldTask: async () => {
+        yields++;
+      },
+    });
+    expect(staged).not.toBeNull();
+    expect(staged).toEqual(expected);
+    expect(staged!.marks).toEqual([]);
+    expect(yields).toBeGreaterThan(100);
+  });
+
+  it('skips a malformed watch row on both synchronous and staged paths', async () => {
+    const malformed: Row = {
+      kind: 'wat' as const,
+      schema: 3 as const,
+      title: { type: 'movie' as const, id: 7 },
+      season: 1,
+      block: 0,
+      seasonReset: null,
+      entries: {
+        1: {
+          imported: false,
+          progress: { value: 0.4, viewing: 0, at: [1000, 0, 'aaaaaaaaaaaaaaaa'] },
+          plays: {},
+          cleared: null,
+        },
+      },
+    };
+    expect(await applyLogInSlices(emptyLibrary(), [malformed])).toEqual(
+      applyLog(emptyLibrary(), [malformed]),
+    );
+  });
+
   /**
    * den-core defines the watched threshold once — `crates/den-sync/src/series.rs:6`, "One definition, so a
    * client cannot hold a different opinion about what 'watched' means" — and this app restated it in eight

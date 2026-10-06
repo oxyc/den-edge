@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import type { Download } from '../lib/downloadRows';
   import { coordinate } from '../lib/downloadRows';
-  import { downloadStill } from '../lib/downloadArtwork';
+  import { DOWNLOAD_STILL_RETRY_MS, downloadStill } from '../lib/downloadArtwork';
   import type { Title } from '../lib/library';
   import PosterCard from './PosterCard.svelte';
 
@@ -34,7 +34,6 @@
   let failedKey = $state<string>();
   let failedAt = $state(0);
   let live = true;
-  const RETRY_MS = 30_000;
   let visible = $state(false);
   const isEpisode = $derived(
     download.title.mediaType === 'tv' &&
@@ -67,7 +66,7 @@
       !visible ||
       recoveredKey === key ||
       pendingKey === key ||
-      (failedKey === key && Date.now() - failedAt < RETRY_MS)
+      (failedKey === key && Date.now() - failedAt < DOWNLOAD_STILL_RETRY_MS)
     )
       return;
     // Progress writes replace the row and its nested title object. Record the semantic episode key before asking,

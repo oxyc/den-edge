@@ -231,7 +231,10 @@
                     >{size(source.size)}{#if source.packSize}<span class="pack">
                         · from a {size(source.packSize)} pack</span
                       >{/if}</span
-                  >{/if}
+                  >{:else if source.packSize}<!-- The episode's own size is unknown (scout never names a
+                    pack's whole total as if it were a single file's) — show what the number actually is
+                    rather than nothing at all. -->
+                  <span class="chip quiet">{size(source.packSize)} pack</span>{/if}
               </p>
               <strong>{source.filename}</strong>
               {#if source.probed && source.languages.length}<p class="languages">

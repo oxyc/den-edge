@@ -84,23 +84,28 @@ describe('every device, with a key of its own or without', () => {
 });
 
 describe('cachingFetch', () => {
-  it('reports a rate limit that leaves the page without an answer', async () => {
+  it('reports a direct rate limit and den-edge’s 503 Retry-After when the page has no answer', async () => {
     const waits: number[] = [];
     const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
+    let status = 429;
+    let wait = '17';
     const refused: typeof fetch = async () =>
       new Response('{"error":"rate_limited"}', {
-        status: 429,
-        headers: { 'retry-after': '17' },
+        status,
+        headers: { 'retry-after': wait },
       });
     try {
       expect((await cachingFetch(memory().store, refused)(detail)).status).toBe(429);
-      expect(waits).toEqual([17_000]);
+      status = 503;
+      wait = '23';
+      expect((await cachingFetch(memory().store, refused)(discover)).status).toBe(503);
+      expect(waits).toEqual([17_000, 23_000]);
     } finally {
       stop();
     }
   });
 
-  it('shows the answer it keeps rather than a rate limit, and does not report one', async () => {
+  it('shows the answer it keeps and still reports the provider’s requested rest', async () => {
     const waits: number[] = [];
     const stop = onTmdbThrottle(({ retryMs }) => waits.push(retryMs));
     waits.length = 0; // What an earlier test left in force.
@@ -112,14 +117,14 @@ describe('cachingFetch', () => {
     const refused: typeof fetch = async () =>
       new Response('{"error":"rate_limited"}', {
         status: 429,
-        headers: { 'retry-after': '17' },
+        headers: { 'retry-after': '91' },
       });
     try {
       // Past fresh and past stale: asked, refused, and the kept answer still shows.
       const res = await cachingFetch(store, refused, () => 30 * 24 * HOUR)(discover);
       expect(res.status).toBe(200);
       expect(await res.text()).toBe('{"page":1}');
-      expect(waits).toEqual([]);
+      expect(waits).toEqual([91_000]);
     } finally {
       stop();
     }
@@ -231,14 +236,17 @@ describe('cachingFetch', () => {
     const net = network();
     const shared = sharingFlights(cachingFetch(store, net.fetchImpl, () => 0));
     const parse = vi.spyOn(JSON, 'parse');
+    const clone = vi.spyOn(Response.prototype, 'clone');
     try {
       const [a, b] = await Promise.all([shared(detail), shared(detail)]);
       const [first, second] = await Promise.all([tmdbJson(a), tmdbJson(b)]);
       expect(first).toEqual({ n: 1 });
       expect(second).toBe(first);
       expect(parse).toHaveBeenCalledOnce();
+      expect(clone, 'a known string answer never tees a Response body').not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+      clone.mockRestore();
     }
   });
 

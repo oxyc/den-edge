@@ -648,6 +648,7 @@ export async function startSession(
   fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
   lookup: () => Promise<string | undefined> = () => ipv4Hint(),
+  signal?: AbortSignal,
 ): Promise<Session | Refused> {
   const { subtitles, subtitleLanguages, ...fields } = want;
   const offered = subtitles
@@ -662,11 +663,12 @@ export async function startSession(
     const body = candidate ? { ...fields, subtitles: candidate, subtitleLanguages } : fields;
     let res: Response;
     try {
+      const deadline = AbortSignal.timeout(REMUX_ANSWER_MS);
       res = await fetchImpl(`${base}/session`, {
         method: 'POST',
         headers: browserHeaders(base),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(REMUX_ANSWER_MS),
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       });
     } catch {
       return { failure: 'unreachable' };
@@ -708,13 +710,36 @@ export async function startSession(
     // den-edge sees this page over IPv6 and asks for its IPv4 address. Looked up only now, so a page it sees over
     // IPv4 never makes that third-party request; asked again once, as a page with no address when none was found.
     if (error === 'ipv4_hint_wanted' && !want.ipv4Hint && !want.noHint) {
-      const address = await lookup();
+      const address = signal
+        ? await new Promise<string | undefined>((resolve, reject) => {
+            const stopped = () => resolve(undefined);
+            if (signal.aborted) return stopped();
+            signal.addEventListener('abort', stopped, { once: true });
+            void lookup().then(
+              (found) => {
+                signal.removeEventListener('abort', stopped);
+                resolve(found);
+              },
+              (cause) => {
+                signal.removeEventListener('abort', stopped);
+                reject(cause);
+              },
+            );
+          })
+        : await lookup();
+      if (signal?.aborted) return { failure: 'unreachable' };
       const again: Want = address ? { ...want, ipv4Hint: address } : { ...want, noHint: true };
-      return startSession(again, fetchImpl, base, lookup);
+      return startSession(again, fetchImpl, base, lookup, signal);
     }
     // Past den-edge's cap on distinct reported addresses: asked once more as a page that reported none.
     if (error === 'hint_limit' && want.ipv4Hint) {
-      return startSession({ ...want, ipv4Hint: undefined, noHint: true }, fetchImpl, base, lookup);
+      return startSession(
+        { ...want, ipv4Hint: undefined, noHint: true },
+        fetchImpl,
+        base,
+        lookup,
+        signal,
+      );
     }
     // A zero fallback here means "it named nothing", which is the caller's own interval rather than
     // a wait of no time at all.

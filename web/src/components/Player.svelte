@@ -311,6 +311,8 @@
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  /** The one session POST this player still wants. A newer attempt or close aborts all of its recursive retries. */
+  let startingSession: AbortController | undefined;
   let ended = false;
   const progress = new PlaybackProgressReporter((fraction, seconds) =>
     onprogress(fraction, seconds),
@@ -649,9 +651,13 @@
       ...(replacing?.sid && sessionRoute === route ? { replaces: replacing.sid } : {}),
     };
     const on = route;
-    const result = await startSession(request, undefined, on);
+    startingSession?.abort(new DOMException('superseded session start', 'AbortError'));
+    const attempt = new AbortController();
+    startingSession = attempt;
+    const result = await startSession(request, undefined, on, undefined, attempt.signal);
+    if (startingSession === attempt) startingSession = undefined;
     // Another start (a retry and the key form, say) may have got there first.
-    if (ended || session !== (replacing ?? null)) {
+    if (attempt.signal.aborted || ended || session !== (replacing ?? null)) {
       if (!('failure' in result)) endSession(result);
       return false;
     }
@@ -1019,7 +1025,10 @@
           void broke(element.error?.code ?? 0, why, 'format');
           return;
         }
-        if (element.paused || element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        // No picture: no frame presented yet (`played`), whatever `readyState` claims — some WebViews lose the frame
+        // callback and show nothing over data they have.
+        if (element.paused || (played && element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA))
+          return;
         // Nothing arriving and no picture is a refusal only where den-remux has the segment ready to send: one it is
         // still making — a slow source behind it — is a slow start, waited out with the startup line showing.
         void segmentAnswer(current, stalledAt(), fetch, SEGMENT_ASK_MS).then((answer) => {
@@ -1039,11 +1048,13 @@
       updateProgress();
     };
     element.addEventListener('progress', arriving);
+    const loaded = () => element.removeEventListener('progress', arriving);
+    element.addEventListener('loadeddata', loaded, { once: true });
     const cleanup = () => {
       stuck.stop();
-      element.removeEventListener('progress', arriving);
+      loaded();
+      element.removeEventListener('loadeddata', loaded);
     };
-    element.addEventListener('loadeddata', cleanup, { once: true });
     /**
      * A stall once a frame has already shown (den-edge#275): `weighDelivery`'s early switch covers the first
      * EARLY_WINDOW_SECS on its own `progress` events; this is what the viewer sees meanwhile, and what is left
@@ -1110,11 +1121,23 @@
     // The real first frame (den-edge#234's step 0 and the owner's own correction: not `canplay`, which iOS
     // native HLS can fire tens of seconds late). `requestVideoFrameCallback` fires once a frame has actually
     // been presented; a browser without it (older Safari) falls back to `loadeddata`, as this did before.
-    let cancelFirstFrame: (() => void) | undefined;
+    let cancelVideoFrame: (() => void) | undefined;
+    let cancelLoadedFrame: (() => void) | undefined;
+    const initialQuality = element.getVideoPlaybackQuality?.();
+    const totalAtStart = initialQuality?.totalVideoFrames ?? 0;
+    const droppedAtStart = initialQuality?.droppedVideoFrames ?? 0;
+    const cancelFirstFrame = () => {
+      cancelVideoFrame?.();
+      cancelVideoFrame = undefined;
+      cancelLoadedFrame?.();
+      cancelLoadedFrame = undefined;
+      element.removeEventListener('timeupdate', firstFrameFromProgress);
+    };
     const firstFrame = () => {
-      cancelFirstFrame = undefined;
+      cancelFirstFrame();
       if (session !== current || played) return;
       played = true;
+      cleanup();
       bufferProgress = undefined;
       clearInterval(noticeTimer);
       // den-edge#234's step 0: how long this session took to open, hold and reach its first frame, reported to
@@ -1156,19 +1179,33 @@
         });
       }
     };
+    // Some WebViews expose rVFC but lose its callback. A moving clock and loaded data are not enough (audio can move
+    // under a broken picture), so this fallback requires the browser's count of non-dropped video frames. With no
+    // such presentation proof the startup watchdog above stays armed and fails over instead of hiding a blank image.
+    const firstFrameFromProgress = () => {
+      const quality = element.getVideoPlaybackQuality?.();
+      if (!quality) return;
+      // Implementations differ on whether changing `src` resets these element counters. Compare with this source's
+      // baseline when they remain cumulative, and with zero once either counter proves it reset.
+      const reset =
+        quality.totalVideoFrames < totalAtStart || quality.droppedVideoFrames < droppedAtStart;
+      const presentedAtStart = reset ? 0 : totalAtStart - droppedAtStart;
+      if (quality.totalVideoFrames - quality.droppedVideoFrames > presentedAtStart) firstFrame();
+    };
+    element.addEventListener('timeupdate', firstFrameFromProgress);
     // The type is unconditional (every modern lib.dom.d.ts has it); the browser isn't — an older Safari lacks
     // the method at runtime, hence the `typeof` check rather than `'requestVideoFrameCallback' in element`.
     if (typeof element.requestVideoFrameCallback === 'function') {
       const id = element.requestVideoFrameCallback(firstFrame);
-      cancelFirstFrame = () => element.cancelVideoFrameCallback(id);
+      cancelVideoFrame = () => element.cancelVideoFrameCallback(id);
     } else {
       element.addEventListener('loadeddata', firstFrame, { once: true });
-      cancelFirstFrame = () => element.removeEventListener('loadeddata', firstFrame);
+      cancelLoadedFrame = () => element.removeEventListener('loadeddata', firstFrame);
     }
     const reportUrl = reportUrlOf(current.playlist);
     const stopWatching = () => {
       cleanup();
-      cancelFirstFrame?.();
+      cancelFirstFrame();
       watcher?.stop();
       watcher = undefined;
       unsubscribe();
@@ -1189,8 +1226,19 @@
     };
     if (nativeHls(element)) {
       element.src = current.playlist;
+      const mounted = element.src;
       watcher = watchPlayback({ video: element, reportUrl });
-      return stopWatching;
+      return () => {
+        stopWatching();
+        // Removing a native HLS element does not empty it in WebKit: retained after unmount it remains LOADING with
+        // its playlist selected. Release that decoder/network resource, but never clear a newer session which has
+        // already reused the same element.
+        if (element.src !== mounted) return;
+        element.textTracks.onaddtrack = null;
+        element.pause();
+        element.removeAttribute('src');
+        element.load();
+      };
     }
     // The engine this run made. A failure unmounts the element with the session unchanged, and nothing else would
     // stop it loading into a video that is no longer there.
@@ -1814,6 +1862,8 @@
   let askedFor = 0;
   /** The release SkipDB was last asked about, by filename. */
   let segmentsOf: string | undefined;
+  /** Monotonic request identity: an older release's late answer cannot reset a newer request's dedupe. */
+  let segmentRequest = 0;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
@@ -1826,6 +1876,7 @@
     const asked = length();
     if (askedFor > 0 && Math.abs(asked - askedFor) < 2) return;
     askedFor = asked;
+    const request = ++segmentRequest;
     const release = session?.release.filename;
     segmentsOf = release;
     const found = await fetchSkipSegments(imdb, {
@@ -1833,7 +1884,7 @@
       episode,
       durationSeconds: length(),
     });
-    if (ended) return;
+    if (ended || request !== segmentRequest) return;
     if (session?.release.filename === release) segments = found;
     // Another release started meanwhile: these are the old encode's times. Its own are asked for once it has a length.
     else askedFor = 0;
@@ -1992,6 +2043,8 @@
     clearInterval(countdown);
     clearInterval(noticeTimer);
     clearTimeout(retry);
+    startingSession?.abort(new DOMException('player closed', 'AbortError'));
+    startingSession = undefined;
     report(document.visibilityState === 'hidden' ? HIDDEN_SLACK_SECS : 0);
     const stats = watcher?.stats();
     watcher?.stop();
