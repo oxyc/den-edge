@@ -365,19 +365,38 @@
 
   /** Which trailer `candidates` were found for. Kept while the page is away, so coming back resumes it. */
   let foundFor = '';
+  /**
+   * The title/media-type `candidates` were last resolved for, once resolved — unlike `foundFor`, never
+   * including the reel address. `SessionServices.configure()` publishes a restored `services.v1` reel
+   * first and can replace it from live `/routes` discovery a moment later on a cold route (a hard
+   * refresh); a detail trailer must keep one media identity for the page's lifetime, so that later
+   * address alone must not look like a different trailer and tear down a source already producing
+   * playback. Late discovery still reaches the next `trailerCandidates` call through `reel` itself —
+   * this only holds the CURRENT one steady.
+   */
+  let lockedFor = '';
   // One that had finished plays again from the start when its page is come back to, as a page opened afresh does.
   $effect(() => {
     if (active) untrack(() => (ended = false));
   });
   $effect(() => {
     const [ids, base, mediaType, table] = [{ tmdb: tmdbId, imdb: imdbId }, reel, type, routes];
+    const identity = JSON.stringify([ids, mediaType]);
     const key = JSON.stringify([ids, base, mediaType]);
     const wanted =
       canResolveTrailer && autoplay && !reduced && !saving && !!(ids.tmdb || ids.imdb) && !!base;
     // The page left and come back to: the same trailer, already found. Found again, it started over from
     // the backdrop; kept, it carries on from where it was left (`keepFrame`).
     if (wanted && key === foundFor) return;
+    // Only the reel address changed since the last resolve — the title and media type are the same one
+    // this page already locked onto. Adopt the new key so a later address matching IT is also a no-op,
+    // but touch nothing a video may already be playing from.
+    if (wanted && identity === lockedFor) {
+      foundFor = key;
+      return;
+    }
     foundFor = '';
+    lockedFor = '';
     candidates = [];
     candidate = 0;
     playing = ended = failed = false;
@@ -393,6 +412,7 @@
       if (controller.signal.aborted) return;
       candidates = found;
       foundFor = key;
+      lockedFor = identity;
     });
     return () => controller.abort();
   });
