@@ -194,6 +194,26 @@ export function isTrouble(status: DownloadState, answer?: Preparation): boolean 
   }
 }
 
+/**
+ * Home's Downloading/Downloads row (den-spec library-v4 §17): in flight first, then ready-and-unwatched. A
+ * ready row has no lifetime of its own until its own title is watched (den-core `download_prune` keeps it,
+ * then two more days once it is), so a `ready` download still live in `items` already means not yet watched
+ * — nothing here re-checks that. Refused, not-started, unreachable, gone or no-working-release downloads stay
+ * off Home; they're still on /downloads.
+ */
+export function homeRow(items: { download: Download; status: DownloadState }[]): {
+  heading: string;
+  downloads: Download[];
+} {
+  const active = items
+    .filter(({ status }) => inFlight(status.state))
+    .map(({ download }) => download);
+  const ready = items
+    .filter(({ status }) => status.state === 'ready')
+    .map(({ download }) => download);
+  return { heading: active.length ? 'Downloading' : 'Downloads', downloads: [...active, ...ready] };
+}
+
 /** "Queued from Chrome on iPhone", for a download another device queued; nothing for this browser's own. */
 export function queuedFrom(
   download: Download,
