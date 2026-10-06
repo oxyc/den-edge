@@ -197,6 +197,19 @@ it('reads everything scout says about a fetch, as the TV does', async () => {
   expect((await prepareSource('/scout/p/t', false, response(202, { progress: 0.5 }))).fetch).toBe(
     undefined,
   );
+  // Parked behind the debrid's own slot limit — no torrent yet, so no swarm to report — must still read
+  // as `fetch.state: 'queued'`, which is what turns into "Queued at TorBox" (downloadStatus.headline).
+  expect(
+    await prepareSource(
+      '/scout/p/ticket',
+      false,
+      response(202, { progress: 0, state: 'queued', service: 'torbox' }),
+    ),
+  ).toEqual({
+    state: 'preparing',
+    progress: 0,
+    fetch: { state: 'queued', service: 'torbox' },
+  });
   expect(
     (await prepareSource('/scout/p/t', false, response(410, { error: 'ticket_expired' }))).state,
   ).toBe('expired');
