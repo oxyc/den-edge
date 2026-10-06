@@ -7,8 +7,8 @@
   import DownloadsPage from './components/DownloadsPage.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
   import PosterCard from './components/PosterCard.svelte';
-  import { downloads, inFlight } from './lib/downloadQueue.svelte';
-  import { headline } from './lib/downloadStatus';
+  import { downloads } from './lib/downloadQueue.svelte';
+  import { headline, homeRow } from './lib/downloadStatus';
   import WindowedPosterRow from './components/WindowedPosterRow.svelte';
   import { seenEpisodes, watchedHistory } from './lib/history';
   import {
@@ -251,9 +251,17 @@
     void applied;
     now = Date.now();
   });
-  /** Home's Downloading row: only while something is in flight, as the TV's shelf (den-spec library-v4 §17). */
-  const downloading = $derived(
-    log ? downloads.list().filter((d) => inFlight(downloads.status(d).state)) : [],
+  /**
+   * Home's Downloading/Downloads row: in flight first, then ready-and-unwatched, as the TV's shelf (den-spec
+   * library-v4 §17) — a ready row stays queued until watched, so it vanishing from here the moment it lands
+   * would read as "the download disappeared" rather than "it's ready".
+   */
+  const downloadRow = $derived(
+    log
+      ? homeRow(
+          downloads.list().map((download) => ({ download, status: downloads.status(download) })),
+        )
+      : { heading: 'Downloads', downloads: [] },
   );
   const liveClock = (entry: ContinueEntry) => {
     const at = livePosition(entry, now);
@@ -1444,11 +1452,11 @@
         {/snippet}
       </WindowedPosterRow>
     {/if}
-    {#if !facet && downloading.length}
+    {#if !facet && downloadRow.downloads.length}
       <WindowedPosterRow
-        heading="Downloading"
+        heading={downloadRow.heading}
         aside={{ label: 'All downloads', href: '/downloads' }}
-        items={downloading}
+        items={downloadRow.downloads}
         itemKey={(download) => download.name}
         itemHref={(download) =>
           titleHref({
