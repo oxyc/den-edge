@@ -15,7 +15,6 @@ import {
   ContinueProjector,
   emptyLibrary,
   nameContinueCandidates,
-  withDisplay,
   type ContinueCandidate,
   type ContinueEntry,
   type Library,
@@ -30,10 +29,10 @@ import { SessionServices } from './sessionServices.svelte';
 /** Directly opened routes may never paint Home's billboard; background providers still start eventually. */
 export const BACKGROUND_PROVIDER_FALLBACK_MS = 10_000;
 
+/* eslint-disable svelte/prefer-svelte-reactivity -- Private projection indexes are deliberately non-reactive; their public snapshots and revision counters use $state. */
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
 export class LibrarySession {
   displays = $state<Title[]>([]);
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Consumers assign complete shape snapshots to state; they never mutate this map in place.
   shapes = $state(new Map<string, Shape>());
   /** Late TMDB display fields are not a library revision: consumers opt into this cheaper keyed stream. */
   displayRevision = $state(0);
@@ -419,20 +418,21 @@ export class LibrarySession {
       held?.displays !== displays && held?.displayRevision === displayRevision;
     const untrackedShape = held?.shapes !== shapes && held?.shapeRevision === shapeRevision;
     if (!held || held.projection !== projection || untrackedDisplay || untrackedShape) {
-      const library = { ...withDisplay(projection, displays), shapes };
       const recordIndexes = new Map<string, number[]>();
       const markIndexes = new Map<string, number[]>();
       const latestMarkIndexes = new Map<string, number>();
       const recordTitles = new Map<string, Title>();
       const markTitles = new Map<string, Title>();
-      projection.records.forEach((record, index) => {
+      const records = projection.records.map((record, index) => {
         const key = `${record.title.type}:${record.title.id}`;
         const indexes = recordIndexes.get(key) ?? [];
         indexes.push(index);
         recordIndexes.set(key, indexes);
-        recordTitles.set(key, library.records[index]!.title);
+        const title = this.displayIndex.get(key) ?? record.title;
+        recordTitles.set(key, title);
+        return title === record.title ? record : { ...record, title };
       });
-      projection.marks.forEach((mark, index) => {
+      const marks = projection.marks.map((mark, index) => {
         const key = `${mark.type}:${mark.id}`;
         const indexes = markIndexes.get(key) ?? [];
         indexes.push(index);
@@ -440,7 +440,17 @@ export class LibrarySession {
         const latest = latestMarkIndexes.get(key);
         if (latest === undefined || projection.marks[latest]!.updatedAt < mark.updatedAt)
           latestMarkIndexes.set(key, index);
+        const title = mark.title === '' ? this.displayIndex.get(key) : undefined;
+        return title
+          ? {
+              ...mark,
+              title: title.title,
+              posterPath: title.posterPath,
+              voteAverage: title.rating ?? 0,
+            }
+          : mark;
       });
+      const library = { ...projection, records, marks, shapes };
       for (const [key, index] of latestMarkIndexes) {
         const mark = library.marks[index]!;
         markTitles.set(key, {
@@ -660,6 +670,7 @@ export class LibrarySession {
       }, holdMs);
   }
 }
+/* eslint-enable svelte/prefer-svelte-reactivity */
 
 const TOAST_MS = 6000;
 
