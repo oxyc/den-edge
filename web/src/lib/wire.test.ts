@@ -8,11 +8,13 @@ import {
   mergeV3,
   mergeSettings,
   mergeTitle,
+  newestSummary,
   open,
   rowName,
   seal,
   ZERO_STAMP,
   type Row,
+  type DocumentRow,
   type SettingsRow,
   type Stamp,
   type TitleRow,
@@ -84,6 +86,23 @@ describe('library wire v2 matches den-spec', () => {
     const believed = believe(row, now);
     expect(believed.status.at).toEqual(ZERO_STAMP);
     expect(believed.reaction.at).toEqual([now + 3_600_000, 0, 'tv01']);
+  });
+
+  it('says exactly when a future document stamp can change its newest answer', () => {
+    const now = 1_789_000_000_000;
+    const current: Stamp = [now + 1000, 0, 'tv01'];
+    const future: Stamp = [now + 86_400_000 + 5000, 0, 'tv02'];
+    const document: DocumentRow = {
+      kind: 'title',
+      format: 4,
+      title: { type: 'movie', id: 1 },
+      current: { at: current },
+      pending: { deeply: { at: future } },
+    };
+
+    expect(newestSummary(document, now)).toEqual({ stamp: current, reconsiderAt: now + 5000 });
+    expect(newestSummary(document, now + 4999).stamp).toEqual(current);
+    expect(newestSummary(document, now + 5000)).toEqual({ stamp: future });
   });
 
   it.each(merges.clock)('clock: $case', ({ last, now, issued, seen }) => {

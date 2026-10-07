@@ -63,8 +63,10 @@ if (readPendingReset())
       console.warn('den: a pending key reset could not be settled', error),
     );
 
-// Home's billboard for everyone, asked now rather than once the app has found atlas and opened the library.
-startBillboard(location.pathname, !!links.current, freshOn());
+// The document head has already started an exact kept personalized lead, when one exists. Everyone else's billboard
+// is still asked here before the app has found atlas or opened the library.
+const earlyFresh = freshOn();
+startBillboard(location.pathname, !!links.current, earlyFresh);
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

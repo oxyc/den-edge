@@ -34,7 +34,13 @@
   import type { Crop, Source } from '../lib/reel';
   import { titleHref } from '../lib/route';
   import type { Routes } from '../lib/routes';
-  import { recommendationReason, type RecommendedTitle } from '../lib/recommend';
+  import {
+    BILLBOARD_IMAGE_SIZES,
+    billboardBackdropSrcset,
+    billboardBackdropURL,
+    recommendationReason,
+    type RecommendedTitle,
+  } from '../lib/recommend';
 
   let {
     titles,
@@ -129,7 +135,6 @@
 
   const keyOf = (title: Title) => `${title.type}:${title.id}`;
   const currentKey = $derived(current ? keyOf(current) : '');
-  const backdropURL = (path: string) => `https://image.tmdb.org/t/p/w1280${path}`;
   const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   /** Run non-critical work in an idle slice, with a bounded fallback for browsers without the API. */
@@ -177,8 +182,8 @@
    * asking the framework for a transition — a plain CSS opacity change the compositor can run on its own.
    */
   let layers = $state([
-    { id: 0, url: '' },
-    { id: 1, url: '' },
+    { id: 0, url: '', path: '' },
+    { id: 1, url: '', path: '' },
   ]);
   let lit = $state(0);
 
@@ -189,7 +194,8 @@
 
   $effect(() => {
     const path = current?.backdropPath ?? detail?.backdropPath;
-    const url = path ? backdropURL(path) : '';
+    const imagePath = path ?? '';
+    const url = imagePath ? billboardBackdropURL(imagePath) : '';
     const titleKey = current ? keyOf(current) : '';
     untrack(() => {
       if (lit >= 0 && layers[lit]?.url === url) return;
@@ -202,11 +208,13 @@
       if (!url) return;
       const image = new Image();
       image.fetchPriority = 'high';
+      image.sizes = BILLBOARD_IMAGE_SIZES;
+      image.srcset = billboardBackdropSrcset(imagePath);
       image.onload = () => {
         // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
         if (wanted !== url) return;
         const next = layers[0]?.url === url ? 0 : 1;
-        layers[next] = { id: next, url };
+        layers[next] = { id: next, url, path: imagePath };
         lit = next;
         readyKey = titleKey;
         onready?.();
@@ -228,7 +236,9 @@
         if (!path) continue;
         const image = new Image();
         image.fetchPriority = 'low';
-        image.src = backdropURL(path);
+        image.sizes = BILLBOARD_IMAGE_SIZES;
+        image.srcset = billboardBackdropSrcset(path);
+        image.src = billboardBackdropURL(path);
       }
     });
   });
@@ -820,6 +830,8 @@
           class="backdrop"
           class:lit={layer.id === lit}
           src={layer.url}
+          srcset={billboardBackdropSrcset(layer.path)}
+          sizes={BILLBOARD_IMAGE_SIZES}
           fetchpriority={layer.id === lit ? 'high' : 'low'}
           alt=""
           draggable="false"

@@ -64,6 +64,7 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium webkit
       - run: node test/sync-policy-browser.mjs
+      # Real-time player switching soaks run weekly/on demand in player-switch-soak.yml.
       - run: npm run test:e2e
       - run: npm run build
       - run: npm run build:cast

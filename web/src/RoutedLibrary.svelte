@@ -26,6 +26,7 @@
   } = $props();
   // With no TV, the browser's own library: the whole app, kept here, until a TV is linked.
   const ownKey = untrack(() => (link ? null : localLibraryKey()));
+  let libraryIdentity = $state.raw(untrack(() => link?.libraryKey ?? ownKey));
   const open = (own: string | null) =>
     untrack(() => new LibrarySession(link?.libraryKey ?? own, !link && own !== null));
   let session = $state.raw(open(ownKey));
@@ -43,7 +44,14 @@
   });
   // Another tab made this browser's own library at the same moment, and its key is the one kept: this tab's rows go
   // into that library, and the page goes on with it.
-  onMount(() => (ownKey ? followLocalLibrary(ownKey, (key) => (session = open(key))) : undefined));
+  onMount(() =>
+    ownKey
+      ? followLocalLibrary(ownKey, (key) => {
+          libraryIdentity = key;
+          session = open(key);
+        })
+      : undefined,
+  );
 </script>
 
 {#key session}
@@ -71,7 +79,17 @@
           <ScreenLoading screen={LinkScreen} />
         {/if}
       {:else}
-        <Library {link} {session} {route} {active} {query} {explore} {people} {watchedYear} />
+        <Library
+          {link}
+          {libraryIdentity}
+          {session}
+          {route}
+          {active}
+          {query}
+          {explore}
+          {people}
+          {watchedYear}
+        />
       {/if}
     {/snippet}
   </Router>

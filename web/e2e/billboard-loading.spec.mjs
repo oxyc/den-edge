@@ -1,4 +1,5 @@
 import { test, expect, chromium } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
@@ -89,3 +90,129 @@ for (const width of [320, 393, 844, 1280])
       await browser.close();
     }
   });
+
+test('the early personalized preload is reused by the billboard image', async ({ page }) => {
+  await guardNetwork(page);
+  let requests = 0;
+  await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', async (route) => {
+    requests++;
+    await route.fulfill({
+      headers: { 'cache-control': 'public, max-age=600' },
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    });
+  });
+  await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1`);
+  await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(
+    'href',
+    /\/early\.jpg$/,
+  );
+  await expect.poll(() => requests).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+  await expect(page.locator('img.backdrop.lit')).toHaveAttribute('src', /\/early\.jpg$/);
+  await page.waitForTimeout(100);
+  expect(requests).toBe(1);
+});
+
+test('the responsive hero preload and image choose one smaller mobile candidate', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 393, height: 800 });
+  await guardNetwork(page);
+  const images = [];
+  await page.route('https://image.tmdb.org/t/p/*/early.jpg', async (route) => {
+    images.push(new URL(route.request().url()).pathname);
+    await route.fulfill({
+      headers: { 'cache-control': 'public, max-age=600' },
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="780" height="439"></svg>',
+    });
+  });
+  await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1`);
+  const preload = page.locator('link[rel="preload"][as="image"]');
+  await expect(preload).toHaveAttribute('imagesizes', '100vw');
+  await expect(preload).toHaveAttribute('imagesrcset', /w300.*300w,.*w780.*780w,.*w1280.*1280w/);
+  await expect.poll(() => images).toEqual(['/t/p/w780/early.jpg']);
+
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+  const shown = page.locator('img.backdrop.lit');
+  await expect(shown).toHaveAttribute('sizes', '100vw');
+  await expect
+    .poll(() => shown.evaluate((image) => new URL(image.currentSrc).pathname))
+    .toBe('/t/p/w780/early.jpg');
+  await page.waitForTimeout(100);
+  expect(images, 'the matching responsive preload is reused by the visible image').toEqual([
+    '/t/p/w780/early.jpg',
+  ]);
+});
+
+test('the document starts its exact personalized hero before the app module answers', async ({
+  page,
+}) => {
+  const identity = 'fixture-library';
+  const id = createHash('sha256').update(identity).digest('hex');
+  const leadKey = `den.hero-lead.v1.${id}.fresh.all`;
+  await page.addInitScript(
+    ({ key, library, at }) => {
+      localStorage.setItem(
+        'den.links',
+        JSON.stringify([
+          {
+            inboxKey: '0123456789abcdef',
+            libraryKey: library,
+            linkKey: 'fixture-link',
+          },
+        ]),
+      );
+      localStorage.setItem('den.billboard.fresh', '1');
+      localStorage.setItem('den.billboard.member-post', '1');
+      localStorage.setItem(key, JSON.stringify({ at, path: '/parser-early.jpg' }));
+    },
+    { key: leadKey, library: identity, at: Date.now() },
+  );
+
+  let releaseModule;
+  const moduleGate = new Promise((resolve) => (releaseModule = resolve));
+  let moduleStarted;
+  const moduleRequest = new Promise((resolve) => (moduleStarted = resolve));
+  await page.route('**/src/main.ts*', async (route) => {
+    moduleStarted();
+    await moduleGate;
+    await route.fulfill({ contentType: 'text/javascript', body: '' });
+  });
+  let imageStarted;
+  const imageRequest = new Promise((resolve) => (imageStarted = resolve));
+  await page.route('https://image.tmdb.org/t/p/w1280/parser-early.jpg', async (route) => {
+    imageStarted();
+    await route.fulfill({
+      headers: { 'cache-control': 'public, max-age=600' },
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    });
+  });
+
+  const navigating = page.goto(`${E2E_ORIGIN}/#pair=ABCD-EFGH`);
+  await moduleRequest;
+  await imageRequest;
+  expect(typeof releaseModule, 'the image starts while the entry module is still blocked').toBe(
+    'function',
+  );
+  releaseModule();
+  await navigating;
+  await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(
+    'href',
+    /\/parser-early\.jpg$/,
+  );
+
+  // Invite and pairing fragments are not routes; Home remains the intended facet for both.
+  await page.goto(`${E2E_ORIGIN}/?invite-document=1#invite=fixture`);
+  await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(
+    'href',
+    /\/parser-early\.jpg$/,
+  );
+  // main.ts will rewrite this old route to /movies. The parser bootstrap must not warm Home first.
+  await page.goto(`${E2E_ORIGIN}/?legacy-document=1#movies`);
+  await expect(page.locator('link[rel="preload"][as="image"]')).toHaveCount(0);
+});

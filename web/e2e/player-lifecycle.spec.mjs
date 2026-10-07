@@ -14,6 +14,34 @@ const session = {
   audioTracks: [],
 };
 
+async function trackIntervals(page) {
+  await page.addInitScript(() => {
+    const intervals = new Map();
+    const intervalStacks = new Map();
+    const set = window.setInterval.bind(window);
+    const clear = window.clearInterval.bind(window);
+    window.setInterval = (callback, delay, ...args) => {
+      const handle = set(callback, delay, ...args);
+      intervals.set(handle, delay);
+      intervalStacks.set(handle, new Error().stack ?? '');
+      return handle;
+    };
+    window.clearInterval = (handle) => {
+      intervals.delete(handle);
+      intervalStacks.delete(handle);
+      clear(handle);
+    };
+    window.playerFixtureIntervals = intervals;
+    window.playerFixturePlayerIntervals = (delays) =>
+      [...intervals].flatMap(([handle, delay]) =>
+        delays.includes(delay) &&
+        intervalStacks.get(handle)?.includes('/src/components/Player.svelte')
+          ? [delay]
+          : [],
+      );
+  });
+}
+
 async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
@@ -41,13 +69,14 @@ async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
   });
 }
 
-test('playback progress clears startup when requestVideoFrameCallback never calls back', async () => {
+test('playback progress clears startup and leaves no hls.js head poll behind', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
   });
   try {
     const page = await browser.newPage();
+    await trackIntervals(page);
     await page.addInitScript(() => {
       HTMLVideoElement.prototype.requestVideoFrameCallback = () => 1;
       HTMLVideoElement.prototype.cancelVideoFrameCallback = () => undefined;
@@ -61,6 +90,55 @@ test('playback progress clears startup when requestVideoFrameCallback never call
     );
 
     await expect(page.locator('.startup')).toHaveCount(0);
+    expect(await page.evaluate(() => window.playerFixturePlayerIntervals([250]))).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('player polling sleeps while paused', async () => {
+  const browser = await webkit.launch();
+  try {
+    const page = await browser.newPage();
+    await trackIntervals(page);
+    await mockPlayer(page);
+    await page.goto(`${ORIGIN}/test/player.html`);
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
+      undefined,
+      { timeout: 30_000 },
+    );
+    expect(
+      await page.locator('.player video').evaluate((video) => {
+        let paused = false;
+        Object.defineProperties(video, {
+          paused: { configurable: true, get: () => paused },
+          seeking: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+        });
+        window.setPlayerFixturePaused = (next) => {
+          paused = next;
+          video.dispatchEvent(new Event(next ? 'pause' : 'playing'));
+        };
+        video.dispatchEvent(new Event('waiting'));
+        return window.playerFixturePlayerIntervals([500]);
+      }),
+    ).toContain(500);
+    expect(
+      await page.locator('.player video').evaluate((video) => {
+        window.setPlayerFixturePaused(true);
+        video.dispatchEvent(new Event('waiting'));
+        return window.playerFixturePlayerIntervals([250, 500]);
+      }),
+    ).toEqual([]);
+
+    expect(
+      await page.locator('.player video').evaluate((video) => {
+        window.setPlayerFixturePaused(false);
+        video.dispatchEvent(new Event('waiting'));
+        return window.playerFixturePlayerIntervals([500]);
+      }),
+    ).toContain(500);
   } finally {
     await browser.close();
   }

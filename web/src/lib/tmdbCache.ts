@@ -46,6 +46,15 @@ export const RETENTION = 180 * DAY;
  */
 const SHARED_MS = 20_000;
 /**
+ * Keep a completed answer across the short handoff from the shared request to IndexedDB. A trace measured identical
+ * detail requests 671–849 ms apart; with a delayed store, the completed flight is removed before its write is
+ * readable and the visit asks again. This is deliberately brief: IndexedDB remains the durable cache and another
+ * tab's newer answer is observed after the handoff.
+ */
+export const ANSWER_HANDOFF_MS = 30_000;
+/** A bounded working set for that handoff; one library page can prewarm several rows at once. */
+export const MOST_HANDOFF_ANSWERS = 64;
+/**
  * The most answers kept. Age alone (`RETENTION`) let the store grow with every title and page ever browsed for six
  * months; past this the oldest go first. An answer is some kilobytes to tens of kilobytes (estimated, not
  * measured), so this bounds the store to some tens of megabytes.
@@ -209,6 +218,24 @@ const parsedAnswers = new WeakMap<Response, object>();
 /** A successful answer whose inert string body can be copied without teeing a Response stream. */
 const reusableAnswers = new WeakMap<Response, { body: string; parsed?: object }>();
 
+interface HandoffAnswer {
+  entry: Entry;
+  parsed?: object;
+  until: number;
+}
+
+/** Each persistent store has its own short-lived answers; injected stores and sessions cannot lend one another. */
+const handoffAnswers = new WeakMap<Store, Map<string, HandoffAnswer>>();
+
+function answersFor(store: Store): Map<string, HandoffAnswer> {
+  let answers = handoffAnswers.get(store);
+  if (!answers) {
+    answers = new Map();
+    handoffAnswers.set(store, answers);
+  }
+  return answers;
+}
+
 /** A TMDB answer's JSON: the object it was checked as, where it was, or the body parsed now. */
 export function tmdbJson(res: Response): Promise<unknown> {
   const parsed = parsedAnswers.get(res);
@@ -238,6 +265,30 @@ export function cachingFetch(
   network: typeof fetch = relayFetch,
   now: () => number = Date.now,
 ): typeof fetch {
+  const handoff = store ? answersFor(store) : null;
+  const remember = (key: string, entry: Entry, parsed?: object) => {
+    if (!handoff) return;
+    handoff.delete(key);
+    handoff.set(key, { entry, parsed, until: now() + ANSWER_HANDOFF_MS });
+    while (handoff.size > MOST_HANDOFF_ANSWERS) {
+      const oldest = handoff.keys().next().value;
+      if (oldest === undefined) break;
+      handoff.delete(oldest);
+    }
+  };
+  const recall = (key: string): HandoffAnswer | undefined => {
+    const found = handoff?.get(key);
+    if (!found) return undefined;
+    const at = now();
+    if (at >= found.until || at - found.entry.fetchedAt >= RETENTION) {
+      handoff!.delete(key);
+      return undefined;
+    }
+    // A hit becomes the newest entry in this small LRU.
+    handoff!.delete(key);
+    handoff!.set(key, found);
+    return found;
+  };
   /** Answers kept since the last prune started; undefined until the first one has. */
   let keptSince: number | undefined;
   let pruning = false;
@@ -284,7 +335,9 @@ export function cachingFetch(
       .catch(() => undefined)
       .finally(() => (pruning = false));
   };
-  const keep = async (key: string, entry: Entry) => {
+  const keep = async (key: string, entry: Entry, parsed?: object) => {
+    // Publish synchronously before the first await: a settled flight is removed in this same microtask turn.
+    remember(key, entry, parsed);
     await store?.put(key, entry);
     if (keptSince !== undefined && ++keptSince >= PRUNE_EVERY) prune();
   };
@@ -306,7 +359,8 @@ export function cachingFetch(
         ? { body, fetchedAt, checked: true }
         : undefined;
     };
-    const stored = await store.get(key).catch(() => undefined);
+    const remembered = recall(key);
+    const stored = remembered?.entry ?? (await store.get(key).catch(() => undefined));
     // Anything unusable is treated as absent, which also heals what an earlier version kept. So is anything
     // past TMDB's six months, whatever happens next: not shown stale, and not shown when the network is down.
     const kept =
@@ -316,7 +370,8 @@ export function cachingFetch(
     // What was kept decides how long it stays fresh, not the question alone: a series still airing is a list.
     const fresh = freshFor(url.pathname, kept?.body, url.searchParams.get('append_to_response'));
     const age = kept ? now() - kept.fetchedAt : Infinity;
-    if (kept && age < fresh) return answer(kept.body);
+    const keptParsed = kept && kept === remembered?.entry ? remembered.parsed : undefined;
+    if (kept && age < fresh) return answer(kept.body, keptParsed);
     if (kept && age < fresh + STALE_FOR) {
       if (!refreshing.has(key)) {
         refreshing.add(key);
@@ -325,30 +380,31 @@ export function cachingFetch(
           .then(async (res) => {
             if (!res.ok) return;
             const body = await res.text();
-            const refreshed = entry(res, body, keepable(body));
-            if (refreshed) await keep(key, refreshed);
+            const parsed = keepable(body);
+            const refreshed = entry(res, body, parsed);
+            if (refreshed) await keep(key, refreshed, parsed);
           })
           .catch(() => undefined)
           .finally(() => refreshing.delete(key));
       }
-      return answer(kept.body);
+      return answer(kept.body, keptParsed);
     }
     try {
       const res = await network(asked, init);
       if (!res.ok) {
         if (throttled(res)) announceThrottle(res);
         // A refusal to answer now, like den-edge or TMDB failing, is no reason to drop the answer already kept.
-        if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body);
+        if (kept && (res.status >= 500 || res.status === 429)) return answer(kept.body, keptParsed);
         return res;
       }
       const body = await res.text();
       const parsed = keepable(body);
       const fetched = entry(res, body, parsed);
       // What it says about its titles den-edge kept as it fetched it (`src/title_metadata.rs`).
-      if (fetched) void keep(key, fetched).catch(() => undefined);
+      if (fetched) void keep(key, fetched, parsed).catch(() => undefined);
       return answer(body, parsed);
     } catch (error) {
-      if (kept) return answer(kept.body);
+      if (kept) return answer(kept.body, keptParsed);
       throw error;
     }
   };
@@ -472,5 +528,6 @@ export const tmdbFetch = sharingFlights(cachingFetch(store));
 
 /** Forget every kept answer: the TMDB key was removed. */
 export async function clearTmdbCache(): Promise<void> {
+  if (store) handoffAnswers.get(store)?.clear();
   await store?.clear().catch(() => undefined);
 }

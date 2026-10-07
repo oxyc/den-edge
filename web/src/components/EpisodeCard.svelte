@@ -9,6 +9,7 @@
     episode,
     progress,
     busy,
+    deferred = false,
     fallback,
     onplay,
     onplaytv,
@@ -20,6 +21,8 @@
     episode: Episode;
     progress: number;
     busy: boolean;
+    /** A lightweight, inert card with the same content-dependent geometry; replaced in a later task. */
+    deferred?: boolean;
     fallback?: string;
     onplay: () => void;
     /**
@@ -66,59 +69,72 @@
   ]);
 </script>
 
-<li class="episode" class:seen class:upcoming>
-  <button
-    type="button"
-    class="episode-play"
-    disabled={upcoming || busy}
-    onclick={onplay}
-    aria-label={upcoming
-      ? `Episode ${episode.number}: ${episode.name}. Airs ${date}`
-      : `Play episode ${episode.number}: ${episode.name}`}
-  >
-    <span class="still">
-      {#if episode.stillPath || fallback}
-        <img
-          src={`https://image.tmdb.org/t/p/w500${episode.stillPath ?? fallback}`}
-          alt=""
-          width="500"
-          height="281"
-          loading="lazy"
-          decoding="async"
-        />
-      {:else}<span class="missing-art"><DetailIcon name="play" /></span>{/if}
-      <span class="number">{episode.number}</span>
-      {#if seen}<span class="watched"><DetailIcon name="check" /></span>{/if}
-      {#if !upcoming}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
-      {#if progress > RESUME_FLOOR}<span
-          class="progress"
-          style:--progress={`${seen ? 100 : progress * 100}%`}
-        ></span>{/if}
+{#snippet about(interactive: boolean)}
+  <span class="about">
+    <span class="episode-heading"
+      ><strong>{episode.name}</strong><span class="facts"
+        >{[episode.runtime ? `${episode.runtime} min` : '', !upcoming ? date : '']
+          .filter(Boolean)
+          .join(' · ')}</span
+      ></span
+    >
+    {#if downloadState}<span class="download-state">
+        {#if interactive}<DetailIcon name="download" />{/if}{downloadState === 'ready'
+          ? 'Downloaded'
+          : 'Downloading'}
+      </span>{/if}
+    {#if upcoming}<span class="air-date">Airs <time datetime={episode.airDate}>{date}</time></span>
+    {:else if episode.overview}<span class="overview">{cleanedOverview(episode)}</span>{/if}
+  </span>
+{/snippet}
+
+<li class="episode" class:seen class:upcoming class:deferred aria-hidden={deferred || undefined}>
+  {#if deferred}
+    <span class="episode-play">
+      <span class="still"></span>
+      {@render about(false)}
     </span>
-    <span class="about">
-      <span class="episode-heading"
-        ><strong>{episode.name}</strong><span class="facts"
-          >{[episode.runtime ? `${episode.runtime} min` : '', !upcoming ? date : '']
-            .filter(Boolean)
-            .join(' · ')}</span
-        ></span
-      >
-      {#if downloadState}<span class="download-state">
-          <DetailIcon name="download" />{downloadState === 'ready' ? 'Downloaded' : 'Downloading'}
-        </span>{/if}
-      {#if upcoming}<span class="air-date">Airs <time datetime={episode.airDate}>{date}</time></span
-        >
-      {:else if episode.overview}<span class="overview">{cleanedOverview(episode)}</span>{/if}
-    </span>
-  </button>
-  <div class="episode-menu">
-    <ActionMenu
-      items={menuItems}
-      label={`Options for episode ${episode.number}`}
-      triggerClass="episode-trigger"
-      glyph={more}
-    />
-  </div>
+    <span class="episode-menu"></span>
+  {:else}
+    <button
+      type="button"
+      class="episode-play"
+      disabled={upcoming || busy}
+      onclick={onplay}
+      aria-label={upcoming
+        ? `Episode ${episode.number}: ${episode.name}. Airs ${date}`
+        : `Play episode ${episode.number}: ${episode.name}`}
+    >
+      <span class="still">
+        {#if episode.stillPath || fallback}
+          <img
+            src={`https://image.tmdb.org/t/p/w500${episode.stillPath ?? fallback}`}
+            alt=""
+            width="500"
+            height="281"
+            loading="lazy"
+            decoding="async"
+          />
+        {:else}<span class="missing-art"><DetailIcon name="play" /></span>{/if}
+        <span class="number">{episode.number}</span>
+        {#if seen}<span class="watched"><DetailIcon name="check" /></span>{/if}
+        {#if !upcoming}<span class="play-glyph"><DetailIcon name="play" filled /></span>{/if}
+        {#if progress > RESUME_FLOOR}<span
+            class="progress"
+            style:--progress={`${seen ? 100 : progress * 100}%`}
+          ></span>{/if}
+      </span>
+      {@render about(true)}
+    </button>
+    <div class="episode-menu">
+      <ActionMenu
+        items={menuItems}
+        label={`Options for episode ${episode.number}`}
+        triggerClass="episode-trigger"
+        glyph={more}
+      />
+    </div>
+  {/if}
 </li>
 
 {#snippet more()}
@@ -134,11 +150,20 @@
     align-items: center;
     padding: 12px;
     border-radius: 16px;
+
+    /* Each row lays itself out from its own fixed grid. Keep its style/layout invalidation local without paint
+       containment: keyboard outlines and the menu are deliberately allowed to escape the row. */
+    contain: layout style;
   }
 
   .episode:has(.episode-play:hover),
   .episode:has(.episode-play:focus-visible) {
     background: rgb(255 255 255 / 0.06);
+  }
+
+  .episode.deferred {
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .episode-play {

@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ANSWER_HANDOFF_MS,
   cachingFetch,
   freshFor,
   MOST_KEPT,
+  MOST_HANDOFF_ANSWERS,
   onTmdbThrottle,
   PRUNE_BATCH,
   PRUNE_EVERY,
@@ -248,6 +250,66 @@ describe('cachingFetch', () => {
       parse.mockRestore();
       clone.mockRestore();
     }
+  });
+
+  it('reuses a completed answer while its IndexedDB write is still settling', async () => {
+    const entries = new Map<string, Entry>();
+    let release!: () => void;
+    const settling = new Promise<void>((resolve) => (release = resolve));
+    const store: Store = {
+      get: async (key) => entries.get(key),
+      put: async (key, entry) => {
+        await settling;
+        entries.set(key, entry);
+      },
+      prune: async () => 0,
+      clear: async () => entries.clear(),
+    };
+    const net = network();
+    const cached = sharingFlights(cachingFetch(store, net.fetchImpl, () => 0));
+    try {
+      const first = await cached(detail);
+      expect(await first.json()).toEqual({ n: 1 });
+      expect(entries.size, 'the persistent write is deliberately still pending').toBe(0);
+
+      const sameQuestion =
+        'https://api.themoviedb.org/3/movie/603?append_to_response=credits&api_key=another';
+      const second = await cached(sameQuestion);
+      expect(second, 'each caller owns an unconsumed response').not.toBe(first);
+      expect(await second.json()).toEqual({ n: 1 });
+      expect(net.asked, 'the settled answer bridges the write handoff').toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  it('expires and bounds answers waiting at the persistence handoff', async () => {
+    const entries = new Map<string, Entry>();
+    const store: Store = {
+      get: async (key) => entries.get(key),
+      // Model a blocked IndexedDB transaction: none of these writes becomes readable during the test.
+      put: () => new Promise<void>(() => undefined),
+      prune: async () => 0,
+      clear: async () => entries.clear(),
+    };
+    const net = network();
+    let clock = 0;
+    const cached = sharingFlights(cachingFetch(store, net.fetchImpl, () => clock));
+
+    await cached(detail);
+    clock = ANSWER_HANDOFF_MS;
+    await cached(detail);
+    expect(net.asked, 'an answer is not held in memory beyond the short handoff').toHaveLength(2);
+
+    for (let id = 0; id <= MOST_HANDOFF_ANSWERS; id++)
+      await cached(`https://api.themoviedb.org/3/movie/${id}?api_key=secret`);
+    const afterFill = net.asked.length;
+    await cached('https://api.themoviedb.org/3/movie/0?api_key=another');
+    expect(net.asked, 'the least-recent answer is evicted at the bound').toHaveLength(
+      afterFill + 1,
+    );
+    await cached(`https://api.themoviedb.org/3/movie/${MOST_HANDOFF_ANSWERS}?api_key=another`);
+    expect(net.asked, 'the newest answer remains reusable').toHaveLength(afterFill + 1);
   });
 
   it('leaves everything but TMDB alone, and prunes past the retention limit once', async () => {

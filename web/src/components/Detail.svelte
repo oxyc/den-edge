@@ -240,6 +240,20 @@
   let seasonEpisodes = $state<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
   let seasonLoading = $state(false);
+  /**
+   * Episode cards are comparatively deep trees (art, progress, actions and a menu). A long season used to create
+   * every one in the promise callback's single Svelte flush: 50 cards added 941 nodes and one 56 ms task at 4x CPU.
+   * Keep the list's complete geometry from the first paint, then replace its inert slots a few cards per task.
+   */
+  const EPISODE_CHUNK = 4;
+  let episodeLimit = $state(0);
+  async function yieldEpisodeTask() {
+    const scheduler = (
+      globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }
+    ).scheduler;
+    if (scheduler?.yield) await scheduler.yield();
+    else await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
   let retry = $state(0),
     seasonRetry = $state(0);
   let ratings = $state<Ratings | null>(null);
@@ -260,6 +274,39 @@
       detail = loaded;
       season = loaded ? seriesPresentation(loaded, episodes, row).initialSeason : null;
     });
+    return () => {
+      live = false;
+    };
+  });
+
+  // A different season starts with its first screenful. Fixed slots below it keep later sections and saved scroll
+  // positions still while the rest is filled in; none are capped, and every episode becomes an ordinary card.
+  $effect(() => {
+    const [loaded, picked] = [seasonEpisodes, displayedSeason];
+    untrack(() => {
+      episodeLimit = loaded && picked !== null ? Math.min(EPISODE_CHUNK, loaded.length) : 0;
+    });
+  });
+
+  // One task boundary per small batch gives input and paint a chance between cards. Leaving this retained page stops
+  // its remaining work; returning continues from the first batch rather than filling a hidden route in the meantime.
+  $effect(() => {
+    const [loaded, picked, visible] = [seasonEpisodes, displayedSeason, active];
+    if (!visible || !loaded || picked === null || loaded.length <= EPISODE_CHUNK) return;
+    let live = true;
+    void (async () => {
+      while (live && untrack(() => episodeLimit) < loaded.length) {
+        await yieldEpisodeTask();
+        if (
+          !live ||
+          !active ||
+          untrack(() => seasonEpisodes) !== loaded ||
+          untrack(() => displayedSeason) !== picked
+        )
+          return;
+        episodeLimit = Math.min(loaded.length, untrack(() => episodeLimit) + EPISODE_CHUNK);
+      }
+    })();
     return () => {
       live = false;
     };
@@ -651,7 +698,7 @@
               inert={seasonLoading}
               aria-hidden={seasonLoading}
             >
-              {#each seasonEpisodes as e (e.number)}
+              {#each seasonEpisodes as e, index (e.number)}
                 {@const episodeDownload =
                   displayedSeason === null
                     ? undefined
@@ -664,6 +711,7 @@
                       : undefined
                   : undefined}
                 <EpisodeCard
+                  deferred={index >= episodeLimit}
                   episode={e}
                   progress={episodeProgress(episodes.get(`${displayedSeason}:${e.number}`), row)}
                   {busy}

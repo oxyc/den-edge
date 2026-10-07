@@ -391,10 +391,17 @@ export async function open(keys: LibraryKeys, k: string, v: string): Promise<Row
   );
 }
 
-/** The newest stamp in a row. */
-export function newest(row: Row): Stamp {
-  if (isDocument(row)) return documentNewest(row);
-  if (row.kind === 'wat' || row.kind === 'snt') return syncPolicy<Stamp>({ op: 'newest', row });
+export interface NewestSummary {
+  stamp: Stamp;
+  /** A future document stamp first becomes believable then; before it, this answer is stable. */
+  reconsiderAt?: number;
+}
+
+/** The newest stamp in a row, and when a future document stamp can change that answer without a write. */
+export function newestSummary(row: Row, now = Date.now()): NewestSummary {
+  if (isDocument(row)) return documentNewest(row, now);
+  if (row.kind === 'wat' || row.kind === 'snt')
+    return { stamp: syncPolicy<Stamp>({ op: 'newest', row }) };
   const stamps =
     row.kind === 'ep'
       ? [row.progress.at]
@@ -408,15 +415,23 @@ export function newest(row: Row): Stamp {
             row.dismissed.at,
             row.episodesReset ?? ZERO_STAMP,
           ];
-  return stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP);
+  return {
+    stamp: stamps.reduce((a, b) => (compareStamps(b, a) > 0 ? b : a), ZERO_STAMP),
+  };
+}
+
+/** The newest stamp in a row. */
+export function newest(row: Row): Stamp {
+  return newestSummary(row).stamp;
 }
 
 /**
  * The newest stamp anywhere in a document, so this device's next stamp is issued after every one it has read. A
  * stamp more than a day ahead is left out, as `believe` reads one.
  */
-function documentNewest(document: DocumentRow, now = Date.now()): Stamp {
+function documentNewest(document: DocumentRow, now: number): NewestSummary {
   let latest = ZERO_STAMP;
+  let reconsiderAt: number | undefined;
   const visit = (value: unknown) => {
     if (!value || typeof value !== 'object') return;
     if (
@@ -427,13 +442,18 @@ function documentNewest(document: DocumentRow, now = Date.now()): Stamp {
       typeof value[2] === 'string'
     ) {
       const stamp = value as Stamp;
-      if (stamp[0] <= now + FUTURE_TOLERANCE_MS && compareStamps(stamp, latest) > 0) latest = stamp;
+      if (stamp[0] <= now + FUTURE_TOLERANCE_MS) {
+        if (compareStamps(stamp, latest) > 0) latest = stamp;
+      } else {
+        const believableAt = stamp[0] - FUTURE_TOLERANCE_MS;
+        reconsiderAt = Math.min(reconsiderAt ?? believableAt, believableAt);
+      }
       return;
     }
     for (const inner of Object.values(value)) visit(inner);
   };
   visit(document);
-  return latest;
+  return { stamp: latest, reconsiderAt };
 }
 
 export function mergeTitle(a: TitleRow, b: TitleRow): TitleRow {

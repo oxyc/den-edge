@@ -178,7 +178,7 @@ async function playsTo(page, seconds, timeout = 60_000) {
 /** Every switch the player made on its own: a session asked for with no release named. */
 const automatic = (asked) => asked.slice(1).filter((want) => !want.filename);
 
-test('a release the viewer picked is never switched away from, and the pick outlives a reload', async () => {
+test('a release the viewer picked is never switched away from, and the pick outlives a reload @soak', async () => {
   test.setTimeout(240_000);
   const { browser, page } = await openPlayer();
   try {
@@ -214,7 +214,7 @@ test('a release the viewer picked is never switched away from, and the pick outl
   }
 });
 
-test('a link too slow for the playing copy moves only to a lighter one, then says nothing contradictory', async () => {
+test('a link too slow for the playing copy moves only to a lighter one, then says nothing contradictory @soak', async () => {
   test.setTimeout(150_000);
   const { browser, page } = await openPlayer();
   try {
@@ -253,7 +253,7 @@ test('a link too slow for the playing copy moves only to a lighter one, then say
   }
 });
 
-test('a slow start, or an error that is no MediaError, is never "couldn’t play"', async () => {
+test('a slow start, or an error that is no MediaError, is never "couldn’t play" @soak', async () => {
   test.setTimeout(150_000);
   const { browser, page } = await openPlayer();
   try {
@@ -298,7 +298,7 @@ test('a release that couldn’t play is not the automatic pick again after a rel
   }
 });
 
-test('a full buffer that stops growing is no slow link: nothing switches, least of all to a heavier copy', async () => {
+test('a full buffer that stops growing is no slow link: nothing switches, least of all to a heavier copy @soak', async () => {
   test.setTimeout(150_000);
   const { browser, page } = await openPlayer();
   try {
@@ -312,7 +312,7 @@ test('a full buffer that stops growing is no slow link: nothing switches, least 
   }
 });
 
-test('four minutes of ordinary jitter switch nothing', async () => {
+test('four minutes of ordinary jitter switch nothing @soak', async () => {
   test.setTimeout(420_000);
   const { browser, page } = await openPlayer();
   try {
