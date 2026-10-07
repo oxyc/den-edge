@@ -616,13 +616,14 @@ export class ContinueProjector {
     for (const mark of library.marks) {
       const key = titleKey(mark);
       bucket(key).marks.push(mark);
+      if (mark.type !== 'tv') continue;
       latest.set(key, Math.max(latest.get(key) ?? -Infinity, mark.updatedAt));
     }
     const flagged = new Set<string>();
     for (const [mark, flag] of library.flags ?? []) {
       const key = titleKey(flag);
       bucket(key).flags!.set(mark, flag);
-      flagged.add(key);
+      if (flag.type === 'tv') flagged.add(key);
     }
     this.seriesOrder = [...new Set([...latest.keys(), ...flagged])].sort(
       (a, b) => (latest.get(b) ?? -Infinity) - (latest.get(a) ?? -Infinity),
@@ -670,6 +671,7 @@ function continueCandidates(
   const finished = new Map<string, { season: number; episode: number }>();
   const flagged = new Map<string, { season: number; episode: number }>();
   for (const mark of library.marks) {
+    if (mark.type !== 'tv') continue;
     const key = titleKey(mark);
     const current = latest.get(key);
     if (!current || mark.updatedAt > current.updatedAt) latest.set(key, mark);
@@ -680,6 +682,7 @@ function continueCandidates(
     }
   }
   for (const flag of library.flags?.values() ?? []) {
+    if (flag.type !== 'tv') continue;
     const key = titleKey(flag);
     const front = flagged.get(key);
     if (!front || ahead(flag, front))

@@ -278,7 +278,7 @@ export function recommendBody({
   prefs: Prefs;
   library: Weighted[];
   /** The library's titles TMDB has named, by `type:id`. */
-  named?: Map<string, Title>;
+  named?: ReadonlyMap<string, Title>;
   /** Every title the library holds, by `type:id`. */
   owned: Set<string>;
   /** Only new titles (`freshOn`). */

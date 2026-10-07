@@ -345,7 +345,7 @@ export class LibrarySession {
   }
 
   /** The retained display index, for consumers that genuinely need all currently named titles. */
-  displayTitles(): Map<string, Title> {
+  displayTitles(): ReadonlyMap<string, Title> {
     void this.displayRevision;
     this.ensureDisplayIndex();
     return this.displayIndex;

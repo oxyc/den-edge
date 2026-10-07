@@ -334,7 +334,7 @@ it('keeps unrelated Continue entries identical across display and shape batches'
       id,
       season: 1,
       episode: 1,
-      fraction: 0.5,
+      fraction: id === 1 ? 1 : 0.5,
       updatedAt: id,
       title: '',
       voteAverage: 0,
@@ -345,11 +345,13 @@ it('keeps unrelated Continue entries identical across display and shape batches'
   let displayed = session.displayedLibrary(projection);
   const initial = session.continueWatching(projection, displayed);
   const untouched = initial.find((entry) => entry.title.id === 2);
+  expect(initial.map((entry) => entry.title.id)).toEqual([2]);
 
   session.publishLibraryMetadata([], [['tv:1', { counts: new Map([[1, 8]]) }]]);
   displayed = session.displayedLibrary(projection);
   const shaped = session.continueWatching(projection, displayed);
 
+  expect(shaped.map((entry) => entry.title.id)).toEqual([2, 1]);
   expect(shaped.find((entry) => entry.title.id === 2)).toBe(untouched);
 });
 

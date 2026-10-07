@@ -373,6 +373,31 @@ describe("the TV's rows", () => {
     expect(decisions, 'a removed series is evicted and decided if it returns').toBe(3);
   });
 
+  it('keeps series ahead of movies when a shape-only update reassembles candidates', () => {
+    const base: Library = {
+      records: [record('movie', 9, 'inProgress', { progress: 0.4, t: 2000 })],
+      marks: [
+        mark(1, 1, 1, 0.5, 1000),
+        // A malformed old episode row for a film must not turn that film into a series bucket.
+        { ...mark(9, 1, 1, 0.5, 3000), type: 'movie' },
+      ],
+      flags: new Map(),
+      shapes: new Map([['tv:1', { counts: new Map([[1, 8]]) }]]),
+      dismissed: new Map(),
+    };
+    const projector = new ContinueProjector();
+    const initial = projector.project(base);
+    const movie = initial.find((candidate) => candidate.ref.type === 'movie');
+    expect(initial.map((candidate) => candidate.ref.type)).toEqual(['tv', 'movie']);
+
+    const shapes = new Map(base.shapes);
+    shapes.set('tv:1', { counts: new Map([[1, 9]]) });
+    const changed = projector.projectShapeChanges({ ...base, shapes }, new Set(['tv:1']));
+
+    expect(changed.map((candidate) => candidate.ref.type)).toEqual(['tv', 'movie']);
+    expect(changed[1]).toBe(movie);
+  });
+
   it('lists the watchlist newest first, without deleted titles', () => {
     expect(watchlist(library).map((t) => `${t.type}:${t.id}`)).toEqual(['tv:11', 'movie:10']);
     expect(watchlist(library)[0]).toMatchObject({
