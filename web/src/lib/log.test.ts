@@ -1440,6 +1440,19 @@ describe('LibraryLog', () => {
     expect(log.newestStamp()).toEqual(at(11_000, 'import'));
   });
 
+  it('shares one projected row snapshot until an entry changes', async () => {
+    const server = await edge([row(1)]);
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    const projected = await log.rowsInSlices();
+
+    expect(log.rows()).toBe(projected);
+    expect(log.rows()).toBe(projected);
+
+    await server.append(row(2));
+    expect(await log.refresh()).toBe(true);
+    expect(log.rows()).not.toBe(projected);
+  });
+
   it('keeps the newest cache correct across concurrent conflict merges', async () => {
     const server = await edge([row(1)]);
     const [phone, laptop] = await Promise.all([
