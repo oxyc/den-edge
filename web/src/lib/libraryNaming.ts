@@ -8,6 +8,7 @@ import {
 } from './library';
 import type { Row, TitleRow } from './wire';
 import { fetchDetails, type Details } from './tmdb';
+import { yieldTask } from './taskYield';
 
 interface NamedLibrary {
   displays: Title[];
@@ -61,7 +62,15 @@ export interface BackgroundNaming {
   cancel(): void;
 }
 export type ShelfName = 'continue' | 'watchlist';
+export interface ShelfPlan {
+  continue: boolean;
+  watchlist: boolean;
+}
 export interface ShelfNaming {
+  /** Membership known without metadata: Watchlist is exact; Continue awaits policy-critical TV shapes. */
+  initialPlan: ShelfPlan;
+  /** Exact shelf presence, available before any display names are published. */
+  planned: Promise<ShelfPlan>;
   /** Initial names and every shape that can decide Continue Watching have been published. */
   ready: Promise<void>;
   /** Admit one bounded tranche for the shelf the viewer is moving through. */
@@ -373,6 +382,7 @@ export function nameLibraryShelfTitles(
   rows: Row[],
   key: string,
   lookup: typeof fetchDetails = fetchDetails,
+  yieldToBrowser: () => Promise<void> = yieldTask,
 ): ShelfNaming {
   const run = namingRun(session, key);
   const critical = shelfTitleRefs(library, rows);
@@ -387,31 +397,56 @@ export function nameLibraryShelfTitles(
   let visibleRefs: Ref[] = [];
   let admissions = Promise.resolve();
   let draining: Promise<void> | undefined;
+  const initialPlan: ShelfPlan = {
+    continue: false,
+    watchlist: library.records.some((record) => !record.deleted && record.status === 'watchlist'),
+  };
+  let planSettled = false;
+  let resolvePlan!: (plan: ShelfPlan) => void;
+  const planned = new Promise<ShelfPlan>((resolve) => (resolvePlan = resolve));
+  const settlePlan = (plan: ShelfPlan) => {
+    if (planSettled) return;
+    planSettled = true;
+    resolvePlan(plan);
+  };
 
   const ready = (async () => {
-    await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
-    if (job.cancelled || runs.get(session) !== run) return;
+    try {
+      await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
+      if (job.cancelled || runs.get(session) !== run) return;
 
-    queues = shelfQueues(session, library);
-    const seeds = personalSeedRows(rows);
-    const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
-    visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
-    const initial = uniqueRefs([
-      ...seedRefs,
-      ...queues.continue.slice(0, INITIAL_SHELF_TITLES),
-      ...queues.watchlist.slice(0, INITIAL_SHELF_TITLES),
-    ]);
-    const initialKeys = new Set(initial.map(titleKey));
-    const known = knownTitles(session, run);
-    job.refs = new Map(
-      visibleRefs.flatMap((ref) => {
-        const id = titleKey(ref);
-        return initialKeys.has(id) || run.admitted.has(id) || known.has(id)
-          ? []
-          : [[id, ref] as const];
-      }),
-    );
-    await nameLibraryTitles(session, initial, key, lookup);
+      queues = shelfQueues(session, library);
+      const seeds = personalSeedRows(rows);
+      const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
+      visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
+      const initial = uniqueRefs([
+        ...seedRefs,
+        ...queues.continue.slice(0, INITIAL_SHELF_TITLES),
+        ...queues.watchlist.slice(0, INITIAL_SHELF_TITLES),
+      ]);
+      const initialKeys = new Set(initial.map(titleKey));
+      const known = knownTitles(session, run);
+      job.refs = new Map(
+        visibleRefs.flatMap((ref) => {
+          const id = titleKey(ref);
+          return initialKeys.has(id) || run.admitted.has(id) || known.has(id)
+            ? []
+            : [[id, ref] as const];
+        }),
+      );
+      settlePlan({ continue: queues.continue.length > 0, watchlist: queues.watchlist.length > 0 });
+
+      // Let the fixed shelf geometry paint before fetching and publishing the first display tranche.
+      await yieldToBrowser();
+      if (job.cancelled || runs.get(session) !== run) return;
+      await nameLibraryTitles(session, initial, key, lookup);
+      // Keep the reactive metadata publication and the component swap in separate browser tasks.
+      await yieldToBrowser();
+      if (job.cancelled || runs.get(session) !== run) return;
+    } finally {
+      // Cancellation or an unexpected lookup failure must never leave a Home loader waiting on the plan.
+      settlePlan({ continue: false, watchlist: false });
+    }
   })();
 
   const take = (shelf: ShelfName): Ref[] => {
@@ -453,6 +488,8 @@ export function nameLibraryShelfTitles(
   };
 
   return {
+    initialPlan,
+    planned,
     ready,
     admit,
     drain,
@@ -462,6 +499,7 @@ export function nameLibraryShelfTitles(
     cancel() {
       if (job.cancelled) return;
       job.cancelled = true;
+      settlePlan({ continue: false, watchlist: false });
       job.refs.clear();
       run.shelves.delete(job);
     },

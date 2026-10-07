@@ -1206,6 +1206,10 @@
   @supports (animation-timeline: --rail) {
     @media not (prefers-reduced-motion: reduce) {
       .picture {
+        /* A one-slide rail has no scroll range, so its scroll timeline is inactive. Keep that fallback at the
+           animation's first position: when the remaining slides (and pager) arrive, activating the timeline
+           must not move an already-painted retained image sideways. */
+        transform: translate3d(2.5%, 0, 0) scale(1.14);
         animation: drift linear both;
         animation-timeline: --rail;
         will-change: transform;
