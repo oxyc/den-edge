@@ -418,6 +418,29 @@ export function untitled(library: Library): { type: MediaType; id: number }[] {
   return [...refs.values()];
 }
 
+/** Whether one exact title would be returned by `untitled`, without enumerating the whole library. */
+export function hasUntitledTitle(library: Library, ref: { type: MediaType; id: number }): boolean {
+  for (const record of library.records) {
+    if (
+      record.title.type === ref.type &&
+      record.title.id === ref.id &&
+      !record.deleted &&
+      record.title.title === '' &&
+      (record.status === 'watchlist' ||
+        record.status === 'inProgress' ||
+        record.status === 'watched')
+    )
+      return true;
+  }
+  return library.marks.some(
+    (mark) =>
+      mark.type === ref.type &&
+      mark.id === ref.id &&
+      mark.title === '' &&
+      (mark.type === 'movie' || mark.type === 'tv'),
+  );
+}
+
 export function withDisplay(library: Library, titles: Title[]): Library {
   const byKey = new Map(titles.map((t) => [titleKey(t), t]));
   return {

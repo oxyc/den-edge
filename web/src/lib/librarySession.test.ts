@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { continueWatching, emptyLibrary, type Library, type Title } from './library';
+import {
+  continueWatching,
+  ContinueProjector,
+  emptyLibrary,
+  type Library,
+  type Title,
+} from './library';
 import { LibraryLog } from './log';
 import { BACKGROUND_PROVIDER_FALLBACK_MS, LibrarySession } from './librarySession.svelte';
 import { deliverSimkl } from './simklDelivery';
@@ -258,9 +264,13 @@ it('shares one immutable library projection per revision across retained pages',
   expect(log.rows).toHaveBeenCalledOnce();
 
   const applied = first!.library;
+  const projectContinue = vi.spyOn(ContinueProjector.prototype, 'project');
+  session.continueTitleRefs(applied);
+  expect(projectContinue).toHaveBeenCalledOnce();
   const displayed = session.displayedLibrary(applied);
   expect(session.displayedLibrary(applied)).toBe(displayed);
   const continued = session.continueWatching(applied, displayed);
+  expect(projectContinue).toHaveBeenCalledOnce();
   expect(session.continueWatching(applied, displayed)).toBe(continued);
 
   session.displays = [{ type: 'movie', id: 1, title: 'One' }];

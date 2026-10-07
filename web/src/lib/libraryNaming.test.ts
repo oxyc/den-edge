@@ -213,6 +213,28 @@ it('publishes only the first viewport of each shelf, then admits the intended sh
   naming.cancel();
 });
 
+it('reuses a session-owned Continue projection when forming shelf queues', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankTitle, updateProgress } = await import('./actions');
+  const rows = [updateProgress(blankTitle({ type: 'movie', id: 100 }, 1), 0.5, 40, [1, 0, 'test'])];
+  const library = applyLog(emptyLibrary(), rows);
+  const state = {
+    ...session(),
+    continueTitleRefs: vi.fn(() => [{ type: 'movie' as const, id: 900 }]),
+  };
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+
+  const naming = nameLibraryShelfTitles(state, library, rows, 'key', lookup);
+  await naming.ready;
+
+  expect(state.continueTitleRefs).toHaveBeenCalledWith(library);
+  expect(lookup).toHaveBeenCalledWith({ type: 'movie', id: 900 }, 'key');
+  expect(lookup).not.toHaveBeenCalledWith({ type: 'movie', id: 100 }, 'key');
+  naming.cancel();
+});
+
 it('does not let already-published titles hide an unnamed tail from the next intent tranche', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { blankTitle, updateProgress } = await import('./actions');
@@ -396,6 +418,33 @@ it('does not admit watched history until priority naming completes and the brows
   background.cancel();
 });
 
+it('does not enumerate a lazy history tail until its first active idle turn', async () => {
+  const state = session();
+  const idle = idleHarness();
+  const history = { type: 'movie' as const, id: 2 };
+  const refs = vi.fn(() => [history]);
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: 'History' },
+  }));
+  const background = nameLibraryHistoryTitles(state, refs, 'key', {
+    lookup,
+    scheduleIdle: idle.schedule,
+  });
+
+  expect(refs).not.toHaveBeenCalled();
+  background.pause();
+  expect(idle.pending).toBe(0);
+  background.resume();
+  expect(idle.pending).toBe(1);
+  expect(refs).not.toHaveBeenCalled();
+
+  idle.run();
+  await turns();
+  expect(refs).toHaveBeenCalledOnce();
+  expect(lookup).toHaveBeenCalledOnce();
+  background.cancel();
+});
+
 it('admits at most two background lookups and returns to idle before admitting another', async () => {
   const state = session();
   const idle = idleHarness();
@@ -469,6 +518,47 @@ it('promotes queued work and joins an already-running background key without ano
   finishes.get(queued.id)?.({ title: { ...queued, title: 'Queued' } });
   finishes.get(running.id)?.({ title: { ...running, title: 'Running' } });
   await Promise.all([promoted, joined]);
+  expect(lookup).toHaveBeenCalledTimes(2);
+  background.cancel();
+});
+
+it('promotes an exact direct route before lazy history enumeration without requesting it twice', async () => {
+  const state = session();
+  const idle = idleHarness();
+  const direct = { type: 'movie' as const, id: 1 };
+  const other = { type: 'movie' as const, id: 2 };
+  const refs = vi.fn(() => [direct, other]);
+  const finishes = new Map<number, (value: Details) => void>();
+  const lookup = vi.fn(
+    (wanted: Ref) =>
+      new Promise<Details>((resolve) => {
+        finishes.set(wanted.id, resolve);
+      }),
+  );
+  const background = nameLibraryHistoryTitles(state, refs, 'key', {
+    lookup,
+    scheduleIdle: idle.schedule,
+    owns: (wanted) => wanted.id === direct.id,
+  });
+  // A retained detail route is not the Watchlist, so its history queue stays dormant.
+  background.pause();
+
+  expect(promoteLibraryTitle(state, other, 'key', lookup)).toBeUndefined();
+  const promoted = promoteLibraryTitle(state, direct, 'key', lookup);
+  expect(promoted).toBeDefined();
+  await turns();
+  expect(refs).not.toHaveBeenCalled();
+  expect(lookup.mock.calls.map(([wanted]) => wanted.id)).toEqual([direct.id]);
+
+  background.resume();
+  idle.run();
+  await turns();
+  expect(refs).toHaveBeenCalledOnce();
+  expect(lookup.mock.calls.map(([wanted]) => wanted.id)).toEqual([direct.id, other.id]);
+
+  finishes.get(direct.id)?.({ title: { ...direct, title: 'Direct' } });
+  finishes.get(other.id)?.({ title: { ...other, title: 'Other' } });
+  await promoted;
   expect(lookup).toHaveBeenCalledTimes(2);
   background.cancel();
 });

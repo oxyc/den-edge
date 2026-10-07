@@ -12,6 +12,8 @@ import { fetchDetails, type Details } from './tmdb';
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
+  /** Reuse a session's retained policy projection instead of folding the whole library again for shelf naming. */
+  continueTitleRefs?(library: Library): Ref[];
   /** Sessions use this to publish one keyed metadata batch without making every consumer diff snapshots. */
   publishLibraryMetadata?: (
     titles: Title[],
@@ -37,7 +39,12 @@ interface NamingRun {
   idle?: () => void;
 }
 interface BackgroundJob {
-  refs: Map<string, Ref>;
+  /** Undefined until the first active idle turn when this job was supplied lazily. */
+  refs?: Map<string, Ref>;
+  source?: () => Ref[];
+  /** Keys claimed before a lazy source is enumerated must not re-enter its queue afterward. */
+  skipped: Set<string>;
+  owns?: (ref: Ref) => boolean;
   active: boolean;
   cancelled: boolean;
   scheduleIdle: (task: () => void) => () => void;
@@ -72,6 +79,8 @@ export interface BackgroundNamingOptions {
   /** Test seam for document visibility. */
   hidden?: () => boolean;
   onVisibilityChange?: (task: () => void) => () => void;
+  /** Exact cheap membership check used to promote a direct route before a lazy source is enumerated. */
+  owns?: (ref: { type: MediaType; id: number }) => boolean;
 }
 // Retained pages share pending work; weak ownership releases it with the paired library.
 const runs = new WeakMap<NamedLibrary, NamingRun>();
@@ -107,11 +116,14 @@ function stopBackground(run: NamingRun): void {
 }
 
 function usable(job: BackgroundJob): boolean {
-  return !job.cancelled && job.active && !job.hidden() && job.refs.size > 0;
+  return !job.cancelled && job.active && !job.hidden() && job.refs?.size !== 0;
 }
 
 function removeBackgroundRef(run: NamingRun, id: string): void {
-  for (const job of run.background) job.refs.delete(id);
+  for (const job of run.background) {
+    job.skipped.add(id);
+    job.refs?.delete(id);
+  }
 }
 
 function removeShelfRef(run: NamingRun, id: string): void {
@@ -121,6 +133,16 @@ function removeShelfRef(run: NamingRun, id: string): void {
 function nextBackground(run: NamingRun): Ref | undefined {
   for (const job of run.background) {
     if (!usable(job)) continue;
+    if (!job.refs) {
+      const refs = job.source?.() ?? [];
+      job.source = undefined;
+      job.refs = new Map(
+        refs.flatMap((ref) => {
+          const id = titleKey(ref);
+          return job.skipped.has(id) ? [] : [[id, ref] as const];
+        }),
+      );
+    }
     const ref = job.refs.values().next().value as Ref | undefined;
     if (ref) return ref;
   }
@@ -326,11 +348,13 @@ function shapeRefs(library: Library, critical: readonly Ref[]): Ref[] {
   return critical.filter((ref) => ref.type === 'tv' && needed.has(titleKey(ref)));
 }
 
-function shelfQueues(library: Library): Record<ShelfName, Ref[]> {
-  const continued = new ContinueProjector().project(library).map(({ ref }) => ({
-    type: ref.type,
-    id: ref.id,
-  }));
+function shelfQueues(session: NamedLibrary, library: Library): Record<ShelfName, Ref[]> {
+  const continued =
+    session.continueTitleRefs?.(library) ??
+    new ContinueProjector().project({ ...library, shapes: session.shapes }).map(({ ref }) => ({
+      type: ref.type,
+      id: ref.id,
+    }));
   const saved = library.records
     .filter((record) => !record.deleted && record.status === 'watchlist')
     .sort((a, b) => b.addedAt - a.addedAt)
@@ -368,7 +392,7 @@ export function nameLibraryShelfTitles(
     await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
     if (job.cancelled || runs.get(session) !== run) return;
 
-    queues = shelfQueues({ ...library, shapes: session.shapes });
+    queues = shelfQueues(session, library);
     const seeds = personalSeedRows(rows);
     const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
     visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
@@ -456,7 +480,9 @@ export function promoteLibraryTitle(
   const id = titleKey(ref);
   if (
     !run.pending.has(id) &&
-    ![...run.background].some((job) => job.refs.has(id)) &&
+    ![...run.background].some(
+      (job) => job.refs?.has(id) || (!job.refs && !job.skipped.has(id) && job.owns?.(ref)),
+    ) &&
     ![...run.shelves].some((job) => job.refs.has(id))
   )
     return;
@@ -478,14 +504,18 @@ export function promoteLibraryTitle(
  */
 export function nameLibraryHistoryTitles(
   session: NamedLibrary,
-  refs: Ref[],
+  refs: Ref[] | (() => Ref[]),
   key: string,
   options: BackgroundNamingOptions = {},
 ): BackgroundNaming {
   const run = namingRun(session, key);
   const lookup = options.lookup ?? fetchDetails;
   const job: BackgroundJob = {
-    refs: new Map(refs.map((ref) => [titleKey(ref), ref])),
+    ...(typeof refs === 'function'
+      ? { source: refs }
+      : { refs: new Map(refs.map((ref) => [titleKey(ref), ref])) }),
+    skipped: new Set(),
+    owns: options.owns,
     active: true,
     cancelled: false,
     scheduleIdle: options.scheduleIdle ?? browserIdle,
@@ -516,7 +546,7 @@ export function nameLibraryHistoryTitles(
     cancel() {
       if (job.cancelled) return;
       job.cancelled = true;
-      job.refs.clear();
+      job.refs?.clear();
       job.stopVisibility();
       run.background.delete(job);
       refresh();

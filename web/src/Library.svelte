@@ -46,6 +46,7 @@
     episodeAfter,
     isAired,
     standings,
+    hasUntitledTitle,
     titleKey,
     untitled,
     watchlist,
@@ -219,8 +220,11 @@
           // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
           background = nameLibraryHistoryTitles(
             session,
-            untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
+            () => untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
             key,
+            {
+              owns: (ref) => !reserved.has(titleKey(ref)) && hasUntitledTitle(raw, ref),
+            },
           );
           historyNaming = background;
           if (!active || route.page !== 'watchlist') background.pause();
