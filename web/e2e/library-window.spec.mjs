@@ -32,7 +32,9 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
   await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=200`);
   const row = page.getByRole('region', { name: 'Continue Watching', exact: true });
   await expect(row).toBeVisible();
-  await expect(row.locator('[data-card-index]')).toHaveCount(201);
+  // The fixture pre-names its 200 measured titles. The older unnamed base title stays dormant until intent,
+  // instead of making the initial reactive shelf publication larger.
+  await expect(row.locator('[data-card-index]')).toHaveCount(200);
   await expect.poll(() => row.locator('.card').count()).toBeGreaterThan(0);
   expect(await row.locator('.card').count()).toBeLessThan(20);
   const measured = await row.evaluate((node) => ({
@@ -53,6 +55,7 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
   });
+  await expect(row.locator('[data-card-index]')).toHaveCount(201);
   await expect(row.locator('[data-card-index="200"] .card')).toHaveCount(1);
   await expect(row.locator('[data-card-index="0"] .card')).toHaveCount(0);
   expect(await row.locator('.card').count()).toBeLessThan(20);

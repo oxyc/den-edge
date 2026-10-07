@@ -117,3 +117,73 @@ for (const [width, failed] of [
     }
   });
 }
+
+test('large Home shelves publish and extend in viewport-sized tranches', async ({ browser }) => {
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 852 },
+    reducedMotion: 'reduce',
+  });
+  await guardNetwork(page);
+  const details = new Set();
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, async (route) => {
+    const url = new URL(route.request().url());
+    const match = url.pathname.match(/\/movie\/(\d+)$/);
+    const id = Number(match?.[1]);
+    const movie = (movieId) => ({
+      id: movieId,
+      title: `Movie ${movieId}`,
+      poster_path: '/poster.jpg',
+      backdrop_path: '/backdrop.jpg',
+      release_date: '2026-01-01',
+      vote_average: 7.5,
+      vote_count: 500,
+      genre_ids: [18],
+    });
+    if (id >= 1000) details.add(id);
+    await route.fulfill({
+      json: id
+        ? movie(id)
+        : {
+            page: 1,
+            total_pages: 1,
+            results: Array.from({ length: 12 }, (_, index) => movie(index + 1)),
+          },
+    });
+  });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&many=24&unnamed-many`);
+  const row = page.getByRole('region', { name: 'Continue Watching', exact: true });
+  await expect(row.locator('[data-card-index]')).toHaveCount(8);
+  // Eight continued titles, one saved title and the two newest watched recommendation seeds. The other sixteen
+  // continued titles stay out of Svelte's first shelf publication.
+  await expect.poll(() => details.size).toBe(11);
+
+  await row.locator('.track').evaluate((track) => {
+    track.scrollLeft = track.scrollWidth;
+    track.dispatchEvent(new Event('scroll'));
+  });
+  await expect(row.locator('[data-card-index]')).toHaveCount(16);
+  await expect.poll(() => details.size).toBe(19);
+  expect(
+    await row
+      .locator('[data-card-index]')
+      .evaluateAll((slots) =>
+        slots.map((slot) =>
+          Number(/\/movie\/(\d+)/.exec(slot.querySelector('a')?.getAttribute('href') ?? '')?.[1]),
+        ),
+      ),
+  ).toEqual(Array.from({ length: 16 }, (_, index) => 3023 - index));
+
+  // Focusing near the named edge admits the following tranche before Tab can leave the shelf.
+  await row.locator('[data-card-index="14"] a').focus();
+  await expect(row.locator('[data-card-index]')).toHaveCount(24);
+  await expect.poll(() => details.size).toBe(27);
+  await page.close();
+});

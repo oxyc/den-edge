@@ -1,5 +1,11 @@
 import { expect, it, vi } from 'vitest';
-import { nameLibraryHistoryTitles, nameLibraryTitles, promoteLibraryTitle } from './libraryNaming';
+import {
+  INITIAL_SHELF_TITLES,
+  nameLibraryHistoryTitles,
+  nameLibraryShelfTitles,
+  nameLibraryTitles,
+  promoteLibraryTitle,
+} from './libraryNaming';
 import type { MediaType, Shape, Title } from './library';
 import type { Details } from './tmdb';
 
@@ -167,6 +173,153 @@ it('prioritizes shelf titles and stable recent seeds ahead of older watched hist
   expect(shelfTitleRefs(applyLog(emptyLibrary(), rows), rows).map((r) => r.id)).toEqual([
     3, 2, 4, 5, 6,
   ]);
+});
+
+it('publishes only the first viewport of each shelf, then admits the intended shelf in bounded tranches', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { addToWatchlist, blankTitle, updateProgress } = await import('./actions');
+  const continued = Array.from({ length: 12 }, (_, index) =>
+    updateProgress(blankTitle({ type: 'movie', id: 100 + index }, index + 1), 0.5, 40, [
+      index + 1,
+      0,
+      'test',
+    ]),
+  );
+  const saved = Array.from({ length: 12 }, (_, index) =>
+    addToWatchlist(blankTitle({ type: 'movie', id: 200 + index }, 100 + index), [
+      100 + index,
+      0,
+      'test',
+    ]),
+  );
+  const rows = [...continued, ...saved];
+  const state = session();
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  const naming = nameLibraryShelfTitles(state, applyLog(emptyLibrary(), rows), rows, 'key', lookup);
+
+  await naming.ready;
+  expect(state.displays).toHaveLength(INITIAL_SHELF_TITLES * 2);
+  expect(lookup).toHaveBeenCalledTimes(INITIAL_SHELF_TITLES * 2);
+
+  await naming.admit('continue');
+  expect(state.displays).toHaveLength(INITIAL_SHELF_TITLES * 2 + 4);
+  expect(state.displays.filter(({ id }) => id >= 200)).toHaveLength(INITIAL_SHELF_TITLES);
+
+  await naming.admit('watchlist');
+  expect(state.displays).toHaveLength(24);
+  expect(lookup).toHaveBeenCalledTimes(24);
+  naming.cancel();
+});
+
+it('does not let already-published titles hide an unnamed tail from the next intent tranche', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankTitle, updateProgress } = await import('./actions');
+  const rows = Array.from({ length: 17 }, (_, index) =>
+    updateProgress(blankTitle({ type: 'movie', id: 100 + index }, index + 1), 0.5, 40, [
+      index + 1,
+      0,
+      'test',
+    ]),
+  );
+  const state = session();
+  // Everything except the oldest tail already has display metadata, as the large-window fixture does.
+  state.displays = rows.slice(1).map(({ title: wanted }) => ({
+    type: wanted.type,
+    id: wanted.id,
+    title: `#${wanted.id}`,
+  }));
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  const naming = nameLibraryShelfTitles(state, applyLog(emptyLibrary(), rows), rows, 'key', lookup);
+
+  await naming.ready;
+  expect(lookup).not.toHaveBeenCalled();
+  await naming.admit('continue');
+  expect(lookup).toHaveBeenCalledOnce();
+  expect(lookup).toHaveBeenCalledWith({ type: 'movie', id: 100 }, 'key');
+  expect(state.displays.map(({ id }) => id)).toContain(100);
+  naming.cancel();
+});
+
+it('publishes every series shape before shelves are ready while keeping off-window names dormant', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankEpisode, markEpisode } = await import('./actions');
+  const rows = Array.from({ length: 10 }, (_, index) =>
+    markEpisode(blankEpisode({ type: 'tv', id: 300 + index }, 1, 1), true, [index + 1, 0, 'test']),
+  );
+  const state = session();
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+    shape: { counts: new Map([[1, 2]]) },
+  }));
+  const naming = nameLibraryShelfTitles(state, applyLog(emptyLibrary(), rows), rows, 'key', lookup);
+
+  await naming.ready;
+  expect(state.shapes.size).toBe(10);
+  expect(state.displays).toHaveLength(INITIAL_SHELF_TITLES);
+  // Shape preflight and display admission join the same resolved details; no title is fetched twice.
+  expect(lookup).toHaveBeenCalledTimes(10);
+  await naming.admit('continue');
+  expect(state.displays).toHaveLength(10);
+  expect(lookup).toHaveBeenCalledTimes(10);
+  naming.cancel();
+});
+
+it('reuses a staged shape detail when watched history later admits its display', async () => {
+  vi.useFakeTimers();
+  try {
+    const { applyLog, emptyLibrary } = await import('./library');
+    const { blankEpisode, markEpisode } = await import('./actions');
+    const watched = { type: 'tv' as const, id: 399 };
+    const rows = [markEpisode(blankEpisode(watched, 1, 1), true, [1, 0, 'test'])];
+    const state = session();
+    const lookup = vi.fn(async (wanted: Ref) => ({
+      title: { ...wanted, title: 'Complete' },
+      // There is no next episode, so this title belongs to watched history, not Continue Watching.
+      shape: { counts: new Map([[1, 1]]) },
+    }));
+    const naming = nameLibraryShelfTitles(
+      state,
+      applyLog(emptyLibrary(), rows),
+      rows,
+      'key',
+      lookup,
+    );
+    await naming.ready;
+    expect(state.displays).toEqual([]);
+    expect(lookup).toHaveBeenCalledOnce();
+
+    const idle = idleHarness();
+    const history = nameLibraryHistoryTitles(state, [watched], 'key', {
+      lookup,
+      scheduleIdle: idle.schedule,
+    });
+    idle.run();
+    await turns();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(state.displays).toEqual([{ ...watched, title: 'Complete' }]);
+    expect(lookup).toHaveBeenCalledOnce();
+    history.cancel();
+    naming.cancel();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('does not expand the old pre-ready request set for a flag-only history series', async () => {
+  const { emptyLibrary } = await import('./library');
+  const library = emptyLibrary();
+  library.flags?.set('tv:500:1:1', { type: 'tv', id: 500, season: 1, episode: 1 });
+  const state = session();
+  const lookup = vi.fn(async () => null);
+  const naming = nameLibraryShelfTitles(state, library, [], 'key', lookup);
+
+  await naming.ready;
+  expect(lookup).not.toHaveBeenCalled();
+  naming.cancel();
 });
 
 it('loads the episode shape even when a series name is already remembered', async () => {

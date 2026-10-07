@@ -63,7 +63,9 @@
   /** You might also like's row id (`moreLikeThisRow`). */
   const SUGGESTED = 'you-might-also-like';
   /** Each shown row with its build: a rebuilt row keeps its id, and must still start its own loader afresh. */
-  let rows = $state<{ build: number; row: RowDef }[]>([]);
+  // Row definitions are replaced as complete builds and never mutated. Avoid deep proxies around every loader and
+  // filter while the detail page constructs its below-fold placeholders.
+  let rows = $state.raw<{ build: number; row: RowDef }[]>([]);
   /** The title `rows` were built for, and how many builds there have been. Not reactive: the effect only reads them. */
   let rowsFor = '';
   let builds = 0;
