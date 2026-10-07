@@ -79,7 +79,9 @@ async function setup(page) {
     .locator('[data-active="true"]')
     .getByRole('link', { name: /^Another Movie/ })
     .first();
-  await card.scrollIntoViewIfNeeded();
+  // The virtual row may replace its initial slots once ResizeObserver supplies
+  // the measured width. Re-resolve the locator if that happens mid-scroll.
+  await expect(async () => card.scrollIntoViewIfNeeded()).toPass();
   await expect(card.locator('img')).toBeVisible();
   return { card, release };
 }
