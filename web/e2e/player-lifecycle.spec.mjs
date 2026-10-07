@@ -119,8 +119,17 @@ test('native polling sleeps with a paused or hidden player', async () => {
           (delay) => delay === 250 || delay === 500,
         ),
       );
-    await page.locator('.player video').evaluate(async (video) => {
-      await video.play();
+    await page.locator('.player video').evaluate((video) => {
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        seeking: { configurable: true, get: () => false },
+        ended: { configurable: true, get: () => false },
+      });
+      window.setPlayerFixturePaused = (next) => {
+        paused = next;
+        video.dispatchEvent(new Event(next ? 'pause' : 'playing'));
+      };
       video.dispatchEvent(new Event('playing'));
     });
     await expect.poll(timers).toContain(250);
@@ -142,7 +151,7 @@ test('native polling sleeps with a paused or hidden player', async () => {
 
     await page.evaluate(() => window.setPlayerFixtureVisibility('visible'));
     await expect.poll(timers).toContain(250);
-    await page.locator('.player video').evaluate((video) => video.pause());
+    await page.evaluate(() => window.setPlayerFixturePaused(true));
     await expect.poll(timers).toEqual([]);
   } finally {
     await browser.close();
