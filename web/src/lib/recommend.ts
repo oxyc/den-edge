@@ -558,6 +558,9 @@ export async function enrichPersonalBackdrop(
         if (pendingEnrichments.get(scope) === pending) pendingEnrichments.delete(scope);
         return;
       }
+      // Backdrop paths are normally title-specific, but they are not an identity. A stale detail response must
+      // never relabel another retained lead merely because TMDB happened to reuse the same artwork path.
+      if (record.copy && (record.copy.type !== copy.type || record.copy.id !== copy.id)) return;
       const enriched = withRichCopy(copy, record.copy, copy);
       if (JSON.stringify(record.copy) !== JSON.stringify(enriched))
         storage.setItem(

@@ -579,6 +579,22 @@ describe('personal backdrop preload', () => {
       id: 43,
       title: 'T43',
     });
+
+    const other = film(44, { title: 'Another lead', backdropPath: lead.backdropPath });
+    await enrichPersonalBackdrop(
+      'library-changed-lead',
+      null,
+      true,
+      other,
+      detail,
+      now + 1,
+      storage,
+    );
+    expect(JSON.parse([...values.values()][0]!).copy).toEqual({
+      type: 'movie',
+      id: 43,
+      title: 'T43',
+    });
   });
 
   it('rejects invalid copy and caps every retained text field', () => {
