@@ -1665,7 +1665,12 @@ export class LibraryLog {
     try {
       const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
       if (!bytes) return undefined;
-      const opened = await openKeptInWorker<T>(this.local.key, name, bytes);
+      const opened = await openKeptInWorker<T>(
+        this.local.key,
+        name,
+        bytes,
+        name === SNAPSHOT || name === SNAPSHOT_V4,
+      );
       if (opened !== undefined) return opened;
       const plain = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode(name) },

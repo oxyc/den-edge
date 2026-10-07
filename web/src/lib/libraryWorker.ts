@@ -7,8 +7,23 @@ import { compareStamps, isDocument, newestSummary, ZERO_STAMP, type Row, type St
 import { initialize } from '../vendor/den-core/index.js';
 
 type Request =
-  | { id: number; op: 'open'; key: CryptoKey; name: string; bytes: ArrayBuffer }
-  | { id: number; op: 'project'; source: Row[]; now: number }
+  | {
+      id: number;
+      op: 'open';
+      key: CryptoKey;
+      name: string;
+      bytes: ArrayBuffer;
+      retainRows: boolean;
+    }
+  | {
+      id: number;
+      op: 'project';
+      source?: Row[];
+      retainedId?: number;
+      indexes?: ArrayBuffer;
+      releaseRetained?: number[];
+      now: number;
+    }
   | {
       id: number;
       op: 'apply';
@@ -17,6 +32,12 @@ type Request =
     };
 
 const utf8 = new TextEncoder();
+// A cached snapshot is cloned to the page once because LibraryLog owns it there. Keep its Worker-side parse just
+// long enough for the first projection, so the page can refer back to those immutable rows by tiny integer indexes
+// instead of synchronously cloning the whole history into this Worker again. The cap also bounds abandoned opens.
+const retainedRows = new Map<number, unknown[]>();
+let nextRetainedId = 0;
+const RETAINED_LIMIT = 4;
 
 function message(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -30,6 +51,28 @@ async function openValue(key: CryptoKey, name: string, buffer: ArrayBuffer): Pro
     bytes.subarray(12),
   );
   return JSON.parse(new TextDecoder().decode(plain)) as unknown;
+}
+
+function retainOpenedRows(value: unknown): number | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const entries = (value as { entries?: unknown }).entries;
+  if (!Array.isArray(entries)) return undefined;
+  const rows = entries.map((entry) => (Array.isArray(entry) ? entry[2] : undefined));
+  const retainedId = ++nextRetainedId;
+  retainedRows.set(retainedId, rows);
+  while (retainedRows.size > RETAINED_LIMIT) retainedRows.delete(retainedRows.keys().next().value!);
+  return retainedId;
+}
+
+function retainedSource(retainedId: number, buffer: ArrayBuffer): Row[] {
+  const held = retainedRows.get(retainedId);
+  retainedRows.delete(retainedId);
+  if (!held) throw new Error('retained library rows expired');
+  return [...new Uint32Array(buffer)].map((index) => {
+    const row = held[index];
+    if (!row || typeof row !== 'object') throw new Error('retained library row is unavailable');
+    return row as Row;
+  });
 }
 
 async function project(source: Row[], now: number) {
@@ -50,9 +93,20 @@ self.onmessage = async (event: MessageEvent<Request>) => {
   const request = event.data;
   try {
     let value: unknown;
-    if (request.op === 'open') value = await openValue(request.key, request.name, request.bytes);
-    else if (request.op === 'project') {
-      const projected = await project(request.source, request.now);
+    if (request.op === 'open') {
+      const opened = await openValue(request.key, request.name, request.bytes);
+      value = {
+        opened,
+        retainedId: request.retainRows ? retainOpenedRows(opened) : undefined,
+      };
+    } else if (request.op === 'project') {
+      for (const retainedId of request.releaseRetained ?? []) retainedRows.delete(retainedId);
+      const source =
+        request.retainedId !== undefined && request.indexes
+          ? retainedSource(request.retainedId, request.indexes)
+          : request.source;
+      if (!source) throw new Error('library projection has no rows');
+      const projected = await project(source, request.now);
       value = { ...projected, library: applyLog(emptyLibrary(), projected.rows) };
     } else {
       await initialize();

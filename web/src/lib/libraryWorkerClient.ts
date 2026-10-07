@@ -21,6 +21,16 @@ interface WorkerReply {
   error?: string;
 }
 
+interface OpenedValue<T> {
+  opened: T;
+  retainedId?: number;
+}
+
+interface RetainedRow {
+  id: number;
+  index: number;
+}
+
 type Waiting = {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
@@ -29,6 +39,9 @@ type Waiting = {
 let worker: Worker | undefined;
 let nextId = 0;
 const waiting = new Map<number, Waiting>();
+// Structured cloning gives the page different objects than the Worker retained. Their identity still tells us
+// whether LibraryLog is projecting the exact opened rows or whether journal work replaced any of them.
+const retainedRows = new WeakMap<object, RetainedRow>();
 
 function failed(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -89,17 +102,52 @@ export async function openKeptInWorker<T>(
   key: CryptoKey,
   name: string,
   bytes: Uint8Array,
+  retainRows = false,
 ): Promise<T | undefined> {
   // IndexedDB returns an owned clone, but Vault's test and alternate implementations need not. Transfer a copy so
   // moving the buffer into the Worker cannot detach the value they retain.
   const copy = bytes.slice();
-  const request = ask<T>({ op: 'open', key, name, bytes: copy.buffer }, [copy.buffer]);
+  const request = ask<OpenedValue<T>>({ op: 'open', key, name, bytes: copy.buffer, retainRows }, [
+    copy.buffer,
+  ]);
   if (!request) return undefined;
   try {
-    return await request;
+    const { opened, retainedId } = await request;
+    if (retainedId !== undefined && opened && typeof opened === 'object') {
+      const entries = (opened as { entries?: unknown }).entries;
+      if (Array.isArray(entries))
+        entries.forEach((entry, index) => {
+          const row = Array.isArray(entry) ? entry[2] : undefined;
+          if (row && typeof row === 'object') retainedRows.set(row, { id: retainedId, index });
+        });
+    }
+    return opened;
   } catch {
     return undefined;
   }
+}
+
+function retainedProjection(
+  source: Row[],
+): { retainedId: number; indexes: Uint32Array } | { releaseRetained: number[] } {
+  let retainedId: number | undefined;
+  let complete = source.length > 0;
+  const indexes = new Uint32Array(source.length);
+  const seen = new Set<number>();
+  source.forEach((row, index) => {
+    const retained = retainedRows.get(row);
+    if (!retained) {
+      complete = false;
+      return;
+    }
+    seen.add(retained.id);
+    if (retainedId === undefined) retainedId = retained.id;
+    else if (retainedId !== retained.id) complete = false;
+    indexes[index] = retained.index;
+  });
+  return complete && retainedId !== undefined
+    ? { retainedId, indexes }
+    : { releaseRetained: [...seen] };
 }
 
 /** Project v4 documents and summarize stamps off-thread. Undefined asks the caller to use its sliced fallback. */
@@ -108,7 +156,18 @@ export async function projectRowsInWorker(
   now: number,
 ): Promise<ProjectedRows | undefined> {
   try {
-    const request = ask<ProjectedLibrary>({ op: 'project', source, now });
+    const retained = retainedProjection(source);
+    const message =
+      'retainedId' in retained
+        ? {
+            op: 'project',
+            retainedId: retained.retainedId,
+            indexes: retained.indexes.buffer,
+            now,
+          }
+        : { op: 'project', source, releaseRetained: retained.releaseRetained, now };
+    const transfer = 'retainedId' in retained ? [retained.indexes.buffer] : [];
+    const request = ask<ProjectedLibrary>(message, transfer);
     if (!request) return undefined;
     const projected = await request;
     projectedLibraries.set(projected.rows, projected.library);
