@@ -354,19 +354,88 @@ const KEPT_FRESH_MS = 86_400_000;
 const KEPT_DISPLAY_MS = 7 * KEPT_FRESH_MS;
 
 /**
- * The one non-sensitive fragment needed before an encrypted kept billboard can be opened: its lead backdrop path.
- * The storage key is scoped to a digest of the exact library key, page facet and `fresh` mode, so switching any of
- * them cannot warm another household's or another ranking's art. The value contains no title or recommendation.
+ * The bounded, non-interactive copy that may accompany the retained lead artwork before the encrypted billboard
+ * opens. It is deliberately presentation-sized rather than a second title database.
+ */
+export interface PersonalHeroCopy {
+  type: MediaType;
+  id: number;
+  title: string;
+  year?: number;
+  reason?: string;
+  genres?: string[];
+  overview?: string;
+  runtime?: number;
+}
+
+/**
+ * The small non-sensitive fragment needed before an encrypted kept billboard can be opened. The storage key is
+ * scoped to a digest of the exact library key, page facet and `fresh` mode, so switching any of them cannot warm
+ * another household's or another ranking's art. Older `{ at, path }` values remain valid.
  */
 const LEAD_PREFIX = 'den.hero-lead.v1';
 interface KeptLead {
   at: number;
   path: string;
+  copy?: PersonalHeroCopy;
 }
 type LeadStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined;
 
 const backdropPath = (value: unknown): value is string =>
-  typeof value === 'string' && /^\/[A-Za-z0-9_./-]+$/.test(value);
+  typeof value === 'string' && value.length <= 256 && /^\/[A-Za-z0-9_./-]+$/.test(value);
+
+const boundedText = (value: unknown, max: number): string | undefined => {
+  if (typeof value !== 'string') return;
+  const text = value.trim().replace(/\s+/g, ' ');
+  return text ? text.slice(0, max) : undefined;
+};
+
+type HeroCopyTitle = Pick<RecommendedTitle, 'type' | 'id' | 'title' | 'year' | 'why'>;
+type HeroCopyDetail = {
+  overview?: string;
+  runtime?: number;
+  genres?: { name: string }[];
+};
+
+/** Reduce a named lead and optional detail to the only plaintext copy the parser-time shell understands. */
+export function personalHeroCopy(
+  title: HeroCopyTitle | undefined,
+  detail?: HeroCopyDetail,
+): PersonalHeroCopy | undefined {
+  if (
+    !title ||
+    (title.type !== 'movie' && title.type !== 'tv') ||
+    !Number.isInteger(title.id) ||
+    title.id <= 0
+  )
+    return;
+  const name = boundedText(title.title, 160);
+  if (!name) return;
+  const year =
+    Number.isInteger(title.year) && title.year! >= 1888 && title.year! <= 2200
+      ? title.year
+      : undefined;
+  const reason = boundedText(recommendationReason(title.why), 100);
+  const genres = (detail?.genres ?? [])
+    .map((genre) => boundedText(genre?.name, 60))
+    .filter((genre): genre is string => !!genre)
+    .slice(0, 2);
+  const overview = boundedText(detail?.overview, 1024);
+  const runtime =
+    Number.isInteger(detail?.runtime) && detail!.runtime! > 0 && detail!.runtime! <= 1440
+      ? detail!.runtime
+      : undefined;
+  return {
+    type: title.type,
+    id: title.id,
+    title: name,
+    ...(year ? { year } : {}),
+    ...(reason ? { reason } : {}),
+    ...(genres.length ? { genres } : {}),
+    ...(overview ? { overview } : {}),
+    ...(runtime ? { runtime } : {}),
+  };
+}
 
 async function leadKey(identity: string, facet: MediaType | null, fresh: boolean) {
   if (!identity || !globalThis.crypto?.subtle) return null;
@@ -385,14 +454,54 @@ export async function keepPersonalBackdrop(
   path: string | undefined,
   at = Date.now(),
   storage: LeadStorage = globalThis.localStorage,
+  copy?: PersonalHeroCopy,
 ): Promise<void> {
   try {
     const key = await leadKey(identity, facet, fresh);
     if (!key || !storage) return;
     if (!backdropPath(path)) return storage.removeItem(key);
-    storage.setItem(key, JSON.stringify({ at, path } satisfies KeptLead));
+    storage.setItem(
+      key,
+      JSON.stringify({ at, path, ...(copy ? { copy } : {}) } satisfies KeptLead),
+    );
   } catch {
     // Storage and Web Crypto may be unavailable in a private or constrained browser; normal billboard loading wins.
+  }
+}
+
+/** Add detail copy without extending the ranking's display lifetime or changing which retained image it names. */
+export async function enrichPersonalBackdrop(
+  identity: string | null | undefined,
+  facet: MediaType | null,
+  fresh: boolean,
+  title: RecommendedTitle,
+  detail: HeroCopyDetail,
+  now = Date.now(),
+  storage: LeadStorage = globalThis.localStorage,
+): Promise<void> {
+  try {
+    if (!identity || !backdropPath(title.backdropPath) || !storage) return;
+    const key = await leadKey(identity, facet, fresh);
+    const raw = key && storage.getItem(key);
+    if (!key || !raw) return;
+    const record = JSON.parse(raw) as Partial<KeptLead> | null;
+    const age = now - (record?.at ?? NaN);
+    if (
+      !record ||
+      !backdropPath(record.path) ||
+      record.path !== title.backdropPath ||
+      !(age >= 0 && age < KEPT_DISPLAY_MS)
+    )
+      return;
+    const copy = personalHeroCopy(title, detail);
+    if (!copy) return;
+    if (JSON.stringify(record.copy) === JSON.stringify(copy)) return;
+    storage.setItem(
+      key,
+      JSON.stringify({ at: record.at!, path: record.path, copy } satisfies KeptLead),
+    );
+  } catch {
+    // The hint is opportunistic; the encrypted ranking remains the source of truth.
   }
 }
 
@@ -441,8 +550,18 @@ export async function replacePersonalBillboard(
       if (identity && !(await clearPersonalBackdrop(identity, facet, fresh, storage)))
         throw new Error('the previous billboard lead could not be cleared');
       await save({ at, titles });
-      if (identity)
-        await keepPersonalBackdrop(identity, facet, fresh, titles[0]?.backdropPath, at, storage);
+      if (identity) {
+        const lead = titles[0];
+        await keepPersonalBackdrop(
+          identity,
+          facet,
+          fresh,
+          lead?.backdropPath,
+          at,
+          storage,
+          personalHeroCopy(lead),
+        );
+      }
     });
   replacementTails.set(queueKey, replacement);
   try {

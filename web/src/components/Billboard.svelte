@@ -49,6 +49,7 @@
     tmdbKey,
     onplay,
     onready,
+    onretained,
     reel,
     routes,
     // eslint-disable-next-line no-useless-assignment -- An output binding: written below, read by the parent.
@@ -78,6 +79,8 @@
     onplay?: (title: Title) => void;
     /** The current still is decoded and visible, so the rest of Home may begin speculative work. */
     onready?: () => void;
+    /** Preserve bounded static copy for this retained lead's next parser-time paint. */
+    onretained?: (title: RecommendedTitle, detail: TitleDetail) => void;
     /** Where this page asks den-reel (`/reel/<config>`); without it a slide keeps its still picture. */
     reel?: string | null;
     /** The routes table, for the address the trailer's video is loaded from. */
@@ -189,12 +192,13 @@
   let lit = $state(0);
 
   /**
-   * The shared document shell contains no personal data. Its hashed parser-time script may fill one image from
-   * the separately kept lead hint, though, before this component exists. Move that exact node into the live
-   * picture instead of drawing an identical successor: the preload, shell paint and billboard are then one
-   * browser request and one LCP candidate.
+   * The shared document shell contains no personal data. Its hashed parser-time script may fill one image and
+   * bounded inert copy from the separately kept lead hint before this component exists. Move the exact image node
+   * into the live picture instead of drawing an identical successor: the preload, shell paint and billboard are
+   * then one browser request and one LCP candidate.
    */
   let earlyBackdrop = $state.raw<HTMLImageElement | null>(null);
+  let earlyCopy = $state.raw<HTMLElement | null>(null);
   let earlyLoaded = $state(false);
   let stopEarly: (() => void) | undefined;
 
@@ -207,6 +211,7 @@
       const path = image?.dataset.path;
       if (!image || !path) return;
       const shell = image.closest('[data-den-early-billboard]');
+      const copy = shell?.querySelector<HTMLElement>('[data-den-early-copy]:not([hidden])');
       const loaded = () => (earlyLoaded = true);
       const failed = () => {
         image.remove();
@@ -220,6 +225,10 @@
       earlyLoaded = image.complete && image.naturalWidth > 0;
       image.classList.add('backdrop');
       node.prepend(image);
+      if (copy) {
+        earlyCopy = copy;
+        node.parentElement?.append(copy);
+      }
       shell?.remove();
       layers[0] = {
         id: 0,
@@ -240,9 +249,55 @@
         window.removeEventListener('den:early-hero', adopt);
         stopEarly?.();
         earlyBackdrop?.remove();
+        earlyCopy?.remove();
       },
     };
   }
+
+  // Keep rich parser-time copy over the live slide until its matching detail has arrived. The real slide is already
+  // laid out underneath; taking the inert overlay away in the next frame is therefore a paint swap, not a jump.
+  $effect(() => {
+    const copy = earlyCopy;
+    const title = current;
+    if (!copy || !title) return;
+    const matches = copy.dataset.path === title.backdropPath;
+    if (matches && copy.dataset.detail === 'true' && !detail) {
+      // A failed detail request must not leave the real controls hidden behind inert retained copy indefinitely.
+      const timeout = setTimeout(() => {
+        if (earlyCopy === copy) {
+          copy.remove();
+          earlyCopy = null;
+        }
+      }, 2000);
+      return () => clearTimeout(timeout);
+    }
+    let frame = 0;
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      frame = requestAnimationFrame(() => {
+        if (earlyCopy === copy) {
+          copy.remove();
+          earlyCopy = null;
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  });
+
+  let retainedCopy = '';
+  $effect(() => {
+    const title = current;
+    const found = detail;
+    if (index !== 0 || !title || !found || !onretained) return;
+    const key = `${keyOf(title)}:${title.backdropPath ?? ''}`;
+    if (retainedCopy === key) return;
+    retainedCopy = key;
+    onretained(title, found);
+  });
 
   /** The picture this slide should be showing; anything that finishes loading after this changed is stale. */
   let wanted = '';
@@ -900,6 +955,7 @@
      arrived, so the page doesn't jump when they do. -->
 <section
   class="billboard"
+  class:retaining-early-copy={earlyCopy}
   use:stableViewportHeight
   aria-roledescription={shown.length ? 'carousel' : undefined}
   aria-label={shown.length ? 'Featured' : undefined}
@@ -1265,6 +1321,10 @@
     max-width: 1400px;
     margin: 0 auto;
     padding: var(--bar-space) var(--gutter) 76px;
+  }
+
+  .retaining-early-copy .slide:first-child .told {
+    visibility: hidden;
   }
 
   .text {

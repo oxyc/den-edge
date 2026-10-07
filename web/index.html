@@ -62,6 +62,17 @@
         transform: scale(1.14);
       }
 
+      /* The live picture's scroll-linked drift starts here too. Matching its first transform keeps the exact
+           retained image node still when the component adopts it; reduced-motion and unsupported browsers use
+           the unshifted fallback in both places. */
+      @supports (animation-timeline: --rail) {
+        @media not (prefers-reduced-motion: reduce) {
+          [data-den-early-picture] {
+            transform: translate3d(2.5%, 0, 0) scale(1.14);
+          }
+        }
+      }
+
       [data-den-early-backdrop] {
         position: absolute;
         inset: 0;
@@ -95,6 +106,103 @@
         );
       }
 
+      [data-den-early-copy][hidden] {
+        display: none;
+      }
+
+      [data-den-early-copy] {
+        position: absolute;
+        z-index: 3;
+        inset: 0;
+        display: grid;
+        align-items: end;
+        color: #e7e7ea;
+        font:
+          16px/1.4 -apple-system,
+          BlinkMacSystemFont,
+          'SF Pro Text',
+          'Segoe UI',
+          Roboto,
+          sans-serif;
+        pointer-events: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      [data-den-early-told] {
+        box-sizing: border-box;
+        width: 100%;
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: calc(max(12px, env(safe-area-inset-top)) + 62px) clamp(16px, 4vw, 48px) 76px;
+      }
+
+      [data-den-early-text] {
+        display: grid;
+        gap: 8px;
+        max-width: 720px;
+        min-height: 190px;
+        align-content: end;
+      }
+
+      [data-den-early-title],
+      [data-den-early-reason],
+      [data-den-early-facts],
+      [data-den-early-overview] {
+        filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
+      }
+
+      [data-den-early-title] {
+        max-block-size: 2.4em;
+        display: -webkit-box;
+        margin: 0;
+        overflow: hidden;
+        font-size: clamp(26px, 6vw, 48px);
+        line-height: 1.05;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      [data-den-early-reason],
+      [data-den-early-facts] {
+        margin: 0;
+        color: rgb(255 255 255 / 0.92);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      [data-den-early-reason] {
+        font-weight: 600;
+      }
+
+      [data-den-early-facts] {
+        max-block-size: 2.8em;
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      [data-den-early-overview] {
+        min-block-size: 4.2em;
+        max-block-size: 4.2em;
+        display: -webkit-box;
+        margin: 0;
+        overflow: hidden;
+        color: rgb(255 255 255 / 0.88);
+        font-size: 15px;
+        line-height: 1.4;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+      }
+
+      [data-den-early-actions] {
+        height: 48px;
+        margin-top: 4px;
+      }
+
       [data-den-early-fade] {
         bottom: 0;
         height: 62%;
@@ -126,6 +234,24 @@
           [data-den-early-billboard] {
             height: max(clamp(420px, 76lvh, 860px), min(56.25vw, 94lvh));
           }
+        }
+      }
+
+      @media (width <= 759px) {
+        [data-den-early-text] {
+          min-height: 0;
+        }
+
+        [data-den-early-actions] {
+          display: none;
+        }
+      }
+
+      @media (width >= 360px) and (width <= 759px) {
+        [data-den-early-title] {
+          max-block-size: 1.3em;
+          -webkit-line-clamp: 1;
+          line-clamp: 1;
         }
       }
     </style>
@@ -215,6 +341,45 @@
             if (raw) localStorage.removeItem(key);
             return;
           }
+          const bounded = (value, max) =>
+            typeof value === 'string' && value.length > 0 && value.length <= max
+              ? value
+              : undefined;
+          const optionalText = (value, max) =>
+            value === undefined ? undefined : (bounded(value, max) ?? null);
+          const copyOf = (value) => {
+            if (!value || typeof value !== 'object') return null;
+            const title = bounded(value.title, 160);
+            const reason = optionalText(value.reason, 100);
+            const overview = optionalText(value.overview, 1024);
+            const year =
+              value.year === undefined ||
+              (Number.isInteger(value.year) && value.year >= 1888 && value.year <= 2200)
+                ? value.year
+                : null;
+            const runtime =
+              value.runtime === undefined ||
+              (Number.isInteger(value.runtime) && value.runtime > 0 && value.runtime <= 1440)
+                ? value.runtime
+                : null;
+            const genres = value.genres ?? [];
+            if (
+              !title ||
+              (value.type !== 'movie' && value.type !== 'tv') ||
+              !Number.isInteger(value.id) ||
+              value.id <= 0 ||
+              reason === null ||
+              overview === null ||
+              year === null ||
+              runtime === null ||
+              !Array.isArray(genres) ||
+              genres.length > 2 ||
+              genres.some((genre) => !bounded(genre, 60))
+            )
+              return null;
+            return { title, reason, overview, year, runtime, genres };
+          };
+          const copy = copyOf(kept.copy);
           const preload = document.createElement('link');
           const image = (size) => `https://image.tmdb.org/t/p/${size}${kept.path}`;
           preload.rel = 'preload';
@@ -234,6 +399,24 @@
             backdrop.sizes = '100vw';
             backdrop.srcset = preload.imageSrcset;
             backdrop.src = preload.href;
+            const words = shell.querySelector('[data-den-early-copy]');
+            if (copy && words instanceof HTMLElement) {
+              const title = words.querySelector('[data-den-early-title]');
+              const reason = words.querySelector('[data-den-early-reason]');
+              const facts = words.querySelector('[data-den-early-facts]');
+              const overview = words.querySelector('[data-den-early-overview]');
+              if (title) title.textContent = copy.title;
+              if (reason) {
+                reason.textContent = copy.reason ?? '';
+                reason.hidden = !copy.reason;
+              }
+              if (facts)
+                facts.textContent = [copy.year, ...copy.genres].filter(Boolean).join(' · ');
+              if (overview) overview.textContent = copy.overview ?? '';
+              words.dataset.path = kept.path;
+              words.dataset.detail = copy.overview || copy.genres.length ? 'true' : 'false';
+              words.hidden = false;
+            }
             shell.hidden = false;
             window.dispatchEvent(new Event('den:early-hero'));
             return true;
@@ -263,6 +446,17 @@
       </div>
       <div data-den-early-scrim></div>
       <div data-den-early-fade></div>
+      <div data-den-early-copy hidden inert aria-hidden="true">
+        <div data-den-early-told>
+          <div data-den-early-text>
+            <h2 data-den-early-title></h2>
+            <p data-den-early-reason hidden></p>
+            <p data-den-early-facts></p>
+            <p data-den-early-overview></p>
+            <div data-den-early-actions></div>
+          </div>
+        </div>
+      </div>
     </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>

@@ -118,6 +118,62 @@ test('the early personalized shell image is adopted without another transfer', a
   expect(requests).toBe(1);
 });
 
+test('adopting the early personalized image preserves its painted geometry', async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 428, height: 800 },
+    deviceScaleFactor: 2,
+    reducedMotion: 'no-preference',
+  });
+  const page = await context.newPage();
+  try {
+    await guardNetwork(page);
+    await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', (route) =>
+      route.fulfill({
+        headers: { 'cache-control': 'public, max-age=600' },
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+      }),
+    );
+    await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+    await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1&wait-for-mount=1`, {
+      waitUntil: 'commit',
+    });
+    const shellImage = page.locator('[data-den-early-backdrop][data-path]');
+    await expect(shellImage).toBeVisible();
+    const before = await shellImage.boundingBox();
+    const earlyTitle = await page.locator('[data-den-early-title]').boundingBox();
+    const earlyFacts = await page.locator('[data-den-early-facts]').boundingBox();
+    expect(before).not.toBeNull();
+    expect(earlyTitle).not.toBeNull();
+    expect(earlyFacts).not.toBeNull();
+
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture:mount')));
+    const adopted = page.locator('.billboard img.backdrop.lit');
+    await expect(adopted).toHaveAttribute('data-fixture-shell-node', 'true');
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+    await expect(page.locator('.slide')).toHaveCount(2);
+    await expect(page.locator('[data-den-early-copy]')).toHaveCount(0);
+    const after = await adopted.boundingBox();
+    expect(after).not.toBeNull();
+    for (const edge of ['x', 'y', 'width', 'height']) {
+      expect(after[edge], edge).toBeCloseTo(before[edge], 1);
+    }
+    for (const [early, live] of [
+      [earlyTitle, await page.locator('.slide').first().locator('h2').boundingBox()],
+      [earlyFacts, await page.locator('.slide').first().locator('.facts').boundingBox()],
+    ]) {
+      expect(live).not.toBeNull();
+      for (const edge of ['x', 'y', 'width', 'height']) {
+        expect(live[edge], edge).toBeCloseTo(early[edge], 1);
+      }
+    }
+  } finally {
+    await context.close();
+  }
+});
+
 test('the responsive hero preload and image choose one smaller mobile candidate', async ({
   page,
 }) => {
@@ -237,7 +293,23 @@ test('the document starts its exact personalized hero before the app module answ
       );
       localStorage.setItem('den.billboard.fresh', '1');
       localStorage.setItem('den.billboard.member-post', '1');
-      localStorage.setItem(key, JSON.stringify({ at, path: '/parser-early.jpg' }));
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          at,
+          path: '/parser-early.jpg',
+          copy: {
+            type: 'movie',
+            id: 42,
+            title: 'Parser-time title',
+            year: 2026,
+            reason: 'Fits your viewing taste',
+            genres: ['Drama', 'Mystery'],
+            overview: 'Visible before the encrypted billboard and application bundle are ready.',
+            runtime: 98,
+          },
+        }),
+      );
     },
     { key: leadKey, library: identity, at: Date.now() },
   );
@@ -275,6 +347,13 @@ test('the document starts its exact personalized hero before the app module answ
   );
   await expect(shellImage).toHaveAttribute('src', /\/parser-early\.jpg$/);
   await expect(shellImage).toHaveAttribute('fetchpriority', 'high');
+  const shellCopy = page.locator('[data-den-early-copy]:not([hidden])');
+  await expect(shellCopy.locator('[data-den-early-title]')).toHaveText('Parser-time title');
+  await expect(shellCopy.locator('[data-den-early-reason]')).toHaveText('Fits your viewing taste');
+  await expect(shellCopy.locator('[data-den-early-facts]')).toHaveText('2026 · Drama · Mystery');
+  await expect(shellCopy.locator('[data-den-early-overview]')).toHaveText(
+    'Visible before the encrypted billboard and application bundle are ready.',
+  );
   expect(await shellImage.boundingBox()).not.toBeNull();
   await page.waitForTimeout(100);
   expect(imageRequests, 'the responsive preload and shell image share one request').toBe(1);

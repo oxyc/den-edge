@@ -20,7 +20,22 @@ if (new URLSearchParams(location.search).has('preload')) {
     image.sizes = BILLBOARD_IMAGE_SIZES;
     image.srcset = billboardBackdropSrcset(path);
     image.src = url;
+    const copy = shell.querySelector<HTMLElement>('[data-den-early-copy]');
+    if (copy) {
+      copy.querySelector('[data-den-early-title]')!.textContent = 'A short title';
+      copy.querySelector('[data-den-early-reason]')!.textContent = 'Fits your viewing taste';
+      copy.querySelector<HTMLElement>('[data-den-early-reason]')!.hidden = false;
+      copy.querySelector('[data-den-early-facts]')!.textContent = '2026';
+      copy.dataset.path = path;
+      copy.dataset.detail = 'false';
+      copy.hidden = false;
+    }
     shell.hidden = false;
   }
+}
+if (new URLSearchParams(location.search).has('wait-for-mount')) {
+  await new Promise<void>((resolve) =>
+    window.addEventListener('fixture:mount', () => resolve(), { once: true }),
+  );
 }
 mount(Fixture, { target: document.getElementById('app')! });

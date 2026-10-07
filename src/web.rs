@@ -20,14 +20,14 @@ use std::task::{ready, Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 
-// The only inline script in the app shell: its parser-time personalized-art preload and initial image insertion. A
-// hash keeps the shared shell cacheable and grants no other inline script permission. The test below binds this value
-// to web/index.html's bytes.
-const EARLY_HERO_SCRIPT: &str = "'sha256-BuCEAIRwtyWhc25D+VaGqFJvUS0GAG1epGvgTmgbxg0='";
+// The only inline script in the app shell: its parser-time personalized lead preload and static hero insertion. A
+// hash keeps the shared shell cacheable and grants no other inline script permission. The test below binds this
+// value to web/index.html's bytes.
+const EARLY_HERO_SCRIPT: &str = "'sha256-XYD8zmiW7O0fDGZPaxyY/Ppie0hf6jOfBQKsPK5umPI='";
 #[cfg(test)]
 const EARLY_HERO_SHA256: [u8; 32] = [
-    6, 224, 132, 0, 132, 112, 183, 37, 161, 115, 110, 67, 249, 86, 134, 168, 82, 111, 81, 45, 6, 0, 109, 94,
-    164, 107, 224, 78, 104, 27, 198, 13,
+    93, 128, 252, 206, 104, 150, 236, 237, 31, 12, 102, 79, 107, 28, 152, 252, 250, 98, 123, 72, 95, 234,
+    51, 159, 5, 2, 172, 60, 174, 110, 152, 242,
 ];
 
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
