@@ -152,6 +152,13 @@
       : (still ??
           (seed?.posterPath ? `https://image.tmdb.org/t/p/w780${seed.posterPath}` : undefined)),
   );
+  const DETAIL_POSTER_SIZES =
+    '(max-width: 759px) clamp(96px, 22vw, 180px), clamp(110px, 11vw, 160px)';
+  const detailPosterSrcset = (path: string) =>
+    [
+      `https://image.tmdb.org/t/p/w342${path} 342w`,
+      `https://image.tmdb.org/t/p/w500${path} 500w`,
+    ].join(', ');
   const panel = $props.id();
 
   /**
@@ -490,6 +497,8 @@
             <img
               class="poster"
               src="https://image.tmdb.org/t/p/w500{seed.posterPath}"
+              srcset={detailPosterSrcset(seed.posterPath)}
+              sizes={DETAIL_POSTER_SIZES}
               alt=""
               width="280"
               height="420"
@@ -509,6 +518,8 @@
           {#if d.title.posterPath}<img
               class="poster"
               src="https://image.tmdb.org/t/p/w500{d.title.posterPath}"
+              srcset={detailPosterSrcset(d.title.posterPath)}
+              sizes={DETAIL_POSTER_SIZES}
               alt=""
               width="280"
               height="420"

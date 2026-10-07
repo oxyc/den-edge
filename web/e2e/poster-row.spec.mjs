@@ -82,3 +82,25 @@ test('a row far below the screen draws its posters only once it comes near', asy
   await expect(far.locator('img[src$="/far10.jpg"]')).toHaveCount(1);
   await page.close();
 });
+
+test('a landscape TMDB still selects its smaller responsive candidate', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
+  await guardNetwork(page);
+  const requests = [];
+  await page.route('https://image.tmdb.org/t/p/*/landscape.jpg', (route) => {
+    requests.push(new URL(route.request().url()).pathname);
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="169"/>',
+    });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
+  const image = page.getByRole('region', { name: 'Continue Watching' }).locator('img');
+  await expect(image).toHaveAttribute('srcset', /w300.*300w,.*w500.*500w/);
+  await expect(image).toHaveAttribute('sizes', 'clamp(203px, 55.1vw, 275.5px)');
+  await expect
+    .poll(() => image.evaluate((node) => new URL(node.currentSrc).pathname))
+    .toBe('/t/p/w300/landscape.jpg');
+  expect(requests).toEqual(['/t/p/w300/landscape.jpg']);
+  await page.close();
+});

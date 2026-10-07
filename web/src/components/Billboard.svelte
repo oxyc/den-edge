@@ -172,6 +172,7 @@
 
   // The current slide is the only detail request on the page's critical path.
   $effect(() => {
+    if (!active) return;
     void learn(current);
   });
 
@@ -193,11 +194,13 @@
   let readyKey = $state('');
 
   $effect(() => {
+    const visible = active;
     const path = current?.backdropPath ?? detail?.backdropPath;
     const imagePath = path ?? '';
     const url = imagePath ? billboardBackdropURL(imagePath) : '';
     const titleKey = current ? keyOf(current) : '';
     untrack(() => {
+      if (!visible) return;
       if (lit >= 0 && layers[lit]?.url === url) return;
       wanted = url;
       readyKey = '';
@@ -227,8 +230,9 @@
   // Intent still wins immediately: changing `index` makes that slide current and the effect above loads it high.
   $effect(() => {
     const here = current;
-    if (!here || readyKey !== keyOf(here)) return;
+    if (!active || !here || readyKey !== keyOf(here)) return;
     return whenIdle(() => {
+      if (!active) return;
       for (const step of [1, -1]) {
         const near = shown[index + step];
         void learn(near);
