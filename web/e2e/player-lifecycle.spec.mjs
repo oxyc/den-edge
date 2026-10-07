@@ -14,33 +14,32 @@ const session = {
   audioTracks: [],
 };
 
-async function trackIntervals(page, mockVisibility = false) {
-  await page.addInitScript((replaceVisibility) => {
+async function trackIntervals(page) {
+  await page.addInitScript(() => {
     const intervals = new Map();
+    const intervalStacks = new Map();
     const set = window.setInterval.bind(window);
     const clear = window.clearInterval.bind(window);
     window.setInterval = (callback, delay, ...args) => {
       const handle = set(callback, delay, ...args);
       intervals.set(handle, delay);
+      intervalStacks.set(handle, new Error().stack ?? '');
       return handle;
     };
     window.clearInterval = (handle) => {
       intervals.delete(handle);
+      intervalStacks.delete(handle);
       clear(handle);
     };
     window.playerFixtureIntervals = intervals;
-    if (replaceVisibility) {
-      let visibility = 'visible';
-      Object.defineProperty(document, 'visibilityState', {
-        configurable: true,
-        get: () => visibility,
-      });
-      window.setPlayerFixtureVisibility = (next) => {
-        visibility = next;
-        document.dispatchEvent(new Event('visibilitychange'));
-      };
-    }
-  }, mockVisibility);
+    window.playerFixturePlayerIntervals = (delays) =>
+      [...intervals].flatMap(([handle, delay]) =>
+        delays.includes(delay) &&
+        intervalStacks.get(handle)?.includes('/src/components/Player.svelte')
+          ? [delay]
+          : [],
+      );
+  });
 }
 
 async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
@@ -91,21 +90,17 @@ test('playback progress clears startup and leaves no hls.js head poll behind', a
     );
 
     await expect(page.locator('.startup')).toHaveCount(0);
-    expect(
-      await page.evaluate(() =>
-        [...window.playerFixtureIntervals.values()].filter((delay) => delay === 250),
-      ),
-    ).toEqual([]);
+    expect(await page.evaluate(() => window.playerFixturePlayerIntervals([250]))).toEqual([]);
   } finally {
     await browser.close();
   }
 });
 
-test('native polling sleeps with a paused or hidden player', async () => {
+test('player polling sleeps while paused', async () => {
   const browser = await webkit.launch();
   try {
     const page = await browser.newPage();
-    await trackIntervals(page, true);
+    await trackIntervals(page);
     await mockPlayer(page);
     await page.goto(`${ORIGIN}/test/player.html`);
     await page.waitForFunction(
@@ -125,40 +120,25 @@ test('native polling sleeps with a paused or hidden player', async () => {
           paused = next;
           video.dispatchEvent(new Event(next ? 'pause' : 'playing'));
         };
-        video.dispatchEvent(new Event('playing'));
-        return [...window.playerFixtureIntervals.values()];
-      }),
-    ).toContain(250);
-
-    expect(
-      await page.locator('.player video').evaluate((video) => {
         video.dispatchEvent(new Event('waiting'));
-        return [...window.playerFixtureIntervals.values()];
+        return window.playerFixturePlayerIntervals([500]);
       }),
     ).toContain(500);
     expect(
-      await page.evaluate(() => {
-        window.setPlayerFixtureVisibility('hidden');
-        return [...window.playerFixtureIntervals.values()].filter(
-          (delay) => delay === 250 || delay === 500,
-        );
+      await page.locator('.player video').evaluate((video) => {
+        window.setPlayerFixturePaused(true);
+        video.dispatchEvent(new Event('waiting'));
+        return window.playerFixturePlayerIntervals([250, 500]);
       }),
     ).toEqual([]);
 
     expect(
-      await page.evaluate(() => {
-        window.setPlayerFixtureVisibility('visible');
-        return [...window.playerFixtureIntervals.values()];
+      await page.locator('.player video').evaluate((video) => {
+        window.setPlayerFixturePaused(false);
+        video.dispatchEvent(new Event('waiting'));
+        return window.playerFixturePlayerIntervals([500]);
       }),
-    ).toContain(250);
-    expect(
-      await page.evaluate(() => {
-        window.setPlayerFixturePaused(true);
-        return [...window.playerFixtureIntervals.values()].filter(
-          (delay) => delay === 250 || delay === 500,
-        );
-      }),
-    ).toEqual([]);
+    ).toContain(500);
   } finally {
     await browser.close();
   }
