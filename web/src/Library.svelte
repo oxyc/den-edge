@@ -139,6 +139,8 @@
   const LOOKUPS = 6;
   /** Slides of everyone's billboard named for an empty library: atlas names them by id, each a TMDB lookup. */
   const EVERYONE_NAMED = 20;
+  /** Let the hero's loaded image reach a paint before background provider synchronization starts. */
+  const PROVIDERS_AFTER_HERO_MS = 1_000;
   const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
@@ -1143,7 +1145,10 @@
   });
   // Common next screens load only after both the shelves and the hero have won their critical resources.
   $effect(() => {
-    if (shelvesReady && heroReady) preloadScreens();
+    if (!shelvesReady || !heroReady) return;
+    preloadScreens();
+    const timer = setTimeout(() => session.foregroundReady(), PROVIDERS_AFTER_HERO_MS);
+    return () => clearTimeout(timer);
   });
   $effect(() => {
     // What the billboard is rebuilt FOR: which page this is, where atlas answers, and whether TMDB can be

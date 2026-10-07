@@ -27,6 +27,9 @@ import { forgetLibraryCredential } from './relayFetch';
 import { fetchRoutes, type Routes } from './routes';
 import { SessionServices } from './sessionServices.svelte';
 
+/** Directly opened routes may never paint Home's billboard; background providers still start eventually. */
+export const BACKGROUND_PROVIDER_FALLBACK_MS = 10_000;
+
 /** Cached pages share one log and revision, so a detail action updates the retained Home immediately. */
 export class LibrarySession {
   displays = $state<Title[]>([]);
@@ -71,6 +74,10 @@ export class LibrarySession {
     entries: ContinueEntry[];
   };
   private readonly device = this.clock.device;
+  /** SIMKL delivery is independent of the visible library. Hold its large snapshot behind foreground readiness. */
+  private providersReady = false;
+  private pendingSimkl?: LibraryLog;
+  private deliveringSimkl?: Promise<void>;
   /** The log's generation changes the last recovery reconcile followed (`reconcileRecovery`). */
   private recoveryGenerations = 0;
   /** Asked as the session starts, beside the library: discovery needs them, and they don't need the library. */
@@ -150,8 +157,7 @@ export class LibrarySession {
           this.notify('Library updated to v4');
         }
         if (await log.compact()) this.changed(true);
-        if (log.wireMinimum >= 3 && !log.readOnly && (await deliverSimkl(log, this.device)))
-          this.changed(true);
+        if (log.wireMinimum >= 3 && !log.readOnly) this.deferSimkl(log);
         await this.reconcileRecovery(log, this.key);
         if (log.wireMinimum >= 4 && !log.readOnly) {
           this.attachDownloads(log);
@@ -204,20 +210,69 @@ export class LibrarySession {
       if (!disposed && this.log?.moved) onMoved();
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let providersDue = false;
+    const releaseProviders = () => {
+      providersDue = true;
+      if (!document.hidden) this.foregroundReady();
+    };
+    const providerTimer = setTimeout(releaseProviders, BACKGROUND_PROVIDER_FALLBACK_MS);
     const tick = async () => {
       await refresh();
       if (!disposed) timer = setTimeout(() => void tick(), this.live ? LIVE_PULL_MS : 30_000);
     };
     void tick();
     window.addEventListener('online', refresh);
-    document.addEventListener('visibilitychange', refresh);
+    const visible = () => {
+      void refresh();
+      if (providersDue && !document.hidden) this.foregroundReady();
+    };
+    document.addEventListener('visibilitychange', visible);
     return () => {
       this.active = false;
       disposed = true;
       clearTimeout(timer);
+      clearTimeout(providerTimer);
       window.removeEventListener('online', refresh);
-      document.removeEventListener('visibilitychange', refresh);
+      document.removeEventListener('visibilitychange', visible);
     };
+  }
+
+  /**
+   * The foreground has painted its critical hero. Release provider synchronization and poster availability now;
+   * neither decides the shelves or hero, but both otherwise begin large/slow requests while those are loading.
+   */
+  foregroundReady(): void {
+    if (!this.active || this.providersReady) return;
+    this.providersReady = true;
+    this.services.foregroundReady();
+    this.startSimkl();
+  }
+
+  private deferSimkl(log: LibraryLog): void {
+    this.pendingSimkl = log;
+    if (this.providersReady) this.startSimkl();
+  }
+
+  /** One delivery at a time. A refresh arriving during it leaves one newest follow-up, never a request burst. */
+  private startSimkl(): void {
+    if (!this.providersReady || this.deliveringSimkl || !this.pendingSimkl) return;
+    const log = this.pendingSimkl;
+    this.pendingSimkl = undefined;
+    const work = this.runSimkl(log);
+    this.deliveringSimkl = work;
+    void work.then(() => {
+      if (this.deliveringSimkl === work) this.deliveringSimkl = undefined;
+      if (this.pendingSimkl) this.startSimkl();
+    });
+  }
+
+  private async runSimkl(log: LibraryLog): Promise<void> {
+    try {
+      if ((await deliverSimkl(log, this.device)) && this.active && this.log === log)
+        this.changed(true);
+    } catch (error) {
+      console.warn('den: SIMKL delivery failed', error);
+    }
   }
   changed(settings = false) {
     this.revision++;

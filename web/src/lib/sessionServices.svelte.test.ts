@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryLog } from './log';
 import type { SettingsRow } from './wire';
+import { availability } from './availability.svelte';
 import { SessionServices } from './sessionServices.svelte';
 
 vi.mock('./discoverServices', () => ({
@@ -8,11 +9,13 @@ vi.mock('./discoverServices', () => ({
     _installed: string[],
     _routes: unknown,
     publish: {
+      scout?: (value: { base: string; install: string } | null) => void;
       atlas: (value: { base: string } | null) => void;
       remux?: (value: string | null) => void;
     },
   ) => {
     discoveries++;
+    queueMicrotask(() => publish.scout?.({ base: `/scout-${discoveries}`, install: '/scout' }));
     queueMicrotask(() => publish.atlas({ base: `/atlas-${discoveries}` }));
     const remux = reaches;
     if (remux) queueMicrotask(() => publish.remux?.(remux));
@@ -45,6 +48,23 @@ const logWith = (plugins: string[]) =>
   }) as unknown as LibraryLog;
 
 describe('SessionServices', () => {
+  it('discovers Scout but holds availability requests until the foreground is ready', async () => {
+    discoveries = 0;
+    const connect = vi.spyOn(availability, 'connect');
+    const services = new SessionServices(
+      async () => ({}),
+      () => undefined,
+    );
+    services.configure(logWith([]));
+    await vi.waitFor(() => expect(services.scout?.base).toBe('/scout-1'));
+    expect(connect).not.toHaveBeenCalledWith(services.scout, expect.any(String));
+
+    connect.mockClear();
+    services.foregroundReady();
+    expect(connect).toHaveBeenCalledWith(services.scout, services.tmdbKey);
+    services.stop();
+  });
+
   it('discovers once for every page, and again only when what it reads changes, keeping what it found', async () => {
     discoveries = 0;
     let asked = 0;
