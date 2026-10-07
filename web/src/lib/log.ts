@@ -41,6 +41,7 @@ import {
 import { trackerEvent } from './trackerEvents';
 import { ensureSyncPolicy } from './syncLoader';
 import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore';
+import { openKeptInWorker, projectRowsInWorker } from './libraryWorkerClient';
 
 interface Entry {
   seq: number;
@@ -1442,9 +1443,25 @@ export class LibraryLog {
 
   /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
   async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
-    const rows: Row[] = [];
     const version = this.entriesVersion;
     const now = Date.now();
+    const source = [...this.entries.values()].map(({ row }) => row);
+    if (options?.shouldContinue && !options.shouldContinue()) return null;
+    const projected = await projectRowsInWorker(source, now);
+    if (projected) {
+      if (options?.shouldContinue && !options.shouldContinue()) return null;
+      // The log is normally private until this finishes. If an unusual owner changed it meanwhile, retry the exact
+      // current snapshot instead of publishing the stale structured clone the Worker finished.
+      if (version !== this.entriesVersion) return this.rowsInSlices(options);
+      this.newestCache = {
+        version,
+        at: now,
+        stamp: projected.stamp,
+        reconsiderAt: projected.reconsiderAt,
+      };
+      return projected.rows;
+    }
+    const rows: Row[] = [];
     let stamp = ZERO_STAMP;
     let reconsiderAt = Infinity;
     const completed = await inPolicySlices(
@@ -1638,6 +1655,8 @@ export class LibraryLog {
     try {
       const bytes = await this.local.vault.get(`${this.keys.id}:${name}`);
       if (!bytes) return undefined;
+      const opened = await openKeptInWorker<T>(this.local.key, name, bytes);
+      if (opened !== undefined) return opened;
       const plain = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: bytes.slice(0, 12), additionalData: utf8.encode(name) },
         this.local.key,
