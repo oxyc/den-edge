@@ -1,0 +1,110 @@
+import { expect, test } from '@playwright/test';
+import { guardNetwork, routeTmdb } from './network.mjs';
+import { E2E_ORIGIN } from './base-url.mjs';
+
+const svg =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="281"><rect width="500" height="281" fill="#456"/></svg>';
+
+for (const width of [393, 700, 759, 760, 844, 1280])
+  test(`a large season keeps its geometry while episode cards yield between batches at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await guardNetwork(page);
+    await page.addInitScript(() => {
+      const waiting = [];
+      Object.defineProperty(globalThis, 'scheduler', {
+        configurable: true,
+        value: { yield: () => new Promise((resolve) => waiting.push(resolve)) },
+      });
+      window.fixtureYieldCount = () => waiting.length;
+      window.fixtureYield = () => waiting.shift()?.();
+    });
+    const stills = [];
+    await page.route('https://image.tmdb.org/**', (route) => {
+      if (/still-\d+\.jpg$/.test(route.request().url())) stills.push(route.request().url());
+      return route.fulfill({ contentType: 'image/svg+xml', body: svg });
+    });
+    await page.route('**/atlas/**', (route) => route.fulfill({ status: 404, json: {} }));
+    let releaseSeason;
+    const season = new Promise((resolve) => (releaseSeason = resolve));
+    await routeTmdb(page, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/season/1')) {
+        await season;
+        return route.fulfill({
+          json: {
+            episodes: Array.from({ length: 50 }, (_, index) => ({
+              episode_number: index + 1,
+              name:
+                index % 4 === 0
+                  ? `Episode ${index + 1} with a deliberately long title that wraps`
+                  : `Episode ${index + 1}`,
+              overview:
+                index % 4 === 0
+                  ? 'An unusually long episode synopsis that occupies several lines and proves the reserved card follows real content instead of assuming one fixed height across a season.'
+                  : index % 4 === 1
+                    ? ''
+                    : 'A short synopsis.',
+              air_date: index % 4 === 3 ? '2099-01-01' : '2025-01-01',
+              runtime: index % 3 === 0 ? null : 55,
+              still_path: `/still-${index + 1}.jpg`,
+            })),
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          id: 42,
+          name: 'Large Series',
+          first_air_date: '2020-01-01',
+          imdb_id: 'tt0000042',
+          backdrop_path: '/backdrop.jpg',
+          overview: 'A series.',
+          genres: [{ id: 18, name: 'Drama' }],
+          seasons: [{ season_number: 1, name: 'Season 1', episode_count: 50 }],
+          last_episode_to_air: { season_number: 1, episode_number: 50 },
+          credits: { cast: [], crew: [] },
+          aggregate_credits: { cast: [], crew: [] },
+          videos: { results: [] },
+          content_ratings: { results: [] },
+          recommendations: { results: [] },
+        },
+      });
+    });
+
+    await page.goto(`${E2E_ORIGIN}/test/detail.html?series`);
+    await expect(page.getByRole('heading', { level: 1, name: 'Large Series' })).toBeVisible();
+    releaseSeason();
+    await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
+    await expect(page.locator('.episode.deferred')).toHaveCount(46);
+    await expect(page.locator('.episodes > li')).toHaveCount(50);
+    const reservedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+    expect(stills.length).toBeLessThanOrEqual(4);
+
+    // A retained hidden page neither fills its deep tree nor consumes another task slice.
+    await page.evaluate(() =>
+      window.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
+    );
+    await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+    await page.evaluate(() => window.fixtureYield());
+    await page.waitForTimeout(0);
+    await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
+    await expect(page.locator('.episode.deferred')).toHaveCount(46);
+
+    await page.evaluate(() =>
+      window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+    );
+    let deferred = 46;
+    while (deferred > 0) {
+      await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+      await page.evaluate(() => window.fixtureYield());
+      deferred = Math.max(0, deferred - 4);
+      await expect(page.locator('.episode.deferred')).toHaveCount(deferred);
+      const batchHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+      expect(Math.abs(batchHeight - reservedHeight)).toBeLessThanOrEqual(2);
+    }
+    await expect(page.getByRole('button', { name: 'Play episode 50: Episode 50' })).toBeVisible();
+    const completeHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+    expect(Math.abs(completeHeight - reservedHeight)).toBeLessThanOrEqual(2);
+  });
