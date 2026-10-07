@@ -40,9 +40,14 @@ it('holds provider delivery until the foreground explicitly releases background 
     'the cached library is visible without provider synchronization',
   ).not.toHaveBeenCalled();
   const revision = session.revision;
+  const settingsRevision = session.settingsRevision;
   session.foregroundReady();
   await vi.waitFor(() => expect(deliverSimkl).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(session.revision).toBeGreaterThan(revision));
+  expect(
+    session.settingsRevision,
+    'provider receipts and imported viewing rows are not keys, plugins, or preferences',
+  ).toBe(settingsRevision);
 });
 
 it('eventually releases provider delivery on a route with no Home hero', async () => {

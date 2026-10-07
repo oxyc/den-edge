@@ -288,8 +288,7 @@ export class LibrarySession {
 
   private async runSimkl(log: LibraryLog): Promise<void> {
     try {
-      if ((await deliverSimkl(log, this.device)) && this.active && this.log === log)
-        this.changed(true);
+      if ((await deliverSimkl(log, this.device)) && this.active && this.log === log) this.changed();
     } catch (error) {
       console.warn('den: SIMKL delivery failed', error);
     }

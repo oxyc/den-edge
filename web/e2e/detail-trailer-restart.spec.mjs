@@ -195,3 +195,31 @@ test('iOS detail trailer lifecycle: in-app navigation after discovery settles st
     await browser.close();
   }
 });
+
+test('iOS detail trailer lifecycle: an unrelated settings publication keeps the playing element', async () => {
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext({ ...devices['iPhone 15'] });
+    const page = await context.newPage();
+    const counts = await mock(page);
+    const { video, errors } = await openPlaying(page);
+
+    await expect.poll(() => video.evaluate((v) => v.currentTime)).toBeGreaterThan(0.1);
+    const srcBefore = await video.evaluate((v) => v.currentSrc);
+    const timeBefore = await video.evaluate((v) => v.currentTime);
+    await page.evaluate(() => document.dispatchEvent(new Event('fixture:settings')));
+    await page.waitForTimeout(500);
+
+    expect(
+      await page.evaluate(() => window.originalVideo === document.querySelector('video')),
+    ).toBe(true);
+    expect(await video.evaluate((v) => v.currentSrc)).toBe(srcBefore);
+    expect(await video.evaluate((v) => v.currentTime)).toBeGreaterThanOrEqual(timeBefore);
+    expect(await page.evaluate(() => window.pauseEvents)).toBe(0);
+    expect(await page.evaluate(() => window.playCalls)).toBe(1);
+    expect(counts.activate).toBe(1);
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});

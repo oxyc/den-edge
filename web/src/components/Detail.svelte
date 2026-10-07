@@ -283,8 +283,17 @@
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise memoization must not become a dependency of the season-loading effect.
   const seasonCache = new Map<string, Promise<Episode[] | null>>();
 
+  // Props arrive through one component input object. Publishing an unrelated one (for example fresh library rows
+  // after a provider sync) can therefore make expressions that read `ref`, the key or the region run again even
+  // when all three values are unchanged. Keep the request behind a primitive identity: re-evaluating this derived
+  // to the same string does not tear down the loaded detail — and its playing `DetailMedia` — just because another
+  // prop changed.
+  const detailRequest = $derived(`${ref.type}:${ref.id}\u0000${tmdbKey}\u0000${region}`);
   $effect(() => {
-    const [current, key, country] = [ref, tmdbKey, region];
+    void detailRequest;
+    const [current, key, country] = untrack(
+      () => [{ type: ref.type, id: ref.id }, tmdbKey, region] as const,
+    );
     void retry;
     let live = true;
     detail = undefined;
