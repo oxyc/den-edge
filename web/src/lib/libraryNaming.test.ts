@@ -213,6 +213,28 @@ it('publishes only the first viewport of each shelf, then admits the intended sh
   naming.cancel();
 });
 
+it('reuses a session-owned Continue projection when forming shelf queues', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankTitle, updateProgress } = await import('./actions');
+  const rows = [updateProgress(blankTitle({ type: 'movie', id: 100 }, 1), 0.5, 40, [1, 0, 'test'])];
+  const library = applyLog(emptyLibrary(), rows);
+  const state = {
+    ...session(),
+    continueTitleRefs: vi.fn(() => [{ type: 'movie' as const, id: 900 }]),
+  };
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+
+  const naming = nameLibraryShelfTitles(state, library, rows, 'key', lookup);
+  await naming.ready;
+
+  expect(state.continueTitleRefs).toHaveBeenCalledWith(library);
+  expect(lookup).toHaveBeenCalledWith({ type: 'movie', id: 900 }, 'key');
+  expect(lookup).not.toHaveBeenCalledWith({ type: 'movie', id: 100 }, 'key');
+  naming.cancel();
+});
+
 it('does not let already-published titles hide an unnamed tail from the next intent tranche', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { blankTitle, updateProgress } = await import('./actions');

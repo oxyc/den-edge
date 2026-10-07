@@ -529,10 +529,9 @@ export class LibrarySession {
     return held.library;
   }
 
-  /** Continue Watching from the same shared projection, recomputing only changed per-series policy inputs. */
-  continueWatching(projection: Library, displayed: Library): ContinueEntry[] {
+  /** Keep the policy half shared by shelf naming and the visible Continue row. */
+  private projectContinue(projection: Library): ContinueCandidate[] {
     const shapes = this.shapes;
-    const displayRevision = this.displayRevision;
     const shapeRevision = this.shapeRevision;
     const priorShapeRevision =
       this.continued?.projection === projection ? this.continued.shapeRevision : 0;
@@ -554,7 +553,19 @@ export class LibrarySession {
             : this.continueProjector.project({ ...projection, shapes }),
       };
     }
-    const candidates = this.continued.candidates;
+    return this.continued.candidates;
+  }
+
+  /** Ordered shelf membership without naming display fields. */
+  continueTitleRefs(projection: Library): Array<Pick<Title, 'type' | 'id'>> {
+    return this.projectContinue(projection).map(({ ref }) => ({ type: ref.type, id: ref.id }));
+  }
+
+  /** Continue Watching from the same shared projection, recomputing only changed per-series policy inputs. */
+  continueWatching(projection: Library, displayed: Library): ContinueEntry[] {
+    const displayRevision = this.displayRevision;
+    const shapeRevision = this.shapeRevision;
+    const candidates = this.projectContinue(projection);
     const named = this.namedContinue;
     const currentDisplay = this.displayed;
     const untrackedMetadata =

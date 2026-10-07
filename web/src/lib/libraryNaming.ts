@@ -12,6 +12,8 @@ import { fetchDetails, type Details } from './tmdb';
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
+  /** Reuse a session's retained policy projection instead of folding the whole library again for shelf naming. */
+  continueTitleRefs?(library: Library): Ref[];
   /** Sessions use this to publish one keyed metadata batch without making every consumer diff snapshots. */
   publishLibraryMetadata?: (
     titles: Title[],
@@ -326,11 +328,13 @@ function shapeRefs(library: Library, critical: readonly Ref[]): Ref[] {
   return critical.filter((ref) => ref.type === 'tv' && needed.has(titleKey(ref)));
 }
 
-function shelfQueues(library: Library): Record<ShelfName, Ref[]> {
-  const continued = new ContinueProjector().project(library).map(({ ref }) => ({
-    type: ref.type,
-    id: ref.id,
-  }));
+function shelfQueues(session: NamedLibrary, library: Library): Record<ShelfName, Ref[]> {
+  const continued =
+    session.continueTitleRefs?.(library) ??
+    new ContinueProjector().project({ ...library, shapes: session.shapes }).map(({ ref }) => ({
+      type: ref.type,
+      id: ref.id,
+    }));
   const saved = library.records
     .filter((record) => !record.deleted && record.status === 'watchlist')
     .sort((a, b) => b.addedAt - a.addedAt)
@@ -368,7 +372,7 @@ export function nameLibraryShelfTitles(
     await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
     if (job.cancelled || runs.get(session) !== run) return;
 
-    queues = shelfQueues({ ...library, shapes: session.shapes });
+    queues = shelfQueues(session, library);
     const seeds = personalSeedRows(rows);
     const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
     visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
