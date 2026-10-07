@@ -14,6 +14,7 @@
 
   let {
     heading,
+    ariaLabel,
     headingLink,
     aside,
     active,
@@ -21,9 +22,11 @@
     track = $bindable(),
   }: {
     heading: string;
+    /** The region's full name when the compact visible heading omits its context. */
+    ariaLabel?: string;
     headingLink?: { before: string; label: string; after: string; href: string };
     /** A quiet link beside the heading, to where the row goes on. */
-    aside?: { label: string; href: string };
+    aside?: { label: string; href: string; ariaLabel?: string };
     /** A loading row already tracks its vertical window and supplies it here to avoid observing it twice. */
     active?: boolean;
     children: Snippet;
@@ -52,7 +55,7 @@
   });
 </script>
 
-<section class="row" aria-label={heading} bind:this={section}>
+<section class="row" aria-label={ariaLabel ?? heading} bind:this={section}>
   <div class="head">
     <h2>
       {#if headingLink}
@@ -62,7 +65,9 @@
         {heading}
       {/if}
     </h2>
-    {#if aside}<a class="aside" href={aside.href}>{aside.label} ›</a>{/if}
+    {#if aside}
+      <a class="aside" href={aside.href} aria-label={aside.ariaLabel}>{aside.label} ›</a>
+    {/if}
   </div>
   <div class="track" bind:this={track}>
     {@render children()}
@@ -85,11 +90,17 @@
   }
 
   h2 {
+    min-width: 0;
     margin: 0;
     font-size: 20px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .aside {
+    flex: none;
     color: var(--muted);
     font-size: 14px;
     text-decoration: none;

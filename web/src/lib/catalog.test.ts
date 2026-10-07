@@ -211,16 +211,11 @@ describe('the screens', () => {
       owned: new Set(['movie:1']),
     });
     expect(rows.map((r) => [r.id, r.title])).toEqual([
-      ['byw-movie-329865', 'Because you watched Arrival'],
+      ['byw-movie-329865', 'More like this'],
       ['wl-tv-693134', 'Because you added Dune: Prophecy to your Watchlist'],
     ]);
     expect(rows.map((r) => r.headingLink)).toEqual([
-      {
-        before: 'Because you watched ',
-        label: 'Arrival',
-        after: '',
-        href: '/movie/329865-arrival',
-      },
+      undefined,
       {
         before: 'Because you added ',
         label: 'Dune: Prophecy',
@@ -228,6 +223,12 @@ describe('the screens', () => {
         href: '/tv/693134-dune-prophecy',
       },
     ]);
+    expect(rows[0]?.aside).toEqual({
+      label: 'Explore similar',
+      href: '/search?c=like-movie-329865',
+      ariaLabel: 'Explore titles similar to Arrival',
+    });
+    expect(rows[0]?.ariaLabel).toBe('More like this because you watched Arrival');
     expect((await rows[0]!.load(1)).map((t) => t.title)).toEqual(['New to you']);
     expect(asked).toEqual(['/movie/329865/recommendations']);
   });

@@ -453,14 +453,14 @@
     let firstFrame: number | undefined;
     let paintedFrame: number | undefined;
     let cancelIdle = () => {};
-    const initialScrollY = window.scrollY;
+    let initialScrollY: number | undefined;
     const start = () => {
       if (live && active && detail === current) tailStarted = true;
     };
     const startOnScroll = () => {
-      // Page construction and router restoration can emit a no-op scroll event. Only movement is user demand;
-      // a restored position near the tail is already covered by the viewport observer.
-      if (window.scrollY !== initialScrollY) start();
+      // Before the first paint there is no clean layout from which to sample a baseline. Treat an early scroll as
+      // demand; otherwise compare against the baseline captured once the first paint has completed.
+      if (initialScrollY === undefined || window.scrollY !== initialScrollY) start();
     };
     const stopNear = observeNearViewport(tailRoot, (near) => near && start(), '800px 0px');
     window.addEventListener('scroll', startOnScroll, { passive: true });
@@ -468,7 +468,12 @@
       firstFrame = undefined;
       paintedFrame = requestAnimationFrame(() => {
         paintedFrame = undefined;
-        if (live) cancelIdle = whenIdle(start);
+        if (live) {
+          // The trace showed that reading scrollY in the mounting effect synchronously flushed the whole detail
+          // layout. A nested frame places this read after one completed paint, when geometry is already clean.
+          initialScrollY = window.scrollY;
+          cancelIdle = whenIdle(start);
+        }
       });
     });
     return () => {
