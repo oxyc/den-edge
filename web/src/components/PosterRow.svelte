@@ -61,12 +61,14 @@
 <section class="row" aria-label={ariaLabel ?? heading} bind:this={section}>
   <div class="head">
     <h2 class:mobile-two-lines={mobileHeadingLines === 2}>
-      {#if headingLink}
-        {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
-        >{headingLink.after}
-      {:else}
-        {heading}
-      {/if}
+      <span class="heading-copy">
+        {#if headingLink}
+          {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
+          >{headingLink.after}
+        {:else}
+          {heading}
+        {/if}
+      </span>
     </h2>
     {#if aside}
       <a class="aside" href={aside.href} aria-label={aside.ariaLabel}>{aside.label} ›</a>
@@ -130,9 +132,17 @@
 
   @media (width <= 759px) {
     h2.mobile-two-lines {
-      display: -webkit-box;
-      min-height: 56px;
+      display: flex;
+      align-items: flex-end;
+      height: 56px;
       white-space: normal;
+    }
+
+    h2.mobile-two-lines .heading-copy {
+      display: -webkit-box;
+      width: 100%;
+      min-width: 0;
+      overflow: hidden;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
       line-clamp: 2;
