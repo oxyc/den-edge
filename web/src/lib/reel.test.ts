@@ -433,6 +433,40 @@ describe('fetchSources', () => {
       ]);
     });
 
+    it('keeps activation available for the next candidate after the public copy times out at home', async () => {
+      let activations = 0;
+      const fetchImpl: typeof fetch = async (input) => {
+        if (String(input).includes('/sources/')) {
+          return new Response(
+            JSON.stringify({ sources: [{ kind: 'mp4', url: `../m/s/${blob}?s=${tag}` }] }),
+          );
+        }
+        activations += 1;
+        return activated('https://lan.media.example:8449');
+      };
+      const first = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+      });
+      const publicCopy = first?.sources.find((source) => source.direct === 'public');
+      expect(publicCopy).toBeDefined();
+      abandonDirect(publicCopy!);
+
+      const next = await fetchSources(SOURCES, {
+        surface: 'audible',
+        player: 'native',
+        fetchImpl,
+        relay: false,
+      });
+      expect(activations).toBe(2);
+      expect(next?.sources[0]).toMatchObject({
+        direct: 'lan',
+        url: `https://lan.media.example:8449${media}`,
+      });
+    });
+
     it('away plays the public listener, and on the public web name never the relay', async () => {
       const got = await fetchSources(SOURCES, {
         surface: 'audible',

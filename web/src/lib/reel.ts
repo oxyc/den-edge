@@ -463,6 +463,15 @@ const ACTIVATION_PAUSE_MS = 5 * 60_000;
 let activationPausedUntil = 0;
 /** Until when the home-network origin is passed over, once a copy on it showed nothing from here. */
 let lanPausedUntil = 0;
+/**
+ * Until when a successful activation proved that this browser has a home-network route.
+ *
+ * The public listener is deliberately unreachable from behind routers without hairpin NAT. A timeout on
+ * that copy must not suppress the next candidate's activation there: activation is also how the page is
+ * handed `lanBase`, and the next candidate may have a playable progressive file even when the first one did
+ * not. Away from home there is no `lanBase`, so the existing pause still protects a down public listener.
+ */
+let lanOfferedUntil = 0;
 
 function pauseActivation(response: Response, now = Date.now()): void {
   if (response.status === 503) activationPausedUntil = now + ACTIVATION_PAUSE_MS;
@@ -477,6 +486,7 @@ function pauseActivation(response: Response, now = Date.now()): void {
 export function resetActivationPause(): void {
   activationPausedUntil = 0;
   lanPausedUntil = 0;
+  lanOfferedUntil = 0;
 }
 
 /**
@@ -521,7 +531,12 @@ export function watchDirect(
  * all, as after a 503; the home-network one by leaving it out of the lists built meanwhile.
  */
 export function abandonDirect(source: Source, now = Date.now()): void {
-  if (source.direct === 'public')
+  if (
+    source.direct === 'public' &&
+    // At home, the public copy timing out is normal on a router without hairpin NAT. Keep activation
+    // available for later candidates because its answer is also what names their LAN copies.
+    (now >= lanOfferedUntil || now < lanPausedUntil)
+  )
     activationPausedUntil = Math.max(activationPausedUntil, now + ACTIVATION_PAUSE_MS);
   else if (source.direct === 'lan')
     lanPausedUntil = Math.max(lanPausedUntil, now + ACTIVATION_PAUSE_MS);
@@ -629,7 +644,9 @@ async function activateDirect(
     const base = bareOrigin(answer?.publicBase);
     if (!base || typeof answer?.media !== 'string') return null;
     if (answer.media !== new URL(media, base).href) return null;
-    return { public: base, lan: bareOrigin(answer.lanBase) };
+    const lan = bareOrigin(answer.lanBase);
+    if (lan) lanOfferedUntil = Date.now() + ACTIVATION_PAUSE_MS;
+    return { public: base, lan };
   } catch {
     return null;
   }
