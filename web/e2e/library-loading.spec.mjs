@@ -148,6 +148,78 @@ for (const [width, failed] of [
   });
 }
 
+test('Downloading waits for exact shelf order when Continue Watching membership needs a TV shape', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 852 },
+    reducedMotion: 'reduce',
+  });
+  await guardNetwork(page);
+  let releaseShape;
+  const shapeGate = new Promise((resolve) => (releaseShape = resolve));
+  await page.route('**/routes', (route) => route.fulfill({ json: {} }));
+  await routeTmdb(page, async (route) => {
+    const url = new URL(route.request().url());
+    const [, type, rawId] = url.pathname.match(/\/(movie|tv)\/(\d+)$/) ?? [];
+    const id = Number(rawId);
+    if (type === 'tv' && id === 2002) await shapeGate;
+    const details = {
+      id,
+      ...(type === 'tv' ? { name: `Series ${id}` } : { title: `Movie ${id}` }),
+      poster_path: '/poster.jpg',
+      backdrop_path: '/backdrop.jpg',
+      release_date: '2026-01-01',
+      first_air_date: '2026-01-01',
+      vote_average: 7.5,
+      vote_count: 500,
+      genre_ids: [18],
+      ...(type === 'tv'
+        ? {
+            seasons: [{ season_number: 1, episode_count: 3 }],
+            last_episode_to_air: { season_number: 1, episode_number: 3 },
+          }
+        : {}),
+    };
+    await route.fulfill({
+      json: rawId
+        ? details
+        : {
+            page: 1,
+            total_pages: 1,
+            results: Array.from({ length: 12 }, (_, index) => ({
+              ...details,
+              id: index + 1,
+              title: `Movie ${index + 1}`,
+            })),
+          },
+    });
+  });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+
+  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&series-continue&downloading`);
+  // Watchlist membership is exact from the decrypted projection, but Continue Watching awaits the held TV
+  // layout. A lower shelf must not paint during that uncertainty and then be pushed down.
+  await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toBeAttached();
+  await expect(page.getByRole('region', { name: 'Continue Watching', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Downloading', exact: true })).toHaveCount(0);
+
+  releaseShape();
+  const continued = page.getByRole('region', { name: 'Continue Watching', exact: true });
+  const downloading = page.getByRole('region', { name: 'Downloading', exact: true });
+  await expect(continued).toBeVisible();
+  await expect(downloading).toBeVisible();
+  expect(await continued.evaluate((row) => row.getBoundingClientRect().top)).toBeLessThan(
+    await downloading.evaluate((row) => row.getBoundingClientRect().top),
+  );
+  await page.close();
+});
+
 test('large Home shelves publish and extend in viewport-sized tranches', async ({ browser }) => {
   const page = await browser.newPage({
     viewport: { width: 1280, height: 852 },
