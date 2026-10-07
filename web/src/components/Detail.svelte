@@ -874,9 +874,6 @@
 
   .cast-reserve {
     width: calc(var(--remaining) * var(--card-w) + (var(--remaining) - 1) * 14px);
-  }
-
-  .cast-reserve {
     height: calc(var(--card-w) + 66.8px);
   }
 
