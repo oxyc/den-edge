@@ -254,7 +254,9 @@ test('a legacy episode recovers its still only once its retained page becomes vi
   );
 
   await page.goto(`${E2E_ORIGIN}/test/downloads.html?page=artwork&hidden`);
-  await page.waitForTimeout(200);
+  // The fixture waits for den-core's sync policy before mounting. A module's top-level await can outlive the page
+  // load event, especially on a busy CI runner, so wait for the fixture API instead of an arbitrary delay.
+  await page.waitForFunction(() => window.downloadsFixture !== undefined);
   expect(seasonRequests).toBe(0);
 
   await page.evaluate(() => window.downloadsFixture.setActive(true));
