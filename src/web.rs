@@ -20,6 +20,15 @@ use std::task::{ready, Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 
+// The only inline script in the app shell: its parser-time personalized-art preload. A hash keeps the shared shell
+// cacheable and grants no other inline script permission. The test below binds this value to web/index.html's bytes.
+const EARLY_HERO_SCRIPT: &str = "'sha256-rRnfUY6mWwmjHCBnl+VMQGzsQdEFUCv+ce2PsQpuhJQ='";
+#[cfg(test)]
+const EARLY_HERO_SHA256: [u8; 32] = [
+    173, 25, 223, 81, 142, 166, 91, 9, 163, 28, 32, 103, 151, 229, 76, 64, 108, 236, 65, 209, 5,
+    80, 43, 254, 113, 237, 143, 177, 10, 110, 132, 148,
+];
+
 /// What the app may load and call: itself — its addons too, which it asks through this origin (`relay.rs`, or
 /// `tailscale serve` on the tailnet) — TMDB's images and API, OMDb's ratings (both BYOK, straight from the
 /// browser), YouTube's embed for trailers, YouTube's own media hosts — den-reel's `/direct` hands the page a
@@ -73,7 +82,8 @@ fn csp(media: &[String], cast_origin: Option<&str>) -> String {
     let media: String = media.iter().map(|o| format!(" {o}")).collect();
     let cast = cast_origin.map_or(String::new(), |origin| format!(" {origin}"));
     format!(
-        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; \
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {EARLY_HERO_SCRIPT}; \
+         style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://image.tmdb.org https://images.metahub.space \
          https://live.metahub.space; \
          media-src 'self' blob: data: https: https://*.googlevideo.com https://video-ssl.itunes.apple.com \
@@ -713,13 +723,25 @@ fn not_found() -> Response {
 mod tests {
     use crate::handler::tests::{body_text, Harness};
     use axum::http::{header, StatusCode};
+    use sha2::Digest;
     use std::sync::Arc;
 
     #[test]
     fn policy_allows_local_wasm_without_allowing_javascript_eval() {
         let policy = super::csp(&[], None);
-        assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
+        assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval' 'sha256-"));
         assert!(!policy.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn policy_allows_exactly_the_parser_time_hero_script() {
+        let html = include_str!("../web/index.html");
+        let marker = "<script data-den-early-hero>";
+        let start = html.find(marker).expect("the early hero script") + marker.len();
+        let end = html[start..].find("</script>").expect("the early hero script's end") + start;
+        let digest = sha2::Sha256::digest(html[start..end].as_bytes());
+        assert_eq!(digest.as_slice(), super::EARLY_HERO_SHA256);
+        assert!(super::csp(&[], None).contains(super::EARLY_HERO_SCRIPT));
     }
 
     #[test]

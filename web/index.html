@@ -36,6 +36,106 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <!-- Every page draws posters from here, a visitor's too: the connection opens while the app still loads. -->
     <link rel="preconnect" href="https://image.tmdb.org" />
+    <!-- A return visit can name its exact kept personalized lead without opening the encrypted library. Run this
+         before the module graph: the image request then overlaps the app download instead of starting after it.
+         The CSP permits only this script's hash; changing these bytes also requires changing src/web.rs. -->
+    <script data-den-early-hero>
+      void (async () => {
+        try {
+          const fragment = location.hash.replace(/^#/, '');
+          const [legacyPage, ...legacyRest] = fragment.split('/');
+          const legacyId = (part) => {
+            const digits = /^(\d+)(?:-[^/]*)?$/.exec(part ?? '')?.[1];
+            const id = Number(digits);
+            return digits !== undefined && Number.isInteger(id) && id > 0;
+          };
+          const legacy =
+            fragment &&
+            !fragment.includes('=') &&
+            (legacyPage === 'library' ||
+              legacyPage === 'search' ||
+              (['movies', 'series', 'watchlist', 'downloads', 'settings'].includes(legacyPage) &&
+                legacyRest.length === 0) ||
+              (legacyPage === 'title' &&
+                (legacyRest[0] === 'movie' || legacyRest[0] === 'tv') &&
+                legacyId(legacyRest[1])) ||
+              (legacyPage === 'person' && legacyId(legacyRest[0])));
+          // main.ts turns these old fragment routes into paths. Do not briefly warm Home before that rewrite;
+          // pairing and invite fragments contain `=` and deliberately remain Home.
+          if (legacy) return;
+          const facet =
+            location.pathname === '/'
+              ? 'all'
+              : location.pathname === '/movies'
+                ? 'movie'
+                : location.pathname === '/series'
+                  ? 'tv'
+                  : null;
+          if (!facet) return;
+          const switchOn = (name, parameter) => {
+            const asked = new URLSearchParams(location.search).get(parameter);
+            try {
+              if (asked === '1' || asked === '0') localStorage.setItem(name, asked);
+              return localStorage.getItem(name) !== '0';
+            } catch {
+              return asked !== '0';
+            }
+          };
+          const fresh = switchOn('den.billboard.fresh', 'billboard-fresh');
+          if (!switchOn('den.billboard.member-post', 'billboard-post')) return;
+          const links = JSON.parse(localStorage.getItem('den.links') ?? '[]');
+          const linked = Array.isArray(links)
+            ? links.find(
+                (value) =>
+                  value &&
+                  typeof value.inboxKey === 'string' &&
+                  /^[0-9a-f]{16,}$/i.test(value.inboxKey) &&
+                  typeof value.libraryKey === 'string' &&
+                  typeof value.linkKey === 'string' &&
+                  (value.deviceId === undefined || /^[0-9a-f]{16}$/.test(value.deviceId)) &&
+                  (value.sentIdentityName === undefined ||
+                    typeof value.sentIdentityName === 'string') &&
+                  (value.sentIdentityDeviceId === undefined ||
+                    /^[0-9a-f]{16}$/.test(value.sentIdentityDeviceId)),
+              )
+            : undefined;
+          const identity =
+            linked?.libraryKey ??
+            (localStorage.getItem('den.browsing') === '1'
+              ? localStorage.getItem('den.localLibrary')
+              : null);
+          if (!identity || !crypto.subtle) return;
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
+          const id = Array.from(new Uint8Array(digest), (byte) =>
+            byte.toString(16).padStart(2, '0'),
+          ).join('');
+          const key = `den.hero-lead.v1.${id}.${fresh ? 'fresh.' : ''}${facet}`;
+          const raw = localStorage.getItem(key);
+          const kept = raw ? JSON.parse(raw) : null;
+          const age = Date.now() - (kept?.at ?? NaN);
+          if (
+            !kept ||
+            typeof kept.path !== 'string' ||
+            !/^\/[A-Za-z0-9_./-]+$/.test(kept.path) ||
+            !(age >= 0 && age < 7 * 86_400_000)
+          ) {
+            if (raw) localStorage.removeItem(key);
+            return;
+          }
+          const preload = document.createElement('link');
+          const image = (size) => `https://image.tmdb.org/t/p/${size}${kept.path}`;
+          preload.rel = 'preload';
+          preload.as = 'image';
+          preload.fetchPriority = 'high';
+          preload.imageSrcset = `${image('w300')} 300w, ${image('w780')} 780w, ${image('w1280')} 1280w`;
+          preload.imageSizes = '100vw';
+          preload.href = image('w1280');
+          document.head.append(preload);
+        } catch {
+          // Storage and Web Crypto can be unavailable; ordinary billboard loading remains the fallback.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

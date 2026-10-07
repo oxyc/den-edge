@@ -9,6 +9,17 @@ import { relayFetch } from './relayFetch';
 import { ATLAS } from './scout';
 import { GUEST_PICKS } from './services';
 
+/** The billboard fills the viewport and TMDB offers these three bounded backdrop widths. */
+export const BILLBOARD_IMAGE_SIZES = '100vw';
+export const billboardBackdropURL = (path: string, size = 'w1280') =>
+  `https://image.tmdb.org/t/p/${size}${path}`;
+export const billboardBackdropSrcset = (path: string) =>
+  [
+    `${billboardBackdropURL(path, 'w300')} 300w`,
+    `${billboardBackdropURL(path, 'w780')} 780w`,
+    `${billboardBackdropURL(path)} 1280w`,
+  ].join(', ');
+
 /** A library title and how much it says about taste, as `Library.svelte` weighs it. */
 export interface Weighted {
   ref: { type: MediaType; id: number };
@@ -458,11 +469,13 @@ export async function preloadPersonalBackdrop(
   enabled: boolean,
   now = Date.now(),
   storage: LeadStorage = globalThis.localStorage,
-  start: (url: string) => void = (url) => {
+  start: (url: string, srcset: string, sizes: string) => void = (url, srcset, sizes) => {
     const preload = document.createElement('link');
     preload.rel = 'preload';
     preload.as = 'image';
     preload.fetchPriority = 'high';
+    preload.imageSrcset = srcset;
+    preload.imageSizes = sizes;
     preload.href = url;
     document.head.append(preload);
   },
@@ -479,8 +492,8 @@ export async function preloadPersonalBackdrop(
       if (key && raw) storage?.removeItem(key);
       return null;
     }
-    const url = `https://image.tmdb.org/t/p/w1280${record.path}`;
-    start(url);
+    const url = billboardBackdropURL(record.path);
+    start(url, billboardBackdropSrcset(record.path), BILLBOARD_IMAGE_SIZES);
     return url;
   } catch {
     return null;

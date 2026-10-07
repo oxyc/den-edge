@@ -5,8 +5,7 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links, readPendingReset } from './lib/links.svelte';
-import { localLibraryKey } from './lib/localLibrary';
-import { freshOn, memberPostOn, preloadPersonalBackdrop, startBillboard } from './lib/recommend';
+import { freshOn, startBillboard } from './lib/recommend';
 import { recoverChunkFailure, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
@@ -64,11 +63,9 @@ if (readPendingReset())
       console.warn('den: a pending key reset could not be settled', error),
     );
 
-// A kept personalized lead can begin its image request while its encrypted ranking and library are still opening.
-// Its cache is exact to this library/page/mode; everyone else's billboard is still asked early as before.
+// The document head has already started an exact kept personalized lead, when one exists. Everyone else's billboard
+// is still asked here before the app has found atlas or opened the library.
 const earlyFresh = freshOn();
-const earlyLibrary = links.current?.libraryKey ?? (links.browsing ? localLibraryKey() : null);
-void preloadPersonalBackdrop(location.pathname, earlyLibrary, earlyFresh, memberPostOn());
 startBillboard(location.pathname, !!links.current, earlyFresh);
 
 const target = document.getElementById('app');

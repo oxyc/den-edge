@@ -119,6 +119,10 @@ test('native polling sleeps with a paused or hidden player', async () => {
           (delay) => delay === 250 || delay === 500,
         ),
       );
+    await page.locator('.player video').evaluate(async (video) => {
+      await video.play();
+      video.dispatchEvent(new Event('playing'));
+    });
     await expect.poll(timers).toContain(250);
 
     expect(
