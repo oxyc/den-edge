@@ -1,4 +1,11 @@
-import { titleKey, type Library, type MediaType, type Shape, type Title } from './library';
+import {
+  ContinueProjector,
+  titleKey,
+  type Library,
+  type MediaType,
+  type Shape,
+  type Title,
+} from './library';
 import type { Row, TitleRow } from './wire';
 import { fetchDetails, type Details } from './tmdb';
 
@@ -19,8 +26,13 @@ interface NamingRun {
   known: Set<string>;
   /** Found but not yet published: every assignment re-derives the whole Home, so names land together. */
   found: Map<string, Details>;
+  /** Details fetched for shelf correctness whose display stays dormant until that shelf admits it. */
+  resolved: Map<string, Details>;
+  /** Display keys allowed into the reactive library. Shapes are always allowed through. */
+  admitted: Set<string>;
   timer?: ReturnType<typeof setTimeout>;
   background: Set<BackgroundJob>;
+  shelves: Set<ShelfJob>;
   backgroundPending: Set<string>;
   idle?: () => void;
 }
@@ -32,9 +44,25 @@ interface BackgroundJob {
   hidden: () => boolean;
   stopVisibility: () => void;
 }
+interface ShelfJob {
+  refs: Map<string, Ref>;
+  cancelled: boolean;
+}
 export interface BackgroundNaming {
   pause(): void;
   resume(): void;
+  cancel(): void;
+}
+export type ShelfName = 'continue' | 'watchlist';
+export interface ShelfNaming {
+  /** Initial names and every shape that can decide Continue Watching have been published. */
+  ready: Promise<void>;
+  /** Admit one bounded tranche for the shelf the viewer is moving through. */
+  admit(shelf: ShelfName): Promise<void>;
+  /** Fill both shelves cooperatively for a screen that lists the whole library. */
+  drain(): Promise<void>;
+  /** Every display ref owned by the visible shelves, including the initial tranche. */
+  refs: readonly Ref[];
   cancel(): void;
 }
 export interface BackgroundNamingOptions {
@@ -50,6 +78,10 @@ const runs = new WeakMap<NamedLibrary, NamingRun>();
 /** How long found names gather before they are published together. */
 const BATCH_MS = 100;
 const BACKGROUND_LOOKUPS = 2;
+/** Eight per shelf covers a desktop viewport; two shelves plus the (usually overlapping) taste seeds stay <= 20. */
+export const INITIAL_SHELF_TITLES = 8;
+/** One interaction cannot turn a cached long shelf back into one large Svelte publication. */
+export const SHELF_TRANCHE = 8;
 
 function browserIdle(task: () => void): () => void {
   if (typeof requestIdleCallback === 'function') {
@@ -80,6 +112,10 @@ function usable(job: BackgroundJob): boolean {
 
 function removeBackgroundRef(run: NamingRun, id: string): void {
   for (const job of run.background) job.refs.delete(id);
+}
+
+function removeShelfRef(run: NamingRun, id: string): void {
+  for (const job of run.shelves) job.refs.delete(id);
 }
 
 function nextBackground(run: NamingRun): Ref | undefined {
@@ -144,7 +180,9 @@ function publish(session: NamedLibrary, run: NamingRun): void {
   if (runs.get(session) !== run || !found.length) return;
   // A user action may have remembered a title while its metadata was loading.
   const known = knownTitles(session, run);
-  const titles = found.filter(([id]) => !known.has(id)).map(([, details]) => details.title);
+  const titles = found
+    .filter(([id]) => run.admitted.has(id) && !known.has(id))
+    .map(([, details]) => details.title);
   const shapes = found.flatMap(([id, { shape }]) => (shape ? [[id, shape] as const] : []));
   if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes);
   else {
@@ -154,6 +192,10 @@ function publish(session: NamedLibrary, run: NamingRun): void {
   if (titles.length) {
     run.displays = session.displays;
     for (const title of titles) known.add(titleKey(title));
+  }
+  for (const [id, details] of found) {
+    if (run.admitted.has(id) && known.has(id) && (!details.shape || session.shapes.has(id)))
+      run.resolved.delete(id);
   }
 }
 
@@ -168,7 +210,10 @@ function namingRun(session: NamedLibrary, key: string): NamingRun {
       displays,
       known: new Set(displays.map(titleKey)),
       found: new Map(),
+      resolved: new Map(),
+      admitted: new Set(),
       background: new Set(),
+      shelves: new Set(),
       backgroundPending: new Set(),
     };
     runs.set(session, run);
@@ -181,9 +226,20 @@ function requestName(
   run: NamingRun,
   ref: Ref,
   lookup: typeof fetchDetails,
+  admitTitle = true,
 ): Promise<void> {
   const id = titleKey(ref);
   removeBackgroundRef(run, id);
+  if (admitTitle) {
+    removeShelfRef(run, id);
+    run.admitted.add(id);
+  }
+  const resolved = run.resolved.get(id);
+  if (resolved) {
+    run.found.set(id, resolved);
+    run.timer ??= setTimeout(() => publish(session, run), BATCH_MS);
+    return Promise.resolve();
+  }
   let work = run.pending.get(id);
   if (!work) {
     const requested = ref;
@@ -191,6 +247,7 @@ function requestName(
       .then(() => lookup(requested, run.key))
       .then((found) => {
         if (!found || runs.get(session) !== run) return;
+        run.resolved.set(id, found);
         run.found.set(id, found);
         run.timer ??= setTimeout(() => publish(session, run), BATCH_MS);
       })
@@ -227,6 +284,163 @@ export async function nameLibraryTitles(
   publish(session, current);
 }
 
+/** Fetch policy-critical TV layouts without exposing every fetched display to Svelte at once. */
+async function nameLibraryShapes(
+  session: NamedLibrary,
+  refs: Ref[],
+  key: string,
+  lookup: typeof fetchDetails,
+): Promise<void> {
+  const run = namingRun(session, key);
+  const current = run;
+  const queue = refs.filter((ref) => ref.type === 'tv');
+  let next = 0;
+  const worker = async () => {
+    for (let ref = queue[next++]; ref; ref = queue[next++]) {
+      if (runs.get(session) !== current) return;
+      const id = titleKey(ref);
+      if (session.shapes.has(id)) continue;
+      await requestName(session, current, ref, lookup, false);
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  publish(session, current);
+}
+
+const uniqueRefs = (refs: Ref[]): Ref[] => [
+  ...new Map(refs.map((ref) => [titleKey(ref), { type: ref.type, id: ref.id }])).values(),
+];
+
+function shapeRefs(library: Library, critical: readonly Ref[]): Ref[] {
+  const needed = new Set(
+    uniqueRefs([
+      ...library.marks.flatMap((mark) =>
+        mark.type === 'tv' ? [{ type: 'tv' as const, id: mark.id }] : [],
+      ),
+      ...[...(library.flags?.values() ?? [])].flatMap((flag) =>
+        flag.type === 'tv' ? [{ type: 'tv' as const, id: flag.id }] : [],
+      ),
+    ]).map(titleKey),
+  );
+  // Stay inside v0.263's existing pre-ready request set: flag-only history must not reopen cold TMDB fanout.
+  return critical.filter((ref) => ref.type === 'tv' && needed.has(titleKey(ref)));
+}
+
+function shelfQueues(library: Library): Record<ShelfName, Ref[]> {
+  const continued = new ContinueProjector().project(library).map(({ ref }) => ({
+    type: ref.type,
+    id: ref.id,
+  }));
+  const saved = library.records
+    .filter((record) => !record.deleted && record.status === 'watchlist')
+    .sort((a, b) => b.addedAt - a.addedAt)
+    .map(({ title }) => ({ type: title.type, id: title.id }));
+  return { continue: uniqueRefs(continued), watchlist: uniqueRefs(saved) };
+}
+
+/**
+ * Keep shelf membership eager but bound display publication to what Home can initially show. TV layouts are
+ * fetched first and published without their titles, so completed-series decisions and exact Continue ordering
+ * are known before `ready`. The dormant names already fetched with those layouts are reused on later intent.
+ */
+export function nameLibraryShelfTitles(
+  session: NamedLibrary,
+  library: Library,
+  rows: Row[],
+  key: string,
+  lookup: typeof fetchDetails = fetchDetails,
+): ShelfNaming {
+  const run = namingRun(session, key);
+  const critical = shelfTitleRefs(library, rows);
+  const job: ShelfJob = {
+    // Own every former shelf-critical ref until shapes reveal the exact two visible queues. This also lets a
+    // retained title route promote its own key while the initial pass is still running.
+    refs: new Map(critical.map((ref) => [titleKey(ref), ref])),
+    cancelled: false,
+  };
+  run.shelves.add(job);
+  let queues: Record<ShelfName, Ref[]> = { continue: [], watchlist: [] };
+  let visibleRefs: Ref[] = [];
+  let admissions = Promise.resolve();
+  let draining: Promise<void> | undefined;
+
+  const ready = (async () => {
+    await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
+    if (job.cancelled || runs.get(session) !== run) return;
+
+    queues = shelfQueues({ ...library, shapes: session.shapes });
+    const seeds = personalSeedRows(rows);
+    const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
+    visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
+    const initial = uniqueRefs([
+      ...seedRefs,
+      ...queues.continue.slice(0, INITIAL_SHELF_TITLES),
+      ...queues.watchlist.slice(0, INITIAL_SHELF_TITLES),
+    ]);
+    const initialKeys = new Set(initial.map(titleKey));
+    job.refs = new Map(
+      visibleRefs.flatMap((ref) => {
+        const id = titleKey(ref);
+        return initialKeys.has(id) || run.admitted.has(id) ? [] : [[id, ref] as const];
+      }),
+    );
+    await nameLibraryTitles(session, initial, key, lookup);
+  })();
+
+  const take = (shelf: ShelfName): Ref[] => {
+    const batch: Ref[] = [];
+    for (const ref of queues[shelf]) {
+      const id = titleKey(ref);
+      if (!job.refs.has(id)) continue;
+      job.refs.delete(id);
+      batch.push(ref);
+      if (batch.length === SHELF_TRANCHE) break;
+    }
+    return batch;
+  };
+  const admit = (shelf: ShelfName): Promise<void> => {
+    admissions = Promise.all([ready, admissions]).then(async () => {
+      if (job.cancelled || runs.get(session) !== run) return;
+      const batch = take(shelf);
+      if (batch.length) await nameLibraryTitles(session, batch, key, lookup);
+    });
+    return admissions;
+  };
+  const idleTurn = () =>
+    new Promise<void>((resolve) => {
+      browserIdle(resolve);
+    });
+  const drain = (): Promise<void> => {
+    if (draining) return draining;
+    draining = (async () => {
+      await ready;
+      while (!job.cancelled && job.refs.size) {
+        const before = job.refs.size;
+        await admit('continue');
+        await admit('watchlist');
+        if (job.refs.size === before) break;
+        if (job.refs.size) await idleTurn();
+      }
+    })().finally(() => (draining = undefined));
+    return draining;
+  };
+
+  return {
+    ready,
+    admit,
+    drain,
+    get refs() {
+      return visibleRefs;
+    },
+    cancel() {
+      if (job.cancelled) return;
+      job.cancelled = true;
+      job.refs.clear();
+      run.shelves.delete(job);
+    },
+  };
+}
+
 /** Promote only a title already owned by this run's background tail; unrelated card intent starts no new work. */
 export function promoteLibraryTitle(
   session: NamedLibrary,
@@ -237,7 +451,12 @@ export function promoteLibraryTitle(
   const run = runs.get(session);
   if (!run || run.key !== key) return;
   const id = titleKey(ref);
-  if (!run.pending.has(id) && ![...run.background].some((job) => job.refs.has(id))) return;
+  if (
+    !run.pending.has(id) &&
+    ![...run.background].some((job) => job.refs.has(id)) &&
+    ![...run.shelves].some((job) => job.refs.has(id))
+  )
+    return;
   if (
     run.found.has(id) ||
     (knownTitles(session, run).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))

@@ -15,6 +15,7 @@
     itemHref,
     itemLabel,
     landscape = false,
+    onintent,
     children,
   }: {
     heading: string;
@@ -24,6 +25,8 @@
     itemHref: (item: T) => string;
     itemLabel: (item: T) => string;
     landscape?: boolean;
+    /** The viewer moved into or along this shelf, so its next dormant title tranche is useful. */
+    onintent?: () => void;
     children: Snippet<[T]>;
   } = $props();
 
@@ -37,6 +40,8 @@
   // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
   // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
   let cachedScrollLeft = 0;
+  let observed = false;
+  let intentLength = -1;
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
   onDestroy(() => clearTimeout(releaseTimer));
 
@@ -45,7 +50,18 @@
       rowNear = false;
       return;
     }
-    return observeNearViewport(wrapper, (near) => (rowNear = near), '1250px 0px');
+    return observeNearViewport(
+      wrapper,
+      (near) => {
+        // The observer's first delivery describes initial layout, not viewer intent. A later entry is either a
+        // vertical approach to this row or a retained-route return, and may admit its next title tranche.
+        const entered = observed && near && !rowNear;
+        rowNear = near;
+        observed = true;
+        if (entered) requestMore();
+      },
+      '1250px 0px',
+    );
   });
 
   $effect(() => {
@@ -75,8 +91,11 @@
         });
     };
     const scroll = () => {
-      cachedScrollLeft = scroller.scrollLeft;
+      const next = scroller.scrollLeft;
+      const movedForward = next > cachedScrollLeft + 1;
+      cachedScrollLeft = next;
       schedule();
+      if (movedForward) requestMore();
     };
     const press = (event: PointerEvent) => {
       const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
@@ -107,8 +126,16 @@
     (page.active && rowNear && index >= windowStart && index < windowEnd) ||
     itemKey(item) === focusedKey;
 
-  function remember(item: T) {
+  function requestMore() {
+    if (!onintent || intentLength === items.length) return;
+    intentLength = items.length;
+    onintent();
+  }
+
+  function remember(item: T, index: number) {
     focusedKey = itemKey(item);
+    // Admit the next tranche before Tab reaches the current tail, keeping every later title keyboard-reachable.
+    if (index >= items.length - 2) requestMore();
   }
 
   function releaseFocus() {
@@ -136,7 +163,7 @@
         class:vacant={!mounted(item, index)}
         data-card-index={index}
         data-route-focus-key={itemKey(item)}
-        onfocusin={() => remember(item)}
+        onfocusin={() => remember(item, index)}
         onfocusout={releaseFocus}
       >
         {#if mounted(item, index)}

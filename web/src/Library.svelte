@@ -59,11 +59,11 @@
   import type { LibrarySession } from './lib/librarySession.svelte';
   import {
     nameLibraryHistoryTitles,
-    nameLibraryTitles,
+    nameLibraryShelfTitles,
     promoteLibraryTitle,
-    shelfTitleRefs,
     personalSeedRows,
     type BackgroundNaming,
+    type ShelfNaming,
   } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
@@ -147,6 +147,7 @@
 
   /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
   let shelvesReady = $state(false);
+  let shelfNaming = $state.raw<ShelfNaming | null>(null);
   let historyNaming = $state.raw<BackgroundNaming | null>(null);
   const clock = browserClock();
   /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
@@ -208,11 +209,12 @@
         const projection = session.libraryProjection();
         if (!projection) return;
         const raw = projection.library;
-        const priority = shelfTitleRefs(raw, projection.rows);
-        const reserved = new Set(priority.map(titleKey));
-        void nameLibraryTitles(session, priority, key).then(() => {
+        const naming = nameLibraryShelfTitles(session, raw, projection.rows, key);
+        shelfNaming = naming;
+        void naming.ready.then(() => {
           if (disposed) return;
           shelvesReady = true;
+          const reserved = new Set(naming.refs.map(titleKey));
           // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
           // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
           background = nameLibraryHistoryTitles(
@@ -227,6 +229,8 @@
     });
     return () => {
       disposed = true;
+      shelfNaming?.cancel();
+      shelfNaming = null;
       background?.cancel();
       if (historyNaming === background) historyNaming = null;
     };
@@ -239,6 +243,13 @@
     if (!background) return;
     if (active && route.page === 'watchlist') background.resume();
     else background.pause();
+  });
+
+  // The full-library screen owns every saved/continued title. Fill its progressive Home tail in small idle
+  // tranches; a retained Home keeps that tail dormant until a row is actually explored.
+  $effect(() => {
+    const naming = shelfNaming;
+    if (active && route.page === 'watchlist' && naming) void naming.drain();
   });
 
   /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */
@@ -300,6 +311,7 @@
     const key = tmdbKey;
     // Re-run when the post-shelf tail is created, including a directly opened route with no pointer intent.
     void historyNaming;
+    void shelfNaming;
     if (active && opening && key) void promoteLibraryTitle(session, opening, key);
   });
 
@@ -1487,6 +1499,7 @@
         itemKey={(entry) => `${entry.title.type}:${entry.title.id}`}
         itemHref={(entry) => titleHref(entry.title)}
         itemLabel={(entry) => entry.title.title}
+        onintent={() => void shelfNaming?.admit('continue')}
       >
         {#snippet children(entry)}
           <PosterCard
@@ -1543,6 +1556,7 @@
         itemKey={(title) => `${title.type}:${title.id}`}
         itemHref={titleHref}
         itemLabel={(title) => title.title}
+        onintent={() => void shelfNaming?.admit('watchlist')}
       >
         {#snippet children(title)}
           <PosterCard

@@ -31,6 +31,8 @@
   const params = new URLSearchParams(location.search);
   const populated = params.has('populated');
   const many = Math.max(0, Math.min(500, Number(params.get('many')) || 0));
+  /** Let shelf naming, rather than fixture setup, supply the large row's display fields. */
+  const unnamedMany = params.has('unnamed-many');
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
   let route = $state<Route>(
@@ -156,11 +158,13 @@
     },
     revision: 0,
     settingsRevision: 0,
-    displays: Array.from({ length: many }, (_, index) => ({
-      type: 'movie' as const,
-      id: 3000 + index,
-      title: `Measured movie ${index + 1}`,
-    })),
+    displays: unnamedMany
+      ? []
+      : Array.from({ length: many }, (_, index) => ({
+          type: 'movie' as const,
+          id: 3000 + index,
+          title: `Measured movie ${index + 1}`,
+        })),
     shapes: new Map(),
     log,
     opened: Promise.resolve(log),
