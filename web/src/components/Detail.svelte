@@ -4,7 +4,13 @@
   import { stableViewportHeight } from '../lib/stableViewportHeight';
   import type { Routes } from '../lib/routes';
   import Loading from './Loading.svelte';
-  import { fetchDetail, fetchSeason, type Episode, type TitleDetail } from '../lib/detail';
+  import {
+    fetchDetail,
+    fetchSeason,
+    type Credit,
+    type Episode,
+    type TitleDetail,
+  } from '../lib/detail';
   import {
     episodeProgress,
     fetchRatings,
@@ -214,11 +220,16 @@
   let sourcesPanel = $state<TitleSources>();
   const notify = toastContext();
   let sourceTarget = $state<{ season: number; episode: number } | undefined>();
-  let detail = $state<TitleDetail | null | undefined>();
+  /**
+   * TMDB answers are immutable here: each refresh replaces the whole answer. Keep them shallow-reactive so the
+   * first detail flush does not proxy every property and array walk. In a 4x-CPU trace, the tracked cast merge alone
+   * spent 24 ms in this flush.
+   */
+  let detail = $state.raw<TitleDetail | null | undefined>();
   /** The curated studios credited on this title; undefined while they are asked for. */
-  let iconicStudios = $state<IconicStudio[] | undefined>();
+  let iconicStudios = $state.raw<IconicStudio[] | undefined>();
   /** atlas's facts about this title; undefined while they are asked for. */
-  let titleFacts = $state<TitleFacts | undefined>();
+  let titleFacts = $state.raw<TitleFacts | undefined>();
   /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
@@ -256,7 +267,7 @@
     if (detail) blockedTitles.mark(ref, restricted);
   });
   let season = $state<number | null>(null);
-  let seasonEpisodes = $state<Episode[] | null | undefined>();
+  let seasonEpisodes = $state.raw<Episode[] | null | undefined>();
   let displayedSeason = $state<number | null>(null);
   let seasonLoading = $state(false);
   /**
@@ -268,7 +279,7 @@
   let episodeLimit = $state(0);
   let retry = $state(0),
     seasonRetry = $state(0);
-  let ratings = $state<Ratings | null>(null);
+  let ratings = $state.raw<Ratings | null>(null);
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Promise memoization must not become a dependency of the season-loading effect.
   const seasonCache = new Map<string, Promise<Episode[] | null>>();
 
@@ -414,13 +425,20 @@
       ? `Play Next · S${target.season} · E${target.episode}`
       : 'Continue Watching',
   );
-  const cast = $derived(
-    detail
-      ? [...detail.directors, ...detail.cast].filter(
-          (c, i, all) => all.findIndex((other) => other.id === c.id) === i,
-        )
-      : [],
-  );
+  /** Directors lead the row, followed by cast in billing order, once per person. */
+  const creditedPeople = (loaded: TitleDetail): Credit[] => {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- ephemeral deduplication inside one derived evaluation.
+    const seen = new Set<number>();
+    const people: Credit[] = [];
+    for (const credits of [loaded.directors, loaded.cast])
+      for (const credit of credits) {
+        if (seen.has(credit.id)) continue;
+        seen.add(credit.id);
+        people.push(credit);
+      }
+    return people;
+  };
+  const cast = $derived(detail ? creditedPeople(detail) : []);
   const castTarget = $derived(Math.min(castShown, cast.length));
   const castRemaining = $derived(Math.max(0, castTarget - castMounted));
   const relatedMayMount = $derived(tailStarted && castMounted >= castTarget);
