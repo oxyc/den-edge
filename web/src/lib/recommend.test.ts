@@ -3,14 +3,17 @@ import type { Title } from './library';
 import type { Prefs } from './prefs';
 import {
   billboardScope,
-  freshKept,
+  displayableKept,
   freshOn,
+  keepPersonalBackdrop,
   memberPostOn,
   nameSlides,
   recommend,
   recommendationReason,
   recommendBody,
   recommendForEveryone,
+  preloadPersonalBackdrop,
+  replacePersonalBillboard,
   startBillboard,
   swapAfter,
   type KeptBillboard,
@@ -262,19 +265,213 @@ describe('recommend', () => {
   });
 });
 
-describe('freshKept', () => {
+describe('displayableKept', () => {
   const now = Date.parse('2026-09-30T12:00:00Z');
   const titles = [film(1)];
 
-  it('opens the page with a kept ranking under a day old, and not otherwise', () => {
-    expect(freshKept({ at: now - 60_000, titles }, now)).toEqual(titles);
-    expect(freshKept({ at: now - 86_400_000 + 1, titles }, now)).toEqual(titles);
-    expect(freshKept({ at: now - 86_400_000, titles }, now)).toBeNull();
-    expect(freshKept({ at: now + 60_000, titles }, now)).toBeNull();
-    expect(freshKept({ at: now, titles: [] }, now)).toBeNull();
-    expect(freshKept(undefined, now)).toBeNull();
+  it('is fresh for a day, stale-displayable for a week, and then expires', () => {
+    expect(displayableKept({ at: now - 60_000, titles }, now)).toEqual({ titles, fresh: true });
+    expect(displayableKept({ at: now - 86_400_000 + 1, titles }, now)).toEqual({
+      titles,
+      fresh: true,
+    });
+    expect(displayableKept({ at: now - 86_400_000, titles }, now)).toEqual({
+      titles,
+      fresh: false,
+    });
+    expect(displayableKept({ at: now - 2 * 86_400_000, titles }, now)).toEqual({
+      titles,
+      fresh: false,
+    });
+    expect(displayableKept({ at: now - 7 * 86_400_000 + 1, titles }, now)).toEqual({
+      titles,
+      fresh: false,
+    });
+    expect(displayableKept({ at: now - 7 * 86_400_000, titles }, now)).toBeNull();
+    expect(displayableKept({ at: now + 60_000, titles }, now)).toBeNull();
+    expect(displayableKept({ at: now, titles: [] }, now)).toBeNull();
+    expect(displayableKept(undefined, now)).toBeNull();
     // A bare list, as the shared billboard is kept, has no age to judge.
-    expect(freshKept(titles as unknown as KeptBillboard, now)).toBeNull();
+    expect(displayableKept(titles as unknown as KeptBillboard, now)).toBeNull();
+  });
+});
+
+describe('personal backdrop preload', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const memory = () => {
+    const values = new Map<string, string>();
+    return {
+      values,
+      storage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    };
+  };
+  const preloads = () => {
+    const made: string[] = [];
+    return { made, start: (url: string) => made.push(url) };
+  };
+
+  it('warms only the exact fresh mode, facet and library, without storing the library key', async () => {
+    const { values, storage } = memory();
+    await keepPersonalBackdrop('library-secret', null, true, '/personal-lead.jpg', now, storage);
+    expect([...values.keys()].join()).not.toContain('library-secret');
+    expect([...values.values()]).toEqual([JSON.stringify({ at: now, path: '/personal-lead.jpg' })]);
+
+    for (const [page, identity, fresh, enabled] of [
+      ['/', 'another-library', true, true],
+      ['/', 'library-secret', false, true],
+      ['/movies', 'library-secret', true, true],
+      ['/', 'library-secret', true, false],
+      ['/watchlist', 'library-secret', true, true],
+    ] as const) {
+      const preload = preloads();
+      expect(
+        await preloadPersonalBackdrop(page, identity, fresh, enabled, now, storage, preload.start),
+      ).toBeNull();
+      expect(preload.made).toEqual([]);
+    }
+
+    const preload = preloads();
+    expect(
+      await preloadPersonalBackdrop('/', 'library-secret', true, true, now, storage, preload.start),
+    ).toBe('https://image.tmdb.org/t/p/w1280/personal-lead.jpg');
+    expect(preload.made).toEqual(['https://image.tmdb.org/t/p/w1280/personal-lead.jpg']);
+  });
+
+  it('shares the seven-day display boundary and removes invalid or expired paths', async () => {
+    const { values, storage } = memory();
+    await keepPersonalBackdrop('library', 'movie', false, '/lead.jpg', now, storage);
+    const staleTitles = [film(7, { backdropPath: '/lead.jpg' })];
+    expect(displayableKept({ at: now, titles: staleTitles }, now + 2 * 86_400_000)).toEqual({
+      titles: staleTitles,
+      fresh: false,
+    });
+    const dayTwo = preloads();
+    expect(
+      await preloadPersonalBackdrop(
+        '/movies',
+        'library',
+        false,
+        true,
+        now + 2 * 86_400_000,
+        storage,
+        dayTwo.start,
+      ),
+    ).toContain('/lead.jpg');
+    expect(dayTwo.made).toEqual(['https://image.tmdb.org/t/p/w1280/lead.jpg']);
+
+    const preload = preloads();
+    expect(
+      await preloadPersonalBackdrop(
+        '/movies',
+        'library',
+        false,
+        true,
+        now + 7 * 86_400_000 - 1,
+        storage,
+        preload.start,
+      ),
+    ).toContain('/lead.jpg');
+    expect(
+      await preloadPersonalBackdrop(
+        '/movies',
+        'library',
+        false,
+        true,
+        now + 7 * 86_400_000,
+        storage,
+        preload.start,
+      ),
+    ).toBeNull();
+    expect(values.size).toBe(0);
+
+    await keepPersonalBackdrop(
+      'library',
+      'movie',
+      false,
+      'https://wrong.example/art',
+      now,
+      storage,
+    );
+    expect(values.size).toBe(0);
+  });
+
+  it('clears the old hint before replacing its encrypted ranking', async () => {
+    const { values, storage } = memory();
+    await keepPersonalBackdrop('library', null, true, '/old.jpg', now, storage);
+    let oldPresentWhenSaveStarted = true;
+    await expect(
+      replacePersonalBillboard(
+        'library',
+        null,
+        true,
+        [film(2, { backdropPath: '/new.jpg' })],
+        async () => {
+          oldPresentWhenSaveStarted = values.size > 0;
+          throw new Error('encrypted keep failed');
+        },
+        now + 1,
+        storage,
+      ),
+    ).rejects.toThrow('encrypted keep failed');
+    expect(oldPresentWhenSaveStarted).toBe(false);
+    expect(values.size).toBe(0);
+
+    await replacePersonalBillboard(
+      'library',
+      null,
+      true,
+      [film(2, { backdropPath: '/new.jpg' })],
+      async (kept) => expect(kept.titles[0]?.id).toBe(2),
+      now + 2,
+      storage,
+    );
+    expect([...values.values()]).toEqual([JSON.stringify({ at: now + 2, path: '/new.jpg' })]);
+  });
+
+  it('serializes overlapping replacements so the newest encrypted ranking and hint both win', async () => {
+    const { storage } = memory();
+    let releaseFirst!: () => void;
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => (enteredFirst = resolve));
+    const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve));
+    let encrypted: KeptBillboard | undefined;
+
+    const first = replacePersonalBillboard(
+      'library',
+      null,
+      true,
+      [film(1, { backdropPath: '/old.jpg' })],
+      async (kept) => {
+        enteredFirst();
+        await firstGate;
+        encrypted = kept;
+      },
+      now,
+      storage,
+    );
+    await firstEntered;
+    const second = replacePersonalBillboard(
+      'library',
+      null,
+      true,
+      [film(2, { backdropPath: '/new.jpg' })],
+      async (kept) => {
+        encrypted = kept;
+      },
+      now + 1,
+      storage,
+    );
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(encrypted?.titles[0]?.id).toBe(2);
+    const preload = preloads();
+    await preloadPersonalBackdrop('/', 'library', true, true, now + 1, storage, preload.start);
+    expect(preload.made).toEqual(['https://image.tmdb.org/t/p/w1280/new.jpg']);
   });
 });
 

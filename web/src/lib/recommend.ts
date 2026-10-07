@@ -338,17 +338,171 @@ export interface KeptBillboard {
   titles: RecommendedTitle[];
 }
 
-/** How long a kept personal billboard may open the next visit before the shared one does instead. */
-const KEPT_FOR_MS = 86_400_000;
+/** A ranking is current for a day, then remains a stale-while-revalidate first paint for at most a week. */
+const KEPT_FRESH_MS = 86_400_000;
+const KEPT_DISPLAY_MS = 7 * KEPT_FRESH_MS;
 
-/** The kept billboard's titles while it is under a day old; null when there is none, or it is older. */
-export function freshKept(
+/**
+ * The one non-sensitive fragment needed before an encrypted kept billboard can be opened: its lead backdrop path.
+ * The storage key is scoped to a digest of the exact library key, page facet and `fresh` mode, so switching any of
+ * them cannot warm another household's or another ranking's art. The value contains no title or recommendation.
+ */
+const LEAD_PREFIX = 'den.hero-lead.v1';
+interface KeptLead {
+  at: number;
+  path: string;
+}
+type LeadStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined;
+
+const backdropPath = (value: unknown): value is string =>
+  typeof value === 'string' && /^\/[A-Za-z0-9_./-]+$/.test(value);
+
+async function leadKey(identity: string, facet: MediaType | null, fresh: boolean) {
+  if (!identity || !globalThis.crypto?.subtle) return null;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
+  const id = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  );
+  return `${LEAD_PREFIX}.${id}.${fresh ? 'fresh.' : ''}${facet ?? 'all'}`;
+}
+
+/** Write the lead only after the encrypted `KeptBillboard` holding the same ranking has landed. */
+export async function keepPersonalBackdrop(
+  identity: string,
+  facet: MediaType | null,
+  fresh: boolean,
+  path: string | undefined,
+  at = Date.now(),
+  storage: LeadStorage = globalThis.localStorage,
+): Promise<void> {
+  try {
+    const key = await leadKey(identity, facet, fresh);
+    if (!key || !storage) return;
+    if (!backdropPath(path)) return storage.removeItem(key);
+    storage.setItem(key, JSON.stringify({ at, path } satisfies KeptLead));
+  } catch {
+    // Storage and Web Crypto may be unavailable in a private or constrained browser; normal billboard loading wins.
+  }
+}
+
+async function clearPersonalBackdrop(
+  identity: string,
+  facet: MediaType | null,
+  fresh: boolean,
+  storage: LeadStorage,
+): Promise<boolean> {
+  try {
+    const key = await leadKey(identity, facet, fresh);
+    if (key && storage) storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A route can rebuild the same ranking while its previous encrypted keep is still in flight. Serialize those writes
+// in invocation order; a queued operation superseded before it starts is skipped, and a newer one always lands last.
+const replacementTails = new Map<string, Promise<void>>();
+const replacementGenerations = new Map<string, number>();
+let replacementGeneration = 0;
+
+/**
+ * Replace the encrypted ranking and its early hint as one ordered operation. The old hint goes first: a failed save,
+ * crash, or refused later localStorage write can then cost a preload, but can never preload the previous ranking.
+ */
+export async function replacePersonalBillboard(
+  identity: string | null | undefined,
+  facet: MediaType | null,
+  fresh: boolean,
+  titles: RecommendedTitle[],
+  save: (kept: KeptBillboard) => Promise<unknown>,
+  at = Date.now(),
+  storage: LeadStorage = globalThis.localStorage,
+): Promise<void> {
+  const queueKey = `${identity ?? ''}\0${facet ?? 'all'}\0${fresh ? 'fresh' : 'all'}`;
+  const generation = ++replacementGeneration;
+  replacementGenerations.set(queueKey, generation);
+  const before = replacementTails.get(queueKey) ?? Promise.resolve();
+  const replacement = before
+    .catch(() => {})
+    .then(async () => {
+      if (replacementGenerations.get(queueKey) !== generation) return;
+      if (identity && !(await clearPersonalBackdrop(identity, facet, fresh, storage)))
+        throw new Error('the previous billboard lead could not be cleared');
+      await save({ at, titles });
+      if (identity)
+        await keepPersonalBackdrop(identity, facet, fresh, titles[0]?.backdropPath, at, storage);
+    });
+  replacementTails.set(queueKey, replacement);
+  try {
+    await replacement;
+  } finally {
+    if (replacementTails.get(queueKey) === replacement) {
+      replacementTails.delete(queueKey);
+      replacementGenerations.delete(queueKey);
+    }
+  }
+}
+
+const facetAt = (path: string): MediaType | null | undefined =>
+  path === '/' ? null : path === '/movies' ? 'movie' : path === '/series' ? 'tv' : undefined;
+
+/**
+ * Start only the exact kept personalized lead's image while the encrypted library is still opening. The billboard's
+ * later `Image` joins this browser request/cache entry, so this changes discovery time rather than adding a fetch.
+ */
+export async function preloadPersonalBackdrop(
+  page: string,
+  identity: string | null | undefined,
+  fresh: boolean,
+  enabled: boolean,
+  now = Date.now(),
+  storage: LeadStorage = globalThis.localStorage,
+  start: (url: string) => void = (url) => {
+    const preload = document.createElement('link');
+    preload.rel = 'preload';
+    preload.as = 'image';
+    preload.fetchPriority = 'high';
+    preload.href = url;
+    document.head.append(preload);
+  },
+): Promise<string | null> {
+  const facet = facetAt(page);
+  if (!enabled || !identity || facet === undefined) return null;
+  try {
+    const key = await leadKey(identity, facet, fresh);
+    const raw = key && storage?.getItem(key);
+    const kept: unknown = raw ? JSON.parse(raw) : null;
+    const record = kept as Partial<KeptLead> | null;
+    const age = now - (record?.at ?? NaN);
+    if (!key || !record || !backdropPath(record.path) || !(age >= 0 && age < KEPT_DISPLAY_MS)) {
+      if (key && raw) storage?.removeItem(key);
+      return null;
+    }
+    const url = `https://image.tmdb.org/t/p/w1280${record.path}`;
+    start(url);
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+export interface DisplayableKeptBillboard {
+  titles: RecommendedTitle[];
+  /** False after 24 hours; the caller still paints it while the already-started Atlas ranking revalidates it. */
+  fresh: boolean;
+}
+
+/** A personalized first paint for up to seven days, rejecting future clocks and empty/malformed rankings. */
+export function displayableKept(
   kept: KeptBillboard | null | undefined,
   now = Date.now(),
-): RecommendedTitle[] | null {
+): DisplayableKeptBillboard | null {
   if (!kept || typeof kept.at !== 'number' || !Array.isArray(kept.titles)) return null;
   const age = now - kept.at;
-  return kept.titles.length && age >= 0 && age < KEPT_FOR_MS ? kept.titles : null;
+  return kept.titles.length && age >= 0 && age < KEPT_DISPLAY_MS
+    ? { titles: kept.titles, fresh: age < KEPT_FRESH_MS }
+    : null;
 }
 
 const slideKey = (slide: Pick<Slide, 'type' | 'id'>) => `${slide.type}:${slide.id}`;

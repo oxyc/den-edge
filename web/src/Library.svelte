@@ -86,13 +86,14 @@
   import { fetchDetails, fetchTitle } from './lib/tmdb';
   import {
     billboardScope,
-    freshKept,
+    displayableKept,
     freshOn,
     memberPostOn,
     nameSlides,
     recommend,
     recommendBody,
     recommendForEveryone,
+    replacePersonalBillboard,
     swapAfter,
     type KeptBillboard,
     type RecommendedTitle,
@@ -102,6 +103,7 @@
 
   let {
     link,
+    libraryIdentity,
     route,
     active,
     session,
@@ -112,6 +114,8 @@
   }: {
     /** Null for a guest: someone browsing who has not paired, and so has no library behind them. */
     link: Link | null;
+    /** The exact library key, including a browser-local library where `link` is null. */
+    libraryIdentity?: string | null;
     route: Route;
     active: boolean;
     session: LibrarySession;
@@ -1085,14 +1089,15 @@
   let slideShown = $state<Title>();
   // A return visit shows the billboard it picked last time as soon as the library opens: this visit's build waits
   // for atlas and TMDB, and the page shouldn't. With the member switch on, only atlas's ranking for this library
-  // opens it, and only while it is under a day old; otherwise the shared billboard does.
+  // opens it for up to seven days. After its first day it is stale-while-revalidate: it still paints immediately,
+  // while the ranking already requested below replaces it in the background. Older rankings use the shared one.
   $effect(() => {
     const opened = log;
     const type = facet;
     if (!opened || !tmdbKey) return;
     if (memberPost) {
       void opened.kept<KeptBillboard>(keptPersonal(type)).then((saved) => {
-        const titles = freshKept(saved);
+        const titles = displayableKept(saved)?.titles ?? null;
         if (titles && !featured.length) featured = titles;
       });
       return;
@@ -1140,8 +1145,9 @@
    * twenty.
    *
    * With the member switch on, a library's billboard is then ranked by atlas against the whole library, asked at
-   * once and applied once the first paint is up. A kept ranking under a day old is that first paint instead of the
-   * shared one. The new ranking takes every slide after the one on screen and is kept for the next visit.
+   * once and applied once the first paint is up. A kept ranking up to seven days old is that first paint instead of
+   * the shared one; after day one it is stale while this request revalidates it. The new ranking takes every slide
+   * after the one on screen and is kept for the next visit.
    */
   function buildRecommended(here: string) {
     const type = facet;
@@ -1169,7 +1175,10 @@
         : null;
     const kept =
       ranked && opened
-        ? opened.kept<KeptBillboard>(keptPersonal(type)).then(freshKept, () => null)
+        ? opened.kept<KeptBillboard>(keptPersonal(type)).then(
+            (saved) => displayableKept(saved)?.titles ?? null,
+            () => null,
+          )
         : Promise.resolve(null);
     void kept
       .then(async (personal) => {
@@ -1183,7 +1192,17 @@
         const picked = await nameSlides(slides.slice(0, EVERYONE_NAMED), known, lookup, LOOKUPS);
         if (run !== billboardRun || !picked.length) return;
         featured = swapAfter(featured, slideShown, picked);
-        void opened?.keep(keptPersonal(type), { at: Date.now(), titles: picked }).catch(warnKeep);
+        if (opened) {
+          const keptAt = Date.now();
+          void replacePersonalBillboard(
+            libraryIdentity,
+            type,
+            fresh,
+            picked,
+            (kept) => opened.keep(keptPersonal(type), kept),
+            keptAt,
+          ).catch(warnKeep);
+        }
       })
       .catch(() => buildTrending(run));
   }

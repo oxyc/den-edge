@@ -5,7 +5,8 @@ import { moduleOf, pageError, loadRelease, sendPageError } from './lib/diagnosti
 import { parseInvite } from './lib/grants';
 import { guestGrants } from './lib/grants.svelte';
 import { links, readPendingReset } from './lib/links.svelte';
-import { freshOn, startBillboard } from './lib/recommend';
+import { localLibraryKey } from './lib/localLibrary';
+import { freshOn, memberPostOn, preloadPersonalBackdrop, startBillboard } from './lib/recommend';
 import { recoverChunkFailure, swapWhileHidden } from './lib/release';
 import { legacyPath } from './lib/route';
 
@@ -63,8 +64,12 @@ if (readPendingReset())
       console.warn('den: a pending key reset could not be settled', error),
     );
 
-// Home's billboard for everyone, asked now rather than once the app has found atlas and opened the library.
-startBillboard(location.pathname, !!links.current, freshOn());
+// A kept personalized lead can begin its image request while its encrypted ranking and library are still opening.
+// Its cache is exact to this library/page/mode; everyone else's billboard is still asked early as before.
+const earlyFresh = freshOn();
+const earlyLibrary = links.current?.libraryKey ?? (links.browsing ? localLibraryKey() : null);
+void preloadPersonalBackdrop(location.pathname, earlyLibrary, earlyFresh, memberPostOn());
+startBillboard(location.pathname, !!links.current, earlyFresh);
 
 const target = document.getElementById('app');
 if (!target) throw new Error('index.html has no #app element');

@@ -89,3 +89,27 @@ for (const width of [320, 393, 844, 1280])
       await browser.close();
     }
   });
+
+test('the early personalized preload is reused by the billboard image', async ({ page }) => {
+  await guardNetwork(page);
+  let requests = 0;
+  await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', async (route) => {
+    requests++;
+    await route.fulfill({
+      headers: { 'cache-control': 'public, max-age=600' },
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"></svg>',
+    });
+  });
+  await routeTmdb(page, (route) => route.fulfill({ status: 404, json: {} }));
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html?preload=1`);
+  await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(
+    'href',
+    /\/early\.jpg$/,
+  );
+  await expect.poll(() => requests).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+  await expect(page.locator('img.backdrop.lit')).toHaveAttribute('src', /\/early\.jpg$/);
+  await page.waitForTimeout(100);
+  expect(requests).toBe(1);
+});
