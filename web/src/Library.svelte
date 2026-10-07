@@ -213,14 +213,15 @@
         void nameLibraryTitles(session, priority, key).then(() => {
           if (disposed) return;
           shelvesReady = true;
-          // Watched history enriches taste in the background; it cannot change the initial shelf order.
+          // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
+          // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
           background = nameLibraryHistoryTitles(
             session,
             untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
             key,
           );
           historyNaming = background;
-          if (!active) background.pause();
+          if (!active || route.page !== 'watchlist') background.pause();
         });
       } else shelvesReady = true;
     });
@@ -231,12 +232,12 @@
     };
   });
 
-  // A retained route pauses its watched-history tail as soon as it leaves the document. Document visibility is
-  // watched by the queue itself, because it can change without any Svelte state changing.
+  // A retained route names watched history only on the screen that draws it. Document visibility is watched by the
+  // queue itself, because it can change without any Svelte state changing.
   $effect(() => {
     const background = historyNaming;
     if (!background) return;
-    if (active) background.resume();
+    if (active && route.page === 'watchlist') background.resume();
     else background.pause();
   });
 
