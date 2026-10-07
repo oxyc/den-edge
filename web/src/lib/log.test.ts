@@ -1422,13 +1422,39 @@ describe('LibraryLog', () => {
   });
 
   it('knows the newest stamp it read', async () => {
-    const { fetchImpl } = await edge([
+    const server = await edge([
       row(1),
       row(2, { reaction: { value: 'love', at: at(9000, 'web1') } }),
     ]);
-    expect((await LibraryLog.open(LIBRARY_KEY, fetchImpl))?.newestStamp()).toEqual(
-      at(9000, 'web1'),
-    );
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl))!;
+    await log.rowsInSlices();
+    expect(log.newestStamp()).toEqual(at(9000, 'web1'));
+
+    await server.append(row(3, { reaction: { value: 'love', at: at(10_000, 'phone') } }));
+    expect(await log.refresh()).toBe(true);
+    expect(log.newestStamp()).toEqual(at(10_000, 'phone'));
+
+    expect(
+      await log.writeRows([row(4, { reaction: { value: 'love', at: at(11_000, 'import') } })]),
+    ).toBe(true);
+    expect(log.newestStamp()).toEqual(at(11_000, 'import'));
+  });
+
+  it('keeps the newest cache correct across concurrent conflict merges', async () => {
+    const server = await edge([row(1)]);
+    const [phone, laptop] = await Promise.all([
+      LibraryLog.open(LIBRARY_KEY, server.fetchImpl),
+      LibraryLog.open(LIBRARY_KEY, server.fetchImpl),
+    ]);
+    await Promise.all([phone!.rowsInSlices(), laptop!.rowsInSlices()]);
+    const ref = { type: 'movie' as const, id: 1 };
+
+    await phone!.write(react(phone!.title(ref)!, 'love', at(12_000, 'phone')));
+    await laptop!.write(addToWatchlist(laptop!.title(ref)!, at(13_000, 'laptop')));
+
+    expect(laptop!.newestStamp()).toEqual(at(13_000, 'laptop'));
+    await phone!.refresh();
+    expect(phone!.newestStamp()).toEqual(at(13_000, 'laptop'));
   });
 
   it('writes a title new to the library, and a stale write merges on top of the row that beat it', async () => {
@@ -1470,6 +1496,33 @@ describe('LibraryLog', () => {
 
 describe('a library kept only in this browser', () => {
   const LOCAL_KEY = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
+
+  it('prepares the newest maximum while projecting, so reads do not rescan the log', async () => {
+    const { vault } = memoryVault();
+    const log = (await LibraryLog.openLocal(LOCAL_KEY, vault))!;
+    let traversals = 0;
+    const fields = Object.fromEntries(
+      Array.from({ length: 1000 }, (_, index) => [
+        `field-${index}`,
+        { value: { int: index }, at: at(14_000 - index, 'tv01') },
+      ]),
+    );
+    const values = new Proxy(fields, {
+      get(target, key, receiver) {
+        traversals++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const settings: SettingsRow = { kind: 'set', schema: 2, name: 'counted', values };
+    expect(await log.writeRows([settings])).toBe(true);
+    expect(await log.rowsInSlices()).not.toBeNull();
+    traversals = 0;
+
+    expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));
+    expect(log.newestStamp()).toEqual(at(14_000, 'tv01'));
+    // Before the cache, those two reads touched all 1,000 values twice; the prepared answer touches none.
+    expect(traversals).toBe(0);
+  });
 
   it('keeps what someone does with no TV, and asks den-edge nothing', async () => {
     const { vault } = memoryVault();

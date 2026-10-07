@@ -19,7 +19,7 @@ import {
   mergeSettings,
   mergeTitle,
   mergeV3,
-  newest,
+  newestSummary,
   open,
   openEntry,
   openPlaintext,
@@ -45,6 +45,31 @@ import { inPolicySlices, syncPolicy, type PolicySliceOptions } from './syncCore'
 interface Entry {
   seq: number;
   row: Row;
+}
+
+/** Every mutation advances a version, including conflict replacement and generation reset paths. */
+class ChangedMap<K, V> extends Map<K, V> {
+  constructor(private readonly changed: () => void) {
+    super();
+  }
+
+  override set(key: K, value: V): this {
+    super.set(key, value);
+    this.changed();
+    return this;
+  }
+
+  override delete(key: K): boolean {
+    const deleted = super.delete(key);
+    if (deleted) this.changed();
+    return deleted;
+  }
+
+  override clear(): void {
+    if (!this.size) return;
+    super.clear();
+    this.changed();
+  }
 }
 
 interface RawEntry {
@@ -222,8 +247,16 @@ const REWRITE_BATCH_MAX_BYTES = 2_000_000;
 const utf8 = new TextEncoder();
 
 export class LibraryLog {
+  private entriesVersion = 0;
   /** Each row as last read or written, by the name its key is the HMAC of. */
-  private readonly entries = new Map<string, Entry>();
+  private readonly entries = new ChangedMap<string, Entry>(() => this.entriesVersion++);
+  /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
+  private newestCache?: {
+    version: number;
+    at: number;
+    stamp: Stamp;
+    reconsiderAt: number;
+  };
   /**
    * Each row exactly as den-edge last gave it or applied this browser's write of it, without this browser's unsent
    * edits: what the next visit starts from.
@@ -1410,11 +1443,22 @@ export class LibraryLog {
   /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
   async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
     const rows: Row[] = [];
+    const version = this.entriesVersion;
+    const now = Date.now();
+    let stamp = ZERO_STAMP;
+    let reconsiderAt = Infinity;
     const completed = await inPolicySlices(
       this.entries.values(),
-      ({ row }) => rows.push(...(isDocument(row) ? projectDocument(row) : [row])),
+      ({ row }) => {
+        rows.push(...(isDocument(row) ? projectDocument(row) : [row]));
+        const summary = newestSummary(row, now);
+        if (compareStamps(summary.stamp, stamp) > 0) stamp = summary.stamp;
+        reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
+      },
       options,
     );
+    if (completed && version === this.entriesVersion)
+      this.newestCache = { version, at: now, stamp, reconsiderAt };
     return completed ? rows : null;
   }
 
@@ -1769,12 +1813,23 @@ export class LibraryLog {
   }
 
   /** The newest stamp read, so this browser's next edit is stamped after everything it has seen. */
-  newestStamp(): Stamp {
+  newestStamp(now = Date.now()): Stamp {
+    const cached = this.newestCache;
+    if (
+      cached &&
+      cached.version === this.entriesVersion &&
+      now >= cached.at &&
+      now < cached.reconsiderAt
+    )
+      return cached.stamp;
     let latest = ZERO_STAMP;
+    let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
-      const stamp = newest(row);
-      if (compareStamps(stamp, latest) > 0) latest = stamp;
+      const summary = newestSummary(row, now);
+      if (compareStamps(summary.stamp, latest) > 0) latest = summary.stamp;
+      reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
     }
+    this.newestCache = { version: this.entriesVersion, at: now, stamp: latest, reconsiderAt };
     return latest;
   }
 
