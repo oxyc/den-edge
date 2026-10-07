@@ -184,7 +184,11 @@
   }
 </script>
 
-<div bind:this={wrapper} class:gone={done && !pager.failed && visible.length === 0}>
+<div
+  bind:this={wrapper}
+  class="row-window"
+  class:gone={done && !pager.failed && visible.length === 0}
+>
   <PosterRow
     heading={row.title}
     headingLink={row.headingLink}
@@ -232,6 +236,13 @@
 </div>
 
 <style>
+  /* The poster, its two metadata lines, the heading and the row gaps all have fixed geometry. The automatic
+     remembered size covers any browser rounding once the row has rendered for the first time. */
+  .row-window {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+  }
+
   .gone {
     display: none;
   }
@@ -272,7 +283,9 @@
   .retry {
     flex: 0 0 var(--card-w);
     width: var(--card-w);
-    height: calc(var(--card-w) * 1.5);
+
+    /* Match a normal poster and its two-line metadata reserve so a failure cannot resize the shelf. */
+    height: calc(var(--card-w) * 1.5 + 47.2px);
     padding: 12px;
     border: 0;
     border-radius: 12px;

@@ -85,11 +85,17 @@
   }
 
   h2 {
+    min-width: 0;
     margin: 0;
     font-size: 20px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .aside {
+    flex: none;
     color: var(--muted);
     font-size: 14px;
     text-decoration: none;

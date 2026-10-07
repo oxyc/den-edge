@@ -154,7 +154,7 @@
   }
 </script>
 
-<div bind:this={wrapper}>
+<div bind:this={wrapper} class="windowed" class:landscape>
   <PosterRow {heading} {aside} active={rowNear} bind:track>
     {#each items as item, index (itemKey(item))}
       <span
@@ -182,6 +182,17 @@
 </div>
 
 <style>
+  /* PosterCard has a fixed art ratio and exactly two metadata lines. Keeping this shelf's skipped size exact lets
+     Chromium omit far-below-the-fold style/layout/paint without changing vertical scroll geometry. */
+  .windowed {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+  }
+
+  .windowed.landscape {
+    contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.45 * 9 / 16 + 127.2px);
+  }
+
   .slot {
     display: block;
     width: var(--card-w);
