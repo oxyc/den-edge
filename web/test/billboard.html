@@ -1,9 +1,174 @@
 <!doctype html>
 <html>
   <body>
+    <!-- Keep the parser-time shell's geometry honest in the component fixture. The production copy is inline in
+         index.html so it can paint before any stylesheet or module arrives. -->
+    <style>
+      [data-den-early-billboard][hidden] {
+        display: none;
+      }
+
+      [data-den-early-billboard] {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: clamp(420px, 76vh, 860px);
+        overflow: hidden;
+      }
+
+      [data-den-early-picture] {
+        position: absolute;
+        inset: 0;
+        contain: layout;
+        transform: scale(1.14);
+      }
+
+      @supports (animation-timeline: --rail) {
+        @media not (prefers-reduced-motion: reduce) {
+          [data-den-early-picture] {
+            transform: translate3d(2.5%, 0, 0) scale(1.14);
+          }
+        }
+      }
+
+      [data-den-early-backdrop] {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      [data-den-early-copy][hidden] {
+        display: none;
+      }
+
+      [data-den-early-copy] {
+        position: absolute;
+        z-index: 3;
+        inset: 0;
+        display: grid;
+        align-items: end;
+        color: #e7e7ea;
+        font:
+          16px/1.4 -apple-system,
+          BlinkMacSystemFont,
+          'SF Pro Text',
+          'Segoe UI',
+          Roboto,
+          sans-serif;
+        pointer-events: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      [data-den-early-told] {
+        box-sizing: border-box;
+        width: 100%;
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: calc(max(12px, env(safe-area-inset-top)) + 62px) clamp(16px, 4vw, 48px) 76px;
+      }
+
+      [data-den-early-text] {
+        display: grid;
+        gap: 8px;
+        max-width: 720px;
+        min-height: 190px;
+        align-content: end;
+      }
+
+      [data-den-early-title],
+      [data-den-early-reason],
+      [data-den-early-facts],
+      [data-den-early-overview] {
+        filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
+      }
+
+      [data-den-early-title] {
+        max-block-size: 2.4em;
+        display: -webkit-box;
+        margin: 0;
+        overflow: hidden;
+        font-size: clamp(26px, 6vw, 48px);
+        line-height: 1.05;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      [data-den-early-reason],
+      [data-den-early-facts] {
+        margin: 0;
+        color: rgb(255 255 255 / 0.92);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      [data-den-early-reason] {
+        font-weight: 600;
+      }
+
+      [data-den-early-facts] {
+        max-block-size: 2.8em;
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      [data-den-early-overview] {
+        min-block-size: 4.2em;
+        max-block-size: 4.2em;
+        display: -webkit-box;
+        margin: 0;
+        overflow: hidden;
+        color: rgb(255 255 255 / 0.88);
+        font-size: 15px;
+        line-height: 1.4;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+      }
+
+      [data-den-early-actions] {
+        height: 48px;
+        margin-top: 4px;
+      }
+
+      @media (width <= 759px) {
+        [data-den-early-text] {
+          min-height: 0;
+        }
+
+        [data-den-early-actions] {
+          display: none;
+        }
+      }
+
+      @media (width >= 360px) and (width <= 759px) {
+        [data-den-early-title] {
+          max-block-size: 1.3em;
+          -webkit-line-clamp: 1;
+          line-clamp: 1;
+        }
+      }
+    </style>
     <div data-den-early-billboard hidden aria-hidden="true">
       <div data-den-early-picture>
         <img class="lit" data-den-early-backdrop alt="" decoding="async" draggable="false" />
+      </div>
+      <div data-den-early-copy hidden inert aria-hidden="true">
+        <div data-den-early-told>
+          <div data-den-early-text>
+            <h2 data-den-early-title></h2>
+            <p data-den-early-reason hidden></p>
+            <p data-den-early-facts></p>
+            <p data-den-early-overview></p>
+            <div data-den-early-actions></div>
+          </div>
+        </div>
       </div>
     </div>
     <div id="app"></div>

@@ -22,8 +22,10 @@ const PUBLIC = `http://den.localhost:${E2E_PORT}`;
 const DIRECT = 'https://media.invalid';
 const LAN = 'https://lan.media.invalid:8449';
 const BLOB = 'A'.repeat(40);
+const SECOND_BLOB = 'B'.repeat(40);
 const TAG = 'b'.repeat(24);
 const MEDIA = `/reel/m/s/${BLOB}?s=${TAG}`;
+const SECOND_MEDIA = `/reel/m/s/${SECOND_BLOB}?s=${TAG}`;
 /** reel's `DIRECT_FIRST_FRAME_MS`, which these hold the page to. */
 const DEADLINE_MS = 2_000;
 
@@ -66,7 +68,7 @@ const NAMED_ONLY = `media-src 'self' blob: data: ${DIRECT}; connect-src 'self' $
  * listeners answer: the others never do. The relay answers too, so a page that used it would be seen playing.
  * `csp` is the policy the page is served with; the dev server sends none of its own.
  */
-async function mock(page, origin, { home, reach, csp = POLICY }) {
+async function mock(page, origin, { home, reach, csp = POLICY, firstFails = false }) {
   const seen = { activations: 0, lan: 0, direct: 0, relay: 0 };
   await guardNetwork(page, origin);
   // A request the policy refuses never leaves the browser, so it never reaches the routes below.
@@ -96,24 +98,36 @@ async function mock(page, origin, { home, reach, csp = POLICY }) {
               trailers: 'http://internal/play/trailer.webm',
               sources: 'http://internal/sources/trailer.json',
             },
+            ...(firstFails
+              ? [
+                  {
+                    trailers: 'http://internal/play/second.webm',
+                    sources: 'http://internal/sources/second.json',
+                  },
+                ]
+              : []),
           ],
         },
       },
     }),
   );
-  await page.route('**/sources/trailer.json**', (r) =>
-    r.fulfill({
+  await page.route('**/sources/*.json**', (r) => {
+    const media = new URL(r.request().url()).pathname.includes('/second.json')
+      ? SECOND_MEDIA
+      : MEDIA;
+    return r.fulfill({
       json: {
-        sources: [{ kind: 'mp4', url: `http://internal${MEDIA}`, audio: true, height: 720 }],
+        sources: [{ kind: 'mp4', url: `http://internal${media}`, audio: true, height: 720 }],
       },
-    }),
-  );
+    });
+  });
   await page.route(`${origin}/reel/activate`, (r) => {
     seen.activations += 1;
+    const { media } = r.request().postDataJSON();
     return r.fulfill({
       json: {
         publicBase: DIRECT,
-        media: `${DIRECT}${MEDIA}`,
+        media: `${DIRECT}${media}`,
         form: 'progressive',
         ...(home ? { lanBase: LAN } : {}),
       },
@@ -129,6 +143,8 @@ async function mock(page, origin, { home, reach, csp = POLICY }) {
   );
   await page.route(`${LAN}/**`, (route) => {
     seen.lan += 1;
+    if (firstFails && new URL(route.request().url()).pathname === MEDIA.split('?')[0])
+      return route.fulfill({ status: 502, body: 'progressive unavailable' });
     if (reach.includes('lan')) return serveVideo(route);
   });
   await page.route(`${DIRECT}/**`, (route) => {
@@ -264,3 +280,19 @@ for (const [engine, launch, available = () => true] of engines) {
       });
   }
 }
+
+test('detail hero tries the next LAN candidate when the first media file is unavailable', async () => {
+  const hero = surfaces[0];
+  const result = await play(
+    engines[0][1],
+    hero,
+    PUBLIC,
+    { home: true, reach: ['lan'], firstFails: true },
+    DEADLINE_MS + 8_000,
+  );
+  expect(result.src).toBe(`${LAN}${SECOND_MEDIA}`);
+  expect(result.seen.activations).toBe(2);
+  expect(result.seen.lan).toBeGreaterThan(1);
+  expect(result.seen.direct, 'the public copy between candidates was tried').toBeGreaterThan(0);
+  expect(result.seen.relay).toBe(0);
+});

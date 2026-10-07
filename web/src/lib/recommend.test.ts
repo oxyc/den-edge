@@ -4,10 +4,12 @@ import type { Prefs } from './prefs';
 import {
   billboardScope,
   displayableKept,
+  enrichPersonalBackdrop,
   freshOn,
   keepPersonalBackdrop,
   memberPostOn,
   nameSlides,
+  personalHeroCopy,
   recommend,
   recommendationReason,
   recommendBody,
@@ -429,7 +431,83 @@ describe('personal backdrop preload', () => {
       now + 2,
       storage,
     );
-    expect([...values.values()]).toEqual([JSON.stringify({ at: now + 2, path: '/new.jpg' })]);
+    expect([...values.values()].map((value) => JSON.parse(value))).toEqual([
+      {
+        at: now + 2,
+        path: '/new.jpg',
+        copy: { type: 'movie', id: 2, title: 'T2' },
+      },
+    ]);
+  });
+
+  it('keeps bounded lead copy and enriches it without extending its lifetime', async () => {
+    const { values, storage } = memory();
+    const lead = film(42, {
+      title: '  A   short title  ',
+      year: 2026,
+      backdropPath: '/lead.jpg',
+    });
+    const basic = personalHeroCopy({ ...lead, why: { reason: 'profile' } });
+    await keepPersonalBackdrop('library', null, true, '/lead.jpg', now, storage, basic);
+    await enrichPersonalBackdrop(
+      'library',
+      null,
+      true,
+      { ...lead, why: { reason: 'profile' } },
+      {
+        overview: '  The   retained overview.  ',
+        runtime: 98,
+        genres: [{ name: 'Drama' }, { name: 'Mystery' }, { name: 'Ignored' }],
+      },
+      now + 86_400_000,
+      storage,
+    );
+    expect([...values.values()].map((value) => JSON.parse(value))).toEqual([
+      {
+        at: now,
+        path: '/lead.jpg',
+        copy: {
+          type: 'movie',
+          id: 42,
+          title: 'A short title',
+          year: 2026,
+          reason: 'Fits your viewing taste',
+          genres: ['Drama', 'Mystery'],
+          overview: 'The retained overview.',
+          runtime: 98,
+        },
+      },
+    ]);
+
+    await enrichPersonalBackdrop(
+      'library',
+      null,
+      true,
+      { ...lead, backdropPath: '/another.jpg' },
+      { overview: 'Must not replace the selected lead.' },
+      now + 2 * 86_400_000,
+      storage,
+    );
+    expect(JSON.parse([...values.values()][0]!).copy.overview).toBe('The retained overview.');
+  });
+
+  it('rejects invalid copy and caps every retained text field', () => {
+    expect(personalHeroCopy(film(1, { title: ' '.repeat(10) }))).toBeUndefined();
+    const copy = personalHeroCopy(
+      { ...film(1, { title: 'T'.repeat(200), year: 5000 }), why: { reason: 'unknown' } },
+      {
+        overview: 'O'.repeat(2000),
+        runtime: 5000,
+        genres: [{ name: 'G'.repeat(100) }, { name: 'Drama' }, { name: 'Mystery' }],
+      },
+    );
+    expect(copy).toEqual({
+      type: 'movie',
+      id: 1,
+      title: 'T'.repeat(160),
+      genres: ['G'.repeat(60), 'Drama'],
+      overview: 'O'.repeat(1024),
+    });
   });
 
   it('serializes overlapping replacements so the newest encrypted ranking and hint both win', async () => {

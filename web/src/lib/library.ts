@@ -198,6 +198,10 @@ export async function applyLogInSlices(
   rows: Row[],
   options?: PolicySliceOptions,
 ): Promise<Library | null> {
+  if (options?.shouldContinue && !options.shouldContinue()) return null;
+  const { applyRowsInWorker } = await import('./libraryWorkerClient');
+  const projected = await applyRowsInWorker(library, rows);
+  if (projected) return options?.shouldContinue?.() === false ? null : projected;
   const fold = new LibraryFold(library);
   function* steps() {
     for (const row of rows) {

@@ -94,6 +94,7 @@
   import {
     billboardScope,
     displayableKept,
+    enrichPersonalBackdrop,
     freshOn,
     memberPostOn,
     nameSlides,
@@ -1474,6 +1475,8 @@
       {reel}
       {routes}
       onready={() => (heroReady = true)}
+      onretained={(title, detail) =>
+        void enrichPersonalBackdrop(libraryIdentity, facet, fresh, title, detail)}
       onplay={playHere && ((title) => playHere(title))}
       rowOf={log ? rowOf : undefined}
       onwatchlist={(title, on) => fromSlide(act(title, on ? addToWatchlist : removeFromLibrary))}

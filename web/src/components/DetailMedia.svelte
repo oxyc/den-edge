@@ -3,7 +3,6 @@
   import DetailIcon from './DetailIcon.svelte';
   import type Hls from 'hls.js';
   import {
-    abandonDirect,
     cropStyle,
     fetchSources,
     hlsURL,
@@ -692,9 +691,9 @@
   function nextTrailer() {
     if (!url || !active) return;
     playing = false;
-    // A direct copy that will not play here says its listener is unreachable from this browser, not that the
-    // trailer is broken: the next copy is tried, and later trailers pass that listener over for a while.
-    if (mounted?.direct && upgraded === mounted.url) abandonDirect(mounted);
+    // An explicit media error belongs to this source, not necessarily to its listener. In particular, Reel can
+    // answer `progressive_unavailable` for one trailer while the next candidate on the same LAN listener is ready.
+    // Listener reachability is handled by `watchDirect`'s no-frame deadline; do not blacklist the whole origin here.
     // reel offered these in order and guarantees them distinct, so a step always changes the source.
     // A step that did not would fire no load and no error, and the hero would stop here silently.
     const at = nextRung(rungs, rung);
