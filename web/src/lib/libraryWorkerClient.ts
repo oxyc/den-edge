@@ -1,11 +1,19 @@
 import type { Library } from './library';
 import type { Row, Stamp } from './wire';
+import { yieldTask } from './taskYield';
 
 interface ProjectedRows {
   rows: Row[];
   stamp: Stamp;
   reconsiderAt: number;
 }
+
+interface ProjectedLibrary extends ProjectedRows {
+  library: Library;
+}
+
+/** A projection reply carries its first fold so the next startup step does not clone the same rows back again. */
+const projectedLibraries = new WeakMap<Row[], Library>();
 
 interface WorkerReply {
   id: number;
@@ -100,8 +108,11 @@ export async function projectRowsInWorker(
   now: number,
 ): Promise<ProjectedRows | undefined> {
   try {
-    const request = ask<ProjectedRows>({ op: 'project', source, now });
-    return request ? await request : undefined;
+    const request = ask<ProjectedLibrary>({ op: 'project', source, now });
+    if (!request) return undefined;
+    const projected = await request;
+    projectedLibraries.set(projected.rows, projected.library);
+    return projected;
   } catch {
     return undefined;
   }
@@ -112,6 +123,20 @@ export async function applyRowsInWorker(
   library: Library,
   rows: Row[],
 ): Promise<Library | undefined> {
+  const projected = projectedLibraries.get(rows);
+  if (
+    projected &&
+    library.records.length === 0 &&
+    library.marks.length === 0 &&
+    (library.flags?.size ?? 0) === 0 &&
+    library.shapes.size === 0 &&
+    library.dismissed.size === 0
+  ) {
+    projectedLibraries.delete(rows);
+    // Deserialising the combined reply and publishing the whole reactive library must not become one task.
+    await yieldTask();
+    return projected;
+  }
   try {
     const request = ask<Library>({ op: 'apply', library, rows });
     return request ? await request : undefined;

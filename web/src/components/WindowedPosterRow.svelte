@@ -75,14 +75,14 @@
       const index = Number(slot?.dataset.cardIndex);
       if (Number.isInteger(index) && items[index]) focusedKey = itemKey(items[index]);
     };
-    // The first size arrives after layout, instead of forcing the whole page to lay out while Svelte is still
-    // mounting its rows. Later size changes use the same callback; scroll updates stay coalesced to one frame.
+    // Observer delivery must not read layout-sensitive element geometry or synchronously mount cards. Record only
+    // the browser-supplied size, then update in the next frame after the current layout/observer cycle is complete.
     const resize = new ResizeObserver(([entry]) => {
       if (!entry) return;
-      const width = entry.borderBoxSize[0]?.inlineSize ?? scroller.clientWidth;
+      const width = entry.borderBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       if (width === viewportWidth) return;
       viewportWidth = width;
-      update();
+      schedule();
     });
     resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', schedule, { passive: true });

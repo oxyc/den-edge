@@ -251,6 +251,8 @@ export class LibraryLog {
   private entriesVersion = 0;
   /** Each row as last read or written, by the name its key is the HMAC of. */
   private readonly entries = new ChangedMap<string, Entry>(() => this.entriesVersion++);
+  /** Projecting v4 documents allocates rows. Every consumer of one unchanged log shares the completed snapshot. */
+  private rowsCache?: { version: number; rows: Row[] };
   /** One whole-log maximum, prepared with the sliced first projection and invalidated by every entries mutation. */
   private newestCache?: {
     version: number;
@@ -1436,14 +1438,19 @@ export class LibraryLog {
 
   /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
   rows(): Row[] {
-    return [...this.entries.values()].flatMap(({ row }) =>
+    const version = this.entriesVersion;
+    if (this.rowsCache?.version === version) return this.rowsCache.rows;
+    const rows = [...this.entries.values()].flatMap(({ row }) =>
       isDocument(row) ? projectDocument(row) : [row],
     );
+    this.rowsCache = { version, rows };
+    return rows;
   }
 
   /** `rows`, staged across tasks so first projection cannot monopolize the main thread. */
   async rowsInSlices(options?: PolicySliceOptions): Promise<Row[] | null> {
     const version = this.entriesVersion;
+    if (this.rowsCache?.version === version) return this.rowsCache.rows;
     const now = Date.now();
     const source = [...this.entries.values()].map(({ row }) => row);
     if (options?.shouldContinue && !options.shouldContinue()) return null;
@@ -1459,6 +1466,7 @@ export class LibraryLog {
         stamp: projected.stamp,
         reconsiderAt: projected.reconsiderAt,
       };
+      this.rowsCache = { version, rows: projected.rows };
       return projected.rows;
     }
     const rows: Row[] = [];
@@ -1474,8 +1482,10 @@ export class LibraryLog {
       },
       options,
     );
-    if (completed && version === this.entriesVersion)
+    if (completed && version === this.entriesVersion) {
       this.newestCache = { version, at: now, stamp, reconsiderAt };
+      this.rowsCache = { version, rows };
+    }
     return completed ? rows : null;
   }
 

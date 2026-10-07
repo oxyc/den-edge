@@ -1,7 +1,7 @@
-// Cached-library opening and the first policy projection are CPU-heavy on a large history. Keep both in one Worker
-// so its den-core instance is reused; only the already-decrypted result crosses back to the page, as it did before.
+// Cached-library opening, projection and the first policy fold are CPU-heavy on a large history. Keep them in one
+// Worker so its den-core instance is reused; projection and fold share one reply instead of cloning rows twice.
 
-import { applyLog } from './library';
+import { applyLog, emptyLibrary } from './library';
 import { projectDocument } from './libraryV4';
 import { compareStamps, isDocument, newestSummary, ZERO_STAMP, type Row, type Stamp } from './wire';
 import { initialize } from '../vendor/den-core/index.js';
@@ -51,8 +51,10 @@ self.onmessage = async (event: MessageEvent<Request>) => {
   try {
     let value: unknown;
     if (request.op === 'open') value = await openValue(request.key, request.name, request.bytes);
-    else if (request.op === 'project') value = await project(request.source, request.now);
-    else {
+    else if (request.op === 'project') {
+      const projected = await project(request.source, request.now);
+      value = { ...projected, library: applyLog(emptyLibrary(), projected.rows) };
+    } else {
       await initialize();
       value = applyLog(request.library, request.rows);
     }
