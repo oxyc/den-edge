@@ -35,6 +35,10 @@ export class LibrarySession {
   displays = $state<Title[]>([]);
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Consumers assign complete shape snapshots to state; they never mutate this map in place.
   shapes = $state(new Map<string, Shape>());
+  /** Late TMDB display fields are not a library revision: consumers opt into this cheaper keyed stream. */
+  displayRevision = $state(0);
+  /** Episode layouts affect Continue policy, but not records, watched state, or recommendation ownership. */
+  shapeRevision = $state(0);
   revision = $state(0);
   settingsRevision = $state(0);
   /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
@@ -60,19 +64,36 @@ export class LibrarySession {
   private continued?: {
     projection: Library;
     shapes: Map<string, Shape>;
+    shapeRevision: number;
     candidates: ContinueCandidate[];
   };
   private displayed?: {
     projection: Library;
     displays: Title[];
     shapes: Map<string, Shape>;
+    displayRevision: number;
+    shapeRevision: number;
     library: Library;
+    recordIndexes: Map<string, number[]>;
+    markIndexes: Map<string, number[]>;
+    latestMarkIndexes: Map<string, number>;
+    recordTitles: Map<string, Title>;
+    markTitles: Map<string, Title>;
   };
   private namedContinue?: {
+    projection: Library;
     candidates: ContinueCandidate[];
     library: Library;
+    displayRevision: number;
+    shapeRevision: number;
     entries: ContinueEntry[];
+    candidateByKey: Map<string, ContinueCandidate>;
+    entryByKey: Map<string, ContinueEntry>;
   };
+  private displayIndex = new Map<string, Title>();
+  private indexedDisplays = this.displays;
+  private readonly displayBatches: string[][] = [];
+  private readonly shapeBatches: string[][] = [];
   private readonly device = this.clock.device;
   /** SIMKL delivery is independent of the visible library. Hold its large snapshot behind foreground readiness. */
   private providersReady = false;
@@ -280,6 +301,71 @@ export class LibrarySession {
     downloads.touch();
   }
 
+  /** Publish one naming batch and retain its keys, so projectors never have to diff the whole library. */
+  publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>): void {
+    this.ensureDisplayIndex();
+    const added: Title[] = [];
+    for (const title of titles) {
+      const key = `${title.type}:${title.id}`;
+      if (this.displayIndex.has(key)) continue;
+      this.displayIndex.set(key, title);
+      added.push(title);
+    }
+    if (added.length) {
+      this.displays = [...this.displays, ...added];
+      this.indexedDisplays = this.displays;
+      this.displayBatches.push(added.map((title) => `${title.type}:${title.id}`));
+      this.displayRevision = this.displayBatches.length;
+    }
+    if (shapes.length) {
+      const next = new Map(this.shapes);
+      const changed: string[] = [];
+      for (const [key, shape] of shapes) {
+        if (next.get(key) === shape) continue;
+        next.set(key, shape);
+        changed.push(key);
+      }
+      if (changed.length) {
+        this.shapes = next;
+        this.shapeBatches.push(changed);
+        this.shapeRevision = this.shapeBatches.length;
+      }
+    }
+  }
+
+  /** Remember metadata learned outside the background naming queue (for example, a pressed billboard card). */
+  rememberTitle(title: Title): void {
+    this.publishLibraryMetadata([title], []);
+  }
+
+  /** O(1) display lookup; reading it reacts only to display metadata, never to watch-state revisions. */
+  displayTitle(ref: Pick<Title, 'type' | 'id'>): Title | undefined {
+    void this.displayRevision;
+    this.ensureDisplayIndex();
+    return this.displayIndex.get(`${ref.type}:${ref.id}`);
+  }
+
+  /** The retained display index, for consumers that genuinely need all currently named titles. */
+  displayTitles(): Map<string, Title> {
+    void this.displayRevision;
+    this.ensureDisplayIndex();
+    return this.displayIndex;
+  }
+
+  private ensureDisplayIndex(): void {
+    if (this.indexedDisplays === this.displays) return;
+    this.displayIndex = new Map(this.displays.map((title) => [`${title.type}:${title.id}`, title]));
+    this.indexedDisplays = this.displays;
+  }
+
+  private displayKeysSince(revision: number): Set<string> {
+    return new Set(this.displayBatches.slice(revision).flat());
+  }
+
+  private shapeKeysSince(revision: number): Set<string> {
+    return new Set(this.shapeBatches.slice(revision).flat());
+  }
+
   /**
    * Build the first visible snapshot cooperatively, then install the log, revision and exact projection together.
    * The log is not exposed while this yields. If anything else replaced it meanwhile, this work is stale and is
@@ -323,27 +409,123 @@ export class LibrarySession {
 
   /** The current projection with late display metadata overlaid, shared while those exact inputs are current. */
   displayedLibrary(projection: Library): Library {
+    const displayRevision = this.displayRevision;
+    const shapeRevision = this.shapeRevision;
     const displays = this.displays;
     const shapes = this.shapes;
-    if (
-      !this.displayed ||
-      this.displayed.projection !== projection ||
-      this.displayed.displays !== displays ||
-      this.displayed.shapes !== shapes
-    ) {
+    this.ensureDisplayIndex();
+    const held = this.displayed;
+    const untrackedDisplay =
+      held?.displays !== displays && held?.displayRevision === displayRevision;
+    const untrackedShape = held?.shapes !== shapes && held?.shapeRevision === shapeRevision;
+    if (!held || held.projection !== projection || untrackedDisplay || untrackedShape) {
+      const library = { ...withDisplay(projection, displays), shapes };
+      const recordIndexes = new Map<string, number[]>();
+      const markIndexes = new Map<string, number[]>();
+      const latestMarkIndexes = new Map<string, number>();
+      const recordTitles = new Map<string, Title>();
+      const markTitles = new Map<string, Title>();
+      projection.records.forEach((record, index) => {
+        const key = `${record.title.type}:${record.title.id}`;
+        const indexes = recordIndexes.get(key) ?? [];
+        indexes.push(index);
+        recordIndexes.set(key, indexes);
+        recordTitles.set(key, library.records[index]!.title);
+      });
+      projection.marks.forEach((mark, index) => {
+        const key = `${mark.type}:${mark.id}`;
+        const indexes = markIndexes.get(key) ?? [];
+        indexes.push(index);
+        markIndexes.set(key, indexes);
+        const latest = latestMarkIndexes.get(key);
+        if (latest === undefined || projection.marks[latest]!.updatedAt < mark.updatedAt)
+          latestMarkIndexes.set(key, index);
+      });
+      for (const [key, index] of latestMarkIndexes) {
+        const mark = library.marks[index]!;
+        markTitles.set(key, {
+          type: mark.type as Title['type'],
+          id: mark.id,
+          title: mark.title,
+          posterPath: mark.posterPath,
+          rating: mark.voteAverage,
+        });
+      }
       this.displayed = {
         projection,
         displays,
         shapes,
-        library: { ...withDisplay(projection, displays), shapes },
+        displayRevision,
+        shapeRevision,
+        library,
+        recordIndexes,
+        markIndexes,
+        latestMarkIndexes,
+        recordTitles,
+        markTitles,
       };
+      return library;
     }
-    return this.displayed.library;
+
+    const changed = this.displayKeysSince(held.displayRevision);
+    let records = held.library.records;
+    let marks = held.library.marks;
+    for (const key of changed) {
+      const title = this.displayIndex.get(key);
+      if (!title) continue;
+      const recordIndexes = held.recordIndexes.get(key) ?? [];
+      if (recordIndexes.length) {
+        if (records === held.library.records) records = [...records];
+        for (const index of recordIndexes) {
+          const record = records[index]!;
+          if (record.title !== title) records[index] = { ...record, title };
+        }
+        held.recordTitles.set(key, title);
+      }
+      const markIndexes = held.markIndexes.get(key) ?? [];
+      const unnamedMarkIndexes = markIndexes.filter(
+        (index) => projection.marks[index]!.title === '',
+      );
+      if (unnamedMarkIndexes.length) {
+        if (marks === held.library.marks) marks = [...marks];
+        for (const index of unnamedMarkIndexes) {
+          const mark = marks[index]!;
+          marks[index] = {
+            ...mark,
+            title: title.title,
+            posterPath: title.posterPath,
+            voteAverage: title.rating ?? 0,
+          };
+        }
+        const latest = held.latestMarkIndexes.get(key);
+        if (latest !== undefined) {
+          const mark = marks[latest]!;
+          held.markTitles.set(key, {
+            type: mark.type as Title['type'],
+            id: mark.id,
+            title: mark.title,
+            posterPath: mark.posterPath,
+            rating: mark.voteAverage,
+          });
+        }
+      }
+    }
+    if (records !== held.library.records || marks !== held.library.marks || held.shapes !== shapes)
+      held.library = { ...held.library, records, marks, shapes };
+    held.displays = displays;
+    held.shapes = shapes;
+    held.displayRevision = displayRevision;
+    held.shapeRevision = shapeRevision;
+    return held.library;
   }
 
   /** Continue Watching from the same shared projection, recomputing only changed per-series policy inputs. */
   continueWatching(projection: Library, displayed: Library): ContinueEntry[] {
     const shapes = this.shapes;
+    const displayRevision = this.displayRevision;
+    const shapeRevision = this.shapeRevision;
+    const priorShapeRevision =
+      this.continued?.projection === projection ? this.continued.shapeRevision : 0;
     if (
       !this.continued ||
       this.continued.projection !== projection ||
@@ -352,22 +534,75 @@ export class LibrarySession {
       this.continued = {
         projection,
         shapes,
-        candidates: this.continueProjector.project({ ...projection, shapes }),
+        shapeRevision,
+        candidates:
+          this.continued?.projection === projection && priorShapeRevision < shapeRevision
+            ? this.continueProjector.projectShapeChanges(
+                { ...projection, shapes },
+                this.shapeKeysSince(priorShapeRevision),
+              )
+            : this.continueProjector.project({ ...projection, shapes }),
       };
     }
     const candidates = this.continued.candidates;
-    if (
-      !this.namedContinue ||
-      this.namedContinue.candidates !== candidates ||
-      this.namedContinue.library !== displayed
-    ) {
+    const named = this.namedContinue;
+    const currentDisplay = this.displayed;
+    const untrackedMetadata =
+      named?.library !== displayed &&
+      named?.displayRevision === displayRevision &&
+      named?.shapeRevision === shapeRevision;
+    if (!named || named.projection !== projection || !currentDisplay || untrackedMetadata) {
+      const entries = nameContinueCandidates(candidates, displayed);
       this.namedContinue = {
+        projection,
         candidates,
         library: displayed,
-        entries: nameContinueCandidates(candidates, displayed),
+        displayRevision,
+        shapeRevision,
+        entries,
+        candidateByKey: new Map(
+          candidates.map((candidate) => [`${candidate.ref.type}:${candidate.ref.id}`, candidate]),
+        ),
+        entryByKey: new Map(
+          entries.map((entry) => [`${entry.title.type}:${entry.title.id}`, entry]),
+        ),
       };
+      return entries;
     }
-    return this.namedContinue.entries;
+
+    const affected = this.displayKeysSince(named.displayRevision);
+    for (const key of this.shapeKeysSince(named.shapeRevision)) affected.add(key);
+    if (named.candidates !== candidates) {
+      for (const key of affected) {
+        const candidate = candidates.find((entry) => `${entry.ref.type}:${entry.ref.id}` === key);
+        if (candidate) named.candidateByKey.set(key, candidate);
+        else named.candidateByKey.delete(key);
+      }
+      named.candidates = candidates;
+    }
+    if (affected.size) {
+      for (const key of affected) {
+        const candidate = named.candidateByKey.get(key);
+        const previous = named.entryByKey.get(key);
+        const title = candidate
+          ? candidate.display === 'mark'
+            ? currentDisplay.markTitles.get(key)
+            : currentDisplay.recordTitles.get(key)
+          : undefined;
+        if (candidate && title?.title) {
+          const { ref: _ref, display: _display, ...entry } = candidate;
+          named.entryByKey.set(key, { ...entry, title });
+        } else if (previous) named.entryByKey.delete(key);
+      }
+      named.entries = candidates.flatMap((candidate) => {
+        const entry = named.entryByKey.get(`${candidate.ref.type}:${candidate.ref.id}`);
+        return entry ? [entry] : [];
+      });
+    }
+    named.displayRevision = displayRevision;
+    named.shapeRevision = shapeRevision;
+    named.library = displayed;
+    return named.entries;
   }
 
   /** The shared download queue reads and writes this library's rows (den-spec library-v4 §17). */

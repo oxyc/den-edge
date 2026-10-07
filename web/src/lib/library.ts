@@ -526,6 +526,12 @@ type ContinueDecision = (request: Record<string, unknown>) => ContinueAnswer;
  */
 export class ContinueProjector {
   private decisions = new Map<string, { input: string; answer: ContinueAnswer }>();
+  private library?: Library;
+  private series = new Map<string, Omit<Library, 'shapes' | 'dismissed'>>();
+  private seriesOrder: string[] = [];
+  private seriesCandidates = new Map<string, ContinueCandidate>();
+  private movies: ContinueCandidate[] = [];
+  private candidates: ContinueCandidate[] = [];
 
   constructor(
     private readonly decide: ContinueDecision = (request) => syncPolicy<ContinueAnswer>(request),
@@ -544,7 +550,94 @@ export class ContinueProjector {
     };
     const candidates = continueCandidates(library, decision);
     for (const key of this.decisions.keys()) if (!live.has(key)) this.decisions.delete(key);
+    this.rememberProjection(library, candidates);
     return candidates;
+  }
+
+  /**
+   * Re-project only series whose episode layout arrived. Records and watch state are immutable between ordinary
+   * naming batches, so rebuilding their summaries (and every unrelated den-core request) would be pure overhead.
+   */
+  projectShapeChanges(library: Library, changed: ReadonlySet<string>): ContinueCandidate[] {
+    const previous = this.library;
+    if (
+      !previous ||
+      previous.records !== library.records ||
+      previous.marks !== library.marks ||
+      previous.flags !== library.flags ||
+      previous.dismissed !== library.dismissed
+    )
+      return this.project(library);
+    if (!changed.size) {
+      this.library = library;
+      return this.candidates;
+    }
+    for (const key of changed) {
+      const held = this.series.get(key);
+      if (!held) continue;
+      const shape = library.shapes.get(key);
+      const dismissed = library.dismissed.get(key);
+      const one: Library = {
+        ...held,
+        shapes: shape ? new Map([[key, shape]]) : new Map(),
+        dismissed: dismissed === undefined ? new Map() : new Map([[key, dismissed]]),
+      };
+      const candidate = continueCandidates(one, (candidateKey, request) => {
+        const input = JSON.stringify(request);
+        const known = this.decisions.get(candidateKey);
+        if (known?.input === input) return known.answer;
+        const answer = this.decide(request);
+        this.decisions.set(candidateKey, { input, answer });
+        return answer;
+      })[0];
+      if (candidate) this.seriesCandidates.set(key, candidate);
+      else this.seriesCandidates.delete(key);
+    }
+    this.library = library;
+    this.candidates = [
+      ...this.seriesOrder.flatMap((key) => this.seriesCandidates.get(key) ?? []),
+      ...this.movies,
+    ];
+    return this.candidates;
+  }
+
+  private rememberProjection(library: Library, candidates: ContinueCandidate[]): void {
+    const buckets = new Map<string, Omit<Library, 'shapes' | 'dismissed'>>();
+    const bucket = (key: string) => {
+      let found = buckets.get(key);
+      if (!found) {
+        found = { records: [], marks: [], flags: new Map() };
+        buckets.set(key, found);
+      }
+      return found;
+    };
+    for (const record of library.records) bucket(titleKey(record.title)).records.push(record);
+    const latest = new Map<string, number>();
+    for (const mark of library.marks) {
+      const key = titleKey(mark);
+      bucket(key).marks.push(mark);
+      latest.set(key, Math.max(latest.get(key) ?? -Infinity, mark.updatedAt));
+    }
+    const flagged = new Set<string>();
+    for (const [mark, flag] of library.flags ?? []) {
+      const key = titleKey(flag);
+      bucket(key).flags!.set(mark, flag);
+      flagged.add(key);
+    }
+    this.seriesOrder = [...new Set([...latest.keys(), ...flagged])].sort(
+      (a, b) => (latest.get(b) ?? -Infinity) - (latest.get(a) ?? -Infinity),
+    );
+    this.series = new Map(this.seriesOrder.map((key) => [key, bucket(key)]));
+    const seriesKeys = new Set(this.seriesOrder);
+    this.seriesCandidates = new Map(
+      candidates.flatMap((candidate) => {
+        const key = titleKey(candidate.ref);
+        return seriesKeys.has(key) ? [[key, candidate] as const] : [];
+      }),
+    );
+    this.movies = candidates.filter((candidate) => !seriesKeys.has(titleKey(candidate.ref)));
+    this.library = library;
+    this.candidates = candidates;
   }
 }
 

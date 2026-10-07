@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { continueWatching } from './library';
+import { continueWatching, emptyLibrary, type Library, type Title } from './library';
 import { LibraryLog } from './log';
 import { BACKGROUND_PROVIDER_FALLBACK_MS, LibrarySession } from './librarySession.svelte';
 import { deliverSimkl } from './simklDelivery';
@@ -272,6 +272,85 @@ it('shares one immutable library projection per revision across retained pages',
   const changed = session.libraryProjection();
   expect(changed).not.toBe(first);
   expect(log.rows).toHaveBeenCalledTimes(2);
+});
+
+it('patches only records and marks named by a metadata batch', () => {
+  const session = new LibrarySession(null);
+  const records = Array.from({ length: 1_000 }, (_, id) => ({
+    title: { type: 'movie' as const, id, title: '' },
+    status: 'watched' as const,
+    progress: 0,
+    progressAt: id,
+    addedAt: id,
+    deleted: false,
+  }));
+  const projection: Library = {
+    ...emptyLibrary(),
+    records,
+    marks: [
+      {
+        type: 'tv',
+        id: 7,
+        season: 1,
+        episode: 1,
+        fraction: 0.5,
+        updatedAt: 1,
+        title: '',
+        voteAverage: 0,
+      },
+    ],
+  };
+  const before = session.displayedLibrary(projection);
+  const untouchedRecord = before.records[998];
+  const untouchedMark = before.marks[0];
+
+  session.publishLibraryMetadata([{ type: 'movie', id: 7, title: 'Seven' }], []);
+  const namedMovie = session.displayedLibrary(projection);
+  expect(namedMovie.records[7]!.title.title).toBe('Seven');
+  expect(namedMovie.records[998]).toBe(untouchedRecord);
+  expect(namedMovie.marks[0]).toBe(untouchedMark);
+
+  session.publishLibraryMetadata([{ type: 'tv', id: 7, title: 'Series' }], []);
+  const namedSeries = session.displayedLibrary(projection);
+  expect(namedSeries.marks[0]!.title).toBe('Series');
+  expect(namedSeries.records[998]).toBe(untouchedRecord);
+});
+
+it('keeps unrelated Continue entries identical across display and shape batches', async () => {
+  await ensureSyncPolicy();
+  const session = new LibrarySession(null);
+  const projection: Library = {
+    ...emptyLibrary(),
+    records: [1, 2].map((id) => ({
+      title: { type: 'tv' as const, id, title: '' },
+      status: 'inProgress' as const,
+      progress: 0,
+      progressAt: id,
+      addedAt: id,
+      deleted: false,
+    })),
+    marks: [1, 2].map((id) => ({
+      type: 'tv',
+      id,
+      season: 1,
+      episode: 1,
+      fraction: 0.5,
+      updatedAt: id,
+      title: '',
+      voteAverage: 0,
+    })),
+  };
+  const titles: Title[] = [1, 2].map((id) => ({ type: 'tv', id, title: `Series ${id}` }));
+  session.publishLibraryMetadata(titles, []);
+  let displayed = session.displayedLibrary(projection);
+  const initial = session.continueWatching(projection, displayed);
+  const untouched = initial.find((entry) => entry.title.id === 2);
+
+  session.publishLibraryMetadata([], [['tv:1', { counts: new Map([[1, 8]]) }]]);
+  displayed = session.displayedLibrary(projection);
+  const shaped = session.continueWatching(projection, displayed);
+
+  expect(shaped.find((entry) => entry.title.id === 2)).toBe(untouched);
 });
 
 it('keeps the shared projection and Continue result equal to the real den-core path', async () => {

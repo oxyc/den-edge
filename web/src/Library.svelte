@@ -339,8 +339,7 @@
   });
 
   function remember(title: Title) {
-    if (!session.displays.some((d) => d.type === title.type && d.id === title.id))
-      session.displays = [...session.displays, title];
+    session.rememberTitle(title);
   }
 
   /** Write one row and re-derive what shows it. */
@@ -858,7 +857,7 @@
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
     new Set(
-      library?.records
+      applied?.records
         .filter((r) => !r.deleted && r.status === 'watched')
         .map((r) => titleKey(r.title)) ?? [],
     ),
@@ -933,19 +932,17 @@
   /** The browse screens' rows, headers now and posters as each nears the screen. */
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
-  const seeds = $derived.by(() => {
+  const selectedSeeds = $derived.by(() => {
     void version;
     const titleRows = (log?.rows() ?? []).filter(
       (r): r is TitleRow => r.kind === 'rec' && !r.deleted.value,
     );
-    const named = new Map(
-      (library?.records ?? [])
-        .filter((r) => r.title.title)
-        .map((r) => [titleKey(r.title), r.title]),
-    );
-    const selected = personalSeedRows(titleRows);
+    return { selected: personalSeedRows(titleRows), titleRows };
+  });
+  const seeds = $derived.by(() => {
+    const { selected, titleRows } = selectedSeeds;
     const namedSeeds = (refs: TitleRow[]) =>
-      refs.flatMap((r) => named.get(titleKey(r.title)) ?? []);
+      refs.flatMap((r) => session.displayTitle(r.title) ?? []);
     return {
       watched: namedSeeds(selected.watched),
       watchlisted: namedSeeds(selected.watchlisted),
@@ -1204,11 +1201,7 @@
               facet: type,
               prefs,
               library: weighted,
-              named: new Map(
-                (library?.records ?? [])
-                  .filter((r) => r.title.title)
-                  .map((r) => [titleKey(r.title), r.title] as const),
-              ),
+              named: session.displayTitles(),
               owned: seeds.owned,
               fresh,
             }),
@@ -1302,7 +1295,7 @@
   const history = $derived.by(() => {
     void version;
     if (route.page !== 'watchlist' || !log) return [];
-    return watchedHistory(log.rows(), new Map(session.displays.map((t) => [titleKey(t), t])));
+    return watchedHistory(log.rows(), session.displayTitles());
   });
   const seenOfSeries = $derived.by(() => {
     void version;
