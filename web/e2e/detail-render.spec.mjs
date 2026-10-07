@@ -79,6 +79,16 @@ for (const width of [393, 700, 759, 760, 844, 1280])
     await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
     await expect(page.locator('.episode.deferred')).toHaveCount(46);
     await expect(page.locator('.episodes > li')).toHaveCount(50);
+    const firstStill = page.locator('.episode:not(.deferred) img').first();
+    await expect(firstStill).toHaveAttribute('srcset', /w300.*300w,.*w500.*500w/);
+    await expect(firstStill).toHaveAttribute(
+      'sizes',
+      '(max-width: 759px) clamp(96px, 29vw, 180px), clamp(190px, 24vw, 280px)',
+    );
+    await expect
+      .poll(() => firstStill.evaluate((node) => new URL(node.currentSrc).pathname))
+      .toBe('/t/p/w300/still-1.jpg');
+    expect(stills.every((url) => new URL(url).pathname.includes('/t/p/w300/'))).toBe(true);
     const reservedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
     expect(stills.length).toBeLessThanOrEqual(4);
 

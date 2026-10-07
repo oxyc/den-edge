@@ -25,6 +25,8 @@
     withPosters,
   } from '../lib/relatedRows';
   import { NO_FACTS, type TitleFacts } from '../lib/titleFacts';
+  import { whenIdle } from '../lib/idle';
+  import { observeNearViewport } from '../lib/nearViewport';
   import { SvelteSet } from 'svelte/reactivity';
 
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
@@ -61,6 +63,34 @@
   /** The title `rows` were built for, and how many builds there have been. Not reactive: the effect only reads them. */
   let rowsFor = '';
   let builds = 0;
+  /** Row loaders that have actually been entered for this title, retained across an atlas-late rebuild. */
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read and written only by loader closures.
+  let startedRows = new Set<string>();
+  let root: HTMLDivElement;
+  let discovery = $state<{
+    start: () => Promise<void>;
+    cancel: () => void;
+  }>();
+
+  // Discover the two rows whose existence is not known up front only after this retained page is active. The
+  // shared observer promotes the work immediately near Related; otherwise it waits for the browser's idle queue.
+  // Deactivating the page cancels only a start that has not happened: an answer already in flight can settle and is
+  // retained for Back.
+  $effect(() => {
+    const pending = discovery;
+    if (!active || !pending || !root) return;
+    let cancelIdle = () => {};
+    const start = () => {
+      cancelIdle();
+      void pending.start();
+    };
+    const stopNear = observeNearViewport(root, (near) => near && start(), '800px 0px');
+    cancelIdle = whenIdle(pending.start);
+    return () => {
+      cancelIdle();
+      stopNear();
+    };
+  });
 
   // The rows are built as soon as the title is, and each loads its first page as it nears the screen
   // (`BrowseRow`'s `prefetch`), so a title asks for the rows its viewer scrolls to, not all of them. For a title's
@@ -80,6 +110,9 @@
     const self = detail.title;
     const key = titleKey(self);
     const rebuild = key === rowsFor;
+    if (!rebuild) startedRows = new Set<string>();
+    const started = startedRows;
+    const preserve = new Set(started);
     rowsFor = key;
     const originalLanguage = detail.title.originalLanguage;
     const regionalLanguage =
@@ -129,15 +162,50 @@
         return titles;
       },
     });
+    /** Mark the first real entry into a row loader, not merely construction of its placeholder. */
+    const tracked = (row: RowDef): RowDef => ({
+      ...row,
+      load: (page) => {
+        started.add(row.id);
+        return row.load(page);
+      },
+    });
     // Known to exist once atlas (or TMDB's collection) names its members, so it joins then with placeholders
     // rather than after every member's poster is drawn — for a franchise atlas sends no posters for, that
     // is one TMDB request per member.
-    const franchise = franchiseRow(detail.collection, self, atlas, options).then(
-      (row) => row && noted(row),
+    // The promise identities live for this whole build, even while its RoutePage is retained inactive. Their gate
+    // stops either loader from being called by component construction alone.
+    let releaseDiscovery!: (start: boolean) => void;
+    let discoveryDecided = false;
+    const discoveryGate = new Promise<boolean>((resolve) => (releaseDiscovery = resolve));
+    const franchise = discoveryGate.then((start) =>
+      start
+        ? franchiseRow(detail.collection, self, atlas, options).then(
+            (row) => row && tracked(noted(row)),
+          )
+        : null,
     );
-    const versions = versionsRow(self, atlas, franchise, options).then((row) =>
-      row ? firstScreen(noted(row), shown) : null,
+    const versions = discoveryGate.then((start) =>
+      start
+        ? versionsRow(self, atlas, franchise, options).then((row) =>
+            row ? firstScreen(tracked(noted(row)), shown) : null,
+          )
+        : null,
     );
+    const decideDiscovery = (start: boolean) => {
+      if (discoveryDecided) return;
+      discoveryDecided = true;
+      releaseDiscovery(start);
+    };
+    const settledDiscovery = Promise.all([franchise, versions]).then(() => undefined);
+    const pendingDiscovery = {
+      start: () => {
+        decideDiscovery(true);
+        return settledDiscovery;
+      },
+      cancel: () => decideDiscovery(false),
+    };
+    discovery = pendingDiscovery;
     const author = atlas ? authorRow(known, self, atlas) : null;
     // Closest first: what is like this title and what its fans also love, then what else came from its source
     // author's books, the people who made it, then the same of its strongest mood, its studio, network and country or
@@ -195,15 +263,18 @@
           ].map((row) => withPosters(row, options))
         : []),
       ...(regional ? [regional] : []),
-    ];
+    ].map(tracked);
     const build = ++builds;
+    const current = () => live && builds === build && rowsFor === key;
     if (rebuild) {
       void Promise.all([
         franchise,
         versions,
-        ...defined.map((row) => firstScreen(row, shown)),
+        // Only replace content a viewer has already caused to load with another pre-resolved row. Untouched rows
+        // remain cheap definitions and keep the same heading/skeleton geometry when this build is published.
+        ...defined.map((row) => (preserve.has(row.id) ? firstScreen(row, shown) : row)),
       ]).then((found) => {
-        if (!live) return;
+        if (!current()) return;
         const next = found
           .filter((row): row is RowDef => row !== null)
           .map((row) => ({ build, row }));
@@ -216,10 +287,10 @@
     } else {
       rows = defined.map((row) => ({ build, row }));
       void franchise.then(async (row) => {
-        if (live && row) rows = [{ build, row }, ...rows];
+        if (current() && row) rows = [{ build, row }, ...rows];
         // Other versions sit straight under the franchise, which they are never part of.
         const other = await versions;
-        if (!live || !other) return;
+        if (!current() || !other) return;
         const at = row
           ? rows.findIndex((entry) => entry.build === build && entry.row.id === row.id) + 1
           : 0;
@@ -228,11 +299,12 @@
     }
     return () => {
       live = false;
+      pendingDiscovery.cancel();
     };
   });
 </script>
 
-<div aria-hidden={!active}>
+<div bind:this={root} aria-hidden={!active}>
   {#each rows as { build, row } (`${build}:${row.id}`)}
     <BrowseRow {row} {shown} prefetch={false} />
   {/each}

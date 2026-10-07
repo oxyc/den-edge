@@ -1,3 +1,12 @@
+<script module lang="ts">
+  const STILL_SIZES = '(max-width: 759px) clamp(96px, 29vw, 180px), clamp(190px, 24vw, 280px)';
+  const stillSrcset = (path: string) =>
+    [
+      `https://image.tmdb.org/t/p/w300${path} 300w`,
+      `https://image.tmdb.org/t/p/w500${path} 500w`,
+    ].join(', ');
+</script>
+
 <script lang="ts">
   import DetailIcon from './DetailIcon.svelte';
   import ActionMenu from './ActionMenu.svelte';
@@ -107,8 +116,11 @@
     >
       <span class="still">
         {#if episode.stillPath || fallback}
+          {@const path = episode.stillPath ?? fallback!}
           <img
-            src={`https://image.tmdb.org/t/p/w500${episode.stillPath ?? fallback}`}
+            src={`https://image.tmdb.org/t/p/w500${path}`}
+            srcset={stillSrcset(path)}
+            sizes={STILL_SIZES}
             alt=""
             width="500"
             height="281"

@@ -19,7 +19,9 @@ export default defineConfig({
   timeout: 120_000,
   // Files are isolated by Playwright contexts and do not share mutable server state.
   // Keep local runs deterministic while allowing CI to execute independent files in parallel.
-  workers: process.env.CI ? 2 : 1,
+  // GitHub's public ubuntu-latest runner has four CPUs. Keep local runs conservative,
+  // but use the runner rather than leaving half of it idle.
+  workers: process.env.CI ? 4 : 1,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',

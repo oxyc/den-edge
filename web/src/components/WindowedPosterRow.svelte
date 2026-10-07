@@ -5,7 +5,6 @@
   import { cardWindow, posterCardWidth } from '../lib/cardWindow';
   import { observeNearViewport } from '../lib/nearViewport';
   import { pageVisibility } from '../lib/pageVisibility.svelte';
-  import { observeWindowResize } from '../lib/windowEvents';
   import PosterRow from './PosterRow.svelte';
 
   let {
@@ -51,12 +50,13 @@
     if (!page.active || !rowNear || !track) return;
     const scroller = track;
     let frame: number | undefined;
+    let viewportWidth = 0;
     const update = () => {
-      frame = undefined;
+      if (!viewportWidth) return;
       const window = cardWindow(
         items.length,
         scroller.scrollLeft,
-        scroller.clientWidth,
+        viewportWidth,
         posterCardWidth(innerWidth) * (landscape ? 1.45 : 1),
         14,
       );
@@ -64,21 +64,33 @@
       windowEnd = window.end;
     };
     const schedule = () => {
-      if (frame === undefined) frame = requestAnimationFrame(update);
+      if (frame === undefined)
+        frame = requestAnimationFrame(() => {
+          frame = undefined;
+          update();
+        });
     };
     const press = (event: PointerEvent) => {
       const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
       const index = Number(slot?.dataset.cardIndex);
       if (Number.isInteger(index) && items[index]) focusedKey = itemKey(items[index]);
     };
-    update();
+    // The first size arrives after layout, instead of forcing the whole page to lay out while Svelte is still
+    // mounting its rows. Later size changes use the same callback; scroll updates stay coalesced to one frame.
+    const resize = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const width = entry.borderBoxSize[0]?.inlineSize ?? scroller.clientWidth;
+      if (width === viewportWidth) return;
+      viewportWidth = width;
+      update();
+    });
+    resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', schedule, { passive: true });
     scroller.addEventListener('pointerdown', press, { passive: true });
-    const stopResize = observeWindowResize(schedule);
     return () => {
       scroller.removeEventListener('scroll', schedule);
       scroller.removeEventListener('pointerdown', press);
-      stopResize();
+      resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
   });

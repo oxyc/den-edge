@@ -148,6 +148,72 @@ test('the responsive hero preload and image choose one smaller mobile candidate'
   ]);
 });
 
+test('a retained hidden billboard starts no current, detail, or adjacent image work', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.addInitScript(() => {
+    const idle = new Map();
+    let id = 0;
+    window.requestIdleCallback = (callback) => {
+      const next = ++id;
+      idle.set(next, callback);
+      return next;
+    };
+    window.cancelIdleCallback = (cancelled) => idle.delete(cancelled);
+    window.fixtureIdleCount = () => idle.size;
+    window.fixtureRunIdle = () => {
+      const pending = [...idle.values()];
+      idle.clear();
+      for (const callback of pending) callback({ didTimeout: false, timeRemaining: () => 50 });
+    };
+  });
+  const details = [];
+  await routeTmdb(page, (route) => {
+    const path = new URL(route.request().url()).pathname;
+    details.push(path);
+    return route.fulfill({
+      json: {
+        id: path.endsWith('/43') ? 43 : 42,
+        title: path.endsWith('/43') ? 'Later title' : 'A short title',
+        backdrop_path: path.endsWith('/43') ? '/later.jpg' : '/early.jpg',
+      },
+    });
+  });
+  const images = [];
+  await page.route('https://image.tmdb.org/**', (route) => {
+    images.push(new URL(route.request().url()).pathname);
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"/>',
+    });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/billboard.html`);
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
+  );
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
+  await page.waitForTimeout(100);
+  expect(details).toEqual([]);
+  expect(images).toEqual([]);
+
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+  );
+  await expect.poll(() => images.length).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.fixtureIdleCount())).toBe(1);
+  // Run the callback in the same task as deactivation, before Svelte's effect cleanup can cancel it. The
+  // callback's own active check must be what prevents the retained page from warming its neighbours.
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: false }));
+    window.fixtureRunIdle();
+  });
+  await page.waitForTimeout(100);
+  expect(details).toEqual(['/tmdb/3/movie/42']);
+  expect(images).toHaveLength(1);
+});
+
 test('the document starts its exact personalized hero before the app module answers', async ({
   page,
 }) => {

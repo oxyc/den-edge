@@ -3,6 +3,15 @@
      opened in a new tab, copied, or middle-clicked like any other link on the web; the router intercepts the
      ordinary click, so navigating within the app is unchanged. A movie scout found nothing to play for is
      faded, as on the TV. -->
+<script module lang="ts">
+  const LANDSCAPE_STILL_SIZES = 'clamp(203px, 55.1vw, 275.5px)';
+  const landscapeStillSrcset = (path: string) =>
+    [
+      `https://image.tmdb.org/t/p/w300${path} 300w`,
+      `https://image.tmdb.org/t/p/w500${path} 500w`,
+    ].join(', ');
+</script>
+
 <script lang="ts">
   import { getContext, onDestroy } from 'svelte';
   import { availability } from '../lib/availability.svelte';
@@ -90,6 +99,9 @@
   let failed = $state('');
   const art = $derived(
     still && still !== failed ? still : poster && poster !== failed ? poster : undefined,
+  );
+  const stillSrcset = $derived(
+    stillPath && art === still ? landscapeStillSrcset(stillPath) : undefined,
   );
   const portraitFallback = $derived(landscape && !!poster && art === poster);
   /** Far or retained-hidden cards keep their geometry but draw no poster; one shared observer activates nearby art. */
@@ -204,6 +216,8 @@
         <img
           class:contained={portraitFallback}
           src={art}
+          srcset={stillSrcset}
+          sizes={stillSrcset ? LANDSCAPE_STILL_SIZES : undefined}
           alt=""
           loading="lazy"
           decoding="async"

@@ -15,6 +15,12 @@
     title: `Far title ${index + 1}`,
     posterPath: `/far${index + 1}.jpg`,
   }));
+  const continuing: Title = {
+    type: 'tv',
+    id: 50,
+    title: 'Continuing title',
+    posterUrl: 'https://images.metahub.space/poster/medium/tt50/img',
+  };
 </script>
 
 <main>
@@ -22,6 +28,9 @@
     {#each titles as title (title.id)}
       <PosterCard {title} caption="An Exceptional… · Sep 19" />
     {/each}
+  </PosterRow>
+  <PosterRow heading="Continue Watching">
+    <PosterCard title={continuing} stillPath="/landscape.jpg" landscape />
   </PosterRow>
   <div style="height:4000px"></div>
   <PosterRow heading="Far below">

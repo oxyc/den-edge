@@ -79,7 +79,9 @@ async function setup(page) {
     .locator('[data-active="true"]')
     .getByRole('link', { name: /^Another Movie/ })
     .first();
-  await card.scrollIntoViewIfNeeded();
+  // The virtual row may replace its initial slots once ResizeObserver supplies
+  // the measured width. Re-resolve the locator if that happens mid-scroll.
+  await expect(async () => card.scrollIntoViewIfNeeded()).toPass();
   await expect(card.locator('img')).toBeVisible();
   return { card, release };
 }
@@ -111,6 +113,38 @@ test('a title opens on its own skeleton, with no cover of the page it was opened
   release();
   await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
   expect(await page.evaluate(() => window.covered)).toBe(false);
+  await page.close();
+});
+
+test('a row poster is reused by the responsive detail poster at DPR 2', async ({ browser }) => {
+  const page = await browser.newPage({
+    viewport: { width: 677, height: 800 },
+    deviceScaleFactor: 2,
+  });
+  const posterRequests = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/another.jpg'))
+      posterRequests.push(new URL(request.url()).pathname);
+  });
+  const { card, release } = await setup(page);
+  await expect
+    .poll(() => card.locator('img').evaluate((image) => new URL(image.currentSrc).pathname))
+    .toBe('/t/p/w342/another.jpg');
+
+  await card.click();
+  release();
+  const poster = page.locator('[data-active="true"] img.poster');
+  await expect(page.locator('[data-active="true"] h1')).toHaveText('Another Movie');
+  await expect(poster).toHaveAttribute('srcset', /w342.*342w,.*w500.*500w/);
+  await expect(poster).toHaveAttribute(
+    'sizes',
+    '(max-width: 759px) clamp(96px, 22vw, 180px), clamp(110px, 11vw, 160px)',
+  );
+  await expect
+    .poll(() => poster.evaluate((image) => new URL(image.currentSrc).pathname))
+    .toBe('/t/p/w342/another.jpg');
+  await page.waitForTimeout(100);
+  expect(posterRequests).toEqual(['/t/p/w342/another.jpg']);
   await page.close();
 });
 

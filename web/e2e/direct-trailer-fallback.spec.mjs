@@ -163,6 +163,17 @@ const surfaces = [
   },
 ];
 
+// reel.test.ts exhaustively covers the source order and timeout state machine. Here the browser is proving the
+// integration boundaries: each engine and each independently implemented surface sees every route class once,
+// without paying for their full 2 × 2 × 4 Cartesian product. The diagonal assignment also leaves every
+// engine/surface pair with one direct-success case and one relay-policy case.
+const integrationCases = new Map([
+  ['chromium hero', new Set(['away', 'public-failure'])],
+  ['chromium billboard', new Set(['home', 'local-relay'])],
+  ['webkit hero', new Set(['home', 'local-relay'])],
+  ['webkit billboard', new Set(['away', 'public-failure'])],
+]);
+
 /** Opens the surface on `origin`; the time until its trailer is playing (null if it never does) and what played. */
 async function play(launch, surface, origin, network, wait = 15_000) {
   const browser = await launch();
@@ -187,64 +198,69 @@ async function play(launch, surface, origin, network, wait = 15_000) {
 for (const [engine, launch, available = () => true] of engines) {
   for (const surface of surfaces) {
     const name = `${engine} ${surface.name}`;
+    const covers = integrationCases.get(name);
 
-    test(`${name}: at home plays from the home-network listener, never the relay`, async () => {
-      test.skip(!available(), `${engine} is not installed here`);
-      // Under den-edge's policy, which names no home-network origin: `media-src https:` alone lets it play.
-      const home = await play(launch, surface, PUBLIC, { home: true, reach: ['lan'] });
-      expect(home.src).toBe(`${LAN}${MEDIA}`);
-      expect(home.seen).toMatchObject({ lan: expect.any(Number), direct: 0, relay: 0 });
-      expect(home.seen.lan).toBeGreaterThan(0);
-      // The control: without `https:` the same copy is refused before it is asked for, so the policy is in force.
-      const named = await play(launch, surface, PUBLIC, {
-        home: true,
-        reach: ['lan', 'public'],
-        csp: NAMED_ONLY,
+    if (covers.has('home'))
+      test(`${name}: at home plays from the home-network listener, never the relay`, async () => {
+        test.skip(!available(), `${engine} is not installed here`);
+        // Under den-edge's policy, which names no home-network origin: `media-src https:` alone lets it play.
+        const home = await play(launch, surface, PUBLIC, { home: true, reach: ['lan'] });
+        expect(home.src).toBe(`${LAN}${MEDIA}`);
+        expect(home.seen).toMatchObject({ lan: expect.any(Number), direct: 0, relay: 0 });
+        expect(home.seen.lan).toBeGreaterThan(0);
+        // The control: without `https:` the same copy is refused before it is asked for, so the policy is in force.
+        const named = await play(launch, surface, PUBLIC, {
+          home: true,
+          reach: ['lan', 'public'],
+          csp: NAMED_ONLY,
+        });
+        expect(named.seen.lan, 'refused by the policy, never requested').toBe(0);
+        expect(named.src).toBe(`${DIRECT}${MEDIA}`);
+        // The home-network listener unreachable: the public one comes after it, one deadline later, no relay.
+        const lanDown = await play(launch, surface, PUBLIC, { home: true, reach: ['public'] });
+        expect(lanDown.src).toBe(`${DIRECT}${MEDIA}`);
+        expect(lanDown.seen.relay).toBe(0);
+        expect(lanDown.took).toBeLessThan(home.took + DEADLINE_MS + 1_500);
+        test.info().annotations.push({
+          type: 'time to playing',
+          description: `${name}: home-network ${home.took} ms; home-network unreachable, public ${lanDown.took} ms`,
+        });
       });
-      expect(named.seen.lan, 'refused by the policy, never requested').toBe(0);
-      expect(named.src).toBe(`${DIRECT}${MEDIA}`);
-      // The home-network listener unreachable: the public one comes after it, one deadline later, no relay.
-      const lanDown = await play(launch, surface, PUBLIC, { home: true, reach: ['public'] });
-      expect(lanDown.src).toBe(`${DIRECT}${MEDIA}`);
-      expect(lanDown.seen.relay).toBe(0);
-      expect(lanDown.took).toBeLessThan(home.took + DEADLINE_MS + 1_500);
-      test.info().annotations.push({
-        type: 'time to playing',
-        description: `${name}: home-network ${home.took} ms; home-network unreachable, public ${lanDown.took} ms`,
+
+    if (covers.has('away'))
+      test(`${name}: away plays from the public listener, never the relay`, async () => {
+        test.skip(!available(), `${engine} is not installed here`);
+        const away = await play(launch, surface, PUBLIC, { home: false, reach: ['public'] });
+        expect(away.src).toBe(`${DIRECT}${MEDIA}`);
+        expect(away.seen).toMatchObject({ lan: 0, relay: 0 });
+        test.info().annotations.push({
+          type: 'time to playing',
+          description: `${name}: public ${away.took} ms`,
+        });
       });
-    });
 
-    test(`${name}: away plays from the public listener, never the relay`, async () => {
-      test.skip(!available(), `${engine} is not installed here`);
-      const away = await play(launch, surface, PUBLIC, { home: false, reach: ['public'] });
-      expect(away.src).toBe(`${DIRECT}${MEDIA}`);
-      expect(away.seen).toMatchObject({ lan: 0, relay: 0 });
-      test.info().annotations.push({
-        type: 'time to playing',
-        description: `${name}: public ${away.took} ms`,
+    if (covers.has('public-failure'))
+      test(`${name}: on the public web name a failed direct listener means no trailer, as remux`, async () => {
+        test.skip(!available(), `${engine} is not installed here`);
+        const failed = await play(
+          launch,
+          surface,
+          PUBLIC,
+          { home: false, reach: [] },
+          DEADLINE_MS + 4_000,
+        );
+        expect(failed.took, 'no trailer plays').toBeNull();
+        expect(failed.seen.direct).toBeGreaterThan(0);
+        expect(failed.seen.relay, 'and nothing crosses the relay').toBe(0);
       });
-    });
 
-    test(`${name}: on the public web name a failed direct listener means no trailer, as remux`, async () => {
-      test.skip(!available(), `${engine} is not installed here`);
-      const failed = await play(
-        launch,
-        surface,
-        PUBLIC,
-        { home: false, reach: [] },
-        DEADLINE_MS + 4_000,
-      );
-      expect(failed.took, 'no trailer plays').toBeNull();
-      expect(failed.seen.direct).toBeGreaterThan(0);
-      expect(failed.seen.relay, 'and nothing crosses the relay').toBe(0);
-    });
-
-    test(`${name}: on a local origin the relay is still the last copy`, async () => {
-      test.skip(!available(), `${engine} is not installed here`);
-      const local = await play(launch, surface, LOCAL, { home: false, reach: [] });
-      expect(local.src).toBe(MEDIA);
-      expect(local.seen.direct).toBeGreaterThan(0);
-      expect(local.took).toBeLessThan(DEADLINE_MS + 5_000);
-    });
+    if (covers.has('local-relay'))
+      test(`${name}: on a local origin the relay is still the last copy`, async () => {
+        test.skip(!available(), `${engine} is not installed here`);
+        const local = await play(launch, surface, LOCAL, { home: false, reach: [] });
+        expect(local.src).toBe(MEDIA);
+        expect(local.seen.direct).toBeGreaterThan(0);
+        expect(local.took).toBeLessThan(DEADLINE_MS + 5_000);
+      });
   }
 }

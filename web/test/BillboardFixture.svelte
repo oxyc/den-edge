@@ -4,6 +4,7 @@
   import Billboard from '../src/components/Billboard.svelte';
   import '../src/app.css';
   let titles = $state<RecommendedTitle[]>([]);
+  let active = $state(true);
   // Off unless a test asks for it: the specs that measure layout mock no reel, and handing them one
   // would have them fetching a trailer the network guard refuses.
   const reel = new URLSearchParams(location.search).has('reel') ? '/reel/fixture' : null;
@@ -30,11 +31,14 @@
     const republish = () => {
       titles = titles.map((title) => ({ ...title }));
     };
+    const setActive = (event: Event) => (active = (event as CustomEvent<boolean>).detail);
     window.addEventListener('fixture:titles', load);
     window.addEventListener('fixture:republish', republish);
+    window.addEventListener('fixture:active', setActive);
     return () => {
       window.removeEventListener('fixture:titles', load);
       window.removeEventListener('fixture:republish', republish);
+      window.removeEventListener('fixture:active', setActive);
     };
   });
 </script>
@@ -42,6 +46,7 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   <Billboard
     {titles}
+    {active}
     tmdbKey="fixture-key"
     {reel}
     routes={{ reel: [{ url: 'http://internal' }] }}

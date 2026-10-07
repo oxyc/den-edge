@@ -43,26 +43,41 @@ jobs:
   # The Den web app den-edge serves: type-checked, tested and built, as the image's web stage builds it.
   web:
     runs-on: ubuntu-latest
+    # Keep this tag and the assertion below equal to web/package-lock.json's @playwright/test version.
+    # The official image supplies that release's exact browsers and Linux dependencies, avoiding a
+    # network/apt install on every run. Chromium recommends host IPC in containers to avoid OOM crashes.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # The app and fixtures are repository-controlled; the image's default root user also keeps checkout/setup-node
+      # compatible with GitHub's mounted workspace. Playwright documents root as suitable for trusted E2E tests.
+      options: --ipc=host
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: true   # spec/: den-spec's vectors, which the wire tests load
+          submodules: true # spec/: den-spec's vectors, which the wire tests load
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --ignore-scripts
+      - name: Verify Playwright image matches the lockfile
+        run: |
+          version=$(node -p "require('./node_modules/@playwright/test/package.json').version")
+          test "$version" = 1.63.0 || {
+            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.63.0-noble"
+            exit 1
+          }
+          node --input-type=module -e "import { chromium, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"
       # A known high or critical advisory in any web dependency fails the build, as it would ship in
       # the image — except one on scripts/audit.mjs's time-boxed allowlist (dev-tooling-only advisories
       # with no fix upstream, re-reviewed on expiry).
       - run: npm run audit
       - run: npm run lint
       - run: npm test
-      - run: npx playwright install --with-deps chromium webkit
       - run: node test/sync-policy-browser.mjs
       # Real-time player switching soaks run weekly/on demand in player-switch-soak.yml.
       - run: npm run test:e2e
