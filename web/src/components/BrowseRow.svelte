@@ -116,14 +116,14 @@
       const index = Number(slot?.dataset.cardIndex);
       if (Number.isInteger(index)) focusedIndex = index;
     };
-    // ResizeObserver supplies the initial width after layout, avoiding a synchronous full-page layout while rows
-    // mount. Ignore height-only notifications from cards filling their fixed slots.
+    // Observer delivery must not read layout-sensitive element geometry or synchronously mount cards. Record only
+    // the browser-supplied size, then update in the next frame after the current layout/observer cycle is complete.
     const resize = new ResizeObserver(([entry]) => {
       if (!entry) return;
-      const width = entry.borderBoxSize[0]?.inlineSize ?? scroller.clientWidth;
+      const width = entry.borderBoxSize[0]?.inlineSize ?? entry.contentRect.width;
       if (width === viewportWidth) return;
       viewportWidth = width;
-      update();
+      schedule();
     });
     resize.observe(scroller, { box: 'border-box' });
     scroller.addEventListener('scroll', schedule, { passive: true });
