@@ -39,7 +39,12 @@ interface NamingRun {
   idle?: () => void;
 }
 interface BackgroundJob {
-  refs: Map<string, Ref>;
+  /** Undefined until the first active idle turn when this job was supplied lazily. */
+  refs?: Map<string, Ref>;
+  source?: () => Ref[];
+  /** Keys claimed before a lazy source is enumerated must not re-enter its queue afterward. */
+  skipped: Set<string>;
+  owns?: (ref: Ref) => boolean;
   active: boolean;
   cancelled: boolean;
   scheduleIdle: (task: () => void) => () => void;
@@ -74,6 +79,8 @@ export interface BackgroundNamingOptions {
   /** Test seam for document visibility. */
   hidden?: () => boolean;
   onVisibilityChange?: (task: () => void) => () => void;
+  /** Exact cheap membership check used to promote a direct route before a lazy source is enumerated. */
+  owns?: (ref: { type: MediaType; id: number }) => boolean;
 }
 // Retained pages share pending work; weak ownership releases it with the paired library.
 const runs = new WeakMap<NamedLibrary, NamingRun>();
@@ -109,11 +116,14 @@ function stopBackground(run: NamingRun): void {
 }
 
 function usable(job: BackgroundJob): boolean {
-  return !job.cancelled && job.active && !job.hidden() && job.refs.size > 0;
+  return !job.cancelled && job.active && !job.hidden() && job.refs?.size !== 0;
 }
 
 function removeBackgroundRef(run: NamingRun, id: string): void {
-  for (const job of run.background) job.refs.delete(id);
+  for (const job of run.background) {
+    job.skipped.add(id);
+    job.refs?.delete(id);
+  }
 }
 
 function removeShelfRef(run: NamingRun, id: string): void {
@@ -123,6 +133,16 @@ function removeShelfRef(run: NamingRun, id: string): void {
 function nextBackground(run: NamingRun): Ref | undefined {
   for (const job of run.background) {
     if (!usable(job)) continue;
+    if (!job.refs) {
+      const refs = job.source?.() ?? [];
+      job.source = undefined;
+      job.refs = new Map(
+        refs.flatMap((ref) => {
+          const id = titleKey(ref);
+          return job.skipped.has(id) ? [] : [[id, ref] as const];
+        }),
+      );
+    }
     const ref = job.refs.values().next().value as Ref | undefined;
     if (ref) return ref;
   }
@@ -460,7 +480,9 @@ export function promoteLibraryTitle(
   const id = titleKey(ref);
   if (
     !run.pending.has(id) &&
-    ![...run.background].some((job) => job.refs.has(id)) &&
+    ![...run.background].some(
+      (job) => job.refs?.has(id) || (!job.refs && !job.skipped.has(id) && job.owns?.(ref)),
+    ) &&
     ![...run.shelves].some((job) => job.refs.has(id))
   )
     return;
@@ -482,14 +504,18 @@ export function promoteLibraryTitle(
  */
 export function nameLibraryHistoryTitles(
   session: NamedLibrary,
-  refs: Ref[],
+  refs: Ref[] | (() => Ref[]),
   key: string,
   options: BackgroundNamingOptions = {},
 ): BackgroundNaming {
   const run = namingRun(session, key);
   const lookup = options.lookup ?? fetchDetails;
   const job: BackgroundJob = {
-    refs: new Map(refs.map((ref) => [titleKey(ref), ref])),
+    ...(typeof refs === 'function'
+      ? { source: refs }
+      : { refs: new Map(refs.map((ref) => [titleKey(ref), ref])) }),
+    skipped: new Set(),
+    owns: options.owns,
     active: true,
     cancelled: false,
     scheduleIdle: options.scheduleIdle ?? browserIdle,
@@ -520,7 +546,7 @@ export function nameLibraryHistoryTitles(
     cancel() {
       if (job.cancelled) return;
       job.cancelled = true;
-      job.refs.clear();
+      job.refs?.clear();
       job.stopVisibility();
       run.background.delete(job);
       refresh();
