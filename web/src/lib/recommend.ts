@@ -381,6 +381,9 @@ interface KeptLead {
 }
 type LeadStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined;
 
+const leadScope = (identity: string | null | undefined, facet: MediaType | null, fresh: boolean) =>
+  `${identity ?? ''}\0${facet ?? 'all'}\0${fresh ? 'fresh' : 'all'}`;
+
 const backdropPath = (value: unknown): value is string =>
   typeof value === 'string' && value.length <= 256 && /^\/[A-Za-z0-9_./-]+$/.test(value);
 
@@ -469,6 +472,56 @@ export async function keepPersonalBackdrop(
   }
 }
 
+type PendingEnrichment = { path: string; copy: PersonalHeroCopy };
+// Detail can arrive before the encrypted replacement has made a lead record to enrich. Keep only the newest
+// bounded copy per exact library/facet until that replacement lands; a different lead invalidates it.
+const pendingEnrichments = new Map<string, PendingEnrichment>();
+// Replacement and enrichment mutate the same plaintext record. One queue closes the clear/save gap and makes their
+// invocation order deterministic; failed work never poisons the next mutation.
+const leadMutationTails = new Map<string, Promise<void>>();
+
+async function mutateLead(scope: string, mutation: () => Promise<void>): Promise<void> {
+  const before = leadMutationTails.get(scope) ?? Promise.resolve();
+  const running = before.catch(() => {}).then(mutation);
+  leadMutationTails.set(scope, running);
+  try {
+    await running;
+  } finally {
+    if (leadMutationTails.get(scope) === running) leadMutationTails.delete(scope);
+  }
+}
+
+const compatibleDetail = (
+  copy: Partial<PersonalHeroCopy> | null | undefined,
+  lead: PersonalHeroCopy | undefined,
+): Pick<PersonalHeroCopy, 'genres' | 'overview' | 'runtime'> => {
+  if (!copy || !lead || copy.type !== lead.type || copy.id !== lead.id) return {};
+  const genres = Array.isArray(copy.genres)
+    ? copy.genres
+        .map((genre) => boundedText(genre, 60))
+        .filter((genre): genre is string => !!genre)
+        .slice(0, 2)
+    : [];
+  const overview = boundedText(copy.overview, 1024);
+  const runtime =
+    Number.isInteger(copy.runtime) && copy.runtime! > 0 && copy.runtime! <= 1440
+      ? copy.runtime
+      : undefined;
+  return {
+    ...(genres.length ? { genres } : {}),
+    ...(overview ? { overview } : {}),
+    ...(runtime ? { runtime } : {}),
+  };
+};
+
+const withRichCopy = (
+  basic: PersonalHeroCopy | undefined,
+  ...copies: Array<Partial<PersonalHeroCopy> | null | undefined>
+): PersonalHeroCopy | undefined =>
+  basic
+    ? Object.assign({}, basic, ...copies.map((copy) => compatibleDetail(copy, basic)))
+    : undefined;
+
 /** Add detail copy without extending the ranking's display lifetime or changing which retained image it names. */
 export async function enrichPersonalBackdrop(
   identity: string | null | undefined,
@@ -479,30 +532,43 @@ export async function enrichPersonalBackdrop(
   now = Date.now(),
   storage: LeadStorage = globalThis.localStorage,
 ): Promise<void> {
-  try {
-    if (!identity || !backdropPath(title.backdropPath) || !storage) return;
-    const key = await leadKey(identity, facet, fresh);
-    const raw = key && storage.getItem(key);
-    if (!key || !raw) return;
-    const record = JSON.parse(raw) as Partial<KeptLead> | null;
-    const age = now - (record?.at ?? NaN);
-    if (
-      !record ||
-      !backdropPath(record.path) ||
-      record.path !== title.backdropPath ||
-      !(age >= 0 && age < KEPT_DISPLAY_MS)
-    )
-      return;
-    const copy = personalHeroCopy(title, detail);
-    if (!copy) return;
-    if (JSON.stringify(record.copy) === JSON.stringify(copy)) return;
-    storage.setItem(
-      key,
-      JSON.stringify({ at: record.at!, path: record.path, copy } satisfies KeptLead),
-    );
-  } catch {
-    // The hint is opportunistic; the encrypted ranking remains the source of truth.
-  }
+  if (!identity || !backdropPath(title.backdropPath) || !storage) return;
+  const copy = personalHeroCopy(title, detail);
+  if (!copy) return;
+  const scope = leadScope(identity, facet, fresh);
+  const pending = { path: title.backdropPath, copy };
+  pendingEnrichments.set(scope, pending);
+  await mutateLead(scope, async () => {
+    try {
+      const key = await leadKey(identity, facet, fresh);
+      const raw = key && storage.getItem(key);
+      if (!key) {
+        if (pendingEnrichments.get(scope) === pending) pendingEnrichments.delete(scope);
+        return;
+      }
+      if (!raw) return;
+      const record = JSON.parse(raw) as Partial<KeptLead> | null;
+      const age = now - (record?.at ?? NaN);
+      if (
+        !record ||
+        !backdropPath(record.path) ||
+        record.path !== title.backdropPath ||
+        !(age >= 0 && age < KEPT_DISPLAY_MS)
+      ) {
+        if (pendingEnrichments.get(scope) === pending) pendingEnrichments.delete(scope);
+        return;
+      }
+      const enriched = withRichCopy(copy, record.copy, copy);
+      if (JSON.stringify(record.copy) !== JSON.stringify(enriched))
+        storage.setItem(
+          key,
+          JSON.stringify({ at: record.at!, path: record.path, copy: enriched } satisfies KeptLead),
+        );
+      if (pendingEnrichments.get(scope) === pending) pendingEnrichments.delete(scope);
+    } catch {
+      // The hint is opportunistic; the encrypted ranking remains the source of truth.
+    }
+  });
 }
 
 async function clearPersonalBackdrop(
@@ -520,9 +586,8 @@ async function clearPersonalBackdrop(
   }
 }
 
-// A route can rebuild the same ranking while its previous encrypted keep is still in flight. Serialize those writes
-// in invocation order; a queued operation superseded before it starts is skipped, and a newer one always lands last.
-const replacementTails = new Map<string, Promise<void>>();
+// A route can rebuild the same ranking while its previous encrypted keep is still in flight. A queued replacement
+// superseded before it starts is skipped, and a newer one always lands last.
 const replacementGenerations = new Map<string, number>();
 let replacementGeneration = 0;
 
@@ -539,19 +604,31 @@ export async function replacePersonalBillboard(
   at = Date.now(),
   storage: LeadStorage = globalThis.localStorage,
 ): Promise<void> {
-  const queueKey = `${identity ?? ''}\0${facet ?? 'all'}\0${fresh ? 'fresh' : 'all'}`;
+  const queueKey = leadScope(identity, facet, fresh);
   const generation = ++replacementGeneration;
   replacementGenerations.set(queueKey, generation);
-  const before = replacementTails.get(queueKey) ?? Promise.resolve();
-  const replacement = before
-    .catch(() => {})
-    .then(async () => {
+  await mutateLead(queueKey, async () => {
+    try {
       if (replacementGenerations.get(queueKey) !== generation) return;
+      const lead = titles[0];
+      const basic = personalHeroCopy(lead);
+      let previous: Partial<KeptLead> | null = null;
+      if (identity && storage) {
+        const key = await leadKey(identity, facet, fresh);
+        const raw = key && storage.getItem(key);
+        if (raw) {
+          try {
+            previous = JSON.parse(raw) as Partial<KeptLead> | null;
+          } catch {
+            previous = null;
+          }
+        }
+      }
       if (identity && !(await clearPersonalBackdrop(identity, facet, fresh, storage)))
         throw new Error('the previous billboard lead could not be cleared');
       await save({ at, titles });
       if (identity) {
-        const lead = titles[0];
+        const pending = pendingEnrichments.get(queueKey);
         await keepPersonalBackdrop(
           identity,
           facet,
@@ -559,19 +636,15 @@ export async function replacePersonalBillboard(
           lead?.backdropPath,
           at,
           storage,
-          personalHeroCopy(lead),
+          withRichCopy(basic, previous?.copy, pending?.copy),
         );
+        pendingEnrichments.delete(queueKey);
       }
-    });
-  replacementTails.set(queueKey, replacement);
-  try {
-    await replacement;
-  } finally {
-    if (replacementTails.get(queueKey) === replacement) {
-      replacementTails.delete(queueKey);
-      replacementGenerations.delete(queueKey);
+    } finally {
+      if (replacementGenerations.get(queueKey) === generation)
+        replacementGenerations.delete(queueKey);
     }
-  }
+  });
 }
 
 const facetAt = (path: string): MediaType | null | undefined =>
