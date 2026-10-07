@@ -75,9 +75,22 @@ for (const [width, failed] of [
       });
       await page.goto(`${E2E_ORIGIN}/test/library.html?populated`);
       await expect.poll(() => requested.size).toBe(4);
+      const pending = page.locator('[data-pending-shelf]');
+      await expect(pending).toHaveCount(2);
+      await expect(pending.locator('.skeleton')).toHaveCount(12);
+      const pendingGeometry = await pending.locator('section.row').evaluateAll((rows) =>
+        Object.fromEntries(
+          rows.map((row) => [
+            row.getAttribute('aria-label'),
+            {
+              top: row.getBoundingClientRect().top + scrollY,
+              height: row.getBoundingClientRect().height,
+            },
+          ]),
+        ),
+      );
       gates.get(1001).release();
       gates.get(1005).release();
-      await expect(page.locator('section.row')).toHaveCount(0);
       gates.get(1002).release();
       gates.get(1004).release();
       if (!failed)
@@ -90,12 +103,29 @@ for (const [width, failed] of [
         ).toHaveCount(0);
       await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toBeAttached();
       await expect(page.locator('section.row .card').first()).toBeVisible();
-      const positions = () =>
-        page.locator('section.row').evaluateAll((rows) =>
-          rows.slice(0, 5).map((row) => ({
-            label: row.getAttribute('aria-label'),
+      await expect(pending).toHaveCount(0);
+      const settledLabels = failed ? ['Watchlist'] : ['Continue Watching', 'Watchlist'];
+      for (const label of settledLabels) {
+        const settled = await page
+          .getByRole('region', { name: label, exact: true })
+          .evaluate((row) => ({
             top: row.getBoundingClientRect().top + scrollY,
-          })),
+            height: row.getBoundingClientRect().height,
+          }));
+        expect(settled.height).toBeCloseTo(pendingGeometry[label].height, 1);
+        // A failed earlier shelf is deliberately removed; the later shelf then closes that reserved gap.
+        if (!failed) expect(settled.top).toBeCloseTo(pendingGeometry[label].top, 1);
+      }
+      const positions = () =>
+        page.locator('section.row').evaluateAll(
+          (rows, labels) =>
+            rows
+              .filter((row) => labels.includes(row.getAttribute('aria-label')))
+              .map((row) => ({
+                label: row.getAttribute('aria-label'),
+                top: row.getBoundingClientRect().top + scrollY,
+              })),
+          settledLabels,
         );
       const before = await positions();
       await page.waitForTimeout(250);
@@ -104,8 +134,8 @@ for (const [width, failed] of [
       // thirty-second of a pixel, sub-pixel rounding as the last shelf resolves, and comfortably
       // inside the 0.05 this test already calls settled. A shelf moving under a reader is what this
       // is about, and that is what both assertions now measure.
-      // Rows the browser adds below while idle (`Browse`) move nothing above them, so only the shelves already
-      // there are compared.
+      // Browse rows below use content-visibility and may report a temporary zero rect while skipped, so compare
+      // only the named shelves whose stability this test owns.
       const after = (await positions()).slice(0, before.length);
       expect(after.map((row) => row.label)).toEqual(before.map((row) => row.label));
       for (const [at, row] of after.entries()) expect(row.top).toBeCloseTo(before[at].top, 1);

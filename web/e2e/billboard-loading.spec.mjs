@@ -152,9 +152,17 @@ test('adopting the early personalized image preserves its painted geometry', asy
     await page.evaluate(() => window.dispatchEvent(new Event('fixture:mount')));
     const adopted = page.locator('.billboard img.backdrop.lit');
     await expect(adopted).toHaveAttribute('data-fixture-shell-node', 'true');
+    const mounted = await adopted.boundingBox();
+    expect(mounted).not.toBeNull();
+    for (const edge of ['x', 'y', 'width', 'height']) {
+      expect(mounted[edge], `adoption ${edge}`).toBeCloseTo(before[edge], 1);
+    }
     await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
     await expect(page.locator('.slide')).toHaveCount(2);
     await expect(page.locator('[data-den-early-copy]')).toHaveCount(0);
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
     const after = await adopted.boundingBox();
     expect(after).not.toBeNull();
     for (const edge of ['x', 'y', 'width', 'height']) {

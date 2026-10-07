@@ -73,6 +73,16 @@ test('hero adopts reel’s source and crop', async () => {
   });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.addInitScript(() => {
+      const animate = Element.prototype.animate;
+      window.detailBackdropAnimations = 0;
+      Element.prototype.animate = function (...args) {
+        if (this.matches?.('[data-detail-media] img.backdrop')) {
+          window.detailBackdropAnimations++;
+        }
+        return animate.apply(this, args);
+      };
+    });
     await mock(page, {
       sources: [{ kind: 'mp4', url: 'http://internal/m/s/chosen.webm', audio: true, height: 1080 }],
       crop: { letterboxed: true, aspect: 1.85, rect: [0, 0.0194, 1, 0.9611] },
@@ -86,6 +96,10 @@ test('hero adopts reel’s source and crop', async () => {
       timeout: 15000,
     });
     await expect(video).toHaveAttribute('style', /scale\(1\.04/);
+    const backdrop = page.locator('[data-detail-media] img.backdrop');
+    await expect(backdrop).toHaveClass(/\bshown\b/);
+    await backdrop.evaluate((image) => image.decode());
+    expect(await page.evaluate(() => window.detailBackdropAnimations)).toBe(0);
   } finally {
     await browser.close();
   }

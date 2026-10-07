@@ -6,6 +6,7 @@
   import Browse from './components/Browse.svelte';
   import DownloadsPage from './components/DownloadsPage.svelte';
   import DownloadPosterCard from './components/DownloadPosterCard.svelte';
+  import PendingPosterRow from './components/PendingPosterRow.svelte';
   import PosterCard from './components/PosterCard.svelte';
   import { downloads, inFlight } from './lib/downloadQueue.svelte';
   import { headline } from './lib/downloadStatus';
@@ -65,6 +66,7 @@
     personalSeedRows,
     type BackgroundNaming,
     type ShelfNaming,
+    type ShelfPlan,
   } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
@@ -148,6 +150,7 @@
 
   /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
   let shelvesReady = $state(false);
+  let shelfPlan = $state.raw<ShelfPlan | null>(null);
   let shelfNaming = $state.raw<ShelfNaming | null>(null);
   let historyNaming = $state.raw<BackgroundNaming | null>(null);
   const clock = browserClock();
@@ -207,29 +210,44 @@
       // Naming the library is still only the paired case: it reads the log itself.
       const key = discovered.tmdbKey;
       if (key && opened) {
+        // An initial run may be replaced before it becomes ready. Never let its plan paint for the replacement.
+        shelfPlan = null;
         const projection = session.libraryProjection();
         if (!projection) return;
         const raw = projection.library;
         const naming = nameLibraryShelfTitles(session, raw, projection.rows, key);
         shelfNaming = naming;
-        void naming.ready.then(() => {
-          if (disposed) return;
-          shelvesReady = true;
-          const reserved = new Set(naming.refs.map(titleKey));
-          // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
-          // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
-          background = nameLibraryHistoryTitles(
-            session,
-            () => untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
-            key,
-            {
-              owns: (ref) => !reserved.has(titleKey(ref)) && hasUntitledTitle(raw, ref),
-            },
-          );
-          historyNaming = background;
-          if (!active || route.page !== 'watchlist') background.pause();
+        shelfPlan = naming.initialPlan;
+        void naming.planned.then((plan) => {
+          if (!disposed) shelfPlan = plan;
         });
-      } else shelvesReady = true;
+        void naming.ready
+          .then(() => {
+            if (disposed) return;
+            shelvesReady = true;
+            const reserved = new Set(naming.refs.map(titleKey));
+            // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
+            // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
+            background = nameLibraryHistoryTitles(
+              session,
+              () => untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
+              key,
+              {
+                owns: (ref) => !reserved.has(titleKey(ref)) && hasUntitledTitle(raw, ref),
+              },
+            );
+            historyNaming = background;
+            if (!active || route.page !== 'watchlist') background.pause();
+          })
+          .catch((error) => {
+            if (disposed) return;
+            console.warn('den: Library shelves could not be named', error);
+            shelvesReady = true;
+          });
+      } else {
+        shelfPlan = null;
+        shelvesReady = true;
+      }
     });
     return () => {
       disposed = true;
@@ -823,9 +841,6 @@
         intent: 'warm',
       });
     });
-    // hls.js is a dynamic import, so the first trailer of a session pays for fetching and parsing it
-    // before it can play anything. Started here, it is usually resident by then.
-    if (!nativeHls()) void import('hls.js').catch(() => undefined);
   }
 
   // Every link to a title warms its trailer as the pointer goes down, before the click has even landed — one
@@ -1493,10 +1508,10 @@
       onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
-  {#if !shelvesReady}
+  {#if !shelvesReady && (!shelfPlan || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
-    {#if resume.length}
+    {#if shelvesReady && resume.length}
       <WindowedPosterRow
         heading="Continue Watching"
         items={resume}
@@ -1516,6 +1531,8 @@
           />
         {/snippet}
       </WindowedPosterRow>
+    {:else if !shelvesReady && !facet && shelfPlan?.continue}
+      <PendingPosterRow heading="Continue Watching" />
     {/if}
     {#if !facet && downloading.length}
       <WindowedPosterRow
@@ -1553,7 +1570,7 @@
         {/snippet}
       </WindowedPosterRow>
     {/if}
-    {#if saved.length}
+    {#if shelvesReady && saved.length}
       <WindowedPosterRow
         heading="Watchlist"
         items={saved}
@@ -1570,6 +1587,8 @@
           />
         {/snippet}
       </WindowedPosterRow>
+    {:else if !shelvesReady && !facet && shelfPlan?.watchlist}
+      <PendingPosterRow heading="Watchlist" />
     {/if}
     {#if !facet}
       <ServicesRow {services} pending={naming ? servicePicks.length : 0} onintent={primeService} />

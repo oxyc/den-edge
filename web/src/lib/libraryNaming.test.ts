@@ -213,6 +213,111 @@ it('publishes only the first viewport of each shelf, then admits the intended sh
   naming.cancel();
 });
 
+it('publishes an exact shelf plan before names and yields on both sides of their publication', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { addToWatchlist, blankTitle, updateProgress } = await import('./actions');
+  const continued = updateProgress(blankTitle({ type: 'movie', id: 101 }, 1), 0.5, 40, [
+    1,
+    0,
+    'test',
+  ]);
+  const saved = addToWatchlist(blankTitle({ type: 'movie', id: 202 }, 2), [2, 0, 'test']);
+  const rows = [continued, saved];
+  const state = session();
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  const releases: Array<() => void> = [];
+  const yieldToBrowser = vi.fn(() => new Promise<void>((resolve) => releases.push(resolve)));
+  const naming = nameLibraryShelfTitles(
+    state,
+    applyLog(emptyLibrary(), rows),
+    rows,
+    'key',
+    lookup,
+    yieldToBrowser,
+  );
+
+  await expect(naming.planned).resolves.toEqual({ continue: true, watchlist: true });
+  expect(yieldToBrowser).toHaveBeenCalledOnce();
+  expect(lookup).not.toHaveBeenCalled();
+  expect(state.displays).toEqual([]);
+
+  releases.shift()?.();
+  await vi.waitFor(() => expect(yieldToBrowser).toHaveBeenCalledTimes(2));
+  expect(lookup).toHaveBeenCalledTimes(2);
+  expect(state.displays).toHaveLength(2);
+  let ready = false;
+  void naming.ready.then(() => (ready = true));
+  await Promise.resolve();
+  expect(ready).toBe(false);
+
+  releases.shift()?.();
+  await naming.ready;
+  expect(ready).toBe(true);
+  naming.cancel();
+});
+
+it('exposes exact Watchlist presence synchronously before a Continue shape lookup', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { addToWatchlist, blankEpisode, blankTitle, updateEpisodeProgress } =
+    await import('./actions');
+  const continued = updateEpisodeProgress(blankEpisode({ type: 'tv', id: 111 }, 1, 1), 0.5, 40, [
+    1,
+    0,
+    'test',
+  ]);
+  const saved = addToWatchlist(blankTitle({ type: 'movie', id: 222 }, 2), [2, 0, 'test']);
+  const rows = [continued, saved];
+  const state = session();
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+    shape: wanted.type === 'tv' ? { counts: new Map([[1, 8]]) } : undefined,
+  }));
+  const naming = nameLibraryShelfTitles(
+    state,
+    applyLog(emptyLibrary(), rows),
+    rows,
+    'key',
+    lookup,
+    async () => {},
+  );
+
+  expect(naming.initialPlan).toEqual({ continue: false, watchlist: true });
+  expect(lookup).not.toHaveBeenCalled();
+  await expect(naming.planned).resolves.toEqual({ continue: true, watchlist: true });
+  await naming.ready;
+  naming.cancel();
+});
+
+it('does not publish the initial tranche when cancelled at the planned-shelf yield', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankTitle, updateProgress } = await import('./actions');
+  const rows = [updateProgress(blankTitle({ type: 'movie', id: 303 }, 1), 0.5, 40, [1, 0, 'test'])];
+  const state = session();
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  let release!: () => void;
+  const yieldToBrowser = vi.fn(() => new Promise<void>((resolve) => (release = resolve)));
+  const naming = nameLibraryShelfTitles(
+    state,
+    applyLog(emptyLibrary(), rows),
+    rows,
+    'key',
+    lookup,
+    yieldToBrowser,
+  );
+
+  await expect(naming.planned).resolves.toEqual({ continue: true, watchlist: false });
+  naming.cancel();
+  release();
+  await naming.ready;
+  expect(lookup).not.toHaveBeenCalled();
+  expect(state.displays).toEqual([]);
+  expect(yieldToBrowser).toHaveBeenCalledOnce();
+});
+
 it('reuses a session-owned Continue projection when forming shelf queues', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { blankTitle, updateProgress } = await import('./actions');
@@ -309,6 +414,7 @@ it('reuses a staged shape detail when watched history later admits its display',
       rows,
       'key',
       lookup,
+      async () => {},
     );
     await naming.ready;
     expect(state.displays).toEqual([]);

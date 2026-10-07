@@ -757,7 +757,8 @@
         canResolveTrailer = true;
         // A one-off animation rather than a standing `transition`, which kept the picture on a layer of its
         // own for good and shifted the antialiasing of what is drawn beside it.
-        if (!reduced) image.animate([{ opacity: 0 }, {}], { duration: 150, easing: 'ease-out' });
+        if (!reduced && placeholder)
+          image.animate([{ opacity: 0 }, {}], { duration: 150, easing: 'ease-out' });
       }}
       onerror={() => (canResolveTrailer = true)}
     />
