@@ -188,10 +188,12 @@
   bind:this={wrapper}
   class="row-window"
   class:gone={done && !pager.failed && visible.length === 0}
+  class:mobile-two-line-heading={row.mobileHeadingLines === 2}
 >
   <PosterRow
     heading={row.title}
     ariaLabel={row.ariaLabel}
+    mobileHeadingLines={row.mobileHeadingLines}
     headingLink={row.headingLink}
     aside={row.aside}
     active={rowNear}
@@ -242,6 +244,12 @@
   .row-window {
     content-visibility: auto;
     contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 127.2px);
+  }
+
+  @media (width <= 759px) {
+    .row-window.mobile-two-line-heading {
+      contain-intrinsic-block-size: auto calc(clamp(140px, 38vw, 190px) * 1.5 + 155.2px);
+    }
   }
 
   .gone {

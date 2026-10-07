@@ -15,6 +15,7 @@
   let {
     heading,
     ariaLabel,
+    mobileHeadingLines,
     headingLink,
     aside,
     active,
@@ -24,6 +25,8 @@
     heading: string;
     /** The region's full name when the compact visible heading omits its context. */
     ariaLabel?: string;
+    /** Reserve and clamp two heading lines on a narrow screen; desktop remains one line. */
+    mobileHeadingLines?: 2;
     headingLink?: { before: string; label: string; after: string; href: string };
     /** A quiet link beside the heading, to where the row goes on. */
     aside?: { label: string; href: string; ariaLabel?: string };
@@ -57,7 +60,7 @@
 
 <section class="row" aria-label={ariaLabel ?? heading} bind:this={section}>
   <div class="head">
-    <h2>
+    <h2 class:mobile-two-lines={mobileHeadingLines === 2}>
       {#if headingLink}
         {headingLink.before}<a class="heading-link" href={headingLink.href}>{headingLink.label}</a
         >{headingLink.after}
@@ -123,6 +126,17 @@
   .heading-link:focus-visible {
     text-decoration: underline;
     text-underline-offset: 4px;
+  }
+
+  @media (width <= 759px) {
+    h2.mobile-two-lines {
+      display: -webkit-box;
+      min-height: 56px;
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+    }
   }
 
   .track {
