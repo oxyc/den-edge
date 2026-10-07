@@ -1072,9 +1072,9 @@ export function personalRows(
   return [
     ...watched.map((seed) => ({
       ...row('byw', 'Because you watched ', '', seed),
-      title: 'More like this',
-      ariaLabel: `More like this because you watched ${seed.title}`,
-      headingLink: undefined,
+      title: `More like ${seed.title}`,
+      ariaLabel: `More like ${seed.title} because you watched it`,
+      headingLink: { before: 'More like ', label: seed.title, after: '', href: titleHref(seed) },
       aside: {
         label: 'Explore similar',
         href: searchHref('', { chips: [likeId(seed)] }),
