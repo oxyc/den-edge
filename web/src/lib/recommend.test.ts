@@ -491,6 +491,112 @@ describe('personal backdrop preload', () => {
     expect(JSON.parse([...values.values()][0]!).copy.overview).toBe('The retained overview.');
   });
 
+  it('retains rich same-lead copy when detail arrives before, during, or after replacement', async () => {
+    const lead = film(42, { title: 'Silo', year: 2023, backdropPath: '/silo.jpg' });
+    const detail = {
+      overview: 'In a ruined and toxic future, a community exists in a giant underground silo.',
+      runtime: 50,
+      genres: [{ name: 'Drama' }, { name: 'Sci-Fi & Fantasy' }],
+    };
+    const expected = personalHeroCopy(lead, detail);
+
+    for (const order of ['before-existing', 'before-absent', 'during', 'after'] as const) {
+      const { values, storage } = memory();
+      const identity = `library-${order}`;
+      const enrich = () =>
+        enrichPersonalBackdrop(identity, null, true, lead, detail, now + 1, storage);
+      let releaseSave = () => {};
+      let saveStarted = Promise.resolve();
+      let enterSave = () => {};
+      if (order === 'during') {
+        saveStarted = new Promise<void>((resolve) => (enterSave = resolve));
+      }
+      const replacement = () =>
+        replacePersonalBillboard(
+          identity,
+          null,
+          true,
+          [lead],
+          async () => {
+            if (order !== 'during') return;
+            enterSave();
+            await new Promise<void>((resolve) => (releaseSave = resolve));
+          },
+          now,
+          storage,
+        );
+
+      if (order === 'before-existing') {
+        await keepPersonalBackdrop(
+          identity,
+          null,
+          true,
+          lead.backdropPath,
+          now - 1,
+          storage,
+          personalHeroCopy(lead),
+        );
+        await enrich();
+        await replacement();
+      } else if (order === 'before-absent') {
+        await enrich();
+        await replacement();
+      } else if (order === 'during') {
+        const replacing = replacement();
+        await saveStarted;
+        const enriching = enrich();
+        releaseSave();
+        await Promise.all([replacing, enriching]);
+      } else {
+        await replacement();
+        await enrich();
+      }
+
+      expect(JSON.parse([...values.values()][0]!).copy).toEqual(expected);
+    }
+
+    const { values, storage } = memory();
+    await keepPersonalBackdrop(
+      'library-changed-lead',
+      null,
+      true,
+      lead.backdropPath,
+      now - 1,
+      storage,
+      expected,
+    );
+    await replacePersonalBillboard(
+      'library-changed-lead',
+      null,
+      true,
+      [{ ...film(43), backdropPath: lead.backdropPath }],
+      async () => {},
+      now,
+      storage,
+    );
+    expect(JSON.parse([...values.values()][0]!).copy).toEqual({
+      type: 'movie',
+      id: 43,
+      title: 'T43',
+    });
+
+    const other = film(44, { title: 'Another lead', backdropPath: lead.backdropPath });
+    await enrichPersonalBackdrop(
+      'library-changed-lead',
+      null,
+      true,
+      other,
+      detail,
+      now + 1,
+      storage,
+    );
+    expect(JSON.parse([...values.values()][0]!).copy).toEqual({
+      type: 'movie',
+      id: 43,
+      title: 'T43',
+    });
+  });
+
   it('rejects invalid copy and caps every retained text field', () => {
     expect(personalHeroCopy(film(1, { title: ' '.repeat(10) }))).toBeUndefined();
     const copy = personalHeroCopy(

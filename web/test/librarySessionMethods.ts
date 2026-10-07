@@ -15,6 +15,7 @@ interface FixtureSession {
   log?: { rows: () => Row[] } | null;
   displays: Title[];
   shapes: Map<string, Shape>;
+  publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>): void;
 }
 
 const projections = new WeakMap<
@@ -27,6 +28,29 @@ const projectors = new WeakMap<object, ContinueProjector>();
 export const fixtureLibrarySessionMethods = {
   /** Provider delivery is outside these lightweight layout/navigation fixtures. */
   foregroundReady(): void {},
+
+  publishLibraryMetadata(
+    this: FixtureSession,
+    titles: Title[],
+    shapes: ReadonlyArray<readonly [string, Shape]>,
+  ): void {
+    const known = new Set(this.displays.map((title) => `${title.type}:${title.id}`));
+    const added = titles.filter((title) => !known.has(`${title.type}:${title.id}`));
+    if (added.length) this.displays = [...this.displays, ...added];
+    if (shapes.length) this.shapes = new Map([...this.shapes, ...shapes]);
+  },
+
+  rememberTitle(this: FixtureSession, title: Title): void {
+    this.publishLibraryMetadata([title], []);
+  },
+
+  displayTitle(this: FixtureSession, ref: Pick<Title, 'type' | 'id'>): Title | undefined {
+    return this.displays.find((title) => title.type === ref.type && title.id === ref.id);
+  },
+
+  displayTitles(this: FixtureSession): ReadonlyMap<string, Title> {
+    return new Map(this.displays.map((title) => [`${title.type}:${title.id}`, title]));
+  },
 
   libraryProjection(this: FixtureSession): { rows: Row[]; library: Library } | null {
     const log = this.log;

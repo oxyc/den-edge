@@ -73,6 +73,26 @@ it('publishes names in batches, not one Home update per title', async () => {
   expect(assignments).toBe(1);
 });
 
+it('hands sessions the exact changed metadata keys as one publication', async () => {
+  const state = {
+    ...session(),
+    publishLibraryMetadata(titles: Title[], shapes: ReadonlyArray<readonly [string, Shape]>) {
+      state.displays = [...state.displays, ...titles];
+      state.shapes = new Map([...state.shapes, ...shapes]);
+    },
+  };
+  const publish = vi.spyOn(state, 'publishLibraryMetadata');
+  const series = { type: 'tv' as const, id: 7 };
+  const shape = { counts: new Map([[1, 8]]) };
+
+  await nameLibraryTitles(state, [series], 'key', async () => ({
+    title: { ...series, title: 'Seven' },
+    shape,
+  }));
+
+  expect(publish).toHaveBeenCalledWith([{ ...series, title: 'Seven' }], [['tv:7', shape]]);
+});
+
 it('keeps six shelf-critical lookups in flight', async () => {
   const state = session();
   const refs = Array.from({ length: 7 }, (_, id) => ({ type: 'movie' as const, id: id + 1 }));

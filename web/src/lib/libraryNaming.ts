@@ -5,6 +5,11 @@ import { fetchDetails, type Details } from './tmdb';
 interface NamedLibrary {
   displays: Title[];
   shapes: Map<string, Shape>;
+  /** Sessions use this to publish one keyed metadata batch without making every consumer diff snapshots. */
+  publishLibraryMetadata?: (
+    titles: Title[],
+    shapes: ReadonlyArray<readonly [string, Shape]>,
+  ) => void;
 }
 type Ref = { type: MediaType; id: number };
 interface NamingRun {
@@ -140,13 +145,16 @@ function publish(session: NamedLibrary, run: NamingRun): void {
   // A user action may have remembered a title while its metadata was loading.
   const known = knownTitles(session, run);
   const titles = found.filter(([id]) => !known.has(id)).map(([, details]) => details.title);
+  const shapes = found.flatMap(([id, { shape }]) => (shape ? [[id, shape] as const] : []));
+  if (session.publishLibraryMetadata) session.publishLibraryMetadata(titles, shapes);
+  else {
+    if (titles.length) session.displays = [...session.displays, ...titles];
+    if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
+  }
   if (titles.length) {
-    session.displays = [...session.displays, ...titles];
     run.displays = session.displays;
     for (const title of titles) known.add(titleKey(title));
   }
-  const shapes = found.flatMap(([id, { shape }]) => (shape ? [[id, shape] as const] : []));
-  if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
 }
 
 function namingRun(session: NamedLibrary, key: string): NamingRun {
