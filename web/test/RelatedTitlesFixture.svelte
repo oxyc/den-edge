@@ -1,5 +1,6 @@
 <script lang="ts">
   import RelatedTitles from '../src/components/RelatedTitles.svelte';
+  import RoutePage from '../src/components/RoutePage.svelte';
   import type { TitleDetail } from '../src/lib/detail';
   import type { Title } from '../src/lib/library';
   import { NO_FACTS } from '../src/lib/titleFacts';
@@ -27,13 +28,25 @@
   // Known from the start with `?atlas=`, as on a title page opened with atlas already found; otherwise the page learns
   // where atlas is after the rows have shown, as a title page does when its answer is late.
   let atlas = $state<string | null>(new URLSearchParams(location.search).get('atlas'));
+  let active = $state(new URLSearchParams(location.search).get('active') !== '0');
+  (
+    window as unknown as {
+      relatedFixture: { setActive: (value: boolean) => void; setAtlas: (url: string) => void };
+    }
+  ).relatedFixture = {
+    setActive: (value) => (active = value),
+    setAtlas: (url) => (atlas = url),
+  };
+  // Kept for the original fixture callers.
   (window as unknown as { setAtlas: (url: string) => void }).setAtlas = (url) => (atlas = url);
 </script>
 
-<main>
-  <div class="above"></div>
-  <RelatedTitles {detail} tmdbKey="" {atlas} studios={[]} facts={NO_FACTS} active={true} {shown} />
-</main>
+<RoutePage {active}>
+  <main>
+    <div class="above"></div>
+    <RelatedTitles {detail} tmdbKey="" {atlas} studios={[]} facts={NO_FACTS} {active} {shown} />
+  </main>
+</RoutePage>
 
 <style>
   main {

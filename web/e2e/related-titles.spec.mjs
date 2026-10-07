@@ -29,6 +29,62 @@ test('a title’s rows below the fold load only as they near the screen', async 
   await page.close();
 });
 
+test('an atlas-late rebuild does not load untouched related rows', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  const asked = [];
+  let tmdbAsked = 0;
+  await routeTmdb(page, (r) => {
+    tmdbAsked++;
+    return r.fulfill({ json: { page: 1, results: [], total_pages: 1 } });
+  });
+  await page.route('**/atlas-late/**', (r) => {
+    const path = new URL(r.request().url()).pathname;
+    asked.push(path);
+    if (path.includes('/franchise/')) return r.fulfill({ json: {} });
+    if (path.includes('/versions/'))
+      return r.fulfill({ json: { seed: { type: 'movie', id: 1 }, versions: [], total: 0 } });
+    if (path.includes('/similar/')) return r.fulfill({ json: { ids: [], mixed: [] } });
+    return r.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html`);
+
+  // Nothing has approached Related, so its known rows are still only headings and skeleton geometry.
+  await page.evaluate(() => window.relatedFixture.setAtlas('/atlas-late'));
+  await expect.poll(() => asked.length).toBe(2);
+  await page.waitForTimeout(200);
+  expect(asked.sort()).toEqual([
+    '/atlas-late/index/franchise/movie/1.json',
+    '/atlas-late/index/versions/movie/1.json',
+  ]);
+  expect(tmdbAsked).toBe(0);
+  await page.close();
+});
+
+test('an inactive retained title starts no related discovery', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  let asked = 0;
+  await page.route('**/atlas-off/**', (r) => {
+    asked++;
+    const path = new URL(r.request().url()).pathname;
+    return path.includes('/versions/')
+      ? r.fulfill({ json: { seed: { type: 'movie', id: 1 }, versions: [], total: 0 } })
+      : r.fulfill({ json: {} });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-off&active=0`);
+
+  await page.waitForTimeout(1200);
+  expect(asked).toBe(0);
+  await page.evaluate(() => window.relatedFixture.setActive(true));
+  await expect.poll(() => asked).toBe(2);
+  await page.evaluate(() => window.relatedFixture.setActive(false));
+  await page.evaluate(() => window.relatedFixture.setActive(true));
+  await page.waitForTimeout(300);
+  expect(asked).toBe(2);
+  await page.close();
+});
+
 test('a title’s rows rebuilt for a late atlas keep the page where the viewer scrolled it', async ({
   browser,
 }) => {
@@ -76,6 +132,58 @@ test('a title’s rows rebuilt for a late atlas keep the page where the viewer s
   await expect(row.getByRole('link', { name: /^Similar film 1 / })).toBeVisible();
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => scrollY)).toBe(bottom);
+  await page.close();
+});
+
+test('a stale related-row generation cannot publish over the current atlas', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosters(page);
+  await routeTmdb(page, (r) => r.fulfill({ json: { page: 1, results: [], total_pages: 1 } }));
+  await page.route('**/metadata/title/query', (r) => r.fulfill({ status: 404, json: {} }));
+  let releaseA;
+  let sawA;
+  const atlasAGate = new Promise((resolve) => (releaseA = resolve));
+  const atlasAStarted = new Promise((resolve) => (sawA = resolve));
+  const answer = (name, id) => ({
+    franchise: { id: name.toLowerCase(), name },
+    members: [
+      { type: 'movie', id: 1, title: 'The Seed', posterPath: '/seed.jpg' },
+      { type: 'movie', id, title: `${name} member`, posterPath: `/${id}.jpg` },
+    ],
+  });
+  await page.route('**/atlas-a/**', async (r) => {
+    const path = new URL(r.request().url()).pathname;
+    if (path.includes('/franchise/')) {
+      sawA();
+      await atlasAGate;
+      return r.fulfill({ json: answer('Atlas A', 10) });
+    }
+    if (path.includes('/versions/'))
+      return r.fulfill({ json: { seed: { type: 'movie', id: 1 }, versions: [], total: 0 } });
+    if (path.includes('/similar/')) return r.fulfill({ json: { ids: [], mixed: [] } });
+    return r.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+  });
+  await page.route('**/atlas-b/**', (r) => {
+    const path = new URL(r.request().url()).pathname;
+    if (path.includes('/franchise/')) return r.fulfill({ json: answer('Atlas B', 20) });
+    if (path.includes('/versions/'))
+      return r.fulfill({ json: { seed: { type: 'movie', id: 1 }, versions: [], total: 0 } });
+    if (path.includes('/similar/')) return r.fulfill({ json: { ids: [], mixed: [] } });
+    return r.fulfill({ json: { perSeed: [], pooled: [], pooledMixed: [] } });
+  });
+  await page.goto(`${E2E_ORIGIN}/test/related-titles.html?atlas=/atlas-a`);
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await atlasAStarted;
+
+  await page.evaluate(() => window.relatedFixture.setAtlas('/atlas-b'));
+  await expect(page.getByRole('region', { name: 'Atlas B' })).toBeAttached();
+  releaseA();
+  await page.waitForTimeout(200);
+  await expect(page.getByRole('region', { name: 'Atlas B' })).toBeAttached();
+  await expect(page.getByRole('region', { name: 'Atlas A' })).toHaveCount(0);
   await page.close();
 });
 

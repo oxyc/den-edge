@@ -97,8 +97,10 @@
     });
   }
   $effect(() => {
-    const [addon, id, table, s, e] = [scout, imdb, routes, season, episode];
+    const [addon, id, table, s, e, visible] = [scout, imdb, routes, season, episode, active];
     void retry;
+    // A Detail first created in the retained history stack must not start its source request before it is shown.
+    if (!visible) return;
     sources = undefined;
     answer = undefined;
     if (!addon || !id) return;
