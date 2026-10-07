@@ -37,6 +37,9 @@
   let windowStart = $state(0);
   let windowEnd = $state(0);
   let focusedIndex = $state<number | null>(null);
+  // Reading the track in an update frame can flush layout after another row mounted its cards. Scroll events are
+  // already delivered with the browser's position, so remember it there and keep it across effect reactivation.
+  let cachedScrollLeft = 0;
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
   onDestroy(() => clearTimeout(releaseTimer));
 
@@ -96,9 +99,10 @@
       if (!viewportWidth) return;
       const window = cardWindow(
         visible.length,
-        scroller.scrollLeft,
+        cachedScrollLeft,
         viewportWidth,
-        posterCardWidth(innerWidth),
+        // The negative-gutter track spans the viewport, so this matches PosterRow's `38vw` clamp without a read.
+        posterCardWidth(viewportWidth),
         14,
       );
       windowStart = window.start;
@@ -110,6 +114,10 @@
           frame = undefined;
           update();
         });
+    };
+    const scroll = () => {
+      cachedScrollLeft = scroller.scrollLeft;
+      schedule();
     };
     const press = (event: PointerEvent) => {
       const slot = (event.target as Element).closest<HTMLElement>('[data-card-index]');
@@ -126,10 +134,10 @@
       schedule();
     });
     resize.observe(scroller, { box: 'border-box' });
-    scroller.addEventListener('scroll', schedule, { passive: true });
+    scroller.addEventListener('scroll', scroll, { passive: true });
     scroller.addEventListener('pointerdown', press, { passive: true });
     return () => {
-      scroller.removeEventListener('scroll', schedule);
+      scroller.removeEventListener('scroll', scroll);
       scroller.removeEventListener('pointerdown', press);
       resize.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);

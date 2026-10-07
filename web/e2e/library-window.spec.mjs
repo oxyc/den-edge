@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { recordFrameGeometryReads } from './frame-geometry-reads.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
 test('large fixed library shelves mount a bounded card window', async ({ page }) => {
+  await recordFrameGeometryReads(page);
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   await routeTmdb(page, (route) => {
@@ -46,6 +48,7 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
     .evaluate((node) => node.focus({ preventScroll: true }));
   await expect(row.locator('[data-card-index="100"] .card')).toBeFocused();
 
+  await page.evaluate(() => window.takeFrameGeometryReads());
   await row.locator('.track').evaluate((node) => {
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
@@ -53,4 +56,5 @@ test('large fixed library shelves mount a bounded card window', async ({ page })
   await expect(row.locator('[data-card-index="200"] .card')).toHaveCount(1);
   await expect(row.locator('[data-card-index="0"] .card')).toHaveCount(0);
   expect(await row.locator('.card').count()).toBeLessThan(20);
+  expect(await page.evaluate(() => window.takeFrameGeometryReads())).toEqual([]);
 });

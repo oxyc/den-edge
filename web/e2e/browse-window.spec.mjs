@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
+import { recordFrameGeometryReads } from './frame-geometry-reads.mjs';
 import { guardNetwork } from './network.mjs';
 
 test('a retained hidden browse page owns no viewport observers or idle expansion', async ({
@@ -48,6 +49,7 @@ test('large rows keep every title reachable while mounting a bounded card window
   browser,
 }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await recordFrameGeometryReads(page);
   await guardNetwork(page);
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
@@ -72,6 +74,7 @@ test('large rows keep every title reachable while mounting a bounded card window
   expect(initial.cards).toBeLessThan(20);
   expect(initial.nodes).toBeLessThan(800);
 
+  await page.evaluate(() => window.takeFrameGeometryReads());
   await track.evaluate((node) => {
     node.scrollLeft = node.scrollWidth;
     node.dispatchEvent(new Event('scroll'));
@@ -79,6 +82,8 @@ test('large rows keep every title reachable while mounting a bounded card window
   await expect(row.locator('[data-card-index="199"] .card')).toHaveCount(1);
   await expect(row.locator('[data-card-index="0"] .card')).toHaveCount(0);
   expect(await row.locator('.card').count()).toBeLessThan(20);
+  expect(await page.evaluate(() => window.takeFrameGeometryReads())).toEqual([]);
+  const savedScrollLeft = await track.evaluate((node) => node.scrollLeft);
 
   // A keyboard can land on any lightweight proxy. It becomes the real card without moving the row first.
   await row
@@ -92,7 +97,10 @@ test('large rows keep every title reachable while mounting a bounded card window
   expect(await row.locator('.card').count()).toBeLessThanOrEqual(1);
   await page.evaluate(() => window.fixture.setActive(true));
   await expect(row.locator('[data-card-index="100"] .card')).toBeFocused();
+  await expect.poll(() => track.evaluate((node) => node.scrollLeft)).toBe(savedScrollLeft);
+  await expect(row.locator('[data-card-index="199"] .card')).toHaveCount(1);
   expect(await row.locator('.card').count()).toBeLessThan(20);
+  expect(await page.evaluate(() => window.takeFrameGeometryReads())).toEqual([]);
 
   await page.close();
 });
