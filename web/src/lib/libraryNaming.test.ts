@@ -213,6 +213,37 @@ it('publishes only the first viewport of each shelf, then admits the intended sh
   naming.cancel();
 });
 
+it('does not let already-published titles hide an unnamed tail from the next intent tranche', async () => {
+  const { applyLog, emptyLibrary } = await import('./library');
+  const { blankTitle, updateProgress } = await import('./actions');
+  const rows = Array.from({ length: 17 }, (_, index) =>
+    updateProgress(blankTitle({ type: 'movie', id: 100 + index }, index + 1), 0.5, 40, [
+      index + 1,
+      0,
+      'test',
+    ]),
+  );
+  const state = session();
+  // Everything except the oldest tail already has display metadata, as the large-window fixture does.
+  state.displays = rows.slice(1).map(({ title: wanted }) => ({
+    type: wanted.type,
+    id: wanted.id,
+    title: `#${wanted.id}`,
+  }));
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  const naming = nameLibraryShelfTitles(state, applyLog(emptyLibrary(), rows), rows, 'key', lookup);
+
+  await naming.ready;
+  expect(lookup).not.toHaveBeenCalled();
+  await naming.admit('continue');
+  expect(lookup).toHaveBeenCalledOnce();
+  expect(lookup).toHaveBeenCalledWith({ type: 'movie', id: 100 }, 'key');
+  expect(state.displays.map(({ id }) => id)).toContain(100);
+  naming.cancel();
+});
+
 it('publishes every series shape before shelves are ready while keeping off-window names dormant', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { blankEpisode, markEpisode } = await import('./actions');

@@ -378,10 +378,13 @@ export function nameLibraryShelfTitles(
       ...queues.watchlist.slice(0, INITIAL_SHELF_TITLES),
     ]);
     const initialKeys = new Set(initial.map(titleKey));
+    const known = knownTitles(session, run);
     job.refs = new Map(
       visibleRefs.flatMap((ref) => {
         const id = titleKey(ref);
-        return initialKeys.has(id) || run.admitted.has(id) ? [] : [[id, ref] as const];
+        return initialKeys.has(id) || run.admitted.has(id) || known.has(id)
+          ? []
+          : [[id, ref] as const];
       }),
     );
     await nameLibraryTitles(session, initial, key, lookup);
