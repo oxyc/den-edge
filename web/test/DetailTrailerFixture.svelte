@@ -3,6 +3,7 @@
   import Detail from '../src/components/Detail.svelte';
   import '../src/app.css';
   const noop = () => {};
+  const ref = { type: 'movie' as const, id: 42 };
   const browserPlay = new URLSearchParams(location.search).has('browser-play');
   let active = $state(true);
   // What SessionServices.configure() would publish for `reel`/`routes`: a restored `services.v1`
@@ -10,6 +11,16 @@
   // second publish mid-page, the way a cold route's discovery race does (oxyc/den-edge#281).
   let reel = $state('/reel/fixture');
   let routes = $state({ reel: [{ url: location.origin }] });
+  let settingsRevision = $state(0);
+  const detailPrefs = $derived.by(() => {
+    void settingsRevision;
+    return {
+      region: 'US',
+      autoplay: true,
+      ratingSources: ['imdb', 'tmdb', 'rottenTomatoes', 'metacritic'],
+      warningCategories: [],
+    };
+  });
   onMount(() => {
     const change = (event: Event) => {
       active = (event as CustomEvent<boolean>).detail;
@@ -19,11 +30,14 @@
       reel = detail.base;
       routes = { reel: [{ url: location.origin }] };
     };
+    const refreshSettings = () => settingsRevision++;
     document.addEventListener('fixture:active', change);
     document.addEventListener('fixture:reel', rediscover);
+    document.addEventListener('fixture:settings', refreshSettings);
     return () => {
       document.removeEventListener('fixture:active', change);
       document.removeEventListener('fixture:reel', rediscover);
+      document.removeEventListener('fixture:settings', refreshSettings);
     };
   });
 </script>
@@ -32,10 +46,14 @@
   <div data-route-page data-active={active} hidden={!active} style="display:flow-root">
     <Detail
       {active}
-      ref={{ type: 'movie', id: 42 }}
+      {ref}
       tmdbKey="fixture-key"
       {reel}
       {routes}
+      region={detailPrefs.region}
+      autoplay={detailPrefs.autoplay}
+      ratingSources={detailPrefs.ratingSources}
+      warningCategories={detailPrefs.warningCategories}
       row={undefined}
       episodes={new Map()}
       busy={false}
