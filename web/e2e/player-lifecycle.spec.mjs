@@ -14,6 +14,35 @@ const session = {
   audioTracks: [],
 };
 
+async function trackIntervals(page, mockVisibility = false) {
+  await page.addInitScript((replaceVisibility) => {
+    const intervals = new Map();
+    const set = window.setInterval.bind(window);
+    const clear = window.clearInterval.bind(window);
+    window.setInterval = (callback, delay, ...args) => {
+      const handle = set(callback, delay, ...args);
+      intervals.set(handle, delay);
+      return handle;
+    };
+    window.clearInterval = (handle) => {
+      intervals.delete(handle);
+      clear(handle);
+    };
+    window.playerFixtureIntervals = intervals;
+    if (replaceVisibility) {
+      let visibility = 'visible';
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => visibility,
+      });
+      window.setPlayerFixtureVisibility = (next) => {
+        visibility = next;
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
+    }
+  }, mockVisibility);
+}
+
 async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
@@ -41,13 +70,14 @@ async function mockPlayer(page, { onSession, onSkip, releases = [] } = {}) {
   });
 }
 
-test('playback progress clears startup when requestVideoFrameCallback never calls back', async () => {
+test('playback progress clears startup and leaves no hls.js head poll behind', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ['--autoplay-policy=no-user-gesture-required'],
   });
   try {
     const page = await browser.newPage();
+    await trackIntervals(page);
     await page.addInitScript(() => {
       HTMLVideoElement.prototype.requestVideoFrameCallback = () => 1;
       HTMLVideoElement.prototype.cancelVideoFrameCallback = () => undefined;
@@ -61,6 +91,55 @@ test('playback progress clears startup when requestVideoFrameCallback never call
     );
 
     await expect(page.locator('.startup')).toHaveCount(0);
+    expect(
+      await page.evaluate(() =>
+        [...window.playerFixtureIntervals.values()].filter((delay) => delay === 250),
+      ),
+    ).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('native polling sleeps with a paused or hidden player', async () => {
+  const browser = await webkit.launch();
+  try {
+    const page = await browser.newPage();
+    await trackIntervals(page, true);
+    await mockPlayer(page);
+    await page.goto(`${ORIGIN}/test/player.html`);
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
+      undefined,
+      { timeout: 30_000 },
+    );
+    const timers = () =>
+      page.evaluate(() =>
+        [...window.playerFixtureIntervals.values()].filter(
+          (delay) => delay === 250 || delay === 500,
+        ),
+      );
+    await expect.poll(timers).toContain(250);
+
+    expect(
+      await page.locator('.player video').evaluate((video) => {
+        video.dispatchEvent(new Event('waiting'));
+        return [...window.playerFixtureIntervals.values()];
+      }),
+    ).toContain(500);
+    expect(
+      await page.evaluate(() => {
+        window.setPlayerFixtureVisibility('hidden');
+        return [...window.playerFixtureIntervals.values()].filter(
+          (delay) => delay === 250 || delay === 500,
+        );
+      }),
+    ).toEqual([]);
+
+    await page.evaluate(() => window.setPlayerFixtureVisibility('visible'));
+    await expect.poll(timers).toContain(250);
+    await page.locator('.player video').evaluate((video) => video.pause());
+    await expect.poll(timers).toEqual([]);
   } finally {
     await browser.close();
   }

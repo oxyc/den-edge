@@ -964,6 +964,7 @@
   $effect(() => {
     const [current, element] = [session, video];
     if (!current || current.castOrigin || !element) return;
+    const playsNatively = nativeHls(element);
     // A browser that can't decode what it was sent doesn't always say so: Safari strikes out its play button and
     // fires nothing. Given no source it can use, or trying to play with no picture yet, after a while is that — a
     // while with nothing arriving, since a slow link shows no picture either but keeps delivering (`stuckWatch`).
@@ -1078,9 +1079,12 @@
       if (session === current) stallSince = undefined;
     };
     const onStallWaiting = () => {
-      if (!played || element.seeking) return;
+      // A background tab and a deliberately paused player are waited on by nobody. In particular, do not leave the
+      // 500 ms progress clock running after WebKit reports `waiting` while it suspends hidden media.
+      if (!played || element.paused || element.seeking || document.visibilityState === 'hidden')
+        return;
       stalling = true;
-      if (stallSince === undefined && document.visibilityState === 'visible') {
+      if (stallSince === undefined) {
         stallCount += 1;
         stallSince = performance.now();
       }
@@ -1095,29 +1099,71 @@
       stallTimer = undefined;
       stallProgress = undefined;
     };
-    element.addEventListener('waiting', onStallWaiting);
-    element.addEventListener('playing', onStallResume);
-    // A paused or hidden player is waited on by no one: what it sits through then is not counted as stalling.
-    const stopCounting = () => {
-      if (element.paused || document.visibilityState === 'hidden') endStall();
+    // WebKit can suspend without a matching media event. Clear both stall clocks on the way out; on the way back,
+    // restart from what the element says now rather than retaining a hidden-page `stalling` bit that prevents the
+    // native head watch from observing the stall again.
+    let headAt = element.currentTime;
+    let headMovedAt = performance.now();
+    let headWatch: ReturnType<typeof setInterval> | undefined;
+    const stopHeadWatch = () => {
+      clearInterval(headWatch);
+      headWatch = undefined;
     };
+    const startHeadWatch = () => {
+      if (
+        !playsNatively ||
+        headWatch !== undefined ||
+        element.paused ||
+        element.seeking ||
+        element.ended ||
+        document.visibilityState === 'hidden'
+      )
+        return;
+      headAt = element.currentTime;
+      headMovedAt = performance.now();
+      headWatch = setInterval(() => {
+        const now = performance.now();
+        const moved = Math.abs(element.currentTime - headAt) > HEAD_MOVED_SECS;
+        if (moved) {
+          headAt = element.currentTime;
+          headMovedAt = now;
+          if (stalling) onStallResume();
+          return;
+        }
+        if (!stalling && now - headMovedAt >= HEAD_STILL_MS) onStallWaiting();
+      }, 250);
+    };
+    const stopCounting = () => {
+      if (
+        element.paused ||
+        element.seeking ||
+        element.ended ||
+        document.visibilityState === 'hidden'
+      ) {
+        onStallResume();
+        stopHeadWatch();
+        return;
+      }
+      headAt = element.currentTime;
+      headMovedAt = performance.now();
+      startHeadWatch();
+      if (played && element.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) onStallWaiting();
+    };
+    const onPlaying = () => {
+      onStallResume();
+      startHeadWatch();
+    };
+    element.addEventListener('waiting', onStallWaiting);
+    element.addEventListener('playing', onPlaying);
     element.addEventListener('pause', stopCounting);
+    element.addEventListener('seeking', stopCounting);
+    element.addEventListener('seeked', stopCounting);
+    element.addEventListener('ended', stopCounting);
     document.addEventListener('visibilitychange', stopCounting);
     // WebKit's own player can stop with nothing to show and fire no `waiting`, and resume without `playing`: the play
     // head standing still while nothing paused, sought or ended it is a stall all the same, and moving again ends one.
-    let headAt = element.currentTime;
-    let headMovedAt = performance.now();
-    const headWatch = setInterval(() => {
-      const now = performance.now();
-      const moved = Math.abs(element.currentTime - headAt) > HEAD_MOVED_SECS;
-      if (moved || element.paused || element.seeking || element.ended) {
-        headAt = element.currentTime;
-        headMovedAt = now;
-        if (stalling && moved) onStallResume();
-        return;
-      }
-      if (!stalling && now - headMovedAt >= HEAD_STILL_MS) onStallWaiting();
-    }, 250);
+    // hls.js already supplies `waiting`/`playing` and fragment progress; polling it four times a second adds no
+    // evidence. Keep the fallback strictly on the native path while it is actually playing and visible.
     // The real first frame (den-edge#234's step 0 and the owner's own correction: not `canplay`, which iOS
     // native HLS can fire tens of seconds late). `requestVideoFrameCallback` fires once a frame has actually
     // been presented; a browser without it (older Safari) falls back to `loadeddata`, as this did before.
@@ -1145,7 +1191,7 @@
       const timing = startupTimings.get(current);
       if (timing) {
         const firstFrameAt = Date.now();
-        const engine = nativeHls(element) ? 'native' : 'hls.js';
+        const engine = playsNatively ? 'native' : 'hls.js';
         const subtitleIndex = current.subtitles?.findIndex((s) => s.language === subtitleChoice);
         sendStartupReport({
           sessionMs: Math.round(timing.answeredAt - timing.askedAt),
@@ -1211,20 +1257,23 @@
       unsubscribe();
       clearInterval(watching);
       endStall();
-      clearInterval(headWatch);
+      stopHeadWatch();
       clearInterval(stallTimer);
       stallTimer = undefined;
       stalling = false;
       stallProgress = undefined;
       element.removeEventListener('waiting', onStallWaiting);
-      element.removeEventListener('playing', onStallResume);
+      element.removeEventListener('playing', onPlaying);
       element.removeEventListener('pause', stopCounting);
+      element.removeEventListener('seeking', stopCounting);
+      element.removeEventListener('seeked', stopCounting);
+      element.removeEventListener('ended', stopCounting);
       document.removeEventListener('visibilitychange', stopCounting);
       connection.dispose();
       if (link === connection) link = undefined;
       reconnecting = false;
     };
-    if (nativeHls(element)) {
+    if (playsNatively) {
       element.src = current.playlist;
       const mounted = element.src;
       watcher = watchPlayback({ video: element, reportUrl });
