@@ -739,7 +739,7 @@ mod tests {
         let marker = "<script data-den-early-hero>";
         let start = html.find(marker).expect("the early hero script") + marker.len();
         let end = html[start..].find("</script>").expect("the early hero script's end") + start;
-        let digest = sha2::Sha256::digest(html[start..end].as_bytes());
+        let digest = sha2::Sha256::digest(&html.as_bytes()[start..end]);
         assert_eq!(digest.as_slice(), super::EARLY_HERO_SHA256);
         assert!(super::csp(&[], None).contains(super::EARLY_HERO_SCRIPT));
     }
