@@ -75,9 +75,6 @@ for (const [width, failed] of [
       });
       await page.goto(`${E2E_ORIGIN}/test/library.html?populated`);
       await expect.poll(() => requested.size).toBe(4);
-      expect(requested.has(1003), 'older watched history should wait for visible shelves').toBe(
-        false,
-      );
       gates.get(1001).release();
       gates.get(1005).release();
       await expect(page.locator('section.row')).toHaveCount(0);
@@ -93,7 +90,6 @@ for (const [width, failed] of [
         ).toHaveCount(0);
       await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toBeAttached();
       await expect(page.locator('section.row .card').first()).toBeVisible();
-      await expect.poll(() => requested.has(1003)).toBe(true);
       const positions = () =>
         page.locator('section.row').evaluateAll((rows) =>
           rows.slice(0, 5).map((row) => ({
@@ -102,7 +98,6 @@ for (const [width, failed] of [
           })),
         );
       const before = await positions();
-      gates.get(1003).release();
       await page.waitForTimeout(250);
       // Labels exactly, positions to the same tolerance the shift metric below allows. Exact float
       // equality failed about one run in three at this width, on a difference of 0.031px — a
@@ -116,6 +111,7 @@ for (const [width, failed] of [
       for (const [at, row] of after.entries()) expect(row.top).toBeCloseTo(before[at].top, 1);
       const shifts = await page.evaluate(() => window.shifts.reduce((a, b) => a + b, 0));
       expect(shifts).toBeLessThan(0.05);
+      expect(requested.has(1003), 'watched history should stay dormant on Home').toBe(false);
     } finally {
       await browser.close();
     }
