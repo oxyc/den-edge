@@ -151,6 +151,8 @@
   /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
   let shelvesReady = $state(false);
   let shelfPlan = $state.raw<ShelfPlan | null>(null);
+  /** The exact shelf membership is known. Until then a lower row must not paint ahead of Continue Watching. */
+  let shelfPlanReady = $state(false);
   let shelfNaming = $state.raw<ShelfNaming | null>(null);
   let historyNaming = $state.raw<BackgroundNaming | null>(null);
   const clock = browserClock();
@@ -212,6 +214,7 @@
       if (key && opened) {
         // An initial run may be replaced before it becomes ready. Never let its plan paint for the replacement.
         shelfPlan = null;
+        shelfPlanReady = false;
         const projection = session.libraryProjection();
         if (!projection) return;
         const raw = projection.library;
@@ -219,7 +222,10 @@
         shelfNaming = naming;
         shelfPlan = naming.initialPlan;
         void naming.planned.then((plan) => {
-          if (!disposed) shelfPlan = plan;
+          if (!disposed) {
+            shelfPlan = plan;
+            shelfPlanReady = true;
+          }
         });
         void naming.ready
           .then(() => {
@@ -246,6 +252,7 @@
           });
       } else {
         shelfPlan = null;
+        shelfPlanReady = true;
         shelvesReady = true;
       }
     });
@@ -1534,7 +1541,7 @@
     {:else if !shelvesReady && !facet && shelfPlan?.continue}
       <PendingPosterRow heading="Continue Watching" />
     {/if}
-    {#if !facet && downloading.length}
+    {#if !facet && downloading.length && shelfPlanReady}
       <WindowedPosterRow
         heading="Downloading"
         aside={{ label: 'All downloads', href: '/downloads' }}

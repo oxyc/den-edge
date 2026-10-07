@@ -20,6 +20,10 @@
   import { SessionServices } from '../src/lib/sessionServices.svelte';
   import { fixtureLibrarySessionMethods } from './librarySessionMethods';
   import { trackerEvent } from '../src/lib/trackerEvents';
+  import { browserClock } from '../src/lib/clock';
+  import { downloads } from '../src/lib/downloadQueue.svelte';
+  import { startRow } from '../src/lib/downloadRows';
+  import type { LibraryLog } from '../src/lib/log';
   import {
     rowName,
     type EpisodeRow,
@@ -35,6 +39,21 @@
   const unnamedMany = params.has('unnamed-many');
   /** Every action refused, as a library that can't be reached refuses it. */
   const failing = params.has('failing');
+  const withDownload = params.has('downloading');
+  const fixtureClock = browserClock();
+  const downloadRow = startRow(
+    undefined,
+    {
+      release: {
+        identity: 'fixture-download.mkv',
+        label: 'Fixture download',
+        url: '/scout/p/fixture-download',
+      },
+      title: { mediaType: 'movie', mediaId: 9001, title: 'Fixture download' },
+    },
+    () => fixtureClock.issue(),
+    Date.now(),
+  );
   let route = $state<Route>(
     params.get('page') === 'watchlist'
       ? { page: 'watchlist' }
@@ -86,6 +105,10 @@
             const id = 3000 + index;
             return updateProgress(blankTitle({ type: 'movie', id }, id), 0.5, 40, [id, 0, 'test']);
           }),
+          ...(params.has('series-continue')
+            ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
+            : []),
+          ...(withDownload ? [downloadRow] : []),
         ]
       : [],
   );
@@ -106,6 +129,7 @@
         : undefined,
     refresh: async () => false,
     rows: () => stored,
+    seqOf: () => 0,
     newestStamp: () => [1, 0, 'test'],
     kept: async () => undefined,
     keep: async () => {},
@@ -146,6 +170,8 @@
       return row;
     },
   };
+
+  if (withDownload) downloads.attach(log as unknown as LibraryLog, fixtureClock);
 
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   const TOAST_MS = 6000;
