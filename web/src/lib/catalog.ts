@@ -4,7 +4,7 @@
 
 import { filterTitles, FilterUnavailable, type FilterItem } from './filterRoutes';
 import type { MediaType, Title } from './library';
-import { likeId, searchHref, titleHref } from './route';
+import { titleHref } from './route';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
@@ -795,6 +795,8 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** Personal explanations may use a second heading line on a narrow screen; ordinary labels never do. */
+  mobileHeadingLines?: 2;
   /** A more specific accessible name where the visible heading is deliberately shared between several rows. */
   ariaLabel?: string;
   /** The named title/person within a contextual heading, and its destination. */
@@ -1053,7 +1055,7 @@ export function homeRows(
 }
 
 /**
- * Home's personal rows, above the spine (HomeModel): recommendations for your latest watched or liked titles,
+ * Home's personal rows, above the spine (HomeModel): "Because you watched X" for your latest watched or liked titles,
  * then "Because you added X to your Watchlist" — TMDB's recommendations for each, less what your library holds.
  */
 export function personalRows(
@@ -1063,6 +1065,7 @@ export function personalRows(
   const row = (id: string, before: string, after: string, seed: Title): RowDef => ({
     id: `${id}-${seed.type}-${seed.id}`,
     title: `${before}${seed.title}${after}`,
+    mobileHeadingLines: 2,
     headingLink: { before, label: seed.title, after, href: titleHref(seed) },
     load: async (page) =>
       (await pages(`/${seed.type}/${seed.id}/recommendations`, seed.type, {}, page)).filter(
@@ -1070,17 +1073,7 @@ export function personalRows(
       ),
   });
   return [
-    ...watched.map((seed) => ({
-      ...row('byw', 'Because you watched ', '', seed),
-      title: 'More like this',
-      ariaLabel: `More like this because you watched ${seed.title}`,
-      headingLink: undefined,
-      aside: {
-        label: 'Explore similar',
-        href: searchHref('', { chips: [likeId(seed)] }),
-        ariaLabel: `Explore titles similar to ${seed.title}`,
-      },
-    })),
+    ...watched.map((seed) => row('byw', 'Because you watched ', '', seed)),
     ...watchlisted.map((seed) => row('wl', 'Because you added ', ' to your Watchlist', seed)),
   ];
 }
