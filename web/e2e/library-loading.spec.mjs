@@ -165,6 +165,9 @@ test('large Home shelves publish and extend in viewport-sized tranches', async (
   // continued titles stay out of Svelte's first shelf publication.
   await expect.poll(() => details.size).toBe(11);
 
+  // Slots precede the virtual window's effect. A mounted card proves its passive scroll listener and width
+  // observer are ready before this faster-than-human synthetic scroll.
+  await expect(row.locator('[data-card-index="0"] .card')).toBeVisible();
   await row.locator('.track').evaluate((track) => {
     track.scrollLeft = track.scrollWidth;
     track.dispatchEvent(new Event('scroll'));
@@ -182,8 +185,12 @@ test('large Home shelves publish and extend in viewport-sized tranches', async (
   ).toEqual(Array.from({ length: 16 }, (_, index) => 3023 - index));
 
   // Focusing near the named edge admits the following tranche before Tab can leave the shelf.
+  // Native focus may also scroll the track. If that scroll lands after the tranche is published, it is a
+  // second valid intent and admits the final one-title tail; keep both outcomes bounded.
   await row.locator('[data-card-index="14"] a').focus();
-  await expect(row.locator('[data-card-index]')).toHaveCount(24);
-  await expect.poll(() => details.size).toBe(27);
+  await expect.poll(() => row.locator('[data-card-index]').count()).toBeGreaterThanOrEqual(24);
+  expect(await row.locator('[data-card-index]').count()).toBeLessThanOrEqual(25);
+  await expect.poll(() => details.size).toBeGreaterThanOrEqual(27);
+  expect(details.size).toBeLessThanOrEqual(28);
   await page.close();
 });
