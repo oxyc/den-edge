@@ -2,9 +2,19 @@ import { expect, test } from '@playwright/test';
 import { guardNetwork } from './network.mjs';
 import { E2E_ORIGIN } from './base-url.mjs';
 
+async function routePosterArt(page) {
+  await page.route(/^https:\/\/(?:image\.tmdb\.org|images\.metahub\.space)\//, (route) =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
+    }),
+  );
+}
+
 test('Coming Soon captions stay on one line in a horizontal-only shelf', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
+  await routePosterArt(page);
   await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
 
   const row = page.getByRole('region', { name: 'Coming Soon' });
@@ -57,12 +67,7 @@ test('a row far below the screen draws its posters only once it comes near', asy
 }) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await guardNetwork(page);
-  await page.route('https://image.tmdb.org/**', (r) =>
-    r.fulfill({
-      contentType: 'image/svg+xml',
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>',
-    }),
-  );
+  await routePosterArt(page);
   await page.goto(`${E2E_ORIGIN}/test/poster-row.html`);
   const far = page.getByRole('region', { name: 'Far below' });
   await expect(far.locator('a.card, figure.card')).toHaveCount(10);
@@ -86,6 +91,7 @@ test('a row far below the screen draws its posters only once it comes near', asy
 test('a landscape TMDB still selects its smaller responsive candidate', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
   await guardNetwork(page);
+  await routePosterArt(page);
   const requests = [];
   await page.route('https://image.tmdb.org/t/p/*/landscape.jpg', (route) => {
     requests.push(new URL(route.request().url()).pathname);
