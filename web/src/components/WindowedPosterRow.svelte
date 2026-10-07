@@ -19,7 +19,7 @@
     children,
   }: {
     heading: string;
-    aside?: { label: string; href: string };
+    aside?: { label: string; href: string; ariaLabel?: string };
     items: T[];
     itemKey: (item: T) => string;
     itemHref: (item: T) => string;

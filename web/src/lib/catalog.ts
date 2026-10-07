@@ -4,7 +4,7 @@
 
 import { filterTitles, FilterUnavailable, type FilterItem } from './filterRoutes';
 import type { MediaType, Title } from './library';
-import { titleHref } from './route';
+import { likeId, searchHref, titleHref } from './route';
 import { toTitle } from './tmdb';
 
 import { tmdbFetch } from './tmdbCache';
@@ -795,10 +795,12 @@ export function categories(
 export interface RowDef {
   id: string;
   title: string;
+  /** A more specific accessible name where the visible heading is deliberately shared between several rows. */
+  ariaLabel?: string;
   /** The named title/person within a contextual heading, and its destination. */
   headingLink?: { before: string; label: string; after: string; href: string };
   /** A quiet link beside the heading, to where the row's titles go on: "Explore similar". */
-  aside?: { label: string; href: string };
+  aside?: { label: string; href: string; ariaLabel?: string };
   load: (page: number) => Promise<Title[]>;
   /** A shelf's semantic membership, applied after loading so an all-secondary page can be skipped. */
   filter?: (title: Title) => boolean;
@@ -1051,7 +1053,7 @@ export function homeRows(
 }
 
 /**
- * Home's personal rows, above the spine (HomeModel): "Because you watched X" for your latest watched or liked titles,
+ * Home's personal rows, above the spine (HomeModel): recommendations for your latest watched or liked titles,
  * then "Because you added X to your Watchlist" — TMDB's recommendations for each, less what your library holds.
  */
 export function personalRows(
@@ -1068,7 +1070,17 @@ export function personalRows(
       ),
   });
   return [
-    ...watched.map((seed) => row('byw', 'Because you watched ', '', seed)),
+    ...watched.map((seed) => ({
+      ...row('byw', 'Because you watched ', '', seed),
+      title: 'More like this',
+      ariaLabel: `More like this because you watched ${seed.title}`,
+      headingLink: undefined,
+      aside: {
+        label: 'Explore similar',
+        href: searchHref('', { chips: [likeId(seed)] }),
+        ariaLabel: `Explore titles similar to ${seed.title}`,
+      },
+    })),
     ...watchlisted.map((seed) => row('wl', 'Because you added ', ' to your Watchlist', seed)),
   ];
 }

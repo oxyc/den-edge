@@ -191,6 +191,7 @@
 >
   <PosterRow
     heading={row.title}
+    ariaLabel={row.ariaLabel}
     headingLink={row.headingLink}
     aside={row.aside}
     active={rowNear}
