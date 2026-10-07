@@ -34,6 +34,11 @@
 
   const params = new URLSearchParams(location.search);
   const populated = params.has('populated');
+  let releaseContinueHint!: () => void;
+  const continueHint = new Promise<void>((resolve) => (releaseContinueHint = resolve));
+  if (params.has('continue-hint'))
+    (window as unknown as { denTestReleaseContinueHint: () => void }).denTestReleaseContinueHint =
+      releaseContinueHint;
   const many = Math.max(0, Math.min(500, Number(params.get('many')) || 0));
   /** Let shelf naming, rather than fixture setup, supply the large row's display fields. */
   const unnamedMany = params.has('unnamed-many');
@@ -88,7 +93,11 @@
   let stored = $state<Row[]>(
     populated
       ? [
-          updateProgress(blankTitle({ type: 'movie', id: 1001 }, 1), 0.5, 40, [1, 0, 'test']),
+          ...(params.has('no-movie-continue')
+            ? []
+            : [
+                updateProgress(blankTitle({ type: 'movie', id: 1001 }, 1), 0.5, 40, [1, 0, 'test']),
+              ]),
           addToWatchlist(blankTitle({ type: 'movie', id: 1002 }, 2), [2, 0, 'test']),
           ...[1003, 1004, 1005].map((id) =>
             markWatched(blankTitle({ type: 'movie', id }, id), [id, 0, 'test']),
@@ -131,7 +140,11 @@
     rows: () => stored,
     seqOf: () => 0,
     newestStamp: () => [1, 0, 'test'],
-    kept: async () => undefined,
+    kept: async (name: string) => {
+      if (!params.has('continue-hint') || name !== 'home.shelves.v1') return undefined;
+      await continueHint;
+      return { continue: true };
+    },
     keep: async () => {},
     /** Nothing is ever waiting to be sent: a write here is done the moment it is made. */
     pendingActions: 0,

@@ -202,11 +202,19 @@ test('Downloading waits for exact shelf order when Continue Watching membership 
     }),
   );
 
-  await page.goto(`${E2E_ORIGIN}/test/library.html?populated&series-continue&downloading`);
-  // Watchlist membership is exact from the decrypted projection, but Continue Watching awaits the held TV
-  // layout. A lower shelf must not paint during that uncertainty and then be pushed down.
-  await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toBeAttached();
+  await page.goto(
+    `${E2E_ORIGIN}/test/library.html?populated&series-continue&downloading&no-movie-continue&continue-hint`,
+  );
+  // Until Continue is either reserved or proven absent, every lower Home row stays out of the document.
   await expect(page.getByRole('region', { name: 'Continue Watching', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Downloading', exact: true })).toHaveCount(0);
+
+  await page.evaluate(() => window.denTestReleaseContinueHint());
+  // The encrypted last-known positive reserves geometry only: Watchlist may now follow that placeholder, while
+  // real Download cards still wait for the current shelf contents.
+  await expect(page.getByRole('region', { name: 'Continue Watching', exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Watchlist', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Downloading', exact: true })).toHaveCount(0);
 
   releaseShape();
