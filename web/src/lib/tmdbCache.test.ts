@@ -312,6 +312,34 @@ describe('cachingFetch', () => {
     expect(net.asked, 'the newest answer remains reusable').toHaveLength(afterFill + 1);
   });
 
+  it('does not evict an opened title behind a burst of background lookups', async () => {
+    const entries = new Map<string, Entry>();
+    const store: Store = {
+      get: async (key) => entries.get(key),
+      // Model the same blocked persistence handoff as the trace: memory is the only readable copy for now.
+      put: () => new Promise<void>(() => undefined),
+      prune: async () => 0,
+      clear: async () => entries.clear(),
+    };
+    const net = network();
+    let clock = 0;
+    const cached = sharingFlights(cachingFetch(store, net.fetchImpl, () => clock));
+    const opened =
+      'https://api.themoviedb.org/3/movie/603?api_key=secret&append_to_response=credits,recommendations,videos,external_ids,release_dates,watch/providers';
+
+    await cached(opened);
+    for (let id = 0; id < MOST_HANDOFF_ANSWERS; id++)
+      await cached(`https://api.themoviedb.org/3/movie/${id}/external_ids?api_key=secret`);
+    clock = 542;
+    await cached(opened);
+
+    expect(net.asked.filter((url) => url.includes('/movie/603?'))).toHaveLength(1);
+    expect(
+      net.asked,
+      'the handoff remains bounded while preserving the interactive answer',
+    ).toHaveLength(MOST_HANDOFF_ANSWERS + 1);
+  });
+
   it('leaves everything but TMDB alone, and prunes past the retention limit once', async () => {
     const { entries, pruned, store } = memory();
     const net = network();

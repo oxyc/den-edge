@@ -222,6 +222,8 @@ interface HandoffAnswer {
   entry: Entry;
   parsed?: object;
   until: number;
+  /** The wide title-page question: preserve it when background naming/lookups fill this small cache. */
+  interactiveDetail: boolean;
 }
 
 /** Each persistent store has its own short-lived answers; injected stores and sessions cannot lend one another. */
@@ -234,6 +236,14 @@ function answersFor(store: Store): Map<string, HandoffAnswer> {
     handoffAnswers.set(store, answers);
   }
   return answers;
+}
+
+/** A Detail screen's one wide question, as distinct from shelf naming and Scout's external-id lookup. */
+function isInteractiveDetail(key: string): boolean {
+  const url = new URL(key);
+  if (!/^\/3\/(movie|tv)\/\d+$/.test(url.pathname)) return false;
+  const appends = new Set((url.searchParams.get('append_to_response') ?? '').split(','));
+  return appends.has('recommendations') && appends.has('videos');
 }
 
 /** A TMDB answer's JSON: the object it was checked as, where it was, or the body parsed now. */
@@ -269,11 +279,21 @@ export function cachingFetch(
   const remember = (key: string, entry: Entry, parsed?: object) => {
     if (!handoff) return;
     handoff.delete(key);
-    handoff.set(key, { entry, parsed, until: now() + ANSWER_HANDOFF_MS });
+    handoff.set(key, {
+      entry,
+      parsed,
+      until: now() + ANSWER_HANDOFF_MS,
+      interactiveDetail: isInteractiveDetail(key),
+    });
     while (handoff.size > MOST_HANDOFF_ANSWERS) {
-      const oldest = handoff.keys().next().value;
-      if (oldest === undefined) break;
-      handoff.delete(oldest);
+      // A page can admit more than 64 shelf-naming and availability questions during this 30-second handoff.
+      // Prefer dropping the oldest background answer so the just-opened Detail does not ask the same wide,
+      // rate-limit-expensive question again a few hundred milliseconds later. The map stays strictly bounded;
+      // if it contains only interactive details, ordinary LRU eviction still applies.
+      const background = [...handoff].find(([, answer]) => !answer.interactiveDetail)?.[0];
+      const drop = background ?? handoff.keys().next().value;
+      if (drop === undefined) break;
+      handoff.delete(drop);
     }
   };
   const recall = (key: string): HandoffAnswer | undefined => {

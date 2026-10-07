@@ -88,6 +88,34 @@ test('a row far below the screen draws its posters only once it comes near', asy
   await page.close();
 });
 
+test('availability waits for its narrower lookahead after poster art starts', async ({
+  browser,
+}) => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await guardNetwork(page);
+  await routePosterArt(page);
+  const lookups = [];
+  await page.route('**/tmdb/3/movie/*/external_ids', (route) => {
+    const id = /\/movie\/(\d+)\//.exec(route.request().url())?.[1];
+    lookups.push(Number(id));
+    return route.fulfill({ json: { imdb_id: `tt${id.padStart(7, '0')}` } });
+  });
+  await page.route('**/scout/availability', (route) =>
+    route.fulfill({ json: { availability: {} } }),
+  );
+  await page.goto(`${E2E_ORIGIN}/test/poster-row.html?availability`);
+  const far = page.getByRole('region', { name: 'Far below' });
+
+  await far.evaluate((node) => scrollTo(0, node.offsetTop - innerHeight - 800));
+  await expect(far.locator('img').first()).toBeAttached();
+  await page.waitForTimeout(100);
+  expect(lookups, 'the 1250px art window does not admit Scout work').toEqual([]);
+
+  await far.evaluate((node) => scrollTo(0, node.offsetTop - innerHeight - 200));
+  await expect.poll(() => lookups.length).toBeGreaterThan(0);
+  await page.close();
+});
+
 test('a landscape TMDB still selects its smaller responsive candidate', async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 390, height: 800 } });
   await guardNetwork(page);
@@ -105,7 +133,9 @@ test('a landscape TMDB still selects its smaller responsive candidate', async ({
   await expect(image).toHaveAttribute('srcset', /w300.*300w,.*w500.*500w/);
   await expect(image).toHaveAttribute('sizes', 'clamp(203px, 55.1vw, 275.5px)');
   await expect
-    .poll(() => image.evaluate((node) => new URL(node.currentSrc).pathname))
+    .poll(() =>
+      image.evaluate((node) => (node.currentSrc ? new URL(node.currentSrc).pathname : '')),
+    )
     .toBe('/t/p/w300/landscape.jpg');
   expect(requests).toEqual(['/t/p/w300/landscape.jpg']);
   await page.close();

@@ -75,6 +75,7 @@ for (const width of [393, 700, 759, 760, 844, 1280])
 
     await page.goto(`${E2E_ORIGIN}/test/detail.html?series`);
     await expect(page.getByRole('heading', { level: 1, name: 'Large Series' })).toBeVisible();
+    await expect(page.locator('img.backdrop')).toHaveAttribute('fetchpriority', 'high');
     releaseSeason();
     await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
     await expect(page.locator('.episode.deferred')).toHaveCount(46);
@@ -96,6 +97,7 @@ for (const width of [393, 700, 759, 760, 844, 1280])
     await page.evaluate(() =>
       window.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
     );
+    await expect(page.locator('img.backdrop')).toHaveAttribute('fetchpriority', 'auto');
     await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
     await page.evaluate(() => window.fixtureYield());
     await page.waitForTimeout(0);

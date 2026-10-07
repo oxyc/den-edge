@@ -749,6 +749,7 @@
       class:portrait={!backdrop}
       class:shown={painted === (backdrop ?? poster)}
       src={backdrop ?? poster}
+      fetchpriority={active && !!backdrop ? 'high' : 'auto'}
       alt=""
       use:loaded
       onload={(event) => {

@@ -53,9 +53,9 @@ export default defineConfig({
       '/remux': { target: remux, changeOrigin: true },
     },
   },
-  // One small stylesheet avoids a chain of tiny route CSS requests on constrained mobile links. Route JS
-  // remains split and on-demand; only the CSS shares the first cacheable transfer.
-  build: { target: 'es2022', cssCodeSplit: false },
+  // Keep route styles beside their already-split route chunks. Settings, Player and other uncommon screens are
+  // intent-loaded, so Home should not transfer or parse their CSS either.
+  build: { target: 'es2022', cssCodeSplit: true },
   test: {
     include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     setupFiles: ['test/setup-sync.ts'],
