@@ -1,14 +1,68 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { continueWatching } from './library';
 import { LibraryLog } from './log';
-import { LibrarySession } from './librarySession.svelte';
+import { BACKGROUND_PROVIDER_FALLBACK_MS, LibrarySession } from './librarySession.svelte';
+import { deliverSimkl } from './simklDelivery';
 import { ensureSyncPolicy } from './syncLoader';
 import type { Row } from './wire';
+
+vi.mock('./simklDelivery', () => ({ deliverSimkl: vi.fn(async () => false) }));
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  vi.mocked(deliverSimkl).mockReset().mockResolvedValue(false);
+});
+
+it('holds provider delivery until the foreground explicitly releases background work', async () => {
+  const log = {
+    ...fakeLog(),
+    fromCache: true,
+    wireMinimum: 4,
+    readOnly: false,
+    needsV4: false,
+    compact: vi.fn(async () => false),
+  };
+  vi.mocked(deliverSimkl).mockResolvedValue(true);
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+
+  await session.opened;
+  expect(
+    deliverSimkl,
+    'the cached library is visible without provider synchronization',
+  ).not.toHaveBeenCalled();
+  const revision = session.revision;
+  session.foregroundReady();
+  await vi.waitFor(() => expect(deliverSimkl).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(session.revision).toBeGreaterThan(revision));
+});
+
+it('eventually releases provider delivery on a route with no Home hero', async () => {
+  vi.useFakeTimers();
+  const win = new EventTarget();
+  const doc = Object.assign(new EventTarget(), { hidden: false });
+  vi.stubGlobal('window', win);
+  vi.stubGlobal('document', doc);
+  const log = {
+    ...fakeLog(),
+    fromCache: true,
+    wireMinimum: 4,
+    readOnly: false,
+    needsV4: false,
+    compact: vi.fn(async () => false),
+  };
+  vi.spyOn(LibraryLog, 'open').mockResolvedValue(log as unknown as LibraryLog);
+  const session = new LibrarySession('test');
+  await session.opened;
+  const stop = session.start(vi.fn());
+
+  await vi.advanceTimersByTimeAsync(BACKGROUND_PROVIDER_FALLBACK_MS - 1);
+  expect(deliverSimkl).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(deliverSimkl).toHaveBeenCalledOnce();
+  stop();
 });
 const fakeLog = (held: Row[] = []) => {
   const rows = vi.fn().mockReturnValue(held);

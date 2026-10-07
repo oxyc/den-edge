@@ -43,6 +43,9 @@
   import { fetchIconicStudios, type IconicStudio } from '../lib/iconicStudios';
   import { fetchTitleFacts, NO_FACTS, type TitleFacts } from '../lib/titleFacts';
   import { toastContext } from '../lib/toast';
+  import { whenIdle } from '../lib/idle';
+  import { observeNearViewport } from '../lib/nearViewport';
+  import { yieldTask } from '../lib/taskYield';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -219,6 +222,15 @@
   /** The cast row shows the top of the bill and goes on as it is scrolled to its end: a long series lists hundreds. */
   const CAST_PAGE = 20;
   let castShown = $state(CAST_PAGE);
+  /**
+   * PersonCard and BrowseRow are the deep trees at the foot of a detail page. Keep their final geometry in the
+   * first detail flush, but do not put all of their live DOM in it: the phone trace's single ~40 ms ParseHTML task
+   * was mostly these two sections. A scroll promotes them at once; otherwise they begin after paint, in idle time.
+   */
+  const CAST_DOM_CHUNK = 4;
+  let castMounted = $state(0);
+  let tailStarted = $state(false);
+  let tailRoot = $state<HTMLDivElement>();
   function castEnd(node: HTMLElement) {
     $effect(() => {
       if (!active || castShown >= cast.length) return;
@@ -254,13 +266,6 @@
    */
   const EPISODE_CHUNK = 4;
   let episodeLimit = $state(0);
-  async function yieldEpisodeTask() {
-    const scheduler = (
-      globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }
-    ).scheduler;
-    if (scheduler?.yield) await scheduler.yield();
-    else await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  }
   let retry = $state(0),
     seasonRetry = $state(0);
   let ratings = $state<Ratings | null>(null);
@@ -276,6 +281,8 @@
     seasonEpisodes = undefined;
     displayedSeason = null;
     castShown = CAST_PAGE;
+    castMounted = 0;
+    tailStarted = false;
     void fetchDetail(current, key, undefined, country).then((loaded) => {
       if (!live) return;
       detail = loaded;
@@ -303,7 +310,7 @@
     let live = true;
     void (async () => {
       while (live && untrack(() => episodeLimit) < loaded.length) {
-        await yieldEpisodeTask();
+        await yieldTask();
         if (
           !live ||
           !active ||
@@ -414,6 +421,74 @@
         )
       : [],
   );
+  const castTarget = $derived(Math.min(castShown, cast.length));
+  const castRemaining = $derived(Math.max(0, castTarget - castMounted));
+  const relatedMayMount = $derived(tailStarted && castMounted >= castTarget);
+
+  // Register only while this retained page is in front. Two animation frames put the idle request after its first
+  // paint; a real scroll or the reserved tail nearing the viewport bypasses that wait so content is ready when the
+  // viewer asks for it. All three paths converge on one idempotent flag and are torn down on route deactivation.
+  $effect(() => {
+    const current = detail;
+    if (!active || !current || tailStarted || !tailRoot) return;
+    let live = true;
+    let firstFrame: number | undefined;
+    let paintedFrame: number | undefined;
+    let cancelIdle = () => {};
+    const initialScrollY = window.scrollY;
+    const start = () => {
+      if (live && active && detail === current) tailStarted = true;
+    };
+    const startOnScroll = () => {
+      // Page construction and router restoration can emit a no-op scroll event. Only movement is user demand;
+      // a restored position near the tail is already covered by the viewport observer.
+      if (window.scrollY !== initialScrollY) start();
+    };
+    const stopNear = observeNearViewport(tailRoot, (near) => near && start(), '800px 0px');
+    window.addEventListener('scroll', startOnScroll, { passive: true });
+    firstFrame = requestAnimationFrame(() => {
+      firstFrame = undefined;
+      paintedFrame = requestAnimationFrame(() => {
+        paintedFrame = undefined;
+        if (live) cancelIdle = whenIdle(start);
+      });
+    });
+    return () => {
+      live = false;
+      if (firstFrame !== undefined) cancelAnimationFrame(firstFrame);
+      if (paintedFrame !== undefined) cancelAnimationFrame(paintedFrame);
+      cancelIdle();
+      stopNear();
+      window.removeEventListener('scroll', startOnScroll);
+    };
+  });
+
+  // The first promoted batch is small enough to mount in the observer/idle callback's own task. Every later batch
+  // crosses a task boundary. A hidden retained page stops at its current batch and resumes from there on Back.
+  $effect(() => {
+    const [people, target, visible, started] = [cast, castTarget, active, tailStarted];
+    if (!visible || !started || untrack(() => castMounted) >= target) return;
+    let live = true;
+    void (async () => {
+      let first = true;
+      while (live && untrack(() => castMounted) < target) {
+        if (!first) await yieldTask();
+        first = false;
+        if (
+          !live ||
+          !active ||
+          !tailStarted ||
+          untrack(() => cast) !== people ||
+          untrack(() => castTarget) !== target
+        )
+          return;
+        castMounted = Math.min(target, untrack(() => castMounted) + CAST_DOM_CHUNK);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  });
   /** What a season-wide press may write here: nothing on Specials, and nothing that has yet to air. */
   const seasonMarkable = $derived(markableEpisodes(displayedSeason, seasonEpisodes));
   const seasonSeen = $derived(
@@ -752,26 +827,38 @@
         </div>
       </section>
     {/if}
-    {#if cast.length}
-      <PosterRow heading="Cast & Crew">
-        {#each cast.slice(0, castShown) as c (c.id)}<PersonCard
-            id={c.id}
-            name={c.name}
-            role={c.role}
-            profilePath={c.profilePath}
-          />{/each}
-        <span use:castEnd class="cast-end" aria-hidden="true"></span>
-      </PosterRow>
-    {/if}
-    <RelatedTitles
-      detail={d}
-      {tmdbKey}
-      {atlas}
-      studios={iconicStudios}
-      facts={titleFacts}
-      {active}
-      {shown}
-    />
+    <div class="detail-tail" bind:this={tailRoot}>
+      {#if cast.length}
+        <div aria-busy={castRemaining ? 'true' : undefined}>
+          <PosterRow heading="Cast & Crew">
+            {#each cast.slice(0, Math.min(castMounted, castTarget)) as c (c.id)}<PersonCard
+                id={c.id}
+                name={c.name}
+                role={c.role}
+                profilePath={c.profilePath}
+              />{/each}
+            {#if castRemaining}<span
+                class="cast-reserve"
+                data-cast-placeholder
+                style:--remaining={castRemaining}
+                aria-hidden="true"
+              ></span>{/if}
+            <!-- The sentinel also keeps the row's block height identical as its reserve becomes real cards. -->
+            <span use:castEnd class="cast-end" aria-hidden="true"></span>
+          </PosterRow>
+        </div>
+      {/if}
+      <RelatedTitles
+        detail={d}
+        {tmdbKey}
+        {atlas}
+        studios={iconicStudios}
+        facts={titleFacts}
+        {active}
+        mountRows={relatedMayMount}
+        {shown}
+      />
+    </div>
   {/if}
 {/if}
 
@@ -782,6 +869,12 @@
 
   .cast-end {
     width: 1px;
+    height: calc(var(--card-w) + 66.8px);
+  }
+
+  .cast-reserve {
+    width: calc(var(--remaining) * var(--card-w) + (var(--remaining) - 1) * 14px);
+    height: calc(var(--card-w) + 66.8px);
   }
 
   .hero {

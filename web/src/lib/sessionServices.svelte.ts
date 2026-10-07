@@ -56,6 +56,8 @@ export class SessionServices {
   #stop?: () => void;
   #keep?: ReturnType<typeof setTimeout>;
   #grants = false;
+  /** Availability only fades posters; keep its lookups behind the foreground hero. */
+  #foregroundReady = false;
   readonly #clock = browserClock();
 
   constructor(
@@ -71,6 +73,8 @@ export class SessionServices {
    * and what the last run found stays until the new one answers, so nothing blanks while it asks.
    */
   configure(opened: LibraryLog | null): void {
+    // A replaced session's singleton connection must not consume this session's queued card wants before its hero.
+    if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, '');
     if (!this.#grants) {
       this.#grants = true;
       // A grant's name, end date or ended state as den-edge holds it now.
@@ -105,7 +109,7 @@ export class SessionServices {
           reel: this.reel,
           remux: this.remux,
         } = saved);
-        availability.connect(saved.scout, tmdbKey);
+        if (this.#foregroundReady) availability.connect(saved.scout, tmdbKey);
       });
     void (async () => {
       const foundRoutes = await this.fetchRoutes();
@@ -123,7 +127,7 @@ export class SessionServices {
           ? {
               scout: (found: Addon | null) => {
                 this.scout = found;
-                availability.connect(found, tmdbKey);
+                if (this.#foregroundReady) availability.connect(found, tmdbKey);
                 this.#settled(opened);
               },
               remux: (found: string | null) => {
@@ -164,6 +168,13 @@ export class SessionServices {
         stop();
       };
     })();
+  }
+
+  /** The critical hero has loaded: queued visible-card wants may now gather into Scout requests. */
+  foregroundReady(): void {
+    if (this.#foregroundReady) return;
+    this.#foregroundReady = true;
+    availability.connect(this.scout, this.tmdbKey);
   }
 
   /** Stop publishing: the session is over. */

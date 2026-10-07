@@ -183,10 +183,66 @@
    * asking the framework for a transition — a plain CSS opacity change the compositor can run on its own.
    */
   let layers = $state([
-    { id: 0, url: '', path: '' },
-    { id: 1, url: '', path: '' },
+    { id: 0, url: '', path: '', adopted: false },
+    { id: 1, url: '', path: '', adopted: false },
   ]);
   let lit = $state(0);
+
+  /**
+   * The shared document shell contains no personal data. Its hashed parser-time script may fill one image from
+   * the separately kept lead hint, though, before this component exists. Move that exact node into the live
+   * picture instead of drawing an identical successor: the preload, shell paint and billboard are then one
+   * browser request and one LCP candidate.
+   */
+  let earlyBackdrop = $state.raw<HTMLImageElement | null>(null);
+  let earlyLoaded = $state(false);
+  let stopEarly: (() => void) | undefined;
+
+  function adoptEarlyBackdrop(node: HTMLElement) {
+    const adopt = () => {
+      if (earlyBackdrop) return;
+      const image = document.querySelector<HTMLImageElement>(
+        '[data-den-early-backdrop][data-path]',
+      );
+      const path = image?.dataset.path;
+      if (!image || !path) return;
+      const shell = image.closest('[data-den-early-billboard]');
+      const loaded = () => (earlyLoaded = true);
+      const failed = () => {
+        image.remove();
+        earlyBackdrop = null;
+        earlyLoaded = false;
+        layers[0] = { id: 0, url: '', path: '', adopted: false };
+      };
+      image.addEventListener('load', loaded);
+      image.addEventListener('error', failed, { once: true });
+      earlyBackdrop = image;
+      earlyLoaded = image.complete && image.naturalWidth > 0;
+      image.classList.add('backdrop');
+      node.prepend(image);
+      shell?.remove();
+      layers[0] = {
+        id: 0,
+        url: billboardBackdropURL(path),
+        path,
+        adopted: true,
+      };
+      lit = 0;
+      stopEarly = () => {
+        image.removeEventListener('load', loaded);
+        image.removeEventListener('error', failed);
+      };
+    };
+    window.addEventListener('den:early-hero', adopt);
+    adopt();
+    return {
+      destroy() {
+        window.removeEventListener('den:early-hero', adopt);
+        stopEarly?.();
+        earlyBackdrop?.remove();
+      },
+    };
+  }
 
   /** The picture this slide should be showing; anything that finishes loading after this changed is stale. */
   let wanted = '';
@@ -199,9 +255,30 @@
     const imagePath = path ?? '';
     const url = imagePath ? billboardBackdropURL(imagePath) : '';
     const titleKey = current ? keyOf(current) : '';
+    const retainedBackdrop = earlyBackdrop;
+    const retainedLoaded = earlyLoaded;
     untrack(() => {
       if (!visible) return;
-      if (lit >= 0 && layers[lit]?.url === url) return;
+      // The encrypted ranking is still opening. Leave its retained lead painted rather than taking the shell
+      // image down only to put the same one back when `titles` arrives.
+      if (!current && retainedBackdrop) return;
+      if (lit >= 0 && layers[lit]?.url === url) {
+        if (layers[lit]?.adopted && retainedLoaded && readyKey !== titleKey) {
+          readyKey = titleKey;
+          onready?.();
+        }
+        return;
+      }
+      const ready = url ? layers.findIndex((layer) => layer.url === url) : -1;
+      if (ready >= 0) {
+        wanted = url;
+        lit = ready;
+        if (!layers[ready]?.adopted || retainedLoaded) {
+          readyKey = titleKey;
+          onready?.();
+        }
+        return;
+      }
       wanted = url;
       readyKey = '';
       // Nothing is lit while the right picture is on its way. Keeping the last one up would show one title's
@@ -217,13 +294,19 @@
         // The slide may have moved on while this loaded, and a slow picture must not overwrite a later one.
         if (wanted !== url) return;
         const next = layers[0]?.url === url ? 0 : 1;
-        layers[next] = { id: next, url, path: imagePath };
+        layers[next] = { id: next, url, path: imagePath, adopted: false };
         lit = next;
         readyKey = titleKey;
         onready?.();
       };
       image.src = url;
     });
+  });
+
+  // The adopted image is outside Svelte's keyed each block, so mirror only the one class that changes. Keeping
+  // the node outside that block is deliberate: reconciling it there would replace the already-painted element.
+  $effect(() => {
+    earlyBackdrop?.classList.toggle('lit', lit >= 0 && layers[lit]?.adopted === true);
   });
 
   // Once the visible still has won the network and decoded, prepare only the adjacent slides in an idle slice.
@@ -827,9 +910,9 @@
   onfocusin={() => (held = true)}
   onfocusout={() => (held = false)}
 >
-  <div class="picture" aria-hidden="true">
+  <div class="picture" aria-hidden="true" use:adoptEarlyBackdrop>
     {#each layers as layer (layer.id)}
-      {#if layer.url}
+      {#if layer.url && !layer.adopted}
         <img
           class="backdrop"
           class:lit={layer.id === lit}

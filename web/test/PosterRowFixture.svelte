@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import PosterCard from '../src/components/PosterCard.svelte';
   import PosterRow from '../src/components/PosterRow.svelte';
+  import { availability } from '../src/lib/availability.svelte';
   import type { Title } from '../src/lib/library';
   import '../src/app.css';
 
@@ -21,6 +23,12 @@
     title: 'Continuing title',
     posterUrl: 'https://images.metahub.space/poster/medium/tt50/img',
   };
+
+  onMount(() => {
+    if (!new URLSearchParams(location.search).has('availability')) return;
+    availability.connect({ install: '/scout', base: '/scout' }, 'fixture-key', fetch);
+    return () => availability.connect(null, '');
+  });
 </script>
 
 <main>

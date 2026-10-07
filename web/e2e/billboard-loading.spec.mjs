@@ -91,7 +91,7 @@ for (const width of [320, 393, 844, 1280])
     }
   });
 
-test('the early personalized preload is reused by the billboard image', async ({ page }) => {
+test('the early personalized shell image is adopted without another transfer', async ({ page }) => {
   await guardNetwork(page);
   let requests = 0;
   await page.route('https://image.tmdb.org/t/p/w1280/early.jpg', async (route) => {
@@ -110,7 +110,10 @@ test('the early personalized preload is reused by the billboard image', async ({
   );
   await expect.poll(() => requests).toBe(1);
   await page.evaluate(() => window.dispatchEvent(new Event('fixture:titles')));
-  await expect(page.locator('img.backdrop.lit')).toHaveAttribute('src', /\/early\.jpg$/);
+  const shown = page.locator('.billboard img.backdrop.lit');
+  await expect(shown).toHaveAttribute('src', /\/early\.jpg$/);
+  await expect(shown).toHaveAttribute('data-fixture-shell-node', 'true');
+  await expect(page.locator('[data-den-early-billboard]')).toHaveCount(0);
   await page.waitForTimeout(100);
   expect(requests).toBe(1);
 });
@@ -250,7 +253,9 @@ test('the document starts its exact personalized hero before the app module answ
   });
   let imageStarted;
   const imageRequest = new Promise((resolve) => (imageStarted = resolve));
+  let imageRequests = 0;
   await page.route('https://image.tmdb.org/t/p/w1280/parser-early.jpg', async (route) => {
+    imageRequests++;
     imageStarted();
     await route.fulfill({
       headers: { 'cache-control': 'public, max-age=600' },
@@ -265,6 +270,14 @@ test('the document starts its exact personalized hero before the app module answ
   expect(typeof releaseModule, 'the image starts while the entry module is still blocked').toBe(
     'function',
   );
+  const shellImage = page.locator(
+    '[data-den-early-billboard]:not([hidden]) [data-den-early-backdrop]',
+  );
+  await expect(shellImage).toHaveAttribute('src', /\/parser-early\.jpg$/);
+  await expect(shellImage).toHaveAttribute('fetchpriority', 'high');
+  expect(await shellImage.boundingBox()).not.toBeNull();
+  await page.waitForTimeout(100);
+  expect(imageRequests, 'the responsive preload and shell image share one request').toBe(1);
   releaseModule();
   await navigating;
   await expect(page.locator('link[rel="preload"][as="image"]')).toHaveAttribute(

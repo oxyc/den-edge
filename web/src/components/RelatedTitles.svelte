@@ -28,6 +28,7 @@
   import { whenIdle } from '../lib/idle';
   import { observeNearViewport } from '../lib/nearViewport';
   import { SvelteSet } from 'svelte/reactivity';
+  import { yieldTask } from '../lib/taskYield';
 
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
   import BrowseRow from './BrowseRow.svelte';
@@ -39,6 +40,7 @@
     studios,
     facts,
     active,
+    mountRows = true,
     shown,
   }: {
     detail: TitleDetail;
@@ -53,6 +55,8 @@
     studios: IconicStudio[] | undefined;
     facts: TitleFacts | undefined;
     active: boolean;
+    /** Detail promotes the live row trees only after its cast has mounted in small batches. */
+    mountRows?: boolean;
     shown: (t: Title) => boolean;
   } = $props();
 
@@ -71,6 +75,8 @@
     start: () => Promise<void>;
     cancel: () => void;
   }>();
+  /** Live BrowseRows already admitted. The one-block substitutes keep the same initial skeleton height. */
+  const mountedRows = new SvelteSet<string>();
 
   // Discover the two rows whose existence is not known up front only after this retained page is active. The
   // shared observer promotes the work immediately near Related; otherwise it waits for the browser's idle queue.
@@ -110,7 +116,10 @@
     const self = detail.title;
     const key = titleKey(self);
     const rebuild = key === rowsFor;
-    if (!rebuild) startedRows = new Set<string>();
+    if (!rebuild) {
+      startedRows = new Set<string>();
+      mountedRows.clear();
+    }
     const started = startedRows;
     const preserve = new Set(started);
     rowsFor = key;
@@ -302,10 +311,44 @@
       pendingDiscovery.cancel();
     };
   });
+
+  // BrowseRow is a substantial subtree even before its loader runs. Admit one per task, never while this retained
+  // route is hidden. Build-qualified keys also make an atlas-late rebuild progressive instead of moving the same
+  // ParseHTML burst to a later moment.
+  $effect(() => {
+    const [currentRows, visible, allowed] = [rows, active, mountRows];
+    if (!visible || !allowed || !currentRows.length) return;
+    const pending = currentRows.filter(({ build, row }) => !mountedRows.has(`${build}:${row.id}`));
+    if (!pending.length) return;
+    let live = true;
+    void (async () => {
+      for (const { build, row } of pending) {
+        await yieldTask();
+        if (!live || !active || !mountRows || rows !== currentRows) return;
+        mountedRows.add(`${build}:${row.id}`);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  });
 </script>
 
 <div bind:this={root} aria-hidden={!active}>
   {#each rows as { build, row } (`${build}:${row.id}`)}
-    <BrowseRow {row} {shown} prefetch={false} />
+    {#if mountedRows.has(`${build}:${row.id}`)}
+      <BrowseRow {row} {shown} prefetch={false} />
+    {:else}
+      <div class="row-reserve" data-related-placeholder aria-hidden="true"></div>
+    {/if}
   {/each}
 </div>
+
+<style>
+  .row-reserve {
+    --card-w: clamp(140px, 38vw, 190px);
+
+    /* PosterRow heading + gap + BrowseRow's initial card skeleton + track padding + row margin. */
+    height: calc(var(--card-w) * 1.5 + 127.2px);
+  }
+</style>

@@ -75,6 +75,7 @@ for (const width of [393, 700, 759, 760, 844, 1280])
 
     await page.goto(`${E2E_ORIGIN}/test/detail.html?series`);
     await expect(page.getByRole('heading', { level: 1, name: 'Large Series' })).toBeVisible();
+    await expect(page.locator('img.backdrop')).toHaveAttribute('fetchpriority', 'high');
     releaseSeason();
     await expect(page.locator('.episode:not(.deferred)')).toHaveCount(4);
     await expect(page.locator('.episode.deferred')).toHaveCount(46);
@@ -96,6 +97,7 @@ for (const width of [393, 700, 759, 760, 844, 1280])
     await page.evaluate(() =>
       window.dispatchEvent(new CustomEvent('fixture:active', { detail: false })),
     );
+    await expect(page.locator('img.backdrop')).toHaveAttribute('fetchpriority', 'auto');
     await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
     await page.evaluate(() => window.fixtureYield());
     await page.waitForTimeout(0);
@@ -106,15 +108,155 @@ for (const width of [393, 700, 759, 760, 844, 1280])
       window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
     );
     let deferred = 46;
-    while (deferred > 0) {
+    let continuations = 0;
+    while (deferred > 0 && continuations++ < 100) {
       await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
       await page.evaluate(() => window.fixtureYield());
-      deferred = Math.max(0, deferred - 4);
-      await expect(page.locator('.episode.deferred')).toHaveCount(deferred);
-      const batchHeight = await page.evaluate(() => document.documentElement.scrollHeight);
-      expect(Math.abs(batchHeight - reservedHeight)).toBeLessThanOrEqual(2);
+      await page.waitForTimeout(0);
+      const next = await page.locator('.episode.deferred').count();
+      // Cast/related staging shares the cooperative task queue; its continuation may be the one released here.
+      expect(
+        [0, Math.min(4, deferred)],
+        `deferred episodes changed ${deferred} → ${next}`,
+      ).toContain(deferred - next);
+      if (next !== deferred) {
+        const batchHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+        expect(Math.abs(batchHeight - reservedHeight)).toBeLessThanOrEqual(2);
+      }
+      deferred = next;
     }
+    expect(deferred).toBe(0);
     await expect(page.getByRole('button', { name: 'Play episode 50: Episode 50' })).toBeVisible();
     const completeHeight = await page.evaluate(() => document.documentElement.scrollHeight);
     expect(Math.abs(completeHeight - reservedHeight)).toBeLessThanOrEqual(2);
   });
+
+test('cast and related DOM promote in geometry-preserving cancellable batches', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await guardNetwork(page);
+  await page.addInitScript(() => {
+    const waiting = [];
+    Object.defineProperty(globalThis, 'scheduler', {
+      configurable: true,
+      value: { yield: () => new Promise((resolve) => waiting.push(resolve)) },
+    });
+    window.fixtureYieldCount = () => waiting.length;
+    window.fixtureYield = () => waiting.shift()?.();
+  });
+  await page.route('https://image.tmdb.org/**', (route) =>
+    route.fulfill({ contentType: 'image/svg+xml', body: svg }),
+  );
+  const film = (id) => ({
+    id,
+    media_type: 'movie',
+    title: `Related ${id}`,
+    release_date: '2020-01-01',
+    poster_path: '/poster.jpg',
+    vote_count: 1000,
+  });
+  await routeTmdb(page, (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/3/movie/42'))
+      return route.fulfill({
+        json: {
+          id: 42,
+          title: 'Staged Movie',
+          release_date: '2020-01-01',
+          imdb_id: 'tt0000042',
+          backdrop_path: '/backdrop.jpg',
+          overview: 'A movie whose below-fold sections are deliberately substantial.',
+          genres: [{ id: 18, name: 'Drama' }],
+          credits: {
+            cast: Array.from({ length: 12 }, (_, index) => ({
+              id: index + 1,
+              name: `Actor ${index + 1}`,
+              profile_path: '/person.jpg',
+              character: 'Someone',
+            })),
+            crew: [],
+          },
+          videos: { results: [] },
+          release_dates: { results: [] },
+          recommendations: {
+            page: 1,
+            total_pages: 1,
+            results: Array.from({ length: 12 }, (_, index) => film(index + 100)),
+          },
+        },
+      });
+    if (path.includes('/person/'))
+      return route.fulfill({ json: { cast: Array.from({ length: 12 }, (_, i) => film(i + 200)) } });
+    return route.fulfill({ json: { page: 1, total_pages: 1, results: [] } });
+  });
+
+  await page.goto(`${E2E_ORIGIN}/test/detail.html?inactive`);
+  await expect(page.getByRole('heading', { level: 1, name: 'Staged Movie' })).toBeVisible();
+  await expect(page.locator('a.person')).toHaveCount(0);
+  await expect(page.locator('[data-cast-placeholder]')).toHaveCount(1);
+  await expect.poll(() => page.locator('[data-related-placeholder]').count()).toBeGreaterThan(0);
+  expect(
+    await page
+      .locator('[data-related-placeholder]')
+      .evaluateAll((nodes) => nodes.every((node) => node.getAttribute('aria-hidden') === 'true')),
+  ).toBe(true);
+  const reservedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+
+  // A scroll is an immediate promotion signal: the first small cast batch does not wait for idle.
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+  );
+  await page.waitForTimeout(0);
+  await page.evaluate(() => scrollTo(0, 1));
+  await expect(page.locator('a.person')).toHaveCount(4);
+
+  // Leaving while a continuation is pending cancels it; returning resumes at the next batch.
+  await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: false }));
+    window.fixtureYield();
+  });
+  await page.waitForTimeout(0);
+  await expect(page.locator('a.person')).toHaveCount(4);
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: true })),
+  );
+  await expect(page.locator('a.person')).toHaveCount(8);
+  await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+  await page.evaluate(() => window.fixtureYield());
+  await expect(page.locator('a.person')).toHaveCount(12);
+
+  const relatedCount = await page.locator('[data-related-placeholder]').count();
+  await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+  await page.evaluate(() => window.fixtureYield());
+  await expect(page.locator('[data-related-placeholder]')).toHaveCount(relatedCount - 1);
+  await expect(page.getByRole('region', { name: 'More like this' })).toBeAttached();
+
+  let remaining = relatedCount - 1;
+  let continuations = 0;
+  while (remaining > 0 && continuations++ < 50) {
+    await expect.poll(() => page.evaluate(() => window.fixtureYieldCount())).toBeGreaterThan(0);
+    await page.evaluate(() => window.fixtureYield());
+    await page.waitForTimeout(0);
+    const next = await page.locator('[data-related-placeholder]').count();
+    // Discovery may insert a newly-known row while staging, but one continuation never mounts multiple trees.
+    expect(remaining - next).toBeLessThanOrEqual(1);
+    remaining = next;
+  }
+  expect(remaining).toBe(0);
+  const completeHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  expect(Math.abs(completeHeight - reservedHeight)).toBeLessThanOrEqual(2);
+
+  // Retaining and restoring the route does not discard already-mounted accessible links or schedule more work.
+  const firstActor = page.locator('a.person').first();
+  const actorNode = await firstActor.elementHandle();
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: false }));
+    window.dispatchEvent(new CustomEvent('fixture:active', { detail: true }));
+  });
+  expect(await actorNode.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(firstActor).toBeVisible();
+  await expect(firstActor).toHaveAccessibleName(/Actor 1/);
+  expect(await page.evaluate(() => window.fixtureYieldCount())).toBe(0);
+});

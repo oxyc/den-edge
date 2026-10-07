@@ -3,8 +3,9 @@
   import Detail from '../src/components/Detail.svelte';
   import '../src/app.css';
   const noop = () => {};
-  const series = new URLSearchParams(location.search).has('series');
-  let active = $state(true);
+  const search = new URLSearchParams(location.search);
+  const series = search.has('series');
+  let active = $state(!search.has('inactive'));
   onMount(() => {
     const setActive = (event: Event) => (active = (event as CustomEvent<boolean>).detail);
     window.addEventListener('fixture:active', setActive);

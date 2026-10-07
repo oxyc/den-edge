@@ -5,6 +5,8 @@
      faded, as on the TV. -->
 <script module lang="ts">
   const LANDSCAPE_STILL_SIZES = 'clamp(203px, 55.1vw, 275.5px)';
+  /** Availability can be useful just before a card is seen, but need not follow the much wider art lookahead. */
+  export const AVAILABILITY_AHEAD = 250;
   const landscapeStillSrcset = (path: string) =>
     [
       `https://image.tmdb.org/t/p/w300${path} 300w`,
@@ -109,12 +111,25 @@
   const page = pageVisibility();
   let cardElement = $state<HTMLElement>();
   let imageNear = $state(false);
+  let availabilityNear = $state(false);
   $effect(() => {
     if (!cardElement) return;
     // A retained hidden route still supplies the frozen frame for swipe history. Release its observer and stop new
     // image work, but preserve prior proximity so reactivation can restore loaded art without another observer turn.
     if (!page.active || row?.near === false) return;
     return observeNearViewport(cardElement, (near) => (imageNear = near), '1250px');
+  });
+  $effect(() => {
+    if (!cardElement || !checkAvailability) return;
+    if (!page.active || row?.near === false) {
+      availabilityNear = false;
+      return;
+    }
+    return observeNearViewport(
+      cardElement,
+      (near) => (availabilityNear = near),
+      `${AVAILABILITY_AHEAD}px`,
+    );
   });
   // While live art is deferred, `pageSnapshot` can materialize it only in an inert swipe copy.
   const showImage = $derived(page.active && (row?.near ?? true) && imageNear);
@@ -126,7 +141,7 @@
   const standing = $derived(downloadBadge ? undefined : libraryStandings.of(title));
   const standingLabel = { watched: 'Seen', watchlist: 'On your watchlist', inProgress: 'Watching' };
   $effect(() => {
-    if (checkAvailability && showImage) availability.want(title);
+    if (checkAvailability && availabilityNear) availability.want(title);
   });
 
   // A pointer resting on the card, or a finger pressing it, fetches the title's details, so the page opens on an

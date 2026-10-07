@@ -25,6 +25,9 @@ const projectors = new WeakMap<object, ContinueProjector>();
 
 /** The production projection API for lightweight Library fixtures that deliberately do not construct a session. */
 export const fixtureLibrarySessionMethods = {
+  /** Provider delivery is outside these lightweight layout/navigation fixtures. */
+  foregroundReady(): void {},
+
   libraryProjection(this: FixtureSession): { rows: Row[]; library: Library } | null {
     const log = this.log;
     if (!log) return null;
