@@ -117,8 +117,13 @@ test('a page scroll while the menu is open closes it', async () => {
     const menu = page.getByRole('menu', { name: 'Actions for Movie 101' });
     await expect(menu).toBeVisible();
 
-    // The fixture page is tall (a 200vh spacer below both rows) precisely so a wheel scroll moves it.
+    // A click leaves Playwright's pointer on the trigger, which the menu deliberately treats as inside. Move
+    // over the blank page below the rows so this is unambiguously a wheel gesture outside the menu. The fixture
+    // has a 200vh spacer, but `mouse.wheel` does not wait for scrolling, so observe the movement too.
+    await page.mouse.move(640, 850);
+    const before = await page.evaluate(() => window.scrollY);
     await page.mouse.wheel(0, 400);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before);
     await expect(menu).toBeHidden();
   } finally {
     await browser.close();
