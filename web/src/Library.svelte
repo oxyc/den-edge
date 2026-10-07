@@ -57,7 +57,14 @@
   import { clock as timecode, livePosition } from './lib/livePosition';
   import { libraryStandings } from './lib/standing.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
-  import { nameLibraryTitles, shelfTitleRefs, personalSeedRows } from './lib/libraryNaming';
+  import {
+    nameLibraryHistoryTitles,
+    nameLibraryTitles,
+    promoteLibraryTitle,
+    shelfTitleRefs,
+    personalSeedRows,
+    type BackgroundNaming,
+  } from './lib/libraryNaming';
   import { recordTrackerEvent } from './lib/trackerEvents';
   import { ensureSyncPolicy } from './lib/syncLoader';
   import { isHidden, readApiKey, readPrefs, readDetailPrefs } from './lib/prefs';
@@ -137,6 +144,7 @@
 
   /** Keep the initial shelves together; naming must not insert rows above an already painted row. */
   let shelvesReady = $state(false);
+  let historyNaming = $state.raw<BackgroundNaming | null>(null);
   const clock = browserClock();
   /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
   const log = $derived(session.log);
@@ -186,6 +194,7 @@
     // The shared grants are read here so a grant that arrives or ends asks again (`guestGrants.list` is state).
     void guestGrants.pluginUrls();
     let disposed = false;
+    let background: BackgroundNaming | null = null;
     // Only the shared settings revision and opened log trigger reconfiguration.
     // Service state is an output, not a dependency of this effect.
     untrack(() => {
@@ -202,17 +211,30 @@
           if (disposed) return;
           shelvesReady = true;
           // Watched history enriches taste in the background; it cannot change the initial shelf order.
-          void nameLibraryTitles(
+          background = nameLibraryHistoryTitles(
             session,
             untitled(raw).filter((ref) => !reserved.has(titleKey(ref))),
             key,
           );
+          historyNaming = background;
+          if (!active) background.pause();
         });
       } else shelvesReady = true;
     });
     return () => {
       disposed = true;
+      background?.cancel();
+      if (historyNaming === background) historyNaming = null;
     };
+  });
+
+  // A retained route pauses its watched-history tail as soon as it leaves the document. Document visibility is
+  // watched by the queue itself, because it can change without any Svelte state changing.
+  $effect(() => {
+    const background = historyNaming;
+    if (!background) return;
+    if (active) background.resume();
+    else background.pause();
   });
 
   /** The log's rows applied, only when the log changes: names arrive far more often and are laid over it below. */
@@ -266,6 +288,16 @@
 
   /** The title whose page is open, if one is. */
   const page = $derived(route.page === 'title' ? { type: route.type, id: route.id } : null);
+
+  // A route the viewer chose is foreground work. This removes it from the idle tail, or joins the exact pending
+  // request when an idle slot got there first.
+  $effect(() => {
+    const opening = page;
+    const key = tmdbKey;
+    // Re-run when the post-shelf tail is created, including a directly opened route with no pointer intent.
+    void historyNaming;
+    if (active && opening && key) void promoteLibraryTitle(session, opening, key);
+  });
 
   // A screen Home doesn't draw loads when this page is it (`screens.svelte.ts`).
   $effect(() => {
@@ -741,6 +773,9 @@
    * reports a failure as an empty list rather than throwing.
    */
   function warmTrailer(title: { type: Title['type']; id: number; imdbId?: string }) {
+    // Promote a watched-history title at pointer intent, before navigation mounts its detail route. The naming
+    // run owns de-duplication, so the route effect and an already-running idle request join this same key.
+    if (tmdbKey) void promoteLibraryTitle(session, title, tmdbKey);
     // The page itself, before its trailer. `preloadScreens` fetches this chunk once Home is idle, so
     // it is usually resident already — but a press within the first second of a visit landed on the
     // route-level spinner while it downloaded. Idempotent: a second call joins the first.

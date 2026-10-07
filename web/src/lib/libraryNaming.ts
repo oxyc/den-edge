@@ -15,11 +15,111 @@ interface NamingRun {
   /** Found but not yet published: every assignment re-derives the whole Home, so names land together. */
   found: Map<string, Details>;
   timer?: ReturnType<typeof setTimeout>;
+  background: Set<BackgroundJob>;
+  backgroundPending: Set<string>;
+  idle?: () => void;
+}
+interface BackgroundJob {
+  refs: Map<string, Ref>;
+  active: boolean;
+  cancelled: boolean;
+  scheduleIdle: (task: () => void) => () => void;
+  hidden: () => boolean;
+  stopVisibility: () => void;
+}
+export interface BackgroundNaming {
+  pause(): void;
+  resume(): void;
+  cancel(): void;
+}
+export interface BackgroundNamingOptions {
+  lookup?: typeof fetchDetails;
+  /** Test seam for the browser idle callback. Returns its cancellation function. */
+  scheduleIdle?: (task: () => void) => () => void;
+  /** Test seam for document visibility. */
+  hidden?: () => boolean;
+  onVisibilityChange?: (task: () => void) => () => void;
 }
 // Retained pages share pending work; weak ownership releases it with the paired library.
 const runs = new WeakMap<NamedLibrary, NamingRun>();
 /** How long found names gather before they are published together. */
 const BATCH_MS = 100;
+const BACKGROUND_LOOKUPS = 2;
+
+function browserIdle(task: () => void): () => void {
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(task, { timeout: 3000 });
+    return () => cancelIdleCallback(id);
+  }
+  const id = setTimeout(task, 200);
+  return () => clearTimeout(id);
+}
+
+const documentHidden = () => typeof document !== 'undefined' && document.hidden;
+function onDocumentVisibility(task: () => void): () => void {
+  if (typeof document === 'undefined') return () => {};
+  document.addEventListener('visibilitychange', task);
+  return () => document.removeEventListener('visibilitychange', task);
+}
+
+function stopBackground(run: NamingRun): void {
+  run.idle?.();
+  run.idle = undefined;
+  for (const job of run.background) job.stopVisibility();
+  run.background.clear();
+}
+
+function usable(job: BackgroundJob): boolean {
+  return !job.cancelled && job.active && !job.hidden() && job.refs.size > 0;
+}
+
+function removeBackgroundRef(run: NamingRun, id: string): void {
+  for (const job of run.background) job.refs.delete(id);
+}
+
+function nextBackground(run: NamingRun): Ref | undefined {
+  for (const job of run.background) {
+    if (!usable(job)) continue;
+    const ref = job.refs.values().next().value as Ref | undefined;
+    if (ref) return ref;
+  }
+}
+
+function scheduleBackground(
+  session: NamedLibrary,
+  run: NamingRun,
+  lookup: typeof fetchDetails,
+): void {
+  if (runs.get(session) !== run || run.idle || run.backgroundPending.size >= BACKGROUND_LOOKUPS)
+    return;
+  const owner = [...run.background].find(usable);
+  if (!owner) return;
+  run.idle = owner.scheduleIdle(() => {
+    run.idle = undefined;
+    if (runs.get(session) !== run) return;
+    while (run.backgroundPending.size < BACKGROUND_LOOKUPS) {
+      const ref = nextBackground(run);
+      if (!ref) break;
+      const id = titleKey(ref);
+      removeBackgroundRef(run, id);
+      if (
+        run.found.has(id) ||
+        (knownTitles(session, run).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))
+      )
+        continue;
+      const existing = run.pending.get(id);
+      if (existing) {
+        void existing.finally(() => scheduleBackground(session, run, lookup));
+        continue;
+      }
+      run.backgroundPending.add(id);
+      void requestName(session, run, ref, lookup).finally(() => {
+        run.backgroundPending.delete(id);
+        scheduleBackground(session, run, lookup);
+      });
+    }
+  });
+}
 
 /** Title membership for the current display snapshot, shared by every retained page's naming pass. */
 function knownTitles(session: NamedLibrary, run: NamingRun): Set<string> {
@@ -49,14 +149,10 @@ function publish(session: NamedLibrary, run: NamingRun): void {
   if (shapes.length) session.shapes = new Map([...session.shapes, ...shapes]);
 }
 
-export async function nameLibraryTitles(
-  session: NamedLibrary,
-  refs: Ref[],
-  key: string,
-  lookup: typeof fetchDetails = fetchDetails,
-): Promise<void> {
+function namingRun(session: NamedLibrary, key: string): NamingRun {
   let run = runs.get(session);
   if (!run || run.key !== key) {
+    if (run) stopBackground(run);
     const displays = session.displays;
     run = {
       key,
@@ -64,9 +160,46 @@ export async function nameLibraryTitles(
       displays,
       known: new Set(displays.map(titleKey)),
       found: new Map(),
+      background: new Set(),
+      backgroundPending: new Set(),
     };
     runs.set(session, run);
   }
+  return run;
+}
+
+function requestName(
+  session: NamedLibrary,
+  run: NamingRun,
+  ref: Ref,
+  lookup: typeof fetchDetails,
+): Promise<void> {
+  const id = titleKey(ref);
+  removeBackgroundRef(run, id);
+  let work = run.pending.get(id);
+  if (!work) {
+    const requested = ref;
+    work = Promise.resolve()
+      .then(() => lookup(requested, run.key))
+      .then((found) => {
+        if (!found || runs.get(session) !== run) return;
+        run.found.set(id, found);
+        run.timer ??= setTimeout(() => publish(session, run), BATCH_MS);
+      })
+      .catch(() => {})
+      .finally(() => run.pending.delete(id));
+    run.pending.set(id, work);
+  }
+  return work;
+}
+
+export async function nameLibraryTitles(
+  session: NamedLibrary,
+  refs: Ref[],
+  key: string,
+  lookup: typeof fetchDetails = fetchDetails,
+): Promise<void> {
+  const run = namingRun(session, key);
   const current = run;
   const queue = [...refs];
   let next = 0;
@@ -79,25 +212,86 @@ export async function nameLibraryTitles(
         (knownTitles(session, current).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))
       )
         continue;
-      let work = current.pending.get(id);
-      if (!work) {
-        const requested = ref;
-        work = Promise.resolve()
-          .then(() => lookup(requested, key))
-          .then((found) => {
-            if (!found || runs.get(session) !== current) return;
-            current.found.set(id, found);
-            current.timer ??= setTimeout(() => publish(session, current), BATCH_MS);
-          })
-          .catch(() => {})
-          .finally(() => current.pending.delete(id));
-        current.pending.set(id, work);
-      }
-      await work;
+      await requestName(session, current, ref, lookup);
     }
   };
   await Promise.all(Array.from({ length: 6 }, worker));
   publish(session, current);
+}
+
+/** Promote only a title already owned by this run's background tail; unrelated card intent starts no new work. */
+export function promoteLibraryTitle(
+  session: NamedLibrary,
+  ref: Ref,
+  key: string,
+  lookup: typeof fetchDetails = fetchDetails,
+): Promise<void> | undefined {
+  const run = runs.get(session);
+  if (!run || run.key !== key) return;
+  const id = titleKey(ref);
+  if (!run.pending.has(id) && ![...run.background].some((job) => job.refs.has(id))) return;
+  if (
+    run.found.has(id) ||
+    (knownTitles(session, run).has(id) && (ref.type !== 'tv' || session.shapes.has(id)))
+  ) {
+    removeBackgroundRef(run, id);
+    publish(session, run);
+    return Promise.resolve();
+  }
+  const work = requestName(session, run, ref, lookup);
+  return work.then(() => publish(session, run));
+}
+
+/**
+ * Name the unreserved watched-history tail only while its route and document are active. Each request is admitted
+ * by an idle callback, and all retained routes sharing this session share the same two-request ceiling.
+ */
+export function nameLibraryHistoryTitles(
+  session: NamedLibrary,
+  refs: Ref[],
+  key: string,
+  options: BackgroundNamingOptions = {},
+): BackgroundNaming {
+  const run = namingRun(session, key);
+  const lookup = options.lookup ?? fetchDetails;
+  const job: BackgroundJob = {
+    refs: new Map(refs.map((ref) => [titleKey(ref), ref])),
+    active: true,
+    cancelled: false,
+    scheduleIdle: options.scheduleIdle ?? browserIdle,
+    hidden: options.hidden ?? documentHidden,
+    stopVisibility: () => {},
+  };
+  const refresh = () => {
+    if (runs.get(session) !== run) return;
+    if (!usable(job)) {
+      // A shared idle callback may belong to this job. Re-admit it from another active owner if there is one.
+      run.idle?.();
+      run.idle = undefined;
+    }
+    scheduleBackground(session, run, lookup);
+  };
+  job.stopVisibility = (options.onVisibilityChange ?? onDocumentVisibility)(refresh);
+  run.background.add(job);
+  scheduleBackground(session, run, lookup);
+  return {
+    pause() {
+      job.active = false;
+      refresh();
+    },
+    resume() {
+      job.active = true;
+      refresh();
+    },
+    cancel() {
+      if (job.cancelled) return;
+      job.cancelled = true;
+      job.refs.clear();
+      job.stopVisibility();
+      run.background.delete(job);
+      refresh();
+    },
+  };
 }
 
 /** Select by log recency before looking up names: network order must never select the recommendation seeds. */
