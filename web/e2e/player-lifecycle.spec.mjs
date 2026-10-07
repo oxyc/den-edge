@@ -113,26 +113,22 @@ test('native polling sleeps with a paused or hidden player', async () => {
       undefined,
       { timeout: 30_000 },
     );
-    const timers = () =>
-      page.evaluate(() =>
-        [...window.playerFixtureIntervals.values()].filter(
-          (delay) => delay === 250 || delay === 500,
-        ),
-      );
-    await page.locator('.player video').evaluate((video) => {
-      let paused = false;
-      Object.defineProperties(video, {
-        paused: { configurable: true, get: () => paused },
-        seeking: { configurable: true, get: () => false },
-        ended: { configurable: true, get: () => false },
-      });
-      window.setPlayerFixturePaused = (next) => {
-        paused = next;
-        video.dispatchEvent(new Event(next ? 'pause' : 'playing'));
-      };
-      video.dispatchEvent(new Event('playing'));
-    });
-    await expect.poll(timers).toContain(250);
+    expect(
+      await page.locator('.player video').evaluate((video) => {
+        let paused = false;
+        Object.defineProperties(video, {
+          paused: { configurable: true, get: () => paused },
+          seeking: { configurable: true, get: () => false },
+          ended: { configurable: true, get: () => false },
+        });
+        window.setPlayerFixturePaused = (next) => {
+          paused = next;
+          video.dispatchEvent(new Event(next ? 'pause' : 'playing'));
+        };
+        video.dispatchEvent(new Event('playing'));
+        return [...window.playerFixtureIntervals.values()];
+      }),
+    ).toContain(250);
 
     expect(
       await page.locator('.player video').evaluate((video) => {
@@ -149,10 +145,20 @@ test('native polling sleeps with a paused or hidden player', async () => {
       }),
     ).toEqual([]);
 
-    await page.evaluate(() => window.setPlayerFixtureVisibility('visible'));
-    await expect.poll(timers).toContain(250);
-    await page.evaluate(() => window.setPlayerFixturePaused(true));
-    await expect.poll(timers).toEqual([]);
+    expect(
+      await page.evaluate(() => {
+        window.setPlayerFixtureVisibility('visible');
+        return [...window.playerFixtureIntervals.values()];
+      }),
+    ).toContain(250);
+    expect(
+      await page.evaluate(() => {
+        window.setPlayerFixturePaused(true);
+        return [...window.playerFixtureIntervals.values()].filter(
+          (delay) => delay === 250 || delay === 500,
+        );
+      }),
+    ).toEqual([]);
   } finally {
     await browser.close();
   }
