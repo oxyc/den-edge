@@ -258,7 +258,7 @@ it('publishes an exact shelf plan before names and yields on both sides of their
   naming.cancel();
 });
 
-it('exposes exact Watchlist presence synchronously before a Continue shape lookup', async () => {
+it('proves resumable Continue and Watchlist presence before a TV shape lookup', async () => {
   const { applyLog, emptyLibrary } = await import('./library');
   const { addToWatchlist, blankEpisode, blankTitle, updateEpisodeProgress } =
     await import('./actions');
@@ -270,10 +270,15 @@ it('exposes exact Watchlist presence synchronously before a Continue shape looku
   const saved = addToWatchlist(blankTitle({ type: 'movie', id: 222 }, 2), [2, 0, 'test']);
   const rows = [continued, saved];
   const state = session();
-  const lookup = vi.fn(async (wanted: Ref) => ({
-    title: { ...wanted, title: `#${wanted.id}` },
-    shape: wanted.type === 'tv' ? { counts: new Map([[1, 8]]) } : undefined,
-  }));
+  let releaseShape!: () => void;
+  const shapeGate = new Promise<void>((resolve) => (releaseShape = resolve));
+  const lookup = vi.fn(async (wanted: Ref) => {
+    if (wanted.type === 'tv') await shapeGate;
+    return {
+      title: { ...wanted, title: `#${wanted.id}` },
+      shape: wanted.type === 'tv' ? { counts: new Map([[1, 8]]) } : undefined,
+    };
+  });
   const naming = nameLibraryShelfTitles(
     state,
     applyLog(emptyLibrary(), rows),
@@ -283,9 +288,10 @@ it('exposes exact Watchlist presence synchronously before a Continue shape looku
     async () => {},
   );
 
-  expect(naming.initialPlan).toEqual({ continue: false, watchlist: true });
+  expect(naming.initialPlan).toEqual({ continue: true, watchlist: true });
   expect(lookup).not.toHaveBeenCalled();
   await expect(naming.planned).resolves.toEqual({ continue: true, watchlist: true });
+  releaseShape();
   await naming.ready;
   naming.cancel();
 });

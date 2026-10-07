@@ -357,20 +357,6 @@ function shapeRefs(library: Library, critical: readonly Ref[]): Ref[] {
   return critical.filter((ref) => ref.type === 'tv' && needed.has(titleKey(ref)));
 }
 
-function shelfQueues(session: NamedLibrary, library: Library): Record<ShelfName, Ref[]> {
-  const continued =
-    session.continueTitleRefs?.(library) ??
-    new ContinueProjector().project({ ...library, shapes: session.shapes }).map(({ ref }) => ({
-      type: ref.type,
-      id: ref.id,
-    }));
-  const saved = library.records
-    .filter((record) => !record.deleted && record.status === 'watchlist')
-    .sort((a, b) => b.addedAt - a.addedAt)
-    .map(({ title }) => ({ type: title.type, id: title.id }));
-  return { continue: uniqueRefs(continued), watchlist: uniqueRefs(saved) };
-}
-
 /**
  * Keep shelf membership eager but bound display publication to what Home can initially show. TV layouts are
  * fetched first and published without their titles, so completed-series decisions and exact Continue ordering
@@ -386,6 +372,24 @@ export function nameLibraryShelfTitles(
 ): ShelfNaming {
   const run = namingRun(session, key);
   const critical = shelfTitleRefs(library, rows);
+  const requiredShapes = shapeRefs(library, critical);
+  // The session-owned projector retains this fold and later applies only the shapes published below. Lightweight
+  // fixtures without one get the same property from one projector local to this naming run.
+  const fallbackProjector = new ContinueProjector();
+  const queuesFor = () => {
+    const continued =
+      session.continueTitleRefs?.(library) ??
+      fallbackProjector.project({ ...library, shapes: session.shapes }).map(({ ref }) => ({
+        type: ref.type,
+        id: ref.id,
+      }));
+    const saved = library.records
+      .filter((record) => !record.deleted && record.status === 'watchlist')
+      .sort((a, b) => b.addedAt - a.addedAt)
+      .map(({ title }) => ({ type: title.type, id: title.id }));
+    return { continue: uniqueRefs(continued), watchlist: uniqueRefs(saved) };
+  };
+  const initialQueues = queuesFor();
   const job: ShelfJob = {
     // Own every former shelf-critical ref until shapes reveal the exact two visible queues. This also lets a
     // retained title route promote its own key while the initial pass is still running.
@@ -398,8 +402,10 @@ export function nameLibraryShelfTitles(
   let admissions = Promise.resolve();
   let draining: Promise<void> | undefined;
   const initialPlan: ShelfPlan = {
-    continue: false,
-    watchlist: library.records.some((record) => !record.deleted && record.status === 'watchlist'),
+    // A movie in progress or a TV episode that can be resumed is a conclusive positive without a season layout.
+    // Only a negative answer can still depend on the policy-critical shapes below.
+    continue: initialQueues.continue.length > 0,
+    watchlist: initialQueues.watchlist.length > 0,
   };
   let planSettled = false;
   let resolvePlan!: (plan: ShelfPlan) => void;
@@ -409,13 +415,16 @@ export function nameLibraryShelfTitles(
     planSettled = true;
     resolvePlan(plan);
   };
+  if (initialPlan.continue) settlePlan(initialPlan);
 
   const ready = (async () => {
     try {
-      await nameLibraryShapes(session, shapeRefs(library, critical), key, lookup);
+      await nameLibraryShapes(session, requiredShapes, key, lookup);
       if (job.cancelled || runs.get(session) !== run) return;
 
-      queues = shelfQueues(session, library);
+      // With no shape work, reuse the initial projection exactly. Production's session projector also makes the
+      // shaped path incremental, rather than replaying the whole library after metadata arrives.
+      queues = requiredShapes.length ? queuesFor() : initialQueues;
       const seeds = personalSeedRows(rows);
       const seedRefs = [...seeds.watched, ...seeds.watchlisted].map(({ title }) => title);
       visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);

@@ -145,6 +145,8 @@
   const EVERYONE_NAMED = 20;
   /** Let the hero's loaded image reach a paint before background provider synchronization starts. */
   const PROVIDERS_AFTER_HERO_MS = 1_000;
+  /** Last exact Continue presence, sealed by `LibraryLog.keep`; it reserves layout only, never membership. */
+  const KEPT_HOME_SHELVES = 'home.shelves.v1';
   const warnKeep = (error: unknown) => console.warn('den: Home could not be kept', error);
   const SAVE_FAILED = 'Couldn’t save that. Check that this device is on your network.';
 
@@ -153,6 +155,8 @@
   let shelfPlan = $state.raw<ShelfPlan | null>(null);
   /** The exact shelf membership is known. Until then a lower row must not paint ahead of Continue Watching. */
   let shelfPlanReady = $state(false);
+  /** Continue's geometry is either reserved or proven absent, so every lower Home row has a stable place. */
+  const shelfOrderReady = $derived(shelfPlanReady || shelfPlan?.continue === true);
   let shelfNaming = $state.raw<ShelfNaming | null>(null);
   let historyNaming = $state.raw<BackgroundNaming | null>(null);
   const clock = browserClock();
@@ -213,6 +217,7 @@
       const key = discovered.tmdbKey;
       if (key && opened) {
         // An initial run may be replaced before it becomes ready. Never let its plan paint for the replacement.
+        shelvesReady = false;
         shelfPlan = null;
         shelfPlanReady = false;
         const projection = session.libraryProjection();
@@ -221,8 +226,17 @@
         const naming = nameLibraryShelfTitles(session, raw, projection.rows, key);
         shelfNaming = naming;
         shelfPlan = naming.initialPlan;
+        // A prior exact positive may reserve the portrait row while this visit validates TV layouts. It cannot
+        // release lower shelves or supply cards, and the current exact plan always replaces it.
+        if (!naming.initialPlan.continue)
+          void opened.kept<{ continue?: unknown }>(KEPT_HOME_SHELVES).then((saved) => {
+            if (!disposed && !shelfPlanReady && saved?.continue === true)
+              shelfPlan = { ...(shelfPlan ?? naming.initialPlan), continue: true };
+          });
+        let exactPlan: ShelfPlan | undefined;
         void naming.planned.then((plan) => {
           if (!disposed) {
+            exactPlan = plan;
             shelfPlan = plan;
             shelfPlanReady = true;
           }
@@ -231,6 +245,8 @@
           .then(() => {
             if (disposed) return;
             shelvesReady = true;
+            if (exactPlan)
+              void opened.keep(KEPT_HOME_SHELVES, { continue: exactPlan.continue }).catch(warnKeep);
             const reserved = new Set(naming.refs.map(titleKey));
             // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
             // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
@@ -1515,7 +1531,7 @@
       onseen={(title, on) => fromSlide(setSeen(title, on))}
     />
   {/if}
-  {#if !shelvesReady && (!shelfPlan || facet)}
+  {#if !shelvesReady && (!shelfOrderReady || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
     {#if shelvesReady && resume.length}
@@ -1541,7 +1557,7 @@
     {:else if !shelvesReady && !facet && shelfPlan?.continue}
       <PendingPosterRow heading="Continue Watching" />
     {/if}
-    {#if !facet && downloading.length && shelfPlanReady}
+    {#if !facet && downloading.length && shelvesReady}
       <WindowedPosterRow
         heading="Downloading"
         aside={{ label: 'All downloads', href: '/downloads' }}
