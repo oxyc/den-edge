@@ -821,10 +821,8 @@ async function deliverAccount(
   const epoch =
     locallyHeld && kept
       ? kept.epoch
-      : lease[0] === device && !fresh
-        ? Number(lease[1] ?? 0)
-        : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0, heldEpoch(log, account)) +
-          1;
+      : Math.max(Number(lease[1] ?? 0), pendingV4?.greatest_epoch ?? 0, heldEpoch(log, account)) +
+        1;
   if (!locallyHeld || !kept || Math.max(Date.now() - kept.at, monoNow() - kept.mono) >= HOLD / 2) {
     // Compare-and-set on the lease as read: another device that took or renewed it since wins, and this pass stops.
     // The hold counts from when the request was sent.

@@ -1,7 +1,7 @@
 import { beforeAll, expect, it } from 'vitest';
 import { initialize } from '../vendor/den-core/index.js';
 import type { LibraryLog } from './log';
-import { deliverSimkl } from './simklDelivery';
+import { deliverSimklWithClock } from './simklDelivery';
 import { rowName, type Row, type SettingsRow, type Stamp } from './wire';
 
 beforeAll(() => initialize());
@@ -64,6 +64,13 @@ it('a switched v2 Simkl library sends missing work once and keeps its receipt', 
     },
   } as unknown as LibraryLog;
   let sends = 0;
+  let counter = 0;
+  const clock = {
+    device: 'aaaaaaaaaaaaaaaa',
+    issue: async (now = 2_000) => [now, counter++, 'aaaaaaaaaaaaaaaa'] as Stamp,
+    see: async () => undefined,
+    current: async () => [2_000, counter, 'aaaaaaaaaaaaaaaa'] as Stamp,
+  };
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url === '/config') return new Response(JSON.stringify({ simklClientId: 'client' }));
@@ -76,9 +83,9 @@ it('a switched v2 Simkl library sends missing work once and keeps its receipt', 
     return new Response('{}', { status: 404 });
   };
 
-  expect(await deliverSimkl(fake, 'aaaaaaaaaaaaaaaa', fetchImpl, 600_000)).toBe(true);
+  expect(await deliverSimklWithClock(fake, clock, fetchImpl, 600_000)).toBe(true);
   expect(sends).toBe(1);
   expect(rows.some((row) => row.kind === 'snt')).toBe(true);
-  expect(await deliverSimkl(fake, 'aaaaaaaaaaaaaaaa', fetchImpl, 600_000)).toBe(true);
+  expect(await deliverSimklWithClock(fake, clock, fetchImpl, 600_000)).toBe(true);
   expect(sends).toBe(1);
 });
