@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import {
   INITIAL_SHELF_TITLES,
+  nameActiveHomeShelfTitles,
   nameLibraryHistoryTitles,
   nameLibraryShelfTitles,
   nameLibraryTitles,
@@ -8,6 +9,7 @@ import {
 } from './libraryNaming';
 import type { MediaType, Shape, Title } from './library';
 import type { Details } from './tmdb';
+import type { ActiveHomePayload } from './homeLibraryView';
 
 const ref = { type: 'movie' as const, id: 42 };
 type Ref = { type: MediaType; id: number };
@@ -248,6 +250,67 @@ it('publishes only the first viewport of each shelf, then admits the intended sh
   expect(state.displays).toHaveLength(24);
   expect(lookup).toHaveBeenCalledTimes(24);
   naming.cancel();
+});
+
+it('uses the compact Home queues without materializing the full library', async () => {
+  const continued = Array.from({ length: 12 }, (_, id) => ({
+    ref: { type: 'movie' as const, id: 100 + id },
+    display: 'record' as const,
+    fraction: 0.5,
+    seconds: 40,
+    at: id,
+  }));
+  const payload = {
+    handle: 1,
+    view: {
+      owned: [],
+      watched: [],
+      watchlist: Array.from({ length: 12 }, (_, id) => `movie:${200 + id}`),
+      standings: [],
+      weighted: [],
+      seeds: { watched: [], watchlisted: [] },
+      shelfRefs: [
+        ...continued.map(({ ref }) => `movie:${ref.id}`),
+        ...Array.from({ length: 12 }, (_, id) => `movie:${200 + id}`),
+      ],
+      requiredShapeRefs: [],
+      continue: continued,
+      downloads: [],
+    },
+    settings: {
+      tmdbKey: 'key',
+      plugins: [],
+      remux: null,
+      prefs: {
+        excludedGenres: [],
+        excludedLanguages: [],
+        hideAnime: false,
+        hideWatched: false,
+        services: [],
+        servicesConfigured: false,
+      },
+    },
+    stamp: [1, 0, 'test'],
+    reconsiderAt: Infinity,
+    at: 1,
+  } satisfies ActiveHomePayload;
+  const state = {
+    ...session(),
+    activeHome: payload,
+    settleActiveHomeContinue: vi.fn(async () => {}),
+  };
+  const lookup = vi.fn(async (wanted: Ref) => ({
+    title: { ...wanted, title: `#${wanted.id}` },
+  }));
+  const naming = nameActiveHomeShelfTitles(state, payload, 'key', lookup, async () => {});
+
+  await naming.ready;
+  expect(state.settleActiveHomeContinue).toHaveBeenCalledOnce();
+  expect(state.displays).toHaveLength(INITIAL_SHELF_TITLES * 2);
+  await naming.admit('continue');
+  expect(state.displays).toHaveLength(INITIAL_SHELF_TITLES * 2 + 4);
+  await naming.admit('watchlist');
+  expect(state.displays).toHaveLength(24);
 });
 
 it('publishes an exact shelf plan before names and yields on both sides of their publication', async () => {

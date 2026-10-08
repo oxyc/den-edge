@@ -42,6 +42,8 @@
   import { browserClock } from './lib/clock';
   import { sendToTV } from './lib/inbox';
   import { playGuard } from './lib/playGuard';
+  import { digestHomeLibraryView, homeLibraryViewFromCurrent } from './lib/homeLibraryView';
+  import { devHomeLibraryView } from './lib/libraryWorkerClient';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
   import {
     episodeAfter,
@@ -60,6 +62,7 @@
   import { libraryStandings } from './lib/standing.svelte';
   import type { LibrarySession } from './lib/librarySession.svelte';
   import {
+    nameActiveHomeShelfTitles,
     nameLibraryHistoryTitles,
     nameLibraryShelfTitles,
     promoteLibraryTitle,
@@ -162,6 +165,8 @@
   const clock = browserClock();
   /** The record log — reading it and writing to it. Undefined while it opens; null when it couldn't. */
   const log = $derived(session.log);
+  /** Compact worker-owned state is usable only on Home; every other route asks the session to hydrate. */
+  const stagedHome = $derived(route.page === 'library' ? session.activeHome : null);
   /** Bumped after a write: the log isn't reactive, so the rows re-derive from it on this. */
   const version = $derived(session.revision);
   let busy = $state(false);
@@ -199,12 +204,20 @@
     if (opened) clock.see(opened.newestStamp());
   });
 
+  const refOfKey = (key: string): Pick<Title, 'type' | 'id'> | undefined => {
+    const match = /^(movie|tv):(\d+)$/.exec(key);
+    const id = Number(match?.[2]);
+    return match && Number.isSafeInteger(id) && id > 0
+      ? { type: match[1] as Title['type'], id }
+      : undefined;
+  };
   $effect(() => {
     void session.settingsRevision;
     const opened = log;
+    const staged = stagedHome;
     // `undefined` is a library still opening. `null` is a guest — no library, and still every reason to run
     // the discovery: atlas gives them rows and reel gives them trailers, both on this origin.
-    if (opened === undefined) return;
+    if (opened === undefined && !staged) return;
     // The shared grants are read here so a grant that arrives or ends asks again (`guestGrants.list` is state).
     void guestGrants.pluginUrls();
     let disposed = false;
@@ -212,23 +225,26 @@
     // Only the shared settings revision and opened log trigger reconfiguration.
     // Service state is an output, not a dependency of this effect.
     untrack(() => {
-      discovered.configure(opened);
+      if (staged) discovered.configureActive(staged.settings);
+      else discovered.configure(opened ?? null);
       // Naming the library is still only the paired case: it reads the log itself.
       const key = discovered.tmdbKey;
-      if (key && opened) {
+      if (key && (opened || staged)) {
         // An initial run may be replaced before it becomes ready. Never let its plan paint for the replacement.
         shelvesReady = false;
         shelfPlan = null;
         shelfPlanReady = false;
-        const projection = session.libraryProjection();
-        if (!projection) return;
-        const raw = projection.library;
-        const naming = nameLibraryShelfTitles(session, raw, projection.rows, key);
+        const projection = opened ? session.libraryProjection() : null;
+        if (opened && !projection) return;
+        const raw = projection?.library;
+        const naming = staged
+          ? nameActiveHomeShelfTitles(session, staged, key)
+          : nameLibraryShelfTitles(session, raw!, projection!.rows, key);
         shelfNaming = naming;
         shelfPlan = naming.initialPlan;
         // A prior exact positive may reserve the portrait row while this visit validates TV layouts. It cannot
         // release lower shelves or supply cards, and the current exact plan always replaces it.
-        if (!naming.initialPlan.continue)
+        if (opened && !naming.initialPlan.continue)
           void opened.kept<{ continue?: unknown }>(KEPT_HOME_SHELVES).then((saved) => {
             if (!disposed && !shelfPlanReady && saved?.continue === true)
               shelfPlan = { ...(shelfPlan ?? naming.initialPlan), continue: true };
@@ -245,8 +261,9 @@
           .then(() => {
             if (disposed) return;
             shelvesReady = true;
-            if (exactPlan)
+            if (exactPlan && opened)
               void opened.keep(KEPT_HOME_SHELVES, { continue: exactPlan.continue }).catch(warnKeep);
+            if (!opened || !raw) return;
             const reserved = new Set(naming.refs.map(titleKey));
             // Watched history is not drawn on Home and cannot change the ranking already in flight. Keep its
             // potentially large TMDB tail dormant until the Watchlist screen can actually use the names.
@@ -290,6 +307,11 @@
     else background.pause();
   });
 
+  // Compact state is deliberately a Home-only surface. A directly opened route asks for the ordinary log at once.
+  $effect(() => {
+    if (active && route.page !== 'library' && session.activeHome) void session.ensureLog(true);
+  });
+
   // The full-library screen owns every saved/continued title. Fill its progressive Home tail in small idle
   // tranches; a retained Home keeps that tail dormant until a row is actually explored.
   $effect(() => {
@@ -322,11 +344,19 @@
    * when its marks, shape, dismissal or watched state changes.
    */
   const continueEntries = $derived(
-    applied && library ? session.continueWatching(applied, library) : [],
+    stagedHome
+      ? session.activeHomeContinueWatching()
+      : applied && library
+        ? session.continueWatching(applied, library)
+        : [],
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
-  $effect(() => libraryStandings.set(applied ? standings(applied) : new Map()));
+  $effect(() =>
+    libraryStandings.set(
+      stagedHome ? new Map(stagedHome.view.standings) : applied ? standings(applied) : new Map(),
+    ),
+  );
   $effect(() => () => libraryStandings.set(new Map()));
 
   /**
@@ -352,7 +382,19 @@
   });
   /** Home's Downloading row: only while something is in flight, as the TV's shelf (den-spec library-v4 §17). */
   const downloading = $derived(
-    log ? downloads.list().filter((d) => inFlight(downloads.status(d).state)) : [],
+    stagedHome
+      ? stagedHome.view.downloads.filter((d) => inFlight(downloads.status(d).state))
+      : log
+        ? downloads.list().filter((d) => inFlight(downloads.status(d).state))
+        : [],
+  );
+  const stagedWatchlist = $derived(
+    stagedHome
+      ? stagedHome.view.watchlist.flatMap((key) => {
+          const ref = refOfKey(key);
+          return ref ? (session.displayTitle(ref) ?? []) : [];
+        })
+      : [],
   );
   const liveClock = (entry: ContinueEntry) => {
     const at = livePosition(entry, now);
@@ -413,20 +455,23 @@
     session.rememberTitle(title);
   }
 
+  const actionLog = () => (log ? Promise.resolve(log) : session.ensureLog());
+
   /** Write one row and re-derive what shows it. */
   async function save(row: Row, journal = false) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     busy = true;
     failure = null;
     try {
       const saved =
-        journal && row.kind === 'set' ? await log.writeAction(row) : await log.write(row);
-      if (log.moved) {
+        journal && row.kind === 'set' ? await opened.writeAction(row) : await opened.write(row);
+      if (opened.moved) {
         if (link) links.forgetMoved(link);
         return;
       }
       if (!saved) failure = SAVE_FAILED;
-      else if (log.pendingActions > 0)
+      else if (opened.pendingActions > 0)
         notice =
           'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
       session.changed();
@@ -454,12 +499,13 @@
 
   /** Apply an action to the title's row as last read (or a blank one), stamped now, and write it. */
   async function act(title: Title, change: (row: TitleRow, at: Stamp) => TitleRow) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     try {
       await ensureSyncPolicy();
       remember(title);
-      const before = log.title(title) ?? blankTitle(title, Date.now());
-      clock.see(log.newestStamp());
+      const before = opened.title(title) ?? blankTitle(title, Date.now());
+      clock.see(opened.newestStamp());
       const at = clock.issue();
       const event = recordTrackerEvent(before, change(before, at), at);
       return event ? await save(event, true) : true;
@@ -475,13 +521,14 @@
    * sync policy doesn't capture for this change and `act` would then drop.
    */
   async function dismiss(title: Title) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     try {
       // Stamping runs through the sync policy, as for every other action: without it loaded the dismissal throws.
       await ensureSyncPolicy();
       remember(title);
-      const before = log.title(title) ?? blankTitle(title, Date.now());
-      clock.see(log.newestStamp());
+      const before = opened.title(title) ?? blankTitle(title, Date.now());
+      clock.see(opened.newestStamp());
       if (!(await save(dismissFromContinueWatching(before, clock.issue())))) {
         // Unlike the actions around it, a row write isn't kept on this device to sync later.
         failure =
@@ -498,12 +545,13 @@
 
   /** Undoes `dismiss` — the poster menu's "Remove from Continue Watching" offers this in its toast. */
   async function restore(title: Title) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     try {
       await ensureSyncPolicy();
       remember(title);
-      const before = log.title(title) ?? blankTitle(title, Date.now());
-      clock.see(log.newestStamp());
+      const before = opened.title(title) ?? blankTitle(title, Date.now());
+      clock.see(opened.newestStamp());
       return await save(restoreToContinueWatching(before, clock.issue()));
     } catch (error) {
       console.warn('den: restoring to Continue Watching failed', error);
@@ -518,12 +566,13 @@
    * puts the same word where the press happened, as the poster ⋯ menu's own writes already do.
    */
   async function markEpisodeSeen(title: Title, season: number, episode: number, seen: boolean) {
-    if (!log) return false;
+    const opened = await actionLog();
+    if (!opened) return false;
     try {
       await ensureSyncPolicy();
       remember(title);
-      const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
-      clock.see(log.newestStamp());
+      const row = opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+      clock.see(opened.newestStamp());
       const at = clock.issue();
       const event = recordTrackerEvent(row, markEpisode(row, seen, at), at);
       const ok = event ? await save(event, true) : true;
@@ -538,7 +587,8 @@
 
   /** Same regular-season/last-aired expansion as DenKit.SeriesProgress.airedEpisodes. */
   async function setSeen(title: Title, seen: boolean) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     try {
       await ensureSyncPolicy();
       if (title.type === 'tv') {
@@ -549,19 +599,19 @@
           return false;
         }
         const journals: SettingsRow[] = [];
-        clock.see(log.newestStamp());
+        clock.see(opened.newestStamp());
         for (const [season, count] of [...shape.counts].sort((a, b) => a[0] - b[0])) {
           if (season <= 0) continue;
           for (let episode = 1; episode <= count; episode++) {
             if (!isAired({ season, episode }, shape.lastAired)) continue;
             const before =
-              log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+              opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
             const at = clock.issue();
             const event = recordTrackerEvent(before, markEpisode(before, seen, at), at);
             if (event) journals.push(event);
           }
         }
-        const before = log.title(title) ?? blankTitle(title, Date.now());
+        const before = opened.title(title) ?? blankTitle(title, Date.now());
         const at = clock.issue();
         const event = recordTrackerEvent(
           before,
@@ -572,8 +622,8 @@
         busy = true;
         failure = null;
         try {
-          if (!(await log.writeActions(journals))) failure = SAVE_FAILED;
-          else if (log.pendingActions > 0)
+          if (!(await opened.writeActions(journals))) failure = SAVE_FAILED;
+          else if (opened.pendingActions > 0)
             notice =
               'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
           session.changed();
@@ -603,16 +653,19 @@
    * un-mark works by `episodesReset`, which cannot say "this season only".
    */
   async function markSeasonSeen(title: Title, season: number, episodes: number[], seen: boolean) {
-    if (!log || !episodes.length) return;
+    if (!episodes.length) return;
+    const opened = await actionLog();
+    if (!opened) return;
     busy = true;
     failure = null;
     try {
       await ensureSyncPolicy();
       remember(title);
       const journals: SettingsRow[] = [];
-      clock.see(log.newestStamp());
+      clock.see(opened.newestStamp());
       for (const episode of episodes) {
-        const before = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+        const before =
+          opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
         // A stamp each: one shared across the rows would lose the order they merge in.
         const at = clock.issue();
         // An episode already in this state journals nothing, and drops out of the write by itself.
@@ -620,8 +673,8 @@
         if (event) journals.push(event);
       }
       if (!journals.length) return;
-      if (!(await log.writeActions(journals))) failure = SAVE_FAILED;
-      else if (log.pendingActions > 0)
+      if (!(await opened.writeActions(journals))) failure = SAVE_FAILED;
+      else if (opened.pendingActions > 0)
         notice =
           'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.';
       session.changed();
@@ -718,7 +771,7 @@
   }
   setTitleActionsContext({
     get libraryOpen() {
-      return !!log;
+      return !!log || !!stagedHome;
     },
     get busy() {
       return busy;
@@ -810,18 +863,19 @@
 
   /** Where playback got to, written as the TV's player writes it. */
   async function progressed(target: Target, fraction: number, seconds: number) {
-    if (!log) return;
+    const opened = await actionLog();
+    if (!opened) return;
     try {
       await ensureSyncPolicy();
       const { title, season, episode } = target;
       remember(title);
       if (season !== undefined && episode !== undefined) {
-        const row = log.episode(title, season, episode) ?? blankEpisode(title, season, episode);
+        const row = opened.episode(title, season, episode) ?? blankEpisode(title, season, episode);
         await save(updateEpisodeProgress(row, fraction, seconds, clock.issue()));
       } else {
         await save(
           updateProgress(
-            log.title(title) ?? blankTitle(title, Date.now()),
+            opened.title(title) ?? blankTitle(title, Date.now()),
             fraction,
             seconds,
             clock.issue(),
@@ -902,6 +956,14 @@
   /** The TV's hide rules, from the log's `set:prefs`: re-read when settings change, not on every refresh. */
   const prefs = $derived.by(() => {
     void session.settingsRevision;
+    if (stagedHome) {
+      const compact = stagedHome.settings.prefs;
+      return {
+        ...compact,
+        excludedGenres: new Set(compact.excludedGenres),
+        excludedLanguages: new Set(compact.excludedLanguages),
+      };
+    }
     return readPrefs(log?.settings('prefs'));
   });
   const detailPrefs = $derived.by(() => {
@@ -925,9 +987,11 @@
   /** What the TV's discovery rows hide: its rules, and what you've seen when Hide Watched is on. */
   const watched = $derived(
     new Set(
-      applied?.records
-        .filter((r) => !r.deleted && r.status === 'watched')
-        .map((r) => titleKey(r.title)) ?? [],
+      stagedHome
+        ? stagedHome.view.watched
+        : (applied?.records
+            .filter((r) => !r.deleted && r.status === 'watched')
+            .map((r) => titleKey(r.title)) ?? []),
     ),
   );
   const browseShown = (title: Title) =>
@@ -969,6 +1033,11 @@
    * so it counts for more than either, and a dislike counts against. Ids and weights need no names.
    */
   const weighted = $derived.by(() => {
+    if (stagedHome)
+      return stagedHome.view.weighted.map(([key, weight, at]) => {
+        const ref = refOfKey(key)!;
+        return { ref, weight, at };
+      });
     // Reactions live on the log's rows; the records carry only status. A title is read by both.
     const reactions = personalTitleRows.reactions;
     const weightOf = (status: string, reaction: string | null | undefined) => {
@@ -996,6 +1065,18 @@
   const pages = $derived(tmdbKey ? tmdbPages(tmdbKey) : null);
   /** The seeds of Home's personal rows: your two latest watched or liked titles, and two latest watchlisted, named. */
   const seeds = $derived.by(() => {
+    if (stagedHome) {
+      const named = (keys: string[]) =>
+        keys.flatMap((key) => {
+          const ref = refOfKey(key);
+          return ref ? (session.displayTitle(ref) ?? []) : [];
+        });
+      return {
+        watched: named(stagedHome.view.seeds.watched),
+        watchlisted: named(stagedHome.view.seeds.watchlisted),
+        owned: new Set(stagedHome.view.owned),
+      };
+    }
     const { selected, titleRows } = personalTitleRows;
     const namedSeeds = (refs: TitleRow[]) =>
       refs.flatMap((r) => session.displayTitle(r.title) ?? []);
@@ -1004,6 +1085,42 @@
       watchlisted: namedSeeds(selected.watchlisted),
       owned: new Set(titleRows.map((r) => titleKey(r.title))),
     };
+  });
+  // Opt-in development proof: the Worker selects the compact fixed Home inputs while it already owns the fold;
+  // compare them with the values this component still derives today. Production omits and never reads the proof.
+  // Enable with VITE_HOME_VIEW_PROOF=1; ordinary development should not pay for the extra clone and comparison.
+  $effect(() => {
+    if (
+      !import.meta.env.DEV ||
+      import.meta.env.VITE_HOME_VIEW_PROOF !== '1' ||
+      !projection ||
+      !applied
+    )
+      return;
+    const worker = devHomeLibraryView(projection.rows);
+    if (!worker) return;
+    const current = homeLibraryViewFromCurrent({
+      library: applied,
+      rows: projection.rows,
+      ...personalTitleRows,
+      watched,
+      watchlist: applied.records
+        .filter((record) => !record.deleted && record.status === 'watchlist')
+        .sort((a, b) => b.addedAt - a.addedAt)
+        .map((record) => titleKey(record.title)),
+      standings: standings(applied),
+      weighted,
+    });
+    const digest = digestHomeLibraryView(current);
+    if (
+      digest.hash !== worker.digest.hash ||
+      digest.bytes !== worker.digest.bytes ||
+      JSON.stringify(current) !== JSON.stringify(worker.view)
+    )
+      console.warn('den: Worker Home view differs from the page projection', {
+        worker,
+        current: { view: current, digest },
+      });
   });
   /**
    * atlas's service charts, as its manifest lists them: what the pooled rows can be built from at all.
@@ -1231,7 +1348,7 @@
   });
 
   /** Whether the log's rows have been read: once, rather than every time they change. */
-  const libraryOpen = $derived(applied !== null);
+  const libraryOpen = $derived(applied !== null || stagedHome !== null);
 
   /**
    * Everyone starts with atlas's one cacheable ranking for this surface and UTC day, less what the library holds.
@@ -1250,7 +1367,7 @@
     const opened = log;
     const lookup = (ref: { type: 'movie' | 'tv'; id: number }) => fetchTitle(ref, key);
     const ranked =
-      opened && memberPost
+      (opened || stagedHome) && memberPost
         ? recommend(
             here,
             recommendBody({
@@ -1364,9 +1481,9 @@
   }
 </script>
 
-{#if link && log === undefined}
+{#if link && log === undefined && !stagedHome}
   <Loading label="Loading your library" page />
-{:else if link && (log === null || !library)}
+{:else if link && (log === null || (!library && !stagedHome))}
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its
     library key, unlink in
@@ -1513,7 +1630,9 @@
   {/if}
 {:else}
   {@const resume = continueEntries.filter((e) => !facet || e.title.type === facet)}
-  {@const saved = library ? watchlist(library).filter((t) => !facet || t.type === facet) : []}
+  {@const saved = (stagedHome ? stagedWatchlist : library ? watchlist(library) : []).filter(
+    (t) => !facet || t.type === facet,
+  )}
   <!-- The billboard reaches the top of the window and runs behind the navigation bar. -->
   {#if tmdbKey}
     <Billboard

@@ -195,9 +195,52 @@ interface Snapshot {
   memberRegistered?: boolean;
   /**
    * The wire form of a library kept only here (`openLocal`), which has no den-edge to say it; absent means 2. One kept
-   * on den-edge remembers den-edge's answer in localStorage instead.
+   * on den-edge remembers den-edge's answer in the browser runtime vault instead.
    */
   wireMin?: number;
+}
+
+/**
+ * One row in a live log handed from the staged-open Worker to the page. `current` includes projected pending work;
+ * `acknowledged` is the den-edge base against which later writes compare. Keeping both avoids opening the network or
+ * replaying the pending journal a second time during hydration.
+ */
+export interface LibraryLogSnapshotEntry {
+  name: string;
+  current?: [seq: number, row: Row];
+  acknowledged?: [seq: number, row: Row];
+}
+
+/** Non-row state needed to resume an already-opened online log on the page. */
+export interface LibraryLogSnapshotHeader {
+  version: 1;
+  generation?: string;
+  writeGeneration?: string;
+  head: number;
+  memberRegistered: boolean;
+  wireMin: number;
+  upgradeRequired: number | null;
+  unreadable: Array<[string, string]>;
+  newerFraming: string[];
+  newerDocuments: string[];
+  switchFailure: string | null;
+  predatesV3: boolean;
+  compactionRefused: string | null;
+  recoveryRows?: Row[];
+  moved: boolean;
+  refused: boolean;
+  refusedAt: number;
+  refusal: string | null;
+  rejected: Array<[string, number]>;
+  fromCache: boolean;
+  generationChanges: number;
+  unreported: boolean;
+}
+
+/** Exact, clone-safe state of an online `LibraryLog`. */
+export interface LibraryLogSnapshot {
+  header: LibraryLogSnapshotHeader;
+  entries: LibraryLogSnapshotEntry[];
 }
 
 /** What the device switching a library to v3 says about itself (`switchWebOnly`), for den-core's `v3_form`. */
@@ -246,6 +289,7 @@ const REWRITE_BATCH_MAX = 200;
 const REWRITE_BATCH_MAX_BYTES = 2_000_000;
 
 const utf8 = new TextEncoder();
+const text = new TextDecoder();
 
 export class LibraryLog {
   private entriesVersion = 0;
@@ -307,6 +351,11 @@ export class LibraryLog {
   compactionRefused: string | null = null;
   /** `compactedKeys` as this page added to it. */
   private readonly compacted = new Set<string>();
+  /** Vault-backed runtime work, mirrored so synchronous UI facts stay synchronous after async startup. */
+  private readonly pending = new Map<string, string>();
+  private runtimeVault: Vault | null;
+  private runtimeFallback = false;
+  private runtimeChannel?: BroadcastChannel;
   private recoveryRows?: Row[];
   private memberRegistered = false;
   private registering?: Promise<void>;
@@ -357,22 +406,12 @@ export class LibraryLog {
    * the library so a reload under it may take again at once. Any other generation is watched first.
    */
   get observedGeneration(): string | undefined {
-    if (this.observed !== undefined) return this.observed;
-    try {
-      return this.storage?.getItem(`den.libraryObservedGeneration.${this.keys.id}`) ?? undefined;
-    } catch {
-      return undefined;
-    }
+    return this.observed;
   }
 
   set observedGeneration(generation: string | undefined) {
     this.observed = generation;
-    try {
-      if (generation)
-        this.storage?.setItem(`den.libraryObservedGeneration.${this.keys.id}`, generation);
-    } catch {
-      // Storage blocked: this page remembers it, and the next one watches again.
-    }
+    if (generation) void this.putMeta('observed', generation);
   }
 
   /** Nothing is written: the library needs a newer build, a switch to v4 failed, or it predates v3. */
@@ -398,10 +437,262 @@ export class LibraryLog {
     private readonly local: { vault: Vault; key: CryptoKey } | null = null,
     /** A library that lives only in this browser (`openLocal`): nothing is asked of den-edge, or sent to it. */
     private readonly offline = false,
+    vault: Vault | null = local?.vault ?? null,
   ) {
-    const remembered = Number(this.storage?.getItem(`den.libraryWireMin.${this.keys.id}`));
+    this.runtimeVault = vault;
+  }
+
+  private get runtimePrefix(): string {
+    return `${this.keys.id}:runtime:`;
+  }
+
+  private get pendingPrefix(): string {
+    return `${this.runtimePrefix}pending:`;
+  }
+
+  private get legacyPendingPrefix(): string {
+    return `den.pendingTracker.${this.keys.id}.`;
+  }
+
+  private metaKey(name: string): string {
+    return `${this.runtimePrefix}meta:${name}`;
+  }
+
+  private legacyMetaKey(name: 'observed' | 'wireMin' | 'compacted'): string {
+    const part =
+      name === 'observed' ? 'ObservedGeneration' : name === 'wireMin' ? 'WireMin' : 'Compacted';
+    return `den.library${part}.${this.keys.id}`;
+  }
+
+  private legacyEntries(prefix: string): Array<[string, string]> {
+    const found: Array<[string, string]> = [];
+    try {
+      for (let index = 0; index < (this.storage?.length ?? 0); index++) {
+        const key = this.storage!.key(index);
+        if (!key?.startsWith(prefix)) continue;
+        const value = this.storage!.getItem(key);
+        if (value !== null) found.push([key, value]);
+      }
+    } catch {
+      // Blocked storage contributes nothing; IndexedDB may still work.
+    }
+    return found;
+  }
+
+  /** Import old localStorage state write-before-delete, then initialize every synchronous runtime mirror. */
+  private async initializeRuntime(): Promise<void> {
+    let stored = new Map<string, string>();
+    if (this.runtimeVault) {
+      try {
+        stored = new Map(
+          (await this.runtimeVault.entries(this.runtimePrefix)).map(([key, value]) => [
+            key,
+            text.decode(value),
+          ]),
+        );
+      } catch {
+        // IndexedDB refused or disappeared. Preserve the former localStorage fallback for this visit.
+        this.runtimeVault = null;
+      }
+    }
+    if (!this.runtimeVault && this.storage)
+      try {
+        // Merely touching Storage can throw in a blocked/private frame.
+        void this.storage.length;
+        this.runtimeFallback = true;
+      } catch {
+        this.runtimeFallback = false;
+      }
+    const legacy: Array<[oldKey: string, newKey: string, value: string]> = [
+      ...this.legacyEntries(this.legacyPendingPrefix).map(
+        ([key, value]) =>
+          [key, this.pendingPrefix + key.slice(this.legacyPendingPrefix.length), value] as [
+            string,
+            string,
+            string,
+          ],
+      ),
+      ...(['observed', 'wireMin', 'compacted'] as const).flatMap((name) => {
+        const oldKey = this.legacyMetaKey(name);
+        try {
+          const value = this.storage?.getItem(oldKey);
+          return value === null || value === undefined
+            ? []
+            : ([[oldKey, this.metaKey(name), value]] as Array<[string, string, string]>);
+        } catch {
+          return [];
+        }
+      }),
+    ];
+    for (const [oldKey, newKey, value] of legacy) {
+      if (this.runtimeVault) {
+        try {
+          const existing = stored.get(newKey);
+          let imported = existing ?? value;
+          // These facts accumulate: a partially completed earlier import must not discard the stronger legacy fact.
+          if (oldKey === this.legacyMetaKey('wireMin') && existing !== undefined)
+            imported = String(Math.max(Number(existing) || 2, Number(value) || 2));
+          else if (oldKey === this.legacyMetaKey('compacted') && existing !== undefined) {
+            try {
+              imported = JSON.stringify([
+                ...new Set([
+                  ...(JSON.parse(existing) as string[]),
+                  ...(JSON.parse(value) as string[]),
+                ]),
+              ]);
+            } catch {
+              imported = existing;
+            }
+          }
+          if (existing !== imported) {
+            await this.runtimeVault.put(newKey, utf8.encode(imported));
+            stored.set(newKey, imported);
+          }
+          this.storage?.removeItem(oldKey);
+        } catch {
+          // The old value remains authoritative until a later visit can import it.
+          if (!stored.has(newKey)) stored.set(newKey, value);
+        }
+      } else stored.set(newKey, value);
+    }
+    this.installRuntime(stored);
+    this.listenForRuntimeChanges();
+  }
+
+  private get runtimeAvailable(): boolean {
+    return this.runtimeVault !== null || this.runtimeFallback;
+  }
+
+  private installRuntime(stored: ReadonlyMap<string, string>): void {
+    this.pending.clear();
+    for (const [key, value] of stored)
+      if (key.startsWith(this.pendingPrefix)) this.pending.set(key, value);
+    this.observed = stored.get(this.metaKey('observed'));
+    const remembered = Number(stored.get(this.metaKey('wireMin')));
     if (Number.isInteger(remembered) && remembered >= 2) this.wireMin = remembered;
     if (this.wireMin > WIRE) this.upgradeRequired = this.wireMin;
+    try {
+      const compacted = stored.get(this.metaKey('compacted'));
+      if (compacted) for (const key of JSON.parse(compacted) as string[]) this.compacted.add(key);
+    } catch {
+      // Malformed optimization metadata is ignored; no library content depends on it.
+    }
+  }
+
+  private listenForRuntimeChanges(): void {
+    if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return;
+    try {
+      this.runtimeChannel = new BroadcastChannel(`den-library-runtime:${this.keys.id}`);
+      this.runtimeChannel.onmessage = (event: MessageEvent<{ key?: string; value?: string }>) => {
+        const { key, value } = event.data ?? {};
+        if (!key?.startsWith(this.runtimePrefix)) return;
+        if (key.startsWith(this.pendingPrefix)) {
+          if (value === undefined) this.pending.delete(key);
+          else this.pending.set(key, value);
+        } else if (key === this.metaKey('observed')) this.observed = value;
+        else if (key === this.metaKey('wireMin')) {
+          const minimum = Number(value);
+          if (Number.isInteger(minimum) && minimum > this.wireMin) {
+            this.wireMin = minimum;
+            if (minimum > WIRE) this.upgradeRequired = minimum;
+          }
+        } else if (key === this.metaKey('compacted') && value) {
+          try {
+            for (const compacted of JSON.parse(value) as string[]) this.compacted.add(compacted);
+          } catch {
+            /* Ignore malformed optimization metadata from another tab. */
+          }
+        }
+      };
+    } catch {
+      // Live cross-tab hints are optional; startup and replay re-scan IndexedDB.
+    }
+  }
+
+  private announceRuntime(key: string, value?: string): void {
+    try {
+      this.runtimeChannel?.postMessage({ key, value });
+    } catch {
+      // A later IndexedDB scan remains authoritative.
+    }
+  }
+
+  private async putRuntime(key: string, value: string, legacyKey?: string): Promise<boolean> {
+    try {
+      if (this.runtimeVault) await this.runtimeVault.put(key, utf8.encode(value));
+      else {
+        const fallback = legacyKey;
+        if (!fallback || !this.runtimeFallback || !this.storage) return false;
+        this.storage.setItem(fallback, value);
+      }
+      this.announceRuntime(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private putMeta(name: 'observed' | 'wireMin' | 'compacted', value: string): Promise<boolean> {
+    return this.putRuntime(this.metaKey(name), value, this.legacyMetaKey(name));
+  }
+
+  private async keepPending(key: string, value: string): Promise<boolean> {
+    const legacyKey = this.legacyPendingPrefix + key.slice(this.pendingPrefix.length);
+    if (!(await this.putRuntime(key, value, legacyKey))) return false;
+    this.pending.set(key, value);
+    return true;
+  }
+
+  /** Re-scan before replay so work written or removed by another tab is never hidden by the sync count mirror. */
+  private async refreshPending(): Promise<void> {
+    const found = new Map<string, string>();
+    if (this.runtimeVault) {
+      try {
+        for (const [key, value] of await this.runtimeVault.entries(this.pendingPrefix))
+          found.set(key, text.decode(value));
+      } catch {
+        return;
+      }
+    }
+    for (const [key, value] of this.legacyEntries(this.legacyPendingPrefix))
+      found.set(this.pendingPrefix + key.slice(this.legacyPendingPrefix.length), value);
+    this.pending.clear();
+    for (const [key, value] of found) this.pending.set(key, value);
+  }
+
+  private async discard(key: string): Promise<void> {
+    const legacyKey = this.legacyPendingPrefix + key.slice(this.pendingPrefix.length);
+    try {
+      if (this.runtimeVault) await this.runtimeVault.delete(key);
+      this.storage?.removeItem(legacyKey);
+      this.pending.delete(key);
+      this.announceRuntime(key);
+    } catch {
+      // Retrying accepted work is harmless; a later scan keeps counting it.
+    }
+  }
+
+  private async forgetRuntime(): Promise<void> {
+    try {
+      await this.runtimeVault?.remove(`${this.keys.id}:`);
+    } catch {
+      // The library itself is already gone; stale encrypted cache is harmless and may be cleared later.
+    }
+    for (const [key] of this.legacyEntries(this.legacyPendingPrefix))
+      try {
+        this.storage?.removeItem(key);
+      } catch {
+        /* Blocked legacy storage is already unusable. */
+      }
+    for (const name of ['observed', 'wireMin', 'compacted'] as const)
+      try {
+        this.storage?.removeItem(this.legacyMetaKey(name));
+      } catch {
+        /* Blocked legacy storage is already unusable. */
+      }
+    this.pending.clear();
+    this.runtimeChannel?.close();
+    this.runtimeChannel = undefined;
   }
 
   /**
@@ -423,7 +714,9 @@ export class LibraryLog {
       undefined,
       { vault, key: await localKey(raw) },
       true,
+      vault,
     );
+    await log.initializeRuntime();
     await ensureSyncPolicy();
     const saved = await log.kept<Snapshot>(SNAPSHOT);
     log.takeForm(saved);
@@ -473,7 +766,7 @@ export class LibraryLog {
    */
   async moveTo(libraryKey: string): Promise<LibraryLog | null> {
     await this.saving;
-    const next = await LibraryLog.open(libraryKey, this.fetchImpl, this.storage);
+    const next = await LibraryLog.open(libraryKey, this.fetchImpl, this.storage, this.runtimeVault);
     if (!next || next.moved) return null;
     // v3 rows written into a v2 library would be rows its devices don't read: its watched episodes would go missing
     // there. So that library is switched to v3 first; the TV reads the new form from den-edge's wire minimum. A v2
@@ -735,26 +1028,29 @@ export class LibraryLog {
    * storage is blocked or absent (a private window): a new page there couldn't know what an earlier one removed.
    */
   private get compactedKeys(): Set<string> | null {
-    if (!this.storage) return null;
+    if (this.runtimeVault) return new Set(this.compacted);
+    if (!this.runtimeFallback || !this.storage) return null;
     try {
-      const kept = this.storage.getItem(`den.libraryCompacted.${this.keys.id}`);
+      const kept = this.storage.getItem(this.legacyMetaKey('compacted'));
       return new Set([...this.compacted, ...(kept ? (JSON.parse(kept) as string[]) : [])]);
-    } catch (error) {
-      console.warn(`den: the library rows removed by compaction can't be read here: ${error}`);
+    } catch {
       return null;
     }
   }
 
-  private rememberCompacted(keys: string[]) {
+  private async rememberCompacted(keys: string[]) {
     for (const k of keys) this.compacted.add(k);
-    try {
-      this.storage?.setItem(
-        `den.libraryCompacted.${this.keys.id}`,
-        JSON.stringify([...(this.compactedKeys ?? this.compacted)]),
-      );
-    } catch (error) {
+    if (this.runtimeVault)
+      try {
+        const held = await this.runtimeVault.get(this.metaKey('compacted'));
+        if (held)
+          for (const key of JSON.parse(text.decode(held)) as string[]) this.compacted.add(key);
+      } catch {
+        // `putMeta` below reports the persistence failure; this visit still remembers its own keys.
+      }
+    if (!(await this.putMeta('compacted', JSON.stringify([...this.compacted])))) {
       // Storage failed after the compaction: this page still remembers them.
-      console.warn(`den: the library rows removed by compaction couldn't be kept: ${error}`);
+      console.warn("den: the library rows removed by compaction couldn't be kept");
     }
   }
 
@@ -825,7 +1121,7 @@ export class LibraryLog {
       this.compactionRefused = null;
       return { writes, wireMin: this.wireMin };
     });
-    if (done) this.rememberCompacted(removedKeys);
+    if (done) await this.rememberCompacted(removedKeys);
     return done;
   }
 
@@ -950,7 +1246,7 @@ export class LibraryLog {
   async forget(): Promise<boolean> {
     await this.saving;
     if (this.offline) {
-      await this.local?.vault.remove(`${this.keys.id}:`);
+      await this.forgetRuntime();
       return true;
     }
     try {
@@ -964,7 +1260,9 @@ export class LibraryLog {
         method: 'DELETE',
         headers: this.headers(),
       });
-      return res.ok || res.status === 404;
+      const gone = res.ok || res.status === 404;
+      if (gone) await this.forgetRuntime();
+      return gone;
     } catch {
       return false;
     }
@@ -1066,9 +1364,12 @@ export class LibraryLog {
     libraryKey: string,
     fetchImpl: typeof fetch = (input, init) => fetch(input, init),
     storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+    vault: Vault | null = libraryVault,
   ): Promise<LibraryLog> {
     const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
-    return new LibraryLog(await deriveKeys(raw), fetchImpl, storage);
+    const log = new LibraryLog(await deriveKeys(raw), fetchImpl, storage, null, false, vault);
+    await log.initializeRuntime();
+    return log;
   }
 
   /**
@@ -1077,12 +1378,12 @@ export class LibraryLog {
    * that doesn't open is left where it was.
    */
   async rekeyKept(to: LibraryLog): Promise<void> {
-    if (!this.storage) return;
+    await this.refreshPending();
     const reseal = (sealed: { k: string; v: string }[]) =>
       Promise.all(sealed.map(async ({ k, v }) => seal(to.keys, await open(this.keys, k, v))));
-    for (const key of this.keptKeys()) {
+    for (const [key, encoded] of this.pending) {
       try {
-        const pending = JSON.parse(this.storage.getItem(key)!) as {
+        const pending = JSON.parse(encoded) as {
           k?: string;
           v?: string;
           ops?: string;
@@ -1097,25 +1398,14 @@ export class LibraryLog {
         else if (pending.restore) moved = { restore: await reseal(pending.restore) };
         else if (pending.rows) moved = { rows: await reseal(pending.rows) };
         else moved = (await reseal([{ k: pending.k!, v: pending.v! }]))[0];
-        this.storage.setItem(
-          to.pendingPrefix + key.slice(this.pendingPrefix.length),
-          JSON.stringify(moved),
-        );
-        this.storage.removeItem(key);
+        const movedKey = to.pendingPrefix + key.slice(this.pendingPrefix.length);
+        if (!(await to.keepPending(movedKey, JSON.stringify(moved))))
+          throw new Error('destination runtime storage refused the pending edit');
+        await this.discard(key);
       } catch (error) {
         console.warn('den: an unsent edit could not be moved to the new library key', error);
       }
     }
-  }
-
-  /** The storage keys of the work this browser kept for this library (`pendingPrefix`). */
-  private keptKeys(): string[] {
-    const keys: string[] = [];
-    for (let i = 0; i < (this.storage?.length ?? 0); i++) {
-      const key = this.storage!.key(i);
-      if (key?.startsWith(this.pendingPrefix)) keys.push(key);
-    }
-    return keys;
   }
 
   /**
@@ -1324,7 +1614,10 @@ export class LibraryLog {
       fetchImpl,
       storage,
       vault && { vault, key: await localKey(raw) },
+      false,
+      vault,
     );
+    await log.initializeRuntime();
     // Loads beside the first read, and is waited for outside the per-row tampering catches: a loader failure must
     // never skip valid rows.
     const policy = ensureSyncPolicy();
@@ -1435,6 +1728,79 @@ export class LibraryLog {
       log.keepPartial();
       since = page.entries.at(-1)?.seq ?? page.head;
     }
+  }
+
+  /**
+   * Resume a log exported by `exportSnapshot` without reading den-edge, reopening the kept log, or replaying its
+   * journal. Runtime pending/meta records are still initialized so subsequent writes and cross-tab replay retain
+   * their ordinary durability contract.
+   */
+  static async importSnapshot(
+    libraryKey: string,
+    snapshot: LibraryLogSnapshot,
+    fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+    storage: Storage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage,
+    vault: Vault | null = libraryVault,
+  ): Promise<LibraryLog | null> {
+    if (snapshot.header.version !== 1) return null;
+    const raw = Uint8Array.from(atob(libraryKey), (c) => c.charCodeAt(0));
+    const keys = await deriveKeys(raw);
+    const log = new LibraryLog(
+      keys,
+      fetchImpl,
+      storage,
+      vault && { vault, key: await localKey(raw) },
+      false,
+      vault,
+    );
+    await log.initializeRuntime();
+    await ensureSyncPolicy();
+    const header = snapshot.header;
+    log.generation = header.generation;
+    log.writeGeneration = header.writeGeneration;
+    log.head = header.head;
+    log.memberRegistered = header.memberRegistered;
+    log.wireMin = Math.max(log.wireMin, header.wireMin);
+    log.upgradeRequired =
+      log.upgradeRequired === null
+        ? header.upgradeRequired
+        : header.upgradeRequired === null
+          ? log.upgradeRequired
+          : Math.max(log.upgradeRequired, header.upgradeRequired);
+    log.switchFailure = header.switchFailure;
+    log.predatesV3 = header.predatesV3;
+    log.compactionRefused = header.compactionRefused;
+    log.recoveryRows = header.recoveryRows;
+    log.moved = header.moved;
+    log.refused = header.refused;
+    log.refusedAt = header.refusedAt;
+    log.refusal = header.refusal;
+    log.fromCache = header.fromCache;
+    log.generationChanges = header.generationChanges;
+    log.unreported = header.unreported;
+    for (const [key, why] of header.unreadable) log.unreadable.set(key, why);
+    for (const key of header.newerFraming) log.newerFraming.add(key);
+    for (const key of header.newerDocuments) log.newerDocuments.add(key);
+    for (const [key, at] of header.rejected) log.rejected.set(key, at);
+    let valid = true;
+    await inPolicySlices(snapshot.entries, (entry) => {
+      if (entry.current) {
+        const [seq, row] = entry.current;
+        if (!wellFormed(row)) valid = false;
+        else log.entries.set(entry.name, { seq, row });
+      }
+      if (entry.acknowledged) {
+        const [seq, row] = entry.acknowledged;
+        if (!wellFormed(row)) valid = false;
+        else log.acknowledged.set(entry.name, { seq, row });
+      }
+    });
+    if (!valid) {
+      log.runtimeChannel?.close();
+      return null;
+    }
+    if (log.memberRegistered && !log.refused) useLibraryCredential(keys);
+    return log;
   }
 
   /** Every row, a v4 document shown as the title or season row it stands for (`projectDocument`). */
@@ -1741,6 +2107,51 @@ export class LibraryLog {
     };
   }
 
+  /**
+   * Clone-safe live state for the staged-open handoff. This is deliberately not the kept `Snapshot`: pending work
+   * may have changed `entries` without changing `acknowledged`, and both sides are required to resume exact writes.
+   */
+  exportSnapshot(): LibraryLogSnapshot {
+    const names = new Set([...this.entries.keys(), ...this.acknowledged.keys()]);
+    return {
+      header: {
+        version: 1,
+        generation: this.generation,
+        writeGeneration: this.writeGeneration,
+        head: this.head,
+        memberRegistered: this.memberRegistered,
+        wireMin: this.wireMin,
+        upgradeRequired: this.upgradeRequired,
+        unreadable: [...this.unreadable],
+        newerFraming: [...this.newerFraming],
+        newerDocuments: [...this.newerDocuments],
+        switchFailure: this.switchFailure,
+        predatesV3: this.predatesV3,
+        compactionRefused: this.compactionRefused,
+        recoveryRows: this.recoveryRows,
+        moved: this.moved,
+        refused: this.refused,
+        refusedAt: this.refusedAt,
+        refusal: this.refusal,
+        rejected: [...this.rejected],
+        fromCache: this.fromCache,
+        generationChanges: this.generationChanges,
+        unreported: this.unreported,
+      },
+      entries: [...names].map((name) => {
+        const current = this.entries.get(name);
+        const acknowledged = this.acknowledged.get(name);
+        return {
+          name,
+          ...(current ? { current: [current.seq, current.row] as [number, Row] } : {}),
+          ...(acknowledged
+            ? { acknowledged: [acknowledged.seq, acknowledged.row] as [number, Row] }
+            : {}),
+        };
+      }),
+    };
+  }
+
   /** The pages a first read has read so far (`PARTIAL`); a failure only costs the next visit those pages. */
   private keepPartial(): void {
     if (!this.local) return;
@@ -1850,6 +2261,11 @@ export class LibraryLog {
 
   /** The newest stamp read, so this browser's next edit is stamped after everything it has seen. */
   newestStamp(now = Date.now()): Stamp {
+    return this.currentSummary(now).stamp;
+  }
+
+  /** Stamp summary paired with the instant at which future document stamps must be reconsidered. */
+  currentSummary(now = Date.now()): { stamp: Stamp; reconsiderAt: number; at: number } {
     const cached = this.newestCache;
     if (
       cached &&
@@ -1857,7 +2273,7 @@ export class LibraryLog {
       now >= cached.at &&
       now < cached.reconsiderAt
     )
-      return cached.stamp;
+      return { stamp: cached.stamp, reconsiderAt: cached.reconsiderAt, at: cached.at };
     let latest = ZERO_STAMP;
     let reconsiderAt = Infinity;
     for (const { row } of this.entries.values()) {
@@ -1866,7 +2282,7 @@ export class LibraryLog {
       reconsiderAt = Math.min(reconsiderAt, summary.reconsiderAt ?? Infinity);
     }
     this.newestCache = { version: this.entriesVersion, at: now, stamp: latest, reconsiderAt };
-    return latest;
+    return { stamp: latest, reconsiderAt, at: now };
   }
 
   /**
@@ -1887,13 +2303,10 @@ export class LibraryLog {
       local = converted;
     }
     let kept: string | undefined;
-    if (durable && !this.offline && this.storage) {
+    if (durable && !this.offline && this.runtimeAvailable) {
       kept = this.pendingPrefix + 'rows:' + crypto.randomUUID();
-      try {
-        this.storage.setItem(kept, JSON.stringify({ rows: [await seal(this.keys, local)] }));
-      } catch {
+      if (!(await this.keepPending(kept, JSON.stringify({ rows: [await seal(this.keys, local)] }))))
         return null;
-      }
     }
     const run = this.writes.then(() => this.writeSerial(local, outcome));
     this.writes = run.catch(() => null);
@@ -1904,7 +2317,7 @@ export class LibraryLog {
       // the edit altogether.
       this.persist();
       await this.saving;
-      if (kept) this.discard(kept);
+      if (kept) await this.discard(kept);
     }
     return saved ?? (kept ? this.project(local) : null);
   }
@@ -1980,13 +2393,10 @@ export class LibraryLog {
   ): Promise<boolean> {
     if (!ops.length) return true;
     let kept = key;
-    if (!kept && durable && this.storage) {
+    if (!kept && durable && this.runtimeAvailable) {
       kept = this.pendingPrefix + 'ops:' + crypto.randomUUID();
-      try {
-        this.storage.setItem(kept, JSON.stringify({ ops: await this.sealKept(ops) }));
-      } catch {
+      if (!(await this.keepPending(kept, JSON.stringify({ ops: await this.sealKept(ops) }))))
         return false;
-      }
     }
     if (kept) this.flushing.add(kept);
     const run = this.writes.then(() => this.sendOps(ops, outcome));
@@ -2001,7 +2411,7 @@ export class LibraryLog {
       this.persist();
       await this.saving;
       if (kept) {
-        this.discard(kept);
+        await this.discard(kept);
         this.rejected.delete(kept);
       }
       return true;
@@ -2009,7 +2419,7 @@ export class LibraryLog {
     if (outcome.refused) {
       // A fresh edit refused for good is not kept to be refused again; one kept from before waits `RECHECK_MS`.
       if (key) this.rejected.set(key, Date.now());
-      else if (kept) this.discard(kept);
+      else if (kept) await this.discard(kept);
       return false;
     }
     if (!kept) return false;
@@ -2287,7 +2697,7 @@ export class LibraryLog {
     } finally {
       clearTimeout(deadline);
     }
-    this.observeProtocol(res);
+    await this.observeProtocol(res);
     if (!res.body) return res;
     const reader = res.body.getReader();
     const body = new ReadableStream<Uint8Array>({
@@ -2327,7 +2737,7 @@ export class LibraryLog {
     };
   }
 
-  private observeProtocol(res: Response): void {
+  private async observeProtocol(res: Response): Promise<void> {
     const minimum = Number(res.headers.get('x-den-wire-min'));
     if (!Number.isInteger(minimum) || minimum < 2 || minimum <= this.wireMin) return;
     this.wireMin = minimum;
@@ -2337,11 +2747,8 @@ export class LibraryLog {
       this.switchFailure = null;
       this.predatesV3 = false;
     }
-    try {
-      this.storage?.setItem(`den.libraryWireMin.${this.keys.id}`, String(minimum));
-    } catch {
-      /* The in-memory monotonic fence still holds for this visit. */
-    }
+    // The in-memory monotonic fence already stands for this visit; persistence is an optimization for the next.
+    await this.putMeta('wireMin', String(minimum));
   }
 
   /** Register this browser's membership, once at a time: a cached open starts it while `refresh` may ask too. */
@@ -2390,11 +2797,11 @@ export class LibraryLog {
       }
       return true;
     }
-    if (!this.storage) return false;
+    if (!this.runtimeAvailable) return false;
     const key = this.pendingPrefix + 'bulk:' + crypto.randomUUID();
     try {
       const sealed = await Promise.all(journals.map((row) => seal(this.keys, row)));
-      this.storage.setItem(key, JSON.stringify({ bulk: sealed }));
+      if (!(await this.keepPending(key, JSON.stringify({ bulk: sealed })))) return false;
     } catch {
       return false;
     }
@@ -2403,7 +2810,7 @@ export class LibraryLog {
     // Refused for good before any of it landed, it is not kept to be refused again: the viewer is told it wasn't
     // saved. Refused after some of it landed, the rest stays kept, as work kept from before does.
     if (outcome.refused && !outcome.applied) {
-      this.discard(key);
+      await this.discard(key);
       return false;
     }
     for (const row of journals) this.project(trackerEvent(row)!.after);
@@ -2412,20 +2819,25 @@ export class LibraryLog {
 
   private async stageRecovery(): Promise<boolean> {
     // A library now at v4 takes no v2 or v3 row back (`v4Work`): the switch already converted what this browser read
-    // of the old log. Staging them anyway can overflow localStorage for a large library, and then the new log is
+    // of the old log. Staging them anyway can overflow browser storage for a large library, and then the new log is
     // never read: every write goes on carrying the old generation.
     const rows = [...this.entries.values()]
       .filter((entry) => entry.seq > 0 && !(this.wireMin >= WIRE && legacy(entry.row)))
       .map((entry) => entry.row);
     if (!rows.length) return true;
     try {
-      if (this.storage)
-        this.storage.setItem(
-          this.pendingPrefix + 'recovery:' + crypto.randomUUID(),
-          JSON.stringify({
-            restore: await Promise.all(rows.map((row) => seal(this.keys, row))),
-          }),
-        );
+      if (this.runtimeAvailable) {
+        const key = this.pendingPrefix + 'recovery:' + crypto.randomUUID();
+        if (
+          !(await this.keepPending(
+            key,
+            JSON.stringify({
+              restore: await Promise.all(rows.map((row) => seal(this.keys, row))),
+            }),
+          ))
+        )
+          return false;
+      }
       const retained = new Map((this.recoveryRows ?? []).map((row) => [rowName(row), row]));
       for (const row of rows) {
         const previous = retained.get(rowName(row));
@@ -2515,11 +2927,7 @@ export class LibraryLog {
           }
         }
       }
-      try {
-        this.storage?.removeItem(key);
-      } catch {
-        /* Retain harmless replayable work. */
-      }
+      if (key.startsWith(this.pendingPrefix)) await this.discard(key);
       return true;
     });
     this.writes = run.catch(() => false);
@@ -2554,12 +2962,11 @@ export class LibraryLog {
     }
     const storageKey = this.pendingPrefix + event.id;
     // Persist ciphertext before starting the network operation. Quota/privacy errors fail visibly.
-    try {
-      if (this.storage)
-        this.storage.setItem(storageKey, JSON.stringify(await seal(this.keys, journal)));
-    } catch {
-      return null;
-    }
+    const canKeep = this.runtimeAvailable;
+    const retained = canKeep
+      ? await this.keepPending(storageKey, JSON.stringify(await seal(this.keys, journal)))
+      : false;
+    if (canKeep && !retained) return null;
     const outcome = { refused: false };
     this.flushing.add(storageKey);
     const accepted = await this.write(journal, outcome, false).finally(() =>
@@ -2567,19 +2974,15 @@ export class LibraryLog {
     );
     if (!accepted && outcome.refused) {
       if (fresh) {
-        this.discard(storageKey);
+        await this.discard(storageKey);
         return null;
       }
       this.rejected.set(storageKey, Date.now());
     }
-    if (!accepted && !this.storage) return null;
+    if (!accepted && !retained) return null;
     if (accepted) {
       this.rejected.delete(storageKey);
-      try {
-        this.storage?.removeItem(storageKey);
-      } catch {
-        /* Retrying an accepted event is harmless. */
-      }
+      if (retained) await this.discard(storageKey);
     }
     if (!accepted) return this.project(event.after);
     // The accepted immutable event is the durable source of this projection; keeping a second generic row would
@@ -2587,15 +2990,6 @@ export class LibraryLog {
     const saved = await this.write(event.after, undefined, false);
     if (saved) return saved;
     return this.project(event.after);
-  }
-
-  /** Drop work kept in this browser (`pendingPrefix`). */
-  private discard(key: string): void {
-    try {
-      this.storage?.removeItem(key);
-    } catch {
-      /* Replaying it is refused again, and costs only the request. */
-    }
   }
 
   private project(after: Row): Row {
@@ -2609,16 +3003,11 @@ export class LibraryLog {
 
   /** Each piece of work kept in this browser (`pendingPrefix`), opened; one that doesn't open is left out. */
   private async keptWork(): Promise<KeptWork[]> {
-    if (!this.storage) return [];
-    const keys: string[] = [];
-    for (let i = 0; i < this.storage.length; i++) {
-      const key = this.storage.key(i);
-      if (key?.startsWith(this.pendingPrefix)) keys.push(key);
-    }
+    await this.refreshPending();
     const kept: KeptWork[] = [];
-    for (const key of keys) {
+    for (const [key, encoded] of this.pending) {
       try {
-        const pending = JSON.parse(this.storage.getItem(key)!) as {
+        const pending = JSON.parse(encoded) as {
           k: string;
           v: string;
           bulk?: { k: string; v: string }[];
@@ -2700,16 +3089,8 @@ export class LibraryLog {
     return { restore, ops };
   }
 
-  private get pendingPrefix(): string {
-    return `den.pendingTracker.${this.keys.id}.`;
-  }
-
   get pendingActions(): number {
-    if (!this.storage) return 0;
-    let count = 0;
-    for (let i = 0; i < this.storage.length; i++)
-      if (this.storage.key(i)?.startsWith(this.pendingPrefix)) count++;
-    return count;
+    return this.pending.size;
   }
 
   private async restoreJournal(): Promise<LibraryLog> {
@@ -2745,7 +3126,7 @@ export class LibraryLog {
     for (const work of kept) {
       const { key, rows, kind } = work;
       // Sent by a send that ended since it was read.
-      if (this.flushing.has(key) || this.storage?.getItem(key) == null) continue;
+      if (this.flushing.has(key) || !this.pending.has(key)) continue;
       if (Date.now() - (this.rejected.get(key) ?? 0) < RECHECK_MS) {
         this.projectWork(work);
         continue;
@@ -2756,7 +3137,7 @@ export class LibraryLog {
           const { restore, ops } = this.v4Work(work);
           for (const row of restore) this.project(row);
           if (ops.length && !(await this.writeOps(ops, undefined, false, key))) continue;
-          if (!restore.length) this.discard(key);
+          if (!restore.length) await this.discard(key);
           else if ((await this.flushRows(key, [restore])) && kind === 'restore')
             this.recoveryRows = undefined;
           continue;
@@ -2782,7 +3163,7 @@ export class LibraryLog {
         if (
           !rows.every((row): row is SettingsRow => row.kind === 'set' && trackerEvent(row) !== null)
         ) {
-          this.discard(key);
+          await this.discard(key);
           continue;
         }
         if (kind === 'bulk') {
@@ -2796,7 +3177,7 @@ export class LibraryLog {
       }
     }
     if (
-      !this.storage &&
+      !this.runtimeAvailable &&
       this.recoveryRows &&
       Date.now() - (this.rejected.get(this.pendingPrefix + 'recovery') ?? 0) >= RECHECK_MS
     ) {

@@ -15,6 +15,7 @@ import type { Routes } from './routes';
 import type { Addon } from './scout';
 import { ensureSyncPolicy } from './syncLoader';
 import { tmdbKeyOf } from './tmdb';
+import type { ActiveHomeSettings } from './homeLibraryView';
 
 /** Where this browser keeps what discovery found (`LibraryLog.keep`). */
 const SERVICES = 'services.v1';
@@ -56,6 +57,8 @@ export class SessionServices {
   #stop?: () => void;
   #keep?: ReturnType<typeof setTimeout>;
   #grants = false;
+  /** The hydrated owner for kept discovery state; absent while compact Home owns startup. */
+  #opened: LibraryLog | null = null;
   /** Availability only fades posters; keep its lookups behind the foreground hero. */
   #foregroundReady = false;
   readonly #clock = browserClock();
@@ -73,6 +76,27 @@ export class SessionServices {
    * and what the last run found stays until the new one answers, so nothing blanks while it asks.
    */
   configure(opened: LibraryLog | null): void {
+    this.#opened = opened;
+    this.#configure(
+      opened !== null,
+      tmdbKeyOf(opened?.settings('keys')),
+      opened ? readPlugins(opened.settings('plugins')) : [],
+      readPrivateAddresses(opened?.settings(ADDRESSES)).remux ?? null,
+    );
+  }
+
+  /** Start discovery from the compact worker reply without waiting for the full log to hydrate. */
+  configureActive(settings: ActiveHomeSettings): void {
+    this.#opened = null;
+    this.#configure(true, settings.tmdbKey, settings.plugins, settings.remux);
+  }
+
+  #configure(
+    library: boolean,
+    tmdbKey: string,
+    libraryPlugins: string[],
+    remux: string | null,
+  ): void {
     // A replaced session's singleton connection must not consume this session's queued card wants before its hero.
     if (this.#for === undefined && !this.#foregroundReady) availability.connect(null, '');
     if (!this.#grants) {
@@ -82,10 +106,8 @@ export class SessionServices {
     }
     // The addons shared with this browser join the library's own for lookups; nothing writes them back to it.
     const shared = guestGrants.pluginUrls();
-    const tmdbKey = tmdbKeyOf(opened?.settings('keys'));
-    const plugins = [...(opened ? readPlugins(opened.settings('plugins')) : []), ...shared];
-    const kept = readPrivateAddresses(opened?.settings(ADDRESSES));
-    const wanted = inputs(opened !== null, tmdbKey, plugins, kept.remux ?? null);
+    const plugins = [...libraryPlugins, ...shared];
+    const wanted = inputs(library, tmdbKey, plugins, remux);
     if (wanted === this.#for) return;
     const first = this.#for === undefined;
     this.#for = wanted;
@@ -99,6 +121,7 @@ export class SessionServices {
     // Where the last visit found the addons, used until this visit's discovery answers. A guest keeps nothing
     // between visits — what is kept lives in the library — so there is nothing to restore.
     let live = false;
+    const opened = this.#opened;
     if (first && opened)
       void opened.kept<Kept>(SERVICES).then((saved) => {
         if (!current || live || !saved) return;
@@ -118,17 +141,20 @@ export class SessionServices {
       this.routes = foundRoutes;
       // The household's own tailnet address for den-remux, tried ahead of the table's entries: on the public name
       // the table names none at all, and this is the only thing that reaches it.
-      const forDiscovery = { ...foundRoutes, remux: ahead(kept.remux, foundRoutes.remux) };
+      const forDiscovery = {
+        ...foundRoutes,
+        remux: ahead(remux ?? undefined, foundRoutes.remux),
+      };
       const stop = discoverServices(plugins, forDiscovery, {
         // A guest holding no shared grant is handed neither publisher, so those probes are never issued and the
         // playback services cannot be discovered at all. Structural, rather than a callback someone has to remember
         // to leave out. A guest holding a grant plays through the shared scout and den-remux, so it is handed both.
-        ...(opened || shared.length > 0
+        ...(library || shared.length > 0
           ? {
               scout: (found: Addon | null) => {
                 this.scout = found;
                 if (this.#foregroundReady) availability.connect(found, tmdbKey);
-                this.#settled(opened);
+                this.#settled();
               },
               remux: (found: string | null) => {
                 this.remux = found;
@@ -144,23 +170,23 @@ export class SessionServices {
                 // Where it answered, kept for the visit that will be shown no private address. That write is a
                 // settings change, and the address it keeps is one this run already reached: not a reason to
                 // discover again, so the run counts as started for it.
-                void this.#remember(opened, 'remux', found).then((stored) => {
+                void this.#remember('remux', found).then((stored) => {
                   if (stored === undefined) return;
-                  if (current) this.#for = inputs(opened !== null, tmdbKey, plugins, stored);
+                  if (current) this.#for = inputs(library, tmdbKey, plugins, stored);
                   this.changed();
                 });
-                this.#settled(opened);
+                this.#settled();
               },
             }
           : {}),
         atlas: (found) => {
           this.atlas = found?.base ?? null;
           this.atlasReady = true;
-          this.#settled(opened);
+          this.#settled();
         },
         reel: (found) => {
           this.reel = found?.base ?? null;
-          this.#settled(opened);
+          this.#settled();
         },
       });
       this.#stop = () => {
@@ -184,7 +210,8 @@ export class SessionServices {
   }
 
   /** What discovery found, kept for the next visit once it has settled for a moment. */
-  #settled(opened: LibraryLog | null): void {
+  #settled(): void {
+    const opened = this.#opened;
     if (!opened) return;
     clearTimeout(this.#keep);
     this.#keep = setTimeout(() => {
@@ -212,11 +239,8 @@ export class SessionServices {
    * Quiet on purpose. Nobody asked for this write, and a household that cannot reach its own library has a larger
    * problem than an address the next visit will discover again. The address as kept, once it was written.
    */
-  async #remember(
-    opened: LibraryLog | null,
-    service: string,
-    reached: string | null,
-  ): Promise<string | null | undefined> {
+  async #remember(service: string, reached: string | null): Promise<string | null | undefined> {
+    const opened = this.#opened;
     if (!opened) return;
     const change = healed(readPrivateAddresses(opened.settings(ADDRESSES)), service, reached);
     if (!change) return;

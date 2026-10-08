@@ -9,6 +9,7 @@ import {
 import type { Row, TitleRow } from './wire';
 import { fetchDetails, type Details } from './tmdb';
 import { yieldTask } from './taskYield';
+import type { ActiveHomePayload } from './homeLibraryView';
 
 interface NamedLibrary {
   displays: Title[];
@@ -20,6 +21,9 @@ interface NamedLibrary {
     titles: Title[],
     shapes: ReadonlyArray<readonly [string, Shape]>,
   ) => void;
+  /** Compact startup state, replaced after exact shape projection without materializing the full log. */
+  activeHome?: ActiveHomePayload | null;
+  settleActiveHomeContinue?(): Promise<void>;
 }
 type Ref = { type: MediaType; id: number };
 interface NamingRun {
@@ -504,6 +508,145 @@ export function nameLibraryShelfTitles(
     return draining;
   };
 
+  return {
+    initialPlan,
+    planned,
+    ready,
+    admit,
+    drain,
+    get refs() {
+      return visibleRefs;
+    },
+    cancel() {
+      if (job.cancelled) return;
+      job.cancelled = true;
+      settlePlan({ continue: false, watchlist: false });
+      job.refs.clear();
+      run.shelves.delete(job);
+    },
+  };
+}
+
+const refOfKey = (key: string): Ref | undefined => {
+  const match = /^(movie|tv):(\d+)$/.exec(key);
+  const id = Number(match?.[2]);
+  return match && Number.isSafeInteger(id) && id > 0
+    ? { type: match[1] as MediaType, id }
+    : undefined;
+};
+
+/** The same bounded shelf naming lifecycle when policy membership came from the retained startup engine. */
+export function nameActiveHomeShelfTitles(
+  session: NamedLibrary,
+  payload: ActiveHomePayload,
+  key: string,
+  lookup: typeof fetchDetails = fetchDetails,
+  yieldToBrowser: () => Promise<void> = yieldTask,
+): ShelfNaming {
+  const run = namingRun(session, key);
+  const refs = (keys: string[]) => keys.flatMap((value) => refOfKey(value) ?? []);
+  const seedRefs = refs([...payload.view.seeds.watched, ...payload.view.seeds.watchlisted]);
+  const watchlistQueue = refs(payload.view.watchlist);
+  let queues: Record<ShelfName, Ref[]> = {
+    continue: payload.view.continue.map(({ ref }) => ref),
+    watchlist: watchlistQueue,
+  };
+  const critical = refs(payload.view.shelfRefs);
+  const requiredShapes = refs(payload.view.requiredShapeRefs);
+  const job: ShelfJob = {
+    refs: new Map(critical.map((ref) => [titleKey(ref), ref])),
+    cancelled: false,
+  };
+  run.shelves.add(job);
+  let visibleRefs: Ref[] = [];
+  let admissions = Promise.resolve();
+  let draining: Promise<void> | undefined;
+  const initialPlan: ShelfPlan = {
+    continue: queues.continue.length > 0,
+    watchlist: queues.watchlist.length > 0,
+  };
+  let planSettled = false;
+  let resolvePlan!: (plan: ShelfPlan) => void;
+  const planned = new Promise<ShelfPlan>((resolve) => (resolvePlan = resolve));
+  const settlePlan = (plan: ShelfPlan) => {
+    if (planSettled) return;
+    planSettled = true;
+    resolvePlan(plan);
+  };
+  if (initialPlan.continue) settlePlan(initialPlan);
+
+  const ready = (async () => {
+    try {
+      await nameLibraryShapes(session, requiredShapes, key, lookup);
+      await session.settleActiveHomeContinue?.();
+      if (job.cancelled || runs.get(session) !== run) return;
+      const exact =
+        session.activeHome?.handle === payload.handle ? session.activeHome.view : undefined;
+      // `payload` stays valid when a lightweight caller has no live active state; production reads the exact reply.
+      const view = exact ?? session.activeHome?.view ?? payload.view;
+      queues = {
+        continue: view.continue.map(({ ref }) => ref),
+        watchlist: watchlistQueue,
+      };
+      visibleRefs = uniqueRefs([...seedRefs, ...queues.continue, ...queues.watchlist]);
+      const initial = uniqueRefs([
+        ...seedRefs,
+        ...queues.continue.slice(0, INITIAL_SHELF_TITLES),
+        ...queues.watchlist.slice(0, INITIAL_SHELF_TITLES),
+      ]);
+      const initialKeys = new Set(initial.map(titleKey));
+      const known = knownTitles(session, run);
+      job.refs = new Map(
+        visibleRefs.flatMap((ref) => {
+          const id = titleKey(ref);
+          return initialKeys.has(id) || run.admitted.has(id) || known.has(id)
+            ? []
+            : [[id, ref] as const];
+        }),
+      );
+      settlePlan({ continue: queues.continue.length > 0, watchlist: queues.watchlist.length > 0 });
+      await yieldToBrowser();
+      if (job.cancelled || runs.get(session) !== run) return;
+      await nameLibraryTitles(session, initial, key, lookup);
+      await yieldToBrowser();
+    } finally {
+      settlePlan({ continue: false, watchlist: false });
+    }
+  })();
+
+  const take = (shelf: ShelfName): Ref[] => {
+    const batch: Ref[] = [];
+    for (const ref of queues[shelf]) {
+      const id = titleKey(ref);
+      if (!job.refs.has(id)) continue;
+      job.refs.delete(id);
+      batch.push(ref);
+      if (batch.length === SHELF_TRANCHE) break;
+    }
+    return batch;
+  };
+  const admit = (shelf: ShelfName): Promise<void> => {
+    admissions = Promise.all([ready, admissions]).then(async () => {
+      if (job.cancelled || runs.get(session) !== run) return;
+      const batch = take(shelf);
+      if (batch.length) await nameLibraryTitles(session, batch, key, lookup);
+    });
+    return admissions;
+  };
+  const drain = (): Promise<void> => {
+    if (draining) return draining;
+    draining = (async () => {
+      await ready;
+      while (!job.cancelled && job.refs.size) {
+        const before = job.refs.size;
+        await admit('continue');
+        await admit('watchlist');
+        if (job.refs.size === before) break;
+        if (job.refs.size) await new Promise<void>((resolve) => browserIdle(resolve));
+      }
+    })().finally(() => (draining = undefined));
+    return draining;
+  };
   return {
     initialPlan,
     planned,

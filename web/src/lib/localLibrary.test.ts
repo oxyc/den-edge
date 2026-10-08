@@ -27,7 +27,9 @@ function memoryVault() {
   const data = new Map<string, Uint8Array>();
   const vault: Vault = {
     get: async (k) => data.get(k),
+    entries: async (prefix) => [...data].filter(([key]) => key.startsWith(prefix)),
     put: async (k, value) => void data.set(k, value),
+    delete: async (key) => void data.delete(key),
     remove: async (prefix) => {
       for (const k of [...data.keys()]) if (k.startsWith(prefix)) data.delete(k);
     },
