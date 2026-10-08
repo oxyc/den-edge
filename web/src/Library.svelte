@@ -219,7 +219,18 @@
       ? { type: match[1] as Title['type'], id }
       : undefined;
   };
+  let libraryNamingDeferredForTitle = false;
+  let libraryNamingResume = $state(0);
+  // The large naming effect stays attached to its library across ordinary navigation. Only a title transition that
+  // deliberately skipped its staged -> hydrated rerun needs to restart it when Home becomes visible again.
   $effect(() => {
+    if (route.page !== 'title' && libraryNamingDeferredForTitle) {
+      libraryNamingDeferredForTitle = false;
+      libraryNamingResume++;
+    }
+  });
+  $effect(() => {
+    void libraryNamingResume;
     void libraryNamingSettingsRevision;
     const source = libraryNamingSource;
     const opened = untrack(() => log);
@@ -236,6 +247,12 @@
     untrack(() => {
       if (staged) discovered.configureActive(staged.settings);
       else discovered.configure(opened ?? null);
+      // A title page reads its own rows directly. Rebuilding every Home shelf while its hero mounts used to run
+      // the whole Continue policy for an invisible retained route; returning Home starts a fresh naming run.
+      if (route.page === 'title' && (session.detailBridgeContinueWatching?.() ?? null) !== null) {
+        libraryNamingDeferredForTitle = true;
+        return;
+      }
       // Naming the library is still only the paired case: it reads the log itself.
       const key = discovered.tmdbKey;
       if (key && (opened || staged)) {
@@ -334,6 +351,16 @@
     return session.libraryProjection();
   });
   const applied = $derived(projection?.library ?? null);
+  /**
+   * Home's Worker answer remains exact across route hydration. Use it on a title page until a real row revision,
+   * avoiding an otherwise invisible whole-library display/Continue pass during the detail hero's first paint.
+   */
+  const retainedDetailContinue = $derived(
+    route.page === 'title' ? (session.detailBridgeContinueWatching?.() ?? null) : null,
+  );
+  const retainedDetailStandings = $derived(
+    route.page === 'title' ? (session.detailBridgeStandings?.() ?? null) : null,
+  );
   /** One pass shared by recommendation weighting, personal seeds and owned-title filtering. */
   const personalTitleRows = $derived.by(() => {
     const titleRows: TitleRow[] = [];
@@ -355,15 +382,19 @@
   const continueEntries = $derived(
     stagedHome
       ? session.activeHomeContinueWatching()
-      : applied && library
-        ? session.continueWatching(applied, library)
-        : [],
+      : retainedDetailContinue !== null
+        ? retainedDetailContinue
+        : applied && library
+          ? session.continueWatching(applied, library)
+          : [],
   );
 
   // Every poster marks what the library says of its title: seen, on the watchlist, or being watched.
   $effect(() =>
     libraryStandings.set(
-      stagedHome ? new Map(stagedHome.view.standings) : applied ? standings(applied) : new Map(),
+      stagedHome
+        ? new Map(stagedHome.view.standings)
+        : (retainedDetailStandings ?? (applied ? standings(applied) : new Map())),
     ),
   );
   $effect(() => () => libraryStandings.set(new Map()));
@@ -1493,7 +1524,7 @@
 
 {#if link && log === undefined && !stagedHome}
   <Loading label="Loading your library" page />
-{:else if link && (log === null || (!library && !stagedHome))}
+{:else if link && (log === null || (route.page !== 'title' && !library && !stagedHome))}
   <p class="note">
     Couldn’t open your library. Check that this device is on your network. If your TV reset its
     library key, unlink in

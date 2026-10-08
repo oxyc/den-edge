@@ -12,7 +12,7 @@ import { deliverSimkl } from './simklDelivery';
 import { ensureSyncPolicy } from './syncLoader';
 import type { Row } from './wire';
 import * as libraryEngineClient from './libraryEngineClient';
-import type { ActiveHomePayload } from './homeLibraryView';
+import type { ActiveHomePayload, ActiveHomeShapeReply } from './homeLibraryView';
 
 vi.mock('./simklDelivery', () => ({ deliverSimkl: vi.fn(async () => false) }));
 
@@ -204,6 +204,140 @@ it('publishes a staged route log and its Worker projection atomically', async ()
   expect(session.libraryProjection()?.library).toBe(workerLibrary);
   expect(log.rows).not.toHaveBeenCalled();
   expect(log.rowsInSlices).not.toHaveBeenCalled();
+});
+
+it('retains exact Worker Continue state across detail hydration until library rows change', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const payload = activeHomePayload();
+  payload.view.continue = [
+    {
+      ref: { type: 'movie', id: 7 },
+      display: 'record',
+      fraction: 0.4,
+      title: { type: 'movie', id: 7, title: 'Old name' },
+    },
+  ];
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload,
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate: vi.fn(async () => ({
+      log: log as unknown as LibraryLog,
+      projection: { rows: [] as Row[], library: emptyLibrary() },
+    })),
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+  expect(session.detailBridgeContinueWatching()).toEqual([
+    {
+      fraction: 0.4,
+      title: { type: 'movie', id: 7, title: 'Old name' },
+    },
+  ]);
+  await session.ensureLog();
+  expect(session.log).toBe(log);
+  expect(session.activeHome).not.toBeNull();
+  expect(session.detailBridgeContinueWatching()).not.toBeNull();
+  await session.ensureLog(true);
+
+  session.publishLibraryMetadata([{ type: 'movie', id: 7, title: 'Fresh name' }], []);
+  expect(session.detailBridgeContinueWatching()).toEqual([
+    {
+      fraction: 0.4,
+      title: { type: 'movie', id: 7, title: 'Fresh name' },
+    },
+  ]);
+  expect(session.detailBridgeStandings()).toEqual(new Map([['movie:1', 'watched']]));
+
+  session.changed();
+  expect(session.detailBridgeContinueWatching()).toBeNull();
+  expect(session.detailBridgeStandings()).toBeNull();
+});
+
+it('does not retain compact Continue before required TV shapes settle', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const payload = activeHomePayload();
+  payload.view.requiredShapeRefs = ['tv:7'];
+  payload.view.continue = [
+    {
+      ref: { type: 'tv', id: 7 },
+      display: 'record',
+      fraction: 0.4,
+      title: { type: 'tv', id: 7, title: 'Seven' },
+    },
+  ];
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload,
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate: vi.fn(async () => ({
+      log: log as unknown as LibraryLog,
+      projection: { rows: [] as Row[], library: emptyLibrary() },
+    })),
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+  await session.ensureLog(true);
+
+  expect(session.detailBridgeContinueWatching()).toBeNull();
+});
+
+it('retains the newest required-shape answer when it supersedes the settlement request', async () => {
+  const log = fakeLog();
+  log.refresh.mockResolvedValue(false);
+  const payload = activeHomePayload();
+  payload.view.requiredShapeRefs = ['tv:7'];
+  const answer: ActiveHomeShapeReply = {
+    handle: payload.handle,
+    continue: [
+      {
+        ref: { type: 'tv', id: 7 },
+        display: 'record',
+        fraction: 0.4,
+        title: { type: 'tv', id: 7, title: 'Seven' },
+      },
+    ],
+  };
+  const replies: Array<(value: ActiveHomeShapeReply) => void> = [];
+  vi.spyOn(libraryEngineClient, 'projectLibraryEngineShapes').mockImplementation(
+    () => new Promise((resolve) => replies.push(resolve)),
+  );
+  vi.spyOn(libraryEngineClient, 'openLibraryEngine').mockResolvedValue({
+    payload,
+    kept: vi.fn(async () => undefined),
+    keep: vi.fn(async () => {}),
+    hydrate: vi.fn(async () => ({
+      log: log as unknown as LibraryLog,
+      projection: { rows: [] as Row[], library: emptyLibrary() },
+    })),
+    release: vi.fn(async () => {}),
+  });
+  const session = new LibrarySession('test');
+  await session.opened;
+  const settling = session.settleActiveHomeContinue();
+  let settled = false;
+  void settling.then(() => (settled = true));
+  session.publishLibraryMetadata([], [['tv:7', { counts: new Map([[1, 8]]) }]]);
+  expect(replies).toHaveLength(2);
+  replies[0]!(answer);
+  await Promise.resolve();
+  expect(settled, 'a stale reply must wait for its winning successor').toBe(false);
+  replies[1]!(answer);
+  await settling;
+  expect(settled).toBe(true);
+  expect(session.activeHome?.view.continue).toEqual(answer.continue);
+  await session.ensureLog(true);
+
+  expect(session.detailBridgeContinueWatching()).toEqual([
+    {
+      fraction: 0.4,
+      title: { type: 'tv', id: 7, title: 'Seven' },
+    },
+  ]);
 });
 
 it('retries an initially failed open without discarding a recovered log', async () => {

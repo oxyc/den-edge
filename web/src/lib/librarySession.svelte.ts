@@ -16,6 +16,7 @@ import {
   type ContinueEntry,
   type Library,
   type Shape,
+  type Standing,
   type Title,
 } from './library';
 import type { Row } from './wire';
@@ -53,6 +54,8 @@ export class LibrarySession {
   settingsRevision = $state(0);
   /** Compact first-paint state while the ordinary mutable log remains retained in the library Worker. */
   activeHome = $state.raw<ActiveHomePayload | null>(null);
+  /** Exact compact Home policy can bridge Home -> detail until the first real library change. */
+  private retainedHome = $state.raw<{ revision: number; payload: ActiveHomePayload }>();
   /** Something in the library is playing somewhere (`livePosition`): pull faster, so a pause shows soon. */
   live = false;
   log = $state<LibraryLog | null | undefined>(undefined);
@@ -107,6 +110,10 @@ export class LibrarySession {
   private readonly displayBatches: string[][] = [];
   private readonly shapeBatches: string[][] = [];
   private activeHomeShapeRun = 0;
+  /** The Worker has answered with Continue policy for every shape Home required. */
+  private activeHomeContinueSettledHandle?: number;
+  /** Final shelf naming follows whichever concurrent shape request is newest instead of returning on a stale one. */
+  private activeHomeContinueSettlement?: { promise: Promise<void>; resolve: () => void };
   private stagedEngine?: StagedLibraryEngine;
   private hydrating?: Promise<LibraryLog | null>;
   private readonly device = this.clock.device;
@@ -146,13 +153,23 @@ export class LibrarySession {
   /** Install the Worker's compact first reply. The log/facade owner decides when its retained handle hydrates. */
   adoptActiveHome(payload: ActiveHomePayload, engine?: StagedLibraryEngine): void {
     this.stagedEngine = engine;
+    this.retainedHome = undefined;
+    this.finishActiveHomeContinueSettlement();
+    this.activeHomeContinueSettledHandle = payload.view.requiredShapeRefs.length
+      ? undefined
+      : payload.handle;
     this.activeHome = payload;
   }
 
   /** The retained snapshot has become the ordinary log; its compact first reply no longer owns page state. */
   clearActiveHome(handle?: number): void {
     if (handle === undefined || this.activeHome?.handle === handle) {
+      const active = this.activeHome;
+      if (active && this.activeHomeContinueSettledHandle === active.handle)
+        this.retainedHome = { revision: this.revision, payload: active };
       this.activeHome = null;
+      this.activeHomeContinueSettledHandle = undefined;
+      this.finishActiveHomeContinueSettlement();
       this.activeHomeShapeRun++;
     }
   }
@@ -487,31 +504,86 @@ export class LibrarySession {
   private async projectActiveHomeContinue(): Promise<void> {
     const active = this.activeHome;
     if (!active) return;
+    // A late layout update temporarily invalidates the prior exact answer. Keep settlement latched so whichever
+    // concurrent projection wins restores the bridge; navigation in between safely takes the full-policy path.
+    if (
+      active.view.requiredShapeRefs.length &&
+      this.activeHomeContinueSettledHandle === active.handle
+    ) {
+      this.activeHomeContinueSettledHandle = undefined;
+      this.beginActiveHomeContinueSettlement();
+    }
     const wanted = new Set(active.view.requiredShapeRefs);
     const shapes = [...this.shapes].filter(([key]) => wanted.has(key));
     const run = ++this.activeHomeShapeRun;
     const projected = await projectLibraryEngineShapes(active.handle, shapes);
-    if (
-      !projected ||
-      run !== this.activeHomeShapeRun ||
-      this.activeHome?.handle !== projected.handle
-    )
+    if (run !== this.activeHomeShapeRun) return;
+    if (!projected || this.activeHome?.handle !== projected.handle) {
+      this.finishActiveHomeContinueSettlement();
       return;
+    }
     this.activeHome = {
       ...this.activeHome,
       view: { ...this.activeHome.view, continue: projected.continue },
     };
+    if (this.activeHomeContinueSettlement) {
+      this.activeHomeContinueSettledHandle = projected.handle;
+      this.finishActiveHomeContinueSettlement();
+    }
   }
 
   /** Wait for exact compact Continue membership after Home's required layouts have been published. */
   settleActiveHomeContinue(): Promise<void> {
-    return this.projectActiveHomeContinue();
+    if (!this.activeHome) return Promise.resolve();
+    const promise = this.beginActiveHomeContinueSettlement();
+    void this.projectActiveHomeContinue();
+    return promise;
+  }
+
+  private beginActiveHomeContinueSettlement(): Promise<void> {
+    if (this.activeHomeContinueSettlement) return this.activeHomeContinueSettlement.promise;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => (resolve = done));
+    this.activeHomeContinueSettlement = { promise, resolve };
+    return promise;
+  }
+
+  private finishActiveHomeContinueSettlement(): void {
+    this.activeHomeContinueSettlement?.resolve();
+    this.activeHomeContinueSettlement = undefined;
   }
 
   /** Compact Continue candidates with the TMDB titles already published by Home's naming pass. */
   activeHomeContinueWatching(): ContinueEntry[] {
     const active = this.activeHome;
     if (!active) return [];
+    return this.namedActiveHomeContinue(active);
+  }
+
+  /**
+   * Continue state the Worker already projected for Home, usable after route hydration until rows actually change.
+   * `null` asks the caller to use the full projection; an empty array is a valid exact answer.
+   */
+  detailBridgeContinueWatching(): ContinueEntry[] | null {
+    const payload = this.detailBridgeHome();
+    return payload ? this.namedActiveHomeContinue(payload) : null;
+  }
+
+  /** Exact compact poster standings under the same revision lease as retained Continue state. */
+  detailBridgeStandings(): Map<string, Standing> | null {
+    const payload = this.detailBridgeHome();
+    return payload ? new Map(payload.view.standings) : null;
+  }
+
+  /** The settled active answer is already safe before route hydration publishes its retained successor. */
+  private detailBridgeHome(): ActiveHomePayload | undefined {
+    const active = this.activeHome;
+    if (active && this.activeHomeContinueSettledHandle === active.handle) return active;
+    const retained = this.retainedHome;
+    return retained?.revision === this.revision ? retained.payload : undefined;
+  }
+
+  private namedActiveHomeContinue(active: ActiveHomePayload): ContinueEntry[] {
     return active.view.continue.flatMap(({ ref, display: _display, title: retained, ...entry }) => {
       const title = this.displayTitle(ref) ?? retained;
       return title?.title ? [{ ...entry, title }] : [];
