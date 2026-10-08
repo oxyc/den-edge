@@ -674,15 +674,20 @@ export class LibraryLogAuthority {
   }
 
   #simklAccount(): string | undefined {
+    return this.#simklAccounts()[0];
+  }
+
+  #simklAccounts(): string[] {
     return Object.entries(this.#log.settings('trackers')?.values ?? {})
-      .find(
+      .filter(
         ([name, stamped]) =>
           name.startsWith('simkl:') &&
           !name.endsWith('.token') &&
           stamped.value !== null &&
           stamped.value !== undefined,
-      )?.[0]
-      .slice('simkl:'.length);
+      )
+      .map(([name]) => name.slice('simkl:'.length))
+      .sort();
   }
 
   #projected(): { rows: Row[]; home: HomeLibraryView } {
@@ -1124,15 +1129,25 @@ export class LibraryLogAuthority {
       } catch {
         // A malformed credential is replaced below.
       }
-    if (same && this.#log.settings(deliveryName)) return this.#unchanged();
+    if (
+      same &&
+      this.#log.settings(deliveryName) &&
+      this.#simklAccounts().every((existing) => existing === account)
+    )
+      return this.#unchanged();
 
     const pending = this.#log.pendingActions;
     await this.#clock.see(this.#log.newestStamp());
     const connectedAt = await this.#clock.issue();
-    if (!same) {
+    if (!same || this.#simklAccounts().some((existing) => existing !== account)) {
       const row = this.#changedSettingsRow(
         'trackers',
         {
+          ...Object.fromEntries(
+            this.#simklAccounts()
+              .filter((existing) => existing !== account)
+              .map((existing) => [`simkl:${existing}`, null]),
+          ),
           [trackerName]: {
             string: JSON.stringify({ access_token: token, connectedAt }),
           },
@@ -1165,10 +1180,13 @@ export class LibraryLogAuthority {
   async #disconnectSimkl(): Promise<LibraryAuthorityCommandResult> {
     if (this.#log.wireMinimum < 3 || !this.#simklAccount())
       return this.#patchSettings('keys', { simkl: null }, [{ kind: 'simkl' }]);
-    const account = this.#simklAccount();
-    if (!account) return this.#unchanged();
+    const accounts = this.#simklAccounts();
     this.#simklApproval = undefined;
-    return this.#patchSettings('trackers', { [`simkl:${account}`]: null }, [{ kind: 'simkl' }]);
+    return this.#patchSettings(
+      'trackers',
+      Object.fromEntries(accounts.map((account) => [`simkl:${account}`, null])),
+      [{ kind: 'simkl' }],
+    );
   }
 
   async #approveSimklRemovals(approvalId: string): Promise<LibraryAuthorityCommandResult> {

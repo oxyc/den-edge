@@ -803,8 +803,11 @@ function simklView(value: unknown): value is SimklView {
     list(value.heldRemovals, titleRef, 10_000) &&
     unique(value.heldRemovals, (title) => `${title.type}:${title.id}`) &&
     optional(value.approvalId, (candidate): candidate is string => boundedText(candidate, 256)) &&
-    (value.connected || (value.account === undefined && value.heldRemovals.length === 0)) &&
-    (value.heldRemovals.length === 0 || value.approvalId !== undefined)
+    (value.connected ||
+      (value.account === undefined &&
+        value.heldRemovals.length === 0 &&
+        value.approvalId === undefined)) &&
+    value.heldRemovals.length > 0 === (value.approvalId !== undefined)
   );
 }
 
